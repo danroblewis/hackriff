@@ -277,6 +277,13 @@ pub struct LearnConfig {
     pub persist_interval_ns: i64,
     /// Persistent: cumulative detected duration at the stable centre at least this, ns (0.5 s).
     pub persist_min_detected_ns: i64,
+    /// T-558: most clusters the plan holds. Beyond it the weakest are forgotten — unpublished
+    /// first, then by least evidence and oldest last seen.
+    pub max_clusters: usize,
+    /// T-558: an **unpublished** cluster unseen for this long is forgotten, ns. Defaults to the
+    /// whole persistence window (`persist_intervals × persist_interval_ns`), so a cluster is only
+    /// dropped once it has been quiet for longer than it would have taken to earn a channel.
+    pub forget_unpublished_ns: i64,
 }
 
 impl Default for LearnConfig {
@@ -291,6 +298,8 @@ impl Default for LearnConfig {
             persist_intervals: 3,
             persist_interval_ns: 900_000_000_000,
             persist_min_detected_ns: 500_000_000,
+            max_clusters: 4096,
+            forget_unpublished_ns: 3 * 900_000_000_000,
         }
     }
 }
@@ -319,6 +328,16 @@ impl Sample {
 #[derive(Clone, Debug)]
 struct Cluster {
     samples: VecDeque<Sample>,
+    /// Cached `median(center)`, `median(obw)` and the non-fragment median SNR of `samples`
+    /// (T-558). They were recomputed — each allocating and sorting a Vec — on every one of the
+    /// `O(n²)` comparisons `merge` makes, which is what made a survey's channel plan the busiest
+    /// thing in the process. [`Cluster::recompute`] is called from every site that mutates
+    /// `samples` or a sample's `fragment` flag.
+    med_center: f64,
+    med_obw: f64,
+    med_snr: f64,
+    /// Newest sample end, ns: when this cluster was last seen (`i64::MIN` for a restored seed).
+    last_ns: i64,
     evidence: u64,
     /// Non-fragment detections.
     clean: u64,
@@ -349,6 +368,10 @@ impl Cluster {
     fn new(first_learned: Timestamp) -> Self {
         Self {
             samples: VecDeque::new(),
+            med_center: f64::NAN,
+            med_obw: f64::NAN,
+            med_snr: f64::NEG_INFINITY,
+            last_ns: i64::MIN,
             evidence: 0,
             clean: 0,
             intervals: 0,
@@ -361,27 +384,41 @@ impl Cluster {
         }
     }
 
-    fn center(&self) -> f64 {
-        median(self.samples.iter().map(|s| s.center).collect())
-    }
-
-    fn obw(&self) -> f64 {
-        median(self.samples.iter().map(|s| s.obw).collect())
-    }
-
-    /// Median SNR of the window's non-fragment samples; −∞ when there are none.
-    fn snr(&self) -> f64 {
+    /// Recomputes the cached medians. Every mutation of `samples`, or of a sample's `fragment`
+    /// flag, ends in a call to this (T-558).
+    fn recompute(&mut self) {
+        self.med_center = median(self.samples.iter().map(|s| s.center).collect());
+        self.med_obw = median(self.samples.iter().map(|s| s.obw).collect());
         let v: Vec<f64> = self
             .samples
             .iter()
             .filter(|s| !s.fragment)
             .map(|s| s.snr)
             .collect();
-        if v.is_empty() {
+        self.med_snr = if v.is_empty() {
             f64::NEG_INFINITY
         } else {
             median(v)
-        }
+        };
+        self.last_ns = self
+            .samples
+            .iter()
+            .map(|s| s.end_ns)
+            .max()
+            .unwrap_or(i64::MIN);
+    }
+
+    fn center(&self) -> f64 {
+        self.med_center
+    }
+
+    fn obw(&self) -> f64 {
+        self.med_obw
+    }
+
+    /// Median SNR of the window's non-fragment samples; −∞ when there are none.
+    fn snr(&self) -> f64 {
+        self.med_snr
     }
 
     fn extent(&self) -> FreqRange {
@@ -426,6 +463,7 @@ impl Cluster {
         self.trim(cfg.max_samples);
         self.evidence += 1;
         self.clean += u64::from(!s.fragment);
+        self.recompute();
     }
 
     fn trim(&mut self, max: usize) {
@@ -563,8 +601,12 @@ impl ChannelPlan {
                     end_ns: i64::MIN,
                     fragment,
                 };
-                Cluster {
+                let mut cluster = Cluster {
                     samples: std::iter::repeat_n(seed, n).collect(),
+                    med_center: f64::NAN,
+                    med_obw: f64::NAN,
+                    med_snr: f64::NEG_INFINITY,
+                    last_ns: i64::MIN,
                     evidence,
                     clean: ev.map_or(evidence, |e| e.clean),
                     intervals: ev.map_or(0, |e| e.intervals),
@@ -576,7 +618,9 @@ impl ChannelPlan {
                     first_learned: c.first_learned,
                     source: c.source,
                     raster_hint: c.raster_hint.clone(),
-                }
+                };
+                cluster.recompute();
+                cluster
             })
             .collect();
         Self {
@@ -591,6 +635,11 @@ impl ChannelPlan {
     /// Plan version (bumped on every change of the published key set).
     pub fn version(&self) -> u32 {
         self.version
+    }
+
+    /// Clusters held (published and not): the plan's residency, for tests and measurement.
+    pub fn cluster_count(&self) -> usize {
+        self.clusters.len()
     }
 
     /// Grid scheme id.
@@ -700,6 +749,12 @@ impl ChannelPlan {
         let before = self.keys();
         let (cfg, cell) = (self.cfg, self.f_cell_hz);
         let tol = 0.5 * cell;
+        let mut now_ns = self
+            .clusters
+            .iter()
+            .map(|c| c.last_ns)
+            .max()
+            .unwrap_or(i64::MIN);
         for d in detections {
             if d.suspect || d.obw_hz <= 0.0 {
                 continue;
@@ -737,11 +792,13 @@ impl ChannelPlan {
                 &cfg,
                 cell,
             );
+            let i = self.merge_at(i);
             if !fragment && self.clusters[i].published(&cfg, cell) {
                 self.flag_fragments(i);
             }
-            self.merge();
+            now_ns = now_ns.max(end_ns);
         }
+        self.forget(now_ns);
         for c in &mut self.clusters {
             c.visible = c.published(&cfg, cell);
         }
@@ -779,59 +836,115 @@ impl ChannelPlan {
             if k == host || c.visible || !c.samples.iter().any(hosted) || c.persistent(&cfg, cell) {
                 continue;
             }
+            let mut touched = false;
             for s in c.samples.iter_mut() {
                 if hosted(s) {
                     s.fragment = true;
                     c.clean = c.clean.saturating_sub(1);
+                    touched = true;
                 }
+            }
+            if touched {
+                c.recompute();
             }
         }
     }
 
-    fn merge(&mut self) {
+    /// Merges cluster `at` into, or with, any other it has come to overlap, and returns where
+    /// the survivor ended up.
+    ///
+    /// **Why only `at` (T-558).** The old pass compared every pair after every detection, so one
+    /// `learn` call cost `O(detections × clusters²)`, each comparison recomputing four medians.
+    /// Measured over a 1 MHz–6 GHz sweep it reached **1.46 s per sweep step by step 236 of 2999**
+    /// and rose quadratically from there — a survey that cannot finish. Nothing but the cluster
+    /// that just took a sample can have *become* mergeable, though: every other pair was compared
+    /// when one of them last changed and neither has moved since. Following the survivor (a merge
+    /// moves its median, which can open another) keeps the closure the old loop's `continue
+    /// 'outer` gave, at `O(clusters)` a detection.
+    fn merge_at(&mut self, at: usize) -> usize {
         let tol = 0.5 * self.f_cell_hz;
         let cfg = self.cfg;
-        'outer: loop {
-            for i in 0..self.clusters.len() {
-                for j in i + 1..self.clusters.len() {
-                    let (a, b) = (&self.clusters[i], &self.clusters[j]);
-                    if !(a.holds(b.center(), -tol) || b.holds(a.center(), -tol)) {
-                        continue;
-                    }
+        let mut i = at;
+        loop {
+            let Some(j) = (0..self.clusters.len()).find(|&j| {
+                if j == i {
+                    return false;
+                }
+                let (a, b) = (&self.clusters[i], &self.clusters[j]);
+                (a.holds(b.center(), -tol) || b.holds(a.center(), -tol))
                     // Nested emitters of very different width, and a host and its fragments'
                     // cluster, never pool.
-                    if !comparable_widths(&cfg, a.obw(), b.obw())
-                        || a.would_host_cluster(&cfg, b)
-                        || b.would_host_cluster(&cfg, a)
-                    {
-                        continue;
-                    }
-                    let b = self.clusters.remove(j);
-                    let a = &mut self.clusters[i];
-                    let shared = b
-                        .recent_intervals
-                        .iter()
-                        .filter(|k| a.recent_intervals.contains(k))
-                        .count() as u32;
-                    a.intervals += b.intervals.saturating_sub(shared);
-                    for k in b.recent_intervals {
-                        a.note_interval(k);
-                    }
-                    a.samples.extend(b.samples);
-                    a.trim(cfg.max_samples);
-                    a.evidence += b.evidence;
-                    a.clean += b.clean;
-                    a.detected_ns = a.detected_ns.saturating_add(b.detected_ns);
-                    a.visible |= b.visible;
-                    a.first_learned = a.first_learned.min(b.first_learned);
-                    if a.raster_hint.is_none() {
-                        a.raster_hint = b.raster_hint;
-                    }
-                    continue 'outer;
-                }
+                    && comparable_widths(&cfg, a.obw(), b.obw())
+                    && !a.would_host_cluster(&cfg, b)
+                    && !b.would_host_cluster(&cfg, a)
+            }) else {
+                return i;
+            };
+            let b = self.clusters.remove(j);
+            if j < i {
+                i -= 1;
             }
+            let a = &mut self.clusters[i];
+            let shared = b
+                .recent_intervals
+                .iter()
+                .filter(|k| a.recent_intervals.contains(k))
+                .count() as u32;
+            a.intervals += b.intervals.saturating_sub(shared);
+            for k in b.recent_intervals {
+                a.note_interval(k);
+            }
+            a.samples.extend(b.samples);
+            a.trim(cfg.max_samples);
+            a.evidence += b.evidence;
+            a.clean += b.clean;
+            a.detected_ns = a.detected_ns.saturating_add(b.detected_ns);
+            a.visible |= b.visible;
+            a.first_learned = a.first_learned.min(b.first_learned);
+            if a.raster_hint.is_none() {
+                a.raster_hint = b.raster_hint;
+            }
+            a.recompute();
+        }
+    }
+
+    /// Forgets clusters until the plan is within [`LearnConfig::max_clusters`], and forgets any
+    /// **unpublished** cluster unseen for [`LearnConfig::forget_unpublished_ns`] (T-558).
+    ///
+    /// A device-wide survey meets a great many emitters, and before this the plan kept a cluster
+    /// for every one of them for ever — at step 236 of a 1 MHz–6 GHz sweep, 1896 clusters of
+    /// which **none** had published, because most were one detection that never recurred. That is
+    /// the unbounded seen-count accumulator the inventory model rejects: a candidate is a
+    /// hypothesis about a region, and when the region goes quiet it expires.
+    ///
+    /// Order of forgetting: unpublished before published, then least evidence, then oldest last
+    /// seen. A published channel is real measured structure, so it goes last and only to keep the
+    /// hard bound honest — the bound has to hold whatever the survey meets, or it is not a bound.
+    fn forget(&mut self, now_ns: i64) {
+        let (cfg, cell) = (self.cfg, self.f_cell_hz);
+        if cfg.forget_unpublished_ns > 0 {
+            let cutoff = now_ns.saturating_sub(cfg.forget_unpublished_ns);
+            self.clusters
+                .retain(|c| c.published(&cfg, cell) || c.last_ns > cutoff);
+        }
+        if cfg.max_clusters == 0 || self.clusters.len() <= cfg.max_clusters {
             return;
         }
+        let mut order: Vec<usize> = (0..self.clusters.len()).collect();
+        order.sort_by_key(|&i| {
+            let c = &self.clusters[i];
+            (c.published(&cfg, cell), c.evidence, c.last_ns)
+        });
+        let drop: std::collections::HashSet<usize> = order
+            .into_iter()
+            .take(self.clusters.len() - cfg.max_clusters)
+            .collect();
+        let mut i = 0;
+        self.clusters.retain(|_| {
+            let keep = !drop.contains(&i);
+            i += 1;
+            keep
+        });
     }
 
     /// Attaches a raster suggestion to channels whose centre lies in `range` (never changes keys).

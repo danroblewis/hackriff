@@ -16415,7 +16415,68 @@ tasks:
   - id: T-558
     milestone: M2-hardening
     title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
-    status: todo
+    status: done
+    branch: task-t558
+    result: |
+      Measured first, on the mock SDR device behind the normal source interface, then bounded.
+      Three leaks, one cause each; every bound has a test that was watched go red without its fix.
+
+      1. THREADS. `ChainManager::attach` had no run-wide cap. `attach_measuring` capped its own
+         kind at the node spec's `max_chains` (4) and `attach_track` refused a duplicate *channel*,
+         but only for a spec with a raster - and `fsk-bursts`, what a burst-rich survey attaches,
+         has none. So concurrent chains were simply "however many tracks got confirmed".
+         MEASURED (tests/sweep_residency.rs, mock device 2 Msps): threads rose ONE PER ATTACH,
+         43 -> 219 over 175 attaches; with the cap removed again at 400 attaches it reached
+         444 threads / 401 running chains, reproducing T-542's live ~450 almost exactly.
+         FIXED: `chains::MAX_RUNTIME_CHAINS = 16`, checked after a `reap()` so the count is of
+         chains still running; over it the attach is refused and counted
+         (`chains.admission_refused`), never queued. AFTER: threads flat at 59 at 25 attaches and
+         at 400.
+      2. RSS. Followed the threads, and each chain's own retain buffer is sized in SECONDS:
+         `2 x retain_s x fs`. The built-in `fsk-bursts` 3 s is 24 MB at 2 Msps and ~240 MB at the
+         HackRF's 20 Msps, per chain. MEASURED: 64 -> 1210 MiB over 175 attaches, ~6.5 MiB a
+         chain, still climbing. FIXED: the cap above, plus `fsk::MAX_RETAIN_SAMPLES` (16 Msamp,
+         32 MB) so the buffer no longer scales with the device, plus `MAX_PENDING_GROUPS` (4096)
+         on the queue of burst groups awaiting samples. AFTER: 482 MiB at 400 attaches, flat once
+         the live chains have filled - a steady state, not a climb.
+      3. THE OCCUPANCY ACCUMULATOR. `ChannelPlan::clusters` was never pruned, and `learn` called
+         the full O(n^2) pairwise `merge` after EVERY detection, each comparison recomputing four
+         medians by allocating and sorting a Vec. MEASURED over a 1 MHz-6 GHz sweep: step 236 of
+         2999 reached 1896 clusters and 1.46 s FOR ONE STEP, rising quadratically, 120 s for 8 %
+         of the sweep - and NONE of those 1896 had published. A survey that cannot finish, filled
+         entirely with candidates for regions that went quiet. FIXED: (a) cached medians on
+         `Cluster`, recomputed at every mutation site; (b) `merge_at(i)` - only the cluster that
+         just took a sample can have become mergeable, so the closure is followed from the
+         survivor at O(clusters) a detection instead of O(detections x clusters^2); (c) `forget()`
+         - `max_clusters` 4096 hard cap (weakest first: unpublished, then least evidence, then
+         oldest) and `forget_unpublished_ns`, an unpublished cluster unseen for the whole
+         persistence window expires. Published channels survive the quiet; the hard cap is the
+         backstop that holds whatever the survey meets.
+         AFTER: all 2999 steps in 0.65 s, 4096 clusters, 0.2 ms a step - a ~800x speedup measured
+         against the restored merge (520.7 s) with the cap already in place.
+
+      This is the "no unbounded seen-count accumulators, no ghost candidates for signals that have
+      stopped" invariant applied where it had not been: candidate confidence now decays and expires
+      when a region goes quiet.
+
+      TESTS (all watched red without their fix):
+      - hk-context::sweep_accumulators::the_channel_plan_holds_a_bounded_number_of_clusters_however_long_the_survey_runs
+        (red: "1000 steps: 8000 clusters exceeds the 4096 cap")
+      - hk-context::sweep_accumulators::an_unpublished_cluster_expires_once_its_region_has_been_quiet
+        (red: left 3, right 2)
+      - hk-context::sweep_accumulators::a_full_sweep_of_learning_costs_a_bounded_time_per_step
+        (red: "2999 sweep steps took 520.7 s")
+      - hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads
+        (red: "400 attaches left 401 chains running, above the 16 cap")
+      Each asserts at TWO survey lengths, so a cap cannot be mistaken for a slower climb. Two
+      `#[ignore]` measurement tests beside them print the tables.
+
+      VERIFIED: hk-context + hk-core + hk-pipeline 679 pass, hk-api + hk-cli 289 pass, clippy and
+      fmt clean. Full gate not run (coordinator runs it at merge).
+
+      FOLLOW-UP worth a ticket: `MAX_RUNTIME_CHAINS` is a const, not a setting. On a bigger box
+      16 is conservative and on a Jetson at 20 Msps even 16 x 32 MB of retain buffer is 512 MB;
+      it wants to come from `PipelineSettings` and be sized from the rate.
     priority: high
     parallel_group: PIPE
     core_interface: true
