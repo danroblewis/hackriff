@@ -216,6 +216,9 @@ pub enum SkipReason {
     NoModel,
     /// The snippet is too short, or its geometry gives too few samples per symbol.
     Geometry,
+    /// No symbol-geometry view was supplied at all, so the verifier was never offered the call
+    /// ([`crate::classifier`]'s own arm — the stage did not even get as far as [`verify`]).
+    NoSymbolView,
 }
 
 impl SkipReason {
@@ -228,6 +231,7 @@ impl SkipReason {
             SkipReason::NoClockLock => "verifier_no_clock_lock",
             SkipReason::NoModel => "verifier_no_model",
             SkipReason::Geometry => "verifier_geometry",
+            SkipReason::NoSymbolView => "verifier_no_symbol_view",
         }
     }
 }
@@ -1058,8 +1062,12 @@ mod tests {
     struct T246Case {
         x: Vec<Complex64>,
         /// Samples per symbol the stage would use: C14's where it locked, the generator's where it
-        /// did not (genuine 8-PSK never locks at these SNRs, and the likelihood is still the thing
-        /// under test).
+        /// did not, since the likelihood is the thing under test here either way.
+        ///
+        /// When T-246 measured this, genuine 8-PSK never locked at these SNRs — which is the
+        /// finding T-246 handed on as T-589, and T-589 fixed: C14's digital-structure gate could
+        /// not see an alphabet that collapses at the eighth power. All twelve lock now, so the
+        /// fallback no longer fires on this grid.
         sps: f64,
         sps_true: f64,
         locked: bool,
@@ -1147,7 +1155,8 @@ mod tests {
             }
         }
         assert_eq!(n, 36, "grid size");
-        assert!(n_locked >= 23, "C14 locked on only {n_locked} of {n}");
+        // 23 before T-589 (11 bpsk, 12 qpsk, 0 of the 12 genuine 8-PSK); 35 after it.
+        assert!(n_locked >= 35, "C14 locked on only {n_locked} of {n}");
         // Timing: the symbol clock is right to parts per million, and the record never slips by a
         // tenth of a symbol end to end. Nothing here can smear a constellation.
         assert!(

@@ -18092,7 +18092,7 @@ tasks:
   - id: T-589
     milestone: M3
     title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
-    status: todo
+    status: done
     priority: high
     parallel_group: M3A
     model: opus
@@ -18118,6 +18118,53 @@ tasks:
       the vacuous-guard failure this project has been bitten by.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    resolved_2026_09_21: |
+      MEASURED FIRST, and both obvious suspects were WRONG. Over 12 genuine 8-PSK snippets
+      (20/30 dB, 6 seeds) the rate consensus PASSED on 12 of 12 - four direct lines at the same
+      rate from BOTH independent method groups at 19.8-26.5 dB, a stronger line than bpsk's on the
+      same grid - so neither "tighter symbol spacing weakens the line" nor "the 8th-power line is
+      too weak" is the failure. The 8th-power line was never computed at all. The gate that failed
+      is digital_structure: C14 labels four families {ook,fsk,bpsk,qpsk} and the structure gate was
+      "one of those four scored >= 0.5, or a transition fit converged". bpsk is recognised by its
+      2nd-power carrier line (c2 0.89-1.00 here) and qpsk by its 4th (c4 0.61-0.73); 8-PSK
+      collapses only at the 8th, so it read c2 0.06-0.12 and c4 0.05-0.10 (the bias-corrected null)
+      and every family score was ~0. A correctly measured rate was discarded with
+      NoDigitalStructure 12 of 12. A FAMILY-LABEL test was doing duty as a DIGITAL-STRUCTURE test,
+      and the label set stops at order 4.
+      FIX: RateTrust::higher_order_linear - the same ratio-veto shape the bpsk/qpsk scores already
+      use, one order up (c8 above the null AND c4 not dominating c8). The veto does the work: a
+      high c8 alone is common (ook 0.90, am 0.96, ppm 0.94, vsb-am 0.73) but in every such case a
+      LOWER order line is at least as strong, because the structure is an envelope or a carrier.
+      Structure evidence only - not a family score, not in FamilyScores or features@1, no new
+      hypothesis (qam16/qam64 stays T-590).
+      LOCK RATE, per class and SNR, before -> after: 8psk 0/6 -> 6/6 at 20 dB and 0/6 -> 6/6 at
+      30 dB; worst symbol-rate error over every lock 0.002 %. Across the WHOLE 31-class grid
+      (384 snippets) Psk8 is the only row that moved - bpsk 6/5, qpsk 6/6, qam16 5/6, qam64 4/3,
+      pi4dqpsk 5/5, apsk16 0/0, vsb-am 0/0, pulse 0/0, ask3 0/0 all unchanged.
+      VERIFIER RUN COUNT on the shipped path: with the tree left undecided between two orders (the
+      condition the stage exists for) it now RUNS on 11 of 11 genuine 8-PSK snippets that reach
+      psk-qam and picks 8psk on all 11 - it ran 0 times before. The 12th abstains upstream with
+      low_confidence and is counted out of the DENOMINATOR, not the numerator.
+      VISIBILITY: classifier.rs discarded verify()'s outcome entirely, so a classification whose
+      verifier confirmed the call and one whose verifier never ran carried identical reasons. Every
+      path now records one: verifier_confirmed/verifier_reranked, or the SkipReason code
+      (new SkipReason::NoSymbolView covers the call site's own arm). Documented in docs/api.md.
+      On genuine 8-PSK verifier_no_clock_lock is now 0 of 12 (was 12 of 12); what remains is
+      verifier_single_candidate on 11 - the tree's own call being decisive, the same gate bpsk and
+      qpsk stop at, which is not a missing stage.
+      RED WITHOUT THE FIX, both halves ablated separately: dropping higher_order_linear from the
+      gate reproduces 8psk 0/6 and 0/6 and verifier ran 0 of 11 (3 of 4 tests red, and the grid
+      test names Psk8 as the only wrong row); dropping the reason recording makes the shipped-path
+      test report {} verifier outcomes over 12 classifications.
+      TESTS: crates/hk-classify/tests/higher_order_clock_lock.rs (4). hk-estimate + hk-classify
+      209/209 green, no regressions. T-246's own stale note that "genuine 8-PSK never locks at
+      these SNRs" corrected and its n_locked floor raised 23 -> 35.
+      FOLLOW-UP NOT CHASED (for the coordinator): the psk-qam verifier now skips with
+      SingleCandidate on essentially every decisive tree call - bpsk, qpsk and 8psk alike - so on
+      the shipped path the stage is still exercised only when the tree is genuinely undecided.
+      That is correct behaviour, but it means the verifier's production run count is near zero on
+      clean synthetic input and nothing currently reports that rate. Worth a ticket to count and
+      surface verifier run rate per family in the harness.
   - id: T-590
     milestone: M3
     title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
