@@ -5864,7 +5864,7 @@ tasks:
     milestone: M3
     title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
       was made on
-    status: todo
+    status: done
     priority: low
     deps:
     - T-302
@@ -5878,6 +5878,20 @@ tasks:
       change to attribution behaviour. Update docs/api.md and the api_contract tests together per T-079
       if the field crosses the wire. Keep the T-302 invariant visible in the disclosure: an artifact is
       a property of ONE receive chain'
+    resolution: 'Added a chain: ReceiveChain field to ArtifactPrediction (image uses the matched
+      TunedLo.chain; harmonic/intermod use the new shared_chain() helper, which finds and discloses
+      the specific chain the existing T-302 gate already matched on, replacing the boolean-only
+      on_any_chain) and added receive_chain: {device_id, antenna_port} to artifact_detail()''s JSON.
+      Purely additive: predict_artifacts()''s frequency/width/level/chain gating and claim ranking are
+      unchanged. Crosses the wire through emitter_relations().detail (query.rs serves it verbatim), so
+      docs/api.md''s relation/artifact-of paragraph was updated; no api_contract test pins detail''s
+      internal shape (it is untyped JSON there), so hk-model''s repo::relate_tests carries the new
+      assertion instead. New test t307_artifact_detail_discloses_the_receive_chain_the_claim_was_made_on
+      runs image_scene on two different device names and asserts detail.receive_chain.device_id tracks
+      the device the claim was actually made on (proven RED by reverting the production diff and
+      re-running: fails with left: None, right: Some("hackrf:A")). just fmt --check and cargo clippy -p
+      hk-model -D warnings both clean; hk-model repo::relate_tests (35 tests) and hk-cli api_contract
+      (52 tests) pass.'
   - id: T-308
     milestone: M4
     title: A followed transmission still running when the buffered window ends is written open, and a later
