@@ -64,6 +64,27 @@ use crate::gate::GateCursor;
 use crate::recorder::{RECORDING_LABEL_MAX, RECORDING_MAX_BYTES};
 use crate::run::Shared;
 
+/// The IQ ring directory of a run's **further** front end (T-510):
+/// `<data_dir>/iqbuffer-devices/<device id, path-safe>-<its history source key>`. The key — the
+/// same hash the history tiles record that front end under — keeps two ids that sanitise alike
+/// apart, so two radios can never share a ring directory by accident.
+pub fn device_dir(data_dir: &std::path::Path, device_id: &str) -> PathBuf {
+    let safe: String = device_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let key = hk_store::history::source_key(device_id);
+    data_dir
+        .join("iqbuffer-devices")
+        .join(format!("{safe}-{key:016x}"))
+}
+
 /// A clip export request (frequencies Hz).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipRequest {
@@ -242,8 +263,18 @@ impl IqBufferService {
     /// reported as disabled with its reason). Returns at once; the ring opens on a background
     /// thread.
     pub(crate) fn open(cfg: &PipelineConfig, db_path: PathBuf) -> Self {
-        let bc = cfg.iq_buffer;
         let dir = cfg.data_dir.join(hk_store::iqbuffer::DIR_NAME);
+        Self::open_in(cfg, db_path, dir)
+    }
+
+    /// [`Self::open`] with the ring in `dir` (T-510: **one ring per front end**, because a ring's
+    /// segments are one stream's sample indices and its directory lock admits one writer — and
+    /// because the coverage map reads those segments per device, so a shared ring would let one
+    /// radio's coverage answer for another's). The run's first front end keeps
+    /// `<data_dir>/iqbuffer`, so a single-device run's on-disk layout is unchanged; each further
+    /// one gets [`device_dir`].
+    pub(crate) fn open_in(cfg: &PipelineConfig, db_path: PathBuf, dir: PathBuf) -> Self {
+        let bc = cfg.iq_buffer;
         let active = bc.active(cfg.lossless);
         let alloc = Arc::new(Alloc {
             phase: Mutex::new(Phase::Allocating),

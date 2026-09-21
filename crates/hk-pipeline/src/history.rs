@@ -14,7 +14,10 @@
 //!
 //! **One floor tracker, one front end (T-377).** This reader's `NoiseFloorTracker` is *not* keyed
 //! by origin, and does not need to be: it is fed only from `shared.ring`, and a ring carries the
-//! blocks of exactly one source. `Pipeline::start` takes one `Box<dyn Source>`; a re-plumb (T-050)
+//! blocks of exactly one source. A **multi-source** run (T-510, `crate::run::devices`) gives every
+//! further front end its **own ring and its own instance of this reader**, never a shared ring, so
+//! this stays true at N front ends: the composition is what was single-device, not the store.
+//! `Pipeline::start` takes one `Box<dyn Source>`; a re-plumb (T-050)
 //! hands that *same still-open device* back and starts the new segment with it, and each segment
 //! builds its own reader and its own tracker. `Provenance::device_id` is a per-source constant —
 //! `hackrf:<serial>`, `sigmf:<hw>` from the one recording's global metadata, `mock:<device>` — and
@@ -65,7 +68,7 @@ use num_complex::Complex;
 use crate::attention::AttentionService;
 use crate::compute::Reader;
 use crate::run::Shared;
-use crate::stats::{HistoryCounters, add, inc, set};
+use crate::stats::{Counters, HistoryCounters, add, inc, set, thread_cpu_ns};
 
 /// Frames queued while a query holds the product (about a minute at 10 rows/s).
 pub(crate) const HISTORY_QUEUE_FRAMES: usize = 600;
@@ -75,7 +78,13 @@ pub(crate) const PARTIAL_MIN_DIVISOR: usize = 10;
 
 /// Updates the tile counters from the product.
 pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
-    let h = &shared.counters.history;
+    update_tile_counters(&shared.counters, product);
+}
+
+/// [`update_tiles`] into any run's counters (T-510: a multi-source run's one end-of-run seal is
+/// taken by the run, not by whichever reader finished first, and it updates these there).
+pub(crate) fn update_tile_counters(counters: &Counters, product: &FloorProduct) {
+    let h = &counters.history;
     let (c, u) = (
         product.calibrated_pyramid().stats(),
         product.uncalibrated_pyramid().stats(),
@@ -86,9 +95,14 @@ pub(crate) fn update_tiles(shared: &Shared, product: &FloorProduct) {
 
 /// Updates the view-scheme tile counters (T-439).
 pub(crate) fn update_view_tiles(shared: &Shared, view: &Pyramid) {
+    update_view_tile_counters(&shared.counters, view);
+}
+
+/// [`update_view_tiles`] into any run's counters (T-510).
+pub(crate) fn update_view_tile_counters(counters: &Counters, view: &Pyramid) {
     let s = view.stats();
-    set(&shared.counters.history.view_tiles_written, s.tiles_written);
-    set(&shared.counters.history.view_bytes_written, s.bytes_written);
+    set(&counters.history.view_tiles_written, s.tiles_written);
+    set(&counters.history.view_bytes_written, s.bytes_written);
 }
 
 fn tally(h: &HistoryCounters, folded: &[Result<FloorIngest, StoreError>]) {
@@ -596,6 +610,14 @@ pub(crate) fn run(
     let h = &shared.counters.history;
     let mut last_end = Timestamp::UNIX_EPOCH;
     let mut frames_since_update = 0u32;
+    // T-510: this reader's CPU time, added as deltas (so a re-plumbed run's segments accumulate),
+    // on the tile-counter cadence and once at the end. This is the **per-row** cost of the growing
+    // edge, and it is paid once per front end a run composes.
+    let cpu_mark = std::cell::Cell::new(thread_cpu_ns());
+    let account_cpu = || {
+        let now = thread_cpu_ns();
+        add(&rc.cpu_ns, now.saturating_sub(cpu_mark.replace(now)));
+    };
     let mut on_frame = |frame: &SpectrumFrame| {
         let floor = tracker.update(frame, |_| {});
         let site = frame_site(attention.as_deref(), frame.t.host_time);
@@ -621,6 +643,7 @@ pub(crate) fn run(
         last_end = frame.t.host_time.saturating_add_nanos(dur);
         frames_since_update += 1;
         if frames_since_update >= 50 {
+            account_cpu();
             if let Ok(p) = product.try_lock() {
                 frames_since_update = 0;
                 update_tiles(&shared, &p);
@@ -651,6 +674,7 @@ pub(crate) fn run(
     }
     // Stream end or detach: frames still in flight are folded in before the queue drains.
     stft.flush(&mut on_frame);
+    account_cpu();
     let st = stft.stats();
     set(&rc.frames, st.frames);
     set(&rc.stft_resets, st.resets);
@@ -682,7 +706,11 @@ pub(crate) fn run(
             .frames_ingested
             .load(Ordering::Relaxed)
             > 0;
-    let seal = !continues && folded_anything;
+    // T-510: a run with further front ends seals **once**, from `run::devices::finish`, after
+    // every front end has drained — the shared pyramids have one forward-only watermark, so a
+    // reader that finished first and sealed would make every later frame of the others late.
+    // `seal_at_end` is true for a single-device run, which keeps this reader's seal as it was.
+    let seal = !continues && folded_anything && shared.seal_at_end;
     if seal {
         p.seal_through(last_end.saturating_add_nanos(3_600_000_000_000))
             .map_err(|e| anyhow::anyhow!("sealing history: {e}"))?;

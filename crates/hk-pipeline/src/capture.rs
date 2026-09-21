@@ -35,10 +35,16 @@ use num_complex::{Complex, Complex32};
 use crate::chains::spec::Trigger;
 use crate::control::VIRTUAL_TUNING_DEVICE_SUFFIX;
 use crate::run::{Shared, SourceFactory};
-use crate::stats::{Counters, add, inc, set};
+use crate::stats::{Counters, add, inc, set, thread_cpu_ns};
 
 /// Longest coverage hold per tune change.
 pub(crate) const COVERAGE_WAIT: Duration = Duration::from_secs(10);
+
+/// Blocks between samples of the capture thread's CPU clock (T-510). One `clock_gettime` per 64
+/// blocks (~0.4 s of a 20 Msps HackRF's 131 072-sample transfers) keeps the measurement off the
+/// per-block path it measures, and the per-block cost is what multiplies with the number of front
+/// ends a run composes: it is the only cost paid whether or not anyone looks.
+pub(crate) const CPU_SAMPLE_BLOCKS: u64 = 64;
 
 /// Waits until the chain manager has evaluated coverage for tune `seq` (see the module docs).
 fn wait_for_coverage(shared: &Shared, seq: u64) {
@@ -229,6 +235,15 @@ pub(crate) fn run(
     // (`run::Pipeline::start`), evaluated on the source this thread actually holds.
     let recoverable = shared.cfg.live_window_class && source.capabilities().controllable;
     let mut last_tune: Option<(u64, u64)> = None;
+    // T-510: this thread's CPU time, added to `source.cpu_ns` as **deltas**, so the segments of a
+    // re-plumbed run (each its own capture thread) accumulate into the one counter.
+    let mut cpu_mark = thread_cpu_ns();
+    let mut cpu_blocks = 0u64;
+    let mut account_cpu = |c: &crate::stats::SourceCounters| {
+        let now = thread_cpu_ns();
+        add(&c.cpu_ns, now.saturating_sub(cpu_mark));
+        cpu_mark = now;
+    };
     let result = loop {
         if shared.stop.load(Ordering::SeqCst) {
             break Ok(());
@@ -350,6 +365,10 @@ pub(crate) fn run(
         }
         add(&c.samples, n);
         inc(&c.blocks);
+        cpu_blocks += 1;
+        if cpu_blocks % CPU_SAMPLE_BLOCKS == 0 {
+            account_cpu(c);
+        }
         add(&c.source_dropped, h.dropped_before);
         set(&c.gate_waits, shared.gate.waits());
         let end_ns = h.time.host_time.as_unix_nanos() + (n as f64 * 1e9 / fs).round() as i64;
@@ -372,6 +391,7 @@ pub(crate) fn run(
             }
         }
     };
+    account_cpu(c);
     drop(writer);
     result
 }
