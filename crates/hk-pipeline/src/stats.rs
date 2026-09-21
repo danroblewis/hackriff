@@ -416,6 +416,17 @@ counter_group!(
         sweep_no_emitter,
         /// Chain errors (demod, repository).
         errors,
+        /// T-605: chain errors that came back from the **storage engine** — a write the database
+        /// refused, counted apart from every other chain error.
+        ///
+        /// It is counted apart because it is not a busy radio or a signal that would not
+        /// demodulate: it is a stage that could not complete, and a run that keeps going past one
+        /// looks exactly like a run where that stage completed and agreed. A caught-and-printed
+        /// constraint violation left `UNIQUE constraint failed: emission_features.features_id` in
+        /// the log of six green gates before anyone chased it. A test can assert **zero** of
+        /// these over a run; it cannot assert anything useful about `errors`, which legitimately
+        /// moves for reasons a healthy run has.
+        storage_errors,
     }
 );
 
@@ -1044,6 +1055,20 @@ pub fn add(c: &AtomicU64, n: u64) {
 #[inline]
 pub fn inc(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
+}
+
+/// T-605: records one chain error that came back from the **storage engine**, naming it and
+/// counting it twice — once in `errors` with every other chain error, and once in
+/// `storage_errors` on its own.
+///
+/// The second count is the point. A chain that catches a `RepoError`, prints it and carries on
+/// leaves a run that looks exactly like a run where that write succeeded; the printed line is the
+/// only evidence, and nobody reads the log of a green suite. `storage_errors` is a number a test
+/// can require to be **zero** over a run, which `errors` can never be.
+pub fn storage_error(c: &ChainCounters, what: &str, err: &hk_model::RepoError) {
+    inc(&c.errors);
+    inc(&c.storage_errors);
+    eprintln!("hk-pipeline: {what}: {err}");
 }
 
 /// Sets the value.

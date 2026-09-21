@@ -448,13 +448,18 @@ pub(crate) fn classify_decoder_emitters(
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     for &e in emitters {
-        let Ok(live) = repo.live_emitter_id(e) else {
-            inc(&c.errors);
-            continue;
+        let live = match repo.live_emitter_id(e) {
+            Ok(live) => live,
+            Err(err) => {
+                crate::stats::storage_error(c, "plugin chain emitter lookup", &err);
+                continue;
+            }
         };
         if let Some(classification) = call.classification(t) {
-            if repo.append_classification(live, &classification).is_err() {
-                inc(&c.errors);
+            // T-605: named, not a bare count. A classification the database refused is a stage
+            // that did not run, and a silent `continue` makes it look like one that did.
+            if let Err(err) = repo.append_classification(live, &classification) {
+                crate::stats::storage_error(c, "plugin chain classification", &err);
                 continue;
             }
         }
@@ -462,8 +467,7 @@ pub(crate) fn classify_decoder_emitters(
         // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
         // trains everyone to ignore it.
         if let Err(err) = inv.chain_emitter(&mut repo, track, live) {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: plugin chain emitter: {err}");
+            crate::stats::storage_error(c, "plugin chain emitter", &err);
         }
     }
 }

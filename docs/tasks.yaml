@@ -20209,7 +20209,8 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
-    status: todo
+    status: review
+    branch: task-t605
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20242,6 +20243,37 @@ tasks:
       one emission_features row per characterisation that should exist, and zero swallowed storage
       errors over an acceptance run. Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      RESOLVED 2026-09-21 (task-t605). THE SUSPECT WAS HALF RIGHT AND THE DIAGNOSIS WAS NOT.
+      T-321's second `characterise_with` is the trigger, but two writes per session were never the
+      fault: `observe()` increments `observations` every time, so two writes mint two ids. The
+      fault is in `Repository::emitter_features`, which picked the fold source by largest `t`
+      rather than by insertion order. The second call of a session is stamped from a different
+      emitter row and lands up to ~1 s BEHIND the first (measured: snapshot_t 1789297824379318666
+      vs incoming_t 1789297823378252000). The fold then restarted from the SUPERSEDED snapshot,
+      which (a) dropped the intervening observation, (b) scored the catalogue match against stale
+      features, and (c) re-minted `features:{emitter}:{observations}` with a count already spent -
+      the UNIQUE violation.
+      THE SECOND WRITE IS A GENUINE RE-CHARACTERISATION, NOT A DUPLICATE: it carries the shape
+      flatness, which no fingerprint can hold and which is the fourth field keeping a purely
+      analogue emitter above the clustering floor. So the answer is neither upsert nor replace but
+      APPEND, as the append-only table already intends; dropping it on UNIQUE lost exactly what
+      T-335 added.
+      FIX: `emitter_features`/`emitter_features_history` order by `rowid DESC` (insertion order),
+      which makes `observations` strictly increasing and `features_id` unique by construction.
+      LOUD: new `/chains/storage_errors` counter plus `hk_pipeline::stats::storage_error`, which
+      every chain site that catches a `RepoError` and continues now goes through (analog x7,
+      plugin x3, refine x2); the run summary prints it beside `errors`.
+      TESTS (both proven RED with the ordering reverted):
+        - hk-pipeline lib `t605_a_characterisation_stamped_behind_the_snapshot_on_file_still_appends`
+          - 4 characterisations -> 4 snapshots, 4 distinct ids, observations exactly [1,2,3,4],
+            and each call's match scored against the snapshot that call wrote. RED: match read
+            `:1` where `:2` was written.
+        - hk-pipeline `signal_062_session_writes::t605_an_analogue_run_swallows_no_storage_error`
+          - the real FM capture through the mock SDR: `/chains/storage_errors` == 0, guarded
+            against vacuity by demodulations >= 1 and identifications >= 1. RED: 1.
+      FOLLOW-UP NOT CHASED: `current_signature_match` orders by `t`, so with out-of-order
+      characterisations the "current" match row can be an older one. Separate question from this
+      ticket; not filed.
 
   - id: T-614
     milestone: M2-hardening
