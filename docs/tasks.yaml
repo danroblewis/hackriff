@@ -16160,6 +16160,95 @@ tasks:
       supply concrete targets - prefer their numbers over re-deriving them, and coordinate rather
       than duplicating.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-544
+    milestone: MAUTO
+    title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
+    status: in-progress
+    priority: high
+    parallel_group: FIXTURE
+    model: opus
+    depends_on: []
+    use_cases: [SIGNAL-001]
+    acceptance: |
+      USER 2026-09-20. BART (SF Bay Area transit) broadcasts around 851 MHz. This is phase 1 of a
+      blind auto-decode acceptance test - the first end-to-end MAUTO target on a REAL signal the
+      user can stand next to.
+      (a) RESEARCH the system from public sources: which band and channels, trunked or conventional,
+      the modulation and protocol (P25 phase 1/2? analogue FM? NXDN?), the control channel if there
+      is one, and what a correct decode would even look like. RadioReference and sigidwiki are the
+      obvious starting points. Cite sources inline (this repo's docs convention) and mark anything
+      unverified - a guess recorded as fact here poisons the acceptance test that depends on it.
+      (b) CAPTURE real IQ at the researched frequency on the HackRF, as SigMF, recording EVERY
+      setting in the metadata (centre, sample rate, LNA/VGA/amp, antenna, time, location precision)
+      per CLAUDE.md's capture rule.
+      (c) ANNOTATE the HIDDEN GROUND TRUTH: what is actually in the capture - emissions with their
+      time-frequency extents, the modulation, and the decoded content where it can be established.
+      This truth list is what the phase-2 tests assert against, and the system must never see it.
+      THE BLIND RULE (CLAUDE.md, non-negotiable): the fixture's truth is hidden from the system. The
+      test runs blind detection, checks each emission is found and characterised, and checks a
+      sensible explanation ranks. NEVER look a frequency up in the database and tune there.
+      HARDWARE: one agent at a time. The coordinator hands over the HackRF explicitly; the user's
+      demo holds it on :8899. RECEIVE ONLY, never transmit.
+      DoD: a written research note with sources; a SigMF capture in fixtures/ (LFS) with complete
+      metadata; a hidden truth annotation; and an honest statement of what the capture does and does
+      not contain (e.g. if nothing was transmitting, say so - an empty capture is a finding, not a
+      failure to hide).
+    notes: |
+      Filed 2026-09-20. Phases: T-544 research+capture, T-545 failing blind tests, T-546 make them pass.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-545
+    milestone: MAUTO
+    title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
+    status: todo
+    priority: high
+    parallel_group: FIXTURE
+    core_interface: true
+    model: opus
+    depends_on: [T-544]
+    use_cases: [SIGNAL-001]
+    acceptance: |
+      Phase 2 of the BART auto-decode target. Write the acceptance tests FIRST and expect them to
+      FAIL - they define what MAUTO must achieve.
+      Through the MOCK SDR replaying T-544's SigMF capture (CLAUDE.md's rule: e2e drives the system
+      through the device interface, never files into the pipeline), assert that the auto-discovery
+      pipeline, BLIND:
+      (1) DETECTS the emission - centre, bandwidth and TIME EXTENT, as a time-frequency region;
+      (2) ESTIMATES its parameters - modulation, symbol rate, deviation/bandwidth - from the signal;
+      (3) AUTO-SELECTS the demod + decode pipeline, without being told what it is;
+      (4) DECODES to the expected output, checked against the HIDDEN truth;
+      (5) and that a sensible explanation RANKS among the top suggestions - the band-plan database
+      may explain, never identify (exploration-first).
+      The tests must fail for the right reason: a test that fails because the fixture is empty or
+      the harness is wrong teaches nothing. State, for each assertion, what a passing run proves.
+      NO LOOKUP-AND-TUNE: nothing in the test may pass the frequency, modulation or protocol to the
+      system. If the pipeline needs a hint to work at all, that hint IS the gap phase 3 must close.
+    notes: |
+      Filed 2026-09-20. Depends on T-544's fixture and truth list.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-546
+    milestone: MAUTO
+    title: "BART 851 MHz, phase 3: make the blind auto-decode tests pass - the first real MAUTO end-to-end"
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-545]
+    use_cases: [SIGNAL-001]
+    acceptance: |
+      Phase 3: improve the MAUTO auto-discovery pipeline until T-545's blind tests pass on real
+      captured RF. This is the north-star workflow made real - detect blindly, characterise,
+      auto-select demod and decode, confirm by decoding.
+      Build against ADR-0015 and docs/15 rather than inventing a parallel path, and keep the
+      decision inspectable: a decode that succeeds must say WHY that pipeline was chosen, in terms
+      of what was measured. A black box that happens to decode BART is not the capability.
+      GPLv3 decoder code stays behind the plugin process boundary (ADR-0010).
+      NOTE ON SEQUENCING: the user gated MAUTO BUILD work behind the robustness tier (T-541/T-542)
+      and is separately signing off ~13 engine tickets. Do not start this before the coordinator
+      says so - phases 1 and 2 are the parts that run now.
+    notes: |
+      Filed 2026-09-20.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-502
     milestone: M2-hardening
     title: hk-api field-consistency batch - four contract fixes, one ticket, one gate
