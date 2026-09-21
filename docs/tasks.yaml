@@ -17531,6 +17531,74 @@ tasks:
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
+    status: todo
+    priority: high
+    parallel_group: W
+    model: opus
+    depends_on: [T-565]
+    use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
+    core_interface: true
+    acceptance: |
+      Applies ADR-0022 to ADR-0015 section 10's M-9 row and section 11.9's CP-4, and rewrites
+      ADR-0015 sections 5.5 and 11.5, which this branch only pointed at.
+      WHY IT IS core_interface: it is the gate on an IRREVERSIBLE transition. `change_emitter_
+      lifecycle` forbids a return to candidate (ADR-0015 section 11.5), so a wrong auto-confirm is
+      undone only by a user deleting the row - and that row is a measurement-backed fact that
+      outranks the known-signal database, seeds a C18 signature and a C15 rank-1 classification,
+      and can become a template that biases later searches.
+      WHAT TO BUILD.
+      1. `analytic_holdout_bits` on the hold-out result: the sum over ANALYTIC-null stages of the
+         winning prefix only (check_distinct_valid, sync_excess, field_fit, identity_recurrence),
+         each NET OF THE LOOK-ELSEWHERE CHARGED AT ITS OWN STAGE. The calibrated metrics
+         (snr, bimodality, eye_open, timing_var, evm, line_violations, bit_structure) keep every
+         other job - ranking, pruning, the ladder, the UI - and pay for NO confirmation. ADR-0022
+         section 2 states why: those are the tails T-547 questions, and an irreversible decision may
+         not rest on an unmeasured scale.
+      2. NOT the job-total `look_elsewhere_bits` (ADR-0021 section 7A.2). That field stays a
+         REPORTING field. Using it here would double-charge stages that already paid their own L,
+         and would make an ADS-B squitter stop confirming because the job searched a busy window
+         elsewhere. The correction must be attributable to the hypothesis being confirmed.
+      3. The gate, in order (ADR-0022 section 6): width >= 8; check_bits >= 16 (a confirm always
+         carries a CHECK, never sync excess alone); analytic_holdout_bits >= 24; for a SEARCHED
+         check the ADR-0021 section 8.2 null control ran and did not cap; front-end trust
+         unchanged; `quick` never confirms.
+      4. `differences`, NOT `distinct_valid`. assist::codes already computes the chance-corrected
+         count (frames counted once however often they repeat; differences repeating with period
+         <= 16 bits not counted). `distinct_valid` over-credits a beacon sending the same payload
+         every frame, which is most beacons. T-210's rule is unchanged and folded in: FEC-corrected
+         frames are never CRC-valid evidence and contribute 0 bits.
+      5. DELETE `min_evidence_bits` (64: wrong currency) and `min_distinct_valid` (3: a constant
+         standing in for `max(1, ceil((24 + L_check) / width))`, right for a searched CRC-16 and
+         wrong everywhere else). The frame count is DERIVED PER JOB, not stored.
+      6. THE LAUNDERING RULE (ADR-0022 section 5.1). "Template-fixed" means provenance `builtin` or
+         user-authored, and only then is L_check 0. A template DISCOVERED by a previous search
+         records `discovery_look_elsewhere_bits` at save-as-template time (section 4.3) and every
+         later use INHERITS it. Without this, a search launders its own multiplicity: try 10^4
+         polynomials, save the winner, confirm free forever.
+      7. THE DECISION-RATE COUNTER (ADR-0022 section 8). The threshold delivers the budgeted RATE
+         only at the assumed rate of 20 000 confirm decisions per device-week. Count
+         ConfirmPolicy::synthesized evaluations over a rolling 7 days; above the assumed figure the
+         BUDGET CLAIM IS VOID and the device says so - a surfaced state, in the register of
+         ADR-0021's "the null control ran and passed" being a visible fact. A running per-session
+         look-elsewhere term is the REJECTED alternative: it would make identical evidence worth
+         less on a device with longer uptime.
+      8. docs/07 deltas per ADR-0022 section 11.3: ConfirmPolicy fields; Decode provenance gains
+         analytic_holdout_bits / check_bits / l_check / check_searched / template_provenance so a
+         confirmation's arithmetic is reconstructible from the row; the lifecycle reason text
+         carries the arithmetic; template rows gain `discovery_look_elsewhere_bits`.
+      TESTS: a template-fixed CRC-24 single frame confirms and the same frame searched does not;
+      a repeated-payload beacon does not confirm on repeat count; a result with 70 evidence bits of
+      which 22 are analytic does not confirm; the job-total look-elsewhere never reaches the gate;
+      a discovered template confirms only with its inherited L charged.
+      NUMBERS: 24 and 16 are DERIVED (ADR-0022 section 3); the width floor of 8 is an ASSUMPTION
+      T-577 measures. Do not treat the floor as settled and do not loosen any of them.
+    notes: |
+      Filed 2026-09-21 with ADR-0022 (T-548). HIGH: every MAUTO engine ticket bakes ConfirmPolicy's
+      constants in, and they are currently the guessed 64 / 3 / 16.
+      Reads on T-547: nothing in this gate's SOUNDNESS depends on it, by construction - a NO-GO
+      leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
+      ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
@@ -17695,58 +17763,54 @@ tasks:
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
-    depends_on: [T-550, T-565]
-    use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
-    core_interface: true
+    status: todo
+    priority: high
+    parallel_group: M-E
+    model: opus
+    depends_on: [T-568, T-575]
+    use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
+    core_interface: false
     acceptance: |
-      Amends ADR-0015 section 10's M-9 row, per ADR-0021 sections 7A, 8.1-8.2, 9.3 and 11.2.
-      This is the half that protects CLAUDE.md's "unknown signals are the priority": an engine that
-      turns unknowns into plausible wrong answers destroys the thing the product is for, invisibly.
-      WHAT TO BUILD.
-      1. `hk_synth::Resolution`, CONSTRUCTED AND SEALED by hk-synth before any context lookup runs.
-         `kind` in {unknown, structured-unidentified, unsupported-structure, not-searched};
-         `reason` a CLOSED enum of five - no-signal, nothing-scored, tied, budget-exhausted,
-         unsupported-structure - each with the mechanical test that distinguishes it (ADR-0021
-         section 7A.3). `no-signal` and `nothing-scored` MUST NOT be merged: a noise window and a
-         strong unmodulated carrier the engine cannot structure are different facts.
-      2. `coverage`: the decode-side coverage map - skeletons offered/tried/deferred/unsupported,
-         per-family state with deepest stage and best bits, budget spent and `stop`, hypotheses,
-         look-elsewhere bits, window SNR/duration/bursts.
-      3. NOT-SEARCHED IS NOT UNKNOWN. An emitter with no `emitter_synthesis` row reads
-         `not-searched` with `coverage: null`; a cancelled or failed job writes `not-searched` with
-         `last_attempt`; only a FINISHED job writes `unknown`. This is the decode-side statement of
-         the canvas's grey rule, and it is an invariant test, not a convention.
-      4. `characterisation` on a `structured-unidentified` result (framing / check / payload
-         entropy / constant and counter fields). It ranks, displays and persists like any result;
-         it writes NO family to Classification (ADR-0016 section 8) and proposes a C18 signature
-         with provenance `structure-proposed`, never `decoder-confirmed`. A Confirmed emitter with
-         no identity at all is a LEGAL, INTENDED state.
-      5. THE SHUFFLED-NULL CONTROL (ADR-0021 section 8.2). Before an OPEN (non-template) search
-         reports `solved` or `checked`, re-run the winning prefix UNCHANGED over K null windows
-         from the same IQ at the same gain state: time-reversed, phase-randomised surrogates (same
-         magnitude spectrum, randomised phase - preserves PSD, destroys symbol structure), and an
-         adjacent no-detection window where the coverage map says one exists. K = 0/2/8 by profile,
-         <= 5 % of `max_evaluations`. If `holdout_bits - best_null_bits < 8`, CAP the verdict at
-         `framed`, refuse confirmation, and set `kind: unknown, reason: tied`. It can ONLY CAP,
-         never raise, and it is recorded whether or not it fires.
-      6. `retry` (ADR-0021 section 10): the reason code decides. `budget-not-binding` means more
-         budget buys NOTHING - never auto-retry; `unsupported` means never retry until the named
-         block exists; `min_retry_interval` 1 h and never on `battery`. Overlap-triggered
-         re-analysis (CLAUDE.md) is about DETECTION and is explicitly out of this rule's scope.
-      7. Attach persists `resolution`, `trace_summary`, `replay_key` and `null_control` on the
-         append-only `emitter_synthesis` row, so a second look reads the HISTORY of what earlier
-         looks ruled out. docs/07 section 2.29 `Resolution` + the section 2.11 / 2.21 / 2.28 deltas
-         listed in ADR-0021 section 11.2.
-      TESTS: each `reason` reached by a constructed case; not-searched never rendered as unknown;
-      the null control caps and never raises; a capped job records the control either way.
-      NUMBERS ARE FIRST GUESSES: K, the 8-bit margin, 1 h and 3 dB are ADR-0021's unverified
-      values. T-568 measures them; do not treat them as settled.
+      `acceptance_mauto::false_confirm_budget`, per ADR-0022 section 10. Extends T-568's negative
+      populations rather than duplicating them.
+      PROTOCOL, NON-NEGOTIABLE (CLAUDE.md + ADR-0021 section 8.4): fixtures replay THROUGH THE MOCK
+      SDR behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come
+      from BLIND DETECTION or an ad-hoc band, NEVER a truth frequency; truth is loaded only by the
+      assert harness; jobs are bounded by `max_evaluations`, never by wall.
+      THREE ASSERTIONS, because one has no power and one is passed by doing nothing.
+      A1, THE DIRECT ONE (necessary, weak): over T-568's N1 + N2 + N4 at each of `standard` and
+      `deep`, `confirms == 0` and `emitters_created == 0`.
+      A2, THE ONE WITH POWER: report the MAXIMUM `analytic_holdout_bits` reached by any rank-1
+      hold-out result on input with nothing to find, plus p50/p99 per population per profile, and
+      assert `max <= 18.0` against the 24-bit threshold. This measures ADR-0022 section 3.2's
+      9.7-bit model margin DIRECTLY instead of waiting for a threshold crossing a 24-bit gate makes
+      vanishingly rare. If the observed max is 21 bits the true margin is 3 bits, not 9.7, and the
+      budget is missed by ~100x WHILE A1 STILL READS ZERO.
+      A3, THE RECALL CONTROL, because a false-confirm suite with no recall control is passed by
+      never confirming: ADR-0015 section 7's positive rows still confirm under the new gate, and
+      specifically (a) at least one ADS-B single squitter confirms ON ONE FRAME (the ADR-0022
+      section 4.2 case the old rule blocked), (b) a template-fixed CRC-8 emitter confirms at 3
+      differing frames (the case the old width-16 floor refused outright), (c) a repeated-payload
+      beacon does NOT confirm on repeat count alone - `differences`, not `distinct_valid`.
+      WHAT THE SUITE HONESTLY BOUNDS, stated in the report and not implied: zero confirms at
+      n = 800 per profile bounds the true per-decision rate to <= 3.7e-3 at 95 % (rule of three),
+      against a budget of 5.0e-5. A1 IS 75x TOO WEAK TO DEMONSTRATE THE BUDGET and must never be
+      quoted as doing so - it can only fail to contradict it. Demonstrating 5.0e-5 from a
+      zero-failure run at 95 % needs n ~ 60 000 negative decisions. DECIDE AND STATE whether a
+      nightly or milestone run at that scale is worth building outside CI; inventing the number in
+      CI would be the same defect as quoting it (docs/17 section 1's four-decimal error).
+      THE FAILURE MESSAGE IS PART OF THE DELIVERABLE. ADR-0022 section 10.2 gives the format: the
+      budget and its units, the threshold with its two terms, the observation, the IMPLIED MARGIN
+      ("the analytic nulls are optimistic by >= 2^7.1 = 137x more than assumed"), what that means in
+      wrong rows per week, the winning result's check/width/differences/L_check/null-control margin,
+      and the replay command for the offending fixture. A bare `assert!(max <= 18.0)` tells a reader
+      none of it.
+      DoD: the three assertions, the honest-bound paragraph in the report, the legible failure
+      format, and a stated position on the n ~ 60 000 question.
     notes: |
-      Filed 2026-09-21 with ADR-0021 (T-550). HIGH: it sits in front of an irreversible transition
-      (no rule demotes, ADR-0015 section 11.5) and it is the only MECHANISM against a search that
-      always finds something - section 7's over-claim floor is a measurement, not a guard.
-      Reads on T-548: the searched-generator discount for a found-rather-than-specified CRC is
-      T-548's number, not this ticket's. Not a hard dep; record the dependency.
+      Filed 2026-09-21 with ADR-0022 (T-548). HIGH: it is the only evidence the derived threshold
+      actually delivers the budget, and A2 is the only part of it with any statistical power.
+      Runs after T-568 builds the populations; do not rebuild them.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-568
     milestone: MAUTO
@@ -17839,56 +17903,6 @@ tasks:
       relative to the shipped guess of 16 only in the direction of ADMITTING more (CRC-8 sensors in
       902-928 MHz), so getting it wrong costs false confirms on exactly one population - which
       T-576's A2 measures anyway. Worth doing before M-9 ships, not before T-575 starts.
-    depends_on: [T-550, T-565, T-567]
-    use_cases: [RESEARCH-007, RESEARCH-013, SIGNAL-052]
-    core_interface: false
-    acceptance: |
-      Amends ADR-0015 section 10's M-12 row, per ADR-0021 section 8.3-8.4. This is the guard
-      against a search that always finds something, measured.
-      PROTOCOL, NON-NEGOTIABLE (CLAUDE.md + ADR-0015 section 7): fixtures replay THROUGH THE MOCK
-      SDR behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come
-      from BLIND DETECTION or an ad-hoc band, NEVER a truth frequency; truth is loaded only by the
-      assert harness. Jobs are bounded by `max_evaluations`, NEVER by wall, so the suite is
-      deterministic and a search regression shows as a trace diff rather than a flaky pass.
-      FOUR POPULATIONS, because "nothing to find" has four shapes that fail differently:
-        N1 thermal noise, 400 windows at the fixture's gain state -> kind unknown, reason
-           `no-signal`, deepest verdict `energy`, 0 labels >= `framed`, 0 emitters created.
-        N2 energy without symbols, 200: CW carrier, analog FM voice, AM voice -> reason
-           `nothing-scored`, deepest verdict <= `demodulated`, 0 >= `framed`.
-        N3 out-of-catalogue structure, 200: synthetic OFDM (non-standard CP), DSSS, CSS/LoRa-like,
-           16-QAM -> kind `unsupported-structure` NAMING the structure and `missing_block`;
-           0 `solved`; `framed` permitted ONLY where the trace shows a measured framing, because a
-           real preamble is a real measurement. SCORED SEPARATELY for that reason.
-        N4 real empty capture: the 433 MHz empty capture + the 50 ohm terminator capture (T-375)
-           -> as N1, AND a spur is never a label (attributed via `artifact_of`, never a verdict
-           >= `demodulated`).
-      THE BUDGET, STATED: at most ONE FALSE LABEL PER 1 000 analyze jobs on signal-free or
-      out-of-catalogue input, at every profile. False CONFIRMS stay on T-548's budget and this
-      ticket may not loosen it; where the two disagree, the stricter binds. A label is a verdict
-      >= `framed` reported to the user; a confirm is a lifecycle change. They differ because their
-      blast radii differ.
-      THE ASSERTION, AND WHAT IT HONESTLY BOUNDS: `false_labels == 0` over N1 + N2 + N4
-      (n = 800) at each of `standard` and `deep`. State in the report that 0 of 800 is consistent
-      with a true rate up to about 0.0037 at 95 %, so the suite supports the 1/1000 claim only to
-      that precision. Quoting "one in a thousand, measured" from a zero at n = 800 is exactly the
-      four-decimal error docs/17 section 1 documents.
-      ALSO REPORTED (so drift is visible while the assertion stays at zero): `labels_per_1000` per
-      population with a WILSON INTERVAL per profile; the distribution of `resolution.reason` per
-      population; the best `evidence_bits` reached per population (the early-warning number - it
-      rises long before a label appears); and the NULL-CONTROL SAVE COUNT.
-      THE FALSIFIABILITY CLAUSE: if the null control saves ZERO jobs across the whole suite, it is
-      dead weight and ADR-0021 section 8.2 should be reconsidered. A mechanism that never acts is a
-      cost with no evidence behind it. Report the number rather than defending the mechanism.
-      SUBSUMES ADR-0015 section 7's negatives row: `0 solved` becomes `0 labels >= framed`
-      (strictly harder), 200 windows become 800, real captures join the synthetic ones. Section 7's
-      standing rule holds - the review may tighten, never loosen after seeing results.
-      Also measures ADR-0021's unverified numbers against these populations: K, the 8-bit null
-      margin, and the node/byte caps.
-    notes: |
-      Filed 2026-09-21 with ADR-0021 (T-550). HIGH: this is the only thing standing between a deep
-      search and a manufactured verdict that looks exactly like a right one.
-      The 50 ohm terminator capture (T-375) is a user/hardware item; N1-N3 do not wait on it, and
-      N4 runs with the 433 MHz empty capture alone until it exists.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-569
     milestone: MAUTO
@@ -18276,6 +18290,34 @@ tasks:
   - id: T-591
     milestone: M2-hardening
     title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
+      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
+      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
+      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
+      fact, deriving it two different ways.
+      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
+      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
+      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
+      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
+      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
+      constants match - two independent derivations that happen to agree today will diverge again.
+      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
+      measurement exists.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
+      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
+      emitters in the window rather than a sampled one. A test that compares zero emitters is
+      vacuous - report how many it compared.
+      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-589
     milestone: M3
     title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
@@ -18380,6 +18422,30 @@ tasks:
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
     status: todo
     priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571, WHICH MEASURED IT. `Pyramid::fold_row_live` propagates a row to the level
+      above only when that level COMMITS - which is the "commits every N" rule and is what makes
+      the fold exactly-once - so a chain of in-progress rows compounds: node (i, j) trails the
+      finest closed row by up to 2^j - 1 of them, plus level 0's own still-open column. Measured
+      on the 4x4 test lattice at 1, 2 and 4 rows for level_t 1, 2 and 3; at the shipped four time
+      levels and a 1 s cell that is up to 7 s at level_t = 3.
+      Node (0, 0) - the live edge itself - is NOT affected: a direct level-0 read stands in for
+      its open column with `column_preview`. The cells are correct throughout; a partial row reads
+      as fewer observed seconds, never as wrong values. The on-demand fold it replaced had no such
+      lag, because it folded open producers on every read.
+      THE DECISION TO MAKE: whether a zoomed-out pane should see a node's in-progress row, the way
+      level 0 sees its open column. It is a product call, not an oversight - showing it means a
+      coarse cell that changes under the viewer as its remaining producer rows land. If the answer
+      is yes, the mechanism already exists (`Tile::row_pending` plus a `column_preview`-shaped
+      read); if no, the canvas should say what it is showing rather than quietly trailing.
+      Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
+      never a wall-clock budget.
   - id: T-579
     milestone: MLIVE
     title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
@@ -18621,6 +18687,28 @@ tasks:
     status: todo
     priority: normal
     parallel_group: M3A
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
+      probe binary - nothing in `hk-pipeline` ever populates `Fingerprint.structure` (T-233's
+      `envelope_shape`). So entity resolution compares a field that is always absent in production:
+      the comparison runs, contributes nothing, and nobody is told.
+      This is the same class as T-589 (a verifier that cannot run on the class it claims to handle)
+      and as T-321's own defect (an emitter silently not clustering): a stage that is structurally
+      unable to fire looks exactly like a stage that fired and agreed. It is worth measuring how
+      much of entity resolution is in this state rather than fixing only this one field.
+      Decide, with evidence: wire a producer in the pipeline, or remove the field and its comparison
+      and say so. A dead comparison kept "in case" is worse than an absent one, because its presence
+      implies a discrimination that is not happening.
+      If it is wired, note it also gives T-321's analogue-emitter field supply a fifth field, which
+      is margin rather than a reason to touch the floor.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
+      after, and how many comparisons actually used it. A test that passes because the field was
+      absent on both sides is vacuous.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
@@ -18844,6 +18932,35 @@ tasks:
   - id: T-595
     milestone: MLIVE
     title: The DC notch turns grey once its IQ-ring segment ages out - a fourth thing painted with the third mark
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      MEASURED BY T-588 while clearing the user's 892.5 MHz report: over a sweep of 1 966 080 cells,
+      1212 cells held a measurement and read `unobserved` - and ALL 1212 are the 25 kHz DC notch at
+      the tuned centre. None at a band edge.
+      `ObservedWindow.dc_excluded` punches a 25 kHz hole in the observation log's coverage while the
+      history pyramid KEEPS ROWS THERE. Inside the IQ ring's retention the ring journal's full-band
+      spans cover the hole; past the ring horizon nothing does, so a 25 kHz stripe down the middle
+      of every band the radio ever sat on turns grey - "we never looked", painted over rows we hold.
+      BOTH HALVES OF THE INVARIANT BREAK AT ONCE: "whenever data exists for that window it must be
+      shown", and "grey = genuinely unobserved". T-441 says three states, three distinct marks; the
+      DC notch is a FOURTH thing wearing the third one's mark. And it is a genuinely different
+      claim - a region deliberately excluded from measurement is useful to tell the user, just not
+      by calling it unobserved.
+      Give the notch its own mark rather than making the observation log lie in the other direction.
+      The ring-journal cover is why this went unseen: it is invisible for the whole ring retention
+      and appears only in older history.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): cells holding a measurement that read
+      unobserved past the ring horizon is ZERO, counted, WITH A FLOOR on how many cells were judged
+      so it cannot pass on zero-of-zero. T-588's guard in `crates/hk-api/src/tiles.rs` is the model.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-598
     milestone: M2-hardening
     title: The retune verdict is computed and thrown away - the inventory still lists one moving spur as three emitters
