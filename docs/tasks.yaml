@@ -17286,6 +17286,63 @@ tasks:
       DSP job - and that route needs no GPLv3 reference reading at all, which moots the licence question for
       this family. Establish that before scoping the work, not after.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-555
+    milestone: MAUTO
+    title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
+    status: cancelled
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: []
+    use_cases: []
+    core_interface: true
+    acceptance: |
+      DECISION ONLY. No code. The user's call; this ticket prepares it and records the answer.
+      *** THE RULE IN docs/18 SECTION 4 IS AN UNRATIFIED PROPOSAL. IT IS NOT IN FORCE. ***
+      Nobody has agreed to it. It was written by the MAUTO design track as a starting position
+      for this decision, it binds nothing until the user says so, and no implementing task may
+      cite it as authority in the meantime. Until it is ratified, the standing rule is the
+      conservative one that already exists: ADR-0010's process boundary, i.e. GPLv3 decoder
+      code stays in a subprocess and nothing is derived from it in-core. A task that would need
+      the proposed rule to proceed is blocked on this ticket, not free to assume the answer.
+      WHY IT IS BLOCKING-SHAPED, not academic. The user's direction is to treat GNU Radio's
+      decoders as the REFERENCE SET and "use their code as reference". ADR-0010 is unambiguous
+      about the other half: GPLv3 code stays behind the plugin process boundary, never linked.
+      But the disposition audit (T-554) will conclude that the highest-value families want
+      NATIVE hk-blocks recipes, not plugins - because only native structures are searchable by
+      MAUTO. So the question "what may an implementer take from reading gr-lora_sdr before
+      writing hk-blocks' chirp demodulator" is on the critical path of the coverage roadmap, not
+      beside it. It is also a question about how AGENTS are briefed, since an agent that reads a
+      GPLv3 file into context and then writes a block has done something different from an agent
+      that read a specification.
+      docs/18 section 4 proposes a rule. This ticket puts it to the user, records the decision,
+      and makes it enforceable:
+      1. Get an explicit yes / no / amended on the proposed rule.
+      2. Record it where it BINDS - ADR-0010 is the licence ADR and the natural home; CLAUDE.md
+         if it must reach every agent brief.
+      3. Specify what an implementing task must record: per block, what its algorithm was derived
+         from (a published specification, a standards document, a paper, a clean-room
+         description, or GPL source) and by whom. The ADR-0010 ledger already does this for
+         DEPENDENCIES; the same discipline for DERIVATION costs one line per block and is the
+         only durable evidence of provenance. Note the precedent already in the ledger, where
+         T-012 records "redsea (MIT) and py/fixtures/rds_ref.py were references only, no code
+         copied" and T-013 records CRC parameters taken from the RevEng catalogue as
+         "parameters only, no code copied".
+      4. State what the rule does NOT cover, so it is not over-read: it is a working rule for
+         this project, not legal advice, and the project licence itself remains undecided
+         (CLAUDE.md).
+      DoD: the user's decision recorded in ADR-0010 (or CLAUDE.md), and the per-block derivation
+      field specified for implementing tasks to fill.
+    notes: |
+      CANCELLED 2026-09-20 by the user: there is NO licence rule to ratify, and the stray reference is being removed.
+      The standing position stands unchanged and needs no ticket: GPLv3 decoder code lives behind the plugin process
+      boundary (ADR-0010). Nothing was blocked on this.
+      Filed 2026-09-20 with docs/18. HIGH because T-554's native dispositions and every
+      subsequent block ticket depend on the answer, and because getting it wrong is not the kind
+      of mistake that surfaces in a test.
+      Deliberately NOT marked `blocked`: the brief can be written and the rule proposed without
+      the user (CLAUDE.md - `blocked` is a checkable claim about the world, not a parking state).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
