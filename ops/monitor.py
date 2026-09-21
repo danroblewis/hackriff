@@ -341,8 +341,8 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
 .wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none}
 .wrap.grabbing{cursor:grabbing}
-#g{position:absolute;top:14px;left:14px;transform-origin:0 0;will-change:transform}
-#g svg{max-width:none;height:auto}
+#g{position:absolute;inset:0}
+#g svg{width:100%;height:100%;max-width:none;display:block}
 #g .node{cursor:pointer}
 #g .node:hover rect,#g .node:hover polygon{filter:brightness(1.25)}
 @keyframes pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(255,207,107,0))}50%{filter:drop-shadow(0 0 6px rgba(255,207,107,.8))}}
@@ -383,21 +383,33 @@ async function draw(){
   wireNodes();
  }catch(e){ document.getElementById('g').textContent='render error: '+e; }
 }
-// --- pan / zoom / click-to-open (restored) ---
+// --- SVG viewBox pan / zoom / click-to-open (vector-crisp at any zoom) ---
 const wrap=document.querySelector('.wrap'), gg=document.getElementById('g');
-let tx=0,ty=0,k=1,down=false,px=0,py=0,dragMoved=false;
-function apply(){ gg.style.transform=`translate(${tx}px,${ty}px) scale(${k})`; }
-function wireNodes(){ gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); }); }
-wrap.addEventListener('wheel',e=>{ e.preventDefault();
-  const r=wrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
-  const nk=Math.min(6,Math.max(0.1,k*Math.exp(-e.deltaY*0.0015)));
-  tx=mx-(mx-tx)*(nk/k); ty=my-(my-ty)*(nk/k); k=nk; apply();
+let svgEl=null,W=0,H=0,vb=null,down=false,px=0,py=0,dragMoved=false;
+function setVB(){ if(svgEl&&vb) svgEl.setAttribute('viewBox', vb.x+' '+vb.y+' '+vb.w+' '+vb.h); }
+function wireNodes(){
+  svgEl=gg.querySelector('svg'); if(!svgEl) return;
+  const bb=svgEl.viewBox&&svgEl.viewBox.baseVal;
+  W=(bb&&bb.width)||svgEl.getBBox().width; H=(bb&&bb.height)||svgEl.getBBox().height;
+  svgEl.removeAttribute('width'); svgEl.removeAttribute('height');
+  svgEl.setAttribute('preserveAspectRatio','xMidYMid meet');
+  if(!vb) vb={x:(bb&&bb.x)||0,y:(bb&&bb.y)||0,w:W||1000,h:H||800};   // initial: fit whole graph, crisp
+  setVB();
+  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); });
+}
+wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb)return;
+  const r=wrap.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), nh=nw*(vb.h/vb.w);
+  vb.x=(vb.x+fx*vb.w)-fx*nw; vb.y=(vb.y+fy*vb.h)-fy*nh; vb.w=nw; vb.h=nh; setVB();
 },{passive:false});
-wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} });
-wrap.addEventListener('pointermove',e=>{ if(!down)return; const dx=e.clientX-px, dy=e.clientY-py; if(Math.abs(dx)+Math.abs(dy)>3)dragMoved=true; tx+=dx; ty+=dy; px=e.clientX; py=e.clientY; apply(); });
-function endDrag(e){ down=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
-wrap.addEventListener('pointerup',endDrag); wrap.addEventListener('pointercancel',endDrag);
-wrap.addEventListener('click',e=>{ if(dragMoved){dragMoved=false;return;} const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); });
+wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
+wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
+  if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
+  if(dragMoved){ vb.x-=dx*(vb.w/r.width); vb.y-=dy*(vb.h/r.height); px=e.clientX; py=e.clientY; setVB(); } });
+function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); }
+  down=false; dragMoved=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
+wrap.addEventListener('pointerup',endDrag);
+wrap.addEventListener('pointercancel',()=>{ down=false; dragMoved=false; wrap.classList.remove('grabbing'); });
 draw(); setInterval(draw,15000);
 </script></body></html>"""
 
