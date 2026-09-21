@@ -832,8 +832,11 @@ Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integer
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
+**Caching (T-574).** A tile's own `sealed` field says whether its time extent has fully passed the pyramid's watermark — no later frame can still land inside it, so its bytes can never change again. A **sealed** response carries `Cache-Control: public, max-age=31536000, immutable` and an `ETag` (a CRC-32 of the exact response bytes, quoted); a repeat `GET` with a matching `If-None-Match` gets **`304 Not Modified`** with an empty body and the same `ETag`/`Cache-Control`. A tile that is **not** sealed — most of all the growing live edge, whose bytes change on the next ingest — keeps the route's usual `Cache-Control: no-store` and carries **no `ETag` at all**, so a cache can never answer it from a stale copy or a 304 that has gone out of date. `sealed` is derived from the pyramid's own state (the watermark against the tile's own extent), never from the tile's age or a guess, and it is the same fact `tiles.rs` uses internally to decide sealed-vs-derived storage.
+
 ```jsonc
 {
+  "sealed": true,
   "key": { "device": "any", "device_named": false, "scheme": "view",
            "level_f": 3, "level_t": 5, "f_index": 139, "t_index": 218427, "cells": 256 },
   "extent": { "f_lo_hz": 1779200000.0, "f_hi_hz": 1792000000.0, "f_cell_hz": 50000.0,
