@@ -417,3 +417,21 @@ def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tm
         assert env["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only"
         assert env["CARGO_BUILD_JOBS"] == "6"
         assert env["SOME_UNRELATED_VAR"] == "kept"
+
+
+def test_t561_the_board_file_runs_the_python_suite_not_nothing():
+    """docs/tasks.yaml is DATA, and `docs/` runs nothing.
+
+    A malformed `blocked_on:` - an unquoted value containing ": " - reached main
+    through a docs-class gate, so `py/tests/test_task_board.py`, which exists to
+    catch exactly that, never ran. It broke the board test, the dashboard's task
+    map, and every later gate that parses the file. Prose stays `docs`.
+    """
+    from hkpy.gate import classify, classify_path
+
+    assert classify_path("docs/tasks.yaml")[0] == "py"
+    assert classify_path("docs/use-cases.yaml")[0] == "py"
+    assert classify_path("docs/README.md")[0] == "docs"
+    assert classify(["docs/tasks.yaml"]).classes == ("py",)
+    # a board edit alongside prose still runs the Python suite
+    assert "py" in classify(["docs/tasks.yaml", "docs/README.md"]).classes
