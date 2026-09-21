@@ -339,8 +339,12 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .filters select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;font-size:12px;padding:2px 4px;margin-left:4px;cursor:pointer}
 .legend{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
-.wrap{flex:1;min-height:0;overflow:auto;padding:14px}
+.wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none}
+.wrap.grabbing{cursor:grabbing}
+#g{position:absolute;top:14px;left:14px;transform-origin:0 0;will-change:transform}
 #g svg{max-width:none;height:auto}
+#g .node{cursor:pointer}
+#g .node:hover rect,#g .node:hover polygon{filter:brightness(1.25)}
 @keyframes pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(255,207,107,0))}50%{filter:drop-shadow(0 0 6px rgba(255,207,107,.8))}}
 #g .running rect,#g .running polygon{animation:pulse 1.5s ease-in-out infinite}
 @media(prefers-reduced-motion:reduce){#g .running rect,#g .running polygon{animation:none}}
@@ -358,7 +362,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <a href="/">← dashboard</a>
 <span class=legend><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
-<div class=hint>solid arrow = prerequisite → task · dotted = milestone → its tasks · left-to-right</div>
+<div class=hint>scroll = zoom · drag = pan · click a ticket for details · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
@@ -376,8 +380,24 @@ async function draw(){
   if(d.mermaid===last) return; last=d.mermaid;
   const {svg}=await mermaid.render('gg'+Date.now(), d.mermaid);
   document.getElementById('g').innerHTML=svg;
+  wireNodes();
  }catch(e){ document.getElementById('g').textContent='render error: '+e; }
 }
+// --- pan / zoom / click-to-open (restored) ---
+const wrap=document.querySelector('.wrap'), gg=document.getElementById('g');
+let tx=0,ty=0,k=1,down=false,px=0,py=0,dragMoved=false;
+function apply(){ gg.style.transform=`translate(${tx}px,${ty}px) scale(${k})`; }
+function wireNodes(){ gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); }); }
+wrap.addEventListener('wheel',e=>{ e.preventDefault();
+  const r=wrap.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const nk=Math.min(6,Math.max(0.1,k*Math.exp(-e.deltaY*0.0015)));
+  tx=mx-(mx-tx)*(nk/k); ty=my-(my-ty)*(nk/k); k=nk; apply();
+},{passive:false});
+wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} });
+wrap.addEventListener('pointermove',e=>{ if(!down)return; const dx=e.clientX-px, dy=e.clientY-py; if(Math.abs(dx)+Math.abs(dy)>3)dragMoved=true; tx+=dx; ty+=dy; px=e.clientX; py=e.clientY; apply(); });
+function endDrag(e){ down=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
+wrap.addEventListener('pointerup',endDrag); wrap.addEventListener('pointercancel',endDrag);
+wrap.addEventListener('click',e=>{ if(dragMoved){dragMoved=false;return;} const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); });
 draw(); setInterval(draw,15000);
 </script></body></html>"""
 
@@ -1292,7 +1312,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/graph"):
-            body = GRAPH_PAGE.encode()
+            body = GRAPH_PAGE.replace("</body>", TICKET_MODAL + "</body>").encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/sys.json"):
