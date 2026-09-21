@@ -8893,6 +8893,70 @@ fn anomalies_routes_answer_documented_shapes() {
 }
 
 // ---------------------------------------------------------------------------
+// T-273 trunking load index
+
+/// T-273, AWARE-067: `/api/trunking/load` answers the documented shape on a fresh run (a trunking
+/// store exists — the mock-device server wires it to the same run database as the inventory — but
+/// no trunk system has been seen, so `systems` is empty rather than 503), refuses a bad window and
+/// other methods, and **never carries audio or call content** — the route's actual boundary.
+#[test]
+fn trunking_load_index_answers_documented_shape_and_carries_no_content() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    let (st, v) = get(addr, "/api/trunking/load?t0=0&t1=3600");
+    assert_eq!(st, 200, "{v}");
+    for field in ["window", "systems"] {
+        assert!(v.get(field).is_some(), "missing {field}: {v}");
+    }
+    assert!(is_array(&v["systems"]), "{v}");
+    assert_eq!(v["window"]["t0"], 0.0);
+    assert_eq!(v["window"]["t1"], 3600.0);
+
+    // A system nobody has ever seen answers a zero-grant row, not 404 or 503: the index is a
+    // derived view over the stream, not a lookup that fails on an unknown key.
+    let unknown = "01890000-0000-7000-8000-000000000000";
+    let (st, v) = get(
+        addr,
+        &format!("/api/trunking/load?t0=0&t1=3600&system={unknown}"),
+    );
+    assert_eq!(st, 200, "{v}");
+    let row = &v["systems"][0];
+    assert_eq!(row["system"], unknown);
+    assert_eq!(row["grants"], 0);
+    assert_eq!(row["distinct_talkgroups"], 0);
+    assert_eq!(row["grants_per_min"], 0.0);
+
+    // The hard boundary (the ticket's actual constraint): metadata only, never audio or content,
+    // whatever systems or grants exist.
+    let body = v.to_string().to_lowercase();
+    for banned in ["audio", "content", "vocoder", "payload", "pcm"] {
+        assert!(!body.contains(banned), "must never carry {banned:?}: {v}");
+    }
+
+    for bad in [
+        "/api/trunking/load",
+        "/api/trunking/load?t0=10&t1=10",
+        "/api/trunking/load?t0=abc&t1=10",
+        "/api/trunking/load?t0=0&t1=10&system=not-a-uuid",
+    ] {
+        let (st, v) = get(addr, bad);
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+
+    let auth = format!("Bearer {TOKEN}");
+    let (st, _) = call(
+        addr,
+        "POST",
+        "/api/trunking/load?t0=0&t1=3600",
+        Some(&auth),
+        Some("{}"),
+    );
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
+// ---------------------------------------------------------------------------
 // T-349: every absolute time on the wire declares its unit in its own name.
 //
 // `docs/api.md` "Conventions": times are Unix seconds by default, and a field that departs from

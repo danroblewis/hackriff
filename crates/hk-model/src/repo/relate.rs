@@ -678,6 +678,13 @@ fn artifact_detail(
         "error_hz": p.error_hz,
         "tolerance_hz": p.tolerance_hz,
         "suppression_db": p.suppression_db,
+        // T-307: the receive chain this claim rests on (T-302 gates every pairing on it). An
+        // artifact is a property of ONE receive chain, never a universal claim, so it has to be
+        // auditable alongside the arithmetic that produced it.
+        "receive_chain": {
+            "device_id": p.chain.device_id,
+            "antenna_port": p.chain.antenna_port,
+        },
     })
 }
 

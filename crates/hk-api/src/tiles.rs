@@ -791,6 +791,19 @@ fn probe_key(
 /// 6 GHz wide and always at full extent, while the time surface is a retention window that usually
 /// fits inside one tile whatever the level.
 ///
+/// **But not past zero on an axis** (T-571). Before the coarse nodes were maintained live the fold
+/// budget capped frequency, so the tie never reached the end of its anti-diagonal; with the fold
+/// gone it does, and the frequency preference alone picked `(10, 0)` over `(9, 1)` on the shipped
+/// geometry — identical area, identical 32 tiles for the widest view, and a `max_level` of **0**
+/// on the time axis. A zero there is not "one level less reach": `ui/src/surface/lattice.ts`
+/// skips any ancestor whose `levelT` exceeds the cap, so a cap of 0 emits **no time-coarser
+/// ancestor at all** and `docs/16` §5.5's draw-a-coarser-resident-tile-while-the-fine-one-loads
+/// path loses its time arm — a time zoom-out draws *not loaded* instead of a coarse stand-in. It
+/// also makes the tile count on that axis grow linearly with the span, and a pane over a tuned
+/// 20 MHz band is already narrower than one tile at `level_f = 9`, so the frequency level it was
+/// traded for buys that pane nothing. So a pair with both axes ≥ 1 wins an equal-area tie, and
+/// frequency decides only among those.
+///
 /// # Readability, not existence
 ///
 /// A node a scheme does not *have* — a welded ladder's off-diagonal, which `parse_key` answers with
@@ -837,11 +850,14 @@ pub fn readable_ceiling(p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize,
         last
     };
     let (mut best, mut floor_f) = ((0usize, 0usize), usize::MAX);
+    // Among equal-area maxima, a pair that keeps BOTH axes alive beats one that does not; only
+    // then does frequency decide. See the doc comment: a `0` on an axis is not one level less
+    // reach, it deletes that axis's ancestor ladder in the client.
+    let rank = |(f, t): (usize, usize)| (f + t, usize::from(f >= 1 && t >= 1), f);
     for lt in 0..nt {
         let Some(r) = reach(lt) else { break };
         floor_f = floor_f.min(r);
-        // Maximise the coarsest tile's AREA (`2^(max_f + max_t)`), then reach in frequency.
-        if floor_f + lt > best.0 + best.1 || (floor_f + lt == best.0 + best.1 && floor_f > best.0) {
+        if rank((floor_f, lt)) > rank(best) {
             best = (floor_f, lt);
         }
     }
