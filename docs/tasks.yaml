@@ -19489,6 +19489,67 @@ tasks:
       under deliberate load before and after - "it passes now" on a quiet machine is the evidence
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
+  - id: T-604
+    milestone: M2-hardening
+    title: The bridge re-plumb test read a 503 body that had not arrived yet - a tungstenite tail race, not the wait it looked like
+    status: done
+    priority: medium
+    parallel_group: API
+    model: opus
+    effort: medium
+    depends_on: [T-530, T-542]
+    use_cases: []
+    acceptance: |
+      Done 2026-09-21 on branch task-bridgeflake.
+      THE MEASUREMENT THAT IS THE WHOLE DIAGNOSIS, kept here so nobody triages it twice:
+      `hk-api::bridge a_handshake_between_windows_waits_for_the_successor_and_never_says_gone`
+      FAILED in a loaded five-branch merge gate at 2.282 s and PASSED alone on a quiet machine at
+      2.281 s - ONE MILLISECOND APART. The test ran to completion either way, so nothing timed out.
+      A same-duration pass/fail pair means the outcome turns on WHAT FINISHED INSIDE a fixed wait,
+      never on the wait being too short. None of the five branches touched hk-api.
+      THE ACTUAL CAUSE, and it was not the re-plumb wait the name points at. The test asserted
+      `body.contains("replumbing")` on a `tungstenite::Error::Http` response. tungstenite fills a
+      refused handshake's body from `tail` (handshake/client.rs: `*e.body_mut() = Some(tail)`) -
+      whatever bytes happened to sit in its read buffer next to the status line - and
+      `http.rs::respond_cached` writes the head and the JSON body in TWO `write_all` calls. Whether
+      the body is there at all is therefore whether those two writes landed in one TCP read. Quiet
+      machine: they do. Loaded gate: they do not, `body` comes back EMPTY, the status is still the
+      expected 503, and the assert panics printing nothing. That empty panic message is what made
+      the failure look like a timing bug.
+      FIX (deterministic, no wider timeout, no retry, no heavy-serial pin - task-flakes spent
+      2026-09-20 REMOVING a `retries = 1` and a serial pin that propped up a wall-clock bound):
+      (a) the refusal is now read over a plain TcpStream to EOF (`refusal()` in the test), so the
+      body is complete by construction - the server sends `Connection: close`;
+      (b) `StreamRegistry` counts parks in `wait_for_offer_after` (`successor_waits_entered`,
+      `successor_waiters`, T-604), and the test waits on THE EVENT - the handshake has parked in the
+      gap - instead of sleeping a fixed 250 ms before offering the successor. Under load the old
+      sleep could expire before the knock had even connected, and the test then silently exercised a
+      plain attach to a live publisher, proving nothing about a gap: a green test asserting nothing.
+      (c) both wall-clock assertions are gone. "It waited for the successor before refusing" is now
+      `successor_waits_entered() == before + 1` (the 503 is only reachable through a park), and "an
+      end was not treated as a gap" is that same count UNCHANGED - replacing `elapsed >= 1500 ms`
+      and `elapsed < 1000 ms`. The only bound left is the pre-existing 10 s `wait_for` backstop,
+      whose expiry names what never arrived.
+      ASSERT ON ORDERING AND COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
+      MEASURED, running the whole `binary(bridge)` (13 tests, nextest's 8 threads - the flake needs
+      the sibling tests' concurrency; the test alone never failed, which is exactly what misled the
+      earlier triage) with 28-40 busy-loop processes on a 28-core machine:
+      BEFORE 3 failures in 36 runs (2/12 at 28 procs, 1/24 at 28 procs); AFTER 0 failures in 48 runs
+      (0/24 at 28 procs, 0/24 at 40 procs). Test duration also fell 2.28 s -> 2.02 s (the 250 ms
+      sleep is gone).
+      RED-WHEN-BROKEN, five mutants, each legible: gap answered 410 -> "timed out waiting for the
+      handshake to park in the gap waiting for a successor"; refuse without waiting -> "it refused
+      at once instead of waiting for the successor first, left: 1 right: 2" IN 12 ms (the old
+      wall-clock version needed 2 s to say less); wrong refusal `code` -> prints the ACTUAL body
+      (under load the old assert printed an empty one); every end treated as a gap -> "a finished
+      stream still says it is gone, left: 503 right: 410"; an end waited out as a gap while still
+      answering 410 -> "the end was treated as a gap and waited out for a successor that was never
+      promised, left: 3 right: 2" - the case only an ordering assertion can see.
+      RESIDUAL, for whoever writes the next one: ANY test asserting on a `tungstenite::Error::Http`
+      body has this trap. `bridge.rs` had exactly one and it is fixed; `status_of` (status only) is
+      safe. A grep for `.body()` in test code is the check. The server writing head+body in one
+      `write_all` would make it rarer and is NOT the fix - that is the masking this project rejects.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

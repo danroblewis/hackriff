@@ -63,6 +63,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -217,6 +218,9 @@ pub struct StreamRegistry {
     /// [`FINISHED_LINGER`], overridable by [`StreamRegistry::with_linger`] so a test can age a
     /// spent entry without sleeping a minute.
     linger: Duration,
+    /// How many callers are parked in [`StreamRegistry::wait_for_offer_after`], and how many ever
+    /// have been (T-602).
+    waits: Arc<SuccessorWaits>,
 }
 
 impl Default for StreamRegistry {
@@ -225,6 +229,56 @@ impl Default for StreamRegistry {
             inner: Arc::default(),
             offers: Arc::default(),
             linger: FINISHED_LINGER,
+            waits: Arc::default(),
+        }
+    }
+}
+
+/// Counters for [`StreamRegistry::wait_for_offer_after`] (T-602).
+///
+/// Being parked here is the whole of "this consumer is between windows, waiting for the
+/// successor": it is what a carried-over browser ([`watch_peer`]) and an arriving `/ws/…`
+/// handshake both do in a settle gap, and the only way out is the next offer or the caller's own
+/// deadline. So the count of parks is a fact about **ordering** — whether a successor was waited
+/// for at all, and whether it was waited for *before* something else happened — which a duration
+/// is not: under load every wall-clock bound around a settle gap measures the machine, not the
+/// handover. `hk-api`'s own re-plumb tests assert on these instead of on elapsed time.
+#[derive(Default)]
+struct SuccessorWaits {
+    /// Callers parked right now.
+    now: AtomicUsize,
+    /// Callers that have ever parked.
+    entered: AtomicU64,
+}
+
+/// Counts one caller's park, and un-counts it however the caller leaves (T-602).
+struct WaitGuard<'a> {
+    waits: &'a SuccessorWaits,
+    parked: bool,
+}
+
+impl<'a> WaitGuard<'a> {
+    fn new(waits: &'a SuccessorWaits) -> Self {
+        Self {
+            waits,
+            parked: false,
+        }
+    }
+
+    /// Idempotent: a caller that goes round the condvar loop twice is one waiter, not two.
+    fn enter(&mut self) {
+        if !self.parked {
+            self.parked = true;
+            self.waits.entered.fetch_add(1, Ordering::SeqCst);
+            self.waits.now.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        if self.parked {
+            self.waits.now.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
@@ -347,6 +401,7 @@ impl StreamRegistry {
     ) -> Option<Offer> {
         let deadline = Instant::now() + timeout;
         let (lock, cv) = &*self.offers;
+        let mut guard = WaitGuard::new(&self.waits);
         // Held across the check so an offer registered between the check and the wait still wakes
         // us: `register` takes this lock before it inserts, and notifies after releasing it.
         let mut seen = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -358,11 +413,29 @@ impl StreamRegistry {
             if left.is_zero() {
                 return None;
             }
+            // Counted before the park, so an observer that sees the count has seen a caller that
+            // cannot answer anything until this wait ends (T-602).
+            guard.enter();
             seen = cv
                 .wait_timeout(seen, left)
                 .unwrap_or_else(|p| p.into_inner())
                 .0;
         }
+    }
+
+    /// Callers parked in [`Self::wait_for_offer_after`] right now (T-602): consumers sitting in a
+    /// settle gap, waiting for the successor under their stream id.
+    pub fn successor_waiters(&self) -> usize {
+        self.waits.now.load(Ordering::SeqCst)
+    }
+
+    /// Callers that have **ever** parked in [`Self::wait_for_offer_after`] on this registry
+    /// (T-602).
+    ///
+    /// Monotonic, so it answers ordering questions — did this handshake wait for a successor
+    /// before it refused? did that one refuse without waiting at all? — without a clock.
+    pub fn successor_waits_entered(&self) -> u64 {
+        self.waits.entered.load(Ordering::SeqCst)
     }
 
     /// The `/api/streams` JSON: metadata only, and only what is offered now (see the
