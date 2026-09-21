@@ -358,7 +358,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked class=on>blocked</button></span>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <a href="/">← dashboard</a>
 <span class=legend><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
@@ -367,7 +367,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
-let last='',scope='frontier',flt={done:false,todo:false,blocked:true},msFilter='';
+let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
@@ -1379,6 +1379,18 @@ td.cmd{color:var(--mut)}
   <div class=ctl><label>view</label>
     <div class=seg><button id=segAgg class=on>Aggregate</button><button id=segSplit>Split</button></div>
   </div>
+  <div class=ctl><label>metric</label>
+    <div class=seg id=segMetric><button data-m=time class=on>Time</button><button data-m=count>Count</button></div>
+  </div>
+  <div class=ctl><label>statistic</label>
+    <div class=seg id=segStat><button data-s=sum class=on>Sum</button><button data-s=avg>Avg</button><button data-s=p50>Median</button><button data-s=p90>P90</button><button data-s=p95>P95</button></div>
+  </div>
+  <div class=ctl><label>unit</label>
+    <div class=seg id=segUnit><button data-u=inv class=on>Per invocation</button><button data-u=agent>Per agent</button></div>
+  </div>
+  <div class=ctl><label>bars</label>
+    <div class=seg id=segBars><button data-b=all class=on>Across all</button><button data-b=agent>Per agent</button></div>
+  </div>
   <div class=ctl><label>session</label>
     <select id=agentSel><option value="">— all sessions —</option></select>
   </div>
@@ -1395,9 +1407,31 @@ const C={txt:'#D5DEE2',mut:'#8595A0',dim:'#5A6973',teal:'#52C2AE',amber:'#F0A542
 const F={
   dur(s){ if(s==null) return '—'; s=Math.round(s); if(s<1) return '0s'; if(s<60) return s+'s'; if(s<3600){const m=Math.floor(s/60);return m+'m '+(s%60)+'s';} const h=Math.floor(s/3600);return h+'h '+Math.floor(s%3600/60)+'m';},
   tok(n){ if(n==null) return '—'; const a=Math.abs(n); if(a>=1e6) return (n/1e6).toFixed(2)+'M'; if(a>=1e3) return (n/1e3).toFixed(1)+'k'; return ''+Math.round(n);},
+  count(n){ if(n==null) return '—'; return Math.round(n).toLocaleString(); },
+  ratio(x){ if(x==null||!isFinite(x)) return '∞'; return x.toFixed(1)+'×'; },
+  pct(p){ if(p==null) return '—'; return Math.round(p)+'%'; },
   date(ts){ if(!ts) return '—'; return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 };
-const S={ frm:null, to:null, view:'agg', agent:null, all:0, loF:0, hiF:1 };
+// metric: time|count · stat: sum|avg|p50|p90|p95 · unit: inv|agent · bars: all|agent
+const S={ frm:null, to:null, view:'agg', agent:null, all:0, loF:0, hiF:1,
+          metric:'time', stat:'sum', unit:'inv', bars:'all', fam:null };
+const STAT_LABEL={sum:'Sum',avg:'Avg',p50:'Median',p90:'P90',p95:'P95'};
+// value for a family under the current (metric,stat,unit); everything is carried in the row
+function famValue(f){
+  if(S.metric==='count'){
+    if(S.unit==='inv') return S.stat==='sum' ? (f.cnt_inv&&f.cnt_inv.sum||0) : 1; // 1 each per invocation
+    return (f.cnt_agent||{})[S.stat] || 0;
+  }
+  const blk = S.unit==='agent' ? (f.dur_agent||{}) : (f.dur_inv||{});
+  return blk[S.stat] || 0;
+}
+function famFmt(v){ return S.metric==='count' ? F.count(v) : F.dur(v); }
+// cold/incremental split is a SUM-of-time concept only
+function famSplitOn(){ return S.metric==='time' && S.stat==='sum'; }
+function ctlDesc(){
+  const u = S.metric==='count' && S.unit==='inv' ? 'per invocation' : (S.unit==='agent'?'per agent':'per invocation');
+  return `${S.metric==='count'?'count':'time'} · ${STAT_LABEL[S.stat].toLowerCase()} · ${u}`;
+}
 let win={min_ts:null,max_ts:null}, agentsList=[], lastData=null;
 
 function rect(x,y,w,h,fill){ return `<rect x="${(+x).toFixed(1)}" y="${(+y).toFixed(1)}" width="${Math.max(0,+w).toFixed(1)}" height="${h}" rx="2" fill="${fill}"/>`; }
@@ -1455,28 +1489,42 @@ function render(d){ if(S.view==='split' && !S.agent) renderSplit(); else renderA
 
 function renderAgg(d){
   $('#bc').innerHTML = S.agent ? '‹ back to all sessions' : '';
+  const fams=(d.families||[]);
+  const perAgent=S.bars==='agent';
+  // family focus for the per-agent view (default: top family)
+  if(perAgent){ if(!S.fam || !fams.some(f=>f.stem===S.fam)) S.fam = fams.length?fams[0].stem:null; }
+  const famHead = perAgent
+    ? `Command families · per agent <em>${esc(ctlDesc())}</em>`
+    : `Command families <em>${esc(ctlDesc())}${famSplitOn()?' · cold vs incremental':''}</em>`;
+  const famPicker = perAgent
+    ? `<select id=famPick style="max-width:180px">${fams.slice(0,40).map(f=>`<option value="${esc(f.stem)}"${f.stem===S.fam?' selected':''}>${esc(f.stem)}</option>`).join('')}</select>`
+    : '';
+  const famLegend = (!perAgent && famSplitOn())
+    ? `<div class=legend><span><i style="background:${C.cold}"></i>cold build</span><span><i style="background:${C.amber}"></i>incremental</span><span><i style="background:${C.blue}"></i>other build</span><span><i style="background:${C.teal}"></i>non-build</span></div>`
+    : '';
   $('#charts').innerHTML=`
   <div class=grid>
-    <div class="card wide"><h2>Command families <em>by total time · cold vs incremental</em></h2>
-      <div id=cFam class=chart></div>
-      <div class=legend><span><i style="background:${C.cold}"></i>cold build</span><span><i style="background:${C.amber}"></i>incremental</span><span><i style="background:${C.blue}"></i>other build</span><span><i style="background:${C.teal}"></i>non-build</span></div>
+    <div class="card wide"><h2><span>${famHead}</span>${famPicker}</h2>
+      <div id=cFam class=chart></div>${famLegend}
     </div>
-    <div class=card><h2>Per-ticket time <em>top 25</em></h2>
+    <div class=card><h2>Per-ticket time <em>top 25 · sum</em></h2>
       <div id=cTick class=chart></div>
       <div class=legend><span><i style="background:${C.teal}"></i>build</span><span><i style="background:${C.lav}"></i>test</span><span><i style="background:${C.amber}"></i>gate</span><span><i style="background:${C.blue}"></i>thinking</span><span><i style="background:${C.dim}"></i>other</span></div>
     </div>
-    <div class=card><h2>Thinking vs doing</h2>
+    <div class=card><h2 title="Model time = wall-clock the model spent generating a turn (thinking + text + tool-call planning), clamped per turn. Not token count, not just <thinking> blocks.">Model time vs tool time</h2>
       <div id=cThink class=chart></div>
       <h2 style="margin-top:16px">Token spend</h2>
       <div id=cTok></div>
     </div>
-    <div class="card wide"><h2>Slowest invocations <em>top 25 single commands</em></h2><div id=cSlow></div></div>
+    <div class="card wide"><h2>P90-slowest command types <em>ranked by 90th-percentile invocation time</em></h2><div id=cSlow></div></div>
   </div>`;
-  drawFamilies($('#cFam'), d.families||[]);
+  if(perAgent) drawFamiliesPerAgent($('#cFam'), d.per_agent||[], S.fam, d.n_agents_total);
+  else drawFamilies($('#cFam'), fams, d.n_agents_total);
   drawTickets($('#cTick'), d.tickets||[]);
   drawThinking($('#cThink'), d.thinking||{});
-  $('#cSlow').innerHTML=slowTable(d.slowest||[]);
+  $('#cSlow').innerHTML=p90Table(d.p90_slowest||[]);
   $('#cTok').innerHTML=tokenCard(d.tokens||{}, d.tickets||[]);
+  const fp=$('#famPick'); if(fp) fp.onchange=e=>{ S.fam=e.target.value; render(lastData); };
 }
 function renderSplit(){
   $('#bc').innerHTML='';
@@ -1497,25 +1545,60 @@ function renderSplit(){
   $('#charts').innerHTML=h;
 }
 
-function drawFamilies(el, fams){
-  const rows=(fams||[]).slice(0,14), W=el.clientWidth||600;
+function drawFamilies(el, fams, nAgTot){
+  // one bar per family, ordered by the selected (metric,stat,unit) value
+  const rows=(fams||[]).map(f=>({f,v:famValue(f)})).filter(r=>r.v>0)
+                       .sort((a,b)=>b.v-a.v).slice(0,14);
+  const W=el.clientWidth||600;
   if(!rows.length){ el.innerHTML='<div class=empty>no commands in range</div>'; return; }
-  const rh=30, lblW=Math.min(140,Math.max(78,W*0.24)), barX=lblW+10, metaW=Math.min(214,W*0.36), barW=Math.max(20,W-barX-metaW-6);
-  const max=Math.max.apply(null,rows.map(f=>f.total_s).concat(1)), H=8+rows.length*rh;
+  const rh=30, lblW=Math.min(140,Math.max(78,W*0.24)), barX=lblW+10, metaW=Math.min(240,W*0.40), barW=Math.max(20,W-barX-metaW-6);
+  const max=Math.max.apply(null,rows.map(r=>r.v).concat(1e-9)), H=8+rows.length*rh;
+  const split=famSplitOn();
   let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
-  rows.forEach((f,i)=>{
-    const y=6+i*rh, bh=16, by=y+3, w=barW*f.total_s/max;
+  rows.forEach((r,i)=>{
+    const f=r.f, y=6+i*rh, bh=16, by=y+3, w=barW*r.v/max;
     s+=`<text x="${lblW}" y="${by+12}" text-anchor="end" fill="${C.txt}" font-size="12" font-family="${FM}">${esc(f.stem)}</text>`;
-    const cold=f.cold_s||0, incr=f.incr_s||0, split=cold+incr;
-    if(split>0.05){
+    const cold=f.cold_sum||0, incr=f.incr_sum||0;
+    if(split && (cold+incr)>0.05){
       const cw=barW*cold/max, iw=barW*incr/max, ow=Math.max(0,w-cw-iw);
       if(cw>0.3) s+=rect(barX,by,cw,bh,C.cold);
       if(iw>0.3) s+=rect(barX+cw,by,iw,bh,C.amber);
       if(ow>0.3) s+=rect(barX+cw+iw,by,ow,bh,C.blue);
     } else s+=rect(barX,by,w,bh,C.teal);
-    const meta=`${F.dur(f.total_s)} · ${f.count}× · p50 ${F.dur(f.p50_s)} · p90 ${F.dur(f.p90_s)}`;
+    const pct = nAgTot? ` (${F.pct(f.pct_agents)})` : '';
+    const meta=`${famFmt(r.v)} · n=${f.n_invocations} · ${f.n_agents} agents${pct}`;
     s+=`<text x="${W-2}" y="${by+12}" text-anchor="end" fill="${C.mut}" font-size="10.5" font-family="${FM}">${esc(meta)}</text>`;
   });
+  el.innerHTML=s+'</svg>';
+}
+function drawFamiliesPerAgent(el, perAgent, stem, nAgTot){
+  // one bar per agent for the focused family, using that agent's own stat
+  if(!stem){ el.innerHTML='<div class=empty>no families in range</div>'; return; }
+  const rows=[];
+  (perAgent||[]).forEach(a=>{ const fe=(a.families||[]).find(x=>x.stem===stem); if(!fe) return;
+    let v; if(S.metric==='count') v=fe.count;
+    else if(S.stat==='sum') v=fe.total_s;
+    else if(S.stat==='avg') v=fe.count?fe.total_s/fe.count:0;
+    else if(S.stat==='p50') v=fe.p50_s;
+    else v=fe.p90_s; // p90 & p95 (p95 not tracked per agent) fall back to p90
+    if(v>0) rows.push({a,fe,v});
+  });
+  rows.sort((x,y)=>y.v-x.v);
+  const top=rows.slice(0,16), W=el.clientWidth||600;
+  if(!top.length){ el.innerHTML=`<div class=empty>no agent ran ${esc(stem)} in range</div>`; return; }
+  const rh=26, lblW=Math.min(150,Math.max(84,W*0.28)), barX=lblW+10, metaW=Math.min(150,W*0.26), barW=Math.max(20,W-barX-metaW-6);
+  const max=Math.max.apply(null,top.map(r=>r.v).concat(1e-9)), H=8+top.length*rh+16;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  top.forEach((r,i)=>{
+    const y=6+i*rh, bh=14, by=y+3, w=barW*r.v/max;
+    const lbl=String(r.a.ticket||r.a.label||r.a.agent_id||'—');
+    const isT=/^T-\d/.test(lbl);
+    s+=`<text x="${lblW}" y="${by+11}" text-anchor="end" fill="${isT?C.amber:C.mut}" font-size="11" font-family="${FM}"${isT?` class=tlink data-tid="${esc(lbl)}"`:''}>${esc(lbl.slice(0,18))}</text>`;
+    s+=rect(barX,by,w,bh,C.lav);
+    const meta=`${famFmt(r.v)} · ${r.fe.count}×`;
+    s+=`<text x="${W-2}" y="${by+11}" text-anchor="end" fill="${C.mut}" font-size="10" font-family="${FM}">${esc(meta)}</text>`;
+  });
+  s+=`<text x="0" y="${H-1}" fill="${C.dim}" font-size="10" font-family="${FM}">${top.length} of ${rows.length} agents · ${nAgTot||'?'} ran any command</text>`;
   el.innerHTML=s+'</svg>';
 }
 function drawTickets(el, ticks){
@@ -1541,16 +1624,22 @@ function drawThinking(el, th){
   if(tot<=0){ el.innerHTML=s+`<text x="0" y="22" fill="${C.dim}" font-size="12" font-family="${FM}">no activity in range</text></svg>`; return; }
   const mw=W*m/tot, ratio=t>0?(m/t):Infinity;
   s+=rect(0,by,mw,bh,C.lav)+rect(mw,by,W-mw,bh,C.amber);
-  s+=`<text x="0" y="${by+bh+18}" fill="${C.lav}" font-size="11.5" font-family="${FM}">▉ thinking ${F.dur(m)}</text>`;
-  s+=`<text x="${W-2}" y="${by+bh+18}" text-anchor="end" fill="${C.amber}" font-size="11.5" font-family="${FM}">doing ${F.dur(t)} ▉</text>`;
+  s+=`<text x="0" y="${by+bh+18}" fill="${C.lav}" font-size="11.5" font-family="${FM}">▉ model ${F.dur(m)}</text>`;
+  s+=`<text x="${W-2}" y="${by+bh+18}" text-anchor="end" fill="${C.amber}" font-size="11.5" font-family="${FM}">tool ${F.dur(t)} ▉</text>`;
   s+=`<text x="${W/2}" y="${by+bh+18}" text-anchor="middle" fill="${C.mut}" font-size="11" font-family="${FM}">ratio ${isFinite(ratio)?ratio.toFixed(2)+':1':'∞'}</text>`;
   el.innerHTML=s+'</svg>';
 }
-function slowTable(rows){
+function p90Table(rows){
   if(!rows.length) return '<div class=empty>no commands in range</div>';
-  let h='<table><colgroup><col style="width:60px"><col style="width:108px"><col style="width:64px"><col></colgroup><thead><tr><th>dur</th><th>family</th><th>ticket</th><th>command</th></tr></thead><tbody>';
-  rows.forEach(r=>{ const tid=String(r.ticket||''), isT=/^T-\d/.test(tid);
-    h+=`<tr><td class=num>${F.dur(r.dur_s)}</td><td style="color:${C.mut}">${esc(r.stem)}</td><td${isT?` class=tlink data-tid="${esc(tid)}" style="color:${C.amber}"`:` style="color:${C.dim}"`}>${esc(tid||'—')}</td><td class=cmd title="${esc(r.cmd)}">${esc(r.cmd)}</td></tr>`;
+  let h='<table><colgroup><col><col style="width:74px"><col style="width:74px"><col style="width:70px"><col style="width:64px"><col style="width:72px"></colgroup>'
+      +'<thead><tr><th>command</th><th>P90</th><th>avg</th><th title="P90 ÷ average — how much slower the tail is than the typical run">×slower</th><th>agents</th><th>% agents</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    h+=`<tr><td style="color:${C.txt}">${esc(r.stem)}</td>`
+      +`<td class=num>${F.dur(r.p90_s)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.dur(r.avg_s)}</td>`
+      +`<td class=num style="color:${C.coral}">${F.ratio(r.p90_over_avg)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.count(r.n_agents)}</td>`
+      +`<td class=num style="color:${C.mut}">${F.pct(r.pct_agents)}</td></tr>`;
   });
   return h+'</tbody></table>';
 }
@@ -1573,6 +1662,19 @@ function tokenCard(tok, tickets){
 
 $('#segAgg').onclick=()=>{ S.view='agg'; syncSeg(); render(lastData); };
 $('#segSplit').onclick=()=>{ S.view='split'; if(S.agent){ S.agent=null; syncSeg(); load(); } else { syncSeg(); render(lastData); } };
+// metric/stat/unit/bars are pure client re-renders (all distributions are in the payload)
+function bindSeg(id, attr, key){
+  const seg=$(id); if(!seg) return;
+  seg.addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return;
+    S[key]=b.getAttribute(attr);
+    seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+    if(lastData) render(lastData);
+  });
+}
+bindSeg('#segMetric','data-m','metric');
+bindSeg('#segStat','data-s','stat');
+bindSeg('#segUnit','data-u','unit');
+bindSeg('#segBars','data-b','bars');
 $('#agentSel').onchange=e=>{ S.agent=e.target.value||null; if(S.agent) S.view='agg'; syncSeg(); load(); };
 $('#allChk').onchange=e=>{ S.all=e.target.checked?1:0; load(); };
 document.addEventListener('click',e=>{
