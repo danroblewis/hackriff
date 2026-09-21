@@ -19223,6 +19223,59 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-600
+    milestone: M2-hardening
+    title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
+    status: done
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: [T-598]
+    use_cases: []
+    branch: task-t600
+    acceptance: |
+      FOUND BY T-598. `EMITTER_DETECTION_EVIDENCE_SQL` in `crates/hk-model/src/repo/relate.rs`
+      counts only the flag bits stored ON the detection row. T-598 deliberately does NOT write to
+      that row - a detection is immutable by trigger (`detection_immutable`), because a measurement
+      is what was measured and an interpretation must not rewrite it - so the retune verdict lives
+      in `detection_retune` and is applied on the read path.
+      Consequence: a detection the system has resolved as LO-relative still ranks as though nothing
+      were known about it. Join `detection_retune.flag_bits` into the evidence proxy so a resolved
+      artefact ranks below a clean row.
+      KEEP T-598'S RULE INTACT WHILE DOING IT: read-path application, no write to the measurement.
+      The point of the split is that the measurement and the interpretation have different
+      lifetimes - the interpretation is revocable and the measurement is not.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a resolved LO-relative detection ranks
+      strictly below an unflagged one with otherwise equal evidence, and revoking the verdict
+      restores its rank - the second half matters, because a one-way change would make the ranking
+      outlive the claim.
+      Prove the test goes RED without the fix.
+    resolution: |
+      DONE 2026-09-21. `EMITTER_DETECTION_EVIDENCE_SQL` now reads each detection's currently-active
+      `detection_retune.flag_bits` (0 if none) via a correlated subquery alongside the row's own
+      `flags`, still read-path only - nothing is written back to `detection`, so the immutability
+      trigger and T-598's revocable-verdict design are untouched. The two OR'd together decide only
+      the suspect-fraction count `evidence()` builds for `RowEvidence::rank()`; the
+      `image_flagged`/`imd_flagged`/`spur_flagged` fields `RowEvidence::corroborates` reads stay
+      measurement-only, per their own doc comment.
+      Two tests in `crates/hk-model/src/repo/retune_tests.rs`, both proven RED without the join
+      (asserted `suspect_fraction` was 0.0 where 1.0 was expected):
+      `t600_resolved_lo_relative_artefact_ranks_below_a_clean_row` builds the real emitter and the
+      spur family's representative row with identical measured SNR/level/duty-cycle, resolves the
+      retune verdict, and asserts the artefact's rank is strictly below the clean row's despite the
+      equal underlying measurement. `t600_revoking_the_verdict_restores_the_artefacts_rank` then
+      withdraws the family's evidence (as T-598's own revocation test does) and re-resolves,
+      asserting the artefact's `suspect_fraction` and `rank()` return to exactly the clean row's -
+      the half that matters, since a one-way join would leave the ranking outliving the claim.
+      `just precheck hk-model` (fmt + clippy, `-D warnings`) clean. Targeted:
+      `cargo nextest run -p hk-model -E 'test(t600) or test(t598)'` - 7/7 pass, including T-598's
+      own suite unaffected.
+      NOTE FOR THE COORDINATOR: this worktree was branched from `main` while T-598 was still
+      mid-merge-runner-gate (uncommitted, `.git/MERGE_HEAD` present), so the branch also carries
+      T-598's files copied byte-for-byte from main's staged working tree, to build and test
+      standalone. Merge T-598 first; the overlap should be a trivial/no-op merge since the content
+      is identical.
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
