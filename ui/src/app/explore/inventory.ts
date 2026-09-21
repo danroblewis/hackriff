@@ -195,8 +195,20 @@ export function windowKey(state: WindowState): string {
 
 /** The frequency filters both lists share — the tuned/zoomed view span. Deliberately carries no
  * time: the window belongs to the Candidate query alone (see [[loadInventoryRows]]). */
+/**
+ * T-587: both Explore lists ask for `relations=all` (docs/api.md), never the `shown` default.
+ *
+ * `shown` is the T-219 declutter rule, and it hides a row with **any** standing relation claim —
+ * including `artifact-of`/`retune-sibling-of` — before a client ever sees it. That is exactly the
+ * field report: a receiver artifact the backend had already explained was invisible, so it read as
+ * a mystery signal appearing and vanishing with the tuned centre. `all` lists it with `relation`
+ * set; [[renderedInventory]] still declutters `suppressed-by`/`duplicate-of` client-side (the T-219
+ * behaviour, unchanged — those are the same-emission cases, not the artefact case this ticket is
+ * about) but an artefact claim now reaches the row and is rendered as one (`explanationState`,
+ * `explanationChip`).
+ */
 export function viewFilters(state: WindowState): Filters {
-  const f: Filters = {};
+  const f: Filters = { relations: "all" };
   if (state.live.view) { f.fLoHz = state.live.view.loHz; f.fHiHz = state.live.view.hiHz; }
   return f;
 }
@@ -322,6 +334,13 @@ export function renderedInventory(
   const out: RenderedInventory = { listed: { candidate: [], confirmed: [] }, boxed: [], noExtent: [], focused: null };
   for (const r of all) {
     if (r.state !== "candidate" && r.state !== "confirmed") continue;
+    // T-219, unchanged by T-587: `suppressed-by` and `duplicate-of` stay decluttered — a row
+    // already covered by a stronger Confirmed/Candidate entry, not a mystery to explain. Only
+    // those two kinds are filtered; `artifact-of`/`retune-sibling-of` are exactly what T-587
+    // requests reach the screen, so they are listed and boxed like any other row, just labelled
+    // (`explanationState`/`explanationChip` below).
+    const relKind = r.relation?.kind;
+    if (relKind === "suppressed-by" || relKind === "duplicate-of") continue;
     out.listed[r.state].push(r);
     if (r.id === focusedId) out.focused = r;
     if (r.presence?.last_interval) out.boxed.push(r);
@@ -497,7 +516,7 @@ export function emptyListText(s: EmptyState): string {
 
 // ---- row view model ----
 
-export interface Chip { cls: "known" | "unknown" | "flag" | "cluster"; text: string; title?: string }
+export interface Chip { cls: "known" | "unknown" | "flag" | "cluster" | "artifact"; text: string; title?: string }
 
 /** The family/flag chip(s) for a row, from already-known fields only (`family`,
  * `classification.family`, `explanations[0].flags`); "unknown" when no family is known yet. */
@@ -534,6 +553,57 @@ export function clusterChip(r: Pick<Row, "cluster_id" | "cluster_group">): Chip 
     ? `signature cluster ${g.label} · ${g.rows_in_view} rows measure alike`
     : `signature cluster ${g.label} · seen before`;
   return { cls: "cluster", text, title: CLUSTER_CHIP_TITLE };
+}
+
+// ---- T-587: artefact vs real emission vs not-yet-decided ----
+//
+// The field report: signals appeared and vanished with the tuned centre and there was no way to
+// tell a receiver artefact from an emission. The backend already decides this — `relation.kind`
+// `artifact-of` (image/harmonic/intermod, T-307's `ReceiveChain`-gated arithmetic) and
+// `retune-sibling-of` (T-598's cross-centre LO-relative test) are the only two kinds that assert a
+// row IS an artefact; nothing here recomputes that from `detail`, arithmetic or geometry — only
+// the already-asserted `kind` is read. `RetuneSlope::Absolute` is the classifier's *weak* claim
+// ("not LO-relative", never "real" — a fixed reference harmonic is still an artefact) and the
+// backend never claims a `retune-sibling-of` relation from it (`hk_model::repo::retune`), so
+// `relation !== null` here is never a false positive smuggled in through that slope.
+//
+// Three states, and they must read as distinct (the honesty constraint): an `artifact` row must
+// never look like an unexplained mystery, and a `real`/`undecided` row must never borrow the
+// artefact's certainty. `real` is deliberately "Confirmed and not explained as an artefact" — a
+// verified emitter, per the product model — never "not flagged as an artefact" alone, which would
+// let an un-reviewed candidate read as verified.
+export type ExplanationState = "artifact" | "real" | "undecided";
+
+/** Which of the three states a row is in, from already-asserted backend fields only. */
+export function explanationState(r: Pick<Row, "state" | "relation">): ExplanationState {
+  const kind = r.relation?.kind;
+  if (kind === "artifact-of" || kind === "retune-sibling-of") return "artifact";
+  return r.state === "confirmed" ? "real" : "undecided";
+}
+
+/** A short label for the artefact mechanism — `relation.artifact` for `artifact-of`, or "retune
+ * artefact" for `retune-sibling-of`, which names its mechanism in `detail.slope` instead. */
+function mechanismLabel(rel: NonNullable<Row["relation"]>): string {
+  if (rel.kind === "retune-sibling-of") return "retune artefact";
+  return rel.artifact ?? "artefact";
+}
+
+/** The artefact chip and its backend-rendered reason (`relation.reason`), or `null` for a row that
+ * is not an explained artefact. Distinct `cls` from [[rowChips]]'/[[clusterChip]]'s chips so it
+ * never reads as a family, a flag or a signature match — it is the backend's own explanation of why
+ * this row is not a signal to investigate. `title` repeats `reason` for hover, but the caller must
+ * also render `reason` as visible text (T-587: a label the backend asserted must not depend on a
+ * hover to be seen — that is the same defect as not showing it at all). */
+export function explanationChip(r: Pick<Row, "state" | "relation">): Chip | null {
+  if (explanationState(r) !== "artifact") return null;
+  const rel = r.relation as NonNullable<Row["relation"]>;
+  return { cls: "artifact", text: `Artifact · ${mechanismLabel(rel)}`, title: rel.reason };
+}
+
+/** The reason text to show beside the artefact chip, straight off `relation.reason` — `null` for a
+ * row that isn't an explained artefact, so a caller never renders an empty explanation line. */
+export function explanationReasonText(r: Pick<Row, "state" | "relation">): string | null {
+  return explanationState(r) === "artifact" ? (r.relation as NonNullable<Row["relation"]>).reason : null;
 }
 
 /** "Seen" text for a row (§4.2): confirmed rows show on-air duty and count (GAP 2 interim — no

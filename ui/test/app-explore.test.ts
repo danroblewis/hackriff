@@ -13,12 +13,13 @@ import {
   signalFocus, signalFocusText,
 } from "../src/app/explore/focus";
 import {
-  clearUserBand, CLUSTER_CHIP_TITLE, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText, liveEdgeS,
+  clearUserBand, CLUSTER_CHIP_TITLE, clusterChip, confirmedFilters, DEFAULT_ROW_RATE_HZ, emptyListText,
+  explanationChip, explanationReasonText, explanationState, liveEdgeS,
   loadInventoryRows, nextInventorySort, recurrenceDots, renderedInventory, rowChips, rowSeenText,
   setUserBand, sortInventoryRows, viewFilters, viewWindow, WAITING_FOR_WINDOW, waterfallSpanS,
   type Classification, type Row, FALLBACK_ROWS,
 } from "../src/app/explore/inventory";
-import { signalMarkBoxes } from "../src/surface/marks";
+import { ARTIFACT_MARK, CANDIDATE_MARK, CONFIRMED_MARK, signalMarkBoxes } from "../src/surface/marks";
 import * as ax from "../src/axis";
 
 import {
@@ -439,7 +440,9 @@ test("THE CONTROL: with no live edge reported, the window is UNKNOWN rather than
 
 test("viewFilters carries the frequency span and deliberately no time (the window belongs to the Candidate query alone)", () => {
   const f = viewFilters(winState({ view: { loHz: 99.6e6, hiHz: 102e6 }, rowRateHz: 25 }));
-  assert.deepEqual(f, { fLoHz: 99.6e6, fHiHz: 102e6 });
+  // T-587: `relations: "all"` is the other thing every Explore query carries now — see the
+  // dedicated test above for why (the `shown` default was hiding artefacts entirely).
+  assert.deepEqual(f, { fLoHz: 99.6e6, fHiHz: 102e6, relations: "all" });
 });
 
 test("LIVE: the Candidate query carries the waterfall window; the Confirmed query carries no t0/t1 at all", async () => {
@@ -629,7 +632,7 @@ test("scrubbed back: Confirmed names the scrubbed instant as its live edge, and 
   // scrubbed-back Confirmed row would read the liveness it has *now*, disagreeing with every other
   // surface on screen.
   const view = { loHz: 99.6e6, hiHz: 102e6 };
-  assert.deepEqual(confirmedFilters(winState({ view, rowRateHz: 25 })), { fLoHz: 99.6e6, fHiHz: 102e6 }, "no `at` at the live edge");
+  assert.deepEqual(confirmedFilters(winState({ view, rowRateHz: 25 })), { fLoHz: 99.6e6, fHiHz: 102e6, relations: "all" }, "no `at` at the live edge");
   const scrubbed = confirmedFilters(winState({ view, rowRateHz: 25, time: { live: false, tS: 1_789_540_000 } }));
   assert.equal(scrubbed.at, 1_789_540_000);
   assert.equal(scrubbed.t0, undefined, "still no window: a window would filter the catalogue");
@@ -1086,4 +1089,107 @@ test("commitRegion UNARMED: a degenerate stroke commits nothing at all", () => {
   assert.deepEqual(calls, []);
   assert.deepEqual(store.get().focus, { kind: "none" }, "nothing was made, so nothing is focused");
   assert.equal(store.get().toast.text, "");
+});
+
+// ---- T-587: an artefact reads as a LABELLED artefact, not a mystery signal --------------------
+//
+// The field report: signals appeared and vanished with the tuned centre and there was no way to
+// tell a receiver artefact from a real emission. The backend already computes the answer
+// (`relation.kind` `artifact-of`/`retune-sibling-of`, docs/api.md) — this is presentation only.
+
+/** A `relation` fixture, defaulting to a T-307 image claim with a full backend-rendered reason. */
+function makeRelation(over: Partial<NonNullable<Row["relation"]>> = {}): NonNullable<Row["relation"]> {
+  return {
+    kind: "artifact-of", artifact: "image", source_id: "e-source", author: "system",
+    actor: "hk-pipeline/artifact@1", t_s: 1_789_300_000,
+    reason: "image of the 100.8 MHz carrier", score: null,
+    detail: { n: 1, lo_hz: 99_950_000, predicted_hz: 99_600_000, error_hz: 1200, receive_chain: { device_id: "hackrf-0", antenna_port: null } },
+    ...over,
+  };
+}
+
+test("explanationState: THE THREE STATES — artifact, real, undecided — read from already-asserted fields only", () => {
+  assert.equal(explanationState(makeRow({ state: "candidate", relation: makeRelation() })), "artifact");
+  assert.equal(explanationState(makeRow({ state: "confirmed", relation: makeRelation({ kind: "retune-sibling-of", artifact: null }) })), "artifact");
+  assert.equal(explanationState(makeRow({ state: "confirmed", relation: null })), "real", "a verified emitter with no artifact claim");
+  assert.equal(explanationState(makeRow({ state: "candidate", relation: null })), "undecided", "a hypothesis, not yet an artifact and not yet confirmed");
+  // A `suppressed-by`/`duplicate-of` relation is a DIFFERENT claim (T-219: same emission, not a
+  // receiver artefact) — it must never borrow the artefact label.
+  assert.equal(explanationState(makeRow({ state: "candidate", relation: makeRelation({ kind: "suppressed-by", artifact: null }) })), "undecided");
+  assert.equal(explanationState(makeRow({ state: "candidate", relation: makeRelation({ kind: "duplicate-of", artifact: null }) })), "undecided");
+});
+
+test("explanationChip/explanationReasonText: the backend's own words reach the row, verbatim — nothing re-derived client-side", () => {
+  const row = makeRow({ state: "candidate", relation: makeRelation({ reason: "IM3 product of A and B" }) });
+  const chip = explanationChip(row);
+  assert.ok(chip);
+  assert.equal(chip!.cls, "artifact", "its own chip class — never known/unknown/flag/cluster");
+  assert.match(chip!.text, /image/);
+  assert.equal(chip!.title, "IM3 product of A and B", "hover repeats it, but is not the only place it shows");
+  assert.equal(explanationReasonText(row), "IM3 product of A and B", "and the visible text is exactly this, not a client paraphrase");
+
+  const retune = makeRow({ state: "candidate", relation: makeRelation({ kind: "retune-sibling-of", artifact: null, reason: "same LO-relative line seen from 3 tuning centres" }) });
+  assert.match(explanationChip(retune)!.text, /retune artefact/);
+  assert.equal(explanationReasonText(retune), "same LO-relative line seen from 3 tuning centres");
+
+  // A real emission and an undecided candidate render NEITHER a chip nor a reason line — the
+  // honesty constraint the other direction: nothing is labelled that the backend did not assert.
+  assert.equal(explanationChip(makeRow({ state: "confirmed", relation: null })), null);
+  assert.equal(explanationReasonText(makeRow({ state: "confirmed", relation: null })), null);
+  assert.equal(explanationChip(makeRow({ state: "candidate", relation: null })), null);
+  assert.equal(explanationReasonText(makeRow({ state: "candidate", relation: null })), null);
+});
+
+test("explanationState: RetuneSlope::Absolute is never the source of an artifact label (the weak-claim rule)", () => {
+  // The ticket's own guard: `Absolute` is "not LO-relative", never "real" — but the backend
+  // (`hk_model::repo::retune`) never claims a `retune-sibling-of` relation from it, so a row with
+  // NO relation at all must read `undecided`/`real`, never `artifact`, however it was classified
+  // internally. This is the client-side half of that guard: nothing here upgrades a bare `null`
+  // relation into an artifact claim.
+  assert.equal(explanationState(makeRow({ state: "candidate", relation: null })), "undecided");
+  assert.equal(explanationState(makeRow({ state: "confirmed", relation: null })), "real");
+});
+
+test("viewFilters: asks relations=all — the T-219 'shown' default was hiding the very artefacts T-587 must surface", () => {
+  const f = viewFilters(winState());
+  assert.equal(f.relations, "all", "RED without the fix: the default 'shown' filter hides artifact-of/retune-sibling-of rows entirely");
+});
+
+test("loadInventoryRows: THE REQUEST — both Candidate and Confirmed queries carry relations=all on the wire", async () => {
+  const { ctx, paramsFor, atLiveEdge } = windowCtx();
+  ctx.store.set((s) => ({ live: { ...s.live, rowRateHz: 25 } }));
+  atLiveEdge(CAPTURE_EDGE_S);
+  await loadInventoryRows(ctx, () => {});
+  assert.equal(paramsFor("candidate").get("relations"), "all");
+  assert.equal(paramsFor("confirmed").get("relations"), "all");
+});
+
+test("renderedInventory: an artifact-of row IS listed and boxed (T-587) — suppressed-by/duplicate-of stay hidden (T-219, unchanged)", () => {
+  const rows = [
+    makeRow({ id: "art", state: "candidate", f_center_hz: 99_600_000, presence: iv(100, 118), relation: makeRelation() }),
+    makeRow({ id: "sup", state: "candidate", f_center_hz: 99_601_000, presence: iv(100, 118), relation: makeRelation({ kind: "suppressed-by", artifact: null }) }),
+    makeRow({ id: "dup", state: "candidate", f_center_hz: 99_602_000, presence: iv(100, 118), relation: makeRelation({ kind: "duplicate-of", artifact: null }) }),
+    makeRow({ id: "plain", state: "candidate", f_center_hz: 99_700_000, presence: iv(100, 118), relation: null }),
+  ] as Row[];
+  const r = renderedInventory(rows, null);
+  assert.deepEqual(r.listed.candidate.map((x) => x.id).sort(), ["art", "plain"], "RED without the fix: the artefact row used to be hidden entirely");
+  assert.deepEqual(r.boxed.map((b) => b.id).sort(), ["art", "plain"]);
+});
+
+test("signalMarkBoxes: an explained artifact draws ARTIFACT_MARK, on either tab — never the plain signal inks", () => {
+  const rows = [
+    makeRow({ id: "art-cand", state: "candidate", f_lo_hz: 99_500_000, f_hi_hz: 99_700_000, presence: iv(100, 118), relation: makeRelation() }),
+    makeRow({ id: "art-conf", state: "confirmed", f_lo_hz: 100_500_000, f_hi_hz: 100_700_000, presence: iv(100, 118), relation: makeRelation({ kind: "retune-sibling-of", artifact: null }) }),
+    makeRow({ id: "plain-cand", state: "candidate", f_lo_hz: 101_500_000, f_hi_hz: 101_700_000, presence: iv(100, 118), relation: null }),
+    makeRow({ id: "plain-conf", state: "confirmed", f_lo_hz: 102_500_000, f_hi_hz: 102_700_000, presence: iv(100, 118), relation: null }),
+    makeRow({ id: "sup", state: "candidate", f_lo_hz: 103_500_000, f_hi_hz: 103_700_000, presence: iv(100, 118), relation: makeRelation({ kind: "suppressed-by", artifact: null }) }),
+  ] as Row[];
+  const boxes = signalMarkBoxes(rows, null);
+  assert.deepEqual(boxes.map((b) => b.id).sort(), ["art-cand", "art-conf", "plain-cand", "plain-conf"], "suppressed-by still draws nothing");
+  assert.deepEqual(boxes.find((b) => b.id === "art-cand")!.rgba, ARTIFACT_MARK);
+  assert.deepEqual(boxes.find((b) => b.id === "art-conf")!.rgba, ARTIFACT_MARK, "confirmed does not upgrade an artifact claim either");
+  assert.deepEqual(boxes.find((b) => b.id === "plain-cand")!.rgba, CANDIDATE_MARK);
+  assert.deepEqual(boxes.find((b) => b.id === "plain-conf")!.rgba, CONFIRMED_MARK);
+  assert.notDeepEqual(ARTIFACT_MARK, CANDIDATE_MARK, "the artifact ink must be visually distinct from both signal inks");
+  assert.notDeepEqual(ARTIFACT_MARK, CONFIRMED_MARK);
 });
