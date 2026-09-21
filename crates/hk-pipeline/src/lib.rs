@@ -53,6 +53,7 @@ pub mod recipes;
 pub mod refine;
 pub mod stats;
 pub mod survey; // T-399
+pub mod synth; // T-546 (ADR-0015 / ADR-0021): why a decode pipeline was chosen
 
 // ADR-0012 §11 attention + memory wiring (pre-added by T-113; the owners fill them in).
 pub mod alarms; // T-122

@@ -340,11 +340,11 @@ acceptance-m3 *args:
 acceptance-m4 *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m4 {{args}}
 
-# MAUTO acceptance (SIGNAL-087, T-545 phase 2): blind auto-discovery and auto-decode of a trunked
-# control channel through the mock SDR. FIVE OF ITS SEVEN TESTS ARE `#[ignore]`d AND EXPECTED TO
-# FAIL — they are T-546's definition of done, and are ignored only so one known-red proof does not
-# pin every unrelated merge (the same treatment `canvas_fidelity` gives T-483). This recipe runs
-# the two green controls; add `-- --include-ignored` to run the red proofs and read the spec.
+# MAUTO acceptance (SIGNAL-087, T-545 phase 2 + T-546 phase 3): blind auto-discovery and
+# auto-decode of a trunked control channel through the mock SDR — detect blindly, measure the
+# symbol structure, auto-select the demod + decode pipeline, and confirm the INVENTORY EMITTER by
+# decoding it, at the -9.6 ppm receiver clock error this project measured on its own HackRF. All
+# seven tests run; T-545's five red proofs went green with T-546 and their `#[ignore]`s are gone.
 acceptance-mauto *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_mauto {{args}}
 

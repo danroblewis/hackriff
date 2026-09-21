@@ -16557,7 +16557,108 @@ tasks:
   - id: T-546
     milestone: MAUTO
     title: "BART 851 MHz, phase 3: make the blind auto-decode tests pass - the first real MAUTO end-to-end"
-    status: todo
+    result: |
+      DONE 2026-09-21 on branch task-t546. ALL SEVEN of T-545's acceptance tests pass and the five
+      `#[ignore]` lines are gone, which was the stated definition of done. Baseline re-measured
+      first: 2 passed, 5 failed, exactly as briefed.
+
+      WHAT WAS BUILT, one piece per red message.
+
+      (F) THE CLOCK ERROR, and it is the one to believe. `hk_detect::trunk::raster::fit_grid_offset`
+      fits the receiver's own offset from a channel grid as the POWER-WEIGHTED CIRCULAR MEAN of the
+      occupied bins modulo the raster - one extra FFT pass per hunt, not one per channel, because
+      every emission in a capture shares the same receiver offset and so reinforces one estimate.
+      The trunking hunt re-origins its grid on the fit (occupancy bins, channel centres and the DDC
+      offset all move together) and records it as `ReceiverFit {grid_hz, offset_hz, concentration,
+      ppm}` on the emitter's analysis: PROVENANCE ABOUT THE RADIO, NOT ABOUT THE SIGNAL. Below
+      `MIN_GRID_CONCENTRATION` (0.25, derived from the geometry of a 12.5 kHz channel's occupancy,
+      not read off a run) the answer is `None` and the grid is left uncorrected - a hint that does
+      not hold up buys nothing. At the measured -9.6 ppm the control channel is now found; test F
+      went green first, before anything else was built.
+
+      (B) PARAMETERS. `crates/hk-demod/src/fsk/structure.rs` is a NEW blind measurement, separate
+      from the demodulator on purpose: `C4fmSymbols::rate_bd` is the rate the demodulator was TOLD,
+      so it is not an input to `EstimatedParams`. It measures (1) the symbol rate as a
+      cyclostationary clock line - the squared first difference of the discriminator is a pulse
+      train at the baud rate - parabolically interpolated and gated on `MIN_CLOCK_BITS` over the
+      band median; (2) the level count; (3) the outer deviation. On the fixture, with no expected
+      value supplied anywhere: 4799.8 Bd (a priori tolerance 4800 +/- 48) and 1709 Hz (1800 +/- 360),
+      `mod_order: 4`, `modulation: "c4fm"`.
+
+      THE LEVEL TEST IS THE PART THAT TOOK THE WORK, and the first two attempts were wrong in a way
+      worth recording. `inner_fraction` alone cannot separate four levels from a CONTINUOUS-valued
+      modulation: both put ~50 % of samples on the inner pair (measured 0.49 vs 0.52). A threshold
+      on the mean distance-to-nearest-level cannot either, because a real pulse-shaped C4FM channel
+      has a half-open eye scoring 0.126 against a continuous spread's 1/6 = 0.167 - and setting a
+      constant between those two would have been reading a threshold off the fixture, which the
+      suite explicitly forbids. The statistic that works asks about the distribution's SHAPE rather
+      than its width: three equal, adjacent windows of width 2/9 over normalised |v|, centred on the
+      inner level, the midpoint and the outer level (they tile [2/9, 10/9] exactly, so no constant
+      chooses them), and the midpoint window's share against the modes'. `MAX_VALLEY_RATIO = 0.5` is
+      the honest halfway point. Measured on the two populations in a unit test that PRINTS them: a
+      clean four-level alphabet 0.00, a clocked continuous-valued modulation at the same rate and
+      deviation 0.96.
+
+      `Levels::Indeterminate` is a variant, not a fallback to 2, and it survives into the data model:
+      an emission whose alphabet cannot be measured gets NO `estimated_params` rather than plausible
+      ones, and the analysis caps at `framed` and says why.
+
+      ALSO A CLOSED LOOP, because it was needed: the caller's channel is deliberately wider than the
+      modulation (the trunking DDC passes 2x the raster so the demodulator can apply its own
+      selectivity), so the measurement re-filters at the Carson bandwidth it just measured - outer
+      deviation + half a symbol rate - and re-reads the levels. Without the first filter the
+      neighbours 12.5 kHz away contributed their own clock line and the measurement refused outright.
+
+      (C) AUTO-SELECTION. `crates/hk-pipeline/src/synth.rs` + `hk_model::repo::synthesis`: the
+      chosen pipeline, its per-stage evidence and an ADR-0021 trace are persisted as an
+      `emitter_synthesis` row (ADR-0015 section 5.4, append-only like `emitter_refined_tuning`), and
+      `POST /api/analyze {emitter_id}` serves it - 200 instead of 501. THE TRACE IS THE POINT and it
+      keeps ADR-0021's load-bearing distinction STRUCTURAL: `tried` is served, never inferred, and
+      `EmitterSynthesis::validate` REFUSES a row where `measured` and `outcome` disagree. So "why not
+      DMR" (tried: 0 frame syncs of the 0 blocks it checked) and "why not PSK" (`unsupported`: no
+      `psk_demod` block exists in this build, ADR-0015 section 1.1's own catalogue gap) read as the
+      different answers they are. Every framing in `CC_FRAMINGS` is re-scanned and recorded, winner
+      and losers alike.
+
+      `not-searched` is NOT `unknown`: an emitter no analysis has run on answers 200 with
+      `resolution.kind: "not-searched"` and a null pipeline. That is the decode-side statement of the
+      canvas's grey rule and it is asserted in `api_contract.rs` against a real, un-analysed
+      (analogue) emitter, not a fabricated one. `docs/api.md`'s Analyze section is rewritten with the
+      full vocabulary.
+
+      (D) CONFIRM BY DECODING - the heart of the ticket. The trunking chain now files its decode
+      against the INVENTORY EMITTER at the same frequency: a Demodulation carrying the measured
+      parameters, the synthesis row, and `family::record_decoder_evidence`, then
+      `Inventory::chain_emitter` to re-rank. ONE FINDING WORTH FLAGGING: the control channel confirms
+      inside the FIRST window, while the detector is still accumulating a track, so
+      `emitter_for_channel` routinely finds nothing - the first implementation dropped the strongest
+      evidence in the run on the floor and D stayed red. `synth::attach` therefore RECORDS THE
+      SIGHTING when detection has not offered a row yet, exactly as the analogue and FSK chain
+      writers do, and the repository's clustering resolves it to the detector's row.
+
+      (E2) EXPLANATION QUALITY. `p25-tsbk` / `dmr-csbk` / `nxdn-cac` map to `public-safety` at 0.97
+      in `hk_pipeline::family`, so the ranking rests on a CRC-valid decode of a trunked control
+      channel - which nothing else transmits - instead of on the allocation row that the analogue
+      neighbours and an empty channel would get equally.
+
+      THE NON-CIRCULAR CLAIM STILL HOLDS AND WAS NOT MADE VACUOUS. Test D's precondition 3 - grant ->
+      IDEN_UP -> frequency -> RF energy actually radiating there - passes unchanged, and nothing in
+      this diff touches the framing, the CRC variant or the five compliance gaps at
+      `confirm.rs:980-1035`. What went green is the PLUMBING; T-299 stays open and `docs/19` section
+      7.7 now says so in as many words.
+
+      TARGETED TESTS: `acceptance_mauto` 7/7 (was 2/7). hk-demod + hk-detect + hk-model 579/579.
+      hk-pipeline + hk-api and `hk-cli::api_contract` green. `just precheck` clean. ONE LOAD-FLAKE,
+      triaged not papered over: `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_
+      reports_ready_after_its_bounded_wait` failed once under load (33 s) and PASSES ALONE (19 s) -
+      a bounded-wait timing test, unrelated to this diff, for the deflaker.
+
+      FOLLOW-UP FILED, surfaced and deliberately not chased: T-628 - the fitted offset is known only
+      MODULO the raster (+4300 Hz and -8200 Hz name the same grid), which re-origins the grid but
+      cannot reach an ABSOLUTE frequency, so grant FOLLOWING is skipped while the receiver is
+      measurably off-grid rather than down-converting the channel next door and reporting "not
+      radiating". Recorded in `docs/19` section 7.6b.
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -20126,6 +20227,42 @@ tasks:
       implying resolution it never captured.
       ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
       trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-628
+    milestone: MAUTO
+    title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-546]
+    use_cases: [SIGNAL-087]
+    acceptance: |
+      FOUND BY T-546 while making docs/19 section 7.6a's -9.6 ppm measurement a capability, and
+      deliberately not chased there.
+      `hk_detect::trunk::raster::fit_grid_offset` fits the receiver's own offset from the channel
+      grid as the power-weighted circular mean of the occupied bins MODULO the raster. That is
+      genuinely all the spectrum says - +4300 Hz and -8200 Hz name the same 12.5 kHz grid - and it
+      is enough to re-origin the grid, which is what candidacy needs. It is NOT enough to reach an
+      ABSOLUTE frequency, and a trunking grant is exactly that: the announced band plan fixes the
+      granted channel's transmit frequency unambiguously, so down-converting at `f + offset` with
+      the wrong alias measures the channel NEXT DOOR.
+      T-546's holding answer is to SKIP following while the receiver is measurably off-grid, on the
+      rule that a wrong measurement ("granted channel not radiating") is worse than a missing one.
+      That is right and it is also a hole: on every real 800 MHz capture this HackRF will ever make,
+      grant following is off.
+      Resolve the alias. Two constraints are available and neither is a band-plan lookup:
+      (1) the crystal's own ppm bound - a HackRF One is specified to +/-20 ppm, which at 852 MHz is
+      +/-17 kHz and so does NOT on its own pick one 12.5 kHz alias, but does bound the search to a
+      handful; (2) which alias actually has energy - try each candidate alias on a channel the
+      grants name and keep the one that measures power, which is a MEASUREMENT rather than an
+      assumption. Record the resolved offset as receiver provenance with the evidence that chose it,
+      and make the unresolved case visibly distinct from the resolved one (ADR-0021's tried vs
+      not-tried rule applies here too).
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: over the T-545 scene shifted by the measured -8200 Hz, the
+      granted voice channels are followed and their call count matches the unshifted run's. Prove
+      the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

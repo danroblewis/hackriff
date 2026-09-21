@@ -347,10 +347,6 @@ fn a_the_emission_is_detected_blind_as_a_time_frequency_region() {
 /// the control channel would not produce one. Two things therefore have to change: the digital
 /// emission must get a session at all, and `mod_order` must be able to say 4.
 #[test]
-#[ignore = "T-545 PROVES THE GAP AND IS EXPECTED TO FAIL. `#[ignore]`d only so one known-red \
-            proof does not block every other merge; deleting this line is part of T-546's \
-            definition of done. Run it: cargo nextest run -p hk-e2e \
-            -E 'binary(acceptance_mauto)' --run-ignored all"]
 fn b_the_modulation_symbol_rate_and_deviation_are_estimated_from_the_signal() {
     let Some(run) = run() else { return };
     report(&run);
@@ -462,10 +458,6 @@ fn b_the_modulation_symbol_rate_and_deviation_are_estimated_from_the_signal() {
 /// tunes nothing. **There is no code path in this repository that picks a demod+decode chain for
 /// a digital emission from measurements**, so this assertion cannot fail for any other reason.
 #[test]
-#[ignore = "T-545 PROVES THE GAP AND IS EXPECTED TO FAIL. `#[ignore]`d only so one known-red \
-            proof does not block every other merge; deleting this line is part of T-546's \
-            definition of done. Run it: cargo nextest run -p hk-e2e \
-            -E 'binary(acceptance_mauto)' --run-ignored all"]
 fn c_the_demod_and_decode_pipeline_is_auto_selected_from_the_measurements() {
     let Some(run) = run() else { return };
     report(&run);
@@ -579,10 +571,6 @@ fn c_the_demod_and_decode_pipeline_is_auto_selected_from_the_measurements() {
 /// there. The arithmetic comes from the protocol decoder and the energy comes from the FFT, and
 /// those two were not written from the same source (`docs/19 §5.3`).
 #[test]
-#[ignore = "T-545 PROVES THE GAP AND IS EXPECTED TO FAIL. `#[ignore]`d only so one known-red \
-            proof does not block every other merge; deleting this line is part of T-546's \
-            definition of done. Run it: cargo nextest run -p hk-e2e \
-            -E 'binary(acceptance_mauto)' --run-ignored all"]
 fn d_the_decode_reaches_the_emission_the_run_detected() {
     let Some(run) = run() else { return };
     report(&run);
@@ -783,10 +771,6 @@ fn e_a_sensible_explanation_ranks_among_the_top_suggestions() {
 /// **mismatch** legible later, since an emission with strong signal evidence sitting off its
 /// allocation is the interesting case ADR-0017 asks to flag rather than snap.
 #[test]
-#[ignore = "T-545 PROVES THE GAP AND IS EXPECTED TO FAIL. `#[ignore]`d only so one known-red \
-            proof does not block every other merge; deleting this line is part of T-546's \
-            definition of done. Run it: cargo nextest run -p hk-e2e \
-            -E 'binary(acceptance_mauto)' --run-ignored all"]
 fn e2_the_explanation_rests_on_measured_evidence_not_only_the_allocation() {
     let Some(run) = run() else { return };
     report(&run);
@@ -902,10 +886,6 @@ fn top_services(rows: &[&serde_json::Value]) -> Vec<(f64, Vec<String>)> {
 /// a property of the receiver, not of the signal, and the same correction should then apply to
 /// every emission in the capture.
 #[test]
-#[ignore = "T-545 PROVES THE GAP AND IS EXPECTED TO FAIL. `#[ignore]`d only so one known-red \
-            proof does not block every other merge; deleting this line is part of T-546's \
-            definition of done. Run it: cargo nextest run -p hk-e2e \
-            -E 'binary(acceptance_mauto)' --run-ignored all"]
 fn f_the_receiver_clock_error_is_measured_not_assumed_zero() {
     let Some(run) = blind_run("s087clk", 545, true) else {
         return;

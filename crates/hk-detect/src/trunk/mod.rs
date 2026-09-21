@@ -62,7 +62,11 @@ pub use nxdn::{
     NXDN_SYNC_TOLERANCE_DIBITS, NXDN_TYPE_C, NxdnAssignment, NxdnFrame, NxdnLich, NxdnResolved,
     decode_frame, is_voice_assignment, message_type_name, nxdn_protocol_of, scan_cacs,
 };
-pub use raster::{LMR_RASTERS_HZ, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster, fit_raster};
+pub use raster::GridFit;
+pub use raster::{
+    LMR_RASTERS_HZ, MIN_GRID_CONCENTRATION, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster,
+    fit_grid_offset, fit_raster,
+};
 pub use support::{
     SupportLevel, TRUNK_SUPPORT, TrunkSupport, support_for, support_json, unsupported,
     unsupported_text,
