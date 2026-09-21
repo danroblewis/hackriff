@@ -1538,7 +1538,19 @@ fn join_workers(
             }
             // 50 ms, not 2: this poll runs for the whole life of a segment (the supervisor waits
             // here while the run is healthy), and it is measured against a bound of 8 s.
-            thread::sleep(Duration::from_millis(50));
+            //
+            // **Once a re-plumb is waiting, 2 ms** (T-536). `deadline` is armed only when a
+            // request is pending, which is exactly the case where the poll interval is not idle
+            // bookkeeping but dead air: capture is off, `retune` is on a condvar and every worker
+            // here is already stopping. Measured with nothing else wrong, a re-plumb's join was
+            // 50–60 ms with the IQ buffer off, almost all of it this sleep rounding up the one
+            // worker that had not quite finished.
+            let idle = deadline.is_none();
+            thread::sleep(if idle {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(2)
+            });
         }
         if abandoned {
             // Said out loud, not only counted: "the re-plumb is taking a while" and "a worker of
