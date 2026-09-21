@@ -340,9 +340,12 @@ fn on_chain(chains: &[ReceiveChain], c: &ReceiveChain) -> bool {
     chains.iter().any(|x| x.same_chain(c))
 }
 
-/// Whether `chains` and `targets` share a receive chain.
-fn on_any_chain(chains: &[ReceiveChain], targets: &[ReceiveChain]) -> bool {
-    targets.iter().any(|c| on_chain(chains, c))
+/// The first chain in `targets` that could be the same receive chain as something in `chains`, or
+/// `None` when they share none. Doubles as the boolean "do they share a chain" gate T-302 needs
+/// (`is_some()`) and, per T-307, the disclosure of *which* chain matched — the artifact claim's
+/// `chain` field.
+fn shared_chain(chains: &[ReceiveChain], targets: &[ReceiveChain]) -> Option<ReceiveChain> {
+    targets.iter().find(|c| on_chain(chains, c)).cloned()
 }
 
 /// What the rules need to know about one live inventory row, gathered from its stored measurement
@@ -722,6 +725,11 @@ pub struct ArtifactPrediction {
     pub tolerance_hz: f64,
     /// How far the candidate sits below its source, dB.
     pub suppression_db: f64,
+    /// The receive chain this claim rests on (T-302, T-307): the front end whose mixer, LO and
+    /// non-linearity the arithmetic explains. Every mechanism is gated on this chain having
+    /// measured both the artifact and its source(s) — this is *which* chain matched, disclosed
+    /// alongside the arithmetic so a claim made on one front end is never read as universal.
+    pub chain: ReceiveChain,
 }
 
 impl ArtifactPrediction {
@@ -865,14 +873,15 @@ pub fn predict_artifacts(
                 error_hz: target_f_center_hz - predicted,
                 tolerance_hz: tol,
                 suppression_db: suppression,
+                chain: lo.chain.clone(),
             });
         }
         // Harmonics: this front end's own non-linearity product, so the source has to have been
         // measured on a chain that measured this row. Deliberately placed after the image loop —
         // skipping to the next source here skips only the harmonics.
-        if !on_any_chain(&s.chains, &target_chains) {
+        let Some(harmonic_chain) = shared_chain(&s.chains, &target_chains) else {
             continue;
-        }
+        };
         for n in 2..=HARMONIC_MAX_ORDER {
             let predicted = f64::from(n) * s.f_center_hz;
             let bw = f64::from(n) * s.bandwidth_hz;
@@ -890,6 +899,7 @@ pub fn predict_artifacts(
                 error_hz: target_f_center_hz - predicted,
                 tolerance_hz: tol,
                 suppression_db: suppression,
+                chain: harmonic_chain.clone(),
             });
         }
     }
@@ -901,12 +911,13 @@ pub fn predict_artifacts(
             }
             // Both tones have to have reached the same mixer as the row being explained: a product
             // needs its two sources and its victim on one receive chain.
-            if !target_chains
+            let Some(intermod_chain) = target_chains
                 .iter()
-                .any(|c| on_chain(&s1.chains, c) && on_chain(&s2.chains, c))
-            {
+                .find(|c| on_chain(&s1.chains, c) && on_chain(&s2.chains, c))
+                .cloned()
+            else {
                 continue;
-            }
+            };
             // The weaker source sets how strong the product can be.
             let suppression = s1.level_dbfs.min(s2.level_dbfs) - target_level_dbfs;
             for a in 1..INTERMOD_MAX_ORDER {
@@ -938,6 +949,7 @@ pub fn predict_artifacts(
                             error_hz: target_f_center_hz - predicted,
                             tolerance_hz: tol,
                             suppression_db: suppression,
+                            chain: intermod_chain.clone(),
                         });
                     }
                 }
