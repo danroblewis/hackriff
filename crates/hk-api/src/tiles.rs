@@ -1077,16 +1077,25 @@ fn short_circuit_json(uniform: Option<&'static str>) -> Value {
 /// (`ui/src/surface/tile.ts`), so the measurement the full read would have produced is discarded by
 /// the renderer cell for cell — which is why this is observationally equivalent and not merely
 /// faster.
+/// This read's own diagnostics, grouped: `build_ms` and `in_flight` describe the *request*, not
+/// the tile. T-574 had to strip exactly these two before hashing a response into an ETag, because
+/// two reads of an unchanged sealed tile otherwise differ — so they are one concept, and passing
+/// them as one argument says so (and keeps this helper inside clippy's argument budget).
+struct ReadDiagnostics<'a> {
+    elapsed_ms: f64,
+    slot: &'a TileSlot,
+}
+
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
     ceiling: (usize, usize),
     coverage: Value,
     max_live: Option<f64>,
-    elapsed_ms: f64,
-    slot: &TileSlot,
+    diags: ReadDiagnostics<'_>,
     sealed: bool,
 ) -> Value {
+    let ReadDiagnostics { elapsed_ms, slot } = diags;
     let source = base_tier(key, max_live);
     json!({
         "sealed": sealed,
@@ -1680,7 +1689,16 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         let sh = shadow(state, store, &key, None)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         let mut v = unobserved_tile_json(
-            &key, store, ceiling, coverage, max_live, elapsed_ms, &slot, sealed,
+            &key,
+            store,
+            ceiling,
+            coverage,
+            max_live,
+            ReadDiagnostics {
+                elapsed_ms,
+                slot: &slot,
+            },
+            sealed,
         );
         v["shadow"] = shadow_json(&sh, None);
         return Ok(v);
