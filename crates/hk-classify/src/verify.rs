@@ -45,8 +45,10 @@
 //! # The tests themselves
 //!
 //! - **psk-qam — ALRT with known SNR, GLRT over phase.** Symbol samples are taken through an RRC
-//!   matched filter (roll-off and timing estimated once, *before* any hypothesis is considered, so
-//!   no hypothesis gets a nuisance parameter fitted in its own favour). Each candidate's
+//!   matched filter (roll-off, timing **and residual carrier frequency** estimated once, *before*
+//!   any hypothesis is considered, so no hypothesis gets a nuisance parameter fitted in its own
+//!   favour — see [`remove_residual_cfo`], without which the stage was monotone in alphabet size
+//!   because it was ranking a ring rather than a constellation, T-246). Each candidate's
 //!   constellation then gives the exact average likelihood
 //!   `Σ_k log (1/M) Σ_m exp(−|y_k e^{−jθ} − s_m|²/N₀)`, with `N₀` from the measured SNR and `θ`
 //!   from the M-th-power estimate. Marginalising over the symbol alphabet is what makes this an
@@ -580,12 +582,102 @@ fn symbol_samples(x: &[Complex64], sps: f64) -> Option<Vec<Complex64>> {
     if out.len() < MIN_SYMBOLS {
         return None;
     }
+    let out = remove_residual_cfo(&out);
     let p = out.iter().map(Complex64::norm_sqr).sum::<f64>() / out.len() as f64;
     if !(p.is_finite() && p > 0.0) {
         return None;
     }
     let g = 1.0 / p.sqrt();
     Some(out.into_iter().map(|s| s * g).collect())
+}
+
+/// Order the residual-carrier line is raised to. 8 is the least common multiple of the alphabet
+/// sizes this stage scores (2, 4, 8), so one line serves every hypothesis and no hypothesis is
+/// fitted a frequency of its own — the same rule the roll-off and the timing phase already obey.
+const CFO_ORDER: u32 = 8;
+
+/// How finely the [`CFO_ORDER`]-th power line is searched, as a multiple of the DFT bin width over
+/// the symbol record. Four is enough that the parabolic refinement below lands within a few parts
+/// in 10^4 of a symbol rate, which is two orders below the smallest residual that matters here.
+const CFO_OVERSAMPLE: usize = 4;
+
+/// Removes the residual carrier **frequency** offset from symbol-rate samples.
+///
+/// # Why this exists (T-246)
+///
+/// The ALRT below estimates one constant phase `θ` per hypothesis from an M-th-power sum. A
+/// constant phase is not what the stage input carries. Measured at the stage input on the blind
+/// grid (`t246_stage_input_carries_residual_cfo_not_timing_error`), the symbol clock is *exact* —
+/// C14's samples-per-symbol matches the generator's to within ±21 ppm, a total slip of under
+/// 0.04 symbols across the 256-symbol window — while the residual carrier offset is **0.4 % to
+/// 3.6 % of the symbol rate** (up to 2.3 kHz), which is 1 to 9 whole rotations across that same
+/// window. A single constant `θ` cannot remove that: the constellation is smeared into a ring, and
+/// a ring fits the densest alphabet best for a reason that has nothing to do with the modulation.
+///
+/// That is exactly what the monotone behaviour T-243 found was: before this correction the ALRT's
+/// arg-max was `8psk` on 24 of 36 blind snippets and on 16 of the 24 that were genuinely `bpsk` or
+/// `qpsk`; the own-constellation residual of a *genuine* member ran 1.7–267 N₀ where a synced
+/// receiver sits near 1. After it, the residual is 0.67–2.6 N₀ and the arg-max is the truth on
+/// **36 of 36**. So the likelihood was never mis-derived; it was being fed a ring.
+///
+/// # How
+///
+/// `y^8` collapses BPSK, QPSK and 8-PSK alike to a single point, so the modulation cancels and what
+/// is left is a tone at eight times the residual offset. Its frequency is found by maximising
+/// `|Σ_k y_k^8 e^{−j2πνk}|` over `ν ∈ [−½, ½)` — a coarse search at [`CFO_OVERSAMPLE`] times the bin
+/// width, then one parabolic refinement. Maximising rather than differencing matters: `ν = 0` is in
+/// the search space, so a snippet with no offset is left alone instead of being handed the noise of
+/// a lag-1 phase estimate (a differential estimator took one 20 dB `bpsk` snippet from 1.7 N₀ to
+/// 13.4 N₀ and flipped its call to `8psk`).
+///
+/// The unambiguous range is `±1/16` of a symbol rate — 6.25 %, comfortably above the 3.6 % worst
+/// case observed and above anything a detection box that centred the emission at all would leave.
+fn remove_residual_cfo(y: &[Complex64]) -> Vec<Complex64> {
+    let z: Vec<Complex64> = y.iter().map(|v| v.powu(CFO_ORDER)).collect();
+    let n = z.len();
+    let grid = CFO_OVERSAMPLE * n;
+    let line = |nu: f64| -> f64 {
+        let mut acc = Complex64::new(0.0, 0.0);
+        for (k, v) in z.iter().enumerate() {
+            let ph = -std::f64::consts::TAU * nu * k as f64;
+            acc += *v * Complex64::new(ph.cos(), ph.sin());
+        }
+        acc.norm()
+    };
+    let step = 1.0 / grid as f64;
+    let mut best_g = 0usize;
+    let mut best_m = f64::NEG_INFINITY;
+    let mut mags = Vec::with_capacity(grid);
+    for g in 0..grid {
+        let m = line(g as f64 * step - 0.5);
+        if m > best_m {
+            best_m = m;
+            best_g = g;
+        }
+        mags.push(m);
+    }
+    // Parabolic refinement on the three samples around the peak (wrapping, since the grid is
+    // periodic in nu).
+    let lo = mags[(best_g + grid - 1) % grid];
+    let hi = mags[(best_g + 1) % grid];
+    let den = lo - 2.0 * best_m + hi;
+    let delta = if den.abs() > 0.0 {
+        (0.5 * (lo - hi) / den).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    let nu = (best_g as f64 + delta) * step - 0.5;
+    if !nu.is_finite() {
+        return y.to_vec();
+    }
+    let f = nu / f64::from(CFO_ORDER);
+    y.iter()
+        .enumerate()
+        .map(|(k, s)| {
+            let ph = -std::f64::consts::TAU * f * k as f64;
+            *s * Complex64::new(ph.cos(), ph.sin())
+        })
+        .collect()
 }
 
 /// Mean per-symbol log-likelihood of each candidate `psk-qam` class.
@@ -939,6 +1031,306 @@ mod tests {
     use crate::symbols::SymbolEstimator;
     use crate::synth::{ACCEPTANCE_SEED_BASE, Class, SynthConfig, generate};
     use hk_model::Timestamp;
+
+    // -------------------------------------------------------------------------------------
+    // T-246: the psk-qam ALRT, and the stage input it is fed.
+    // -------------------------------------------------------------------------------------
+
+    /// The three PSK orders this stage scores, with the truth generator for each.
+    const T246_PSK: [(Class, &str, u32); 3] = [
+        (Class::Bpsk, "bpsk", 2),
+        (Class::Qpsk, "qpsk", 4),
+        (Class::Psk8, "8psk", 8),
+    ];
+
+    const T246_SEEDS: u64 = 6;
+    const T246_SNRS: [f64; 2] = [20.0, 30.0];
+
+    /// The generator's own symbol rate for `(class, seed)` — [`crate::synth::generate`]'s first
+    /// draw, reproduced exactly. Used only to score the receiver's estimate, never fed to it.
+    fn t246_true_rate(class: Class, seed: u64) -> f64 {
+        let mut rng =
+            hk_dsp::synth::Rng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ class as u64);
+        25e3 + 75e3 * rng.unit()
+    }
+
+    /// Everything the verifier would see for one snippet, plus the truth it is scored against.
+    struct T246Case {
+        x: Vec<Complex64>,
+        /// Samples per symbol the stage would use: C14's where it locked, the generator's where it
+        /// did not (genuine 8-PSK never locks at these SNRs, and the likelihood is still the thing
+        /// under test).
+        sps: f64,
+        sps_true: f64,
+        locked: bool,
+        fs: f64,
+        n0: f64,
+    }
+
+    fn t246_case(class: Class, snr_db: f64, seed: u64) -> T246Case {
+        let s = generate(class, &SynthConfig::new(snr_db, seed));
+        let mut c14 = SymbolEstimator::new();
+        let symbols = c14.from_samples(
+            &s.symbol_samples,
+            s.symbol_sample_rate_hz,
+            Some(s.obw_hz),
+            Some(snr_db),
+        );
+        let locked = symbols
+            .as_ref()
+            .filter(|x| x.rate_trusted())
+            .and_then(|x| x.symbol_rate_bd.value())
+            .filter(|r| *r > 0.0);
+        let fs = s.symbol_sample_rate_hz;
+        let sps_true = fs / t246_true_rate(class, seed);
+        let sps = locked.map_or(sps_true, |r| fs / r);
+        let want = (sps * MAX_SYMBOLS as f64).ceil() as usize;
+        let x = s.symbol_samples[..s.symbol_samples.len().min(want)]
+            .iter()
+            .map(|c| Complex64::new(f64::from(c.re), f64::from(c.im)))
+            .collect();
+        T246Case {
+            x,
+            sps,
+            sps_true,
+            locked: locked.is_some(),
+            fs,
+            n0: 10f64.powf(-snr_db.clamp(SNR_CLAMP_DB.0, SNR_CLAMP_DB.1) / 10.0),
+        }
+    }
+
+    /// Frequency of the `m`-th power line of `x`, in Hz, with the line's coherence.
+    fn t246_cfo_hz(x: &[Complex64], m: u32, fs: f64) -> (f64, f64) {
+        let mut acc = Complex64::new(0.0, 0.0);
+        let mut p = 0.0;
+        for i in 1..x.len() {
+            let a = x[i].powu(m);
+            let b = x[i - 1].powu(m);
+            acc += a * b.conj();
+            p += a.norm_sqr();
+        }
+        let coh = if p > 0.0 { acc.norm() / p } else { 0.0 };
+        (acc.arg() / std::f64::consts::TAU * fs / f64::from(m), coh)
+    }
+
+    /// **Step one of T-246, and it decides the rest**: a smeared constellation and a mis-derived
+    /// likelihood look identical at the output, so measure which one this stage is handed.
+    ///
+    /// The answer, on the blind grid: the **symbol clock is exact** and the **carrier is not**.
+    #[test]
+    fn t246_stage_input_carries_residual_cfo_not_timing_error() {
+        let mut worst_ppm: f64 = 0.0;
+        let mut worst_slip: f64 = 0.0;
+        let mut worst_cfo_norm: f64 = 0.0;
+        let mut n_locked = 0;
+        let mut n = 0;
+        for (class, _, m) in T246_PSK {
+            for snr in T246_SNRS {
+                for k in 0..T246_SEEDS {
+                    let seed = ACCEPTANCE_SEED_BASE + 900 + k;
+                    let c = t246_case(class, snr, seed);
+                    n += 1;
+                    if c.locked {
+                        n_locked += 1;
+                        let ppm = (c.sps - c.sps_true) / c.sps_true * 1e6;
+                        let slip = (c.x.len() as f64 / c.sps).floor() * (c.sps - c.sps_true);
+                        worst_ppm = worst_ppm.max(ppm.abs());
+                        worst_slip = worst_slip.max(slip.abs());
+                    }
+                    let (cfo_hz, coh) = t246_cfo_hz(&c.x, m, c.fs);
+                    let rate = c.fs / c.sps_true;
+                    // Only count a line the estimator can actually see.
+                    if coh > 0.5 {
+                        worst_cfo_norm = worst_cfo_norm.max((cfo_hz / rate).abs());
+                    }
+                }
+            }
+        }
+        assert_eq!(n, 36, "grid size");
+        assert!(n_locked >= 23, "C14 locked on only {n_locked} of {n}");
+        // Timing: the symbol clock is right to parts per million, and the record never slips by a
+        // tenth of a symbol end to end. Nothing here can smear a constellation.
+        assert!(
+            worst_ppm < 100.0,
+            "worst symbol-rate error {worst_ppm:.0} ppm — the diagnosis assumed it was negligible"
+        );
+        assert!(
+            worst_slip < 0.1,
+            "worst end-to-end slip {worst_slip:.3} symbols"
+        );
+        // Carrier: whole rotations across the same window. 0.4 % of the symbol rate over 256
+        // symbols is one full turn; the worst here is an order above that.
+        assert!(
+            worst_cfo_norm > 0.004,
+            "worst residual CFO {worst_cfo_norm:.5} of the symbol rate — if this is really \
+             negligible the T-246 diagnosis is wrong and the likelihood is the suspect again"
+        );
+        println!(
+            "T-246 stage input over {n} snippets ({n_locked} with a C14 lock): \
+             worst symbol-rate error {worst_ppm:.0} ppm, worst end-to-end slip {worst_slip:.3} \
+             symbols, worst residual CFO {:.2} % of the symbol rate",
+            worst_cfo_norm * 100.0
+        );
+    }
+
+    /// **The defect itself (T-246).** The psk-qam ALRT must rank by the data, not by alphabet size.
+    ///
+    /// Before [`remove_residual_cfo`] this failed exactly as the ticket describes: the arg-max was
+    /// `8psk` on 24 of 36 snippets, including 16 of the 24 that were genuinely `bpsk` or `qpsk`.
+    ///
+    /// The test is deliberately run **at the likelihood**, with all three orders as candidates, so
+    /// it cannot pass by the verifier skipping: `psk_qam_loglikelihoods` either scores all three or
+    /// the case is counted as not run and the count assertion below fails.
+    #[test]
+    fn the_psk_qam_alrt_ranks_by_the_data_not_by_constellation_size() {
+        let candidates: Vec<LabelP> = T246_PSK
+            .iter()
+            .map(|(_, l, _)| LabelP {
+                label: (*l).to_owned(),
+                p: 1.0 / 3.0,
+            })
+            .collect();
+        let mut ran = 0;
+        let mut right = 0;
+        let mut largest = 0;
+        let mut wrong: Vec<String> = Vec::new();
+        for (class, truth, _) in T246_PSK {
+            for snr in T246_SNRS {
+                for k in 0..T246_SEEDS {
+                    let seed = ACCEPTANCE_SEED_BASE + 900 + k;
+                    let c = t246_case(class, snr, seed);
+                    let Some(scores) = psk_qam_loglikelihoods(
+                        &candidates,
+                        &c.x,
+                        c.sps,
+                        Some(-10.0 * c.n0.log10()),
+                    ) else {
+                        continue;
+                    };
+                    assert_eq!(scores.len(), 3, "{truth}/{snr}/{seed}: hypotheses scored");
+                    ran += 1;
+                    let best = scores
+                        .iter()
+                        .max_by(|a, b| a.1.total_cmp(&b.1))
+                        .expect("non-empty");
+                    if best.0 == "8psk" {
+                        largest += 1;
+                    }
+                    if best.0 == truth {
+                        right += 1;
+                    } else {
+                        wrong.push(format!(
+                            "{truth} {snr:.0} dB seed {seed} -> {} [{}]",
+                            best.0,
+                            scores
+                                .iter()
+                                .map(|(l, v)| format!("{l}:{v:.2}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
+                    }
+                }
+            }
+        }
+        println!(
+            "T-246 ALRT: ran on {ran} of 36 snippets, arg-max correct {right}, \
+             arg-max = largest constellation {largest} (12 of those are genuinely 8psk)"
+        );
+        assert_eq!(ran, 36, "the ALRT must actually have run on every snippet");
+        // The monotone failure, stated directly: `8psk` may win only where `8psk` is the truth.
+        assert_eq!(
+            largest, 12,
+            "the ALRT preferred the largest constellation on {largest} of 36 snippets; only the 12 \
+             genuine 8-PSK ones may: {wrong:#?}"
+        );
+        assert_eq!(right, 36, "arg-max wrong on {}: {wrong:#?}", 36 - right);
+    }
+
+    /// The same property **through [`verify`]**, in the condition where it actually runs: a tree
+    /// call left undecided between two orders, both above [`CANDIDATE_MIN_P`].
+    ///
+    /// This is the case the ticket warns is masked today — after T-243 a real tree call is decisive
+    /// enough that the runner-up falls below the floor and the stage skips with
+    /// [`SkipReason::SingleCandidate`], so on/off look identical. Forcing the prior is what makes
+    /// the test non-vacuous, and the `Ran` assertion is what proves it did.
+    #[test]
+    fn a_two_candidate_prior_is_reranked_to_the_truth_not_to_the_larger_alphabet() {
+        let mut ran = 0;
+        for (class, truth, _) in [T246_PSK[0], T246_PSK[1]] {
+            for snr in T246_SNRS {
+                for k in 0..T246_SEEDS {
+                    let seed = ACCEPTANCE_SEED_BASE + 900 + k;
+                    let s = generate(class, &SynthConfig::new(snr, seed));
+                    let mut c14 = SymbolEstimator::new();
+                    let symbols = c14.from_samples(
+                        &s.symbol_samples,
+                        s.symbol_sample_rate_hz,
+                        Some(s.obw_hz),
+                        Some(snr),
+                    );
+                    let mut req =
+                        ClassifyRequest::new(&s.samples, s.sample_rate_hz, Timestamp::UNIX_EPOCH);
+                    req.obw_hz = Some(s.obw_hz);
+                    req.snr_db = Some(snr);
+                    req.symbols = symbols.as_ref();
+                    let mut c = Classifier::new().classify(&req);
+                    if c.family != "psk-qam" || c.class.is_none() {
+                        continue;
+                    }
+                    // An undecided tree call: the truth and the largest alphabet, level pegging.
+                    // Nothing else changes, and both are labels the tree's own family offers.
+                    if let Some(call) = c.class.as_mut() {
+                        call.dist = vec![
+                            LabelP {
+                                label: truth.to_owned(),
+                                p: 0.5,
+                            },
+                            LabelP {
+                                label: "8psk".to_owned(),
+                                p: 0.5,
+                            },
+                        ];
+                        call.label = "8psk".to_owned();
+                        call.p = 0.5;
+                    }
+                    let outcome = verify(
+                        &mut c,
+                        &VerifyInput {
+                            samples: &s.symbol_samples,
+                            sample_rate_hz: s.symbol_sample_rate_hz,
+                            symbols: symbols.as_ref(),
+                            snr_db: Some(snr),
+                        },
+                    );
+                    let VerifyOutcome::Ran { scores, from, to } = &outcome else {
+                        // Only a clock lock may excuse a skip here; everything else means the test
+                        // stopped exercising the stage.
+                        assert_eq!(
+                            outcome,
+                            VerifyOutcome::Skipped(SkipReason::NoClockLock),
+                            "{truth} {snr} {seed}"
+                        );
+                        continue;
+                    };
+                    ran += 1;
+                    assert_eq!(from, "8psk", "the forced prior");
+                    assert_eq!(
+                        to, truth,
+                        "{truth} {snr} dB seed {seed}: verifier kept/chose {to} with {scores:?}"
+                    );
+                    let call = c.class.as_ref().expect("class call");
+                    assert_eq!(call.stage, Stage::Verifier);
+                    assert!(call.p <= MAX_CONFIDENCE + 1e-9);
+                }
+            }
+        }
+        println!("T-246: the verifier ran on {ran} of 24 forced two-candidate snippets");
+        assert!(
+            ran >= 20,
+            "the verifier only ran {ran} times — a green run that never executed the stage is the \
+             failure this test exists to prevent"
+        );
+    }
 
     /// Classifies one generated waveform with the verifier wired in, returning the classification
     /// both before and after it ran.

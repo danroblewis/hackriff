@@ -4050,7 +4050,7 @@ tasks:
     milestone: M3
     title: 'Verifier psk-qam ALRT is monotone in constellation size on every input:
       it re-ranks 8psk -> qam64 on 100%% of bpsk and qpsk snippets'
-    status: todo
+    status: in-progress
     priority: normal
     deps: []
     parallel_group: M3A
@@ -4102,7 +4102,31 @@ tasks:
       EVM while reaching 1.29 %% on a clean control, so those waveforms sit ~15 N0 from
       their own constellation before any receiver touches them. T-246 stays OPEN and is
       blocked by T-296, not by the ALRT derivation.'
-
+    resolved_by_t246_2026_09_21: 'FIXED, and neither earlier attribution was right. Measured at the STAGE
+      INPUT on 36 blind psk snippets (bpsk/qpsk/8psk x 20/30 dB x 6 seeds), against the generator''s own
+      symbol rate reproduced exactly: the symbol CLOCK is exact - C14''s sps matches the generator to
+      within 21 ppm, worst end-to-end slip 0.041 symbols over 256 - while the residual CARRIER offset
+      is 0.4-3.6 % of the symbol rate (up to 2.3 kHz), i.e. 1 to 9 whole rotations across the same window.
+      The ALRT estimated ONE CONSTANT phase per hypothesis from an M-th-power sum, which cannot remove
+      a frequency, so it was scoring a RING, and a ring fits the densest alphabet best for a reason unrelated
+      to the modulation. So the likelihood was never mis-derived, and T-296''s generator work was not
+      the blocker either: the missing stage was carrier recovery, T-291''s route (a), done narrowly. FIX:
+      verify::remove_residual_cfo, a hypothesis-INDEPENDENT 8th-power line (8 = lcm of 2,4,8) maximised
+      over frequency (not a lag-1 difference, which injected noise and made one 20 dB bpsk snippet worse),
+      applied in symbol_samples alongside the roll-off and the timing. MEASURED: genuine-member own-constellation
+      residual 1.7-267 N0 -> 0.67-2.6 N0 (a synced receiver sits near 1); ALRT arg-max correct 20/36 ->
+      36/36; arg-max = largest constellation 28/36 -> 12/36, and those 12 are exactly the genuine 8-PSK
+      ones. No measurable cost: verifier_gain 24.6 s with the correction vs 27.6 s without. TESTS (all
+      in verify.rs, all shown RED with only the one call removed): t246_stage_input_carries_residual_cfo_not_timing_error
+      (the measurement; asserts the clock is exact and the carrier is not), the_psk_qam_alrt_ranks_by_the_data_not_by_constellation_size
+      (ran on 36 of 36; asserts the largest-alphabet count is exactly the 12 genuine ones), and a_two_candidate_prior_is_reranked_to_the_truth_not_to_the_larger_alphabet,
+      which FORCES two candidates above CANDIDATE_MIN_P so the stage actually runs (22 of 24; the other
+      2 skip on NoClockLock, asserted) - that is the SingleCandidate mask the ticket warned about, defeated
+      rather than re-hidden. hk-classify 106/106 green, including accuracy_sweep''s ADR-0016 floors and
+      family_level_answers_are_bit_identical_with_and_without_the_verifier. FOLLOW-UP surfaced, not chased:
+      C14 never reports a trusted rate on genuine 8-PSK at 20 or 30 dB (0 of 12), so the verifier can
+      never run on it in production; and qam16/qam64 stay declined by T-422, which is now worth revisiting
+      because the smear that motivated that decision is gone.'
   - id: T-247
     milestone: M3
     title: 'hk_pipeline::classify::classify_box and ::record have NO CALLER anywhere
@@ -4400,7 +4424,7 @@ tasks:
     milestone: M2-hardening
     title: 'Burst acceptance scene over 902-928 MHz (915 ISM) through the IQ ring: the
       canonical short-burst playground as a blind fixture'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-250
@@ -4424,6 +4448,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    result: "tests/e2e/tests/acceptance_ism.rs + acceptance/t254_ism_bursts.rs (new `just acceptance-ism` target, listed in e2e_milestones and acceptance-milestones): the 902-928 MHz playground blind through the mock SDR AND the IQ ring. Scene = shared `lora_ism_burst` generator (seed 254, 6 s at 500 kSps, centre 903.0 MHz) with three species separating the claim: CW carrier at 902.82 MHz on air throughout (the control), six 16.7 ms FSK sensor bursts at 902.94 MHz over 0.20-1.22 s then silent (the rtl_433-shaped burster that stops), one 132 ms LoRa packet at 903.10 MHz at 2.00 s (the ephemeral one-off). Measured: every truth emission found blind with `ism` in its top-3; sensor detections occupy 2.0 % of the recording and the one-off 2.3 % (ceiling 34 %), the carrier 99.9 % (floor 66 %); last sensor detection ends 1.217 s, exactly when it stopped; ONE inventory row per species (3 rows total, no skirt fragments - T-250 holds in the burst band); /api/events catalogues sensor 0.197-1.217 s (1.02 s) and one-off 1.999-2.138 s (0.139 s), each with its own timespan; at the run's live edge /api/inventory reads sensor `ended` (confidence 0.023), one-off `ended` (0.057), carrier `live` (1.0), and hk_model::presence_in_window agrees. The ring is configured and its allocation waited on (T-178) because liveness inside a 6 s recording is only answerable from the ring-measured idle gap (ADR-0019 3); the test asserts the ring actually buffered (1 segment, 6.000 s, 3 000 000 samples) so no silent fallback to the conservative 60 s gap can pass. Thresholds a priori, none moved. 100.3 MHz field case (B0.497) checked on the real 2026-09-15 FM capture: the burst path fires 2 short detections (100.298/100.302 MHz, 4.4/5.2 dB, ms-long) in the window the annotation pass measured SILENT, minting 1 candidate, never confirmed - so the sighting is NOT reproduced from any recording we hold (it was off air at capture) and what sits there is the designed false-alarm allowance being spent, at its ceiling of 2. Two findings filed as follow-ups: /api/events refuses its own documented limit>500, and its `open` uses the conservative gap while /api/inventory uses the ring-measured one, so the two surfaces disagree about the same emitter in the same window (3 of 3 events open=true beside rows reading ended)."
   - id: T-255
     milestone: M2-hardening
     title: 'Synthetic LoRa scenario in the py/ synth tooling: deterministic up-chirps
@@ -4836,19 +4861,37 @@ tasks:
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
-    status: todo
+    status: in-progress
+    branch: task-t273
     priority: normal
     deps:
     - T-269
     - T-270
     parallel_group: M4D
-    use_cases: []
+    use_cases: [AWARE-067]
     acceptance: 'the GrantEvent stream drives a load index (AWARE-067); docs/api.md and api_contract.rs updated together per T-079; no talkgroup audio or content on the route'
     area: crates/hk-api, docs/api.md
     needs: none
     model: sonnet
     effort: medium
     core_interface: false
+    notes: |
+      Handed back by worker, not merged. GET /api/trunking/load?t0&t1[&system] computes the load
+      index on demand from hk_model::trunking::GrantEvent (grant/grant-update/call-start counts,
+      distinct talkgroup identifiers, grants_per_min) via a new ApiState.trunking: Option<Arc<Mutex
+      <Repository>>> (same run database as inventory/bookmarks). No accumulator: bounded per-request
+      read (MAX_GRANTS_PER_QUERY = 20,000).
+      docs/api.md "Trunking load index" section added; crates/hk-cli/tests/api_contract.rs gained
+      trunking_load_index_answers_documented_shape_and_carries_no_content, run against a live mock-
+      device server. crates/hk-api/src/trunking.rs unit tests cover AWARE-067 (busy > quiet) and the
+      no-audio/no-content boundary (both proven red first by inserting a "content" field and watching
+      no_audio_or_content_field fail, then reverting).
+      Targeted tests green: cargo nextest run -p hk-api trunking (6/6); -p hk-cli -E
+      'binary(api_contract)' trunking_load_index_... and every_route_in_the_route_table_is_documented
+      (both pass). cargo fmt --all --check and cargo clippy -p hk-api -p hk-cli --all-targets -- -D
+      warnings both clean. Branch tip fb0900ac31 (task-t273; based on old main pre-T-574/lintrule -
+      coordinator should rebase/gate as usual).
+      Not done: this worker did not merge, per protocol.
   - id: T-274
     milestone: M5
     title: 'M5 GNSS observables cluster (C36): L1 is NOT blindly detectable, so this is the documented exception to blind-first'
@@ -5864,7 +5907,7 @@ tasks:
     milestone: M3
     title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
       was made on
-    status: todo
+    status: done
     priority: low
     deps:
     - T-302
@@ -5878,6 +5921,20 @@ tasks:
       change to attribution behaviour. Update docs/api.md and the api_contract tests together per T-079
       if the field crosses the wire. Keep the T-302 invariant visible in the disclosure: an artifact is
       a property of ONE receive chain'
+    resolution: 'Added a chain: ReceiveChain field to ArtifactPrediction (image uses the matched
+      TunedLo.chain; harmonic/intermod use the new shared_chain() helper, which finds and discloses
+      the specific chain the existing T-302 gate already matched on, replacing the boolean-only
+      on_any_chain) and added receive_chain: {device_id, antenna_port} to artifact_detail()''s JSON.
+      Purely additive: predict_artifacts()''s frequency/width/level/chain gating and claim ranking are
+      unchanged. Crosses the wire through emitter_relations().detail (query.rs serves it verbatim), so
+      docs/api.md''s relation/artifact-of paragraph was updated; no api_contract test pins detail''s
+      internal shape (it is untyped JSON there), so hk-model''s repo::relate_tests carries the new
+      assertion instead. New test t307_artifact_detail_discloses_the_receive_chain_the_claim_was_made_on
+      runs image_scene on two different device names and asserts detail.receive_chain.device_id tracks
+      the device the claim was actually made on (proven RED by reverting the production diff and
+      re-running: fails with left: None, right: Some("hackrf:A")). just fmt --check and cargo clippy -p
+      hk-model -D warnings both clean; hk-model repo::relate_tests (35 tests) and hk-cli api_contract
+      (52 tests) pass.'
   - id: T-308
     milestone: M4
     title: A followed transmission still running when the buffered window ends is written open, and a later
@@ -6099,7 +6156,7 @@ tasks:
     title: The 99.99 MHz reference-harmonic artefact is identified from a single tune, so the retune test
       that would settle it has not been run
     status: todo
-    priority: low
+    priority: high
     deps:
     - T-289
     parallel_group: PIPE
@@ -6113,7 +6170,17 @@ tasks:
       test is a retune: an artefact generated in the receive chain moves with the LO, an off-air carrier
       does not. Capture the same line at two or three different tuner centres and assert which it does.
       Hardware capture is USER-TRIGGERED - do not touch the HackRF while the users demo holds it. Until
-      then the annotation stays as it is, with the limitation recorded'
+      then the annotation stays as it is, with the limitation recorded LIVE FIELD REPORT, 2026-09-21 (user, staging
+      server on the real HackRF): the deciding experiment is no longer hypothetical - the user has now
+      SEEN the effect in four cases. 840-900 MHz disagrees between centres; a 892.5 MHz digital signal
+      near the band edge vanishes on zoom+retune (T-588 - that one may be a render bug instead); a
+      100.8 MHz FM signal is present at some centres and absent at others while staying consistent when
+      tuned directly to it, which is DC-spike-like; and a bright signal SHIFTS to a new ABSOLUTE
+      frequency on retune, which is the artefact signature outright. T-586 generalises this ticket into
+      a retune-diversity self-consistency acceptance test over a multi-centre fixture through the mock
+      SDR, so the non-hardware half proceeds now. THIS ticket stays the HARDWARE half: the capture over
+      100.x / 840-900 / 892.5 is a capture-agent session the supervisor schedules with the user, and the
+      99.99 MHz reference-harmonic question is settled by the same retunes.'
   - id: T-319
     milestone: M2-hardening
     title: Three more silent chain_emitter swallows would produce the same unnameable error count T-293
@@ -17911,7 +17978,7 @@ tasks:
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -17958,6 +18025,89 @@ tasks:
       tile route. Each of these fails legibly and holds under any load.
       Prove the tests go RED without the fix (standing project rule).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    branch: task-t571
+    notes: |
+      DONE on task-t571, awaiting merge. Coarse view-lattice nodes are now maintained LIVE and
+      INCREMENTALLY. `PyramidConfig::coarse_live` replaces `coarse_on_demand` for the view lattice;
+      `Tile::fold_row` folds ONE producer row (with its frequency footprint) into its consumer and
+      reports the consumer rows that completed; `Pyramid::fold_row_live` cascades that through the
+      lattice on every level-0 column close and on every seal. A coarse tile read is now an
+      ordinary read of an already-committed tile.
+
+      MEASURED - all counts, no wall-clock assertion anywhere (user instruction 2026-09-21):
+
+      - Producer tiles folded to serve ONE coarse tile: control (on demand) 70, live 0. Source
+        tiles read to answer it: 1. A viewport of all 16 nodes: control ran 791 generation passes,
+        live ran 0 and all 16 nodes answered with data. At the hk-api route the control generated
+        48 tiles from 94 producer tiles; live generated 0 and folded 0.
+      - Per arriving row: 4x4 lattice 80.5 producer cells folded per level-0 row (5.03x one
+        16-cell row); 8x8 lattice 97.4 (6.09x). Quadrupling the node count costs 1.21x, not 4x -
+        both series converge (the footprint halves at each frequency step; a time step is visited
+        once per t_factor rows). Confirms T-462's ~4.5x estimate without re-measuring it.
+      - Writes: 70,800 rows committed into coarse nodes produced 2,085 tile writes == 2,085 tile
+        files on disk. A row commit writes NOTHING; a tile is still written once, when it seals.
+        Capture does now write the whole lattice (450 tiles against 128 at node (0,0) on the cost
+        fixture, 4.80x the finest level in bytes) - docs/16 6.4a's ~4x, paid by capture. That is
+        the trade, and it is the same write count the eager-at-seal scheme would have had.
+      - RESPONSE-SIZE CAP on /api/tiles: a fully-observed 256x256 answer <= 4 MiB (measured
+        2.07 MB; the T-467 regression was 19.34 MB); an unobserved answer <= 3 MiB (measured
+        1.06 MB) and strictly under the observed one; the run-length-encoded `coverage` plane
+        <= 8 KiB (measured 3,071 B), which is the half of T-467 that is really an encoding win.
+        `grid` is ~1.05 MB whether or not anything was observed - a value per cell either way -
+        which is the review's S3, not this ticket, and is capped rather than fixed here.
+
+      RESIDENCY DECISION, stated explicitly as the ticket required. Every node now holds an open
+      accumulator for the tile it is filling, because THE TILE IS THE WRITE UNIT: a row committed
+      into a coarse tile must live somewhere between its commit and that tile's seal, and the only
+      alternative to RAM is a row-granular tile file, which history::codec does not have. Measured
+      through a real pyramid (hk-pipeline the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs):
+
+      - T-439 eager-at-seal: 2.28 MB/MHz measured (3.65 bound); a coarse read was 1 tile but up to
+        a whole producer tile stale at the edge.
+      - T-453 on demand: 0.91 MB/MHz; a coarse read folded up to 1024 producer tiles, ~500 ms,
+        inside the request.
+      - T-571 live: 7.76 MB/MHz at one 6.4 MHz block, ~4.9 MB/MHz at 20 MHz (98 MB); a coarse read
+        is 1 tile and at most one producer CELL stale.
+
+      So residency DOES grow with node count - 16 nodes, 16 open accumulators - and that is
+      accepted here rather than hidden, because the only thing that kept 0.91 MB/MHz was the
+      read-time fold this ticket exists to delete. The per-MHz coefficient falls as the span
+      widens (a frequency-coarser node covers 2x the spectrum per tile: at 20 MHz the four
+      frequency levels need 4, 2, 1 and 1 blocks), which is why the bound is computed per node
+      rather than extrapolated. The two levers that would take it back down are both stored-format
+      changes and are deliberately NOT in this ticket: VIEW_T_CELLS_PER_BLOCK (which the settings
+      doc already names as the MEMORY knob - a shorter tile is resident for less of its life, at
+      4x the tile files and a scheme bump), and holding a coarse tile's already-committed rows in
+      their ENCODED form (~3.5 B/cell measured, against 44 B/cell resident) so only the in-progress
+      row is an accumulator. Recommended as a follow-up; not
+        filed here, because this agent's brief scoped it to T-571's own block.
+
+      OTHER CONSEQUENCES, deliberate and documented in the code:
+
+      - A coarse node now lags level 0 by at most ONE producer time cell (1 s at the shipped
+        floor), where the on-demand fold lagged only in occupancy. A row is folded when its column
+        CLOSES, which is what "commits every N" means. Node (0,0) - the live edge itself - is
+        unaffected: a direct level-0 read still stands in for its open column with column_preview.
+      - Provenance merges once, when a producer tile SEALS, not per row: a summary is not a
+        per-row quantity and merging it per row would multiply every count it holds. Inside the
+        current block a coarse tile carries cells without provenance.
+      - coarse_live requires every producing level to coarsen ONE axis (f_factor == 1 ||
+        t_factor == 1) and not to be welded; PyramidConfig::geometry enforces it and
+        ViewLattice::levels satisfies it by construction. The occupancy RATIO is the reason:
+        fold_child maxes it over the producer's frequency cells after summing each over the
+        producer's rows, and that maximum cannot be updated one row at a time without a
+        per-producer-cell running (obs, occ) - residency proportional to a producer row per node,
+        for a shape no scheme uses.
+      - coarse_on_demand remains a supported mode and keeps its tests; scheme 1's eager-at-seal
+        ladder is untouched.
+
+      RED-WHEN-BROKEN: every new test carries the broken design as a CONTROL in the same run over
+      the same frames (a second store built coarse_on_demand), asserted to show the defect before
+      the live store is asserted to show none of it - so the evidence is permanent rather than a
+      one-off, and a test that judged nothing fails on the control first.
+
+      Tests: hk-store history::tests::live_coarse (4), hk-api tile_no_generation (1), plus the
+      rewritten hk-store lattice/lattice_cost T-453 tests and hk-pipeline's residency measurement.
   - id: T-572
     milestone: MLIVE
     title: An in-memory hot-tile LRU - a viewport re-read goes to RAM, not to the filesystem
@@ -18123,6 +18273,66 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-591
+    milestone: M2-hardening
+    title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
+  - id: T-589
+    milestone: M3
+    title: C14 never reports a trusted symbol rate on genuine 8-PSK at 20 or 30 dB, so in production the verifier can never run on it
+    status: todo
+    priority: high
+    parallel_group: M3A
+    model: opus
+    effort: high
+    depends_on: [T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-246 WHILE FIXING THE ALRT, and it is the more serious of the two findings. Measured
+      over the blind snippet set: C14 reported a trusted symbol rate on genuine 8-PSK at 20 and 30 dB
+      in ZERO of 12 cases. The consequence is not a degraded verifier, it is an absent one - the
+      psk-qam verifier cannot run on 8-PSK at all in production, so T-246's fix is exercised at the
+      likelihood level by supplying the generator's geometry and never by the shipped path.
+      This is a C14 (symbol-rate estimation) gap, not a verifier one, and it is the same class of
+      defect the project keeps finding: a stage that silently does not run reads identically to a
+      stage that ran and agreed. Whatever the fix, the absence of a clock lock on a class the system
+      claims to handle must be VISIBLE - an explicit NoClockLock outcome that is counted and
+      surfaced, not a quiet skip.
+      Establish first WHY the lock fails on 8-PSK specifically when it succeeds on bpsk/qpsk -
+      8-PSK's tighter symbol spacing and the 8th-power line are the obvious suspects, but measure
+      before concluding, as T-246 did (it refuted two earlier attributions that way).
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): lock rate per class and SNR, and the
+      number of times the verifier actually RAN - a test that passes because the stage skipped is
+      the vacuous-guard failure this project has been bitten by.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-590
+    milestone: M3
+    title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    model: opus
+    effort: medium
+    depends_on: [T-246]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-246. T-422 declined qam16/qam64 from the hypothesis set, and its stated reason was
+      that the residual is dominated by a smear that does not shrink with SNR. T-246 identified that
+      smear as uncorrected residual carrier offset - 0.4 to 3.6 percent of the symbol rate, i.e. one
+      to nine full rotations over a 256-symbol window - and removed it: the genuine-member residual
+      fell from 1.7-267 N0 to 0.67-2.6 N0. The premise T-422 rested on no longer holds, so the
+      decision is worth re-measuring.
+      DO NOT SIMPLY RESTORE THE LABELS. Restoring two labels to the hypothesis set is a
+      classification-BEHAVIOUR change: it alters what the system will claim about real signals, and
+      a wrong qam64 call is exactly the confidently-wrong outcome the open-set stance exists to
+      avoid. Re-measure first, then decide, and state the false-label cost either way.
+      Relates to ADR-0016's exit gates and to T-306's confidently-wrong analysis.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
+  - id: T-583
+    milestone: MLIVE
+    title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
+    status: todo
+    priority: medium
   - id: T-579
     milestone: MLIVE
     title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
@@ -18196,6 +18406,86 @@ tasks:
     core_interface: true
     model: opus
     effort: medium
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571, WHICH MEASURED IT. `Pyramid::fold_row_live` propagates a row to the level
+      above only when that level COMMITS - which is the "commits every N" rule and is what makes
+      the fold exactly-once - so a chain of in-progress rows compounds: node (i, j) trails the
+      finest closed row by up to 2^j - 1 of them, plus level 0's own still-open column. Measured
+      on the 4x4 test lattice at 1, 2 and 4 rows for level_t 1, 2 and 3; at the shipped four time
+      levels and a 1 s cell that is up to 7 s at level_t = 3.
+      Node (0, 0) - the live edge itself - is NOT affected: a direct level-0 read stands in for
+      its open column with `column_preview`. The cells are correct throughout; a partial row reads
+      as fewer observed seconds, never as wrong values. The on-demand fold it replaced had no such
+      lag, because it folded open producers on every read.
+      THE DECISION TO MAKE: whether a zoomed-out pane should see a node's in-progress row, the way
+      level 0 sees its open column. It is a product call, not an oversight - showing it means a
+      coarse cell that changes under the viewer as its remaining producer rows land. If the answer
+      is yes, the mechanism already exists (`Tile::row_pending` plus a `column_preview`-shaped
+      read); if no, the canvas should say what it is showing rather than quietly trailing.
+      Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
+      never a wall-clock budget.
+  - id: T-584
+    milestone: MLIVE
+    title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    effort: medium
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571. A frame whose time cell has already closed takes `Tile::add_late_occupancy`,
+      which updates the level-0 cell IN PLACE. The live cascade folds a row when the row CLOSES,
+      so a late frame's contribution never reaches a coarse node - the row it belongs to was
+      folded before the frame arrived. The value is on disk at level 0 and absent from every zoom
+      above it, which is the same "present at the finest zoom, gone when you zoom out" shape T-571
+      fixed for checkpoints.
+      Two windows produce it: mild frame disorder inside a cell, and the residual T-571 documented
+      on `Pyramid::checkpoint` - a checkpoint closes the current column, so every frame arriving in
+      that same cell afterwards is late by construction. With the shipped 60 s checkpoint interval
+      over a 1 s cell, that is one cell in sixty exposed for the remainder of its second.
+      The on-demand fold did not have this, because it re-folded the open producer on every read.
+      Options: re-fold the affected row after a late update (needs a subtract-then-re-add, since
+      the cascade accumulates), accumulate late contributions into a pending delta flushed at
+      seal, or stop `checkpoint` closing the column and accept an unrecoverable in-progress column
+      on a crash. MEASURE THE SIZE FIRST with a count assertion - frames folded per node against
+      the on-demand control, with deliberate disorder in the fixture - because the answer decides
+      whether this is worth a mechanism at all.
+  - id: T-585
+    milestone: MLIVE
+    title: Coarse-tile residency is one open accumulator per node - hold committed rows encoded instead
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    core_interface: true
+    model: fable
+    effort: high
+    depends_on: [T-571]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FILED BY T-571, WHOSE RESIDENCY DECISION THIS IS THE REMEDY FOR. Live maintenance means every
+      node holds an open accumulator for the tile it is filling, because THE TILE IS THE WRITE
+      UNIT: a row committed into a coarse tile must live somewhere between its commit and that
+      tile's seal, and `history::codec` has no row-granular form. Measured through a real pyramid:
+      0.91 MB/MHz on demand -> 7.76 MB/MHz at one 6.4 MHz block, ~94 MB at a 20 MHz live edge,
+      one open accumulator per node (16 nodes, 17 tiles). T-453's "residency must not grow back
+      with node count" is therefore not met, and T-571 states that rather than hiding it; the
+      reviewer accepted 94 MB as ~1.2 percent of an Orin Nano 8 GB.
+      THE FIX: hold a coarse tile's ALREADY-COMMITTED rows in their encoded form and keep only the
+      in-progress row as an accumulator - measured at ~3.5 B/cell on disk against 44 B/cell
+      resident, about 13x. That makes residency O(levels) as `docs/tile-perf-review-2026-09-21.md`
+      S1 describes, and it is a stored-format change, which is why it is not in T-571.
+      The cheaper lever, worth measuring alongside: VIEW_T_CELLS_PER_BLOCK, which the settings doc
+      already names as the MEMORY knob (a shorter tile is resident for less of its life). 64 -> 16
+      is ~4x for 4x the tile files and a scheme bump, and it also raises the tiles a read consults.
+      DO NOT re-litigate the streaming design itself - a reviewer checked T-571's fold cell for
+      cell against the on-demand control across all 16 nodes and it agrees exactly. Assert
+      residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
+      already does, never with a wall-clock budget.
     depends_on: [T-571, T-572]
     use_cases: [AWARE-011]
     acceptance: |
@@ -18284,6 +18574,180 @@ tasks:
     status: todo
     priority: normal
     parallel_group: M3A
+  - id: T-586
+    milestone: M2-hardening
+    title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
+    status: done
+    priority: high
+    parallel_group: DETECT
+    core_interface: true
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21, staging server on the LIVE HackRF. Signals appear, shift and
+      vanish as the CENTRE FREQUENCY changes:
+        (a) 840-900 MHz - general disagreement between centres;
+        (b) 892.5 MHz digital signal near the BAND EDGE - vanishes on zoom+retune (see T-588: that
+            one may be a render/coverage bug rather than detection, and is ticketed separately);
+        (c) 100.4/100.8 MHz FM - a signal at 100.8 present at some centres, absent at others, and
+            consistent when tuned directly to it (DC-spike-like);
+        (d) a bright orange-red signal that SHIFTS to a new ABSOLUTE frequency when retuned.
+      THE DIAGNOSTIC IS ALREADY DECIDED BY PHYSICS, which is what makes this testable: a receiver
+      artefact - image, DC spike, IM3 product, reference spur - is LO-RELATIVE and moves with the
+      centre; a real emission is ABSOLUTE-FREQUENCY-INVARIANT and does not. Retune diversity turns
+      that into a measurement rather than an opinion. This generalises T-318, which asks the same
+      question for ONE artefact (the 99.99 MHz reference harmonic) and records that the deciding
+      retune has never been run.
+      BUILD THE NON-HARDWARE HALF FIRST AND DO NOT WAIT ON THE RADIO: a multi-centre SigMF fixture
+      replayed through the MOCK SDR at N centres over one region, asserting that
+        - every real emitter agrees in ABSOLUTE frequency across all N centres, within tolerance;
+        - every LO-relative artefact is FLAGGED as such, not reported as an emission;
+        - the flags use the EXISTING provenance model - `recording.rs`'s `f_center_hz` and
+          `provenance_ref` - rather than a new side channel. Each detection already records which
+          device and configuration saw it; this test is what makes that record load-bearing.
+      T-005/T-006 already flag DC, reference spur and IM3 on SYNTHETIC input. The gap this closes is
+      that nothing checks the INVARIANT ACROSS CENTRES, which is the property that actually
+      distinguishes the two classes, and nothing has validated it over the air (spike S4b, pending
+      the user's FM notch and antenna).
+      BLIND RULE APPLIES: hidden truth in the assertions only, thresholds a priori. Never look a
+      frequency up in the database and tune to it. An artefact correctly flagged is a SUCCESS, not
+      a missed detection - the point is that the system says which it is.
+      ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      DONE 2026-09-21 (branch task-t586). The non-hardware half, built without the radio.
+      FIXTURE: new synthetic scenario `retune_diversity` (py/hkpy/synth/retune.py): one region at
+      THREE centres 100.0 / 100.5 / 101.0 MHz, 4 Msps, 0.3 s dwell each, served through the mock
+      SDR by blind::SurveyDevice (one mock per centre, real tune()/start()/timestamps). Every line
+      in the scene is a CW tone in white noise, so NOTHING about a line's shape can separate the
+      classes - only its behaviour across centres. Nothing was committed under fixtures/;
+      regenerate with
+      `uv run --project py python -m hkpy.synth retune_diversity --seed 7 --out DIR`.
+      TRUTH, both classes, sealed and read only in the assertions: 3 real emitters at fixed
+      ABSOLUTE 99.78 / 100.68 / 101.18 MHz, each in all three captures; 2 LO-relative artefact
+      families - DC/LO leakage at offset 0 and an internal spur at a fixed +370 kHz IF offset -
+      each appearing at a DIFFERENT absolute frequency per centre (100.37 / 100.87 / 101.37 MHz).
+      An artefact correctly flagged is a PASS, not a miss.
+      PRODUCT CODE: `hk_model::retune`, the cross-centre classifier. It reads only Detection
+      `f_center_hz` and the LO from the detection's own `provenance_ref` ->
+      `Provenance.tune.center_hz` (the existing provenance model, no new side channel), projects
+      every detection into each slope's invariant coordinate `f - slope*f_LO`, clusters, and
+      refuses to say anything below 2 distinct LOs. Slopes: 0 absolute (a real emission - or an
+      absolute-frequency artefact such as a reference harmonic, so this is necessary and not
+      sufficient), 1 LO-locked (DC, IF spur, baseband product), 2 image (2*f_LO - f). Verdicts land
+      on the EXISTING DetectionFlags through `RetuneSlope::apply`: spur_candidate +
+      SpurReason::LoRelative, image_candidate + image_retune_confirmed - the same vocabulary
+      hk_detect::trust::RetuneLabel gives the pairwise live-spectrum test. This generalises that
+      pairwise test to N centres and to the STORED record, so a survey can be judged after the fact
+      with no extra dwell.
+      THRESHOLDS, ALL A PRIORI AND NEVER TUNED (the suite passed on its first run): grouping
+      RETUNE_MIN_TOLERANCE_HZ 10 kHz plus 0.25 x measured bandwidth, the same 10 kHz the pairwise
+      live test uses; acceptance MATCH_TOL_HZ 20 kHz, two orders under the 500 kHz centre step and
+      an order under the generator's enforced 180 kHz minimum in-capture line separation.
+      MEASURED: 15 detections = 5 lines x 3 centres, 0 unexplained. 3 truth emitters x 3 centres
+      compared, cross-centre spread 0-1 Hz. 2 artefact families x 3 centres compared, spread
+      2-3 Hz. 5 detections per LO at each of the 3 LOs.
+      THE GAP THIS CLOSES, MEASURED not assumed: the single-capture flaggers caught the DC family
+      (ref-harmonic / dc / dc) and caught the +370 kHz LO-relative spur NOT AT ALL - three
+      detections at three different absolute frequencies, each indistinguishable from an emission,
+      and the run duly put them in the inventory as three separate emitters. That is the user's
+      report (d) reproduced offline.
+      RED WHEN BROKEN, both proven: (1) make RetuneSlope::LoLocked's slope 0 (stop reading the LO)
+      and both artefact families become unexplained and the artefact assertion fails, while the
+      emitter assertions still pass; (2) pin the fixture's spur to a fixed ABSOLUTE frequency and
+      the test refuses to call it LO-relative and fails, while the DC family still resolves - so
+      the test measures the LO relationship, not mere presence. Anti-vacuity is asserted rather
+      than assumed: distinct LOs == 3, detections per LO >= 3, truth emitters == 3, artefact
+      families == 2, and each truth item present in every capture.
+      TESTS: tests/e2e/tests/acceptance/t586_retune_diversity.rs (wired into acceptance_m0, 0.65 s);
+      8 unit tests in crates/hk-model/src/retune.rs; 2 generator-physics tests in
+      py/tests/test_synth.py (the IQ really does hold fixed-absolute and fixed-offset lines, and
+      the generator refuses a layout whose lines would merge).
+      FOLLOW-UPS SURFACED, NOT CHASED: (a) the pipeline does not yet PERSIST the retune verdict -
+      `RetuneSlope::apply` is exercised by the acceptance test over stored rows, so the flags are
+      computed but never written back, and the inventory still shows the moving spur as three
+      emitters; wiring it into the survey/scheduler path is the next ticket. (b) `spur_decision`
+      labels the DC line at exactly 100.0 MHz `ref-harmonic` rather than `dc` because ref_harmonic
+      is tested first - harmless here, but the DC rule is the more specific one. (c) the IQ-image
+      slope (2) is unit-tested only; the fixture omits images deliberately, because their mirrors
+      collide with the emitter grid. (d) T-318's over-the-air half is untouched and still needs the
+      radio.
+  - id: T-587
+    milestone: M2-hardening
+    title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: sonnet
+    effort: medium
+    depends_on: [T-586]
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21. The user watched signals appear and vanish with the centre
+      frequency and had no way to tell a receiver artefact from an emission. The backend already
+      computes the explanation: `artifact_detail()` discloses the arithmetic (lo_hz, orders, error,
+      and after T-307 the receive chain it was made on), and T-302 gates every image/harmonic/
+      intermod pairing on a ReceiveChain. NONE OF IT REACHES THE SCREEN.
+      Surface it: a detection the backend has explained as an artefact is drawn and listed AS an
+      artefact, with its reason in words - "DC spike", "image of the 100.8 MHz carrier",
+      "IM3 product of A and B" - and, where it applies, the emitter it is an artefact OF.
+      THIS IS PRESENTATION, NOT ANALYSIS. The UI is a thin client over docs/api.md: all the
+      recognition, the pairing and the reasoning stay in the backend. The client reads the
+      explanation and renders it. If a field it needs is not on the wire, add it to the route AND
+      to `docs/api.md` AND to `crates/hk-cli/tests/api_contract.rs` together (T-079) - do not
+      compute the explanation client-side.
+      HONESTY CONSTRAINT: an UNEXPLAINED signal must not be dressed up as an explained one. The
+      three states - explained artefact, real emission, and not yet decided - are distinct and must
+      read as distinct. Exploration-first means unknown signals stay visibly unknown; a label the
+      backend did not assert is the same defect as implying resolution that was never captured.
+      ASSERT THE REQUEST THE CLIENT BUILDS, not only what it renders (T-367: a client asked
+      /api/timeline with no band and drew an empty canvas while every suite stayed green). The guard
+      lives in `ui/test`.
+      Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-588
+    milestone: MLIVE
+    title: The 892.5 MHz signal vanishes on zoom+retune - does the backend have data the canvas never draws?
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    acceptance: |
+      USER FIELD REPORT, 2026-09-21, live HackRF: a digital signal at 892.5 MHz, near the BAND EDGE,
+      VANISHES on zoom+retune. Ticketed separately from T-586 on purpose - it has two candidate
+      causes with completely different fixes, and assuming the wrong one wastes the work:
+        1. DETECTION/ARTEFACT: the signal is LO-relative and genuinely is not there at the new
+           centre. T-586 covers that, and this ticket closes as "not a render bug" if so.
+        2. RENDER/COVERAGE: the backend HAS data for that region after the retune and the canvas
+           does not draw it. The standing invariant is explicit - "whenever data exists for that
+           window it must be shown", and "we have it but did not render it is a bug". Band-edge is
+           the suspicious part: a region at the edge of the tuned window is exactly where a coverage
+           calculation, a tile-address rounding or an off-by-one in the observed-extent test is most
+           likely to answer "unobserved" for a span that was in fact sampled.
+      DECIDE WHICH, WITH EVIDENCE, BEFORE FIXING ANYTHING. Ask the backend directly for the region
+      after the retune - the tile route, the coverage map, the detections - and compare against what
+      the canvas drew. If the backend has it, this is a client or coverage bug and the reproduction
+      belongs in `ui/test` asserting the REQUEST the client builds (T-367). If the backend does not
+      have it, say so and hand the case to T-586.
+      Note grey is load-bearing here: "observed-but-not-yet-measured" and "unknown-whether-we-looked"
+      are DISTINCT marks and neither is grey (T-441). A band-edge span wrongly marked unobserved is
+      the failure this invariant exists to catch.
+      ASSERT WITH COUNTS AND COVERAGE STATES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-598
+    milestone: M2-hardening
+    title: The retune verdict is computed and thrown away - the inventory still lists one moving spur as three emitters
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
     model: opus
     effort: medium
     depends_on: []
@@ -18305,6 +18769,97 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
       after, and how many comparisons actually used it. A test that passes because the field was
       absent on both sides is vacuous.
+      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
+      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
+      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
+      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
+      fact, deriving it two different ways.
+      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
+      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
+      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
+      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
+      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
+      constants match - two independent derivations that happen to agree today will diverge again.
+      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
+      measurement exists.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
+      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
+      emitters in the window rather than a sampled one. A test that compares zero emitters is
+      vacuous - report how many it compared.
+      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-592
+    milestone: M2-hardening
+    title: /api/events refuses its own documented limit - 501..2000 is a 400
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-254. `MAX_EVENTS_LIMIT = 2_000` and docs/api.md documents a maximum of 2000, but
+      `events_json` then calls `parse_inventory_query` on the same params, which rejects
+      `limit > 500` with "limit must be an integer in 1..=500". Every value from 501 to 2000 is
+      documented as valid and answered with a 400.
+      Decide which number is right and make the code, the docs and the contract test say the same
+      one (T-079: docs/api.md and crates/hk-cli/tests/api_contract.rs move together). If 500 is the
+      real bound, the constant and the docs are wrong; if 2000 is, the shared validator needs a
+      per-route limit rather than the inventory one.
+      WHY IT SURVIVED: the contract tests evidently only ever exercise the DEFAULT limit, so the
+      documented range has never been tested at its edges. Whichever bound wins, test the boundary
+      values - the last accepted and the first rejected - not just a value in the middle. That is
+      the gap that let a doc/impl contradiction live on a core interface.
+    effort: high
+    depends_on: [T-586]
+    use_cases: [AWARE-011]
+    acceptance: |
+      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
+      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
+      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
+      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
+      three different absolute frequencies - which is exactly what the user saw.
+      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
+      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
+      absolute frequencies, each individually indistinguishable from a real emission. Only the
+      cross-centre relationship separates them, which is the whole point of retune diversity.
+      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
+      resolved as LO-relative carries that on the stored row, and the inventory merges the three
+      sightings into one artefact rather than minting three emitters.
+      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
+      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
+      same way a detected end is provisional and revocable. Do not delete the sightings; relate
+      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
+      harmonic is absolute-fixed and still an artefact.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
+      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
+      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
+      `retune_diversity`) reproduces it directly and its assertions already count what matters.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-599
+    milestone: M2-hardening
+    title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
+    status: todo
+    priority: low
+    parallel_group: DETECT
+    model: sonnet
+    effort: low
+    depends_on: [T-586]
+    use_cases: []
+    acceptance: |
+      Filed 2026-09-21 from T-586, both minor and both deliberately not chased there.
+      (a) `spur_decision` labels the DC line at exactly 100.0 MHz `ref-harmonic` rather than `dc`,
+      because `ref_harmonic` is tested first. Harmless today - both are artefact labels - but the DC
+      rule is the MORE SPECIFIC one and should win. The general lesson is ordering: a first-match
+      chain of rules quietly prefers whichever was written first, not whichever is most specific.
+      (b) The IQ-image slope (2, `2*f_LO - f`) is UNIT-TESTED ONLY. T-586's fixture omits images on
+      purpose, because their mirrors collide with its emitter grid. So the image arm of the
+      cross-centre classifier has never been exercised end to end through the mock SDR, which
+      matters because the user's 840-900 MHz observations are the band where images are most
+      likely. A fixture whose emitter grid leaves room for the mirrors would close it.
+      ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

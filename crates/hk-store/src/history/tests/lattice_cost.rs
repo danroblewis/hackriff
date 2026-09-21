@@ -93,32 +93,41 @@ fn a_lattice_costs_about_four_times_its_finest_level_not_sixteen() {
     p.seal_through(ts(T0 + secs * S)).unwrap();
     let root = dir.0.join("history").join(format!("s{}", sh.scheme));
 
-    // **T-453, and it is the whole point of the ticket: none of that cost has been paid yet.**
+    // **T-571: that cost is now paid as capture runs, and this is where it is weighed.**
     //
-    // Everything below weighs the lattice a *viewer of every node* produces. `docs/16` §5.2 decided
-    // the coarse nodes are built on demand, so after a full run with nobody watching, capture has
-    // written node (0, 0) and nothing else — which is what makes the 4× of §6.4a a cost of
-    // *looking* rather than a cost of *capturing*, and the lattice's node count a reach decision
-    // rather than a gate-time one.
+    // T-453 had the coarse nodes built on demand, so this point in the test asserted the lattice
+    // held node (0, 0) and nothing else and the 4× of §6.4a was a cost of *looking*. Live
+    // maintenance moves it back to capture deliberately — a read that has to fold is the
+    // invariant violation the ticket is about — so the whole lattice is on disk here with nobody
+    // having read a thing, and the rest of the file measures what capture therefore pays.
     let unread: u64 = (0..sh.f_levels * sh.t_levels)
         .map(|l| level_files(&root, l).0)
         .sum();
     let finest_tiles = level_files(&root, sh.index(0, 0)).0;
     println!(
-        "\n  T-453: after the whole run, unread, the lattice holds {unread} tiles — \
+        "\n  T-571: after the whole run, with NOBODY reading, the lattice holds {unread} tiles — \
          {finest_tiles} of them node (0, 0)'s"
     );
     assert!(finest_tiles > 0, "capture must still write its own product");
+    assert!(
+        unread > finest_tiles,
+        "live maintenance must have written the coarse nodes as the rows closed"
+    );
     assert_eq!(
-        unread, finest_tiles,
-        "a coarse node nobody has asked for must not exist on disk (docs/16 §5.2)"
+        p.stats().producer_tiles_folded,
+        0,
+        "and it must have done it WITHOUT a read-time fold"
     );
 
-    // Now ask for every node, which is what the rest of this test is measuring the cost of.
+    // Reading every node must add nothing: they are all already there.
     let whole = FreqRange::new(0.0, n_bins as f64 * 100_000.0);
     let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
     for l in 0..sh.f_levels * sh.t_levels {
-        p.materialize(l, whole, span).unwrap();
+        assert_eq!(
+            p.materialize(l, whole, span).unwrap(),
+            0,
+            "level {l} was built at read time"
+        );
     }
 
     let mut per_node = vec![(0u64, 0u64); sh.f_levels * sh.t_levels];
@@ -400,6 +409,11 @@ fn the_fold_cost_bound_is_exactly_the_worst_start_on_its_grid() {
     let dir = TempDir::new("fold-bound");
     let cfg = PyramidConfig {
         f_cells_per_block: 1024,
+        // T-571 made the shipped lattice live, so `materialize` is a no-op for it and this bound
+        // has nothing to bound. The bound is still the contract of the **on-demand** mode, which
+        // remains a supported scheme, so this test asks for that mode by name.
+        coarse_on_demand: true,
+        coarse_live: false,
         ..PyramidConfig::view_lattice(ViewLattice {
             scheme: 13,
             f_cell_hz: 6250.0,
