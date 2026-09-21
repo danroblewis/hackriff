@@ -26,7 +26,10 @@
 //! 3. [`ephemeral_ism_emissions_are_catalogued_as_past_events_not_live_candidates`] — the one-off
 //!    and the stopped burster are rows on `GET /api/events` with their own timespans (T-264,
 //!    ADR-0017 TM-8), and by the run's live edge they read `ended`, not `live`, while the carrier
-//!    reads `live`.
+//!    reads `live`. Since **T-591** it also asserts that `/api/events` and `/api/inventory` give
+//!    **every** emitter in the window the same liveness — this scene is where the disagreement was
+//!    measured (3 of 3 events `open: true` beside rows reading `ended`), and the fix was one
+//!    derivation rather than two constants that match.
 //!
 //! **Through the IQ ring, in both senses the ticket means.** The samples reach detection through
 //! the ring (`cfg.iq_buffer.enabled = Some(true)`; a lossless replay leaves it off by default),
@@ -586,20 +589,12 @@ fn ephemeral_ism_emissions_are_catalogued_as_past_events_not_live_candidates(r: 
         );
     }
 
-    // Reported, not asserted: `/api/events` derives each event's `open` with
-    // `IdleGap::conservative()` (60 s, `events.rs`), while `/api/inventory` derives the same
-    // emitter's `liveness` from the gap the **ring** measured (`query.rs`, T-410). In a recording
-    // shorter than a minute the two therefore disagree about the same emitter in the same window —
-    // every event here reads `open: true` while its row reads `ended` below. Asserting the
-    // agreement would be asserting a fix this ticket does not make; printing it keeps it visible.
     let open_events = events
         .iter()
         .filter(|e| e["open"].as_bool() == Some(true))
         .count();
     eprintln!(
-        "[{T254}] {open_events} of {} events read open=true against a {DURATION_S} s window; \
-         /api/events uses the conservative 60 s idle gap, /api/inventory the ring-measured one \
-         (reported, not asserted)",
+        "[{T254}] {open_events} of {} events read open=true against a {DURATION_S} s window",
         events.len()
     );
 
@@ -609,6 +604,66 @@ fn ephemeral_ism_emissions_are_catalogued_as_past_events_not_live_candidates(r: 
         &format!("/api/inventory?limit=500&t0={t0}&t1={t1}"),
     );
     let rows = rows["entries"].as_array().cloned().unwrap_or_default();
+
+    // --- T-591: the two surfaces cannot disagree about one emitter's liveness. ---
+    //
+    // This scene is where the defect was measured: `/api/events` derived each event's `open` with
+    // `IdleGap::conservative()` (60 s) while `/api/inventory` derived the same emitter's
+    // `liveness` from the gap the **ring** measured (T-410), so in a recording shorter than a
+    // minute 3 of 3 events read `open: true` beside rows for the same emitter in the same window
+    // reading `ended`. Liveness is a property of the emitter — one interval `[start, end?]`,
+    // ongoing until an end is affirmatively detected (ADR-0017/0019) — never a property of the
+    // route asked, so there is exactly one derivation now (`ObservedCoverage::track`).
+    //
+    // Asserted over EVERY emitter the catalogue lists, not a sampled one, and the number compared
+    // is printed: a comparison of zero emitters would pass while proving nothing, which is the
+    // vacuous-guard failure this project keeps meeting.
+    let catalogued = cat["emitters"].as_array().cloned().unwrap_or_default();
+    let mut compared = 0usize;
+    let mut disagreed: Vec<String> = Vec::new();
+    for m in &catalogued {
+        let id = m["id"].as_str().unwrap_or_default();
+        let Some(row) = rows.iter().find(|r| r["id"].as_str() == Some(id)) else {
+            continue;
+        };
+        compared += 1;
+        let (ev, inv) = (
+            m["liveness"].as_str().unwrap_or("?"),
+            row["presence"]["liveness"].as_str().unwrap_or("?"),
+        );
+        // The same fact a third way: an emitter reads live exactly when one of its events in this
+        // window is still open. This is the literal shape of the measured defect.
+        let any_open = events
+            .iter()
+            .filter(|e| e["emitter_id"].as_str() == Some(id))
+            .any(|e| e["open"].as_bool() == Some(true));
+        if ev != inv || any_open != (ev == Liveness::Live.as_str()) {
+            disagreed.push(format!(
+                "{id} at {:.6} MHz: /api/events liveness={ev} (any open event: {any_open}), \
+                 /api/inventory presence.liveness={inv}",
+                m["f_center_hz"].as_f64().unwrap_or(f64::NAN) / 1e6,
+            ));
+        }
+    }
+    eprintln!(
+        "[{T254}] T-591: liveness compared across /api/events and /api/inventory for {compared} \
+         of {} catalogued emitters; {} disagreed",
+        catalogued.len(),
+        disagreed.len()
+    );
+    assert!(
+        compared > 0,
+        "[{T254}] T-591 compared {compared} emitters — a vacuous comparison proves nothing: \
+         catalogue {cat}"
+    );
+    assert!(
+        disagreed.is_empty(),
+        "[{T254}] T-591: {} of {compared} emitters read a different liveness on /api/events than \
+         on /api/inventory for the same window. Liveness is a property of the emitter, not of the \
+         route asked (ADR-0017/0019), and docs/api.md promises the two surfaces cannot disagree. \
+         {disagreed:#?}",
+        disagreed.len()
+    );
     for (kind, want) in [
         ("fsk-burst", Liveness::Ended),
         ("lora-packet", Liveness::Ended),
