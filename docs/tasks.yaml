@@ -17305,7 +17305,7 @@ tasks:
   - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17366,6 +17366,24 @@ tasks:
       DSP job - and that route needs no GPLv3 reference reading at all, which moots the licence question for
       this family. Establish that before scoping the work, not after.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE 2026-09-21 on branch task-t554. The audit is docs/18 sections 6-9: 58 GNU Radio decoder
+      families, one disposition each - 36 native recipe (11 needing no new blocks, 5 of those already
+      shipped), 8 wrapped plugin, 8 out of reach, 6 unknown-and-marked, plus 2 sub-questions that are
+      cheap checks rather than research. GNSS excluded by the ADR-0018 carve-out.
+      TOP FIVE CATALOGUE GAPS by families unlocked: `psk_demod` 11, `descramble` 10, `viterbi` 10,
+      `reed_solomon` 8, `mlevel_slicer` 5. Filed as T-606 (the ADR-0011 amendment plus the one real
+      contract question), T-607, T-608, T-609, T-610, T-611, T-612, T-613. No block implemented, no
+      ADR rewritten, no ADR status changed.
+      THREE FINDINGS WORTH CARRYING FORWARD:
+      1. The ticket's premise is CONFIRMED - M-14 is too narrow. Eight families need PSK + Viterbi +
+         Reed-Solomon together and none of the eight gets past `demodulated` with only the first.
+      2. liquid-dsp is DESIGNATED IN ADR-0010 BUT NOT LINKED BY ANY CRATE (`grep liquid
+         crates/*/Cargo.toml` is empty). "It is only an adapter job" was an untested claim; T-607
+         tests it, and whichever block goes first otherwise pays silently for landing the FFI.
+      3. OFDM is the audit's sharpest inversion: it looks like the biggest unlock and is the
+         smallest. The front end takes Wi-Fi/LTE/5G/DroneID, gr-dtv's real receive chains make
+         DVB-T/ATSC/ISDB-T plugin jobs, nrsc5 takes HD Radio - ONE clean native family survives
+         (DAB+, 1.536 MHz), so an OFDM investment must be argued as "for DAB+".
   - id: T-555
     milestone: MAUTO
     title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
@@ -19251,6 +19269,331 @@ tasks:
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-606
+    milestone: MAUTO
+    title: 'ADR-0011 AMENDMENT: absorb the T-554 coverage catalogue delta, and decide what a PSK demodulator puts on its output port'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [SIGNAL-034, SIGNAL-080, SIGNAL-053, SIGNAL-004, SIGNAL-054]
+    core_interface: true
+    acceptance: |
+      AMENDMENT / CONTRACT ONLY. No blocks implemented here. Filed 2026-09-21 by T-554; the delta is
+      written out in docs/18 section 8 and the ranking that justifies it is section 7.
+      WHAT THE AMENDMENT CARRIES:
+      1. CATALOGUE ROWS, additive to ADR-0011 section 1.5, each pinning a descriptor in
+         `planned()` so the existing `implemented_blocks_match_their_pinned_descriptors` drift test
+         enforces it: group `iq` - `psk_demod`, `css_demod`, `ssb_demod`, `cw_demod`, `ofdm_demod`;
+         group `symbol` - `mlevel_slicer`, `descramble`, `bitstuff`, `codeword_map`, `despread`,
+         `equalise`; group `fec` - `viterbi`, `reed_solomon`.
+      2. *** THE ONE REAL CONTRACT QUESTION, AND THE POINT OF THIS TICKET. *** ADR-0011 section 1.1
+         defines `soft` as "f32 soft symbol/BIT, positive = 1" - ONE value per item. That is a
+         complete answer for BPSK and for every 2-level family the catalogue serves today, and it is
+         NOT one for QPSK, 8PSK or any constellation whose symbol carries k bits jointly. Decide
+         between:
+         (a) ADDITIVE, and T-554's recommendation: `psk_demod` de-maps INSIDE the block and emits one
+             `soft` item per BIT at k x the symbol rate. No new port type; `slicer`, `descramble`,
+             `viterbi` and everything downstream are untouched; it works today. The cost is that the
+             joint-symbol information is discarded at the block boundary, which a soft-decision
+             equaliser or an iterative decoder would want.
+         (b) CONTRACT CHANGE: a new `symbols` port type carrying complex constellation points or LLR
+             vectors. Section 1.1 says adding a type is a contract change reviewed like the ADR, and
+             it touches every block that accepts `soft`.
+         NOTE THE SEQUENCING ARGUMENT: `ofdm_demod` forces the same question and CANNOT take (a),
+         because its natural output is a subcarrier x symbol grid. So the honest answer is to take
+         (a) for PSK now and treat the port-type change as OFDM's cost, not PSK's - and OFDM unlocks
+         exactly one native family (DAB+), which is docs/18 section 7's finding 2.
+      3. SOFT-DECISION FEC. `viterbi` wants soft input; the existing `fec` group is hard-decision
+         `frames -> frames`. A `soft|bits -> bits` streaming decoder sits inside the existing port
+         types, so it is additive - but it makes `fec` a group with two shapes in it, and section
+         1.5's table must SAY so rather than leave it to be discovered.
+      4. SECTION 1.6 NEEDS A SECOND COLUMN. It says blocks are adapters over existing kernels and
+         names in-repo ones. Four of the new rows would name liquid-dsp, which T-554 established is
+         DESIGNATED IN ADR-0010 BUT NOT LINKED BY ANY CRATE (T-607). The rule must record what a
+         block adapts AND whether that kernel is in the build, so the next audit cannot repeat the
+         mistake of pricing a DSP job as an adapter job.
+      5. A `raster` output kind IF it is taken: beside section 8.2's `audio`, same double gating
+         (`content_class` ceiling, `output_policy` clamp), same schema-version rule.
+      DoD: the amendment written as a new ADR-0011 section in the style of section 8, a stated
+      decision on (2) with its reason, and the descriptor shapes sketched for each new row. No
+      ADR status changes. No block implemented.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-9). core_interface: this is the block contract.
+      The block tickets T-608..T-613 depend on this one for their port shapes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-607
+    milestone: MAUTO
+    title: 'liquid-dsp is DESIGNATED BUT NOT LINKED: land the FFI binding, or record the refusal and re-price the four block tickets that assume it'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: []
+    use_cases: [SIGNAL-034, SIGNAL-024, SIGNAL-027]
+    core_interface: true
+    acceptance: |
+      *** THE FINDING THAT MAKES THIS A TICKET (T-554, docs/18 section 7.1). *** ADR-0010's table
+      names liquid-dsp (C, MIT) as this project's DSP kernel library, and ADR-0011 section 1.6's rule
+      is that a block is an ADAPTER OVER AN EXISTING KERNEL. Both are true. What is ALSO true, and
+      what nobody had checked: `grep liquid crates/*/Cargo.toml` returns NOTHING. Every block in the
+      catalogue today adapts an in-repo kernel (hk-dsp, hk-demod, hk-estimate). So "psk_demod is only
+      an adapter job" is a claim about a binding THAT DOES NOT EXIST, and whichever block goes first
+      silently pays for landing it.
+      WHAT THIS TICKET DECIDES, and it is a yes/no with a measured cost either way:
+      1. Does liquid-dsp build and link into this workspace on the Mac (the primary dev target) and
+         cross-compile for aarch64/JetPack (the Jetson is the product)? MEASURE it, do not assume it.
+      2. Vendored source in-tree vs a system library vs a `-sys` crate from crates.io: pick one and
+         say why, including what it does to `just build` from clean and to the Jetson deploy.
+      3. WHAT IT ACTUALLY SHIPS THAT WE WANT, checked against the T-554 gap list rather than against
+         its README: PSK/QAM modems, NCO/PLL, matched filters, framing, and its FEC (convolutional
+         and Reed-Solomon). Name, per block, whether liquid covers it, covers it partly, or not at
+         all - because `descramble` and `mlevel_slicer` need NOTHING from it and must not be made to
+         wait on it.
+      4. If the answer is no (build pain, cross-compile pain, licence surprise, or it does not
+         actually cover what we need): RECORD THE REFUSAL in ADR-0010 and re-price T-609/T-610/T-611
+         as DSP work rather than adapter work. A refusal recorded is a good outcome; a claim left
+         standing that nobody tested is not.
+      DoD: a measured answer with build times and artefact sizes on both targets, the ADR-0010 ledger
+      row updated either way, and a per-block coverage note the block tickets can be priced against.
+      ADR-0010's status is not changed by this ticket.
+    notes: |
+      Filed 2026-09-21 by T-554. This is the ticket that stops four block estimates resting on an
+      untested premise. It is NOT blocked on anything and nothing is blocked on it - T-608 and T-612
+      deliberately need nothing from liquid-dsp, so work can start in parallel.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-608
+    milestone: MAUTO
+    title: 'hk-blocks `descramble`: the LFSR de-whitener - rank 2 on the T-554 gap list, 10 families, and the cheapest block on it'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-004, SIGNAL-053, SIGNAL-074, AWARE-025, AWARE-026, AWARE-020, RESEARCH-012]
+    core_interface: true
+    acceptance: |
+      *** BUILD THIS ONE FIRST, even though it is rank 2. *** T-554's gap list ranks `psk_demod`
+      first on families unlocked (11 vs 10), but rank 1 is a months-long investment and this is an
+      LFSR. It needs nothing from liquid-dsp (T-607), nothing from the port-type decision beyond
+      T-606's descriptor, and no reference reading of any kind - additive scramblers are defined in
+      published standards.
+      THE BLOCK. Group `symbol`, ports `bits -> bits`, additive to ADR-0011 section 1.5.
+      Parameters to pin: `poly` (hex), `init` (hex), `mode` (`additive`/`multiplicative`), the reset
+      rule (free-running, or reset per frame / on a sync event), and bit order. Cover at minimum the
+      CCSDS 8-bit pseudo-randomiser, PN9, and the BLE data whitener (LFSR seeded from the channel
+      index) - three real parameterisations, not one with two aliases.
+      WHAT IT UNLOCKS (docs/18 section 6.2): CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT /
+      GK-2A LRIT, HRPT/AHRPT, VDL Mode 2, Bluetooth LE advertising, ASTM F3411 Remote ID over its BLE
+      transport, radiosondes, TETRA control, LoRa. TEN families.
+      THE BLE POINT IS WORTH STATING SEPARATELY: docs/18 section 1.4 found there is NO maintained
+      GNU Radio BLE receiver at all - gr-bluetooth is archived at GR 3.7. So for BLE, native is not
+      the preferred path, it is the ONLY path, and this block plus the existing `fsk_demod`,
+      `clock_recovery`, `slicer`, `crc` and `follow_hops` is most of it.
+      ALSO SERVES DETECTION, not just decode: RESEARCH-012 is whitening/scrambler IDENTIFICATION -
+      spotting a PN9-like LFSR in an unknown burst - which is a MAUTO search capability, not a
+      decoder stage. Expose enough in `status()` (lock, error_rate) for the search to score it.
+      TESTS: the ADR-0011 section 1.6 pair every block owes - chunking invariance (output identical
+      however the input is split) and a synthetic-signal test - plus a known-vector test per
+      parameterisation. Prove each test goes RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 2). core_interface because it adds a
+      catalogue row; the descriptor comes from T-606.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-609
+    milestone: MAUTO
+    title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: xhigh
+    depends_on: [T-606, T-607]
+    use_cases: [SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081]
+    core_interface: true
+    acceptance: |
+      *** THIS REPLACES ADR-0015 SECTION 10's M-14 ("OPTIONAL psk_demod/Costas"), WHICH IS TOO NARROW
+      TO BE USEFUL. *** T-554 confirmed the premise: eight of the eleven families this block unlocks
+      ALSO need `viterbi` (T-610) and `reed_solomon` (T-611), and NONE of the eight gets past verdict
+      `demodulated` with only the demodulator, because CCSDS framing means convolutional coding plus
+      Reed-Solomon. Scoped as one-plus-two-optional-extras it would deliver a PSK demodulator that
+      unlocks Orbcomm and nothing else. Read T-609/T-610/T-611 as ONE investment.
+      THE BLOCK. Group `iq`, ports `iq -> soft`, additive to ADR-0011 section 1.5.
+      Must cover BPSK, QPSK, OQPSK, D8PSK and pi/4-DQPSK - the five that the family list actually
+      needs (Zigbee is OQPSK, VDL2 is D8PSK, TETRA is pi/4-DQPSK; a BPSK-only block unlocks three
+      families, not eleven). Carrier recovery (Costas or decision-directed PLL), an FLL or band-edge
+      for acquisition, an RRC matched filter, and a stated acquisition/hold behaviour on
+      DISCONTINUITY.
+      OUTPUT PORT: take T-606's decision, do not re-open it. T-554's recommendation is that the block
+      DE-MAPS INTERNALLY and emits one `soft` item per BIT at k x the symbol rate, which needs no new
+      port type and leaves `slicer`/`descramble`/`viterbi` untouched.
+      DO NOT REDERIVE THE DSP IF T-607 SAYS IT IS THERE: liquid-dsp is MIT and ships PSK modems,
+      NCO/PLL and matched filters. Under ADR-0011 section 1.6 a block is an adapter over an existing
+      kernel. T-607 says whether that kernel is in the build; if it is, this is an adapter job.
+      LICENCE: every algorithm here has a published textbook description (Costas loop, Gardner/M&M
+      timing, RRC). Work from those. ADR-0010's standing rule holds - GPLv3 decoder source stays
+      behind the plugin process boundary and nothing is derived from it in-core - and docs/18
+      section 4 is CANCELLED and may not be cited as authority for anything.
+      TESTS: chunking invariance, synthetic signals per constellation at stated SNR, CFO and timing
+      offsets, and a locked/searching `status()` that the refinement loop and the MAUTO search can
+      read. Prove the tests go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 1). ADR-0015 section 10's M-14 row should
+      be read as superseded by this ticket; T-606's amendment is the place that records it.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-610
+    milestone: MAUTO
+    title: 'hk-blocks `viterbi`: convolutional/punctured FEC incl. CCSDS R=1/2 K=7 - rank 3 on the T-554 gap list, 10 families'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: xhigh
+    depends_on: [T-606, T-607]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-080, SIGNAL-084, SIGNAL-064, SIGNAL-070, SPACE-081]
+    core_interface: true
+    acceptance: |
+      One third of the PSK+Viterbi+Reed-Solomon investment (T-609/T-610/T-611). See T-609's note on
+      why these are one ticket set and not one plus two optional extras.
+      THE BLOCK. Group `fec`, ports `soft|bits -> bits`, additive to ADR-0011 section 1.5.
+      *** NOTE THE SHAPE DIFFERENCE AND MAKE IT EXPLICIT. *** Every existing `fec` block (`crc`,
+      `bch`, `parity`, `checksum`) is hard-decision `frames -> frames`. A streaming convolutional
+      decoder is `soft|bits -> bits`. Both port types already exist, so this is ADDITIVE and not a
+      contract change - but it means the `fec` group has two shapes in it, and T-606's amendment has
+      to say so in section 1.5's table rather than leave it to be discovered by the next
+      implementer.
+      MUST COVER: CCSDS R=1/2 K=7 (the one that matters - it is what a satellite downlink means),
+      arbitrary rate/constraint-length polynomials, puncturing, and soft-decision input with a
+      stated traceback depth. Hard-decision input is allowed and costs the usual ~2 dB; the block
+      must not quietly present hard-decision output as if it were soft-decision performance.
+      UNLOCKS: CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT / GK-2A LRIT, HRPT/AHRPT,
+      Inmarsat STD-C/Aero, TETRA control, P25 Phase 1 trellis, NXDN, DAB+, MIL-STD-188-110.
+      T-607 first: liquid-dsp ships convolutional FEC. If it is in the build this is an adapter job.
+      LICENCE: Viterbi is textbook and CCSDS 131.0-B is a published standard. ADR-0010's boundary
+      holds; docs/18 section 4 is cancelled and is not authority.
+      TESTS: chunking invariance, a known-vector test against the CCSDS standard's own test data,
+      and a BER-vs-Eb/N0 curve at a stated tolerance. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 3).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-611
+    milestone: MAUTO
+    title: 'hk-blocks `reed_solomon`: RS(255,223) dual-basis and friends - rank 4 on the T-554 gap list, 8 families'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: high
+    depends_on: [T-606]
+    use_cases: [SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-004, SIGNAL-074, SIGNAL-080, SIGNAL-064]
+    core_interface: true
+    acceptance: |
+      One third of the PSK+Viterbi+Reed-Solomon investment (T-609/T-610/T-611). Without this one the
+      satellite families stop one stage short of a decoded frame, which is exactly the gap T-554 was
+      filed to find.
+      THE BLOCK. Group `fec`, ports `frames -> frames` - the SAME shape as the existing `bch`, so it
+      sits beside it with no contract question at all. Additive to ADR-0011 section 1.5.
+      PARAMETERS TO PIN: `n`, `k`, `symbol_bits`, generator polynomial / `fcr` / `prim`,
+      `dual_basis` (the CCSDS convention, and getting this wrong is the classic silent failure),
+      interleave `depth` (CCSDS uses I=4/5), `strip`, `drop_invalid` (hot), and a corrected-symbol
+      count surfaced through `FrameInfo` the way `crc`'s correction already is.
+      MUST COVER: RS(255,223) dual-basis (CCSDS), RS(255,239), RS(204,188) (DVB/DAB+), and the short
+      P25 codes RS(24,12,13) / RS(24,16,9) / RS(36,20,17).
+      UNLOCKS: CCSDS satellite telemetry, Meteor-M LRPT, GOES HRIT / GK-2A LRIT, HRPT/AHRPT,
+      VDL Mode 2, radiosondes, P25 Phase 1 link control, DAB+.
+      T-607 first: liquid-dsp ships Reed-Solomon. If it is in the build this is an adapter job.
+      LICENCE: CCSDS 131.0-B is a published standard and the algorithm is textbook. ADR-0010's
+      boundary holds; docs/18 section 4 is cancelled and is not authority.
+      TESTS: chunking invariance, known-vector tests from the CCSDS standard including the
+      dual-basis transform, an erasure/error-count boundary test (t errors corrected, t+1 detected
+      not miscorrected), and the section 1.4 rule 1 allocation test. Prove they go RED without it.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 4). Does not depend on T-607 - if
+      liquid-dsp is refused this is still a well-bounded standalone implementation.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-612
+    milestone: MAUTO
+    title: 'hk-blocks `mlevel_slicer`: M-ary symbol decisions (4-level C4FM, 8-ary) - rank 5 on the T-554 gap list, and the whole trunking/paging unlock'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-080, SIGNAL-082, SIGNAL-084, SIGNAL-086, SIGNAL-087, SIGNAL-070, AWARE-067]
+    core_interface: true
+    acceptance: |
+      THE GAP, precisely: today's `slicer` is `soft -> bits` with ONE threshold - a binary decision.
+      Every 4-level FSK / C4FM family (P25 Phase 1, DMR, NXDN, FLEX) and every M-ary FSK family
+      (2G ALE at 8-ary) is blocked on nothing else in the symbol stage. The discriminator output
+      from `fsk_demod` is already the right signal; only the decision is missing.
+      THE BLOCK. Group `symbol`, ports `soft -> bits` emitting k bits per symbol, additive to
+      ADR-0011 section 1.5. Parameters to pin: `levels` (4, 8, ...), threshold derivation
+      (`auto` from the observed histogram, or `fixed`), `gray` mapping, `bit_order`, and `invert`
+      to match `slicer`'s existing hot parameters. `auto` matters: C4FM deviation drifts and a fixed
+      threshold is exactly the sort of hand-set number CLAUDE.md says should be estimated.
+      UNLOCKS: FLEX paging, P25 Phase 1 control channel, DMR Tier III control, NXDN Type-C control,
+      2G ALE - and contingently P25 Phase 2, which T-554 marked UNKNOWN (H-DQPSK/H-CPM burst
+      structure, TIA standard paywalled) rather than guessing.
+      *** THE VOCODER IS NOT IN SCOPE AND IS NOT A BLOCKER. *** ADR-0010 puts AMBE/IMBE/AMBE+2 IP out
+      of reach, and docs/18 section 3 states the product consequence plainly: this device can
+      inventory, follow and characterise an LMR system without decoding a word of speech. The
+      control channel, the talkgroup/unit metadata, SIGNAL-086's encryption-aware call logging and
+      SIGNAL-087's blind auto-decode target are all unaffected by the vocoder wall.
+      TESTS: chunking invariance, a synthetic 4-level eye at several SNRs with the `auto` threshold
+      converging, a Gray-mapping vector test, and a test that an all-one-level input does NOT
+      produce confident output. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 5). Needs nothing from liquid-dsp
+      (T-607) - it is a decision rule, not a kernel.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
+  - id: T-613
+    milestone: MAUTO
+    title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: [T-606]
+    use_cases: [SIGNAL-015, SIGNAL-036, SIGNAL-004, AWARE-007, AWARE-012, PROP-024, PROP-025]
+    core_interface: false
+    acceptance: |
+      Rank 6 by families unlocked (3) but the best cost-per-family on the T-554 list: it is a
+      six-consecutive-ones rule and a flag detector.
+      THE BLOCK. Group `symbol`, ports `bits -> bits`, additive to ADR-0011 section 1.5.
+      Parameters to pin: `mode` (`hdlc`), `flag` (hex, default 0x7E), `stuff_after` (5 ones),
+      `direction` (`destuff`/`stuff`, mirroring `nrzi`'s existing `direction` precedent), and the
+      abort/idle rule (seven or more ones). Frame boundaries stay `sync_search`'s job - this block
+      removes the stuffed zeros so the bits downstream are the real ones.
+      UNLOCKS, with everything else already in the catalogue:
+      - AIS: GMSK + NRZI + HDLC + CRC-16 - `fsk_demod`, `nrzi`, `sync_search`, `crc` all exist, and
+        this is the only missing piece. Serves SIGNAL-015 and the AIS-derived propagation work
+        (PROP-024, PROP-025) and anomaly detection (AWARE-007, AWARE-012).
+      - AX.25 / APRS / ISS digipeater (SIGNAL-036), and the AX.25 half of amateur cubesat beacons.
+      - VDL Mode 2, in combination with T-609/T-608/T-611.
+      DO NOT GOLD-PLATE IT. It is one block with one rule; the value is in what it completes, not in
+      what it is. Resist folding flag-based framing into it - `sync_search` already owns that and
+      duplicating it would make two blocks that disagree about frame boundaries.
+      TESTS: chunking invariance (including a stuffed zero that falls exactly on a chunk boundary -
+      that is the bug this block will have), a known-vector AIS frame, and a round-trip
+      stuff/destuff test. Prove they go RED without the block.
+    notes: |
+      Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 6). Sonnet: the descriptor is pinned by
+      T-606 and the rule is fully specified by ISO/IEC 13239 - this is a well-specified task with
+      tests, which is exactly the tier CLAUDE.md puts on Sonnet. Not core_interface: T-606 owns the
+      catalogue row.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
+      BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
