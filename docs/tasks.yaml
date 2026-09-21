@@ -6160,7 +6160,7 @@ tasks:
     milestone: M2-hardening
     title: A purely analogue emitter now sits exactly on the shared-field floor, so one field dropping out
       stops it clustering entirely
-    status: todo
+    status: done
     priority: low
     deps:
     - T-309
@@ -6176,6 +6176,19 @@ tasks:
       with fewer measurable dimensions. Do NOT lower CLUSTER_MIN_SHARED_FIELDS: it is the matcher''s evidence
       floor, equal to MATCH_MIN_DISCRIMINATING per ADR-0016 section 5, and T-309 pinned that equality with
       a test. Fix the field supply, not the evidence bar'
+    notes: 'Fixed the field SUPPLY, not the evidence bar: CLUSTER_MIN_SHARED_FIELDS is unmoved and T-309''s
+      equality with MATCH_MIN_DISCRIMINATING still passes untouched. The analogue chain (crates/hk-pipeline/src/chains/analog.rs,
+      shape_observation + write_shape) now writes the C13 spectral `flatness` it had ALREADY measured for
+      that window (ParameterSet::shape.flatness) as a fourth measured clustering field, through the same
+      characterise_with seam the sweep chain uses for sweep_rate_hz_per_s. flatness needs no symbol clock,
+      is a property of the emission rather than of the look (the T-309 criterion), and was already in CLUSTER_FIELDS
+      with a tolerance - the field set was never the gap, the supply was. Measured: a purely analogue emitter
+      goes from 3 cluster fields to 4, and the degraded case (class did not measure) from 2 to 3, so it clusters
+      instead of silently vanishing; an unmeasured flatness contributes nothing, never a placeholder. Tests:
+      hk-pipeline characterise::analogue_field_supply_tests (4), proven red with the field supply stubbed
+      out. Follow-up surfaced, not chased: the clusterer''s too_few_fields abstention is recorded on the
+      emitter_cluster link row but no API route serves it, so a genuinely sub-floor emitter still reads as
+      a bare cluster_id: null to a client.'
   - id: T-322
     milestone: M5
     title: 'hk-gnss is reachable only from its own tests: nothing schedules an L1 dwell, so the acquisition

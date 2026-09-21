@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread;
 
+use hk_context::signature::FeatureObservation;
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::refine::{IqWindow, RefineStart, RefinementOutcome, Tuning};
 use hk_demod::{
@@ -62,6 +63,7 @@ use hk_demod::{
 };
 use hk_dsp::InputInfo;
 use hk_estimate::SnippetRequest;
+use hk_model::signature::field;
 use hk_model::{
     Classification, EmitterId, EmitterLink, Fingerprint, LinkTarget, MeasurementKey, RepoError,
     Repository, SampleTime, Sighting,
@@ -575,6 +577,9 @@ fn identify(
             inc(&c.errors);
             eprintln!("hk-pipeline: analog chain emitter: {err}");
         }
+        drop(inv);
+        // T-321: the fourth measured field a purely analogue emitter can supply.
+        write_shape(&mut repo, c, e, &session);
     }
     Identified::Written(emitter, stored)
 }
@@ -626,6 +631,82 @@ fn mode_emitter(
         linked_at: time.end,
     })?;
     Ok(Some(r.emitter_id))
+}
+
+/// T-321: the C13 spectral shape this chain already measured, offered to C18 as one more
+/// **measured** field.
+///
+/// # Why this exists
+///
+/// A purely analogue emitter has no symbol clock, so it can never measure a symbol rate, an FSK
+/// deviation, a line code, a sync word, a packet length or a CRC. Of the fields a real run
+/// produces it was left with exactly three — `family`, `obw_hz` and `class` — which is *exactly*
+/// [`hk_context::signature::cluster::CLUSTER_MIN_SHARED_FIELDS`]. Sufficient, with no margin: a run
+/// where the within-family class call fell below its gate dropped such an emitter to two shared
+/// fields, and the clusterer then abstained on **every** pair of them. Nothing failed, nothing was
+/// logged as wrong, and the operator simply saw no groups.
+///
+/// # Why *this* field, and not a synthesised one
+///
+/// [`hk_estimate::ShapeFeatures::flatness`] is the spectral flatness of the noise-subtracted PSD
+/// inside OBW99. It is:
+///
+/// - **measured, not manufactured** — C13 computes it from this window's own samples, and it is
+///   `None` (absent, never zero) when the snippet was too short or carried no OBW to measure it in;
+/// - **measurable without a symbol clock**, which is the whole point: it is a property of the
+///   emission's spectral shape, so an analogue emission can supply it;
+/// - **a property of the emission, not of the look** — the criterion T-309 removed `period_s`,
+///   `duty_cycle` and `burst_length_s` for. It is a ratio of two averages over the PSD within a
+///   band the emission itself defines; watching for longer estimates it better and moves it not at
+///   all, exactly unlike a duty cycle measured over whatever span the producer happened to watch.
+///   So this adds a field of the kind T-309 kept, and re-opens nothing it removed;
+/// - **already in [`hk_model::CLUSTER_FIELDS`]**, with a tolerance
+///   ([`hk_model::signature::default_tolerance`]) — the field set was never the gap. The *supply*
+///   was: nothing on this path ever wrote it, so a field the clusterer was willing to compare was
+///   never offered to it.
+///
+/// Sigma is 0: C13 reports no per-measurement uncertainty for it, and the aggregate then learns the
+/// spread from how much repeated sightings actually disagree — the same rule
+/// [`hk_context::signature::FeatureObservation::from_fingerprint`] already follows for every field
+/// a fingerprint carries.
+///
+/// `None` when C13 did not measure it, so an unmeasurable window contributes **nothing** rather
+/// than a placeholder. The floor is unmoved either way: this fixes the field supply, not the
+/// evidence bar.
+pub(crate) fn shape_observation(flatness: Option<f64>, method: &str) -> Option<FeatureObservation> {
+    Some(FeatureObservation::new().num(field::FLATNESS, flatness?, 0.0, method))
+}
+
+/// Writes [`shape_observation`] onto `emitter` through the same seam the sweep chain uses for a
+/// measurement the fingerprint cannot carry ([`crate::characterise::characterise_with`]).
+///
+/// Timed by the emitter's own `last_seen`, like every other caller of that seam: a cluster
+/// assignment stamped before its cluster existed is refused outright.
+fn write_shape(
+    repo: &mut Repository,
+    counters: &crate::stats::ChainCounters,
+    emitter: EmitterId,
+    session: &AnalogSession,
+) {
+    let Some(obs) = shape_observation(session.params.shape.flatness, &session.params.version)
+    else {
+        return;
+    };
+    let t = match repo.emitter(emitter) {
+        Ok(e) => e.last_seen,
+        Err(err) => {
+            inc(&counters.errors);
+            eprintln!("hk-pipeline: analog chain shape emitter: {err}");
+            return;
+        }
+    };
+    // Named, not just counted (T-293/T-319): losing this silently is losing the field that keeps a
+    // purely analogue emitter above the clustering floor, and "no groups" is the failure mode this
+    // exists to stop being silent.
+    if let Err(err) = crate::characterise::characterise_with(repo, emitter, obs, t) {
+        inc(&counters.errors);
+        eprintln!("hk-pipeline: analog chain shape characterisation: {err}");
+    }
 }
 
 /// Largest distance from the nearest raster channel still read as on that channel, as a fraction
@@ -884,6 +965,9 @@ fn collect_and_write(
                     inc(&c.errors);
                     eprintln!("hk-pipeline: analog chain emitter: {err}");
                 }
+                drop(inv);
+                // T-321: the fourth measured field a purely analogue emitter can supply.
+                write_shape(&mut repo, c, e, &session);
             }
         }
         Err(e) => {
