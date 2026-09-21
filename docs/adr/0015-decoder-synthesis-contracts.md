@@ -294,6 +294,7 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
   The lifecycle reason is backend-rendered, e.g. "decoded by synthesized pipeline `generic-fsk-framed`: 5 distinct CRC-16 frames valid on hold-out, 88 bits".
 - **Trust rules.** Partial verdicts never change lifecycle state. The rule never demotes, and a user delete wins. A template-bound decode that yields a real identity (e.g. `adsb-icao`) is still marked `synthesized`, and `/api/inventory` shows that provenance next to the identity: a successful decode is strong evidence, never an unexplained fact.
 - **Single frames** (§6) don't auto-confirm by default: the emitter stays a candidate with `verdict: solved` and the user can promote. (Open question 1.)
+- **Superseded by [ADR-0022](0022-false-confirm-budget.md) (T-548).** The 64 bits / 3 frames / width 16 above are guesses on a one-way door; ADR-0022 derives the gate from the user's budget of one wrong Confirmed emitter per unattended week — **24 analytic hold-out bits**, payable only in analytic-null bits each net of *its own stage's* look-elsewhere, a frame count that is a formula rather than a constant, a width floor of 8 with a 16-bit hard check floor, and the searched-generator discount that [ADR-0021](0021-search-trace-and-negative-result.md) §7A.5 deferred here. T-571 applies it to this section and to §11.5.
 
 ## 6. Burst and one-off path
 
