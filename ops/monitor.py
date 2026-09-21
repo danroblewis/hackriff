@@ -443,9 +443,19 @@ def term_pane():
     return "\n".join(lines[-60:])
 
 def stage_status():
+    # stage.sh writes stage.log to its own scratchpad dir, which may differ from SCRATCH
+    # (~/.hackriff-ops). Read from whichever candidate dir has the freshest stage.log.
+    sdir = SCRATCH; _best = -1.0
+    for d in (os.path.dirname(os.path.abspath(__file__)), SCRATCH):
+        try:
+            m = os.path.getmtime(os.path.join(d, "stage.log"))
+            if m > _best:
+                _best = m; sdir = d
+        except Exception:
+            pass
     lines = []
     try:
-        with open(os.path.join(SCRATCH, "stage.log")) as f:
+        with open(os.path.join(sdir, "stage.log")) as f:
             lines = [l.rstrip() for l in f.read().splitlines() if l.strip()][-16:]
     except Exception:
         pass
@@ -455,7 +465,7 @@ def stage_status():
         alive = False
     def rd(n):
         try:
-            return open(os.path.join(SCRATCH, n)).read().strip()
+            return open(os.path.join(sdir, n)).read().strip()
         except Exception:
             return ""
     smoke = ""
