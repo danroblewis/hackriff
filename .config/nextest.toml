@@ -7,7 +7,9 @@
 #   - tests/e2e (hk-e2e): the harness + M0 acceptance suite drive the whole pipeline
 #     end to end and spawn real processes/servers.
 #   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
-#     live retune/listen/streaming timing against a running pipeline.
+#     live retune/listen/streaming timing against a running pipeline, and
+#     replumb_never_pays_for_the_ring (T-536) asserts a wall-clock bound on how long a
+#     re-plumb may stall capture.
 #   - hk-api, hk-cli: bind real TCP/WebSocket ports and (hk-cli) spawn the daemon
 #     process, so concurrent runs can collide on ports or process lifecycle.
 #   - hk-core: ring_concurrency/ring_stress race real reader/writer threads against
@@ -158,7 +160,7 @@ filter = 'package(hk-e2e)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
-filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history))'
+filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
