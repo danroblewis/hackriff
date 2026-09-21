@@ -150,3 +150,26 @@ def test_effort_is_a_known_tier_and_core_interface_never_goes_to_a_cheap_model(r
                 "CLAUDE.md forbids core interfaces and the real-time path going to "
                 "Sonnet or Haiku alone"
             )
+
+def test_no_ticket_lost_its_body_to_a_merge(records) -> None:
+    """A truncated ticket is the failure a YAML parser cannot see.
+
+    On 2026-09-21 seven tickets reached `main` reduced to `id`/`milestone`/`title`: a
+    conflict-marker-stripping resolution had eaten the rest of each block wherever a hunk boundary
+    fell mid-ticket. The file still PARSED and every other assertion here still passed, so nothing
+    noticed until a reconcile happened to print a ticket with no status. T-582's merge driver stops
+    the cause; this stops the damage reaching `main` if anything else ever does it.
+
+    A ticket worth filing is worth a reason: `status` is structural and a body (`acceptance` or
+    `notes`) is what makes it actionable. A block with neither is not terse, it is damaged.
+    """
+    thin = [
+        tid
+        for tid, rec in records
+        if rec.get("status") not in ("cancelled", "deferred")
+        and not (rec.get("acceptance") or rec.get("notes") or rec.get("dod"))
+    ]
+    assert not thin, (
+        f"{len(thin)} ticket(s) carry neither acceptance nor notes, which is what a merge that ate "
+        f"a block looks like: {thin[:10]}"
+    )
