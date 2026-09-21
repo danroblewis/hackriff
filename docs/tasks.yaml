@@ -19202,6 +19202,37 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-602
+    milestone: M2-hardening
+    title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-595]
+    use_cases: []
+    acceptance: |
+      SURFACED BY T-595, not chased there. T-595 split "sampled" from "analysed": a dwell's DC notch
+      is now recorded as sampled-but-excluded, carried as `analysed_ns` on the span and served as the
+      `excluded` coverage state. `hk-pipeline` and `hk-context` still call
+      `ObservedWindow::covered()` for POI selection and occupancy, which answers the OLD question -
+      was this span sampled - and they have no way to ask the new one.
+      Their semantics are unchanged and nothing is wrong today. The gap is that a ±15 kHz stripe at
+      every tuned centre is, to them, indistinguishable from spectrum that was analysed and found
+      quiet. T-595 put it exactly: worth a look if "why is there never a detection at the tuned
+      centre" ever becomes a question. Occupancy in particular integrates over a band and will
+      quietly count excluded time as measured-and-empty, which biases the figure downward by the
+      notch's share of the band - small at 20 MHz, not small at a narrow dwell.
+      Decide, per caller, which question it should be asking, and make the answer explicit rather
+      than implied by whichever method was to hand. If a caller genuinely wants "sampled", say so in
+      a comment naming why - the point is that the choice becomes visible.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): occupancy over a band containing a
+      notch reports the excluded share separately from the quiet share, and a POI query does not
+      treat the notch as analysed-and-empty. A test that runs on a band with no notch is vacuous -
+      report the notch width and the band width it judged.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
