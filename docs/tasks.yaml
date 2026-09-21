@@ -6446,7 +6446,7 @@ tasks:
     milestone: M2-hardening
     title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
       by a discounted merge can skip re-characterisation
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-329
