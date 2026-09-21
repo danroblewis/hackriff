@@ -47,6 +47,10 @@ import {
 } from "../../surface/marks";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
+import {
+  autoContrastButton, loadRangeMode, pressAutoContrast, pressViewportScale, saveRangeMode,
+  viewportScaleButton, type ContrastButton,
+} from "../../surface/contrast";
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
@@ -54,7 +58,7 @@ import {
   acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
-import type { PaneRect, PaneReport, PaneView } from "../../surface/surface";
+import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
   peakOf, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
@@ -147,6 +151,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // hatch for digging into weak signals, and the label beside it states the range and which way
   // round it is — a fixed scale is honest only if it is quoted.
   const contrastBtn = h("button", { class: "mini sf-contrast", type: "button" }, "Auto-contrast: off");
+  // T-528: the second half of the same control. `Auto-contrast` decides *whether* the scale tracks
+  // the screen; this decides *what it measures* when it does — whole tiles (cheap, and a carrier
+  // off screen in a tile that is partly on screen still sets the top of the ramp) or the observed
+  // cells actually inside the view. Both are kept: they make opposite trades and the user has said
+  // they want each. Persisted per viewer like `Signals` above, defaulting to today's behaviour.
+  const vscaleBtn = h("button", { class: "mini sf-vscale", type: "button" }, "Viewport scale: off");
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -156,7 +166,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
   }, "Signals");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, signalsBtn,
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn,
     recordIqButton(ctx),
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
@@ -379,10 +389,23 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // was decided. It used to read "measured from the served tiles" — true of the viewport-
         // tracking range, and exactly what stopped being true when the scale stopped following the
         // viewport. `app-trace.e2e.mjs` asserts this sentence, and was updated with it.
+        // T-528 adds the third case. The numbers are `s.lo`/`s.hi` — the pair the frame that is on
+        // the screen was uploaded with, not the one the next frame will use (see `Surface.next`) —
+        // so this sentence is true of the pixels beside it in every mode, which is T-475's rule and
+        // is what a re-measured-per-frame scale makes load-bearing rather than incidental.
         `scale ${fmtDb(s.lo)} … ${fmtDb(s.hi)}, ${s.range.mode === "anchored"
           ? "measured over the region and anchored there"
-          : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
+          : s.range.mode === "viewport"
+            ? "measured from the observed cells in this view, shadows excluded (viewport scale)"
+            : "measured from the tiles on screen (auto-contrast)"}, shared with the ramp`,
       ].join(" · "));
+      // **The bar's range line, on the FRAME, not on the 1 s chrome poll** (T-528). It was on the
+      // poll because the anchored range never moves and `auto` creeps; a viewport-measured range
+      // moves with every pan, and a bar quoting a second-old scale beside pixels drawn with the
+      // current one is the readout-disagrees-with-the-pixels defect in miniature. Set-if-changed,
+      // so the anchored mode still writes the DOM exactly once. The poll below stays as the path
+      // for when the trace strip is switched off and this callback does not run.
+      setText(rangeEl, rangeLabel(s.range));
     }
     return out;
   };
@@ -710,23 +733,36 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLive();
     store.select((s) => s.time.live, renderLive);
 
-    // ---- the colour scale (T-470). A view control; it reaches no route and no device. ----
+    // ---- the colour scale (T-470, T-528). A view control; it reaches no route and no device. ----
+    //
+    // Two buttons, ONE piece of state — the mode the surface is actually in — so the pair cannot
+    // get into a combination that means nothing. Every press goes through `./contrast.ts`'s pure
+    // functions and is persisted there; nothing here is fetched, polled or sent.
+    const paint = (btn: HTMLButtonElement, b: ContrastButton) => {
+      btn.textContent = b.label;
+      btn.title = b.title;
+      btn.classList.toggle("on", b.pressed);
+      btn.setAttribute("aria-pressed", String(b.pressed));
+    };
     const renderRange = () => {
       const p = preview;
       if (!p) return;
       const r = p.range;
       rangeEl.textContent = rangeLabel(r);
-      contrastBtn.textContent = r.mode === "anchored" ? "Auto-contrast: off" : "Auto-contrast: on";
-      contrastBtn.classList.toggle("on", r.mode === "auto");
-      contrastBtn.setAttribute("aria-pressed", r.mode === "auto" ? "true" : "false");
-      contrastBtn.title = r.mode === "anchored"
-        ? "The display range is anchored to the region, so the same measured dB is the same colour at every zoom — at the cost of clipping outside it. Press to track what is on screen instead."
-        : "The display range tracks the tiles currently on screen: nothing clips, but the same signal changes colour as you navigate. Press to go back to the anchored range.";
+      paint(contrastBtn as HTMLButtonElement, autoContrastButton(r.mode));
+      paint(vscaleBtn as HTMLButtonElement, viewportScaleButton(r.mode));
     };
-    contrastBtn.addEventListener("click", () => {
-      preview?.setAutoScale(preview.range.mode === "anchored");
+    const setMode = (mode: RangeMode) => {
+      preview?.setRangeMode(mode);
+      saveRangeMode(mode);
       renderRange();
-    });
+    };
+    contrastBtn.addEventListener("click", () => setMode(pressAutoContrast(preview?.range.mode ?? "anchored")));
+    vscaleBtn.addEventListener("click", () => setMode(pressViewportScale(preview?.range.mode ?? "anchored")));
+    // The remembered mode, applied once the surface exists. `anchored` — the default — is what the
+    // probe's anchor already put it in, so the common path sets nothing.
+    const remembered = loadRangeMode();
+    if (remembered !== "anchored") preview.setRangeMode(remembered);
     renderRange();
     // Auto-contrast moves the range every frame, so the statement follows it rather than only the
     // press: a label quoting a range the surface no longer draws with is worse than no label. At the

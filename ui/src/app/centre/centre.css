@@ -10,20 +10,41 @@
  * and the orientation note. None of it overlaps the picture. */
 .surface [hidden] { display: none !important; }
 
+/* **The bar WRAPS, and the controls never shrink** (T-528).
+ *
+ * It used to be one un-wrapping row in which `.sf-actions` was `min-width: 0` — so when the bar was
+ * narrower than the buttons, the *container* shrank and the buttons overflowed to the right, where
+ * `.sf-range` (a later sibling, painted after them) sat on top of them. They were still visible,
+ * still focusable, still `offsetParent !== null` — and **not clickable**, because a real click lands
+ * on whatever `elementFromPoint` says is on top. Measured on the dev Mac at 1440 × 900 after this
+ * ticket added one button: `.sf-actions` content 687 px laid out in 420 px, and `Split ⇔`, `Close`
+ * and `Whole surface` all hit-testing to `SPAN.sf-range`. That is how adding a *fourth* toggle
+ * silently disabled the *split* — and the bar was already 539 px in 420 px before it, so this was
+ * one label away from happening to whoever added the next control.
+ *
+ * So: the controls are `flex: 0 0 auto` — a button a user can see is a button a user can press, and
+ * that is not negotiable against a text readout — and the bar wraps, so a row that cannot fit moves
+ * to the next line inside the bar instead of overflowing under its neighbour. The two readouts
+ * ellipsise first (`flex: 1 1 …` with `min-width: 0`), and only when the range cannot keep a
+ * readable 220 px does it take a line of its own. The bar grows; nothing is ever hidden under
+ * anything. */
 .sf-bar {
-  display: flex; align-items: center; gap: 10px; padding: 0 12px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 0 12px;
   border-bottom: 1px solid var(--line); background: var(--panel);
   font: 11px var(--mono); color: var(--muted); min-width: 0;
 }
-/* T-506: the actions never shrink. With `min-width: 0` they did, and the range sentence beside them
-   was then painted over the buttons that overflowed — measured in a browser at 1440 px, the centre
-   of "Whole surface" hit-tested to `.sf-range`, so a real click did nothing. The sentence is the
-   thing that yields: it already ellipsises. */
-.sf-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+/* T-506: the actions never shrink (`flex: 0 0 auto`). With `min-width: 0` they did, and the range
+   sentence beside them was then painted over the buttons that overflowed — measured in a browser at
+   1440 px, the centre of "Whole surface" hit-tested to `.sf-range`, so a real click did nothing. The
+   sentence is the thing that yields: it already ellipsises.
+   T-528: and when even the un-shrunk row does not fit, the buttons WRAP rather than overflow. The
+   bar's grid row is `minmax(26px, auto)` (base.css) precisely so a wrapped second line grows the bar
+   instead of painting over the stage. */
+.sf-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; flex: 0 0 auto; }
 /* T-470: the colour scale, stated. It sits next to the actions rather than at the far end because a
    fixed range that clips is only honest if the range is read, not hunted for. */
-.sf-range { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sf-range { flex: 1 1 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sf-hover { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
 .sf-stage { position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--ground); }
 /* T-508: capture recovering or ended, said over the picture. A frozen edge that looks live is the

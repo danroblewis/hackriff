@@ -119,6 +119,10 @@ export function legendEntries(): readonly LegendEntry[] {
  *   rather than discovered.
  * - **auto-contrast** — nothing clips, *and* the colour of a measurement depends on what else is on
  *   screen, so the same signal changes colour as you navigate.
+ * - **auto-contrast (viewport)** — the same trade, made harder (T-528): the range is measured from
+ *   the cells inside the viewport rather than from whole tiles, so a quiet band fills the ramp and
+ *   *panning by one screen* can re-colour it. Its note says what it measured, because in this mode
+ *   the scale is a per-frame measurement and a viewer can only check it if it is quoted.
  *
  * The swatch is the ramp itself, rasterised through [[cellPixel]] like every other row — so the key's
  * scale bar cannot drift from the shader's ramp any more than its greys can.
@@ -128,8 +132,12 @@ export function rangeEntry(range: DisplayRange): LegendEntry {
   const note = range.mode === "anchored"
     ? `Anchored: ${range.source}. The same measured dB is the same colour at every zoom — and anything `
       + `below ${range.lo.toFixed(1)} dBFS or above ${range.hi.toFixed(1)} dBFS is clipped to an end of the ramp.`
-    : `Auto-contrast: ${range.source}. Nothing clips, but the colour of a measurement depends on what else is `
-      + "on screen, so the same signal changes colour as you zoom or pan.";
+    : range.mode === "viewport"
+      ? `Auto-contrast, viewport-dynamic: ${range.source}. Nothing on screen clips and a quiet band fills the `
+        + "ramp, but the scale is re-measured every frame, so the same signal changes colour as you pan, not "
+        + "only as you zoom."
+      : `Auto-contrast: ${range.source}. Nothing clips, but the colour of a measurement depends on what else is `
+        + "on screen, so the same signal changes colour as you zoom or pan.";
   return {
     key: "range",
     label: `Display range · ${range.lo.toFixed(1)} … ${range.hi.toFixed(1)} dBFS (${span} dB)`,
@@ -140,9 +148,16 @@ export function rangeEntry(range: DisplayRange): LegendEntry {
 
 /** One line a status bar can carry where there is no room for the key. Same facts, fewer words. */
 export function rangeLabel(range: DisplayRange): string {
-  return `display range ${range.lo.toFixed(1)}…${range.hi.toFixed(1)} dBFS · `
-    + (range.mode === "anchored" ? "anchored (same colour at every zoom; outside it clips)" : "auto-contrast (re-scales to what is on screen)");
+  return `display range ${range.lo.toFixed(1)}…${range.hi.toFixed(1)} dBFS · ` + MODE_CLAUSE[range.mode];
 }
+
+/** The one-clause form of each mode's trade, so the bar, the button and the trace readout cannot
+ * describe the same mode three different ways. */
+export const MODE_CLAUSE: Record<DisplayRange["mode"], string> = {
+  anchored: "anchored (same colour at every zoom; outside it clips)",
+  auto: "auto-contrast (re-scales to the tiles on screen)",
+  viewport: "auto-contrast, viewport-dynamic (re-scales to the observed cells in view; shadows excluded)",
+};
 
 /** Rasterise one swatch into an `ImageData`-shaped RGBA buffer, gamma-free like the renderer. */
 export function swatchPixels(entry: LegendEntry, w: number, h: number): Uint8ClampedArray {

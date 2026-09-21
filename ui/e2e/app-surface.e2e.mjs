@@ -94,6 +94,41 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "the app commanded the front end just by opening");
 
+  // (8) **Every control in the toolbar is actually pressable** (T-528).
+  //
+  // The defect this exists for: `.sf-actions` was a shrinkable flex container, so once its buttons
+  // were wider than the bar the *container* shrank and the buttons overflowed to the right, under
+  // `.sf-range` — a later sibling, therefore painted on top. They stayed visible, focusable and
+  // `offsetParent !== null`; they stopped being *clickable*, because a real click lands on whatever
+  // `elementFromPoint` says is on top. Adding a fourth toggle to this bar silently disabled `Split`,
+  // `Close` and `Whole surface`, and the only thing that noticed was two assertions in another file
+  // reporting that a split had not added a viewport.
+  //
+  // So the guard is the hit test itself, over **every** button rather than over the three that
+  // happened to break, and it is written here because this is the file that owns the app's surface
+  // chrome. Any future control that makes the row too wide fails here, naming itself, instead of
+  // making an unrelated spec fail somewhere else.
+  const unclickable = JSON.parse(await page.eval(`JSON.stringify(
+    [...document.querySelectorAll('.sf-actions button')].map((el) => {
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { label: (el.textContent ?? '').trim(), w: Math.round(r.width),
+               covered: top ? (top.className || top.tagName) : 'nothing',
+               ok: !!top && (top === el || el.contains(top)) };
+    }).filter((b) => !b.ok))`));
+  assert.deepEqual(unclickable, [],
+    "a toolbar button is not clickable at its own centre — something is drawn over it, or it has "
+    + "overflowed the bar. A control a user can see is a control a user can press.");
+  const bar = JSON.parse(await page.eval(`JSON.stringify((() => {
+    const b = document.querySelector('.sf-bar').getBoundingClientRect();
+    const s = document.querySelector('.sf-stage').getBoundingClientRect();
+    const last = [...document.querySelectorAll('.sf-bar > *')].map((e) => e.getBoundingClientRect().bottom);
+    return { bottom: b.bottom, stageTop: s.top, contentBottom: Math.max(...last) };
+  })())`));
+  assert.ok(bar.contentBottom <= bar.stageTop + 0.5,
+    `the bar's contents reach ${bar.contentBottom.toFixed(1)} px, past the stage at ${bar.stageTop.toFixed(1)} px: `
+    + "chrome is being drawn over the picture");
+
   t.diagnostic(`load-to-drawn ${Date.now() - t0} ms · ${page.requests.length} requests`);
 });
 
