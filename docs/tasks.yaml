@@ -15424,7 +15424,7 @@ tasks:
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
-    status: todo
+    status: in-review
     priority: high
     parallel_group: SDR
     core_interface: true
@@ -15453,22 +15453,54 @@ tasks:
       writing the shared stores with correct per-device provenance; N=1 unchanged; measured
       per-row cost at N=1 vs N=2 recorded.
     notes: |
-      PAUSED 2026-09-18 by the user (budget; scan + fog-of-war took priority). Resumes after the weekly
-      reset (Sun 02:00). CHECKPOINT: branch task-t510 @ 96d073a3 builds clean, untested. Handover:
-      the seam was where the survey said for STORAGE (history keys by frame device_id, per-device floor,
-      coverage from ring segments), plus three things it missed - (1) the shared pyramids have ONE
-      forward-only watermark, so all devices in a run must share a clock (live radios do; replays
-      generally don't); (2) the end-of-run seal must happen ONCE after every device drains, not by
-      the first reader to finish; (3) each extra device needs its own Counters or it overwrites the
-      primary's live state. WIP: src/devices.rs (ExtraSource/RunDevice, validate/start/finish),
-      Pipeline::start -> start_multi, Shared.seal_at_end, Common.aux/defer_seal/sealed, per-device
-      iqbuffer dirs, source/history cpu_ns counters. N=1 baseline: ~11.1 ms CPU per Msample on the
-      capture thread, 13.0-13.6 ms per history row, 273-279 MB peak. NEXT: N=2 in
-      tests/multi_source.rs, then two_mock_front_ends_share_the_stores, then targeted tests + the
-      threading/cost note. T-508 also changed run.rs (supervise recovery) - rebase before resuming.
-      Filed 2026-09-18 from /tmp/claude-501/multi-sdr-brief.md (planning log B0.690). Paced to ONE
-      builder slot: the user is near the weekly budget cap and retune/live fixes keep priority.
+      DONE 2026-09-21 on branch task-t510-v2 (fresh from main; the paused task-t510 @ 96d073a3 was
+      read for ideas, not rebased). SHAPE: `Pipeline::start_multi(cfg, source, info, reopen,
+      inventory, extra: Vec<ExtraSource>)`; `Pipeline::start` is it with `extra` empty, so N=1 is
+      unchanged (all 315 hk-pipeline tests pass). New `hk-pipeline/src/devices.rs` owns the seam.
+      Per further front end, never shared: source + capture thread, ring + flow gate, history
+      reader (its STFT and NoiseFloorTracker), detector, IQ ring directory
+      (`iqbuffer-devices/<id>-<source key>`), `Counters`, and an interactive coverage observer
+      under ITS OWN device_id (new `ObservationLog::interactive_for`). Shared: floor product, view
+      pyramid, repository, observation log, attention, compute, Survey. Refused up front by
+      `devices::validate`: no identity, a duplicate device id, unpausable under lossless, or a
+      first-sample time > MAX_START_SKEW (60 s) from the primary - the shared pyramids have ONE
+      forward-only watermark, so the front ends of a run must share a clock. The end-of-run seal is
+      taken ONCE from `devices::finish`, called from `run::end_run` (the run's single end);
+      `Shared::seal_at_end` is false for every front end of a multi-source run and true for a
+      single-device one, so its reader still seals byte for byte. A further front end runs no
+      chains (`chains::MAX_RUNTIME_CHAINS` stays run-wide, T-558), drives no scheduler, does not
+      re-plumb, and refuses a sample-rate change (`FixedRate`) rather than half-applying it.
+      MEASURED (dev profile, 20 s of stream, loadavg ~16, one process per configuration):
+      N=1 primary capture 14.1 ms CPU/Msample, 141 us/block, history 1.82 ms/row, maxrss 372 MB.
+      N=2 primary 12.9 ms/Msample, 1.79 ms/row (UNCHANGED within noise) + second front end
+      11.2 ms/Msample, 2.04 ms/row; maxrss 552 MB (+180 MB), wall unchanged. So N costs one more
+      independent chain - ~13 ms CPU per Msample on its own capture thread (~26 % of a core at
+      20 Msps), ~2 ms per history row, ~180 MB residency, 5 threads - and does NOT regrow the
+      primary's per-row cost. Counters gained `source.cpu_ns` / `history_reader.cpu_ns` (sampled
+      every 64 blocks / 50 rows, so the measurement stays off the path it measures).
+      TESTS: `crates/hk-pipeline/tests/multi_source.rs`, counts not wall-clock, stable over 5 runs
+      - 120/87 history rows, 7 detections judged (4 unit-a, 3 unit-b), 1 dwell record each.
+      Asserts: every Detection's provenance_ref -> device_id AND tune.center_hz (the field T-598
+      reads) names the only front end tuned there; history rows under each device's own source key
+      and ZERO in the other's band; `hk_store::coverage::grid` observed in its own band and
+      unobserved in the other's; two front ends under one device id refused before anything opens.
+      RED WHEN BROKEN (verified): aux sharing the primary IQ ring dir -> 3 of 4 tests fail; aux
+      observer recording `None` for its device -> "a dwell record names no front end"; the two
+      front ends forced under one device id (validate guard disabled) -> "a detection at 433.970
+      MHz (only mock:unit-b was tuned there) is attributed to mock:unit-a".
+      ONE NON-OBVIOUS FIX: the aux coverage observer is driven by CAPTURE PROGRESS (tick when
+      `source.blocks` moves), not by a wall-clock timer. A timer records the dwell between two
+      polls, so a fast replay whose whole stream lands between two ticks recorded a 125 ms dwell -
+      or none at all - for a 3 s observation. Under-claimed coverage greys a band the radio really
+      looked at.
+      LEFT FOR THE SLICE: T-512 serving/CLI (opening N devices, per-device controls, a further
+      front end's recovery and re-plumb, and the primary's own coverage record when it is not
+      live-shaped), T-513 the full two-device e2e, T-514 the RTL-SDR driver. USB: 20 Msps is
+      ~40 MB/s, so concurrent front ends at full rate want separate USB controllers; the module
+      docs say so and the loss shows on each front end's own counters, never as a silent gap.
+      Reviewed by Opus before merge (core_interface).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-511
     milestone: MSDR
     title: The serving layer holds N live controls, and device-control routes take a device selector

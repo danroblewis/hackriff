@@ -83,6 +83,10 @@ counter_group!(
         coverage_waits,
         /// Coverage holds released by their 10 s bound instead of the poll.
         coverage_wait_timeouts,
+        /// CPU time of the capture thread(s), ns (T-510: the per-block cost every front end pays
+        /// whether or not anyone looks; sampled every [`crate::capture::CPU_SAMPLE_BLOCKS`] blocks
+        /// and at the thread's end).
+        cpu_ns,
     }
 );
 
@@ -104,6 +108,9 @@ counter_group!(
         /// Frames emitted from a reset's partial averaging (T-139; history reader only, included
         /// in `frames`).
         partial_frames,
+        /// CPU time of this reader's thread(s), ns (T-510; history reader only: the per-row cost
+        /// of the growing edge, paid on every front end's ring whether or not anyone looks).
+        cpu_ns,
     }
 );
 
