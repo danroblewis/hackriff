@@ -26,7 +26,7 @@ Three things are wrong with the constants as written, and they are different kin
 | What may pay | Only **analytic-null** hold-out bits, each net of the look-elsewhere charged **at its own stage for the winning prefix** — never the job-total `look_elsewhere_bits`, never a calibrated-null metric (§2). |
 | The one constant | **`min_analytic_holdout_bits` = 24**, = 14.3 bits of budget + 9.7 bits of stated model-error margin (§3). Replaces the 64. |
 | Frames | **Not a constant.** `min_differences = max(1, ceil((24 + L_check) / width))`, over `differences` (chance-corrected, FEC-corrected frames excluded per T-210), not `distinct_valid`. Gives 1 for a template-fixed CRC-24, 3 for a searched CRC-16 — the legacy number, for the one case it fitted (§4.2). |
-| Width | **Floor of 8**, down from 16, and **stated as an assumption, not a derivation**: it guards a degenerate null the budget cannot see. T-573 measures it. A **hard floor of 16 of the 24 bits must come from a check stage**, so sync excess alone never confirms (§4.3). |
+| Width | **Floor of 8**, down from 16, and **stated as an assumption, not a derivation**: it guards a degenerate null the budget cannot see. T-577 measures it. A **hard floor of 16 of the 24 bits must come from a check stage**, so sync excess alone never confirms (§4.3). |
 | Template-fixed vs searched | The discount for a *found* rather than *specified* check is exactly `L_check`, inside the same inequality — **no separate penalty**. "Template-fixed" means `builtin` or user-authored; a template **discovered by a previous search inherits that search's look-elsewhere** and is treated as searched (§5). |
 | Attended vs unattended | **One threshold.** The arithmetic says attended operation buys ~7 bits of headroom; that is a reason it is safer, not licence to lower it (§7). |
 | Cross-job multiplicity | Priced **once**, in the budget's denominator. No running per-session counter — a threshold that drifts with uptime would make the same physical evidence worth less on a device that has been on longer. The denominator is instead **monitored at runtime** and the budget claim is void above it (§8). |
@@ -201,11 +201,11 @@ So "3 frames" was correct for exactly one row of that table and was being applie
 Two conditions replace the flat `width ≥ 16`:
 
 ```rust
-min_check_width: u16 = 8          // assumption, not derivation — T-573 measures it
+min_check_width: u16 = 8          // assumption, not derivation — T-577 measures it
 hard_check_floor_bits: f32 = 16.0 // at least this much of the 24 comes from a check stage
 ```
 
-**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 is a judgement that a byte is the smallest unit where the accounting still means something. T-573 measures it against ADR-0021's N2/N3 populations, and the number moves when that measurement lands — up or down.
+**The floor of 8 is not derived from the budget, and this ADR will not pretend otherwise.** The budget constrains a *rate*, and §4.2's inequality already converts any width into the frame count that meets it — arithmetically, width 4 with 7 differences is the same 28 bits as width 16 with 2. What the budget cannot see is a **degenerate null**: below about a byte, a check can be satisfied by a framing artefact rather than by a code, the `differences` guard has too little to work with, and the per-frame independence assumption (§3.2) degrades fastest. 8 is a judgement that a byte is the smallest unit where the accounting still means something. T-577 measures it against ADR-0021's N2/N3 populations, and the number moves when that measurement lands — up or down.
 
 **The hard check floor is derived**, from what a confirmation claims. Confirm-by-decode says *this was decoded*. Sync excess has the weakest independence assumptions of the three analytic nulls (a periodic signal repeats its own patterns), and a result carrying 24 bits of sync excess and no check has not decoded anything. So at least 16 of the 24 bits must come from a `check_distinct_valid` contribution. Lowering the width floor to 8 without this would let a sync-only result through the door the width floor was informally holding shut.
 
@@ -253,7 +253,7 @@ pub struct SynthesizedConfirm {
     min_analytic_holdout_bits: f32,   // 24.0
     /// §4.3: at least this much of the above from a check stage. Derived.
     hard_check_floor_bits: f32,       // 16.0
-    /// §4.3: a degenerate-null floor. ASSUMED, not derived. T-573.
+    /// §4.3: a degenerate-null floor. ASSUMED, not derived. T-577.
     min_check_width: u16,             // 8
     /// §1.2: the budget's denominator. Monitored, not trusted (§8).
     assumed_decisions_per_week: u32,  // 20_000
@@ -371,7 +371,7 @@ This is the measurement that tests §3.2's margin **directly**, instead of waiti
 Following ADR-0021 §8.4's precedent exactly:
 
 - A1 at n = 800 per profile with zero confirms bounds the true per-decision false-confirm rate to **≤ 3.7 × 10⁻³ at 95 % confidence** (the rule of three). The budget is **5 × 10⁻⁵**. So **A1 cannot demonstrate the budget and must not be quoted as doing so**: it is 75× too weak. It can only fail to contradict it.
-- Demonstrating 5 × 10⁻⁵ from a zero-failure run at 95 % confidence needs **n ≈ 60 000** negative decisions. That is a real number and it is not obviously out of reach for a batch run over synthetic negatives — but it is not in the acceptance suite's budget, and inventing it in CI would be the same defect as quoting it. **T-572** owns the question of whether a nightly or milestone run at that scale is worth building.
+- Demonstrating 5 × 10⁻⁵ from a zero-failure run at 95 % confidence needs **n ≈ 60 000** negative decisions. That is a real number and it is not obviously out of reach for a batch run over synthetic negatives — but it is not in the acceptance suite's budget, and inventing it in CI would be the same defect as quoting it. **T-576** owns the question of whether a nightly or milestone run at that scale is worth building.
 - A2 is where the confidence actually comes from. It does not estimate a tiny rate from rare events; it measures the location of a tail directly, which is a quantity 800 samples *can* say something about.
 
 **The failure message must be legible**, so it states the budget, the threshold, the observation and the implied margin rather than a bare inequality:
@@ -410,7 +410,7 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 - **§5.5** — conditions 1–3 replaced by §6's gate; `min_evidence_bits` and `min_distinct_valid` deleted; `min_check_width` 16 → 8 with `hard_check_floor_bits`; condition 4 (front-end trust) unchanged; the actor becomes `hk-pipeline/confirm-synth@2`. The "single frames don't auto-confirm" sentence and §10 open question 1 are **settled** by §4.2 + docs/20 §U1.
 - **§11.5** — the restated thresholds updated to match; "no rule demotes", the T-210 corrected-frame invariant and the one-promoted-row rule unchanged.
 - **§1.3** — a note that `evidence_bits` remains the search-order and result-rank key and is **not** the confirm key; `analytic_holdout_bits` is added beside it.
-- One pointer line added in this branch; the full rewrite belongs to **T-571**.
+- One pointer line added in this branch; the full rewrite belongs to **T-575**.
 
 ### 11.2 ADR-0021
 
@@ -429,9 +429,9 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 
 | Ticket | Owns |
 |---|---|
-| **T-571** | The derived `ConfirmPolicy` inside ADR-0015 §10's M-9 / §11.9's CP-4: `analytic_holdout_bits` with per-stage `L_j`, `differences` not `distinct_valid`, the §4.2 formula, the template-provenance and inherited-L rule, the §8 decision-rate counter, and the ADR-0015 rewrite this branch only points at. `core_interface`. |
-| **T-572** | `acceptance_mauto::false_confirm_budget`: A1, A2 and A3, the legible failure report, and the open question of whether an n ≈ 60 000 negative run is worth building outside CI. |
-| **T-573** | Measure the two numbers §4.3 admits are assumptions: the check-width floor and the degenerate-framing null, against ADR-0021's N2/N3 populations. |
+| **T-575** | The derived `ConfirmPolicy` inside ADR-0015 §10's M-9 / §11.9's CP-4: `analytic_holdout_bits` with per-stage `L_j`, `differences` not `distinct_valid`, the §4.2 formula, the template-provenance and inherited-L rule, the §8 decision-rate counter, and the ADR-0015 rewrite this branch only points at. `core_interface`. |
+| **T-576** | `acceptance_mauto::false_confirm_budget`: A1, A2 and A3, the legible failure report, and the open question of whether an n ≈ 60 000 negative run is worth building outside CI. |
+| **T-577** | Measure the two numbers §4.3 admits are assumptions: the check-width floor and the degenerate-framing null, against ADR-0021's N2/N3 populations. |
 
 ---
 
@@ -461,4 +461,4 @@ A reader of that knows which assumption broke, by how much, and which fixture to
 
 ---
 
-*Unverified in this ADR: the 9.7-bit model margin `M`, the 20 000-decisions-per-week denominator `N`, the width floor of 8, the 16-bit hard check floor, the ~5-bit slot product used in §4.2's worked `L_check` values, and the 18-bit ceiling asserted in §10.1's A2. All are first guesses or stated judgements in the ADR-0015 §7 tradition, to be measured by T-572 and T-573 and never loosened after seeing results. The budget itself (§1.1) is the user's decision, not a guess.*
+*Unverified in this ADR: the 9.7-bit model margin `M`, the 20 000-decisions-per-week denominator `N`, the width floor of 8, the 16-bit hard check floor, the ~5-bit slot product used in §4.2's worked `L_check` values, and the 18-bit ceiling asserted in §10.1's A2. All are first guesses or stated judgements in the ADR-0015 §7 tradition, to be measured by T-576 and T-577 and never loosened after seeing results. The budget itself (§1.1) is the user's decision, not a guess.*

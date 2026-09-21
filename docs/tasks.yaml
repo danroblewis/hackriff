@@ -17260,7 +17260,7 @@ tasks:
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-571
+  - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
     status: todo
@@ -17323,7 +17323,7 @@ tasks:
       which 22 are analytic does not confirm; the job-total look-elsewhere never reaches the gate;
       a discovered template confirms only with its inherited L charged.
       NUMBERS: 24 and 16 are DERIVED (ADR-0022 section 3); the width floor of 8 is an ASSUMPTION
-      T-573 measures. Do not treat the floor as settled and do not loosen any of them.
+      T-577 measures. Do not treat the floor as settled and do not loosen any of them.
     notes: |
       Filed 2026-09-21 with ADR-0022 (T-548). HIGH: every MAUTO engine ticket bakes ConfirmPolicy's
       constants in, and they are currently the guessed 64 / 3 / 16.
@@ -17331,14 +17331,14 @@ tasks:
       leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-572
+  - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
     status: todo
     priority: high
     parallel_group: M-E
     model: opus
-    depends_on: [T-568, T-571]
+    depends_on: [T-568, T-575]
     use_cases: [SIGNAL-001, SIGNAL-062, RESEARCH-009]
     core_interface: false
     acceptance: |
@@ -17383,7 +17383,7 @@ tasks:
       actually delivers the budget, and A2 is the only part of it with any statistical power.
       Runs after T-568 builds the populations; do not rebuild them.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-573
+  - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
     status: todo
@@ -17407,7 +17407,7 @@ tasks:
          reaches `distinct_valid` and `differences` >= the ADR-0022 section 4.2 requirement on
          input with NO code present. This is the degenerate null's actual tail.
       2. The gap between `distinct_valid` and `differences` on real repeated-payload emitters, which
-         is the quantity T-571's swap is justified by. Report it; if the gap is negligible the swap
+         is the quantity T-575's swap is justified by. Report it; if the gap is negligible the swap
          costs nothing and if it is large the old rule was over-crediting by that much.
       3. `max_countable_differences`: at what frame count do additional frames stop being
          independent trials? assist::codes' chance-factor confidence saturates near 8 frames
@@ -17416,12 +17416,12 @@ tasks:
       DoD: a findings section stating, per width, the measured degenerate-null rate, and a
       GO / CHANGE-THE-FLOOR verdict with the number. A verdict that the floor should be HIGHER than
       8 is a legitimate outcome and is cheaper here than after M-9. Feed the result back into
-      ADR-0022 section 4.3 and T-571's `min_check_width`.
+      ADR-0022 section 4.3 and T-575's `min_check_width`.
     notes: |
       Filed 2026-09-21 with ADR-0022 (T-548). NORMAL, not high: the floor at 8 is conservative
       relative to the shipped guess of 16 only in the direction of ADMITTING more (CRC-8 sensors in
       902-928 MHz), so getting it wrong costs false confirms on exactly one population - which
-      T-572's A2 measures anyway. Worth doing before M-9 ships, not before T-571 starts.
+      T-576's A2 measures anyway. Worth doing before M-9 ships, not before T-575 starts.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
