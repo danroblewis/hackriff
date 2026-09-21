@@ -18009,7 +18009,7 @@ tasks:
   - id: T-574
     milestone: MLIVE
     title: Sealed tiles are immutable - serve them with an ETag and a long immutable cache, so a re-read is a 304
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -18032,6 +18032,51 @@ tasks:
       belongs here too, since the point of the ticket is bytes not transferred.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE 2026-09-21 (branch task-t574, tip aebd9029b30d531c002e2ea7f42f7caae850f41b's worktree
+      plus the diff below - not yet merged): `tiles_json` (`crates/hk-api/src/tiles.rs`) now
+      computes `sealed` from the pyramid's own watermark against the tile's own time extent
+      (`p.watermark().as_unix_nanos() >= key.region.t1_ns` - the same fact
+      `Pyramid::materialize_tile` uses to decide sealed-vs-derived, generalised from one store
+      level's block to this tile's own address) and threads it out as a top-level `sealed` field
+      on both the normal and the unobserved-short-circuit response. `http.rs` special-cases
+      `GET /api/tiles` (`respond_tile`) instead of falling into the generic `respond_json` tail:
+      unsealed keeps `Cache-Control: no-store` and gets no `ETag` at all; sealed gets
+      `Cache-Control: public, max-age=31536000, immutable` plus an `ETag` that is an IEEE CRC-32
+      (a small local `crc32` in `http.rs`, the same polynomial hk-store's tile codec uses) over the
+      response bytes with `build_ms`/`in_flight` recursively nulled first (`strip_read_diagnostics`)
+      - those are this READ's own wall-clock/concurrency diagnostics (`cost.build_ms`,
+      `cost.in_flight`, `shadow.search.build_ms`), not the tile's content, and leaving them in the
+      hash broke byte-identity between two reads of an unchanged sealed tile. A matching
+      `If-None-Match` gets a bodyless 304 (`Content-Length: 0`) with the same `ETag`/`Cache-Control`
+      repeated; a live tile ignores `If-None-Match` and always answers 200 with the real body.
+      New test `crates/hk-api/tests/tile_cache_headers.rs`, 3 tests, all against a real
+      `Server::start`+`TcpStream` round trip (no wall-clock assertions, only status/header/byte
+      counts): `sealed_tile_repeat_read_is_304_with_zero_body_bytes` (first read 200 non-empty body
+      + immutable Cache-Control + ETag; second read with that ETag as If-None-Match is 304,
+      Content-Length 0, body.len()==0, same ETag repeated); `live_tile_never_cached_and_body_changes_as_rows_arrive`
+      (Cache-Control always exactly "no-store", ETag always None, a guessed If-None-Match still
+      gets 200, and the body differs byte-for-byte after 2 more rows are ingested into the still-
+      partially-filled tile); `sealed_flag_in_body_matches_header_treatment` (both tiles' `sealed`
+      JSON field is true and both carry an ETag once fully filled). All 3 confirmed RED without the
+      http.rs fix (tiles.rs's `sealed` field alone, http.rs reverted): 2 of 3 failed as expected
+      (`sealed tile Cache-Control was "no-store"`; `assertion failed: a.header("etag").is_some()`),
+      the third (live-tile test) coincidentally still passed because "no ETag, no immutable cache"
+      is also the unfixed route's behaviour for every tile - not a vacuous pass, since it asserts a
+      real, non-trivial fact (Cache-Control literally equals "no-store", no ETag, body changes) that
+      the fix must also keep true, just not one only the fix can satisfy. Fixture note: `Pyramid`'s
+      `watermark_ns` only advances on an explicit `seal_through` call (real usage: an idle clock /
+      shutdown in `hk_pipeline::history`), never on `ingest` alone, so the fixture calls
+      `p.seal_through(...)` exactly as far as data has actually arrived per tile. Also ran (all
+      green, unmodified): `hk-api::tile_cost` (3), `hk-api::tile_ceiling` (6), `hk-api::http_api`
+      (5), `hk-cli::api_contract` (52, includes the tile-route contract tests) - `just test-crate`/
+      `-E 'binary(name)'` scoped runs, no `just gate`. `docs/api.md` updated with a `sealed` field
+      in both `/api/tiles` JSON examples and a new "Caching (T-574)" paragraph documenting the
+      header contract; `docs/tasks.yaml` re-validated with `yaml.safe_load` before writing.
+      NOT MERGED - the coordinator still owns `just gate`/merge; conflict note in the brief named
+      task-t571 also touching `hk-store/src/history/` and `hk-api/src/tiles.rs` (T-571 is rewriting
+      coarse-tile maintenance) - this diff kept to `tiles_json`'s existing `with_tile_history`
+      closure plus one new top-level JSON field, and almost everything else lives in `http.rs`, to
+      minimise overlap; re-check on merge.
   - id: T-578
     milestone: M2-hardening
     title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
