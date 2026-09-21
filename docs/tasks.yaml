@@ -16842,7 +16842,7 @@ tasks:
   - id: T-563
     milestone: M2-hardening
     title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16925,7 +16925,7 @@ tasks:
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
-    status: review
+    status: done
     branch: task-t564
     priority: high
     parallel_group: M3A
