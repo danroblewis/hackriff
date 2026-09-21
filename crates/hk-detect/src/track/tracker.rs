@@ -646,9 +646,18 @@ impl Tracker {
             return;
         };
         let t0 = frame.t.host_time.as_unix_nanos();
+        // T-541: `saturating_*`, not `+`. A frame whose declared rate is zero gives an infinite
+        // duration, which casts to `i64::MAX` and overflowed this addition — a **panic on the
+        // detection thread** from one corrupt block of provenance. `hk_pipeline`'s capture thread
+        // now drops such a block at the device boundary, which is where it belongs; this is the
+        // arithmetic keeping its own promise, because a `Tracker` is also fed by callers that
+        // never went through that boundary.
         let dur = (frame.sample_count as f64 * NS / frame.spectrum.sample_rate_hz).round() as i64;
-        let samples = frame.t.sample_index..frame.t.sample_index + frame.sample_count;
-        let time = TimeRange::new(frame.t.host_time, Timestamp::from_unix_nanos(t0 + dur));
+        let samples = frame.t.sample_index..frame.t.sample_index.saturating_add(frame.sample_count);
+        let time = TimeRange::new(
+            frame.t.host_time,
+            Timestamp::from_unix_nanos(t0.saturating_add(dur)),
+        );
         self.observe(seg.segment, samples, time, out);
     }
 

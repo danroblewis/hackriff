@@ -35,6 +35,13 @@ pub struct RadioControl {
     lose_center: AtomicBool,
     /// T-508: every read fails (see [`RadioControl::fail_reads`]).
     fail_reads: AtomicBool,
+    /// T-541: reads still to fail before the front end comes back (see
+    /// [`RadioControl::fail_reads_for`]).
+    fail_reads_for: AtomicU64,
+    /// T-541: rate changes still to refuse (see [`RadioControl::refuse_rate`]).
+    refuse_rate: AtomicU64,
+    /// T-541: blocks still to deliver with impossible provenance (see [`RadioControl::garbage`]).
+    garbage: AtomicU64,
     /// T-525: reads that do not look at the control mailbox (see
     /// [`RadioControl::hold_changes`]).
     hold_changes: AtomicU64,
@@ -104,6 +111,48 @@ impl RadioControl {
         self.fail_reads.store(on, Ordering::SeqCst);
     }
 
+    /// **T-541: a read error that CLEARS** — the next `n` reads fail with a device error and the
+    /// front end then delivers again.
+    ///
+    /// [`RadioControl::fail_reads`] models a device that is gone for good, which can only prove
+    /// that the run ends honestly. The far more common fault is the one that passes: a USB stall,
+    /// a transfer timeout, a retune the driver could not apply on the first try. It is the shape
+    /// that has to leave the run *back on `running`* afterwards, because a system that answers
+    /// every hiccup by ending the run is as unusable as one that crashes.
+    ///
+    /// Counted in reads, not seconds, so the test is deterministic: this radio is pausable and
+    /// read on demand.
+    pub fn fail_reads_for(&self, n: u64) {
+        self.fail_reads_for.store(n, Ordering::SeqCst);
+    }
+
+    /// **T-541: the device refuses the next `n` sample-rate changes** — `set_sample_rate` returns
+    /// [`SourceError::Device`] instead of posting to the mailbox.
+    ///
+    /// Different from [`RadioControl::fail_reads`] and from T-508's mock fault, both of which
+    /// fail on the *capture* thread: this one fails on the **control** thread, inside the caller's
+    /// own `retune`. It is what a HackRF does when `hackrf_set_sample_rate` returns non-zero, and
+    /// it is the one device error the user is holding a request open for, so it must come back as
+    /// a refusal to *that caller* and leave the run capturing on the window it was already on —
+    /// never a run that ends because a control call failed.
+    pub fn refuse_rate(&self, n: u64) {
+        self.refuse_rate.store(n, Ordering::SeqCst);
+    }
+
+    /// **T-541: a front end that returns garbage** — the next `n` blocks carry provenance that
+    /// cannot be true: a **zero sample rate**, a **NaN centre**, and a sample index that jumps
+    /// **backwards**.
+    ///
+    /// Not contrived. Every one of these is a plausible read of a corrupt USB transfer or an
+    /// uninitialised driver struct, and every one lands on arithmetic the capture thread does per
+    /// block: `n / fs` for the block's end time, the axis splice, the ring write, and downstream
+    /// the history pyramid's monotone watermark. A divide by zero on floats is an infinity rather
+    /// than a trap, which is exactly why this needs a test rather than an argument — the question
+    /// is not whether it panics but whether anything downstream turns the infinity into an index.
+    pub fn garbage(&self, n: u64) {
+        self.garbage.store(n, Ordering::SeqCst);
+    }
+
     /// Waits until `emitted() >= n`; `false` after `limit`.
     pub fn wait_emitted(&self, n: u64, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
@@ -150,6 +199,21 @@ impl SourceControl for RadioControl {
             });
         }
         self.log(format!("rate {rate}"));
+        // T-541: the device refuses the change on the control thread. Logged first, so "the radio
+        // was told" and "the radio accepted" stay separable, as with `lose_center`.
+        if self
+            .refuse_rate
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok()
+        {
+            return Err(SourceError::Device {
+                source_name: "scripted-radio",
+                operation: "set_sample_rate",
+                message: format!("the device refused {rate} Hz (scripted)"),
+            });
+        }
         self.mailbox.post(|p| p.sample_rate_hz = Some(rate));
         Ok(())
     }
@@ -233,6 +297,9 @@ impl Radio {
             emitted: AtomicU64::new(0),
             lose_center: AtomicBool::new(false),
             fail_reads: AtomicBool::new(false),
+            fail_reads_for: AtomicU64::new(0),
+            refuse_rate: AtomicU64::new(0),
+            garbage: AtomicU64::new(0),
             hold_changes: AtomicU64::new(0),
             windows: Mutex::new(vec![(0, center_hz, rate_hz)]),
             calls: Mutex::new(Vec::new()),
@@ -312,12 +379,23 @@ impl Source for Radio {
         if c.finish.load(Ordering::SeqCst) {
             return Ok(None);
         }
-        if c.fail_reads.load(Ordering::SeqCst) {
+        // T-541: a transient stall consumes one of its budget and then clears by itself.
+        let transient = c
+            .fail_reads_for
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok();
+        if transient || c.fail_reads.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(1));
             return Err(SourceError::Device {
                 source_name: "scripted-radio",
                 operation: "receive",
-                message: "the front end is gone (scripted)".into(),
+                message: if transient {
+                    "a USB transfer stalled (scripted, clears)".into()
+                } else {
+                    "the front end is gone (scripted)".to_owned()
+                },
             });
         }
         let index = c.emitted();
@@ -375,7 +453,23 @@ impl Source for Radio {
                 flags.bits() | Discontinuity::STREAM_START.bits(),
             );
         }
-        let h = header(flags, self.t_ns, &self.provenance);
+        let mut h = header(flags, self.t_ns, &self.provenance);
+        // T-541: a block whose provenance cannot be true. The samples are real (the generator
+        // ran); it is the *description* of them that is corrupt, which is the interesting half —
+        // an impossible rate or centre reaches the axis arithmetic, the coverage map and the
+        // history watermark, while an empty block would reach none of it.
+        if c.garbage
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |g| {
+                (g > 0).then(|| g - 1)
+            })
+            .is_ok()
+        {
+            let mut bad = self.provenance.get().clone();
+            bad.tune.sample_rate_hz = 0.0;
+            bad.tune.center_hz = f64::NAN;
+            h.provenance = ProvenanceHandle::new(bad);
+            h.time.sample_index = index.saturating_sub(self.block as u64 * 4);
+        }
         self.t_ns += (n as f64 * 1e9 / rate).round() as i64;
         c.emitted.store(index + n as u64, Ordering::SeqCst);
         Ok(Some(h))

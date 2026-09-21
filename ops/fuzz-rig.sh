@@ -12,10 +12,29 @@
 #                including out-of-range indices
 #   idle       — leave it completely alone for a while (does it crash on its own?)
 # Crashes are attributed to whatever mode was live when the server died. No AI needed to run.
+#
+# T-541: EVERY RESTART ALSO ARMS A DEVICE FAULT (HK_MOCK_FAULT), rotating through the shapes the
+# mock can produce. Before this the rig drove a front end that CANNOT FAIL — it always lands
+# exactly where it is told and every read succeeds — so "0 crashes in 69 cycles" was a statement
+# about the mock, not about the backend. The shapes, and what each is for:
+#   none                     the baseline: the workloads alone
+#   read-fails-every:N       a USB transfer that stalls and CLEARS: capture must recover, over and
+#                            over, for the whole soak (the commonest real fault)
+#   retune-apply-fails:N     the device refuses a retune where the HackRF does — on the capture
+#                            thread, after the control plane has already answered OK (T-508)
+#   refuse-rate:N            the device refuses set_sample_rate on the CONTROL thread, so the
+#                            re-plumb learns of it with the old segment already torn down (T-541)
+#   gone-on-retune           the device goes away for good: the run must END VISIBLY, and the
+#                            server must stay up answering (checked below, not treated as a crash)
+# `gone-on-retune` deliberately ends the run without ending the process. The rig therefore
+# distinguishes "the process died" (a crash) from "the run ended" (correct degradation) and
+# records the second separately in fuzz-degraded.log.
+#
 # NOTE: device-SPECIFIC crashes (a real-HackRF retune to an edge freq) need the live radio and are
 # tracked separately; this rig hunts the device-agnostic + reliability crashes on the mock.
 #
-# Watch:  tail -f $HACKRIFF_OPS/fuzz-crashes.log   ·   tail -f $HACKRIFF_OPS/fuzz-workload.log
+# Watch:  tail -f $HACKRIFF_OPS/fuzz-crashes.log   ·   tail -f $HACKRIFF_OPS/fuzz-degraded.log
+#         tail -f $HACKRIFF_OPS/fuzz-workload.log
 # Stop:   pkill -f fuzz-rig.sh ; pkill -f 'hk serve .*--bind 127.0.0.1:8850'
 set -uo pipefail
 REPO=/Users/daniellewis/hackriff
@@ -26,18 +45,65 @@ FIX="$REPO/fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta
 TOK=$(openssl rand -hex 24)
 DATA="$S/fuzz-data"; SLOG="$S/fuzz-server.log"; CRASHES="$S/fuzz-crashes.log"
 WLOG="$S/fuzz-workload.log"; MODEFILE="$S/fuzz-mode"
-: > "$WLOG"; : > "$MODEFILE"
+DEGRADED="$S/fuzz-degraded.log"; FAULTFILE="$S/fuzz-fault"
+: > "$WLOG"; : > "$MODEFILE"; : > "$FAULTFILE"
 wlog(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$WLOG"; }
 set_mode(){ echo "$1" > "$MODEFILE"; wlog "MODE: $1"; }
 server_up(){ pgrep -f "hk serve .*--bind 127.0.0.1:$PORT" >/dev/null 2>&1; }
 POST(){ curl -s -m 20 -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' -X POST "$@"; }
 GET(){  curl -s -m 20 -o /dev/null -H "Authorization: Bearer $TOK" "$@"; }
 
+# T-541: the fault armed for this launch, rotating so a long soak meets every shape. Weighted
+# towards the recoverable ones: `gone-on-retune` ends the run by design, so a rig that drew it
+# every time would spend the soak restarting rather than exercising anything.
+FAULTS=(none none read-fails-every:97 read-fails-every:311 retune-apply-fails:2 \
+        retune-apply-fails:always refuse-rate:2 refuse-rate:always gone-on-retune)
+pick_fault(){ echo "${FAULTS[$(( RANDOM % ${#FAULTS[@]} ))]}" > "$FAULTFILE"; }
+
 start_server(){
+  pick_fault
+  local F; F=$(cat "$FAULTFILE")
   rm -rf "$DATA"; mkdir -p "$DATA"
-  RUST_BACKTRACE=full HK_TOKEN=$TOK nohup "$BIN" serve --device "mock:$FIX" \
+  wlog "launching with HK_MOCK_FAULT=$F"
+  RUST_BACKTRACE=full HK_TOKEN=$TOK HK_MOCK_FAULT="$F" nohup "$BIN" serve --device "mock:$FIX" \
     --ui-dist "$REPO/ui/dist" --data-dir "$DATA" --bind 127.0.0.1:"$PORT" \
     --iq-retention 20m --iq-buffer-max 4GiB > "$SLOG" 2>&1 &
+}
+
+# T-541, the three properties, checked from outside the process exactly as `ops/stage.sh` does.
+#  1. the process is alive           — `server_up`, below (a death is a crash, as before)
+#  2. the run states what happened   — /api/status carries run.capture + run.capture_note
+#  3. it is still alive to a SUPERVISOR — `/` answers 200, and /ws/spectrum/live answers 101 or
+#     503 ("not now"), never 410 Gone (T-530) and never silence. A 410 here would have stage.sh
+#     restart the demo under the user, which is the failure this rig must be able to catch.
+health(){
+  local root ws
+  root=$(curl -s -o /dev/null -w '%{http_code}' -m5 "http://127.0.0.1:$PORT/")
+  ws=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 -m8 -H 'Connection: Upgrade' \
+       -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+       -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+       "http://127.0.0.1:$PORT/ws/spectrum/live?token=$TOK")
+  local st cap note
+  st=$(curl -s -m5 -H "Authorization: Bearer $TOK" "http://127.0.0.1:$PORT/api/status")
+  # The body is served pretty-printed or compact depending on the route's shaping, so allow
+  # the space after the colon; a regex that silently matched nothing would read as "running".
+  cap=$(printf '%s' "$st" | sed -n 's/.*"capture": *"\([a-z]*\)".*/\1/p')
+  note=$(printf '%s' "$st" | sed -n 's/.*"capture_note": *"\([^"]*\)".*/\1/p')
+  if [ "$root" != 200 ] || { [ "$ws" != 101 ] && [ "$ws" != 503 ]; }; then
+    { echo "[$(date '+%F %T')] UNHEALTHY fault=[$(cat "$FAULTFILE")] mode=[$(cat "$MODEFILE")]"
+      echo "  GET / -> $root ; /ws/spectrum/live -> $ws (410 or silence = stage.sh restarts us)"
+      echo "  run.capture=$cap note=$note"; } >> "$DEGRADED"
+    wlog "!!! UNHEALTHY: / -> $root, ws -> $ws, capture=$cap"
+    return 1
+  fi
+  # Degradation is correct, not a crash — but it must be STATED. An ended run with no cause reads
+  # exactly like a user pressing stop, which is the defect this whole ticket is about.
+  if [ "$cap" != running ] && [ -n "$cap" ]; then
+    { echo "[$(date '+%F %T')] DEGRADED capture=$cap fault=[$(cat "$FAULTFILE")] \
+mode=[$(cat "$MODEFILE")] note=${note:-<NONE - BUG: no cause given>}"; } >> "$DEGRADED"
+    [ -z "$note" ] && wlog "!!! capture=$cap with NO capture_note — the run is not saying why"
+  fi
+  return 0
 }
 
 # Sole (re)starter. First launch is not a crash; every later down IS and is recorded with the mode
@@ -55,6 +121,8 @@ monitor(){
         wlog "!!! SERVER DOWN (crash #$n) during mode [$(cat "$MODEFILE" 2>/dev/null)] — restarting"
       fi
       start_server; n=$((n+1)); sleep 15
+    else
+      health || true
     fi
     sleep 4
   done
@@ -95,7 +163,7 @@ do_idle(){ set_mode "idle"; sleep $(( 600 + RANDOM % 1200 )); }
 
 # --- boot: coexists with the demo (mock uses no HackRF). Monitor owns all starts/restarts. ---
 pkill -f "hk serve .*--bind 127.0.0.1:$PORT" 2>/dev/null; sleep 2
-wlog "=== fuzz-rig up (mock, port $PORT); crashes -> $CRASHES ==="
+wlog "=== fuzz-rig up (mock, port $PORT); crashes -> $CRASHES; degradation -> $DEGRADED ==="
 monitor & disown
 for _ in $(seq 1 45); do curl -s -m3 -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 2; done
 wlog "server reachable — starting workload"

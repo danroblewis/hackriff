@@ -1806,7 +1806,24 @@ impl Publisher {
     /// this changes is the answer given to someone who arrives **during** the gap, which used to
     /// be indistinguishable from the end of the run.
     pub fn finish_between_windows(self) {
-        lock(&self.shared.list).successor_until = Some(Instant::now() + BETWEEN_WINDOWS_GRACE);
+        self.finish_between_windows_for(BETWEEN_WINDOWS_GRACE);
+    }
+
+    /// [`Publisher::finish_between_windows`] with the producer's own bound on how long the
+    /// successor may take (T-541).
+    ///
+    /// [`BETWEEN_WINDOWS_GRACE`] is sized for a *re-plumb*, which is a handover the producer
+    /// controls. A segment that ended because the **device** failed is a different promise: the
+    /// successor arrives only after `hk-pipeline`'s recovery has re-sent the window and restarted
+    /// the readers, which is a backoff schedule, not a handover. Refusing with
+    /// [`StreamError::Finished`] part-way through a recovery that is still running is the same
+    /// defect T-530 fixed for the re-plumb gap — `ops/stage.sh`'s `healthy()` reads `410` as a
+    /// crashed server — so the producer states the bound it actually knows.
+    ///
+    /// It is still a claim that expires by itself: nothing has to come back and retract it, which
+    /// is the point, because the thread that would is the one that died.
+    pub fn finish_between_windows_for(self, grace: Duration) {
+        lock(&self.shared.list).successor_until = Some(Instant::now() + grace);
     }
 }
 
@@ -2064,5 +2081,35 @@ mod tests {
         ));
         assert!(Publisher::new(h.clone(), PublisherConfig::default()).is_ok());
         assert!(DecoderFeed::new(h, FeedFraming::Raw, PublisherConfig::default()).is_err());
+    }
+
+    /// **T-541: the between-windows promise is a BOUND, and the bound is the producer's.**
+    ///
+    /// `hk-pipeline` gives a capture recovery a longer grace than a re-plumb, because its
+    /// successor arrives on a backoff schedule rather than a handover. What must not change is
+    /// that the claim **expires by itself**: the thread that would retract it is exactly the one
+    /// that died, so a promise with no bound would tell every later client to keep trying for a
+    /// run that ended.
+    #[test]
+    fn a_between_windows_promise_expires_on_its_own_bound() {
+        let h = StreamHeader::new("s", StreamKind::Messages, ContentClass::Unrestricted, "t");
+        let p = Publisher::new(h, PublisherConfig::default()).unwrap();
+        let handle = p.handle();
+        p.finish_between_windows_for(Duration::from_millis(80));
+        assert!(
+            matches!(
+                handle.subscribe("a", Declared::local(Vec::new()), Box::new(|_| {})),
+                Err(StreamError::BetweenWindows)
+            ),
+            "inside the bound: try again"
+        );
+        std::thread::sleep(Duration::from_millis(140));
+        assert!(
+            matches!(
+                handle.subscribe("b", Declared::local(Vec::new()), Box::new(|_| {})),
+                Err(StreamError::Finished)
+            ),
+            "past the bound the promise has failed, and `finished` is the honest answer again"
+        );
     }
 }

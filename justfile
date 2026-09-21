@@ -508,6 +508,29 @@ lint-rust:
 lint-py:
     cd py && uv run --locked ruff check .
 
+# THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
+#
+# `lint-rust` is two halves, `cargo fmt --check` AND clippy, and a failure of either reads the
+# same in the log: "FAILED just lint". T-574 burned two ~20-minute merge gates on this in one
+# night — the first was a genuine clippy::too_many_arguments, the second was pure rustfmt
+# whitespace in a test file — and the merge-runner reported both to the coordinator as "tests".
+#
+# Formatting is never worth a gate cycle. This recipe is the whole-tree fmt check plus clippy
+# over the crates a branch actually touched, so it is fast enough to run every time and catches
+# the half of `lint` that has no business reaching a gate at all. It is NOT a substitute for the
+# gate (the gate stays full — coverage is not negotiable); it is the thing you run before you
+# put a branch in the queue.
+precheck *crates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fmt --all --check
+    if [ -n "{{crates}}" ]; then
+      cargo clippy $(for c in {{crates}}; do printf -- '-p %s ' "$c"; done) --all-targets -- -D warnings
+    else
+      cargo clippy $(just _crate-scope) --all-targets -- -D warnings
+    fi
+    echo "precheck: fmt clean, clippy clean"
+
 # Generate a synthetic IQ scenario, e.g. `just synth fsk_burst_train --seed 1 --out /tmp/fsk --param snr_db=12`
 synth *args:
     uv run --locked --project py python -m hkpy.synth {{args}}

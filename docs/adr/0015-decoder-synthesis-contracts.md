@@ -294,6 +294,7 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
   The lifecycle reason is backend-rendered, e.g. "decoded by synthesized pipeline `generic-fsk-framed`: 5 distinct CRC-16 frames valid on hold-out, 88 bits".
 - **Trust rules.** Partial verdicts never change lifecycle state. The rule never demotes, and a user delete wins. A template-bound decode that yields a real identity (e.g. `adsb-icao`) is still marked `synthesized`, and `/api/inventory` shows that provenance next to the identity: a successful decode is strong evidence, never an unexplained fact.
 - **Single frames** (§6) don't auto-confirm by default: the emitter stays a candidate with `verdict: solved` and the user can promote. (Open question 1.)
+- **Superseded by [ADR-0022](0022-false-confirm-budget.md) (T-548).** The 64 bits / 3 frames / width 16 above are guesses on a one-way door; ADR-0022 derives the gate from the user's budget of one wrong Confirmed emitter per unattended week — **24 analytic hold-out bits**, payable only in analytic-null bits each net of *its own stage's* look-elsewhere, a frame count that is a formula rather than a constant, a width floor of 8 with a 16-bit hard check floor, and the searched-generator discount that [ADR-0021](0021-search-trace-and-negative-result.md) §7A.5 deferred here. T-575 applies it to this section and to §11.5.
 
 ## 6. Burst and one-off path
 
@@ -369,6 +370,8 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 | M-14 | Optional `psk_demod`/Costas block (ADR-0011 catalogue addition) | M-2 | Opus | SYN-B |
 
 **Waves** (≤ 4 Rust builders at once): (1) M-1; (2) M-2, M-3, M-4, M-6, with M-5 once T-199/T-201 are done; (3) M-7, M-8, M-5; (4) M-9, M-10, M-11; (5) M-12, then M-13.
+
+**Amended by [ADR-0021](0021-search-trace-and-negative-result.md) (T-549/T-550).** Nothing in this table owned the **search trace** — M-3 prunes, M-8 serves, M-11 renders, and the record of what the engine rejected and why was produced by nobody — and nothing owned the **negative result**, so `energy` because the beam never left S0 read identically to `energy` because every S1 family measured below its floor. ADR-0021 gives the trace to **M-3** (inside the beam: a beam that has discarded the information cannot have it retrofitted, only re-instrumented) and widens M-1, M-8, M-9, M-11 and M-12; see its §12 for the amended rows, and §11.3 for the changes it makes to §§1.3, 3.4, 5.1–5.5, 7, 8 and 11.1 above.
 
 ## Options considered
 

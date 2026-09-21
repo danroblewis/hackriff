@@ -803,9 +803,22 @@ fn reason(status: u16) -> &'static str {
 }
 
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, extra: &str, body: &[u8]) {
+    respond_cached(stream, status, content_type, "no-store", extra, body);
+}
+
+/// [`respond`] with the `Cache-Control` value the caller chooses, rather than the hard-coded
+/// `no-store` every other route wants (T-574: only a sealed tile response earns anything else).
+fn respond_cached(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    cache_control: &str,
+    extra: &str,
+    body: &[u8],
+) {
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\nCache-Control: {cache_control}\r\nX-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\nVary: Origin\r\n{extra}\r\n",
         reason(status),
         body.len()
@@ -813,6 +826,85 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, extra: &str,
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
     let _ = stream.flush();
+}
+
+/// `GET /api/tiles` alone (T-574): sealed tiles are immutable by design (docs/16 §5.2/§5.3), so a
+/// sealed response carries a content-derived ETag and `public, max-age=…, immutable`, and a
+/// matching `If-None-Match` gets a bodyless 304. `sealed` is read from the tile's own JSON body —
+/// `tiles.rs` derives it from the pyramid's watermark against the tile's own time extent, never
+/// re-guessed here from age or from a timer — so a LIVE tile (the growing edge, `sealed: false`)
+/// always keeps the existing `no-store` and is never given an ETag at all, which is what stops a
+/// cache from ever answering it with a stale 304.
+fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
+    let sealed = body.get("sealed").and_then(Value::as_bool).unwrap_or(false);
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
+    if !sealed {
+        respond(stream, 200, "application/json", "", &bytes);
+        return;
+    }
+    // Content-derived, not a timestamp — but `build_ms` and `in_flight` (both `cost` and
+    // `shadow.search`, T-574) are THIS READ's own diagnostics, not the tile's content: wall clock
+    // and concurrent in-flight count, which vary request to request even when a sealed tile's real
+    // content is byte-identical. They are stripped out of what the ETag is computed over (and
+    // still served verbatim in the body) so the tag reflects only the measurement, never the
+    // measuring.
+    let mut canonical = body.clone();
+    strip_read_diagnostics(&mut canonical);
+    let canonical_bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let etag = format!("\"{:08x}\"", crc32(&canonical_bytes));
+    let cache_control = "public, max-age=31536000, immutable";
+    let extra = format!("ETag: {etag}\r\n");
+    if req
+        .header("if-none-match")
+        .is_some_and(|v| v.split(',').any(|part| part.trim() == etag))
+    {
+        respond_cached(stream, 304, "application/json", cache_control, &extra, &[]);
+        return;
+    }
+    respond_cached(
+        stream,
+        200,
+        "application/json",
+        cache_control,
+        &extra,
+        &bytes,
+    );
+}
+
+/// Recursively nulls `build_ms` and `in_flight` wherever they appear (`cost` and
+/// `shadow.search`, T-574) — this read's own timing and concurrency, never the tile's content.
+fn strip_read_diagnostics(v: &mut Value) {
+    match v {
+        Value::Object(obj) => {
+            for (k, val) in obj.iter_mut() {
+                if k == "build_ms" || k == "in_flight" {
+                    *val = Value::Null;
+                } else {
+                    strip_read_diagnostics(val);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                strip_read_diagnostics(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// IEEE CRC-32 (the same polynomial `hk-store`'s tile codec uses), over the exact bytes the wire
+/// sends — an ETag from the response's own content, not from its address or its age.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 fn respond_json_with(stream: &mut TcpStream, status: u16, body: &Value, extra: &str) {
@@ -1048,7 +1140,15 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         "/api/coverage" => crate::coverage::coverage_json(state, &req.query),
         // T-438: the panes, the minimap and the live edge are projections of ONE pyramid, so they
         // read one route and cannot disagree on one screen. `(level_f, level_t)` are independent.
-        "/api/tiles" => crate::tiles::tiles_json(state, &req.query),
+        // T-574: this route alone gets ETag/Cache-Control treatment (a sealed tile is immutable; a
+        // live one must never be), so it answers itself rather than falling into the generic
+        // `respond_json` tail below.
+        "/api/tiles" => {
+            return match crate::tiles::tiles_json(state, &req.query) {
+                Ok(v) => respond_tile(&mut stream, &req, v),
+                Err(e) => respond_error(&mut stream, e.status, &e.message),
+            };
+        }
         // docs/16 §5.3: a tile never carries emitters (identity gating is per-caller and a sealed
         // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
         // demand on the same address.
