@@ -383,7 +383,10 @@ export async function windowCoverage(
     // the window lies before its oldest surviving tune record) maps here too, for the same reason:
     // it is the server declining to make the claim, not making the negative one.
     if (cells.length === 0) return null;
-    if (cells.some((c) => c.state === "observed")) return "observed";
+    // T-595: `"excluded"` is sampled — the analysis skipped the DC notch, the radio did not skip
+    // the band — so it answers "observed" here exactly as `"observed"` does. Reading it as
+    // unobserved is the defect this state was added to stop.
+    if (cells.some((c) => c.state === "observed" || c.state === "excluded")) return "observed";
     return cells.every((c) => c.state === "unknown") ? null : "unobserved";
   } catch {
     return null;

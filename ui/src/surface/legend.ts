@@ -33,7 +33,7 @@ const cell = (state: number, tier = TIER.LIVE_IQ, fallback = false) =>
 
 /**
  * The key, in the order a viewer needs it: **the grey first**, because it is the claim, then the
- * four things that are not grey however dark they look, then the three honesty tiers, then the two
+ * five things that are not grey however dark they look, then the three honesty tiers, then the two
  * marks that are about this client's memory rather than about the radio.
  */
 export function legendEntries(): readonly LegendEntry[] {
@@ -75,6 +75,13 @@ export function legendEntries(): readonly LegendEntry[] {
       note: "Swept earlier, not being looked at now: the band's most recent measurement carried forward (T-520). "
         + "Same ramp, held under a brightness ceiling and scanlined — a measurement of an earlier time, never of this cell.",
       pixel: cell(CELL.SHADOW),
+    },
+    {
+      key: "excluded",
+      label: "Excluded from analysis",
+      note: "Sampled, and deliberately left out of the analysis: the receiver's own DC notch at the tuned centre (T-595). "
+        + "The measurement is drawn on the ordinary ramp, ruled along frequency — we looked, we did not analyse it.",
+      pixel: cell(CELL.EXCLUDED),
     },
     {
       key: "tier-history",

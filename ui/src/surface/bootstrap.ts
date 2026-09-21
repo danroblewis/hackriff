@@ -184,7 +184,9 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
     const s = cells[i]?.state;
     if (s === "unobserved") { unobserved++; continue; }
     if (s === "unknown") { unknown++; continue; }
-    if (s !== "observed") continue;
+    // T-595: `"excluded"` is sampled spectrum (the DC notch), so it counts towards the observed
+    // extent the view opens on — the radio was demonstrably there.
+    if (s !== "observed" && s !== "excluded") continue;
     observed++;
     const f = i % nf, t = Math.floor(i / nf);
     if (f < f0) f0 = f;
