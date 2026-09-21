@@ -394,6 +394,10 @@ counter_group!(
         sweep_uncharacterised,
         /// Sweep chains the concurrency cap refused to attach.
         sweep_admission_refused,
+        /// T-558: attaches the run-wide chain cap ([`crate::chains::MAX_RUNTIME_CHAINS`])
+        /// refused. Every chain is a thread and a retain buffer, so an uncapped survey — which
+        /// meets a great many emitters — is an OOM and a thread exhaustion, not a busy device.
+        admission_refused,
         /// Characterisations measured but not written: no inventory emitter covered the region
         /// within the bounded wait, so the measurement had nothing to be evidence about.
         sweep_no_emitter,
