@@ -792,9 +792,10 @@ fn count_inventory_matches_filters_and_ignores_pagination() {
     );
 }
 
-/// T-158: an emitter's latest measured `(snr_peak_db, peak_level_dbfs)` comes from the newest
+/// T-158: an emitter's latest measured `snr_peak_db`/`peak_level_dbfs` comes from the newest
 /// (highest `t_start`) detection linked to it, directly or through a currently-linked track;
-/// `None` until a detection is linked.
+/// `None` until a detection is linked. T-350: and it is dated with **that detection's**
+/// `TimeRange`, which moves as the winning detection does.
 #[test]
 fn emitter_latest_measurement_reads_the_newest_linked_detection() {
     let mut r = repo();
@@ -899,9 +900,17 @@ fn emitter_latest_measurement_reads_the_newest_linked_detection() {
     .unwrap();
     r.link_detections_to_track(track_id, &[d_old.id, d_new.id], t(11))
         .unwrap();
+    // T-350: the measurement carries the detection's own time extent, so a reader can never
+    // hold the level without knowing when it was taken. `tr(10, 11)` is `d_new`'s span, not
+    // `d_old`'s and not the track's hull `tr(0, 11)` - the emitter's own extent would be the
+    // wrong answer here and is exactly what a hull would have given.
     assert_eq!(
         r.emitter_latest_measurement(id).unwrap(),
-        Some((22.5, -18.25))
+        Some(LatestMeasurement {
+            snr_peak_db: 22.5,
+            peak_level_dbfs: -18.25,
+            time: tr(10, 11),
+        })
     );
 
     // A detection linked directly to the emitter wins when it is newer still.
@@ -916,7 +925,12 @@ fn emitter_latest_measurement_reads_the_newest_linked_detection() {
     .unwrap();
     assert_eq!(
         r.emitter_latest_measurement(id).unwrap(),
-        Some((30.0, -5.5))
+        Some(LatestMeasurement {
+            snr_peak_db: 30.0,
+            peak_level_dbfs: -5.5,
+            // T-350: the directly-linked detection's own span, moving with the measurement.
+            time: tr(20, 21),
+        })
     );
 }
 

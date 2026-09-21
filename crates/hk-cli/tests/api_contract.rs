@@ -1182,6 +1182,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         // T-158: measurement fields (present, possibly null).
         "snr_db",
         "peak_dbfs",
+        // T-350: the same measurement with the time it was measured over (present, possibly null).
+        "measured",
         // T-219: why this row defers to another, when it does (present, possibly null).
         "relation",
         // T-211: arbitrated classification and a differing latest row (present, possibly null).
@@ -1252,6 +1254,66 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         row["peak_dbfs"].is_null(),
         "snr_db and peak_dbfs come from the same detection, so they are null together: {row}"
     );
+    // T-350 (ADR-0017): `snr_db`/`peak_dbfs` are a *detection's* numbers, and a detection is a
+    // time-frequency region rather than a persistent carrier - so the row has to say WHEN they
+    // were measured, or an SNR from two days ago is indistinguishable from one from two seconds
+    // ago on a list whose whole question is what is on the air now. Asserted by VALUE (T-315): a
+    // shape check passes on a `measured` block filled with the request's own window, which is
+    // precisely the guess-dressed-as-a-measurement this exists to prevent.
+    {
+        let m = &row["measured"];
+        // Null exactly with the levels: all five values come from one detection, so there is no
+        // state in which a time exists without its levels, or levels without their time.
+        assert_eq!(
+            m.is_null(),
+            row["snr_db"].is_null(),
+            "`measured` is the dated form of snr_db/peak_dbfs, so they are null together: {row}"
+        );
+        if !m.is_null() {
+            // The levels are the SAME measurement, not a second one taken elsewhere.
+            assert_eq!(m["snr_db"], row["snr_db"], "measured.snr_db differs: {row}");
+            assert_eq!(
+                m["peak_dbfs"], row["peak_dbfs"],
+                "measured.peak_dbfs differs: {row}"
+            );
+            let (t0, t1) = (
+                m["t_start_s"].as_f64().expect("t_start_s"),
+                m["t_end_s"].as_f64().expect("t_end_s"),
+            );
+            let dur = m["duration_s"].as_f64().expect("duration_s");
+            // Unix SECONDS, per this API's units law (T-349): the band the sweep in
+            // `every_serialized_time_declares_its_unit` holds every `_s` field to, asserted here
+            // against this row's own clock rather than only against the magnitude.
+            let (first, last) = (
+                row["first_seen_s"].as_f64().expect("first_seen_s"),
+                row["last_seen_s"].as_f64().expect("last_seen_s"),
+            );
+            assert!(t1 >= t0, "measured extent runs backwards: {m}");
+            assert!(
+                (dur - (t1 - t0)).abs() < 1e-6,
+                "duration_s must be t_end_s - t_start_s: {m}"
+            );
+            // It is the DETECTION's extent, so it lies inside the emitter's first/last-seen hull
+            // and is never the hull itself: serving the hull (or the request window) would report
+            // a span over which nothing was measured. A tolerance of 1 s absorbs the detection's
+            // own frame quantisation against the hull's endpoints.
+            assert!(
+                t0 >= first - 1.0 && t1 <= last + 1.0,
+                "measured extent {t0}..{t1} is outside the row's seen hull {first}..{last}: {row}"
+            );
+            // A real detection is short - seconds, not the run - and never longer than the hull
+            // it sits in. This is the honesty claim the block exists for: the levels are dated to
+            // when they were taken, so a client can tell a live number from a stale one.
+            assert!(
+                dur <= (last - first) + 1.0,
+                "measured extent {dur}s is wider than the row's whole seen hull: {row}"
+            );
+            assert!(
+                (0.0..300.0).contains(&dur),
+                "a detection's extent should be seconds, not a whole survey: {m}"
+            );
+        }
+    }
     assert!(
         matches!(row["state"].as_str(), Some("candidate" | "confirmed")),
         "default listing excludes deleted entries: {row}"
