@@ -6956,7 +6956,7 @@ tasks:
     milestone: M2-hardening
     title: An inventory rows snr_db and peak_dbfs are a Detections numbers with its TimeRange stripped at
       the API boundary
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-337
@@ -10999,7 +10999,7 @@ tasks:
   - id: T-435
     milestone: M3
     title: The class NAME changes with SNR in 3 of 252 sequences, and one of them is a confidently-wrong FAMILY at the gate
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-429, T-422]
@@ -16008,7 +16008,7 @@ tasks:
   - id: T-539
     milestone: MLIVE
     title: The tile cache's AIMD cap only rises on a completion, so a still view never recovers from one 503
-    status: todo
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -16094,7 +16094,7 @@ tasks:
   - id: T-542
     milestone: MLIVE
     title: Reproduce the user's two reported crashes on the LIVE HackRF - a full sweep at dwell 1 s, and the deepest zoom
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16132,7 +16132,7 @@ tasks:
   - id: T-543
     milestone: M2-hardening
     title: Cut the ticket cycle time - it is ~4 h start-to-land and the gate is most of it
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16471,7 +16471,7 @@ tasks:
   - id: T-561
     milestone: M2-hardening
     title: "docs/tasks.yaml classified as prose, so the board test never ran on the commit that broke the board"
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16496,7 +16496,7 @@ tasks:
   - id: T-562
     milestone: M2-hardening
     title: "Make the justfile REFUSE the gate, acceptance and the full workspace test when run from an agent worktree"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
