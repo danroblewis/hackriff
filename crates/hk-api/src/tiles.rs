@@ -791,6 +791,19 @@ fn probe_key(
 /// 6 GHz wide and always at full extent, while the time surface is a retention window that usually
 /// fits inside one tile whatever the level.
 ///
+/// **But not past zero on an axis** (T-571). Before the coarse nodes were maintained live the fold
+/// budget capped frequency, so the tie never reached the end of its anti-diagonal; with the fold
+/// gone it does, and the frequency preference alone picked `(10, 0)` over `(9, 1)` on the shipped
+/// geometry — identical area, identical 32 tiles for the widest view, and a `max_level` of **0**
+/// on the time axis. A zero there is not "one level less reach": `ui/src/surface/lattice.ts`
+/// skips any ancestor whose `levelT` exceeds the cap, so a cap of 0 emits **no time-coarser
+/// ancestor at all** and `docs/16` §5.5's draw-a-coarser-resident-tile-while-the-fine-one-loads
+/// path loses its time arm — a time zoom-out draws *not loaded* instead of a coarse stand-in. It
+/// also makes the tile count on that axis grow linearly with the span, and a pane over a tuned
+/// 20 MHz band is already narrower than one tile at `level_f = 9`, so the frequency level it was
+/// traded for buys that pane nothing. So a pair with both axes ≥ 1 wins an equal-area tie, and
+/// frequency decides only among those.
+///
 /// # Readability, not existence
 ///
 /// A node a scheme does not *have* — a welded ladder's off-diagonal, which `parse_key` answers with
@@ -837,11 +850,14 @@ pub fn readable_ceiling(p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize,
         last
     };
     let (mut best, mut floor_f) = ((0usize, 0usize), usize::MAX);
+    // Among equal-area maxima, a pair that keeps BOTH axes alive beats one that does not; only
+    // then does frequency decide. See the doc comment: a `0` on an axis is not one level less
+    // reach, it deletes that axis's ancestor ladder in the client.
+    let rank = |(f, t): (usize, usize)| (f + t, usize::from(f >= 1 && t >= 1), f);
     for lt in 0..nt {
         let Some(r) = reach(lt) else { break };
         floor_f = floor_f.min(r);
-        // Maximise the coarsest tile's AREA (`2^(max_f + max_t)`), then reach in frequency.
-        if floor_f + lt > best.0 + best.1 || (floor_f + lt == best.0 + best.1 && floor_f > best.0) {
+        if rank((floor_f, lt)) > rank(best) {
             best = (floor_f, lt);
         }
     }
@@ -1077,17 +1093,28 @@ fn short_circuit_json(uniform: Option<&'static str>) -> Value {
 /// (`ui/src/surface/tile.ts`), so the measurement the full read would have produced is discarded by
 /// the renderer cell for cell — which is why this is observationally equivalent and not merely
 /// faster.
+/// This read's own diagnostics, grouped: `build_ms` and `in_flight` describe the *request*, not
+/// the tile. T-574 had to strip exactly these two before hashing a response into an ETag, because
+/// two reads of an unchanged sealed tile otherwise differ — so they are one concept, and passing
+/// them as one argument says so (and keeps this helper inside clippy's argument budget).
+struct ReadDiagnostics<'a> {
+    elapsed_ms: f64,
+    slot: &'a TileSlot,
+}
+
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
     ceiling: (usize, usize),
     coverage: Value,
     max_live: Option<f64>,
-    elapsed_ms: f64,
-    slot: &TileSlot,
+    diags: ReadDiagnostics<'_>,
+    sealed: bool,
 ) -> Value {
+    let ReadDiagnostics { elapsed_ms, slot } = diags;
     let source = base_tier(key, max_live);
     json!({
+        "sealed": sealed,
         "key": key_json(key),
         "extent": {
             "f_lo_hz": key.region.freq.lo_hz,
@@ -1634,11 +1661,19 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         return Err(too_many_in_flight());
     };
     let store = tile_store(state, q);
-    let (key, ceiling, readable) = with_tile_history(state, store, |p| {
+    let (key, ceiling, readable, sealed) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
         let ceiling = readable_ceiling(p, &key.lattice);
         let readable = servable(p, &key);
-        Ok((key, ceiling, readable))
+        // T-574: sealedness is a fact about the ADDRESS, not about what answered it — a tile's
+        // whole time extent can never change again once the watermark has passed its end, because
+        // a frame landing before that end is by definition late and dropped (the same rule
+        // `Pyramid::materialize_tile` uses to decide sealed-vs-derived, `docs/16` §5.2/§5.3
+        // generalised from one store level's block to this tile's own extent). Computed here, from
+        // the pyramid's own state, and threaded out to `http.rs` rather than re-derived from a
+        // guess or the answering level/age.
+        let sealed = p.watermark().as_unix_nanos() >= key.region.t1_ns;
+        Ok((key, ceiling, readable, sealed))
     })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
@@ -1669,8 +1704,18 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
         // coverage map just said no tune touched this tile.
         let sh = shadow(state, store, &key, None)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
-        let mut v =
-            unobserved_tile_json(&key, store, ceiling, coverage, max_live, elapsed_ms, &slot);
+        let mut v = unobserved_tile_json(
+            &key,
+            store,
+            ceiling,
+            coverage,
+            max_live,
+            ReadDiagnostics {
+                elapsed_ms,
+                slot: &slot,
+            },
+            sealed,
+        );
         v["shadow"] = shadow_json(&sh, None);
         return Ok(v);
     }
@@ -1680,6 +1725,11 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
     Ok(json!({
+        // T-574: whether this tile's own time extent has fully passed the watermark, so it can
+        // never change again — `http.rs` reads this to decide the ETag / Cache-Control, never a
+        // timestamp or an age. false at the live edge (or anywhere still inside the retained
+        // window), always, so a growing tile is never cached as immutable.
+        "sealed": sealed,
         "key": key_json(&key),
         "extent": {
             "f_lo_hz": key.region.freq.lo_hz,

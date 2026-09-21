@@ -12,7 +12,8 @@ Scenarios (use cases): ``tone`` (building block), ``fsk_burst_train`` (AWARE-036
 T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only -- see
 :mod:`hkpy.synth.acars`), ``trunk_control_channel`` (C23, T-267), ``lora_ism_burst``
 (SIGNAL-062/AWARE-053, T-255: chirps with no stable frequency in 902-928 MHz US ISM -- see
-:mod:`hkpy.synth.lora_scene`). Every scenario also accepts the impairment parameters in
+:mod:`hkpy.synth.lora_scene`), ``retune_diversity`` (AWARE-011, T-586: one region at several
+centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`). Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
 Truth conventions (dBFS reference, calibration constant, annotation roles) are documented in
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hkpy.synth import impairments, lora_scene, occupancy, scenarios, trunk_scene
+from hkpy.synth import impairments, lora_scene, occupancy, retune, scenarios, trunk_scene
 from hkpy.synth.scene import GENERATOR, GENERATOR_VERSION, SUPPORTED_DATATYPES, _jsonable
 
 
@@ -90,6 +91,11 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "bursty NBFM (T-345): its assignments name 10-bit channel numbers that the air interface "
         "defines no mapping for, and real voice keyings sit exactly where an assumed 12.5 kHz band "
         "plan would put them"),
+    "retune_diversity": ScenarioSpec(
+        retune.retune_diversity, retune.RETUNE_DEFAULTS, ("AWARE-011",),
+        "one region surveyed at several centres: fixed-frequency CW emitters and LO-relative "
+        "receiver artefacts (DC leakage, an internal spur at a fixed LO offset), so only the "
+        "behaviour across retunes separates a real emission from a receiver artefact (T-586)"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "

@@ -64,6 +64,7 @@ pub mod recording;
 pub mod region;
 pub mod relate; // T-219 (C40)
 pub mod repo;
+pub mod retune; // T-586 (AWARE-011): retune diversity, absolute vs LO-relative
 pub mod sigmf;
 pub mod signature; // T-218 (ADR-0016 §5)
 pub mod time;
@@ -139,6 +140,10 @@ pub use repo::{
     SELECTION_NOTES_MAX, SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection,
     SelectionLink, SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict,
     USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand,
+};
+pub use retune::{
+    RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,
+    RetuneObservation, RetuneSlope, RetuneSummary, RetuneTolerance, SLOPES, classify,
 };
 pub use signature::cluster::{
     CLUSTER_FIELDS, CLUSTER_LABEL_LEN, CLUSTER_MIN_APPEARANCES, CLUSTER_MIN_MEMBERS,
