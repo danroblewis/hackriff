@@ -224,6 +224,10 @@ pub(crate) fn run(
             .specs
             .iter()
             .any(|s| matches!(s.trigger, Trigger::Coverage | Trigger::Occupancy));
+    // T-541: whether `run::supervise` will try to **recover** from a read error here rather than
+    // end the run. Exactly the predicate that decided `SupState::live` when the run started
+    // (`run::Pipeline::start`), evaluated on the source this thread actually holds.
+    let recoverable = shared.cfg.live_window_class && source.capabilities().controllable;
     let mut last_tune: Option<(u64, u64)> = None;
     let result = loop {
         if shared.stop.load(Ordering::SeqCst) {
@@ -271,6 +275,24 @@ pub(crate) fn run(
             },
             Err(e) => {
                 inc(&c.read_errors);
+                // **T-541: a device error ends this segment, not the stream.** `run::supervise`
+                // restarts capture under the same stream ids, so a consumer arriving in the gap
+                // is between windows — exactly as at a re-plumb (T-530). Without this the
+                // segment's publishers called `finish()`, `/ws/spectrum/live` answered `410 Gone`
+                // for the whole recovery, and `ops/stage.sh`'s `healthy()` restarted `hk serve`
+                // underneath the user for a fault it was already handling. It also keeps
+                // `history::run` from sealing the pyramid at a boundary the run continues past,
+                // which T-446 showed is a permanent data loss rather than a cosmetic one.
+                //
+                // Set before the break, so it is in force before `drop(writer)` closes the ring
+                // and the readers run their `finish`.
+                if recoverable {
+                    shared.successor_grace_ms.store(
+                        crate::run::RECOVERY_SUCCESSOR_GRACE.as_millis() as u64,
+                        Ordering::SeqCst,
+                    );
+                    shared.continues.store(true, Ordering::SeqCst);
+                }
                 break Err(anyhow::Error::from(e).context("reading the source"));
             }
         };
@@ -278,6 +300,23 @@ pub(crate) fn run(
             continue;
         }
         let fs = h.provenance.tune.sample_rate_hz;
+        // **T-541: a block whose provenance cannot be true is dropped HERE, at the boundary.**
+        //
+        // A rate of zero or a NaN centre is not a signal condition to be handled downstream; it
+        // is a corrupt USB transfer or an uninitialised driver struct, and this is the one place
+        // that sees it before anything divides by it. Measured, not feared: a front end returning
+        // `sample_rate_hz = 0` made `hk_detect`'s tracker compute a block duration of
+        // `i64::MAX` ns and **panic** on `t0 + dur` (`track/tracker.rs`'s `observe_frame`), and
+        // it would have stored `stream_time_ns = i64::MAX` — poisoning the run's capture clock
+        // for every later block and every reader, permanently, from one bad transfer.
+        //
+        // Dropped rather than escalated to a segment failure on purpose: one corrupt block is not
+        // a reason to restart capture, and `bad_blocks` makes it visible either way. A front end
+        // that produces nothing else stops delivering samples, which the run already reports.
+        if !(fs.is_finite() && fs > 0.0 && h.provenance.tune.center_hz.is_finite()) {
+            inc(&c.bad_blocks);
+            continue;
+        }
         let first_of_thread = std::mem::take(&mut first_block);
         if pass_start {
             pass_start = false;

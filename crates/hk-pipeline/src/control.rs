@@ -1042,6 +1042,25 @@ pub(crate) fn run(
                 chains.detach_all();
             }
         }
+        // **T-541: the segment's own stop ends this thread too, not only the channel's
+        // disconnect.**
+        //
+        // The disconnect depends on another thread getting far enough to produce it: `hk-detect`
+        // sends `DetectFinished` at its end, and the supervisor drops its sender only *after*
+        // it has joined every worker. So a detect thread that **died** — a panic, the one thing
+        // that skips every orderly exit — left this thread waiting for an event that was never
+        // coming, and the supervisor waiting to join this thread. The run wedged with `hk serve`
+        // still answering every route and still reporting `capture: running`: the exact
+        // "indistinguishable from a dead process" shape, reached without anything crashing.
+        //
+        // `shared.stop` does not have that dependency. It is set by every path that ends a
+        // segment — a re-plumb, a capture error, and now `run::guarded` when a worker panics —
+        // and by the time it is set this segment's chains are being torn down regardless, which
+        // is what the disconnect branch above does anyway.
+        if !detect_done && shared.stop.load(Ordering::SeqCst) {
+            detect_done = true;
+            chains.detach_all();
+        }
         if !detect_done {
             chains.poll_coverage();
             let now_ns = shared.counters.stream_time_ns.load(Ordering::Relaxed);

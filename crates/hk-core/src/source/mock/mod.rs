@@ -246,6 +246,27 @@ pub enum MockFault {
     /// front end unplugged, or wedged on a USB stall, mid-retune. Nothing can recover capture, so
     /// this is how a harness produces a run that has genuinely ended.
     GoneOnRetune,
+    /// **T-541: every `n`th read fails and the device then delivers again** — a USB transfer that
+    /// stalls and clears, which is what a front end mostly does wrong.
+    ///
+    /// The other two faults are one-shot or terminal, so a long soak run against this mock could
+    /// only ever meet a fault once; `ops/fuzz-rig.sh` needs a device that keeps misbehaving, or
+    /// "0 crashes in 69 cycles" is a statement about a device that cannot fail.
+    ReadFailsEvery {
+        /// Reads between failures (> 0).
+        n: u64,
+    },
+    /// **T-541: the next `count` sample-rate changes are refused on the CONTROL thread**
+    /// (`u32::MAX`: all of them), as `hackrf_set_sample_rate` returning non-zero does.
+    ///
+    /// [`MockFault::RetuneApplyFails`] fails on the *capture* thread, where the HackRF applies a
+    /// posted change. This one fails in the caller's own `set_sample_rate`, which is a different
+    /// path through the control plane: the re-plumb has already torn the segment down when it
+    /// learns of the refusal.
+    RefuseRate {
+        /// How many rate changes are refused (`u32::MAX`: all of them).
+        count: u32,
+    },
 }
 
 impl MockFault {
@@ -261,20 +282,29 @@ impl MockFault {
             return Ok(Some(Self::GoneOnRetune));
         }
         let (name, arg) = spec.split_once(':').unwrap_or((spec, "1"));
-        if name != "retune-apply-fails" {
-            return Err(format!(
-                "unknown mock fault {name:?}: use retune-apply-fails[:N|:always] or gone-on-retune"
-            ));
-        }
-        let count = match arg {
-            "always" => u32::MAX,
-            n => n
-                .parse::<u32>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("mock fault count {n:?} is not a positive integer"))?,
+        let count = || -> Result<u32, String> {
+            match arg {
+                "always" => Ok(u32::MAX),
+                n => n
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("mock fault count {n:?} is not a positive integer")),
+            }
         };
-        Ok(Some(Self::RetuneApplyFails { count }))
+        match name {
+            "retune-apply-fails" => Ok(Some(Self::RetuneApplyFails { count: count()? })),
+            "refuse-rate" => Ok(Some(Self::RefuseRate { count: count()? })),
+            "read-fails-every" => Ok(Some(Self::ReadFailsEvery {
+                n: arg.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                    format!("mock fault period {arg:?} is not a positive integer")
+                })?,
+            })),
+            _ => Err(format!(
+                "unknown mock fault {name:?}: use retune-apply-fails[:N|:always], \
+                 refuse-rate[:N|:always], read-fails-every:N or gone-on-retune"
+            )),
+        }
     }
 }
 
@@ -704,6 +734,15 @@ impl MockSdrDriver {
                 _ => 0,
             }),
             gone_on_retune: AtomicBool::new(self.options.fault == Some(MockFault::GoneOnRetune)),
+            read_fail_every: AtomicU64::new(match self.options.fault {
+                Some(MockFault::ReadFailsEvery { n }) => n,
+                _ => 0,
+            }),
+            reads_since_fail: AtomicU64::new(0),
+            refuse_rate: AtomicU32::new(match self.options.fault {
+                Some(MockFault::RefuseRate { count }) => count,
+                _ => 0,
+            }),
             gone: AtomicBool::new(false),
         });
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&control));
@@ -792,6 +831,12 @@ pub struct MockSdrControl {
     gone_on_retune: AtomicBool,
     /// The device has gone ([`MockFault::GoneOnRetune`] fired): every read fails from now on.
     gone: AtomicBool,
+    /// T-541 [`MockFault::ReadFailsEvery`]: reads between failures (0: off).
+    read_fail_every: AtomicU64,
+    /// T-541 [`MockFault::ReadFailsEvery`]: reads since the last failure.
+    reads_since_fail: AtomicU64,
+    /// T-541 [`MockFault::RefuseRate`]: rate changes still to refuse (`u32::MAX` never runs out).
+    refuse_rate: AtomicU32,
 }
 
 impl MockSdrControl {
@@ -872,6 +917,24 @@ impl SourceControl for MockSdrControl {
             "sample rate (Hz)",
             sample_rate_hz,
         )?;
+        // T-541: refused on the control thread, before anything is posted, as
+        // `hackrf_set_sample_rate` returning non-zero is.
+        if self
+            .refuse_rate
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+                0 => None,
+                u32::MAX => Some(u32::MAX),
+                n => Some(n - 1),
+            })
+            .is_ok()
+        {
+            self.counters.faults.fetch_add(1, Ordering::Relaxed);
+            return Err(SourceError::Device {
+                source_name: NAME,
+                operation: "set_sample_rate",
+                message: format!("injected fault (T-541): the device refused {hz} Hz"),
+            });
+        }
         self.mailbox.post(|p| p.sample_rate_hz = Some(hz));
         Ok(())
     }
@@ -1278,6 +1341,22 @@ impl MockSdrSource {
                 source_name: NAME,
                 operation: "receive",
                 message: "injected fault (T-508): the device has gone".into(),
+            });
+        }
+        // T-541 [`MockFault::ReadFailsEvery`]: a stall that clears. Unlike `gone`, the very next
+        // read succeeds, so a run must come back rather than end — and a soak run meets it over
+        // and over instead of once.
+        let every = control.read_fail_every.load(Ordering::SeqCst);
+        if every > 0 && control.reads_since_fail.fetch_add(1, Ordering::SeqCst) + 1 >= every {
+            control.reads_since_fail.store(0, Ordering::SeqCst);
+            control.counters.faults.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(1));
+            return Err(SourceError::Device {
+                source_name: NAME,
+                operation: "receive",
+                message: format!(
+                    "injected fault (T-541): a USB transfer stalled (every {every} reads; clears)"
+                ),
             });
         }
         let c = &control.counters;
