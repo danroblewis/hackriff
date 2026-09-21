@@ -5688,11 +5688,15 @@ tasks:
     parallel_group: M4A
     acceptance: 'T-268 decided BUILD over WRAP for sound reasons (no compliant CC recording exists, so wrapping would need a compliant ENCODER first, and a GPLv3 binary as a hard CI dependency would make the blind acceptance test SKIP in CI). That decision is right for the RUNTIME and leaves a real hole in VERIFICATION: the decoder and the generator were written from the same reading of the same references, so a shared misreading passes both. Close it the way C23 Testing already says to - compare against Trunk Recorder or SDRTrunk on the SAME IQ, as an ORACLE not a runtime, behind the C22 plugin boundary per ADR-0010, and gate it on hardware/off-air tier so CI never depends on it. Blocked until a real off-air P25 capture exists (user-triggered); until then record explicitly in the module header that no independent oracle has confirmed this decoder'
     notes: |
-      2026-09-20 (T-544): the blocker is being lifted. T-544 captures real off-air BART 800 MHz P25
-      (docs/18) and its ground-truth plan REQUIRES exactly this oracle - SDRTrunk/OP25/DSD+ offline
-      over the same IQ, behind the C22 plugin boundary, hardware/off-air tier only, cross-validated
-      against a spectrogram-derived grant/activity check so no single decoder authors the answer
-      key. Pick this up when T-544's capture lands.
+      2026-09-20 (T-544): STILL BLOCKED - an earlier version of this note said the blocker was being
+      lifted; that was written before the capture and is now wrong. T-544's capture was taken and is
+      NEGATIVE (docs/19 section 7): no BART, and no trunked control channel anywhere in 850.9-862.1
+      MHz - the busiest channel in the band runs 88% duty and a control channel is 100% by
+      definition. So there is still no off-air P25 recording and this ticket stays blocked on one.
+      The oracle design in docs/19 section 5.3 stands and is what to build when a capture exists:
+      SDRTrunk/OP25/DSD+ offline over the same IQ, behind the C22 plugin boundary, hardware/off-air
+      tier only, cross-validated against a spectrogram-derived grant/activity check so no single
+      decoder authors the answer key.
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
@@ -16166,10 +16170,41 @@ tasks:
       supply concrete targets - prefer their numbers over re-deriving them, and coordinate rather
       than duplicating.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-560
+    milestone: M2-hardening
+    title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    depends_on: []
+    use_cases: [SIGNAL-087]
+    acceptance: |
+      MEASURED 2026-09-20 during T-544 (docs/19 section 7.6a). Nine real off-air 800 MHz emissions
+      appeared to sit 29-80 kHz OFF the US 12.5 kHz raster and briefly looked spurious because of it.
+      They were not: one constant correction of -8200 Hz at 852.456 MHz (-9.6 ppm) puts every one of
+      them on the raster with a median residual of 390 Hz.
+      WHY IT MATTERS BEYOND THIS CAPTURE: 8200 Hz is nearly two thirds of a 12.5 kHz channel. Any
+      raster fit, band-plan comparison or "off-raster, therefore interesting" judgement at 800 MHz
+      that assumes zero clock error will mis-assign channels by one slot and can flag a perfectly
+      ordinary emitter as anomalous - which inverts the product's "mismatches are interesting" rule
+      into a false-alarm generator. HackRF One has a plain crystal (HackRF Pro adds a TCXO), so this
+      is the normal case, not a faulty unit.
+      DoD: the raster fit estimates a single ppm offset jointly with the grid rather than assuming
+      zero, over the detections it already has (the fit is one line - minimise median |residual| over
+      a spacing/offset grid, as docs/19 section 7.6a did); the estimate is recorded as calibration
+      state under C05 with its provenance, not recomputed per query; and a test asserts that a
+      synthetic set of on-raster emissions shifted by a plausible ppm error still fits the raster and
+      is NOT reported as off-raster.
+    notes: |
+      Filed 2026-09-20 from T-544's measurements. Cheap, self-contained, and independent of whether
+      the BART target is ever reachable.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-544
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
-    status: in-progress
+    status: blocked
+    blocked_on: user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART.
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -16202,6 +16237,62 @@ tasks:
     notes: |
       Filed 2026-09-20. Phases: T-544 research+capture, T-545 failing blind tests, T-546 make them pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      CAPTURE TAKEN 2026-09-20 AND NEGATIVE. Research half DONE (docs/19 sections 1-6, SIGNAL-087
+      minted). Capture half CANNOT BE COMPLETED HERE - no fixture produced, and none should be
+      manufactured from the material that was captured.
+      THE FINDING: all 16 of BART's published channels sit at 0.0-1.4 dB over the noise floor with
+      0.0% duty, while nine OTHER 800 MHz channels are live at 15-23 dB. BART is absent, not
+      attenuated. A blind 30 s sweep of 850.9-862.1 MHz found 28 occupied channels and a maximum duty
+      of 88% - there is no 100%-duty control channel to find anywhere in the band, so SIGNAL-085's
+      whole discovery premise has nothing to act on. The live traffic is conventional ANALOGUE FM
+      voice (discriminator kurtosis 2.9-3.6 vs ~1.6-2.0 for four-level C4FM, no 4800 Bd structure),
+      so there is no digital LMR fixture to salvage either.
+      RECEIVER PROVEN GOOD, three ways: FM broadcast at +33 dB on the same antenna; cellular downlink
+      at 875 MHz clipping 39% of samples; 28 live channels in the target band itself.
+      PLANNING ERROR CORRECTED: the ladder in docs/19 section 4.1 specified amp OFF, which is
+      quantisation-limited at 852 MHz (RMS 2.5-3.4 LSB, peak 11/127). LNA 32 / VGA 40 / AMP ON is the
+      setting to reuse: clip 1e-6, p99.9 = 63/127.
+      TWO RESULTS WORTH KEEPING. (1) The receiver clock is -9.6 ppm (-8200 Hz at 852.456 MHz), which
+      is nearly 2/3 of a 12.5 kHz channel and made real emissions look off-raster; any 800 MHz
+      raster/band-plan comparison must estimate and remove it. Filed as T-560. (2) The
+      antenna-disconnected reference could NOT be taken - that is a physical RF change, reserved to
+      the user - so its purpose was served by a pre-mixer gain-slope test instead: stepping amp/LNA
+      (pre-mixer) against VGA (post-mixer) separates real signals at 1 dB/dB from IM3 at 3 dB/dB. All
+      nine candidates measured 1:1 over a 30 dB range, proving them real external signals rather than
+      intermodulation or internal birdies. That test needs no hardware change and should be standard.
+      Device released; the demo fell back to looping replay while held and needs a restart for live.
+    result_2: |
+      RETRY 2026-09-20 21:00-21:25 after the user gave the location (1177 Market St, SF - downtown,
+      near Civic Center, confirmed in BART's service area). NEGATIVE CONFIRMED, and two errors of
+      mine found and corrected in the process. Device released; demo left on looping replay.
+      (1) GAIN PROVENANCE, since it was asked: every negative measurement was ALREADY taken at the
+      corrected amp-ON setting. The amp-off ladder was a discarded first pass. Nothing was inherited
+      from it. The new 60 s full-band sweep ran LNA 32 / VGA 32 / amp ON, clip 6.5e-6, p99.9 = 87/127.
+      (2) MY DUTY METRIC WAS BROKEN and the first write-up's "no channel above 95% duty" is WITHDRAWN.
+      It referenced each channel to its OWN 5th percentile over time, so a channel on ALL the time
+      scored 0% duty instead of 100% - blind to exactly the signature it existed to find. Seven
+      channels are in fact continuous. The BART conclusion did not change; the reasoning did.
+      (3) GLOBAL vs LOCAL FLOOR - the more important finding. Against a GLOBAL floor the 20 Msps
+      sweep showed all 16 BART channels at +7 to +11 dB and 59-92% duty. FALSE: the levels fall
+      MONOTONICALLY with frequency, which 16 independent emitters do not do - it is a pedestal under
+      the low end of the band. With a CFAR LOCAL floor (median over +/-40 channels, 2-channel guard)
+      it collapses to -0.3..+0.7 dB and <=3.8% duty, 0 of 16 above +4 dB. THE SAME DATA GIVES "no
+      signal", "sixteen signals" or "nine signals" depending ONLY on how the floor is estimated, and
+      the global-floor run would have manufactured 16 BART detections that are not there - then
+      "confirmed" the capture and produced a fixture built on nothing. Worked example for the
+      project's own detector; recorded in docs/19 section 7.4.
+      (4) THE DECISIVE EVIDENCE is adjacent-channel, so no pedestal/tilt/calibration argument touches
+      it: 851.3125 (BART, +0.3 dB) sits 12.5 kHz from 851.2375 (live, +5.3 dB, 43% duty); 853.8625
+      (BART, +0.7 dB) sits 12.5 kHz from 853.8750 (live, +10.3 dB, 93% duty). Same capture, same
+      gain, same instant.
+      (5) WHOLE BAND SWEPT: 1440 channels over 850.6-869.4 MHz, 60 s. Nine occupied, and exactly ONE
+      continuous: 866.8625 MHz, +7.4 dB, 100% duty, in the NPSPAC sub-band. It is NOT C4FM
+      (discriminator kurtosis 3.34, single mode; C4FM wants ~1.6-2.0 and four modes at +/-600/+/-1800
+      Hz). So there is still no P25 control channel reachable - not because nothing is continuous,
+      but because the one continuous thing is not four-level digital. BART is also not hiding on an
+      unlisted channel in this band.
+
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
