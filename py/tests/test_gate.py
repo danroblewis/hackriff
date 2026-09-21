@@ -71,7 +71,10 @@ def test_api_contract_doc_is_full_not_docs():
 
 
 def test_docs_only_has_no_suite_and_says_so():
-    d = classify(["docs/10-test-strategy.md", "docs/planning-log.md", "docs/tasks.yaml"])
+    # PROSE only. docs/tasks.yaml used to be in this list, which is precisely how a
+    # malformed board reached main: the one test that would have caught it never ran
+    # (T-561). A file the tooling parses is data, not prose - see the test below.
+    d = classify(["docs/10-test-strategy.md", "docs/planning-log.md"])
     assert d.label == DOCS
     assert d.commands() == []
     text = "\n".join(render(d, Source("test", []), "all"))
