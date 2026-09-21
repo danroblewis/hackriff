@@ -422,6 +422,524 @@ def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tm
         assert env["SOME_UNRELATED_VAR"] == "kept"
 
 
+# ---------------------------------------------------------------------------------------
+# T-543: which CRATES, once the class is `full`.
+#
+# `py/hkpy/crates.py` narrows the Rust suite inside the `full` class, so these tests are the
+# same shape as the class tests above: assert the answer case by case, and assert the
+# fail-closed cases hardest, because a wrong narrowing is silent. "Fail closed" here means
+# `crates is None` — run the whole workspace.
+# ---------------------------------------------------------------------------------------
+
+
+def _ws(packages):
+    """Build a Workspace from a compact spec: {name: (dir, lib_deps, dev_deps)}."""
+    from hkpy.crates import Workspace
+
+    return Workspace(
+        dirs={n: spec[0] for n, spec in packages.items()},
+        lib_deps={n: set(spec[1]) for n, spec in packages.items()},
+        dev_deps={n: set(spec[2]) for n, spec in packages.items()},
+    )
+
+
+#: A miniature of the real workspace's decisive shape: a leaf model everything uses, a
+#: mid-level crate, a top-level binary, and a test-harness crate that is a DEV-dependency of
+#: a leaf while itself DEV-depending on the binary. That last edge is the one that makes the
+#: real graph subtle, so the fixture has to carry it.
+_MINI = _ws(
+    {
+        "hk-model": ("crates/hk-model", [], []),
+        "hk-dsp": ("crates/hk-dsp", ["hk-model"], ["hk-e2e"]),
+        "hk-pipeline": ("crates/hk-pipeline", ["hk-model", "hk-dsp"], []),
+        "hk-cli": ("crates/hk-cli", ["hk-pipeline"], []),
+        "hk-e2e": ("tests/e2e", ["hk-model"], ["hk-cli", "hk-pipeline", "hk-sim"]),
+        "hk-sim": ("crates/hk-sim", ["hk-model"], []),
+    }
+)
+
+
+def test_a_leaf_binary_change_narrows_to_itself_and_the_harness_that_drives_it():
+    from hkpy.crates import select
+
+    sel = select(["crates/hk-cli/src/main.rs"], _MINI)
+    # hk-e2e DEV-depends on hk-cli, so its test targets link the change and must run.
+    # Nothing else does: hk-cli is a leaf in the lib graph.
+    assert sel.crates == ("hk-cli", "hk-e2e")
+
+
+def test_a_dev_dependency_edge_is_followed_or_tests_that_link_the_change_would_be_skipped():
+    from hkpy.crates import select
+
+    # hk-pipeline -> (lib) hk-cli, and (dev) hk-e2e. hk-dsp DEV-depends on hk-e2e, but
+    # hk-e2e's LIB does not depend on hk-pipeline, so hk-dsp's test binary does NOT link
+    # hk-pipeline and correctly stays out. Getting this edge right in both directions is
+    # the whole difficulty of the rule.
+    sel = select(["crates/hk-pipeline/src/lib.rs"], _MINI)
+    assert sel.crates == ("hk-cli", "hk-e2e", "hk-pipeline")
+
+
+def test_a_change_under_the_harness_reaches_every_crate_that_dev_depends_on_it():
+    from hkpy.crates import select
+
+    sel = select(["tests/e2e/src/lib.rs"], _MINI)
+    assert sel.crates == ("hk-dsp", "hk-e2e")
+
+
+def test_the_foundation_crate_is_the_whole_workspace_and_says_so():
+    from hkpy.crates import select
+
+    # Everything depends on the model, so there is nothing to narrow to. The honest answer
+    # is the expensive one, and it must be reported as such rather than as a 6-crate list
+    # that happens to be all of them.
+    sel = select(["crates/hk-model/src/lib.rs"], _MINI)
+    assert sel.is_workspace
+    assert "whole workspace" in sel.reason
+
+
+def test_the_acceptance_harness_is_in_every_crates_selection():
+    from hkpy.crates import select
+
+    # The rule this ticket may not break: the suite that caught T-484's dark demo runs for
+    # every `crates/` change. It is not enforced by a special case — the graph says so —
+    # but it is asserted here, because a future graph change that quietly dropped it would
+    # be exactly the coverage loss the ticket forbids.
+    for name, (directory, _, _) in (
+        ("hk-cli", ("crates/hk-cli", [], [])),
+        ("hk-dsp", ("crates/hk-dsp", [], [])),
+        ("hk-sim", ("crates/hk-sim", [], [])),
+        ("hk-pipeline", ("crates/hk-pipeline", [], [])),
+    ):
+        sel = select([f"{directory}/src/lib.rs"], _MINI)
+        assert sel.is_workspace or "hk-e2e" in (sel.crates or ()), name
+
+
+def test_cargo_lock_forces_the_whole_workspace_even_beside_a_one_crate_edit():
+    from hkpy.crates import select
+
+    sel = select(["crates/hk-cli/src/main.rs", "Cargo.lock"], _MINI)
+    assert sel.is_workspace
+
+
+def test_a_dot_directory_still_matches_its_rule():
+    from hkpy.crates import select
+
+    # Regression: `lstrip("./")` strips a CHARACTER SET, turning ".config/nextest.toml"
+    # into "config/nextest.toml" so the `.config/` rule never fires. `.config/` changes the
+    # nextest thread cap and the serial groups — how every test in the workspace is
+    # scheduled — so a selection made while ignoring it is made on the wrong information.
+    for path in (".config/nextest.toml", ".github/workflows/ci.yml"):
+        sel = select(["crates/hk-cli/src/main.rs", path], _MINI)
+        assert sel.is_workspace, path
+
+
+def test_a_path_in_the_rust_tree_belonging_to_no_package_fails_closed():
+    from hkpy.crates import select
+
+    # A brand-new crate nobody has added to the workspace yet. The graph does not describe
+    # it, so no answer derived from the graph is trustworthy.
+    sel = select(["crates/hk-brand-new/src/lib.rs"], _MINI)
+    assert sel.is_workspace
+    assert "no workspace package" in sel.reason
+
+
+def test_no_workspace_graph_means_the_whole_workspace():
+    from hkpy.crates import select
+
+    assert select(["crates/hk-cli/src/main.rs"], None).is_workspace
+
+
+def test_paths_outside_the_rust_tree_never_narrow_on_their_own():
+    from hkpy.crates import select
+
+    # `ui/`, `docs/` and `py/` belong to classes that do not run the Rust suite at all. They
+    # must not produce a narrowed Rust selection by themselves.
+    sel = select(["ui/src/app.ts", "docs/api.md", "py/hkpy/synth.py"], _MINI)
+    assert sel.is_workspace
+
+
+def test_selection_env_sets_the_variable_only_for_a_real_narrowing():
+    from hkpy.crates import Selection
+    from hkpy.gate import CRATES_ENV, selection_env
+
+    narrowed = selection_env({}, Selection(("hk-cli", "hk-e2e"), "why"))
+    assert narrowed[CRATES_ENV] == "hk-cli hk-e2e"
+
+    # And an inherited value from an outer shell must never survive a workspace decision:
+    # that would silently narrow a gate that decided not to narrow.
+    widened = selection_env({CRATES_ENV: "hk-cli"}, Selection(None, "no narrowing"))
+    assert CRATES_ENV not in widened
+
+
+def test_a_forced_full_gate_never_narrows_crates():
+    from hkpy.gate import Source, forced_full, resolve_selection
+
+    decision = forced_full("CI push build: no pull-request base, so the full gate runs")
+    source = Source("CI push build", None, forced="no base")
+    sel = resolve_selection(decision, source, ".")
+    assert sel.is_workspace
+
+
+def test_a_non_full_class_has_no_rust_suite_to_narrow():
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["ui/src/app.ts"])
+    source = Source("explicit --files", ["ui/src/app.ts"])
+    assert resolve_selection(decision, source, ".").is_workspace
+
+
+# ---------------------------------------------------------------------------------------
+# T-543, CORRECTED BY THE USER (2026-09-20): affected-crate selection is for an agent's own
+# local iteration ONLY. The merge gate (`just gate-merge`) and the CI gate (`just gate`
+# inside GitHub Actions) must NEVER narrow, unconditionally — not "narrowing wasn't
+# requested this time" but structurally refused even if `--select-crates` is passed. These
+# pin that on `resolve_selection` itself, the one function every path (CLI, gate-merge, CI)
+# funnels through, rather than on trusting that no caller ever wires the flag in wrong.
+# ---------------------------------------------------------------------------------------
+
+
+def test_crate_narrowing_is_opt_in_and_off_by_default():
+    # A plain full-class diff, not a merge, not CI, `--select-crates` not passed: still the
+    # whole workspace. This is the corrected default — T-543 originally had this narrow
+    # automatically, which is exactly the mistake the user's ruling reverses.
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source("explicit --files", ["crates/hk-cli/src/lib.rs"])
+    sel = resolve_selection(decision, source, ".")
+    assert sel.is_workspace
+    assert "opt-in" in sel.reason
+
+
+def test_select_crates_narrows_a_plain_local_run(monkeypatch):
+    # The opt-in DOES work, for the one path it is meant for: an agent's own local
+    # iteration, not a merge and not CI. Pin it with a deterministic fake workspace
+    # (`_MINI`, the same fixture `crates.py`'s own tests use) rather than the real
+    # `cargo metadata`, so the assertion doesn't depend on what's installed.
+    from hkpy import crates as crate_select
+    from hkpy.gate import Source, resolve_selection
+
+    monkeypatch.setattr(crate_select, "load_workspace", lambda root: _MINI)
+
+    decision = classify(["crates/hk-cli/src/main.rs"])
+    source = Source("explicit --files", ["crates/hk-cli/src/main.rs"])
+    sel = resolve_selection(decision, source, ".", select_crates=True)
+    assert not sel.is_workspace
+    assert sel.crates == ("hk-cli", "hk-e2e")
+
+    # And the same diff, still opted in, is refused for merge/CI regardless.
+    assert resolve_selection(
+        decision, source, ".", select_crates=True, merge=True
+    ).is_workspace
+    assert resolve_selection(
+        decision, source, ".", select_crates=True, ci=True
+    ).is_workspace
+
+
+def test_merge_gate_never_narrows_crates_even_if_select_crates_is_passed():
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source(
+        "merge index [MERGE_HEAD]", ["crates/hk-cli/src/lib.rs"]
+    )
+    sel = resolve_selection(decision, source, ".", select_crates=True, merge=True)
+    assert sel.is_workspace
+    assert "merge gate" in sel.reason
+
+
+def test_ci_gate_never_narrows_crates_even_if_select_crates_is_passed():
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-model/src/lib.rs"])
+    source = Source(
+        "CI pull request, merge base with origin/main", ["crates/hk-model/src/lib.rs"]
+    )
+    sel = resolve_selection(decision, source, ".", select_crates=True, ci=True)
+    assert sel.is_workspace
+    assert "CI gate" in sel.reason
+
+
+def test_merge_and_ci_are_checked_before_the_opt_in_flag():
+    # Even a caller that forgot to pass select_crates at all still gets the merge/CI
+    # short-circuit reason, not the generic "opt-in, not requested" one — the two must not
+    # collapse into one message that could plausibly be satisfied by only one of the guards.
+    from hkpy.gate import Source, resolve_selection
+
+    decision = classify(["crates/hk-cli/src/lib.rs"])
+    source = Source("merge index [MERGE_HEAD]", ["crates/hk-cli/src/lib.rs"])
+    sel = resolve_selection(decision, source, ".", merge=True)
+    assert sel.is_workspace
+    assert "merge gate" in sel.reason
+
+
+def test_main_never_narrows_under_merge_even_with_select_crates(monkeypatch, tmp_path, capsys):
+    # Full round-trip through main(): `--merge --select-crates` together must still run the
+    # whole workspace, because it is the wiring in main() (ci = GITHUB_ACTIONS, merge =
+    # args.merge, both passed into resolve_selection) that has to get this right, not just
+    # the pure function in isolation.
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setattr(gate_mod, "merge_state", lambda root: "MERGE_HEAD")
+    monkeypatch.setattr(
+        gate_mod, "staged_changes", lambda root: ["crates/hk-cli/src/lib.rs"]
+    )
+    monkeypatch.setattr(
+        gate_mod, "worktree_changes", lambda root: ["crates/hk-cli/src/lib.rs"]
+    )
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    rc = gate_mod.main(
+        ["--merge", "--select-crates", "--dry-run", "--root", str(tmp_path)]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+    assert "merge gate" in out
+
+
+def test_main_never_narrows_in_ci_even_with_select_crates(monkeypatch, tmp_path, capsys):
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setattr(
+        gate_mod,
+        "committed_changes",
+        lambda root, ref: ["crates/hk-model/src/lib.rs"],
+    )
+
+    rc = gate_mod.main(["--select-crates", "--dry-run", "--root", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+    assert "CI gate" in out
+
+
+def test_main_default_ci_run_never_narrows_even_without_the_flag(
+    monkeypatch, tmp_path, capsys
+):
+    # The realistic case: CI's actual invocation (`just gate --phase check`, no
+    # `--select-crates` at all) over a diff that touches one crate.
+    from hkpy import gate as gate_mod
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setattr(
+        gate_mod,
+        "committed_changes",
+        lambda root, ref: ["crates/hk-cli/src/lib.rs"],
+    )
+
+    rc = gate_mod.main(["--phase", "check", "--dry-run", "--root", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WHOLE WORKSPACE" in out
+
+
+# ---------------------------------------------------------------------------------------
+# T-543: the gate records its own duration.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_gate_writes_a_start_and_an_end_record_for_every_run(monkeypatch, tmp_path):
+    from hkpy import gate as gate_mod
+    from hkpy import gatelog
+
+    class FakeCompleted:
+        returncode = 0
+
+    monkeypatch.setattr(
+        gate_mod.subprocess, "run", lambda *a, **k: FakeCompleted()
+    )
+    monkeypatch.setattr(gate_mod.shutil, "which", lambda name: "/usr/bin/just")
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+
+    assert gate_mod.main(["--files", "py/hkpy/synth.py", "--root", str(tmp_path)]) == 0
+
+    runs = gatelog.runs(gatelog.read())
+    assert len(runs) == 1
+    assert runs[0]["finished"] is True
+    assert runs[0]["class"] == "py"
+    assert runs[0]["result"] == "pass"
+    # One `suite` line per command launched — the per-phase resolution the ledger exists for.
+    assert [s["cmd"] for s in runs[0]["suites"]] == [
+        " ".join(c) for c in classify(["py/hkpy/synth.py"]).commands()
+    ]
+
+
+def test_a_run_that_never_finished_is_still_visible():
+    from hkpy import gatelog
+
+    # The 62-minute starved gate of 2026-09-20 would have left NO trace under an
+    # on-completion-only design. An unterminated run is data.
+    records = [gatelog.start_record("abc", klass="full", phase="all", source="s", n_files=1)]
+    runs = gatelog.runs(records)
+    assert len(runs) == 1
+    assert runs[0]["finished"] is False
+    assert runs[0]["seconds"] is None
+
+
+def test_the_ledger_never_raises_when_it_cannot_write(tmp_path):
+    from hkpy import gatelog
+
+    # Instrumentation that can fail the thing it measures is worse than none.
+    unwritable = tmp_path / "file" / "nested" / "log.jsonl"
+    (tmp_path / "file").write_text("not a directory")
+    assert gatelog.append({"kind": "gate_start"}, path=str(unwritable)) is False
+
+
+def test_a_half_written_line_does_not_destroy_the_history(tmp_path):
+    from hkpy import gatelog
+
+    path = tmp_path / "gate-timings.jsonl"
+    gatelog.append(gatelog.start_record("r1", klass="ui", phase="all", source="s", n_files=1), path=str(path))
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"kind": "gate_en')  # killed mid-write
+    gatelog.append(gatelog.end_record("r1", klass="ui", phase="all", seconds=3.0, rc=0), path=str(path))
+
+    runs = gatelog.runs(gatelog.read(str(path)))
+    assert len(runs) == 1 and runs[0]["finished"] is True
+
+
+# ---------------------------------------------------------------------------------------
+# T-543: reading the merge runner's log back as cycle time.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_merge_log_parses_into_branch_lives_and_deduplicates_its_doubled_lines():
+    from hkpy.cycletime import lives_from_events, parse_runner_log
+
+    # `ops/merge-runner.sh`'s `log()` tees while its stdout is redirected to the same file,
+    # so every line genuinely appears twice. Counting a doubled QUEUED as two events would
+    # not change the times, but a doubled GATE FAILED would double the failure count.
+    text = "\n".join(
+        [
+            "[09-20 10:00:00] QUEUED task-t100",
+            "[09-20 10:00:00] QUEUED task-t100",
+            "[09-20 11:00:00] MERGE start task-t100 (T-100, 1 commits ahead)",
+            "[09-20 11:00:00] GATE task-t100 (just gate-merge; may take 15-25 min)…",
+            "[09-20 11:20:00] GATE FAILED task-t100 (attempt 1/2, tip abc) -> abort",
+            "[09-20 11:20:00] GATE FAILED task-t100 (attempt 1/2, tip abc) -> abort",
+            "[09-20 12:00:00] MERGE start task-t100 (T-100, 1 commits ahead)",
+            "[09-20 12:22:00] MERGED task-t100 ✓",
+        ]
+    )
+    lives = lives_from_events(parse_runner_log(text, 2026))
+    life = lives["task-t100"]
+    assert life.gate_failures == 1
+    assert life.gate_seconds == 22 * 60
+    assert life.wait_seconds is None  # no commit times without a repo
+    assert life.queued is not None and life.queued.hour == 10
+
+
+# ---------------------------------------------------------------------------------------
+# T-543: a slow-down must trip a TEST, not wait for somebody to notice.
+#
+# The check is a ROLLING MEDIAN, not a per-run bound, and that is deliberate. This box runs
+# up to four building agents plus an `hk serve` by policy, and one contended run says nothing
+# — `cargo build -p hk-plugins --bins`, documented in the justfile as ~0.05 s on a warm
+# target, was measured at 500 s at load 211 on the day this was written. A single red from
+# that would be noise, and a noisy guard gets muted. A median that moves is signal.
+# ---------------------------------------------------------------------------------------
+
+
+def _finished(klass, seconds, n):
+    from hkpy import gatelog
+
+    out = []
+    for _ in range(n):
+        rid = gatelog.new_run_id()
+        out.append(
+            gatelog.start_record(rid, klass=klass, phase="all", source="s", n_files=1)
+        )
+        out.append(
+            gatelog.end_record(rid, klass=klass, phase="all", seconds=seconds, rc=0)
+        )
+    return out
+
+
+def test_a_class_over_its_rolling_budget_is_reported():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    runs = gatelog.runs(_finished("full", 45 * 60, 6))
+    breaches = budget_breaches(runs)
+    assert len(breaches) == 1 and breaches[0].startswith("full:")
+
+
+def test_a_class_inside_its_budget_reports_nothing():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    assert budget_breaches(gatelog.runs(_finished("full", 20 * 60, 6))) == []
+
+
+def test_too_few_runs_is_silence_not_a_failure():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    # A fresh machine, or a class that has run twice. Failing here would make the guard fire
+    # on an absence of evidence, which is the fastest way to get a guard switched off.
+    assert budget_breaches(gatelog.runs(_finished("full", 99 * 60, 2))) == []
+
+
+def test_one_slow_run_among_fast_ones_does_not_trip_it():
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    runs = gatelog.runs(_finished("full", 15 * 60, 6) + _finished("full", 62 * 60, 1))
+    assert budget_breaches(runs) == []
+
+
+def test_unfinished_runs_are_never_counted_as_fast():
+    from hkpy import gatelog
+    from hkpy.cycletime import rolling_medians
+
+    # A killed gate has no duration. Treating it as a zero would make starvation look like
+    # speed — the exact wrong conclusion.
+    records = _finished("full", 20 * 60, 5)
+    records.append(
+        gatelog.start_record(
+            gatelog.new_run_id(), klass="full", phase="all", source="s", n_files=1
+        )
+    )
+    median, n = rolling_medians(gatelog.runs(records))["full"]
+    assert n == 5 and median == 20 * 60
+
+
+def test_the_recorded_gate_history_is_within_budget():
+    """The guard itself, over whatever this machine has actually recorded.
+
+    Silent until `$HACKRIFF_OPS/gate-timings.jsonl` holds enough runs of a class, which is
+    the honest state on a fresh checkout or in CI. Once it does, a rolling-median regression
+    fails here rather than waiting for the user to notice the loop got slow again.
+    """
+    from hkpy import gatelog
+    from hkpy.cycletime import budget_breaches
+
+    breaches = budget_breaches(gatelog.runs(gatelog.read()))
+    assert not breaches, "gate duration has regressed:\n  " + "\n  ".join(breaches)
+
+
+def test_the_ui_suite_is_skipped_only_for_a_full_diff_with_no_ui_path():
+    from hkpy.gate import Source, forced_full, skip_ui
+
+    def decide(paths):
+        return classify(paths), Source("explicit --files", list(paths))
+
+    assert skip_ui(*decide(["crates/hk-cli/src/lib.rs"])) is True
+    # A ui/ path anywhere in the diff, and the UI suite runs.
+    assert skip_ui(*decide(["crates/hk-cli/src/lib.rs", "ui/src/app.ts"])) is False
+    # A forced full gate does not know what changed, so it cannot claim the UI is untouched.
+    assert (
+        skip_ui(
+            forced_full("CI push build"), Source("CI push build", None, forced="no base")
+        )
+        is False
+    )
+
+
 def test_t561_the_board_file_runs_the_python_suite_not_nothing():
     """docs/tasks.yaml is DATA, and `docs/` runs nothing.
 

@@ -375,3 +375,201 @@ green. The guard belongs in `ui/test`: **assert the request the client builds**,
 it renders. T-367 added exactly that (a regex forbidding the unscoped request shape from returning),
 and T-389 generalised it (`listed` / `boxed` / `noExtent` derived from one collection, `boxed` a strict
 subset).
+
+#### What the ticket cycle actually costs, and which crates the gate runs (T-543, 2026-09-20)
+
+**Measure before optimising, and the measurement changed the target.** T-543 was filed because
+iteration felt like ~4 h per ticket and "the gate is 20-25 min" was the suspected cause. `just
+cycle-time` (`py/hkpy/cycletime.py`) reads `ops/merge-runner.log` plus git and reports:
+
+| quantity | n | median | p90 | max |
+|---|---|---|---|---|
+| gate (`MERGE start` -> `MERGED`) | 12 | **21.4 min** | 29.3 min | 31.9 min |
+| queue wait (last commit -> gate start) | 11 | **119.7 min** | 452.3 min | 462.8 min |
+| commit -> merged | 12 | **272.6 min** | 2289.8 min | 2742.6 min |
+
+So the gate is **~8 %** of a ticket's 4.5 h cycle. Halving it saves ~10 minutes of 272; halving the
+queue saves an hour. Three consequences, in value order.
+
+**1. The bulk merge had never once worked.** Eight `BULK attempt` lines in the log, zero merges, every
+one "conflict across branches", and the attempt of 09-20 09:43 left a `git merge-octopus` process
+wedged for over ten hours. The cause is that `git merge A B C…` with three or more heads selects the
+**octopus** strategy, which refuses outright any path more than one head modified - it does not attempt
+a content merge. Nearly every branch here touches `docs/tasks.yaml`, so octopus was guaranteed to
+refuse every time, and "fall back to individual" was not a safety net but the only path the code ever
+took. `ops/merge-runner.sh` now merges the batch **one branch at a time** (two heads each, ordinary
+recursive merge, which does resolve a shared `tasks.yaml`) and runs **one** gate over
+`just gate --base <pre-batch sha>`, rewinding to that sha on red and falling back to individual gates.
+N x 22 min of serial gating becomes 1 x ~25 min. Rewinding `main` is acceptable only because this
+runner is the sole merger, nothing is pushed, and the batch is reconstructible from its branches - and
+it is still guarded on HEAD not having moved.
+
+**2. The gate times itself, durably.** `py/hkpy/gatelog.py` appends one JSON line per run to
+`$HACKRIFF_OPS/gate-timings.jsonl`: class, phase, each suite command's duration, exit code, branch, and
+the **load average** it ran under. The start line is written **before the first suite**, so a gate that
+is killed or starved - the 62-minute one - leaves a trace rather than nothing; `gatelog.runs()` reports
+such a run as unfinished instead of dropping it. It can never fail the gate: every write is wrapped,
+and a line truncated by a kill costs that one run, not the history. Load is recorded because it is the
+dominant term: measured on 2026-09-20, `cargo build -p hk-plugins --bins`, documented in the justfile
+as "~0.05 s on a warm target", took **500 s** at load 211 with three agents building and an `hk serve`
+holding 9-13 cores. No gate change competes with that.
+
+**3. Affected-crate selection exists, but only for an agent's own local iteration — the merge and CI
+gates never use it (T-543, corrected by the user 2026-09-20).** `py/hkpy/crates.py` computes the
+reverse-dependency closure from `cargo metadata` at **target** level: a package's test binaries link
+its lib deps *plus* its dev-deps and each dev-dep's own lib closure, so both edge kinds are followed
+and they are followed differently. Measured here: `hk-cli` 2 of 20 packages, `hk-sim` 2,
+`hk-pipeline` 3, `hk-api`/`hk-plugins` 4, `hk-detect` 5, `hk-ml` 6, `hk-recipe` 12, `hk-dsp` 14,
+`hk-stream` 15, `hk-model` 20. The number that makes it work is that `hk-e2e`'s **lib** depends only on
+`hk-model` - everything else it names is a dev-dependency, which reaches hk-e2e's own tests and stops
+there rather than flowing into the eight crates that dev-depend on hk-e2e.
+
+**The user's ruling, corrected into the gate itself, not just documented:** affected-crate selection is
+for the agent iteration path only. `just gate --select-crates` opts in; unset (the default) means the
+whole workspace. `py/hkpy/gate.py`'s `resolve_selection` checks `merge` and `ci` **first, unconditionally,
+before it even looks at the flag** - `just gate-merge` (T-424, the coordinator's per-merge gate) and
+`just gate` running inside `GITHUB_ACTIONS` (CI) both always get the whole workspace, so a future call
+site cannot recreate the original mistake by wiring `--select-crates` into the merge/CI path by
+accident. `py/tests/test_gate.py` pins this on the function, not on trust that no caller ever passes it.
+
+**What the narrowing stops catching, stated plainly, for the opt-in case.** It follows the Cargo graph,
+so it cannot see a coupling that exists only at run time. Three answers:
+
+- **Acceptance is not narrowed, even when opted in.** `hk-e2e` is in the affected set of *every* crate,
+  so `just acceptance-ci` - the tier that caught T-484's dark demo - runs for every `crates/` change.
+  That is the graph agreeing with the policy, not the policy overriding the graph, and it is asserted by
+  a test so a future graph change cannot quietly drop it.
+- **The UI tiers are not narrowed.** `just test-ui` and `just test-ui-e2e` are untouched by the crate
+  selection. Separately, `just test-ui` (not `test-ui-e2e`) is skipped outright for a `full`-class diff
+  with no `ui/` path, on the merge/CI gate too - `npm run build`/`tsc --noEmit`/`npm test` are pure
+  functions of `ui/` source with no generated Rust input, so a `crates/`-only diff cannot change their
+  answer; `test-ui-e2e`, the browser tier that notices a backend change breaking the page, is never
+  skipped. That skip stays on the merge gate because it is provably not a coverage reduction, unlike
+  crate selection, which is a probabilistic-enough narrowing (it follows the *build* graph, not
+  everything a suite might assert against) that it stays opt-in only.
+- **Anything the graph does not model forces the whole workspace**: `Cargo.lock`, `Cargo.toml`,
+  `.config/` (the thread cap and serial groups - *how* every test is scheduled), `fixtures/`,
+  `plugins/`, `recipes/`, `.github/`, the `justfile`, and any path under `crates/` or `tests/` that
+  belongs to no workspace package. So does a `cargo metadata` that fails for any reason, and
+  `just gate --no-select` on demand.
+
+The selection reaches the suites through exactly one variable, `HK_GATE_CRATES`, read by `lint-rust`,
+`test-rust` and `test-doc`. **Unset means the whole workspace**, which is the safety property: an old
+justfile, a hand-typed `just test-rust`, a crashed classifier, a shell that dropped the variable, or
+simply not passing `--select-crates` all land on the expensive answer, never a cheap one. Same
+fail-closed shape as the class rule, one level down.
+
+**Levers measured and rejected.**
+
+- **sccache gives nothing across worktrees, and it cannot.** Live hit rate over ~1000 observed
+  requests: **0.00 %**, with 578 of 943 calls non-cacheable for the reason `incremental` (most builds
+  on the box run with incremental compilation on, which sccache refuses). It is not broken - touching
+  and rebuilding one crate *in the same worktree* hits. But compiling byte-identical source with a
+  byte-identical argv from a **different working directory** misses, every time; `SCCACHE_BASEDIR` does
+  not change that, and neither does `--remap-path-prefix`. sccache 0.18 keys Rust entries on the
+  working directory, so four parallel worktrees at four paths can never share an entry. Leave it on -
+  CLAUDE.md's rule against clearing it stands, and it does help a repeated build at one path - but stop
+  counting it as a reason parallel worktrees are cheap. **The APFS target clone is the mechanism that
+  actually works.**
+- **Acceptance stays on plain `cargo test`, for a measured structural reason.** Moving it under nextest
+  would put it in the `heavy-serial` group (`.config/nextest.toml` pins `package(hk-e2e)` at
+  `max-threads = 1`), making every acceptance test run strictly one at a time; today `cargo test` runs
+  each binary's tests in parallel and the binaries in sequence. That is a slowdown unless the group
+  membership is also changed, and changing it is precisely the timing-flake risk `.config/nextest.toml`
+  documents at length. The change worth *measuring* first is smaller and separate: CLAUDE.md already
+  says the plain-`cargo test` paths "want `-- --test-threads 6`" and nothing passes it, so acceptance
+  runs the most timing-sensitive tests in the repo at 28-way parallelism on a box T-436 measured as
+  both slower and flakier at 28. That is a reliability question - 17 gate failures are in the log, each
+  costing a full re-gate - and it deserves its own measured ticket rather than an unmeasured edit here.
+
+##### The rest of T-543: the UI skip, the ledgers, and the guard that fires by itself
+
+**`just test-ui` is skipped for a `full` diff with no `ui/` path** (`HK_GATE_SKIP_UI`, set by
+`gate.py`, printed before anything runs). Measured by the diagnostic pass at **154 s on every
+crate gate**. It is sound because `ui/` has no generated input: `npm run build` is esbuild over
+`ui/src`, `typecheck` is `tsc --noEmit` over the same tree, and `npm test` is node over `ui/test`.
+None reads a Rust artifact, so a `crates/`-only change cannot alter their answer. **What still runs
+is the part that could:** `just test-ui-e2e`, the browser tier over a real `hk serve`, stays in the
+`full` class's acceptance phase and is never skipped by this or anything else.
+
+This is not the T-358 defect it resembles. T-358 was a suite that *self*-skipped, silently, when
+node was missing — green by doing nothing. This skip is decided by the runner from the diff,
+printed, attributable, and unset-means-run.
+
+**`npm ci` only when the lockfile changed** (`just _npm-deps`). `npm ci` deletes `node_modules` and
+reinstalls it from scratch every time; the stamp records the lockfile's SHA-256 and is written
+*only after a successful install*, so a missing stamp, a mismatched stamp and a failed install all
+re-install. A half-installed tree cannot be mistaken for a good one.
+
+**Two ledgers and one guard, all append-only text — no database, no daemon.**
+
+- `$HACKRIFF_OPS/gate-timings.jsonl` — `py/hkpy/gatelog.py`, one line per gate run and one per
+  suite command: class, phase, affected crates, duration, exit code, load average.
+- `$HACKRIFF_OPS/landed.jsonl` — `ops/merge-runner.sh`, one line per landed ticket:
+  `{ticket, branch, first_commit_ts, merge_ts, land_minutes, gate_attempts}`. `gate_attempts` is
+  read from the `merge-attempts.txt` ledger the runner already keeps rather than counted a second
+  way, and `first_commit_ts` comes from the merge commit's **second parent**, so it survives the
+  branch and its worktree being deleted.
+- **`just gate-stats`** prints p50/p90 per class and per phase, and says whether any class's
+  rolling median is over budget. **`py/tests/test_gate.py` asserts the same budgets**, so a
+  slow-down fails a test instead of waiting for someone to notice.
+
+The guard is a **rolling median over the last 7 runs of a class, with a 5-run floor**, not a
+per-run bound, and the reason is this machine: one contended run says nothing (`cargo build -p
+hk-plugins --bins`, documented at ~0.05 s warm, measured at **500 s at load 211**), so a per-run
+bound would be noise, and a noisy guard gets muted. Fewer than 5 runs reports nothing at all —
+failing on an absence of evidence is the fastest way to get a guard switched off.
+
+**Sized but not done, with numbers, in case they are worth tickets.**
+
+- **204 integration test binaries**, each its own compile *and* link: hk-pipeline **47**, hk-dsp 25,
+  hk-api 17, hk-detect 16, hk-core 15, hk-e2e 15, hk-estimate 12, hk-demod 10, hk-classify 10,
+  hk-cli 6, hk-blocks 6, hk-store 5, hk-stream 4, hk-context 4, hk-recipe 3, hk-plugins 3, hk-gnss
+  3, hk-ml 2, hk-sim 1. Consolidating a crate's integration tests behind one `tests/main.rs` with
+  `mod` per current file gives roughly **10x fewer links** for that crate at no loss of coverage —
+  nextest still lists and runs each test individually, and its filtersets address `binary()`, so
+  `.config/nextest.toml`'s `binary(data_path)`, `binary(live_edge_tiles)` and the other
+  heavy-serial memberships **would have to be rewritten** as `test()` filters first. That
+  rewrite is the risk, and it is why this is sized rather than done: those memberships are the
+  repo's defence against the timing flakes, and getting one wrong is a silent loss.
+- **The timing flakes are a cycle-time cost, not only a quality one.** 17 gate failures are in the
+  merge log; each costs a full re-gate and a requeue, i.e. more than the 21.4 min median. T-430,
+  T-433 and T-446 remain open; T-537's fix — drive frames rather than wall-clock milliseconds — is
+  the precedent worth copying.
+
+##### The two levers T-543 rejected with numbers: the linker, and incremental-instead-of-sccache
+
+**`ld64.lld` is not faster than Apple's `ld` here — rejected.** Measured per target with
+`cargo rustc -p … -- -C link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld`, which changes the linker for
+**one** target and so does not invalidate the workspace the way a `RUSTFLAGS` change does. Six
+pairs, alternating, on the two most link-dominated targets available:
+
+| target | size | Apple `ld` | `ld64.lld` |
+|---|---|---|---|
+| `hk` binary (touch `bin/hk.rs`, 478 lines) | 47 MB | 1.33 / 1.35 / 1.38 s | 1.57 / 1.51 / 1.38 s |
+| `hk-pipeline::data_path` test binary | 28 MB | 1.94 / 2.29 / 2.23 s | 2.27 / 2.20 / 2.32 s |
+
+lld is equal-to-slightly-slower on both. Apple's shipped linker is `ld64-954` (the `ld-prime`
+generation), which is already fast; mold has no Mach-O backend and is not an option. Nothing to
+buy here. Worth re-measuring only if the toolchain changes.
+
+**`CARGO_INCREMENTAL=1` costs 21 GB per worktree — disqualifying at four worktrees, regardless of
+speed.** The proposal was reasonable on its face: sccache never hits (above), and `CARGO_INCREMENTAL=0`
+exists to serve it, so incremental might be free speed. Measured: a **partial** `-p hk-dsp` rebuild
+with `CARGO_INCREMENTAL=1` produced a **21 GB** `target/debug/incremental`, and free space on the dev
+Mac fell from 24 GB to 13 GB during the run — past CLAUDE.md's 20 GB floor, with three other agents
+on the box. The run was stopped and the space reclaimed. Four worktrees at that rate is 80+ GB the
+machine does not have.
+
+So `CARGO_INCREMENTAL=0` has a **second, independent justification** that has nothing to do with
+sccache: it is what keeps four worktree targets on this disk. The speed half of that A/B is
+therefore **unmeasured and not worth measuring** until the disk answer changes. For the record, the
+baseline it would have had to beat: `cargo nextest run -p hk-dsp --no-run` after touching
+`hk-dsp/src/lib.rs`, today's configuration, **54.6 / 47.9 s**.
+
+**A note on what these measurements cost.** Both A/Bs required whole-tree rebuilds because
+`RUSTFLAGS` and `CARGO_INCREMENTAL` are part of every crate's fingerprint, and a rebuilt APFS clone
+turns shared blocks private. Anyone repeating this should use a **dedicated throwaway worktree on
+an otherwise idle box**, watch `df` between runs, and prefer the per-target `cargo rustc` trick
+above wherever the question allows it — it answered the linker question for a few seconds of build
+instead of a few gigabytes.
