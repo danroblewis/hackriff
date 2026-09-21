@@ -3589,6 +3589,146 @@ fn a_retune_keeps_connected_stream_consumers_connected() {
     stop_server(serving);
 }
 
+/// T-529 — **`POST /api/control/window`: one user retune is ONE device action.**
+///
+/// A retune to a region names a capture *configuration*: a centre and a span. The client used to
+/// commit it as `POST /api/control/rate` then `POST /api/control/center`, ~1.5 ms apart, and each
+/// route completed the half the caller had not named from the tuning **in force**. One press
+/// therefore commanded two windows, and the first of them — the *old* centre at the *new* rate —
+/// is a window nobody asked for: reported by `/api/control/state`, captured into a whole segment
+/// of its own, and recorded in the coverage map as spectrum this device chose to observe.
+///
+/// This asserts the route by its **values** (docs/api.md, T-079): both halves land, both are
+/// required, the answer names the device action, and the whole press costs **one** re-plumb —
+/// against two for the split, which is the observable difference between one window and two.
+#[test]
+fn a_window_commits_centre_and_rate_as_one_device_action() {
+    let (_dir_guard, serving, addr) = start_server();
+    let before = get(addr, "/api/control/state").1;
+    assert_eq!(
+        before["tuning"]["sample_rate_hz"].as_f64(),
+        Some(FIXTURE_RATE_HZ),
+        "{before}"
+    );
+    let seg_before = before["run"]["segment"].as_u64().expect("a segment number");
+
+    // A centre the front end can really sit on, and a different rate: both halves move.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let want_center = step * (((FIXTURE_CENTER_HZ + 1e6) / step).round());
+    let want_rate = 4.8e6;
+    let (st, r) = post(
+        addr,
+        "/api/control/window",
+        &format!("{{\"center_hz\":{want_center:?},\"sample_rate_hz\":{want_rate:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // The centre is compared to under a hertz, not bit-for-bit: what the run reports back is the
+    // centre the front end **landed on**, re-read from the pipeline's applied window, and a device
+    // that quantises to its synthesiser grid (T-341) can answer a neighbouring double. A whole
+    // hertz is far inside one HackRF tuning step (~28.6 Hz), so this is still the value and not a
+    // relaxation — and every read after it is compared to `got_center` exactly.
+    let got_center = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+    assert!(
+        (got_center - want_center).abs() < 1.0,
+        "asked for {want_center} Hz and the window in force is {got_center} Hz: {r}"
+    );
+    assert_eq!(
+        r["tuning"]["sample_rate_hz"].as_f64(),
+        Some(want_rate),
+        "{r}"
+    );
+    // T-343's contract, on the new route too: the answer says a device action happened, which one,
+    // and which front end it moved.
+    assert_eq!(r["device"]["action"], json!("window"), "{r}");
+    assert_eq!(
+        r["device"]["id"],
+        get(addr, "/api/control/state").1["device"]["device_id"],
+        "the action must be recorded against the device the state names: {r}"
+    );
+    // ONE re-plumb for one press. Two posts cost two: the rate change re-plumbs at the old centre,
+    // then the centre change re-plumbs (or tunes in place) again.
+    assert_eq!(
+        r["run"]["segment"].as_f64(),
+        Some(seg_before as f64 + 1.0),
+        "a whole-window commit is one re-plumb, not one per half: {r}"
+    );
+
+    // And the window in force afterwards is the one that was asked for, whole.
+    let after = get(addr, "/api/control/state").1;
+    assert_eq!(
+        after["tuning"]["center_hz"].as_f64(),
+        Some(got_center),
+        "{after}"
+    );
+    assert_eq!(
+        after["tuning"]["sample_rate_hz"].as_f64(),
+        Some(want_rate),
+        "{after}"
+    );
+
+    // ---- both halves are REQUIRED: a half-stated window is the defect, not a shorthand ----
+    for body in [
+        format!("{{\"center_hz\":{want_center:?}}}"),
+        format!("{{\"sample_rate_hz\":{want_rate:?}}}"),
+        "{}".into(),
+    ] {
+        let (st, v) = post(addr, "/api/control/window", &body);
+        assert_eq!(
+            st, 400,
+            "a half-stated window must be refused: {body} -> {v}"
+        );
+        assert_eq!(v["code"], json!("invalid"), "{v}");
+    }
+    // Unknown fields are refused here as everywhere, so a typo is never silently a no-op.
+    let (st, v) = post(
+        addr,
+        "/api/control/window",
+        &format!(
+            "{{\"center_hz\":{want_center:?},\"sample_rate_hz\":{want_rate:?},\"span_hz\":1}}"
+        ),
+    );
+    assert_eq!(st, 400, "{v}");
+
+    // ---- an unreachable half refuses the WHOLE window, and the front end does not move ----
+    for body in [
+        r#"{"center_hz": 9.9e12, "sample_rate_hz": 4.8e6}"#,
+        r#"{"center_hz": 100800000.0, "sample_rate_hz": 4.0e7}"#,
+    ] {
+        let (st, v) = post(addr, "/api/control/window", body);
+        assert_eq!(st, 400, "{body} -> {v}");
+        assert_eq!(v["code"], json!("out_of_range"), "{v}");
+    }
+    let held = get(addr, "/api/control/state").1;
+    assert_eq!(
+        held["tuning"]["center_hz"].as_f64(),
+        Some(got_center),
+        "{held}"
+    );
+    assert_eq!(
+        held["tuning"]["sample_rate_hz"].as_f64(),
+        Some(want_rate),
+        "a refused window leaves BOTH halves where they were: {held}"
+    );
+
+    // ---- re-committing the window in force is accepted and moves nothing ----
+    let (st, r) = post(
+        addr,
+        "/api/control/window",
+        &format!("{{\"center_hz\":{want_center:?},\"sample_rate_hz\":{want_rate:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(
+        r["run"]["segment"].as_f64(),
+        Some(seg_before as f64 + 1.0),
+        "a window already in force must not re-plumb the run: {r}"
+    );
+
+    // ---- GET is not a device action's method ----
+    let (st, _) = get(addr, "/api/control/window");
+    assert_eq!(st, 405, "only POST commits a window");
+    stop_server(serving);
+}
+
 /// T-347 — **one client's Pause never freezes another client's stream.**
 ///
 /// The defect: `POST /api/control/pause` set `DisplaySettings.paused` on the **run**, and every

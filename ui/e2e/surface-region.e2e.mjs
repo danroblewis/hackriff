@@ -245,7 +245,7 @@ test("T-340's control, in the browser: no drag of any kind — region stroke inc
   await page.frames(5);
 
   const after = page.requests.slice(mark);
-  const device = after.filter((r) => /\/api\/control\/(center|rate|gains|bias_tee|baseband_filter|record)/.test(r.url));
+  const device = after.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter|record)/.test(r.url));
   assert.deepEqual(device.map((r) => `${r.method} ${r.url}`), [],
     "a drag reached a device route: no pointer stream may command the radio");
   // Non-vacuity: the drags did reach the page and made it work, so an empty device list is a

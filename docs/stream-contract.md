@@ -439,8 +439,27 @@ answered as **HTTP 403** with no WebSocket upgrade (the `101` response is writte
 after `subscribe` succeeds, so a refusal never upgrades the connection). Every other gate (class
 clamping, gated-spectrum rate/size, §6) applies unchanged; the bridge adds no gating of its own.
 
+**A consumer that arrives *during* the gap is carried too (T-530).** The carry-over above is for a
+connection that is already attached; one that opens while the producer is between publishers used
+to be told the stream had finished. It has not: a producer that will offer a successor under the
+same id says so (`Publisher::finish_between_windows`), a subscription refused in that state is
+`StreamError::BetweenWindows` rather than `StreamError::Finished`, and the `/ws/<id>` handshake
+**waits up to 2 s for the successor and upgrades on it** — the same wait `watch_peer` already does,
+for the same reason. Past that bound it is refused **`503 replumbing`** (`Retry-After: 1`), which
+means *not now*; past `BETWEEN_WINDOWS_GRACE` (5 s) the promise has failed and it is
+`StreamError::Finished` again. **`410` therefore still means the stream is really over** — a
+producer that is done calls plain `finish` — and that distinction is the point: it is what stops a
+re-plumb reading as a dead server to anything health-checking the handshake.
+
+**A refused subscription never touches the caller's transport** (T-530). `subscribe` checks
+admission twice — once before the consumer exists, once after its writer thread is spawned — and
+the second refusal used to run the caller's `closer`, i.e. shut down the very socket the refusal
+was about to be written to. A `/ws` handshake that lost that race (the publisher finished between
+the two checks — exactly what a re-plumb does) saw an aborted connection instead of an answer.
+
 **Other refusals, also plain HTTP before any upgrade:**
-- **HTTP 503** at `PublisherConfig::max_consumers` (`StreamError::TooManyConsumers`);
+- **HTTP 503** at `PublisherConfig::max_consumers` (`StreamError::TooManyConsumers`), and
+  `503 replumbing` between windows (above);
 - **HTTP 410** for a stream that has already finished (`StreamError::Finished`);
 - **HTTP 404** for an unknown `stream_id`;
 - **HTTP 426** for a request to `/ws/<id>` that isn't a valid WebSocket upgrade (missing

@@ -35,6 +35,9 @@ pub struct RadioControl {
     lose_center: AtomicBool,
     /// T-508: every read fails (see [`RadioControl::fail_reads`]).
     fail_reads: AtomicBool,
+    /// T-525: reads that do not look at the control mailbox (see
+    /// [`RadioControl::hold_changes`]).
+    hold_changes: AtomicU64,
     /// `(stream index of the first block, centre, rate)` for every applied window change.
     pub windows: Mutex<Vec<(u64, f64, f64)>>,
     /// Receive-side control calls, in order.
@@ -76,6 +79,23 @@ impl RadioControl {
     /// The call is still logged, so a test can see the front end *was* commanded.
     pub fn lose_center(&self, on: bool) {
         self.lose_center.store(on, Ordering::SeqCst);
+    }
+
+    /// **A slow control path: the next `n` reads do not look at the mailbox** (T-525).
+    ///
+    /// Not a contrived fault either — it is the ordinary shape of a front end whose control writes
+    /// take longer than a block. [`hk_core::ControlMailbox`] **coalesces**: `take` returns every
+    /// change posted since the last one, with later fields overwriting earlier ones. So while a
+    /// posted change is waiting to be taken, a second change to the same field *replaces* it and
+    /// the first never reaches the tuning — the device goes straight to the second window and
+    /// never reports the first. A segment told to expect the first then waits for a window that
+    /// no longer exists, which before T-525 could only end at
+    /// [`hk_pipeline::WINDOW_SETTLE_TIMEOUT`].
+    ///
+    /// Counted in reads rather than seconds so the test is deterministic: this radio is pausable
+    /// and read on demand, so "n reads" is a fact about the script, not about the clock.
+    pub fn hold_changes(&self, n: u64) {
+        self.hold_changes.store(n, Ordering::SeqCst);
     }
 
     /// **Every read fails with a device error** (T-508) — a front end that is gone: unplugged, or
@@ -213,6 +233,7 @@ impl Radio {
             emitted: AtomicU64::new(0),
             lose_center: AtomicBool::new(false),
             fail_reads: AtomicBool::new(false),
+            hold_changes: AtomicU64::new(0),
             windows: Mutex::new(vec![(0, center_hz, rate_hz)]),
             calls: Mutex::new(Vec::new()),
         });
@@ -300,7 +321,15 @@ impl Source for Radio {
             });
         }
         let index = c.emitted();
-        if let Some(p) = c.mailbox.take(&mut self.seen) {
+        // T-525: a control path that takes longer than a block. The mailbox is left alone, so a
+        // change posted behind one already waiting coalesces over it.
+        let held = c
+            .hold_changes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n > 0).then(|| n - 1)
+            })
+            .is_ok();
+        if let Some(p) = (!held).then(|| c.mailbox.take(&mut self.seen)).flatten() {
             let mut next = self.provenance.get().clone();
             p.apply_to(&mut next.tune);
             let flags = Discontinuity::between(self.provenance.get(), &next);

@@ -256,6 +256,16 @@ test-group = 'heavy-serial'
 filter = 'package(hk-pipeline) and binary(live_edge_tiles)'
 test-group = 'heavy-serial'
 
+# T-530: the re-plumb handshake test drives a whole pipeline AND a real HTTP/WebSocket server on a
+# real port, then makes ~50 loopback handshakes across a re-plumb — the same two resources every
+# other name in this group contends for. Per the rule above, its waits are measured rather than
+# guessed: six consecutive runs took 7.3-7.5 s wall, of which 5 s is the probe window it chooses;
+# the gap probes answered in 0.4 s each against a 60 s deadline, and the one bound it does assert
+# (a finished run's 410 inside 1.5 s) was measured at under 10 ms.
+[[profile.default.overrides]]
+filter = 'package(hk-pipeline) and binary(replumb_spectrum_handshake)'
+test-group = 'heavy-serial'
+
 # =========================================================================================
 # THE CI RUNNER IS NOT THIS BOX (T-436).
 #

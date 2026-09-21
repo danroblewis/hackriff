@@ -135,6 +135,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
     ("POST", "/api/control/rate"),
+    // T-529: centre AND rate as one device action, because a user retune names a whole capture
+    // configuration and committing the halves separately commands a window nobody asked for.
+    ("POST", "/api/control/window"),
     ("POST", "/api/control/gains"),
     ("POST", "/api/control/bias_tee"),
     ("POST", "/api/control/baseband_filter"),
@@ -383,6 +386,16 @@ pub type StatusFn = Arc<dyn Fn() -> Value + Send + Sync>;
 /// hundreds of servers; past it the thread is abandoned, counted and reported rather than waited
 /// on forever.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// T-530: how long a `/ws/{stream_id}` handshake that lands **between windows** waits for the
+/// successor publisher before answering `503 replumbing`.
+///
+/// It bounds one connection thread, not the client's patience: past it the client is told to retry
+/// rather than held. Two seconds is an order of magnitude over the measured re-plumb gap (0.17 s
+/// after T-525) and well under [`hk_stream::BETWEEN_WINDOWS_GRACE`], so a producer that never
+/// offers its successor degrades to `503` here and then, once that grace expires, to the honest
+/// `410`.
+const REPLUMB_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
 
 /// Connections accepted and not yet finished: one entry per handler thread, holding a cloned
 /// socket handle that [`Server::shutdown`] closes to unblock it (T-236).
@@ -1244,41 +1257,75 @@ fn websocket(mut stream: TcpStream, shared: &Shared, req: &Request, stream_id: &
     let Some(key) = req.header("sec-websocket-key").map(str::trim) else {
         return respond_error(&mut stream, 400, "missing Sec-WebSocket-Key");
     };
-    let Some(offer) = shared.state.streams.offer(stream_id) else {
+    let Some(mut offer) = shared.state.streams.offer(stream_id) else {
         return respond_error(&mut stream, 404, "no such stream");
     };
-    let response = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Accept: {}\r\n\r\n",
-        tungstenite::handshake::derive_accept_key(key.as_bytes())
-    )
-    .into_bytes();
+    let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
     let peer = stream
         .peer_addr()
         .map_or_else(|_| "unknown".into(), |a| a.to_string());
     let _ = stream.set_write_timeout(None);
     let label = format!("ws:{peer}");
-    match bridge::attach(&offer.handle, &stream, label.clone(), response) {
-        // T-417: the connection is watched against the *stream id*, not one publisher of it, so a
-        // retune (which offers a new publisher under the same id) does not drop the browser.
-        Ok(attached) => bridge::watch_peer(
-            &shared.state.streams,
-            stream_id,
-            offer,
-            attached,
-            stream,
-            label,
-        ),
-        Err(StreamError::LocalOnly { .. }) => respond_error(
-            &mut stream,
-            403,
-            "stream is local-only (own-key-decrypted); it is never served over the bridge",
-        ),
-        Err(StreamError::TooManyConsumers { max }) => {
-            respond_error(&mut stream, 503, &format!("consumer limit {max} reached"))
-        }
-        Err(StreamError::Finished) => respond_error(&mut stream, 410, "stream finished"),
-        Err(_) => respond_error(&mut stream, 500, "subscription failed"),
+    let deadline = Instant::now() + REPLUMB_HANDSHAKE_WAIT;
+    loop {
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .into_bytes();
+        return match bridge::attach(&offer.handle, &stream, label.clone(), response) {
+            // T-417: the connection is watched against the *stream id*, not one publisher of it,
+            // so a retune (which offers a new publisher under the same id) does not drop the
+            // browser.
+            Ok(attached) => bridge::watch_peer(
+                &shared.state.streams,
+                stream_id,
+                offer,
+                attached,
+                stream,
+                label,
+            ),
+            // T-530: the publisher finished but its producer said a successor is coming under this
+            // id — the stream is between windows, not over. An arriving consumer gets the same
+            // treatment `watch_peer` gives one that was already attached: wait for the next offer
+            // and subscribe to that. The gap a re-plumb leaves was measured at ~0.17 s (T-525), so
+            // this normally ends in a `101` and the client never learns anything happened.
+            Err(StreamError::BetweenWindows) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match shared
+                    .state
+                    .streams
+                    .wait_for_offer_after(stream_id, offer.generation, left)
+                {
+                    Some(next) => {
+                        offer = next;
+                        continue;
+                    }
+                    // Still between windows when the wait ran out. `503` is "not now": a client
+                    // that retries is right to, and `410` — the resource is permanently gone —
+                    // would be a lie about a run that is still capturing.
+                    None => respond_json_with(
+                        &mut stream,
+                        503,
+                        &json!({
+                            "error": "the stream is moving to a new window; try again",
+                            "code": "replumbing",
+                        }),
+                        "Retry-After: 1\r\n",
+                    ),
+                }
+            }
+            Err(StreamError::LocalOnly { .. }) => respond_error(
+                &mut stream,
+                403,
+                "stream is local-only (own-key-decrypted); it is never served over the bridge",
+            ),
+            Err(StreamError::TooManyConsumers { max }) => {
+                respond_error(&mut stream, 503, &format!("consumer limit {max} reached"))
+            }
+            Err(StreamError::Finished) => respond_error(&mut stream, 410, "stream finished"),
+            Err(_) => respond_error(&mut stream, 500, "subscription failed"),
+        };
     }
 }
 
