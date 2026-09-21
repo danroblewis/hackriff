@@ -32,8 +32,8 @@ use hk_store::Pyramid;
 use serde_json::{Value, json};
 
 use crate::query::{
-    ApiError, Params, Region, bad, count, explanations_json, parse_inventory_query, parse_region,
-    region_coverage, ts_s,
+    ApiError, Params, Region, bad, count, explanations_json, parse_inventory_query_limited,
+    parse_region, region_coverage, ts_s,
 };
 
 /// Events served per page by default.
@@ -224,8 +224,12 @@ pub fn events_json(
     };
     // The same filters as `/api/inventory`, over the same predicate — the surfaces must never
     // disagree about which rows a box holds. `f_lo`/`f_hi`/`t0`/`t1` were required above, so the
-    // freq and time filters are always set here.
-    let mut query = parse_inventory_query(q)?;
+    // freq and time filters are always set here. `limit` is validated against this route's own
+    // bound (T-592): `/api/inventory`'s tighter `MAX_API_INVENTORY_LIMIT` would reject up to
+    // `MAX_EVENTS_LIMIT`, which this route documents and accepts. The parsed `query.limit` itself
+    // is discarded below in favour of `MAX_EVENT_EMITTERS` — it pages emitters expanded, not the
+    // events this route serves.
+    let mut query = parse_inventory_query_limited(q, MAX_EVENTS_LIMIT)?;
     query.limit = MAX_EVENT_EMITTERS;
     query.offset = 0;
     let page = repo.query_inventory(&query).map_err(|_| failed())?;

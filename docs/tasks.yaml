@@ -19119,7 +19119,7 @@ tasks:
   - id: T-592
     milestone: M2-hardening
     title: /api/events refuses its own documented limit - 501..2000 is a 400
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -19139,6 +19139,29 @@ tasks:
       documented range has never been tested at its edges. Whichever bound wins, test the boundary
       values - the last accepted and the first rejected - not just a value in the middle. That is
       the gap that let a doc/impl contradiction live on a core interface.
+    notes: |
+      DONE 2026-09-21 (branch task-t592). 2000 is the right bound - docs/api.md already documented
+      it, and MAX_EVENTS_LIMIT = 2_000 was the correct call for the ticket's own note: /api/events
+      catalogues every past event, not what is live in a window, so it may legitimately want a
+      bigger page than /api/inventory's 500-row cap.
+      THE FIX. events_json already validated `limit` correctly against MAX_EVENTS_LIMIT at its own
+      `count(q, "limit", DEFAULT_EVENTS_LIMIT, MAX_EVENTS_LIMIT)` call - the bug was purely that it
+      then called the shared `parse_inventory_query(q)` a second time to pick up every other
+      `/api/inventory` filter, and that function re-parsed the SAME `limit` parameter against its
+      own MAX_API_INVENTORY_LIMIT (500), even though the `InventoryQuery.limit` it produces is
+      immediately discarded and replaced with MAX_EVENT_EMITTERS two lines later. Split
+      `parse_inventory_query` into a public wrapper (unchanged, still bounds at 500) and
+      `parse_inventory_query_limited(q, max_limit)`, and had events.rs call the latter with
+      MAX_EVENTS_LIMIT. No behaviour changed for /api/inventory or /api/tiles/events (both still
+      call the public wrapper).
+      TESTS: crates/hk-cli/tests/api_contract.rs now asserts the boundary, not the default -
+      limit=2000 (last accepted) returns 200, limit=2001 (first rejected) returns 400.
+      RED WHEN BROKEN: reverted the query.rs/events.rs fix locally and reran
+      `api_contract_smoke_flow` - it failed on the limit=2000 assertion with `limit must be an
+      integer in 1..=500`, confirming the new boundary test catches the defect the ticket
+      describes. Restored the fix; the test passes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      Ran `just precheck hk-api hk-cli` clean.
     effort: high
     depends_on: [T-586]
     use_cases: [AWARE-011]

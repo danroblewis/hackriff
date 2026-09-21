@@ -1881,6 +1881,26 @@ fn events_and_presence_serve_the_durable_catalogue() {
         one["total"], v["total"],
         "a page never changes the total: {one}"
     );
+    // `limit`'s documented range is 1..=2000 (T-592: `events_json` used to re-validate the same
+    // `limit` parameter against `/api/inventory`'s tighter 500-row cap via `parse_inventory_query`,
+    // so every value from 501 to 2000 was documented as valid and answered with a 400). Assert the
+    // boundary, not a value in the middle: the last accepted value and the first rejected one.
+    let (st, at_max) = get(
+        addr,
+        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=2000"),
+    );
+    assert_eq!(
+        st, 200,
+        "limit=2000 is the documented max and must be accepted: {at_max}"
+    );
+    let (st, over_max) = get(
+        addr,
+        &format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}&limit=2001"),
+    );
+    assert_eq!(
+        st, 400,
+        "limit=2001 is one past the documented max and must be refused: {over_max}"
+    );
     for bad in [
         format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
         format!("/api/events?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),

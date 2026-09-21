@@ -993,6 +993,19 @@ pub fn parse_time_window(q: &Params) -> Result<Option<TimeRange>, ApiError> {
 /// Parses the `/api/inventory` filters into an [`InventoryQuery`]. Identity access is always
 /// [`IdentityAccess::Standard`]: no request parameter can grant the own-traffic authorisation.
 pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
+    parse_inventory_query_limited(q, MAX_API_INVENTORY_LIMIT)
+}
+
+/// As [`parse_inventory_query`], but with the `limit` parameter's own accepted range set by the
+/// caller (T-592). `/api/events` shares every other `/api/inventory` filter through this parser,
+/// but its own `limit` pages **events**, not emitters, and is documented and bounded separately
+/// (`MAX_EVENTS_LIMIT`) — the emitter-scoped `InventoryQuery.limit` this produces is discarded and
+/// replaced with `MAX_EVENT_EMITTERS` by its one caller, but the raw `limit` parameter still has to
+/// validate in range rather than being rejected by `/api/inventory`'s tighter cap of the same name.
+pub(crate) fn parse_inventory_query_limited(
+    q: &Params,
+    max_limit: usize,
+) -> Result<InventoryQuery, ApiError> {
     let freq = match optional_pair(q, "f_lo", "f_hi")? {
         None => None,
         Some((lo, hi)) if lo >= 0.0 && hi > lo && hi <= 1e12 => Some(FreqRange::new(lo, hi)),
@@ -1019,7 +1032,7 @@ pub fn parse_inventory_query(q: &Params) -> Result<InventoryQuery, ApiError> {
         .map(|s| s.parse::<IdentityScheme>())
         .transpose()
         .map_err(|_| bad("unknown identity scheme"))?;
-    let limit = count(q, "limit", DEFAULT_INVENTORY_LIMIT, MAX_API_INVENTORY_LIMIT)?;
+    let limit = count(q, "limit", DEFAULT_INVENTORY_LIMIT, max_limit)?;
     let offset = match nonempty(q, "cursor") {
         None => 0,
         Some(c) => c
