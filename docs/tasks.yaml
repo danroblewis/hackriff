@@ -4050,7 +4050,7 @@ tasks:
     milestone: M3
     title: 'Verifier psk-qam ALRT is monotone in constellation size on every input:
       it re-ranks 8psk -> qam64 on 100%% of bpsk and qpsk snippets'
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: M3A
@@ -4861,7 +4861,7 @@ tasks:
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
-    status: in-progress
+    status: done
     branch: task-t273
     priority: normal
     deps:
@@ -6534,7 +6534,7 @@ tasks:
     milestone: M2-hardening
     title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
       by a discounted merge can skip re-characterisation
-    status: in-progress
+    status: done
     priority: low
     deps:
     - T-329
@@ -16162,7 +16162,7 @@ tasks:
   - id: T-541
     milestone: MLIVE
     title: Degrade, don't crash - a device or retune error must never take the server down or look dead to a supervisor
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16617,7 +16617,7 @@ tasks:
   - id: T-559
     milestone: M2-hardening
     title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: CI
     model: sonnet
@@ -17018,7 +17018,7 @@ tasks:
   - id: T-549
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the search trace - what the engine tried, what it pruned and why, so the decision tree is inspectable rather than a black box'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17081,7 +17081,7 @@ tasks:
   - id: T-550
     milestone: MAUTO
     title: 'MAUTO-DESIGN: how an unknown stays unknown - the negative-result contract when the search finds nothing, and the guard against a search that always finds something'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17992,7 +17992,7 @@ tasks:
   - id: T-571
     milestone: MLIVE
     title: Coarse view-lattice tiles are folded ON DEMAND at read time - up to 1024 producer tiles per tile - instead of maintained live
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -18623,7 +18623,7 @@ tasks:
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: todo
+    status: done
     priority: normal
     parallel_group: OPS
     model: sonnet
@@ -18813,7 +18813,7 @@ tasks:
   - id: T-587
     milestone: M2-hardening
     title: An artefact reads as a LABELLED artefact in the UI - DC spike, image of X, IM3 product - not as a mystery signal
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     model: sonnet
@@ -19250,6 +19250,42 @@ tasks:
       means "not LO-relative", not "real").
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-605
+    milestone: M2-hardening
+    title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-321]
+    use_cases: []
+    acceptance: |
+      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
+      has chased it:
+        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
+        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
+        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
+      A storage-engine error is being caught, printed and continued past. The suite stays green, so
+      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
+      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
+      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
+      per analogue session, at both `identify` and the full-window path, and its own agent flagged
+      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
+      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
+      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
+      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
+      duplicate that should be an upsert, or a genuinely new characterisation that should replace
+      the first? T-335 established that a re-characterisation must happen when the evidence changed;
+      if the second write is that, dropping it on a UNIQUE violation silently loses the very
+      re-characterisation T-335 added.
+      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
+      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
+      the wrong reason.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
+      one emission_features row per characterisation that should exist, and zero swallowed storage
+      errors over an acceptance run. Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
