@@ -31,13 +31,18 @@ use std::collections::BTreeMap;
 
 use hk_e2e::fixture::Role;
 use hk_e2e::{Fixture, SynthRequest, TruthItem, synth_or_skip};
-use hk_model::retune::{RetuneObservation, RetuneSlope, RetuneSummary, RetuneTolerance, classify};
-use hk_model::{Detection, FreqRange, Region, Repository};
+use hk_model::retune::{
+    RETUNE_MIN_CENTRES, RetuneObservation, RetuneSlope, RetuneSummary, RetuneTolerance, classify,
+};
+use hk_model::{
+    Detection, FreqRange, InventoryQuery, Region, RelationKind, RelationVisibility, Repository,
+};
 
 use crate::blind::{BlindRun, BlindSource, blind_replay};
 use crate::common::*;
 
 const T586: &str = "T-586";
+const T598: &str = "T-598";
 
 // ---------------------------------------------------------------------------------------------
 // A-priori thresholds. Fixed here, with their arithmetic, before the suite was ever run against
@@ -216,6 +221,9 @@ fn t586_retune_diversity_separates_emitters_from_receiver_artefacts() {
     the_two_classes_are_not_confused(&s);
     the_verdict_is_recorded_on_the_detections_existing_flags(&s);
     the_survey_produced_an_inventory(&s);
+    // T-598: the verdict written down, and the inventory it changes.
+    the_verdict_is_persisted_on_the_stored_detections(&s);
+    the_inventory_shows_one_artefact_not_one_per_centre(&s);
 }
 
 /// The device really was retuned, and the run really did see several centres.
@@ -427,10 +435,12 @@ fn the_verdict_is_recorded_on_the_detections_existing_flags(s: &Survey) {
             verdict[i] = Some(g.slope);
         }
     }
-    // What the single-capture flaggers already knew, before any retune was considered. This is
-    // the gap the cross-centre check closes, printed rather than asserted: DC leakage is caught by
-    // the DC rule from one capture, but an internal spur at an arbitrary IF offset matches no
-    // single-capture rule and is indistinguishable from an emission until the centre moves.
+    // The spur reason each stored line now reads as. T-598 made the cross-centre verdict part of
+    // that record, so this prints the measured reason OR the standing retune verdict — which is
+    // why the +370 kHz family reads `lo-relative` here. Before it was persisted this line read
+    // `["-", "-", "-"]` for that family: DC leakage is caught by the DC rule from one capture, but
+    // an internal spur at an arbitrary IF offset matches no single-capture rule and is
+    // indistinguishable from an emission until the centre moves. Printed, never asserted.
     for g in &s.summary.groups {
         let already: Vec<&str> = g
             .members
@@ -442,7 +452,7 @@ fn the_verdict_is_recorded_on_the_detections_existing_flags(s: &Survey) {
             })
             .collect();
         eprintln!(
-            "[{T586}]   {:>9} invariant {:>12.1} Hz: single-capture spur reasons {already:?}",
+            "[{T586}]   {:>9} invariant {:>12.1} Hz: stored spur reasons {already:?}",
             g.slope.as_str(),
             g.invariant_hz
         );
@@ -526,4 +536,153 @@ fn the_fixture_layout_is_the_one_the_thresholds_assume() {
         centres.len(),
         sorted.iter().map(|f| f / 1e6).collect::<Vec<_>>()
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-598: the verdict, persisted. T-586 computed it and threw it away, so the inventory went on
+// listing one LO-relative spur as one emitter per centre — the user's field report (d). These two
+// checks are over the STORED record, after the run, through the same `/api/inventory` a client
+// reads.
+// ---------------------------------------------------------------------------------------------
+
+/// The verdict survives the run: every detection of an artefact family carries `lo-locked` on its
+/// own append-only verdict record, and every detection of a real emitter carries the weak
+/// `absolute` claim with no flag of its own.
+fn the_verdict_is_persisted_on_the_stored_detections(s: &Survey) {
+    let repo = repo(&s.run.dir.0);
+    let (mut lo_locked, mut absolute) = (0usize, 0usize);
+    for d in &s.dets {
+        let Some(v) = repo.detection_retune(d.id).expect("verdict read") else {
+            continue;
+        };
+        assert!(
+            v.centres >= RETUNE_MIN_CENTRES,
+            "[{T598}] a verdict was stored on {} centres",
+            v.centres
+        );
+        match v.slope {
+            RetuneSlope::LoLocked => {
+                lo_locked += 1;
+                let stored = repo.detection(d.id).expect("detection");
+                assert!(
+                    stored.flags.spur_candidate,
+                    "[{T598}] the stored {:.4} MHz line does not read as a spur candidate",
+                    d.f_center_hz / 1e6
+                );
+            }
+            RetuneSlope::Absolute => {
+                absolute += 1;
+                assert_eq!(v.flag_bits, 0, "[{T598}] absolute implies no flag bits");
+            }
+            RetuneSlope::Image => {}
+        }
+    }
+    eprintln!(
+        "[{T598}] stored verdicts: {lo_locked} lo-locked, {absolute} absolute, over {} detections",
+        s.dets.len()
+    );
+    assert!(
+        lo_locked >= REQUIRED_ARTEFACTS * REQUIRED_CENTRES,
+        "[{T598}] only {lo_locked} detections were recorded LO-relative; \
+         {REQUIRED_ARTEFACTS} families x {REQUIRED_CENTRES} centres were expected"
+    );
+    assert!(
+        absolute >= REQUIRED_EMITTERS * REQUIRED_CENTRES,
+        "[{T598}] only {absolute} detections were recorded absolute-invariant"
+    );
+}
+
+/// **The fix, in counts.** One LO-relative spur over N centres is **one** artefact row in the
+/// inventory a client sees, not N emitters — while every real emitter is unchanged in number
+/// *and* in absolute frequency.
+///
+/// It is non-vacuous by construction: the same query with `relations=all` must still return the N
+/// sightings (nothing was deleted), so the collapse is a relationship and the count it collapses
+/// is asserted to be more than one. Without the write-back the two counts are equal and the shown
+/// count is N.
+fn the_inventory_shows_one_artefact_not_one_per_centre(s: &Survey) {
+    let repo = repo(&s.run.dir.0);
+    let all = inventory(
+        &repo,
+        InventoryQuery {
+            relations: RelationVisibility::All,
+            ..InventoryQuery::default()
+        },
+    );
+    let shown_centres: Vec<f64> = s
+        .run
+        .api_rows
+        .iter()
+        .filter_map(|r| r["f_center_hz"].as_f64())
+        .collect();
+    let near = |centres: &[f64], f: f64| {
+        centres
+            .iter()
+            .filter(|c| (**c - f).abs() <= MATCH_TOL_HZ)
+            .count()
+    };
+    let all_centres: Vec<f64> = all.iter().map(|e| e.emitter.f_center_hz).collect();
+
+    // Every real emitter: one row, at its own absolute frequency, unchanged.
+    for f in truth_emitters(&s.fixture).keys() {
+        let f_hz = hz(*f);
+        assert_eq!(
+            near(&shown_centres, f_hz),
+            1,
+            "[{T598}] truth emitter {:.4} MHz is not exactly one shown row (shown centres {:?})",
+            f_hz / 1e6,
+            shown_centres.iter().map(|c| c / 1e6).collect::<Vec<_>>()
+        );
+    }
+
+    // Every LO-relative family: one row for the family, however many centres saw it.
+    for offset in truth_artefact_offsets(&s.fixture).keys() {
+        let off_hz = hz(*offset);
+        let places: Vec<f64> = s.summary.los_hz.iter().map(|lo| lo + off_hz).collect();
+        let kept: usize = places.iter().map(|f| near(&all_centres, *f)).sum();
+        let shown: usize = places.iter().map(|f| near(&shown_centres, *f)).sum();
+        eprintln!(
+            "[{T598}] artefact at LO offset {:.1} kHz: {kept} sightings kept, {shown} shown",
+            off_hz / 1e3
+        );
+        assert!(
+            kept >= 2,
+            "[{T598}] the artefact at LO offset {:.1} kHz left only {kept} row(s) to collapse: \
+             there is nothing for this assertion to prove",
+            off_hz / 1e3
+        );
+        assert_eq!(
+            shown,
+            1,
+            "[{T598}] the artefact at LO offset {:.1} kHz is shown as {shown} emitters, not one \
+             (its {kept} sightings are at {:?} MHz)",
+            off_hz / 1e3,
+            places.iter().map(|f| f / 1e6).collect::<Vec<_>>()
+        );
+        // The sightings are related, not deleted: each hidden one names the row that represents
+        // the family and discloses the arithmetic.
+        let hidden: Vec<_> = all
+            .iter()
+            .filter(|e| {
+                places
+                    .iter()
+                    .any(|f| (e.emitter.f_center_hz - f).abs() <= MATCH_TOL_HZ)
+            })
+            .filter(|e| {
+                !shown_centres
+                    .iter()
+                    .any(|c| (*c - e.emitter.f_center_hz).abs() <= MATCH_TOL_HZ)
+            })
+            .collect();
+        assert_eq!(hidden.len(), kept - 1);
+        for e in hidden {
+            let rel = repo.emitter_relations(e.emitter.id).expect("relations");
+            assert!(
+                rel.iter()
+                    .any(|r| r.kind == RelationKind::RetuneSiblingOf && r.active),
+                "[{T598}] the hidden sighting at {:.4} MHz defers for some other reason: {rel:?}",
+                e.emitter.f_center_hz / 1e6
+            );
+        }
+    }
 }
