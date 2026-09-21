@@ -115,3 +115,38 @@ def test_a_commit_field_is_never_silently_a_number(records) -> None:
         f"commit SHAs that YAML will read as numbers: {unquoted}. Quote them — an all-digit short "
         "SHA becomes an int, and a leading zero becomes octal (0567143 -> 192099)."
     )
+
+
+def test_effort_is_a_known_tier_and_core_interface_never_goes_to_a_cheap_model(records) -> None:
+    """`effort:` records the complexity tier chosen alongside `model:` (T-563).
+
+    Reasoning time was measured at 184 h against 144 h for ALL tool and build time
+    on 2026-09-20, because nearly every agent ran Opus at high effort regardless of
+    the work. The field is advisory - the Agent tool exposes `model` but no effort
+    parameter - so it exists to make the choice reviewable rather than implicit.
+
+    Note what is NOT asserted: core_interface tickets may sit at `medium`, and 69 of
+    them do. CLAUDE.md's rule is about the MODEL - core interfaces and the real-time
+    path never go to Sonnet or Haiku alone - not about effort. A well-specified
+    change to a core interface, whose mechanism a prior ticket already measured, is
+    legitimately Opus-at-medium.
+    """
+    allowed = {"low", "medium", "high", "xhigh"}
+    cheap = {"sonnet", "haiku"}
+    for tid, rec in records:
+        effort = rec.get("effort")
+        if effort is not None:
+            assert effort in allowed, f"{tid}: unknown effort {effort!r}"
+        # The rule governs work about to be HANDED OUT, so it applies to open tickets.
+        # One historical exception stands on purpose: T-370 is core_interface and was
+        # assigned sonnet; it landed inside the T-502 batch, which measured its premise
+        # to be wrong and correctly changed no contract. Rewriting that record would be
+        # tidying history rather than learning from it.
+        if rec.get("status") in {"done", "cancelled", "deferred"}:
+            continue
+        if rec.get("core_interface") == "true" and rec.get("model") in cheap:
+            raise AssertionError(
+                f"{tid} is core_interface but assigned model {rec['model']!r}; "
+                "CLAUDE.md forbids core interfaces and the real-time path going to "
+                "Sonnet or Haiku alone"
+            )
