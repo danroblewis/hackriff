@@ -85,8 +85,10 @@ health(){
        "http://127.0.0.1:$PORT/ws/spectrum/live?token=$TOK")
   local st cap note
   st=$(curl -s -m5 -H "Authorization: Bearer $TOK" "http://127.0.0.1:$PORT/api/status")
-  cap=$(printf '%s' "$st" | sed -n 's/.*"capture":"\([a-z]*\)".*/\1/p')
-  note=$(printf '%s' "$st" | sed -n 's/.*"capture_note":"\([^"]*\)".*/\1/p')
+  # The body is served pretty-printed or compact depending on the route's shaping, so allow
+  # the space after the colon; a regex that silently matched nothing would read as "running".
+  cap=$(printf '%s' "$st" | sed -n 's/.*"capture": *"\([a-z]*\)".*/\1/p')
+  note=$(printf '%s' "$st" | sed -n 's/.*"capture_note": *"\([^"]*\)".*/\1/p')
   if [ "$root" != 200 ] || { [ "$ws" != 101 ] && [ "$ws" != 503 ]; }; then
     { echo "[$(date '+%F %T')] UNHEALTHY fault=[$(cat "$FAULTFILE")] mode=[$(cat "$MODEFILE")]"
       echo "  GET / -> $root ; /ws/spectrum/live -> $ws (410 or silence = stage.sh restarts us)"
