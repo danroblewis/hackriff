@@ -179,6 +179,25 @@ pub struct PyramidConfig {
     /// frequency blocks the capture actually spans. **On demand is what §5.2 decided, and what
     /// makes the lattice's node count a reach decision rather than a gate-time one.**
     pub coarse_on_demand: bool,
+    /// **Coarse nodes are maintained LIVE and INCREMENTALLY, per downsample interval** (T-571,
+    /// CLAUDE.md "Live rendering, tile maintenance and playback"). Mutually exclusive with
+    /// [`PyramidConfig::coarse_on_demand`].
+    ///
+    /// Each node keeps its **in-progress top row** and adjusts it as producer rows arrive,
+    /// committing every `t_factor` of them — the same rule at 2, 4, 8, 16, 32 — so a coarse tile
+    /// is an ordinary already-committed tile by the time anything reads it. Per arriving row the
+    /// work is O(1) per level and the residency is one `(row, f_lo, f_hi)` per open tile, not a
+    /// second accumulator per node.
+    ///
+    /// This replaces the read-time fold for a de-welded lattice. On demand, one coarse tile was
+    /// folded out of up to [`super::MAX_MATERIALIZE_TILES`] producer tiles **while the reader
+    /// waited**, and the live edge was gated on that batch work; that is exactly the
+    /// "batch materialize-on-demand" the invariant forbids.
+    ///
+    /// Requires every producing level to coarsen **one** axis (`f_factor == 1 || t_factor == 1`)
+    /// and not to be welded — see [`super::tile::Tile::fold_row`] for why, and
+    /// [`ViewLattice::levels`] for the shape that satisfies it by construction.
+    pub coarse_live: bool,
 }
 
 impl Default for PyramidConfig {
@@ -229,6 +248,7 @@ impl Default for PyramidConfig {
             retention_overrides: Vec::new(),
             compression_level: Some(3),
             coarse_on_demand: false,
+            coarse_live: false,
         }
     }
 }
@@ -484,10 +504,16 @@ impl PyramidConfig {
             t_cell: shape.t_cell,
             f_cells_per_block: shape.cells_per_block,
             levels: shape.levels(),
-            // `docs/16` §5.2, T-453: a lattice's coarse nodes are produced when a read asks for
-            // them, never at every seal. See [`PyramidConfig::coarse_on_demand`] for what eager
-            // folding costs a lattice and why it costs a ladder nothing.
-            coarse_on_demand: true,
+            // T-571: a lattice's coarse nodes are maintained LIVE, row by row, so a read of one
+            // is a read. `docs/16` §5.2 and T-453 had them folded when a read asked for them,
+            // which made a cold screen wait on up to `MAX_MATERIALIZE_TILES` producer tiles and
+            // gated the live edge on batch tile generation — the invariant CLAUDE.md states under
+            // "Live rendering, tile maintenance and playback" forbids exactly that. Eager folding
+            // AT SEAL (`coarse_on_demand: false`) is not the alternative and never was: a node
+            // (0, 0) tile seals once per 64 s, so every coarse node lagged the live edge by a
+            // whole tile and the read-time fold had to cover the difference anyway.
+            coarse_on_demand: false,
+            coarse_live: true,
             ..Self::default()
         }
     }
@@ -536,6 +562,13 @@ impl PyramidConfig {
             .is_some_and(|l| !zstd::compression_level_range().contains(&l))
         {
             return bad("compression_level outside zstd's range".into());
+        }
+        if self.coarse_live && self.coarse_on_demand {
+            return bad(
+                "coarse_live and coarse_on_demand are alternatives: a coarse node is either \
+                 maintained as rows arrive or folded when a read asks for it, never both"
+                    .into(),
+            );
         }
         let nf = self.f_cells_per_block as usize;
         let mut levels: Vec<LevelGeometry> = Vec::with_capacity(self.levels.len());
@@ -591,6 +624,27 @@ impl PyramidConfig {
                     "level {i}: t_factor must divide level {from}'s t_cells_per_block (so a child \
                      tile is a whole number of parent time cells)"
                 ));
+            }
+            // T-571: live maintenance folds ONE producer row at a time, and the occupancy ratio
+            // only survives that when a node coarsens a single axis — see `Tile::fold_row`. The
+            // weld (a child tile that is one parent time cell) is excluded for the same reason it
+            // is the one case `fold_child` carries percentiles through: that fold needs the
+            // child's finished tile-wide histogram, which no single row can supply.
+            if self.coarse_live {
+                if l.f_factor != 1 && t_factor != 1 {
+                    return bad(format!(
+                        "level {i}: live coarse maintenance needs a node to coarsen one axis \
+                         (f_factor {} and t_factor {t_factor} both exceed 1)",
+                        l.f_factor
+                    ));
+                }
+                if prev.nt as u32 / t_factor == 1 {
+                    return bad(format!(
+                        "level {i}: live coarse maintenance cannot fold a WELDED level (one \
+                         producer tile per time cell); its percentiles need the producer's \
+                         finished tile histogram, which a row fold does not have"
+                    ));
+                }
             }
             // Parent time cells one producer tile spans. 1 is the weld.
             let k = prev.nt / t_factor as usize;
