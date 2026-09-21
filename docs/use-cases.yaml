@@ -8743,3 +8743,36 @@ use_cases:
   - metadata-only
   fit_note: 'Legal-guardrail item: detects that a call is encrypted, never decrypts it.'
   test_tier: offline-recorded
+- id: SIGNAL-087
+  theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
+  subcategory: Trunked Radio Systems
+  name: Blind end-to-end auto-decode of a local 800 MHz trunked control channel
+  summary: 'The whole chain on one real, strong, local emitter with nothing told to the system: detect the continuously-keyed control channel in a wideband 851-854 MHz capture as a time-frequency region, estimate its modulation and symbol rate blind, auto-select the demod and decode chain, and recover control-channel messages (NAC, system/site identity, channel grants) - the decode is what confirms the emitter. BART''s above-ground simulcast (P25, System ID 338 / WACN 92762) is the reference instance; the claim is the blind chain, not that one system.'
+  band: 851-854 MHz (800 MHz trunked LMR; the family spans VHF / UHF / 700 / 800 MHz)
+  tx: none
+  receiver_hint: null
+  status: accepted
+  refs:
+  - label: docs/18 (BART 851 MHz research note and capture plan)
+    url: 18-bart-800mhz-trunked.md
+  - label: RadioReference BART P25 system (SID 12049)
+    url: https://www.radioreference.com/db/sid/12049
+  - label: sigidwiki P25
+    url: https://www.sigidwiki.com/wiki/Project_25_(P25)
+  - label: docs/15 decoder synthesis
+    url: 15-decoder-synthesis.md
+  capabilities:
+  - blind-symbol-estimation
+  - modulation-classifier
+  - digital-demod
+  - bit-framing-inference
+  - trunking-follow
+  - cfar-detection
+  - signal-inventory
+  - known-signal-priors
+  hardware_fit: native
+  accessory: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: 'Receive-only at 851-854 MHz on an ordinary whip. Three honest caveats. (1) 8-bit, no preselector: 851-869 MHz sits directly below the 869-894 MHz cellular downlink, so an urban capture is dynamic-range-limited and gain state must be recorded and checked for clipping. (2) Both BART sites are simulcast, and simulcast delay spread smears C4FM; a decode gap in an overlap zone is a propagation artefact, not a decoder bug. (3) Voice on this system is P25 Phase 2 TDMA with the proprietary AMBE+2 vocoder, so the acceptance target is the FDMA control channel''s BITSTREAM and message fields, not audio - which is also what SIGNAL-086 (metadata-only) wants. Not offline-synth: T-300 established that this repo''s synthetic P25 framing is simplified in five ways and is self-consistent with its own decoder, so only a real off-air capture can test the claim.'
+  test_tier: offline-recorded
