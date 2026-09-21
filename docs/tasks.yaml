@@ -4836,19 +4836,37 @@ tasks:
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
-    status: todo
+    status: in-progress
+    branch: task-t273
     priority: normal
     deps:
     - T-269
     - T-270
     parallel_group: M4D
-    use_cases: []
+    use_cases: [AWARE-067]
     acceptance: 'the GrantEvent stream drives a load index (AWARE-067); docs/api.md and api_contract.rs updated together per T-079; no talkgroup audio or content on the route'
     area: crates/hk-api, docs/api.md
     needs: none
     model: sonnet
     effort: medium
     core_interface: false
+    notes: |
+      Handed back by worker, not merged. GET /api/trunking/load?t0&t1[&system] computes the load
+      index on demand from hk_model::trunking::GrantEvent (grant/grant-update/call-start counts,
+      distinct talkgroup identifiers, grants_per_min) via a new ApiState.trunking: Option<Arc<Mutex
+      <Repository>>> (same run database as inventory/bookmarks). No accumulator: bounded per-request
+      read (MAX_GRANTS_PER_QUERY = 20,000).
+      docs/api.md "Trunking load index" section added; crates/hk-cli/tests/api_contract.rs gained
+      trunking_load_index_answers_documented_shape_and_carries_no_content, run against a live mock-
+      device server. crates/hk-api/src/trunking.rs unit tests cover AWARE-067 (busy > quiet) and the
+      no-audio/no-content boundary (both proven red first by inserting a "content" field and watching
+      no_audio_or_content_field fail, then reverting).
+      Targeted tests green: cargo nextest run -p hk-api trunking (6/6); -p hk-cli -E
+      'binary(api_contract)' trunking_load_index_... and every_route_in_the_route_table_is_documented
+      (both pass). cargo fmt --all --check and cargo clippy -p hk-api -p hk-cli --all-targets -- -D
+      warnings both clean. Branch tip fb0900ac31 (task-t273; based on old main pre-T-574/lintrule -
+      coordinator should rebase/gate as usual).
+      Not done: this worker did not merge, per protocol.
   - id: T-274
     milestone: M5
     title: 'M5 GNSS observables cluster (C36): L1 is NOT blindly detectable, so this is the documented exception to blind-first'

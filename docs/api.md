@@ -1991,6 +1991,21 @@ Every anomaly the run recorded (noise-floor episodes and C12 novelty alarms), wi
 
 Errors: `400` (bad id, region, span, kind, status, cursor/limit or body field), `404` (no such anomaly), `405`, `409` (dismissing a floor episode or a self-inflicted anomaly; reopening an open alarm), `500`, `503` (no anomaly service).
 
+## Trunking load index (T-273, AWARE-067; C23)
+
+A derived view over the [`GrantEvent`](07-data-model.md) stream (`hk_model::trunking::GrantEvent`, C23, T-266/T-269/T-270): how busy a trunked system's control channel is, from channel-grant **metadata** alone — "count control-channel grants per talkgroup category as a live incident-activity indicator, without recording audio" (AWARE-067). It is computed on demand from the stored event stream over the requested window, not accumulated: the response is a snapshot, never a running counter that grows without bound.
+
+**Metadata only, and this is the hard boundary the route exists to keep.** The index counts `grant`/`grant-update`/`call-start` events and the distinct talkgroup identifiers they named; it never reads `CallRecord` (the call-content aggregate) and never carries an audio, vocoder, payload or bit field. A talkgroup identifier is metadata of the same kind as a channel number, not content.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/trunking/load?t0&t1[&system]` | The load index over `[t0, t1)` (Unix seconds), for every known trunk system, or just `system` (a `TrunkSystemId` UUID) when given |
+
+- **Response:** `{window: {t0, t1}, systems: [{system, grants, distinct_talkgroups, grants_per_min}]}`. `grants` counts `grant`/`grant-update`/`call-start` [`GrantKind`](07-data-model.md) events in the window (`denied`, `outside-window` and `unmapped-channel` are logged elsewhere per C23 but are not channel grants; `call-end` closes traffic already counted at its `grant`/`call-start`); `distinct_talkgroups` counts the distinct talkgroup identifiers those events named; `grants_per_min` is `grants` normalised by the window's length. A system with no rows for the window answers `grants: 0` (unobserved and quiet are not distinguished here — this route is a busy/quiet index, not a coverage map).
+- Reads up to 20,000 grant rows per system per request (`MAX_GRANTS_PER_QUERY`), bounding the query even though the underlying event stream is append-only forever.
+
+Errors: `400 invalid` (missing/non-numeric `t0`/`t1`, `t1 <= t0`, or `system` not a UUID), `405` for other methods, `500 failed` for a store error, `503 unavailable` without a trunking store.
+
 ## Attention and memory (planned, M2; ADR-0012)
 
 **Planned, not served yet.** None of the routes below are in `ROUTES` today (the observation log's, occupancy's, T-119's sites, baselines, candidates and weights, the attention scheduler's, the survey report's and T-122's anomalies have landed and moved to their own sections above). They are named here so the parallel M2 tasks and the M2 UI hooks (T-123) code against one surface. When an owning task lands, it moves its rows into a normal section with request/response shapes and contract tests.
