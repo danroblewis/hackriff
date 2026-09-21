@@ -16881,7 +16881,7 @@ tasks:
   - id: T-555
     milestone: MAUTO
     title: 'DECISION (user): the reference rule - what reading GPLv3 decoder source to understand an algorithm permits, and where independent reimplementation stops being independent'
-    status: todo
+    status: cancelled
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -16926,6 +16926,9 @@ tasks:
       DoD: the user's decision recorded in ADR-0010 (or CLAUDE.md), and the per-block derivation
       field specified for implementing tasks to fill.
     notes: |
+      CANCELLED 2026-09-20 by the user: there is NO licence rule to ratify, and the stray reference is being removed.
+      The standing position stands unchanged and needs no ticket: GPLv3 decoder code lives behind the plugin process
+      boundary (ADR-0010). Nothing was blocked on this.
       Filed 2026-09-20 with docs/18. HIGH because T-554's native dispositions and every
       subsequent block ticket depend on the answer, and because getting it wrong is not the kind
       of mistake that surfaces in a test.
