@@ -119,6 +119,7 @@ def start_record(
     crates: list[str] | None = None,
     crate_selection: str | None = None,
     branch: str | None = None,
+    sha: str | None = None,
     root: str | None = None,
 ) -> dict[str, Any]:
     """The line written before any suite runs."""
@@ -126,6 +127,7 @@ def start_record(
         "kind": "gate_start",
         "run": run_id,
         "ts": time.time(),
+        "sha": sha,
         "class": klass,
         "phase": phase,
         "source": source,

@@ -688,6 +688,15 @@ def current_branch(root: str) -> str | None:
     return None if not name or name == "HEAD" else name
 
 
+def head_sha(root: str) -> str | None:
+    """The commit being gated, short form. Never raises — see `current_branch`."""
+    try:
+        out = _git_ok(["rev-parse", "--short", "HEAD"], root)
+    except Exception:
+        return None
+    return out.strip() if out and out.strip() else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="just gate",
@@ -806,6 +815,7 @@ def main(argv: list[str] | None = None) -> int:
             crates=list(selection.crates) if selection.crates else None,
             crate_selection=selection.reason,
             branch=current_branch(root),
+            sha=head_sha(root),
             root=root,
         )
     )
