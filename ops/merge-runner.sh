@@ -207,7 +207,33 @@ try_bulk(){
 }
 
 SEEN_QUEUED=""   # branches already logged as QUEUED this run (T-543)
+
+# Say WHICH COPY of this script is running, and whether it matches the repo.
+#
+# On 2026-09-20 the runner had been started from a stale copy in $HACKRIFF_OPS rather than
+# from ops/merge-runner.sh. The sequential-bulk fix was committed, reviewed and believed
+# live for hours while the process kept executing the old octopus code from its own inode -
+# eight bulk attempts, zero bulk merges, and a log that gave no hint the running code was
+# not the committed code. A restart is the only way to pick up an edit, so the log must at
+# least say what it is running: a stale runner is invisible otherwise.
+#
+# This only REPORTS. It never re-execs itself - swapping code under a live gate is worse
+# than running old code, and the decision to restart belongs to whoever is watching.
+self_version(){
+  local self repo_copy
+  self=${BASH_SOURCE[0]}
+  repo_copy=$(git -C "$REPO" show HEAD:ops/merge-runner.sh 2>/dev/null)
+  if [ -z "$repo_copy" ]; then log "VERSION: $self (no repo copy to compare against)"; return; fi
+  if [ "$(cat "$self" 2>/dev/null)" = "$repo_copy" ]; then
+    log "VERSION: $self matches $(git -C "$REPO" rev-parse --short HEAD):ops/merge-runner.sh"
+  else
+    log "VERSION: *** STALE *** $self DIFFERS from $(git -C "$REPO" rev-parse --short HEAD):ops/merge-runner.sh"
+    log "VERSION: restart from the repo between gates - see ops/README.md - or this runner keeps executing old code"
+  fi
+}
+
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
+self_version
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
