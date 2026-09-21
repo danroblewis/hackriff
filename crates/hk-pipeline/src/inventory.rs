@@ -796,6 +796,15 @@ impl TrackInventory {
                 Ok(Some(m)) => {
                     id = m.into;
                     self.merged += 1;
+                    // T-335: the survivor's evidence just changed by absorbing `from`, even when
+                    // T-082's overlap discount left its count unmoved and the absorbed partner
+                    // carried no fingerprint of its own to fold (so `characterise`'s other half,
+                    // fingerprint observations, is unmoved too). `characterise` cannot see a
+                    // merge in either of those numbers, so drop its cached (count, fingerprint
+                    // observations) pair here — the merge itself is the signal — and the next
+                    // `characterise` call below reads as a first sighting of `id` rather than a
+                    // false repeat.
+                    self.characterised.remove(&id);
                 }
                 Ok(None) | Err(RepoError::IdentityConflict { .. }) => {}
                 Err(e) => return Err(e),
@@ -1172,8 +1181,16 @@ impl TrackInventory {
     /// sighting over air another producer already counted adds no occurrence, so a chain's
     /// symbol rate and deviation would reach the fingerprint and never reach this seam. The
     /// fingerprint's observation counter moves once per folded measurement, which is exactly the
-    /// bound this skip is documented to enforce. (T-335 owns replacing the count half properly —
-    /// a merge whose overlap discount adds 0 still leaves both halves of this key unmoved.)
+    /// bound this skip is documented to enforce.
+    ///
+    /// **T-335: a same-emission merge (T-082) is a third way evidence changes that this pair
+    /// cannot see.** Its overlap discount can leave `count` unmoved (the absorbed span was
+    /// already counted), and when the absorbed partner carried no fingerprint of its own — a
+    /// decoder's identity-only sighting, [`hk_model::Sighting::decode`] — nothing folds into the
+    /// survivor's fingerprint either, so `fingerprint observations` stays put too. Both halves of
+    /// the key can be unmoved while the survivor just absorbed a partner's evidence (its
+    /// classification, its identity). [`Self::link`] is what knows a merge happened, so it is
+    /// what drops the cached key — the merge itself is the signal, not a third counter.
     fn characterise(
         &mut self,
         repo: &mut Repository,
@@ -1206,7 +1223,11 @@ impl TrackInventory {
 mod tests {
     use super::*;
     use hk_detect::track::CloseCause;
-    use hk_model::{InventoryQuery, TimeRange, Timestamp, TimingFeatures, Track, TrackState};
+    use hk_model::signature::field;
+    use hk_model::{
+        Classification, Fingerprint, InventoryQuery, TimeRange, Timestamp, TimingFeatures, Track,
+        TrackState,
+    };
 
     fn channel_summary(
         id: TrackId,
@@ -1948,5 +1969,147 @@ mod tests {
             .unwrap()
             .contains("rds-pi")
         );
+    }
+
+    /// A track-shaped sighting: fingerprinted, no classification, no identity.
+    fn overlap_track_sighting(f: f64, bw: f64, seen: TimeRange, count: u64) -> Sighting {
+        Sighting {
+            source: LinkTarget::Track(TrackId::new()),
+            seen,
+            count,
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            fingerprint: Some(Fingerprint::new(f, bw)),
+            identity: None,
+            context: None,
+            classification: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// A decoder-shaped sighting with no fingerprint of its own ([`hk_model::Sighting::decode`]'s
+    /// shape): it carries only a classification, the way an identity/content decoder might report
+    /// what it saw without re-measuring the RF fingerprint the tracker already has.
+    fn overlap_decode_sighting(f: f64, bw: f64, seen: TimeRange, family: &str) -> Sighting {
+        Sighting {
+            source: LinkTarget::Demodulation(DemodulationId::new()),
+            seen,
+            count: 1,
+            f_center_hz: f,
+            bandwidth_hz: bw,
+            fingerprint: None,
+            identity: None,
+            context: None,
+            classification: Some(Classification {
+                t: seen.end,
+                family: family.into(),
+                confidence: 0.9,
+                open_set_score: 0.1,
+                model_version: "test@1".into(),
+            }),
+            tags: Vec::new(),
+        }
+    }
+
+    /// T-335: `characterise` must not skip an entry that just absorbed a same-emission partner
+    /// (T-082) whose merge discount left `count` unmoved and whose fingerprint (absent on the
+    /// absorbed side, [`hk_model::Sighting::decode`]'s shape) left `fingerprint observations`
+    /// unmoved too — the exact pair `characterise` used to key its skip on. The merge still
+    /// changed the survivor's evidence (it carries a classification it did not have before), and
+    /// that must reach the features snapshot.
+    #[test]
+    fn t335_absorbing_a_partner_by_a_discounted_merge_still_re_characterises() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let f = 100e6;
+        let bw = 12e3;
+
+        // The track-based entry: seen 0..10s, several bursts, no classification yet.
+        let into_sighting = overlap_track_sighting(f, bw, TimeRange::new(t(0.0), t(10.0)), 5);
+        let into_id = repo
+            .record_sighting(&into_sighting, None)
+            .unwrap()
+            .emitter_id;
+        inv.chain_emitter(&mut repo, None, into_id).unwrap();
+        let baseline = repo
+            .emitter_features(into_id)
+            .unwrap()
+            .expect("first touch characterises");
+        assert!(
+            !baseline.fields.contains_key(field::FAMILY),
+            "nothing has classified this entry yet: {:?}",
+            baseline.fields
+        );
+        let baseline_emitter = repo.emitter(into_id).unwrap();
+        assert_eq!(baseline_emitter.count, 5);
+
+        // A decoder-shaped entry over air already inside the track's span: T-082's overlap
+        // discount takes its whole count (add = 0), and it carries no fingerprint to fold.
+        let from_sighting =
+            overlap_decode_sighting(f, bw, TimeRange::new(t(2.0), t(8.0)), "known-service");
+        let from_id = repo
+            .record_sighting(&from_sighting, None)
+            .unwrap()
+            .emitter_id;
+        inv.chain_emitter(&mut repo, None, from_id).unwrap();
+
+        // The merge happened, onto the track entry, and the discount really did leave both halves
+        // of the old skip key unmoved.
+        assert_eq!(inv.merged, 1, "the two entries were the same emission");
+        assert_eq!(repo.live_emitter_id(from_id).unwrap(), into_id);
+        let merged_emitter = repo.emitter(into_id).unwrap();
+        assert_eq!(
+            merged_emitter.count, baseline_emitter.count,
+            "T-082's overlap discount: the absorbed air was already counted"
+        );
+        assert_eq!(
+            repo.emitter_fingerprint(into_id)
+                .unwrap()
+                .map(|fp| fp.observations),
+            Some(1),
+            "the absorbed entry had no fingerprint to fold, so observations did not move either"
+        );
+
+        // Despite both halves of the old key being unmoved, the survivor absorbed a
+        // classification it did not have before, and that must reach the features snapshot.
+        let after = repo
+            .emitter_features(into_id)
+            .unwrap()
+            .expect("still characterised");
+        assert_eq!(
+            after.fields.get(field::FAMILY).and_then(|f| f.value.text()),
+            Some("known-service"),
+            "[T-335] the merge's absorbed classification never reached characterise(): {:?}",
+            after.fields
+        );
+    }
+
+    /// The skip this ticket narrows stays an optimisation, not a no-op: a `touch` with no new
+    /// merge and no new measurement does not append another features snapshot.
+    #[test]
+    fn t335_a_touch_with_nothing_new_still_skips_characterisation() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let f = 100e6;
+        let bw = 12e3;
+
+        let sighting = overlap_track_sighting(f, bw, TimeRange::new(t(0.0), t(10.0)), 5);
+        let id = repo.record_sighting(&sighting, None).unwrap().emitter_id;
+        inv.chain_emitter(&mut repo, None, id).unwrap();
+        let first = repo.emitter_features(id).unwrap().unwrap();
+        assert_eq!(inv.characterisations, 1);
+
+        // Touched again with the very same live entry: no merge, no growth.
+        inv.chain_emitter(&mut repo, None, id).unwrap();
+        let second = repo.emitter_features(id).unwrap().unwrap();
+        assert_eq!(
+            inv.characterisations, 1,
+            "nothing changed since the last touch, so characterise() must still skip"
+        );
+        assert_eq!(first.id, second.id, "no new snapshot was appended");
+    }
+
+    fn t(sec: f64) -> Timestamp {
+        Timestamp::from_unix_nanos(1_000_000_000 + (sec * 1e9) as i64)
     }
 }

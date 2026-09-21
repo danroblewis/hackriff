@@ -3,6 +3,14 @@
 # status: todo | in-progress | blocked | done. Update status + commit/pr as work proceeds.
 # needs: none | hardware | user  (hardware/user tasks stay with the coordinator, not background agents)
 # model/effort per prompts/model-selection.md. Tasks marked core_interface go to Fable/Opus and are reviewed before merge.
+# effort: low | medium | high | xhigh - the COMPLEXITY TIER, set with `model:` from the rubric in
+#   prompts/model-selection.md (T-563). Trivial/mechanical -> low; well-specified single-crate with tests
+#   -> medium; core_interface / real-time / novel DSP / hard debugging -> high or xhigh. A ticket whose
+#   MECHANISM IS ALREADY MEASURED by a prior ticket is well-specified however alarming its symptom: hand
+#   the agent the measurement and drop the tier. Reasoning time (184 h) exceeded all tool and build time
+#   (144 h) on 2026-09-20 because almost everything ran Opus-high regardless of the work.
+#   NOTE: the Agent tool exposes `model` but no `effort` parameter, so this field records the intended
+#   tier for briefs, agent definitions and review - it is not passed programmatically at spawn.
 version: 1
 milestone: "M0 COMPLETE 2026-09-13 (T-026 deferred to Jetson); M0b complete (T-100 deferred); M1 decoder workbench COMPLETE 2026-09-15; M2 attention + memory maturity COMPLETE 2026-09-15 (T-124 green, full check d0e74df; M2-hardening follow-ups open); current milestone M3 classification started 2026-09-15 (ADR-0016 design T-198); MUI in parallel; MAUTO design only (T-208), build after M3"
 # M0b (Live device + exploration UI) follows M0 and precedes decoder breadth (docs/11 §2); its tasks carry `milestone: M0b`. Tasks without the field are M0.
@@ -6446,7 +6454,7 @@ tasks:
     milestone: M2-hardening
     title: characterise uses emitter.count as a change detector, so an entry that just absorbed a partner
       by a discounted merge can skip re-characterisation
-    status: todo
+    status: in-progress
     priority: low
     deps:
     - T-329
@@ -6956,7 +6964,7 @@ tasks:
     milestone: M2-hardening
     title: An inventory rows snr_db and peak_dbfs are a Detections numbers with its TimeRange stripped at
       the API boundary
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-337
@@ -10999,7 +11007,7 @@ tasks:
   - id: T-435
     milestone: M3
     title: The class NAME changes with SNR in 3 of 252 sequences, and one of them is a confidently-wrong FAMILY at the gate
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     deps: [T-429, T-422]
@@ -16008,7 +16016,7 @@ tasks:
   - id: T-539
     milestone: MLIVE
     title: The tile cache's AIMD cap only rises on a completion, so a still view never recovers from one 503
-    status: todo
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -16030,13 +16038,32 @@ tasks:
   - id: T-540
     milestone: M2-hardening
     title: The plugin host kills a decoder as hung after 10 s, but a cold-linked subprocess can take 30 s to reach its first instruction
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
     model: opus
     depends_on: [T-493]
     use_cases: []
+    result: |
+      Done on task-t540. The one "input queue full past stall_timeout" budget is now two, split on
+      an OBSERVATION rather than a bigger constant: the child's first byte on stdout/stderr
+      (`SignsOfLife`, the only evidence the host has that it ran - starts/records_*/ready all tick
+      whether or not it did). Before that byte a full queue is judged against the new
+      `limits.startup_timeout_ms` (default 60 s, >= stall_timeout, validated); from that byte on
+      against the unchanged `stall_timeout` (10 s), measured FROM THE BYTE, so a genuine hang is
+      detected exactly as fast as before. A per-run watchdog thread in run_once owns the decision
+      (the publisher's own slow-consumer disconnect is now only a backstop, set past both budgets);
+      each kill names its budget in the log ring, in `PluginStats::last_hang`/`startup_kills` and in
+      `last_exit`, never as a generic "hung". A queue that is not full is still not evidence of
+      anything, so a quiet healthy plugin is untouched.
+      Tests: crates/hk-plugins/tests/startup_budget.rs (a: cold start not killed, then decodes;
+      b: wedged-after-start killed on the 300 ms budget, not the 30 s one; c: never-ran killed on
+      the startup budget with the right reason) + a manifest validation unit test. Proven red with
+      the old single budget reinstated: a failed with "a plugin that was merely slow to start was
+      killed" (killed at ~310 ms), c with "killed after 324 ms, before its own 3 s startup budget".
+      One run even hit the real phenomenon live - the plugin took 32.9 s to reach its first
+      instruction and was NOT killed. docs/stream-contract.md 9.2 and docs/10 updated.
     acceptance: |
       T-493 measured, from inside run_once: a freshly linked plugin binary is created in 193 us
       (posix_spawn returns, the host's stdout reader is running at +320 us) and then EXECUTES
@@ -16094,7 +16121,7 @@ tasks:
   - id: T-542
     milestone: MLIVE
     title: Reproduce the user's two reported crashes on the LIVE HackRF - a full sweep at dwell 1 s, and the deepest zoom
-    status: in-progress
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16132,7 +16159,7 @@ tasks:
   - id: T-543
     milestone: M2-hardening
     title: Cut the ticket cycle time - it is ~4 h start-to-land and the gate is most of it
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16415,7 +16442,75 @@ tasks:
   - id: T-558
     milestone: M2-hardening
     title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
-    status: todo
+    status: done
+    branch: task-t558
+    result: |
+      Measured first, on the mock SDR device behind the normal source interface, then bounded.
+      Three leaks, one cause each; every bound has a test that was watched go red without its fix.
+
+      1. THREADS. `ChainManager::attach` had no run-wide cap. `attach_measuring` capped its own
+         kind at the node spec's `max_chains` (4) and `attach_track` refused a duplicate *channel*,
+         but only for a spec with a raster - and `fsk-bursts`, what a burst-rich survey attaches,
+         has none. So concurrent chains were simply "however many tracks got confirmed".
+         MEASURED (tests/sweep_residency.rs, mock device 2 Msps): threads rose ONE PER ATTACH,
+         43 -> 219 over 175 attaches; with the cap removed again at 400 attaches it reached
+         444 threads / 401 running chains, reproducing T-542's live ~450 almost exactly.
+         FIXED: `chains::MAX_RUNTIME_CHAINS = 16`, checked after a `reap()` so the count is of
+         chains still running; over it the attach is refused and counted
+         (`chains.admission_refused`), never queued. AFTER: threads flat at 59 at 25 attaches and
+         at 400.
+      2. RSS. Followed the threads, and each chain's own retain buffer is sized in SECONDS:
+         `2 x retain_s x fs`. The built-in `fsk-bursts` 3 s is 24 MB at 2 Msps and ~240 MB at the
+         HackRF's 20 Msps, per chain. MEASURED: 64 -> 1210 MiB over 175 attaches, ~6.5 MiB a
+         chain, still climbing. FIXED: the cap above, plus `fsk::MAX_RETAIN_SAMPLES` (16 Msamp,
+         32 MB) so the buffer no longer scales with the device, plus `MAX_PENDING_GROUPS` (4096)
+         on the queue of burst groups awaiting samples. AFTER: 482 MiB at 400 attaches, flat once
+         the live chains have filled - a steady state, not a climb.
+      3. THE OCCUPANCY ACCUMULATOR. `ChannelPlan::clusters` was never pruned, and `learn` called
+         the full O(n^2) pairwise `merge` after EVERY detection, each comparison recomputing four
+         medians by allocating and sorting a Vec. MEASURED over a 1 MHz-6 GHz sweep: step 236 of
+         2999 reached 1896 clusters and 1.46 s FOR ONE STEP, rising quadratically, 120 s for 8 %
+         of the sweep - and NONE of those 1896 had published. A survey that cannot finish, filled
+         entirely with candidates for regions that went quiet. FIXED: (a) cached medians on
+         `Cluster`, recomputed at every mutation site; (b) `merge_at(i)` - only the cluster that
+         just took a sample can have become mergeable, so the closure is followed from the
+         survivor at O(clusters) a detection instead of O(detections x clusters^2); (c) `forget()`
+         - `max_clusters` 4096 hard cap (weakest first: unpublished, then least evidence, then
+         oldest) and `forget_unpublished_ns`, an unpublished cluster unseen for the whole
+         persistence window expires. Published channels survive the quiet; the hard cap is the
+         backstop that holds whatever the survey meets.
+         AFTER: all 2999 steps in 0.65 s, 4096 clusters, 0.2 ms a step - a ~800x speedup measured
+         against the restored merge (520.7 s) with the cap already in place.
+
+      This is the "no unbounded seen-count accumulators, no ghost candidates for signals that have
+      stopped" invariant applied where it had not been: candidate confidence now decays and expires
+      when a region goes quiet.
+
+      TESTS (all watched red without their fix):
+      - hk-context::sweep_accumulators::the_channel_plan_holds_a_bounded_number_of_clusters_however_long_the_survey_runs
+        (red: "1000 steps: 8000 clusters exceeds the 4096 cap")
+      - hk-context::sweep_accumulators::an_unpublished_cluster_expires_once_its_region_has_been_quiet
+        (red: left 3, right 2)
+      - hk-context::sweep_accumulators::merge_costs_a_bounded_number_of_comparisons_per_detection
+        (3048 comparisons/detection at 1000 steps, 3749 at 2999, bound 16384; red at the FIRST
+        length with the old pass reinstated: "1000 steps: 5536345 comparisons per detection
+        exceeds the 16384 bound"). Counted, not timed, per the user's 2026-09-21 rule: a
+        wall-clock budget loose enough not to flake would let a reintroduced quadratic merge
+        finish a whole sweep inside it on a fast machine. Wall clock is kept as an `#[ignore]`
+        measurement (0.65 s now, 520.7 s with the old merge and the cluster cap already in
+        place).
+      - hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads
+        (red: "400 attaches left 401 chains running, above the 16 cap")
+      Each asserts at TWO survey lengths, so a cap cannot be mistaken for a slower climb. Three
+      `#[ignore]` measurement tests beside them print the tables and the wall-clock figures.
+
+      VERIFIED: hk-context + hk-core + hk-pipeline 679 pass, hk-api + hk-cli 289 pass, clippy and
+      fmt clean. Full gate not run (coordinator runs it at merge).
+
+      FOLLOW-UP filed as T-578: `MAX_RUNTIME_CHAINS` and `MAX_RETAIN_SAMPLES` are consts, not
+      settings. On a bigger box 16 is conservative and on a Jetson at 20 Msps even 16 x 32 MB of
+      retain buffer is 512 MB; both want to come from `PipelineSettings` and be derived from the
+      core count and the sample rate.
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16442,12 +16537,13 @@ tasks:
   - id: T-559
     milestone: M2-hardening
     title: The 4-builder concurrency cap counts cargo builds but not the hk serve processes agents leave running
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: CI
     model: sonnet
     depends_on: []
     use_cases: []
+    branch: task-t559
     acceptance: |
       MEASURED BY T-543: `cargo build -p hk-plugins --bins` - documented as ~0.05 s warm - took
       500 SECONDS at load average 211. The top consumer was an `hk serve` at 930-1300 % CPU (T-542's
@@ -16468,10 +16564,19 @@ tasks:
       Filed 2026-09-20 from T-543's measurement. The coordinator's scheduling caused several of
       today's gate failures; this is the rule that failed to prevent it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE on branch task-t559: `just builders` (justfile) over the pure, tested
+      `hkpy.builders.assess` (py/hkpy/builders.py) - cargo/rustc grouped by worktree, hk
+      serve/hackriffd processes counted individually (each toward the cap on its own, whether
+      or not that worktree is also building), load(1m) vs a configurable core budget, free disk
+      vs the 20 GB floor, one-line verdict. `py/tests/test_builders.py` (30 cases) covers under/at
+      the cap, hk-serve-alone pushing it over, the coordinator's own full-gate cargo/rustc grouping
+      into one slot, low-disk and high-load. CLAUDE.md's "Worktree launch step" now points at
+      `just builders` instead of relying on the agent to count correctly. Awaiting merge via the
+      merge-runner queue (not merged by this agent).
   - id: T-561
     milestone: M2-hardening
     title: "docs/tasks.yaml classified as prose, so the board test never ran on the commit that broke the board"
-    status: in-progress
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16496,7 +16601,7 @@ tasks:
   - id: T-562
     milestone: M2-hardening
     title: "Make the justfile REFUSE the gate, acceptance and the full workspace test when run from an agent worktree"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -17055,7 +17160,7 @@ tasks:
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17092,6 +17197,31 @@ tasks:
       Filed 2026-09-20 by the MAUTO design/research track. Cheap, and it unblocks the engine
       set without adding engine work - which is exactly what a design track is for.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      Done 2026-09-20 on branch task-t553. Brief is `docs/20-mauto-decision-brief.md` (19 was taken
+      by the BART doc); indexed in docs/README.md; all three ADR-0015 open-question lists now point
+      at it. No ADR status changed, no tickets filed.
+      CORRECTION TO THE PREMISE: there are FIFTEEN open questions, not ten - the ticket counted
+      section 10 (5) and section 11.10 (5) and missed section 12.12's five (Listen retune, SSB/CW
+      blocks, keeping the legacy chain, stereo audio, promotion per output kind).
+      THE BLOCKING STRUCTURE IS SINGULAR: M-1's DoD includes "ADR-0015 -> ACCEPTED review", and an
+      ADR with open questions cannot be accepted - so every MAUTO engine ticket (M-1..M-14,
+      CP-1..CP-9, LP-1..LP-8) is downstream of this one page. There is no second blocker.
+      DISPOSITION of the fifteen: FIVE go to the user (U1 single-burst auto-confirm + the
+      false-confirm budget T-548 needs; U2 auto-analyze and deep-on-battery; U3 user-versus-decode
+      authority, merged with ADR-0016 open question 3; U4 fund PSK/SSB/CW blocks, merging section 10
+      Q5 with section 12.12 Q2; U5 stereo audio). SIX decided in the brief as engineering defaults
+      (local template files - same answer as ADR-0016 Q5; lazy pipeline rows; output_kinds as a set;
+      artifacts hidden behind the existing ?artifacts filter; retune still ends the audio stream;
+      legacy Listen chain kept). TWO of those six were the SAME question asked twice - section 11.10
+      Q2 and section 12.12 Q5 - and section 12.8 already answers both, so they are deleted rather
+      than decided. ONE (section 12.12 Q3) is a consequence of U4, not an independent question.
+      TWO sent to measurement: the 4-bit supersession margin and 0.6 overlap fraction -> T-547; the
+      quick/standard/deep budgets -> T-552.
+      RECOMMENDED ANSWERS: U1 auto-confirm only for template-fixed checks >= 24 bits, budget <= 1
+      wrong Confirmed emitter per week unattended; U2 auto-queue at `quick` only, mains only, deep
+      stays manual; U3 user wins at rank 0 with the contradiction shown; U4 fund psk_demod (M-14
+      becomes required), SSB/CW stay legacy permanently; U5 no stereo.
   - id: T-554
     milestone: MAUTO
     title: 'DECODER COVERAGE: per-family disposition audit - for each GNU Radio decoder family, decide native recipe vs wrapped plugin vs out of reach, and produce the hk-blocks catalogue gap list'
@@ -17480,6 +17610,39 @@ tasks:
       viewport poll drops to zero for the sealed part of the viewport. A response-size assertion
       belongs here too, since the point of the ticket is bytes not transferred.
       Prove the tests go RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-578
+    milestone: M2-hardening
+    title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: [T-558]
+    use_cases: [AWARE-011]
+    acceptance: |
+      Filed 2026-09-21 from T-558, which bounded these but bounded them with constants.
+      T-558 stopped a sustained sweep reaching ~450 threads and multi-GB RSS by adding
+      `chains::MAX_RUNTIME_CHAINS = 16` and `chains::fsk::MAX_RETAIN_SAMPLES` (16 Msamp, 32 MB).
+      Both are hard-coded, and NEITHER KNOWS WHAT MACHINE IT IS ON OR WHAT RATE IT IS RUNNING.
+      That is wrong in both directions: on the dev Mac 16 concurrent chains is conservative and
+      needlessly refuses decodes a 28-core box could run; on a Jetson at the HackRF's 20 Msps,
+      16 chains x 32 MB of retain buffer is 512 MB of buffer alone, before anything else the
+      device is holding, on a module whose whole memory is the budget.
+      WHAT TO DO: take both from `PipelineSettings` (so a run can be configured, and a portable
+      low-power mode can lower them) with defaults DERIVED rather than typed - the chain cap from
+      the core count, the retain bound from a byte budget divided by the sample rate, so the
+      seconds a chain retains fall as the device gets faster rather than the bytes rising. Report
+      both in `/api/status` beside `chains.admission_refused`, which is how anyone would find out
+      the cap is the thing refusing their decode.
+      THE BOUND IS THE POINT, NOT THE NUMBER: whatever the settings say, the residency must stay
+      bounded. Keep T-558's tests (`hk-pipeline::sweep_residency`,
+      `hk-context::sweep_accumulators`) passing and add one that a CONFIGURED cap is the cap that
+      holds - set an unusual value and assert the residency matches it at two survey lengths, so
+      the setting is shown to be wired through rather than merely present.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
+      buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

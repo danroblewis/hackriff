@@ -388,6 +388,8 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 
 ## Open questions (for the user)
 
+**All fifteen of the questions below — these five, §11.10's five and §12.12's five — are consolidated, costed and given a recommendation in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553). Five survive as questions for the user; the rest are decided or sent to measurement there. Answer them from that table, not from these lists.**
+
 1. **Single-burst confirmation.** Should one frame passing a template-fixed ≥ 24-bit check (e.g. an ADS-B squitter) auto-confirm, or only attach, leaving promotion to you (proposed)?
 2. **Budget defaults and battery.** Are `quick` 3 s / `standard` 20 s / `deep` 120 s right for a handheld? Should `deep` be refused on battery?
 3. **Auto-analyze.** Should the attention scheduler eventually queue analyze jobs for unknown candidates by itself, or stay user-triggered only?
@@ -531,6 +533,8 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 
 ### 11.10 Open questions (for the user)
 
+*Consolidated with §10's and §12.12's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q2/Q3 and Q4 are decided there as engineering defaults or measurements; only Q5 (merged with ADR-0016 open question 3) goes to the user.*
+
 1. **Lazy or eager rows.** Materialise a bare `energy` pipeline only on demand (proposed), or give every emitter one from creation so the inventory is uniform, at the cost of a row per box?
 2. **Two promoted pipelines.** Is "one promoted decode plus one promoted audio pipeline per emitter" right, or should exactly one pipeline ever be promoted?
 3. **Artifact visibility.** Should image/harmonic/intermod-attributed candidates be hidden by default (proposed), or shown greyed under their source so you can see the front end misbehaving?
@@ -662,6 +666,8 @@ This section therefore uses placeholder ids **LP-1…LP-8**, mapping onto §12.9
 | LP-8 | Retire `ChainKind::Listen` for cut-over modes; listener-budget mapping | 7 | LP-5 live-tested | Opus |
 
 ### 12.12 Open questions (for the user)
+
+*Consolidated with §10's and §11.10's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q3 and Q5 are decided there (Q5 duplicates §11.10 Q2 and is already answered by §12.8); Q2 is merged with §10 Q5 and Q4 stands, both for the user.*
 
 1. **Retune behaviour.** Keep "a class-changing retune ends the audio stream and the client reconnects" (proposed — it is today's tested behaviour), or make audio pipelines survive a retune (nicer, but a live-visible change with no coverage)?
 2. **SSB/CW.** Fund `ssb_demod`/`cw_demod` blocks so every mode is a recipe, or accept a permanent legacy path for them (proposed)?

@@ -273,7 +273,8 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
     "content_class": "unrestricted"      // REQUIRED ceiling, enforced by the host
   },
   "restart": {"backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300},
-  "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000, "ready_timeout_ms": 5000,
+  "limits": {"input_queue_bytes": 8388608, "stall_timeout_ms": 10000, "startup_timeout_ms": 60000,
+             "ready_timeout_ms": 5000,
              "max_message_bytes": 1048576, "stderr_lines": 200, "nice": 10}
 }
 ```
@@ -291,7 +292,10 @@ JSON was chosen because it needs no new dependency and matches the rest of the c
   - Plugin input never goes to a listener. `DecoderFeed` attaches only to a child's stdin.
 - **`raw`:** payload bytes only, with no header and no markers. This is for existing tools that read raw samples on stdin. Whole records are dropped, so element alignment is kept.
 - **Queueing:** the input queue is bounded and never blocks. `PluginInstance::push` returns `Enqueued`, `DroppedFull` or `DroppedDetached` (no process: starting, backoff or failed). The counters obey `offered = enqueued + dropped_full + dropped_detached` exactly.
-- **Hang watchdog:** if the queue stays full for `stall_timeout`, the plugin is killed (a hang), counted and restarted.
+- **Hang watchdog, on two budgets (T-540):** a full queue is judged against a budget chosen by what the host has *observed* of the child, not by a single constant.
+  - Until the child's **first byte on stdout or stderr** — the only evidence the host has that it reached its first instruction — the budget is `startup_timeout` (default 60 s), counted as `startup_kills`. A freshly linked binary really can be spawned and then execute nothing for ~30 s (measured, T-493), and killing it for that kills a healthy decoder on its first launch after a rebuild or install.
+  - From that first byte on, the budget is the much tighter `stall_timeout` (default 10 s), measured **from the byte** (or from when the queue filled, whichever is later) and counted as `stall_kills`. Detection of a genuine hang is not slowed down by the startup budget.
+  - `startup_timeout_ms` must be `>= stall_timeout_ms`. Either kill names its budget in the log ring, in `PluginStats::last_hang` and in `last_exit`; neither is reported as a generic "hang". A queue that is **not** full is not evidence either way, so a quiet plugin whose producer keeps up is never killed by either budget.
 
 ### 9.3 Message plane: stdout
 
