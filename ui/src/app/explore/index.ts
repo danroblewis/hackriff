@@ -18,9 +18,9 @@ import {
   type Loaded,
 } from "./focus";
 import {
-  clusterChip, deleteEntry, emptyListText, loadInventoryRows, nextInventorySort, promoteEntry,
-  recurrenceDots, renderedInventory, rowChips, rowSeenText, sortInventoryRows, viewWindow,
-  windowKey, type Row,
+  clusterChip, deleteEntry, emptyListText, explanationChip, explanationReasonText, loadInventoryRows,
+  nextInventorySort, promoteEntry, recurrenceDots, renderedInventory, rowChips, rowSeenText,
+  sortInventoryRows, viewWindow, windowKey, type Row,
 } from "./inventory";
 import { mountPresenceStream } from "./presence-stream";
 import {
@@ -98,7 +98,13 @@ const mountInventory: MountFn = (el, ctx) => {
     const focus = ctx.store.get().focus;
     const current = focus.kind === "signal" && focus.id === r.id;
     const cluster = clusterChip(r);
-    const chips = [...rowChips(r), ...(cluster ? [cluster] : [])]
+    // T-587: the artefact chip is its own kind (never `rowChips`'/`clusterChip`'s family/flag/
+    // signature classes), and its reason is a backend-rendered sentence — "image of the 100.8 MHz
+    // carrier" — read straight off `relation.reason` and rendered as visible text, not only a
+    // hover title, so it can't be missed the way T-587's field report was.
+    const artifact = explanationChip(r);
+    const reasonText = explanationReasonText(r);
+    const chips = [...rowChips(r), ...(cluster ? [cluster] : []), ...(artifact ? [artifact] : [])]
       .map((c) => h("span", { class: `chip ${c.cls}`, title: c.title }, c.text));
     const dotsEl = r.state === "candidate" && recurrenceDots(r).length
       ? h("span", { class: "dots" }, ...recurrenceDots(r).map((v) => h("i", { style: `height:${2 + Math.round(v * 8)}px` })))
@@ -114,7 +120,8 @@ const mountInventory: MountFn = (el, ctx) => {
         unkPct !== null ? h("span", { class: "unk-badge", title: "Unknown score" }, `${unkPct}% unk`) : null,
         isOn(ctx, r.id) ? h("span", { class: "on-air", title: "Streaming" }) : null),
       actionButtons(r),
-      h("div", { class: "meta" }, ...chips, h("span", { class: "mono" }, fmtBandwidth(r.bandwidth_hz)), dotsEl, h("span", {}, rowSeenText(r))),
+      h("div", { class: "meta" }, ...chips, h("span", { class: "mono" }, fmtBandwidth(r.bandwidth_hz)), dotsEl, h("span", {}, rowSeenText(r)),
+        reasonText ? h("span", { class: "artifact-reason" }, reasonText) : null),
     );
   }
 
@@ -220,7 +227,14 @@ const mountSelections: MountFn = (el, ctx) => {
 function stateBadge(state: string): HTMLElement { return h("span", { class: `state ${state}` }, state); }
 
 function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
-  const chips = [stateBadge(r.state), ...rowChips(r).map((c) => h("span", { class: `chip ${c.cls}` }, c.text))];
+  // T-587: same artefact chip and visible reason as the sidebar row — the focus panel is the same
+  // row, so it must say the same thing.
+  const artifact = explanationChip(r);
+  const reasonText = explanationReasonText(r);
+  const chips = [
+    stateBadge(r.state), ...rowChips(r).map((c) => h("span", { class: `chip ${c.cls}` }, c.text)),
+    ...(artifact ? [h("span", { class: `chip ${artifact.cls}` }, artifact.text)] : []),
+  ];
   const flags = r.explanations[0]?.flags ?? [];
   const centerHz = r.refined?.center_hz ?? r.f_center_hz;
   const bwHz = r.refined?.bandwidth_hz ?? r.bandwidth_hz;
@@ -289,6 +303,8 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
   // and explanations, freeing the space for per-signal output panels (T-195).
   return h("div", {},
     h("div", {}, h("div", { class: "eyebrow" }, ...chips), h("div", { class: "bigf" }, fmtMHz(centerHz), h("small", {}, " MHz")), h("div", { class: "sub" }, refinedNote(r.refined))),
+    // T-587: the reason in words, next to the chip that names it, never hover-only.
+    reasonText ? h("p", { class: "artifact-reason" }, reasonText) : null,
     unknownBanner,
     kv,
     distSection,
