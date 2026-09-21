@@ -18189,6 +18189,40 @@ tasks:
       Relates to ADR-0016's exit gates and to T-306's confidently-wrong analysis.
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-597
+    milestone: M3
+    title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
+    status: todo
+    priority: normal
+    parallel_group: M3A
+    model: opus
+    effort: medium
+    depends_on: [T-589]
+    use_cases: []
+    acceptance: |
+      FOUND BY T-589, and it is the same defect one level up from the one T-589 just fixed.
+      After T-589, the psk-qam verifier skips with `SingleCandidate` on essentially every decisive
+      tree call - bpsk, qpsk and 8psk alike - so on the shipped path it is exercised only when the
+      tree is genuinely undecided. That is CORRECT behaviour, not a bug. The bug is that its
+      production run count is near zero on clean input and NOTHING REPORTS THAT RATE.
+      This is the shape this project keeps rediscovering: a stage that never fires is
+      indistinguishable from a stage that fires and agrees. T-589's own finding was exactly this
+      (the verifier could not run on 8-PSK at all, 12 of 12, and nobody was told); T-594 is the same
+      thing for a fingerprint field with no producer; T-321's was an emitter that silently stopped
+      clustering. Each time it was found by accident while measuring something else, which is the
+      argument for measuring it on purpose.
+      Count and surface VERIFIER RUN-RATE PER FAMILY in the harness: how often it ran, and the
+      breakdown of why it did not (SingleCandidate / NoClockLock / NoSymbolView / low_confidence).
+      T-589 already made every path record an outcome reason, so the data exists - this ticket is
+      about reporting it where a regression would be noticed.
+      A FALLING RUN RATE IS THE SIGNAL. A change that makes the tree more decisive silently removes
+      the verifier from the shipped path, which is how T-246's fix came to be exercised at the
+      likelihood level and never in production. The harness should make that visible before someone
+      measures it by hand again.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): the run rate is reported per family and
+      per SNR, and the reasons sum to the number of classifications - a report whose parts do not
+      account for the whole is how a skipped stage hides.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
