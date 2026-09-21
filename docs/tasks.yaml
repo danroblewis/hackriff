@@ -16204,7 +16204,7 @@ tasks:
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
     status: blocked
-    blocked_on: user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART.
+    blocked_on: "user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART."
     priority: high
     parallel_group: FIXTURE
     model: opus
