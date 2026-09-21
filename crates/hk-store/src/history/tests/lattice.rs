@@ -50,18 +50,19 @@ fn lattice_cfg() -> PyramidConfig {
     }
 }
 
-/// T-453: a **lazy** lattice builds a coarse node when a read asks for it, so every read here
-/// materialises first. That is the contract, not test scaffolding: `PyramidConfig::view_lattice`
-/// sets `coarse_on_demand`, capture writes node (0, 0) and nothing else, and a level that nobody
-/// has asked for does not exist on disk. Reading without materialising is how a caller discovers
-/// it — the node answers unobserved.
+/// T-571: the shipped lattice is maintained **live**, so a read is a read. The `materialize` call
+/// is left in deliberately — it is a no-op for a live scheme and asserts so: if it ever folded
+/// anything here the counter check in `live_coarse.rs` would be the thing that caught it, and this
+/// helper would be quietly hiding the read-time fold behind every assertion in the file.
 fn read(p: &mut Pyramid, level: usize, secs: i64) -> RegionHistory {
-    p.materialize(
-        level,
-        FreqRange::new(0.0, 4000.0),
-        TimeRange::new(ts(T0), ts(T0 + secs * S)),
-    )
-    .unwrap();
+    let built = p
+        .materialize(
+            level,
+            FreqRange::new(0.0, 4000.0),
+            TimeRange::new(ts(T0), ts(T0 + secs * S)),
+        )
+        .unwrap();
+    assert_eq!(built, 0, "a live lattice builds nothing at read time");
     query(
         p,
         (0.0, 4000.0),
@@ -417,18 +418,17 @@ fn a_lattice_recovers_every_node_from_its_one_producer() {
     }
 }
 
-/// **T-453: the live edge is folded on request and never sealed early.**
+/// **T-571: the live edge is MAINTAINED, not folded on request, and still never sealed early.**
 ///
-/// `docs/16` §5.2 splits the lattice in two: a coarse node whose own time block has elapsed is a
-/// precomputed, immutable product, and one at the live edge *cannot* be, because more frames are
-/// still due inside it. Both must answer — a node that reads grey over data the store holds is the
-/// failure CLAUDE.md's display invariant names — and the second must not be written, because a tile
-/// sealed early is a tile that says *this is all there was*.
+/// This was T-453's test that a coarse node at the live edge is folded when a read asks for it.
+/// T-571 inverts the first half and keeps the second: the node is built as producer rows close,
+/// so a read folds **nothing**, and a node whose own time block has not ended must still not be
+/// written — a tile sealed early is a tile that says *this is all there was*.
 #[test]
-fn a_live_edge_coarse_node_is_folded_on_demand_and_never_sealed_early() {
+fn a_live_edge_coarse_node_is_maintained_as_rows_close_and_never_sealed_early() {
     let dir = TempDir::new("lat-edge");
     let sh = lattice();
-    // Node (0, 0)'s tile is 4 × 1 s, node (0, 1)'s is 4 × 2 s. Six seconds therefore seals the
+    // Node (0, 0)'s tile is 4 x 1 s, node (0, 1)'s is 4 x 2 s. Six seconds therefore seals the
     // first of the former and leaves the latter open, which is exactly the two cases.
     let secs = 6;
     let mut p = Pyramid::open(&dir.0, lattice_cfg()).unwrap();
@@ -445,51 +445,81 @@ fn a_live_edge_coarse_node_is_folded_on_demand_and_never_sealed_early() {
     );
     assert!(
         p.sealed_keys(edge).is_empty(),
-        "nothing has asked for the coarse node, so nothing should have built it"
-    );
-
-    // Ask. The answer comes out of a transient fold over a sealed child and an open one.
-    let h = read(&mut p, edge, secs);
-    let observed = h.cells.iter().filter(|c| c.observed()).count();
-    assert!(
-        observed > 0,
-        "a live-edge coarse node must answer from a fold, not read grey over data the store holds"
-    );
-    assert!(
-        p.sealed_keys(edge).is_empty(),
         "a node whose own time block has not ended must not be sealed: it would claim to be the \
          whole of a block that is still filling"
     );
-    // The transient summary is dropped the moment a frame lands under it, so the next read folds
-    // again rather than serving a stale one — and still agrees with level 0.
+    // It is nonetheless already there, open, with the rows its producer has closed.
+    assert!(
+        !p.open_keys(edge).is_empty(),
+        "the coarse node must be maintained as rows close, not waiting for a reader"
+    );
+
+    // Read it. Nothing is folded to answer.
+    let before = p.stats().producer_tiles_folded;
+    let h = read(&mut p, edge, secs);
+    assert_eq!(
+        p.stats().producer_tiles_folded,
+        before,
+        "a read of a live-edge coarse node must fold no producer tiles"
+    );
+    let observed = h.cells.iter().filter(|c| c.observed()).count();
+    assert!(
+        observed > 0,
+        "a live-edge coarse node must answer from what it holds, not read grey over data the \
+         store holds"
+    );
+    assert!(
+        p.sealed_keys(edge).is_empty(),
+        "reading it must not seal it either"
+    );
+
+    // It agrees with level 0 over every producer row that has CLOSED. The newest level-0 time
+    // cell is still open — its own column has not ended — so a coarse node lags it by at most one
+    // producer cell, which is what "commits every N rows" means and is the only honest answer a
+    // streaming fold can give. (Node (0, 0) itself is unaffected: a direct level-0 read stands in
+    // for its open column with `column_preview`.)
     let psd: Vec<f32> = (0..4).map(|_| lin(-90.0)).collect();
     p.ingest(&frame(T0 + secs * S, S, 0.0, 1000.0, &psd))
         .unwrap();
     let again = read(&mut p, edge, secs + 1);
     let h0 = read(&mut p, sh.index(0, 0), secs + 1);
+    // The producer cell still open, in this coarse node's own row index.
+    let open_row = (secs as usize) / 2;
+    let mut checked = 0;
     for t in 0..again.nt {
+        if t == open_row {
+            continue;
+        }
         for f in 0..again.nf {
             let truth = truth_max_from_level_0(&h0, &again, t, f);
             match truth {
-                Some(want) => assert!(
-                    (again.cell(t, f).max_db - want).abs() < 0.05,
-                    "live-edge cell ({t},{f}): {} vs level-0 truth {want}",
-                    again.cell(t, f).max_db
-                ),
+                Some(want) => {
+                    checked += 1;
+                    assert!(
+                        (again.cell(t, f).max_db - want).abs() < 0.05,
+                        "live-edge cell ({t},{f}): {} vs level-0 truth {want}",
+                        again.cell(t, f).max_db
+                    );
+                }
                 None => assert!(!again.cell(t, f).observed(), "cell ({t},{f})"),
             }
         }
     }
+    assert!(checked > 0, "the agreement check judged nothing");
 
-    // Once its block ends it becomes the other kind of thing: built once, written, and precomputed
-    // for every reader after the first.
+    // Once its block ends it is written, exactly as it stood — not rebuilt.
+    let folded = p.stats().producer_tiles_folded;
     p.seal_through(ts(T0 + 8 * S)).unwrap();
     read(&mut p, edge, 8);
     assert_eq!(
         p.sealed_keys(edge).len(),
         1,
-        "a coarse node whose block has elapsed is sealed on the way, so the second reader pays \
-         nothing"
+        "a coarse node whose block has elapsed is sealed on the way"
+    );
+    assert_eq!(
+        p.stats().producer_tiles_folded,
+        folded,
+        "and sealing it folds nothing either: the rows were already in it"
     );
 }
 
@@ -528,9 +558,17 @@ fn the_byte_budget_builds_the_summary_of_the_tile_it_is_about_to_evict() {
         "the budget stalled: with lazy coarse nodes the pass has to build the summary of the tile \
          it is evicting, and `covered` is false until it does"
     );
-    assert!(
-        st.tiles_materialized > 0,
-        "nothing read this store, so every coarse tile it holds was built by retention"
+    // T-571: retention no longer has to build anything. Under the lazy lattice this was the one
+    // place the fold could not be deferred — the budget was about to drop tiles whose summary did
+    // not exist — and live maintenance removes the case entirely: the summary was built as the
+    // rows closed, so the pass finds `covered` already true.
+    assert_eq!(
+        st.tiles_materialized, 0,
+        "a live lattice's summaries exist before retention looks for them"
+    );
+    assert_eq!(
+        st.producer_tiles_folded, 0,
+        "and nothing re-folded them from their producers"
     );
     // Nothing was thrown away without a summary: the oldest time is still answerable, coarsely.
     let coarse = read(&mut p, sh.index(sh.f_levels - 1, sh.t_levels - 1), secs);

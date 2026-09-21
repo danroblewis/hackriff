@@ -179,6 +179,13 @@ fn the_ceiling_is_maximal_for_this_geometry() {
     let (state, geom) = server(&dir.0, view(6250.0, 4, 4));
     let (max_f, max_t) = ceiling_of(&state, &geom);
     // The shipped geometry's answer, stated so a change to either constant is visible here.
+    //
+    // **Unchanged by T-571, deliberately.** With the coarse nodes maintained live the FOLD budget
+    // no longer binds, so the anti-diagonal reaches one level further in frequency and `(10, 0)`
+    // became an equal-area maximum alongside `(9, 1)`. `readable_ceiling` now refuses to spend a
+    // tie on an axis's last level: a `max_level` of 0 deletes that axis's ancestor ladder in the
+    // client rather than shortening it. Both pairs cost the same 32 tiles for the canvas's widest
+    // view, so nothing is given up by preferring the one that keeps both axes.
     assert_eq!(
         (max_f, max_t),
         (9, 1),
@@ -295,13 +302,18 @@ fn agree_over_the_whole_lattice(fl: usize, tl: usize) {
 /// not a candidate, and the fold bound charges the blocks a chunk really straddles. Each depth
 /// declares the box below, walks it with zero refusals, and is maximal on both axes.
 ///
-/// Each gains exactly one level of `level_f + level_t` over 4 x 4's 10. That is the whole of what
-/// depth buys at this floor: work goes as tile area, so no ladder moves the anti-diagonal far.
+/// Depth buys at most one level of `level_f + level_t` over 4 x 4's 10: work goes as tile area, so
+/// no ladder moves the anti-diagonal far.
+///
+/// **T-571 re-measured these.** With the coarse nodes maintained live the fold budget no longer
+/// binds, so the anti-diagonal is set by the read-work budget alone and frequency reaches further;
+/// the tie-break then moves each box along its own anti-diagonal, stopping short of spending an
+/// axis entirely. The claim the ceiling makes is unchanged and is still checked below — every
+/// address inside the box is servable and one level further on either axis is refused.
 #[test]
 fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
-    // One store deeper in each axis. T-494's sweep measured the rest, each with 0 refused inside
-    // its box: 4x5 -> (7, 4), 3x6 -> (6, 5), 5x5 -> (8, 3), 6x6 -> (9, 2), 7x7 -> (10, 1) and
-    // 8x8 -> (11, 0). All of them used to refuse inside their own box, and 7x7 used to be (0, 0).
+    // One store deeper in each axis. Before T-571 these read (7, 4) and (8, 3), with the fold
+    // budget capping frequency; T-494's sweep measured the rest under that regime.
     //
     // This walks the box's COARSE EDGE (`level_f == max_f` or `level_t == max_t`), which is where
     // the fold budget binds and where every pre-T-494 refusal sat. It does not walk the interior.
@@ -309,7 +321,7 @@ fn deeper_stores_declare_a_deeper_ceiling_that_is_true_and_maximal() {
     // store a fine interior read tries every one of ~20 candidate levels, and the full walk cost
     // 118 s in debug for two stores. The shipped store's interior is still walked in full by
     // `walks_the_declared_ceiling_and_finds_no_refusal`.
-    for (fl, tl, want) in [(4, 6, (7, 4)), (5, 4, (8, 3))] {
+    for (fl, tl, want) in [(4, 6, (11, 1)), (5, 4, (10, 1))] {
         let dir = TempDir::new(&format!("deep-{fl}x{tl}"));
         let (state, geom) = server(&dir.0, view(6250.0, fl, tl));
         let (max_f, max_t) = ceiling_of(&state, &geom);
