@@ -812,3 +812,130 @@ fn a_handshake_between_windows_waits_for_the_successor_and_never_says_gone() {
         started.elapsed()
     );
 }
+
+// ---------------------------------------------------------------------------
+// T-542: what a sweep does to the spectrum stream's id
+// ---------------------------------------------------------------------------
+
+/// **The registry must give a stream that has just gone quiet its whole linger, however long it
+/// had been offered before that.**
+///
+/// The reap aged an entry by `offered` — when it was *registered*. `spectrum/live` is registered
+/// once per segment and then offered for as long as that segment lasts, so by the time a re-plumb
+/// finishes its publisher the entry is already far older than [`hk_api::FINISHED_LINGER`] and the
+/// very next `register` anywhere in the registry withdraws it. Under a sweep that is constant:
+/// the FSK-burst chains publish one stream per emitter, so `register` — and with it the reap —
+/// runs many times a second.
+///
+/// Measured on the live HackRF, `POST /api/control/scan` over 1 MHz–6000 MHz at dwell 1 s:
+/// `/ws/spectrum/live` answered **404 no such stream** during a re-plumb, which `ops/stage.sh`'s
+/// health check reads as a dead server — so the demo was restarted under the user, which is the
+/// "the backend goes down" they reported.
+#[test]
+fn a_stream_offered_longer_than_the_linger_is_not_reaped_the_moment_it_finishes() {
+    let linger = Duration::from_millis(300);
+    let registry = StreamRegistry::with_linger(linger);
+    let live = Publisher::new(
+        spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, 16),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(live.header(), live.handle());
+
+    // The segment runs. This is the whole point: by the time it ends, the *offer* is old.
+    thread::sleep(linger * 3);
+    assert!(
+        registry.offer("spectrum/live").is_some(),
+        "a live publisher was withdrawn while it was still publishing"
+    );
+
+    // The re-plumb starts: the publisher finishes, saying a successor is coming, and nobody is
+    // attached (no browser open — exactly the demo's steady state).
+    live.finish_between_windows();
+
+    // A burst chain registers its emitter's stream, which runs the reap.
+    for i in 0..3 {
+        let h = bits_header(&format!("bits/fsk-bursts/{i}"));
+        let p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+        registry.register(&h, p.handle());
+        p.finish();
+    }
+
+    assert!(
+        registry.offer("spectrum/live").is_some(),
+        "the spectrum stream was withdrawn the instant it went quiet: its linger started when it \
+         was registered, not when it fell silent, so a long-lived stream had no grace at all"
+    );
+
+    // And the grace still ends: a stream that stays quiet past its own linger is withdrawn.
+    thread::sleep(linger * 2);
+    let h = bits_header("bits/fsk-bursts/9");
+    let p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+    registry.register(&h, p.handle());
+    p.finish();
+    assert!(
+        registry.offer("spectrum/live").is_none(),
+        "the linger no longer expires, which would make the registry the accumulator T-531 removed"
+    );
+}
+
+/// **A re-plumb longer than five seconds is still a gap, not an end** — end to end, on the wire.
+///
+/// This is the user's second symptom, and it needs both halves of T-542 to pass:
+///
+///  * the registry must still be offering the id (above), or the handshake is `404`;
+///  * [`hk_api::stream::BETWEEN_WINDOWS_GRACE`] must still be running, or it is `410 Gone`.
+///
+/// Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s: re-plumbs of 8–19 s are
+/// routine (the supervisor joins the old segment's workers, then starts a new one), and
+/// `/ws/spectrum/live` answered `410` for every second past the fifth — for 19 s in one episode
+/// and 41 s in another. `ops/stage.sh` accepts `101` and `503`; `404` and `410` are what it
+/// restarts the server for.
+///
+/// It sleeps for real, because the thing under test is a *duration*: the old grace was 5 s and the
+/// bound that matters is `hk_pipeline::run::REPLUMB_TIMEOUT`, 30 s. A test that did not outlast
+/// five seconds could not tell the two apart.
+#[test]
+fn a_re_plumb_past_the_old_five_second_grace_still_answers_503() {
+    let registry = StreamRegistry::new();
+    let first = Publisher::new(
+        spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, 16),
+        PublisherConfig::default(),
+    )
+    .unwrap();
+    registry.register(first.header(), first.handle());
+    let server = serve(&registry);
+    let addr = server.local_addr();
+
+    first.finish_between_windows();
+    // Longer than the grace was, shorter than a measured re-plumb. Meanwhile the sweep's burst
+    // chains keep registering, as they do on the live radio.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(6500) {
+        let h = bits_header(&format!(
+            "bits/fsk-bursts/{}",
+            started.elapsed().as_millis()
+        ));
+        let p = Publisher::new(h.clone(), PublisherConfig::default()).unwrap();
+        registry.register(&h, p.handle());
+        p.finish();
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let status = status_of(authed(addr, "spectrum/live"));
+    assert_eq!(
+        status, 503,
+        "a run that is still capturing, mid-re-plumb, answered {status}: 404 means the registry \
+         withdrew the id and 410 means the stream was called finished. Both are read as a dead \
+         server by ops/stage.sh, which restarts the demo under the user."
+    );
+
+    // The successor arrives and the stream is simply there again — no client ever had to be told
+    // anything had happened.
+    let mut header = spectrum_header("spectrum/live", ContentClass::Unrestricted, 30.0, 16);
+    header.center_hz = Some(34.3e6);
+    let second = Publisher::new(header, PublisherConfig::default()).unwrap();
+    registry.register(second.header(), second.handle());
+    let mut ws = authed(addr, "spectrum/live").expect("the successor is offered");
+    assert_eq!(header_of(&ws.read().unwrap()).center_hz, Some(34.3e6));
+}

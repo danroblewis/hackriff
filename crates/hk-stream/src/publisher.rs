@@ -633,10 +633,23 @@ enum Mode {
 /// It is a bound on a claim about the future, so it expires by itself: the producer promised a
 /// successor under this id, and if none has been offered by now the promise has failed and
 /// [`StreamError::Finished`] is the honest answer again. Nothing has to come back and retract it —
-/// which matters because the thread that would (the segment's) is exactly the one that died. Sized
-/// over the pipeline's own re-plumb bound (`WINDOW_SETTLE_TIMEOUT`, 5 s): a re-plumb that has not
-/// produced a row by then is not a gap any more.
-pub const BETWEEN_WINDOWS_GRACE: Duration = Duration::from_secs(5);
+/// which matters because the thread that would (the segment's) is exactly the one that died.
+///
+/// **T-542: it is sized over how long a re-plumb may take, which is 30 s, not 5.** It was 5 s,
+/// "sized over the pipeline's own re-plumb bound (`WINDOW_SETTLE_TIMEOUT`)" — but that constant is
+/// the bound on *one* step of a re-plumb (how long a new segment waits for the window it asked
+/// for), not on the re-plumb. The bound on the re-plumb is `hk_pipeline::run::REPLUMB_TIMEOUT`,
+/// 30 s, which is also the number the control API states to the UI ("a re-plumb can take up to
+/// 30 s") and which `hk_api::bridge::CARRY_OVER_GRACE` (60 s) is already sized over for a consumer
+/// that is *already attached*. So an arriving consumer was being told "this stream is over" in a
+/// gap an attached one was told to sit through — the same fact, two answers.
+///
+/// Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s: re-plumbs of **8–19 s** are
+/// routine (the supervisor joins the old segment's workers, then starts a new one), and
+/// `/ws/spectrum/live` answered **410 Gone** for every second past the fifth — which
+/// `ops/stage.sh`'s health check reads as a dead server and restarts the demo for. Past 30 s the
+/// re-plumb has failed by the pipeline's own reckoning and `410` is honest again.
+pub const BETWEEN_WINDOWS_GRACE: Duration = Duration::from_secs(30);
 
 struct List {
     active: Vec<Arc<Consumer>>,

@@ -1486,16 +1486,73 @@ struct Finished {
 
 /// Joins a segment's threads. Returns the capture thread's error, if it ended on one — the one
 /// failure the supervisor treats as "the front end stopped delivering" (T-508).
+///
+/// **The wait is bounded whenever the control plane is waiting behind it** (T-542). It used to be
+/// unbounded in every case, on the reasoning quoted at [`report_stragglers`] — each of these
+/// threads owns state the run is about to close, so abandoning one is worse than waiting. That is
+/// right for a *stop*, where the process is going away and nobody is left to be kept waiting. It
+/// is not right for a **re-plumb**, where the whole run is held hostage to whichever worker is
+/// slowest: capture is off, the spectrum stream has no publisher, and `retune` is blocked on a
+/// condvar. Measured on the live HackRF under a 1 MHz–6 GHz sweep at dwell 1 s, one such join ran
+/// **88 seconds** while ten `hk-chain-fsk-bursts-*` threads kept reading a ring whose segment had
+/// ended — from the user's seat, the backend was down.
+///
+/// The root cause of that particular straggler is fixed where it belongs
+/// ([`crate::chains::ChainReader::next`] now reads a stopped segment as closed). This is the
+/// guard, and it is a guard the file already had a shape for: past the bound the thread is named,
+/// counted and left behind, and [`take_parts`] salvages the segment state it is still holding —
+/// the path written for exactly this ("a chain or tap thread that did not end with its segment"),
+/// counted as `segments_salvaged`.
 fn join_workers(
+    sup: &Supervisor,
     workers: &mut Vec<Worker>,
     errors: &mut Vec<String>,
-    stopping: bool,
 ) -> Option<String> {
+    let stopping = sup.common.user_stop.load(Ordering::SeqCst);
     if stopping {
         report_stragglers(workers);
     }
+    // The bound starts when a re-plumb starts waiting, which is normally *after* this join is
+    // already blocked: the supervisor sits here for the whole life of a segment, and `retune` sets
+    // the request and the stop flag from another thread. So it is discovered inside the wait, not
+    // decided before it.
+    let mut deadline: Option<Instant> = None;
     let mut capture = None;
     for (name, join) in workers.drain(..) {
+        // **`hk-capture` is never abandoned.** It owns the device: the re-plumb's very next act is
+        // to take the source back out of `Common::slot`, which only this thread puts there, so
+        // leaving it behind does not get the radio moving sooner — it guarantees the re-plumb
+        // fails. It is also the one worker whose stop is already bounded by the driver (a HackRF
+        // read returns every 50 ms and errors at `STALL_TIMEOUT`), which is why it was never the
+        // straggler in any of the measurements.
+        let abandonable = name != "hk-capture";
+        let mut abandoned = false;
+        while !join.is_finished() {
+            if let Some(d) = deadline.filter(|_| abandonable) {
+                if Instant::now() >= d {
+                    abandoned = true;
+                    break;
+                }
+            } else if !stopping && deadline.is_none() && sup.lock().request.is_some() {
+                deadline = Some(Instant::now() + REPLUMB_JOIN_BOUND);
+            }
+            // 50 ms, not 2: this poll runs for the whole life of a segment (the supervisor waits
+            // here while the run is healthy), and it is measured against a bound of 8 s.
+            thread::sleep(Duration::from_millis(50));
+        }
+        if abandoned {
+            // Said out loud, not only counted: "the re-plumb is taking a while" and "a worker of
+            // the last segment never stopped" are different facts, and only the second one names
+            // what to go and look at.
+            eprintln!(
+                "{name} did not stop within {REPLUMB_JOIN_BOUND:?} of its segment ending; the \
+                 re-plumb goes on without it and its segment state is salvaged"
+            );
+            errors.push(format!(
+                "{name}: still running {REPLUMB_JOIN_BOUND:?} after its segment ended; left behind"
+            ));
+            continue;
+        }
         let failed = match join.join() {
             Ok(Ok(())) => None,
             Ok(Err(e)) => Some(format!("{e:#}")),
@@ -1510,6 +1567,17 @@ fn join_workers(
     }
     capture
 }
+
+/// **How long the supervisor waits for the last segment's workers before a re-plumb goes on
+/// without them** (T-542).
+///
+/// It has to be shorter than the two bounds a client is judged against, or the guard changes
+/// nothing a user can see: `hk_stream::BETWEEN_WINDOWS_GRACE` (30 s, past which a would-be
+/// consumer of `spectrum/live` is told the stream is over) and [`REPLUMB_TIMEOUT`] (30 s, past
+/// which `retune` gives up on the re-plumb it asked for). It also has to be long enough that an
+/// ordinary drain never trips it — the readers observe `stop` within a block, and a chain within
+/// one 20 ms ring read.
+const REPLUMB_JOIN_BOUND: Duration = Duration::from_secs(8);
 
 /// How long a segment that failed to start may take to wind down what it did start.
 const SEGMENT_JOIN_BOUND: Duration = Duration::from_secs(10);
@@ -1607,11 +1675,9 @@ fn supervise(sup: &Supervisor, mut workers: Vec<Worker>) -> Finished {
     let c = &sup.common;
     let mut errors = Vec::new();
     loop {
-        let capture_failed = join_workers(
-            &mut workers,
-            &mut errors,
-            c.user_stop.load(Ordering::SeqCst),
-        );
+        // T-542: a re-plumb is a caller waiting on a condvar with the radio stopped, so its join is
+        // bounded. A stop is not — nothing is waiting behind it and the state is about to close.
+        let capture_failed = join_workers(sup, &mut workers, &mut errors);
         let mut st = sup.lock();
         if get(&c.counters.source.samples) > st.samples_at_start {
             st.last_good = (st.window, st.class);
