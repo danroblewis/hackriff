@@ -160,10 +160,54 @@ function windowOf(headline) {
 }
 
 /** `slice 12:34:56Z (live frame) · peak -41.2 dB at 100.3021 MHz · max-hold …` */
+const STATED_PEAK = /slice ([\d:]+)Z \(([^)]+)\) · peak (-?[\d.]+) dB at ([\d.]+) MHz/;
+
+/** `slice 12:34:56Z (live frame) · peak -41.2 dB at 100.3021 MHz · max-hold …` */
 function statedSlice(trace) {
-  const m = /slice ([\d:]+)Z \(([^)]+)\) · peak (-?[\d.]+) dB at ([\d.]+) MHz/.exec(trace);
+  const m = STATED_PEAK.exec(trace);
   assert.ok(m, `the slice stated no peak: ${JSON.stringify(trace)}`);
   return { at: m[1], source: m[2], db: Number(m[3]), hz: Number(m[4]) * 1e6 };
+}
+
+/**
+ * **The first readout that satisfies `re`, returned by the read that satisfied it** — and why a
+ * `waitFor` followed by a `$text` is not that.
+ *
+ * `page.waitFor` answers a *boolean* and returns how long it took, so a caller that wants the text
+ * has to read the element again, one or more round trips later. The readout it gets back is then a
+ * **different frame**, and nothing makes that frame still satisfy the property that was waited for.
+ *
+ * Here the gap is not hypothetical, and it is not a flake in the product either. Two states of this
+ * readout both match "a slice with a peak" and they are reached by different routes:
+ *
+ *  - the **live frame** is a delivered row, so it states a peak with no tile resident at all;
+ *  - a **cell** is the pyramid's answer for the pane's own time position, so it states a peak only
+ *    once a tile covering that cell has arrived.
+ *
+ * A cold page reaches the first within ~200 ms and the second only when the tile route answers, and
+ * the pane's time position crosses between them as the live row and the polled edge move relative to
+ * one another. Measured on this fixture, over 8 fresh loads on this tree and 8 on `main`, the
+ * readout drops to a peak-less cell — `no tile in hand for this span yet (N pending, …)` — within a
+ * few hundred ms of the first peak on **2 to 3 loads in 8, identically on both trees**; with the
+ * renderer CPU-throttled the pre-scrub read below lands inside that window outright. So a wait for
+ * "a slice with a peak" followed by a re-read is a wait for one state and an assertion about
+ * another, which is the T-487 adjacent-question mistake spelled with time instead of with pixels.
+ *
+ * The bound is stated and is not a wall-clock guess about the product: it polls at `everyMs` until
+ * `timeoutMs`, and it returns the matching text itself, so the string asserted on is the string the
+ * property was checked against.
+ */
+async function traceMatching(page, what, re, { timeoutMs = 90000, everyMs = 100 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const text = (await page.$text(".sf-trace")) ?? "";
+    if (re.test(text)) return text;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}\n  last readout: ` +
+        `${JSON.stringify(text)}\n  exceptions: ${JSON.stringify(page.exceptions.slice(0, 3))}`);
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
 }
 
 /**
@@ -430,16 +474,27 @@ async function scrubOntoCell(page, lagS, tries = 8) {
     "(window.__hkTap?.rows ?? 0) > 3 && !!window.__hkTap.geom", { timeoutMs: 60000 });
   let last = "";
   for (let i = 0; i < tries; i++) {
-    // Back to the growing edge. `.sf-live` toggles, so this presses until the trace says it is
-    // drawing the live frame rather than assuming one press means one direction.
+    // Back to the growing edge. `.sf-live` toggles, so this presses until the pane says it is
+    // following rather than assuming one press means one direction.
+    //
+    // **`data-following`, not the trace's source label** — T-478's standing rule in this suite, and
+    // T-501 is why it now matters here as well as in `surface-nav`. This used to press until the
+    // readout said `(live frame)`, which is a statement about which SOURCE answered the slice, not
+    // about where the pane is. At the old 1 s floor the socket's newest row always fell inside the
+    // cell at the pane's time position, so the two coincided; at the display floor the cell is
+    // 80 ms and the pane's live edge lags the socket by more than one of them, so a pane that is
+    // genuinely following is answered from the pyramid and `(live frame)` is a transient state this
+    // loop could wait out its whole timeout for. Measured: 0 of 6 attempts reached it, while the
+    // chrome said `LIVE` throughout. What this helper needs is the pane back at the growing edge,
+    // and that is a fact the chrome states.
     for (let k = 0; k < 3; k++) {
       // `page.eval` returns the VALUE, not its string form — comparing against "true" here silently
-      // clicked three times every attempt and left the viewport frozen, waiting for a live frame.
-      if ((await page.eval(LIVE_FRAME_EXPR)) === true) break;
+      // clicked three times every attempt and left the viewport frozen.
+      if ((await page.eval(FOLLOWING_EXPR)) === true) break;
       await page.click(`document.querySelector('.sf-live')`);
       await page.frames(8);
     }
-    await page.waitFor("the trace to state a live-frame slice with a peak", LIVE_FRAME_EXPR,
+    await page.waitFor("the pane to be back at the growing edge", FOLLOWING_EXPR,
       { timeoutMs: 30000 });
     await page.click(`document.querySelector('.sf-live')`);
     try {
@@ -454,6 +509,10 @@ async function scrubOntoCell(page, lagS, tries = 8) {
   throw new Error("could not park a viewport on an OBSERVED pyramid cell behind the live edge after " +
     `${tries} attempts — the last freeze landed somewhere the history has no cell: ${last}`);
 }
+
+/** The pane is at the growing edge — the chrome's own fact, never the readout string (T-478). */
+const FOLLOWING_EXPR =
+  `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
 
 const LIVE_FRAME_EXPR =
   `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
@@ -876,11 +935,13 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   const page = await browser.page(undefined, { initScript: TAP });
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the trace to state a slice",
-    `/slice [\\d:]+Z \\([^)]*\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`,
-    { timeoutMs: 90000 });
+  // The pre-scrub reading, captured by the read that matched it (see `traceMatching`): this line
+  // used to wait for a peak and then read the readout again, and the second read is a later frame
+  // which need not still have one. It is a *baseline*, not the claim — the claim below is stated
+  // against the socket's own newest row, deliberately, and does not consult this at all.
+  const before = statedSlice(await traceMatching(page, "the trace to state a slice with a peak",
+    STATED_PEAK));
   const rect = await page.$rect(".sf-canvas");
-  const before = statedSlice((await page.$text(".sf-trace")) ?? "");
 
   // Freeze the viewport and walk it back through its own window. A drag pans (T-456); the surface
   // clamps at the retained extent, so this cannot run off the end of the record.

@@ -155,10 +155,28 @@ impl ObservationLog {
         survey_id: Option<SurveyId>,
         counters: Arc<Counters>,
     ) -> InteractiveObserver {
+        let device_id = self.device_id.clone();
+        self.interactive_for(device_id, fft_bins, survey_id, counters)
+    }
+
+    /// [`Self::interactive`] naming a **different** front end (T-510): a multi-source run has one
+    /// observation log but N radios, and the coverage map is computed per device from these
+    /// records ([`hk_store::coverage::record_device`]). A further front end's dwell must therefore
+    /// say *its* `device_id`, not the log's — otherwise the primary's coverage silently answers
+    /// for a band only the second radio looked at, and "grey = genuinely unobserved" stops being
+    /// true. `counters` must be that front end's own, because the tune and stream time the
+    /// observer reads are per front end.
+    pub(crate) fn interactive_for(
+        &self,
+        device_id: Option<String>,
+        fft_bins: usize,
+        survey_id: Option<SurveyId>,
+        counters: Arc<Counters>,
+    ) -> InteractiveObserver {
         InteractiveObserver {
             rule: rule(fft_bins),
             survey_id,
-            device_id: self.device_id.clone(),
+            device_id,
             queue: self.writer.queue(),
             seq0: counters.tune_seq.load(Ordering::SeqCst),
             counters,

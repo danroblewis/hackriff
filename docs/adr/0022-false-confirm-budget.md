@@ -314,6 +314,8 @@ This costs one counter and one surfaced state, and it converts the derivation's 
 
 ## 9. What changes when T-547 lands — and what does not
 
+**T-547 has landed** ([docs/21](../21-evidence-bits-under-quantisation.md), 2026-09-21): **CONDITIONAL**, conditioning key **ADC fill** (not gain, not clip fraction), **δ = 1.8 bits at a claimed 6 bits** and 3.3 at 8, plus a separate ~2-bit unattributed spread on real captures. It deliberately did **not** write the amendment below; §8 of that note says what the amendment should say if it is written.
+
 T-547 measures whether the calibrated nulls (bimodality, eye openness, EVM, SNR and the rest of §2.1's second list) have stable tails across gain state, clipping fraction and 8-bit quantisation, and returns GO / CONDITIONAL / NO-GO.
 
 **What does not change, under any of the three outcomes:**

@@ -66,6 +66,10 @@ use crate::recorder::{ManualRecorder, RecordingStatus};
 use crate::spectrum::DisplayControl;
 use crate::stats::{Counters, get, inc};
 
+#[path = "devices.rs"]
+mod devices;
+pub use devices::{ExtraSource, MAX_START_SKEW, RunDevice};
+
 /// `(device_id, calibration)` pins: the newest non-superseded version per device.
 type CalibrationPins = Arc<Vec<(String, CalibrationStateId)>>;
 
@@ -646,6 +650,12 @@ pub(crate) struct Shared {
     pub display: Arc<DisplayControl>,
     /// The run continues in a new segment after this one: history is not sealed at its end.
     pub continues: AtomicBool,
+    /// T-510: this segment's history reader takes the end-of-run seal itself. True for a
+    /// single-device run (behaviour unchanged); false for **every** front end of a multi-source
+    /// run, whose one seal [`devices::finish`] takes after all of them have drained — the shared
+    /// pyramids have one forward-only watermark, so a first-past-the-post seal would make every
+    /// later frame of the other front ends late.
+    pub seal_at_end: bool,
     /// T-541: how long a consumer arriving **after** this segment's publishers end is told the
     /// stream is between windows rather than gone
     /// ([`hk_stream::Publisher::finish_between_windows_for`]), in milliseconds.
@@ -670,6 +680,11 @@ pub(crate) struct Shared {
     /// by the `hk-survey` reader and applied to every classification of a window captured under
     /// that state.
     pub receiver: Arc<crate::survey::ReceiverSurvey>,
+    /// T-484: the hand-off to the view lattice's writer thread. The **spectrum** reader fills it
+    /// (the finest node is that reader's own rows); the **history** reader owns the writer thread
+    /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
+    /// could not open.
+    pub view_queue: Option<Arc<crate::history::ViewQueue>>,
 }
 
 impl Shared {
@@ -924,6 +939,15 @@ struct Common {
     /// several threads report the fall-out, and the first one is the cause. Cleared when the
     /// supervisor has consumed it as a segment's cause, so a later segment's panic is its own.
     worker_panic: Arc<Mutex<Option<String>>>,
+    /// T-510: the run's **further front ends** ([`devices`]), each its own source, ring, capture
+    /// thread, detector and history reader writing the shared, already-per-device stores. Empty
+    /// for a single-device run, which is then byte-for-byte what it was.
+    aux: Vec<devices::AuxDevice>,
+    /// T-510: the run has further front ends, so no reader seals the shared history at its own
+    /// end; [`devices::finish`] does, once, after every front end has drained.
+    defer_seal: bool,
+    /// T-510: that one seal has been taken.
+    sealed: AtomicBool,
     /// T-541 test seam: `(thread name, how many more of its starts panic)`
     /// ([`PipelineHandle::panic_worker`]). There is no other way to get an unwinding pipeline
     /// thread on demand, and a guard over a panic that no test can produce is not a guard.
@@ -1086,12 +1110,43 @@ struct Started {
 impl Pipeline {
     /// Opens the stores, opens the Survey, and starts the threads (capture last).
     pub fn start(
-        mut cfg: PipelineConfig,
+        cfg: PipelineConfig,
         source: Box<dyn Source>,
         info: SourceInfo,
         reopen: Option<crate::run::SourceFactory>,
         inventory: Box<dyn Inventory>,
     ) -> anyhow::Result<PipelineHandle> {
+        Self::start_multi(cfg, source, info, reopen, inventory, Vec::new())
+    }
+
+    /// [`Self::start`] with **further front ends** (T-510, milestone MSDR): each `extra` source
+    /// gets its own ring, capture thread, detector, history reader, IQ capture ring and coverage
+    /// observer, writing the run's shared history, view pyramid, repository and observation log
+    /// under **its own** `device_id`. [`devices`] has the composition and what a further front end
+    /// does not get yet. `source` stays the primary: segments, re-plumbs, chains, the scheduler
+    /// and the control plane are its. With `extra` empty this *is* [`Self::start`].
+    ///
+    /// One self-contained unit with N front ends, never a networked mesh; and N front ends widen
+    /// the coverage available to display, they never add a view window.
+    ///
+    /// Refused before anything opens when a further front end states no identity, shares one with
+    /// another front end, cannot pause under a lossless run, or starts more than
+    /// [`MAX_START_SKEW`] from the primary (the shared history has one watermark).
+    pub fn start_multi(
+        mut cfg: PipelineConfig,
+        source: Box<dyn Source>,
+        info: SourceInfo,
+        reopen: Option<crate::run::SourceFactory>,
+        inventory: Box<dyn Inventory>,
+        extra: Vec<ExtraSource>,
+    ) -> anyhow::Result<PipelineHandle> {
+        // Every refusal happens here, before a file is created or a device is started.
+        let extra_devices = if extra.is_empty() {
+            Vec::new()
+        } else {
+            let primary = source.control().device_info().map(|d| d.device_id);
+            devices::validate(&cfg, primary.as_deref(), &info, &extra)?
+        };
         if cfg.lossless && !source.pausable() {
             anyhow::bail!(
                 "lossless mode needs a source that can pause (a recording), and {} cannot: a \
@@ -1212,6 +1267,14 @@ impl Pipeline {
         // T-439: the de-welded view lattice, in its own scheme root beside `calibrated/` and
         // `uncalibrated/`. Its own `Mutex`, deliberately: `/api/history` and `/api/floor` hold the
         // floor product for a whole query, and the growing edge must not be behind that lock.
+        // T-484: node (0, 0) is the display STFT's own bin and row, so the canvas's finest tier is
+        // the rows the spectrum stream publishes rather than a coarser second STFT's view of the
+        // same samples. It is fixed for the life of the pyramid — the store's geometry is checked
+        // bit-exactly on reopen — so it is taken from the run's opening rate and configured display
+        // plan. A later rate change or display patch still folds honestly (the regrid handles the
+        // bin width, the time assignment the row period); it just stops being 1:1.
+        let (view_f_cell_hz, view_t_cell) =
+            crate::history::view_geometry(info.sample_rate_hz, &cfg.settings, cfg.source_class);
         let view = cfg
             .settings
             .view_history
@@ -1219,7 +1282,7 @@ impl Pipeline {
                 let dir = cfg.data_dir.join("history").join("view");
                 Pyramid::open(
                     &dir,
-                    crate::history::view_config(cfg.settings.view_f_cell_hz),
+                    crate::history::view_config(view_f_cell_hz, view_t_cell),
                 )
                 .map(|p| Arc::new(Mutex::new(p)))
                 .map_err(|e| eprintln!("view-scheme history disabled: {e}"))
@@ -1275,6 +1338,9 @@ impl Pipeline {
             fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
             worker_panic: Arc::default(),
             panic_worker: Mutex::new(None),
+            aux: Vec::new(),
+            defer_seal: !extra.is_empty(),
+            sealed: AtomicBool::new(false),
         };
         // T-118: visits and tiers from the T-115 log when it opened.
         if let Some(log) = &common.observations {
@@ -1288,6 +1354,8 @@ impl Pipeline {
         );
         let class = cfg.source_class;
         let window = (info.center_hz, info.sample_rate_hz);
+        // T-510: every further front end is built from the run's configuration as it stands here.
+        let template = (!extra.is_empty()).then(|| cfg.clone());
         let parts = Parts {
             cfg,
             repo,
@@ -1296,8 +1364,36 @@ impl Pipeline {
         let Started {
             shared,
             tx,
-            workers,
+            mut workers,
         } = start_segment(&common, parts, info, source, reopen, None).map_err(|f| f.error)?;
+        // T-510: the further front ends start **after** the primary, so a primary that cannot
+        // start leaves nothing to tear down. One of them that cannot start ends the run it was
+        // part of, rather than leaving a run that is quietly one radio short of what was asked
+        // for.
+        let mut common = common;
+        if let Some(template) = template {
+            for (e, dev) in extra.into_iter().zip(extra_devices) {
+                match devices::start(&common, &template, e, dev) {
+                    Ok(d) => common.aux.push(d),
+                    Err(e) => {
+                        shared.stop.store(true, Ordering::SeqCst);
+                        drop(tx);
+                        let mut errors = Vec::new();
+                        for (name, h) in workers.drain(..) {
+                            if let Ok(Err(err)) = h.join() {
+                                errors.push(format!("{name}: {err:#}"));
+                            }
+                        }
+                        devices::finish(&common, &mut errors);
+                        common.occupancy.finish();
+                        if !errors.is_empty() {
+                            eprintln!("hk-pipeline: while ending the run: {}", errors.join("; "));
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+        }
         let resolution = (shared.fs, shared.fft_len, shared.averages);
         let sup = Arc::new(Supervisor {
             common,
@@ -1490,23 +1586,8 @@ fn start_segment(
         _ => None,
     };
     let specs = cfg.settings.chain_specs();
-    // T-174: the live DC-twin rule uses the occupancy engine's grid (level-0 cells).
-    let dc_twin = {
-        let p = common
-            .product
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let py = &p.config().pyramid;
-        hk_context::occupancy::channels::DcTwinRule {
-            f_cell_hz: py.f_cell_hz,
-            slack_ns: i64::try_from(py.t_cell.as_nanos())
-                .unwrap_or(1_000_000_000)
-                .max(1),
-            lo_tolerance_hz: hk_detect::DcRule::default().tolerance_hz,
-        }
-    };
     let shared = Arc::new(Shared {
-        dc_twin,
+        dc_twin: dc_twin_rule(common),
         receiver: Arc::clone(&common.receiver),
         counters: Arc::clone(&common.counters),
         ring,
@@ -1523,10 +1604,16 @@ fn start_segment(
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
         successor_grace_ms: AtomicU64::new(hk_stream::BETWEEN_WINDOWS_GRACE.as_millis() as u64),
+        seal_at_end: !common.defer_seal,
         bursts: Arc::clone(&common.bursts),
         claims: crate::chains::EmissionClaims::default(),
         track_decodes: Arc::default(),
         compute: common.compute.clone(),
+        view_queue: common.view.is_some().then(|| {
+            Arc::new(crate::history::ViewQueue::new(
+                crate::history::VIEW_QUEUE_FRAMES,
+            ))
+        }),
         cfg,
     });
     inc(&common.stats.segments);
@@ -1584,10 +1671,10 @@ fn start_segment(
             )?);
         }
         {
-            let s = Arc::clone(&shared);
+            let (s, a) = (Arc::clone(&shared), common.attention.clone());
             workers.push(spawn(
                 "hk-spectrum",
-                Box::new(move || crate::spectrum::run(s)),
+                Box::new(move || crate::spectrum::run(s, a)),
             )?);
         }
         {
@@ -1661,6 +1748,23 @@ fn start_segment(
         tx,
         workers,
     })
+}
+
+/// T-174: the live DC-twin rule uses the occupancy engine's grid (level-0 cells). One rule for
+/// the run: it is a property of the shared history grid, so every front end reads the same one.
+fn dc_twin_rule(common: &Common) -> hk_context::occupancy::channels::DcTwinRule {
+    let p = common
+        .product
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let py = &p.config().pyramid;
+    hk_context::occupancy::channels::DcTwinRule {
+        f_cell_hz: py.f_cell_hz,
+        slack_ns: i64::try_from(py.t_cell.as_nanos())
+            .unwrap_or(1_000_000_000)
+            .max(1),
+        lo_tolerance_hz: hk_detect::DcRule::default().tolerance_hz,
+    }
 }
 
 /// What the supervisor leaves for [`PipelineHandle::wait`].
@@ -2014,6 +2118,11 @@ fn end_run(
     errors: Vec<String>,
     why: Option<String>,
 ) -> Finished {
+    let mut errors = errors;
+    // T-510: the run's one end. Every further front end stops and drains here, and the shared
+    // history's single end-of-run seal is taken once, after all of them have — never by whichever
+    // reader finished first. A no-op on a single-device run.
+    devices::finish(&sup.common, &mut errors);
     sup.common.occupancy.finish(); // T-118: close the last interval after the readers drain
     st.finished = true;
     st.recovering = false;
@@ -2773,12 +2882,16 @@ impl RunSummary {
             c("/detect/explanations")
         ));
         line(format!(
-            "chains:      {} attached, {} detached, {} refused (class), {} unmatched, {} errors",
+            "chains:      {} attached, {} detached, {} refused (class), {} unmatched, {} errors \
+             ({} from storage)",
             c("/chains/attached"),
             c("/chains/detached"),
             c("/chains/refused_class"),
             c("/chains/unmatched"),
-            c("/chains/errors") + c("/chains/attach_errors")
+            c("/chains/errors") + c("/chains/attach_errors"),
+            // T-605: broken out because a storage error is a write that did not happen, not a
+            // signal that would not demodulate, and it must be visible without reading the log.
+            c("/chains/storage_errors")
         ));
         line(format!(
             "characterise: {} sweep chain(s), {} window(s) examined, {} characterised, {} left \
@@ -3151,6 +3264,22 @@ impl PipelineHandle {
     /// much of it reached C30.
     pub fn gnss(&self) -> Arc<crate::gnss::GnssDwell> {
         Arc::clone(&self.sup.common.gnss)
+    }
+
+    /// Every front end of the run (T-510): the primary first, then the further ones in the order
+    /// [`Pipeline::start_multi`] was given them. A single-device run lists one.
+    pub fn devices(&self) -> Vec<RunDevice> {
+        let c = &self.sup.common;
+        let primary = RunDevice {
+            device_id: c.switch.device_info().map(|d| d.device_id),
+            primary: true,
+            control: Arc::clone(&c.switch) as Arc<dyn SourceControl>,
+            counters: Arc::clone(&c.counters),
+            iq_buffer: Arc::clone(&c.iq_buffer),
+        };
+        std::iter::once(primary)
+            .chain(c.aux.iter().map(devices::AuxDevice::run_device))
+            .collect()
     }
 
     /// The newest ring sample index.

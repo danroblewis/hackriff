@@ -1,18 +1,28 @@
-//! `POST /api/analyze` (T-190): the "Analyze / synthesize decoder" action's target validation.
+//! `POST /api/analyze` (T-190, T-546): **why this signal's decoding pipeline was chosen.**
 //!
-//! The synthesis engine (MAUTO, `docs/15-decoder-synthesis.md` §8; the region-analyze API and
-//! streamed best-pipeline-plus-evidence response are ADR-0014 when that milestone is scheduled)
-//! is not built yet. Until then this route only resolves and validates its target — a persisted
-//! selection, an inventory emitter (merged ids resolve to the live entity, like
-//! `GET /api/inventory/{id}`), or an ad-hoc band with an optional history time window — and
-//! answers `501 not_implemented` once the target is known to exist. No engine code, no
-//! background work: every call is answered synchronously.
+//! For an **emitter** target this answers `200` with the emitter's latest analysis: the chosen
+//! demod + decode pipeline, the per-stage evidence it rests on, the ADR-0021 trace of what else
+//! was considered and why each alternative left the search, and — when nothing was fully
+//! resolved — a sealed `Resolution` saying what that absence means. The analysis itself is
+//! produced by the pipeline while it runs (`hk_pipeline::synth`) and persisted as an
+//! `emitter_synthesis` row (ADR-0015 §5.4), so this route reads; it never starts DSP and every
+//! call is answered synchronously.
+//!
+//! **`not-searched` is not `unknown`** (ADR-0021 §7A.4). An emitter no analysis has run on
+//! answers `200` with `resolution.kind: "not-searched"` and a null `pipeline` — *un-looked-at*,
+//! which is a different fact from *looked at and found nothing*, and the two are never rendered
+//! alike. That is the decode-side statement of the canvas's grey rule.
+//!
+//! Selection and band targets still answer `501`: the general region-analyze engine (ADR-0015
+//! §5.1, a queued job over acquired IQ) is not built, and only an emitter that the pipeline
+//! already analysed has an answer to give.
 //!
 //! # Endpoint
 //!
 //! | Method | Path | Body | Answers |
 //! |---|---|---|---|
-//! | POST | `/api/analyze` | `{"selection_id"} \| {"emitter_id"} \| {"band": {"f_lo", "f_hi", "t_lo"?, "t_hi"?}}` (exactly one) | `501 {"error", "code": "not_implemented"}` once the target validates |
+//! | POST | `/api/analyze` | `{"emitter_id"}` | `200 {"emitter_id", "engine", "t", "verdict", "stage_reached", "pipeline", "evidence", "trace", "resolution", "receiver"}` |
+//! | POST | `/api/analyze` | `{"selection_id"} \| {"band": {"f_lo", "f_hi", "t_lo"?, "t_hi"?}}` | `501 {"error", "code": "not_implemented"}` once the target validates |
 //!
 //! Errors: `400 invalid` (unknown field, zero or several target forms, malformed `band`,
 //! `f_lo >= f_hi`), `404 not_found` (unknown selection or emitter, including a malformed id — the
@@ -25,8 +35,9 @@
 
 use std::sync::{MutexGuard, PoisonError};
 
+use hk_model::repo::synthesis::Resolution;
 use hk_model::{EmitterId, IdentityAccess, RepoError, Repository, SelectionId};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::control::{
     Applied, CtlRequest, CtlResponse, Fail, dispatch, number, only, refuse_route, text,
@@ -142,17 +153,51 @@ fn emitter_exists(state: &ApiState, id: EmitterId) -> Result<(), Fail> {
         .map_err(fail)
 }
 
+/// The emitter's latest analysis, or the `not-searched` answer when none has run.
+///
+/// **The distinction is the point.** A `None` here is never served as "unknown": an emitter
+/// nothing looked at and an emitter a finished search could not identify are different findings,
+/// and collapsing them is the defect ADR-0021 §7A.4 names.
+fn analysis(state: &ApiState, id: EmitterId) -> Result<Value, Fail> {
+    let repo = inventory_store(state)?;
+    let fail = |e: RepoError| match e {
+        RepoError::NotFound { .. } => Fail::new(404, "not_found", "no such inventory entry"),
+        RepoError::Invalid(m) => Fail::invalid(m),
+        other => Fail::new(500, "failed", format!("inventory store: {other}")),
+    };
+    let live = repo.live_emitter_id(id).map_err(fail)?;
+    Ok(match repo.synthesis(live).map_err(fail)? {
+        Some(row) => serde_json::to_value(&row)
+            .map_err(|e| Fail::new(500, "failed", format!("serialising the analysis: {e}")))?,
+        None => json!({
+            "emitter_id": live.to_string(),
+            "pipeline": Value::Null,
+            "evidence": [],
+            "trace": [],
+            "resolution": serde_json::to_value(Resolution::not_searched()).map_err(|e| {
+                Fail::new(500, "failed", format!("serialising the resolution: {e}"))
+            })?,
+        }),
+    })
+}
+
 fn apply(state: &ApiState, body: &Map<String, Value>) -> Result<Applied, Fail> {
     let target = parse_target(body)?;
     match target {
         Target::Selection(id) => selection_exists(state, id)?,
-        Target::Emitter(id) => emitter_exists(state, id)?,
+        Target::Emitter(id) => {
+            emitter_exists(state, id)?;
+            let body = analysis(state, id)?;
+            // A read dressed as a control route: the target is audited, and nothing changes.
+            return Ok(crate::control::ok(body, Value::Null, Value::Null));
+        }
         Target::Band { .. } => {}
     }
     Err(Fail::new(
         501,
         "not_implemented",
-        "analyze is not implemented yet",
+        "analyze over a selection or an ad-hoc band is not implemented yet: only an emitter the \
+         pipeline has already analysed has an answer to give",
     ))
 }
 

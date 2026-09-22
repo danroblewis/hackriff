@@ -496,15 +496,20 @@ pub struct OpenRequest {
 /// independent stream, so a caller opening two sources from the same driver or concurrently
 /// gets two separate stream handles.
 ///
-/// The single-device assumption lives not in this trait, but in its **consumers**:
-/// [`hk_pipeline::SourceSlot`], [`hk_pipeline::SwitchableControl`],
-/// `hk_pipeline::config::PipelineConfig::device_id`, [`hk_pipeline::Pipeline::start`],
-/// [`hk_pipeline::capture::run`], and `hk_cli`'s `driver_for` (one driver + one device per
-/// invocation). Those consumers take one `Box<dyn Source>` and assume it is the active window.
-/// When multiple SDRs are added (a future option per ADR-0005 Consequences: "Multiple HackRFs
-/// (a survey radio + a dwell radio) are a later option the policy can grow into; the interface
-/// assumes one window now"), those consumer layers will evolve to hold multiple windows and
-/// sources in parallel; this trait's contract stays the same.
+/// The single-device assumption lived not in this trait, but in its **consumers**. Since T-510
+/// the pipeline composes N of them: `hk_pipeline::Pipeline::start_multi` spawns one
+/// `{source, ring, capture thread, history reader, detector, IQ ring, coverage observer}` set per
+/// front end into the run's shared, already-per-device stores, and each one's measurements carry
+/// its own provenance `device_id`. What is still one-per-run is the **primary's** control plane —
+/// `hk_pipeline::SourceSlot`, `hk_pipeline::SwitchableControl`,
+/// `hk_pipeline::config::PipelineConfig::device_id`, re-plumbing, chains and the scheduler — and
+/// `hk_cli`'s `driver_for` (one driver + one device per invocation, T-512). A further front end
+/// collects passively and widens the coverage available to display; it never adds a view window.
+/// This trait's contract is unchanged, as ADR-0005 Consequences anticipated ("Multiple HackRFs
+/// (a survey radio + a dwell radio) are a later option the policy can grow into").
+///
+/// One caveat that is not software: 20 Msps of ci8 is ~40 MB/s and saturates a USB 2.0
+/// controller, so concurrent front ends at full rate want **separate USB controllers**.
 pub trait SourceDriver: Send + Sync {
     /// Driver name, e.g. `hackrf`.
     fn name(&self) -> &'static str;

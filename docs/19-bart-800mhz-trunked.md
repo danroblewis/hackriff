@@ -732,10 +732,65 @@ takes three captures, and should be the standard way this project separates real
   is the blind chain, not that one system." Any reachable trunked control channel satisfies it. The
   problem is that *no* trunked control channel is reachable here, so the use case needs a different
   instance, not a different definition.
-- **T-545 and T-546 are blocked on a fixture that does not exist.** They should not be started
-  against synthetic material — §3.4 is precisely why that would prove nothing.
+- **T-545 and T-546 are blocked on a fixture that does not exist** *for the decode-compliance
+  half*. §3.4 is precisely why synthetic material cannot prove the framing is standards-correct.
+  **Amended 2026-09-21 (T-545, and §7.7's original blanket "should not be started" is withdrawn):**
+  the user directed phase 2 to proceed on synthetic IQ, and the distinction that makes that sound
+  is *which* assertions the fixture can carry. It cannot carry standards compliance — and
+  `tests/e2e/tests/acceptance_mauto.rs` says so in its header, in T-299's terms, rather than
+  quietly pretending otherwise. It **can** carry every assertion about the chain *around* the
+  decoder, and those turned out to be where the gaps are: nothing estimates parameters on a
+  digital emission (and `mod_order` has no value 4 to give), `POST /api/analyze` is a `501` stub
+  with no engine behind it, a successful decode lands in the `trunk_system` table and never
+  reaches the inventory emitter it describes, the only explanation offered is allocation-only, and
+  **§7.6a's own −9.6 ppm measurement hides the control channel completely** — 5.5× the raster
+  tolerance, so candidacy never happens. That last one is a real-receiver failure found *because*
+  the synthetic route was taken, and it would have been found on the first real capture instead,
+  at much greater cost.
 - **T-299 is NOT unblocked.** The note added to it on this branch was written in the expectation that
   this capture would land. It did not. The note now says so.
+- **T-546 closed all five gaps on 2026-09-21, and every one of them was in the chain *around* the
+  decoder** — which is the strongest possible confirmation that the amended reading above was the
+  right call. Nothing in T-546's diff touches the framing, the CRC variant or the five compliance
+  gaps `confirm.rs:980-1035` records, so **§3.4's objection stands untouched and T-299 stays
+  open**: what went green is the plumbing, not standards compliance.
+  - *Parameters* (`crates/hk-demod/src/fsk/structure.rs`): a blind cyclostationary clock line, an
+    outer-deviation measurement, and a level count that can answer **4** — or abstain. On this
+    fixture it measured **4799.8 Bd** and **1709 Hz** with no expected value supplied.
+  - *Auto-selection* (`crates/hk-pipeline/src/synth.rs`, `hk_model::repo::synthesis`): the chosen
+    pipeline, its per-stage evidence and an ADR-0021 trace are persisted as an `emitter_synthesis`
+    row and served by `POST /api/analyze`. The trace keeps *tried* and *never-looked-at* apart
+    structurally, so "why not DMR" (measured: 0 frame syncs) and "why not PSK" (no `psk_demod`
+    block exists) read as the different answers they are.
+  - *Confirm-by-decode*: the trunking chain files its decode against the **inventory emitter**,
+    so the signal the user is looking at carries the family, the parameters and the evidence.
+  - *Explanation quality*: `p25-tsbk` / `dmr-csbk` / `nxdn-cac` map to `public-safety` at 0.97, so
+    the ranking rests on a CRC-valid decode rather than on the allocation row alone.
+  - *The clock error* — see §7.6b.
+
+### 7.6b The −9.6 ppm measurement, implemented (T-546, 2026-09-21)
+
+§7.6a's figure is now a capability rather than a note. `hk_detect::trunk::raster::fit_grid_offset`
+fits the receiver's own offset from a channel grid as the **power-weighted circular mean of the
+occupied bins modulo the raster** — one extra FFT pass per hunt, not one per channel, because every
+emission in a capture shares the same receiver offset and therefore reinforces the same estimate.
+The trunking hunt re-origins its grid on the fit, and records it as `ReceiverFit {grid_hz,
+offset_hz, concentration, ppm}` on the emitter's analysis: **provenance about the radio, not about
+the signal**, which is both how it is recognised and what makes it cheap.
+
+Two honest limits, recorded rather than buried:
+
+1. **The fit is known only modulo the raster.** +4300 Hz and −8200 Hz name the same 12.5 kHz grid,
+   and nothing in the spectrum distinguishes them. That is enough to re-align the *grid* — which
+   is all candidacy needs — and not enough to reach an **absolute** frequency, so following a
+   grant (whose frequency the announced band plan already fixes unambiguously) is **skipped**
+   while the receiver is measurably off-grid rather than down-converting the channel next door and
+   reporting "not radiating". Resolving the alias needs a second constraint (a ppm bound from the
+   crystal, or agreement with the band plan) and is not done here.
+2. **An unfitted grid is left uncorrected.** Below `MIN_GRID_CONCENTRATION` (0.25, from the
+   geometry of a 12.5 kHz channel's own occupancy, not from a run) the answer is `None` and the
+   grid stays where it was. A hint that does not hold up buys nothing — the same rule the raster
+   tolerance itself follows.
 
 ### 7.8 What to try next, in order of cost
 

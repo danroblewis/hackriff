@@ -77,6 +77,10 @@ struct Stages {
     /// rather than at its exact fractional instant.
     old_placement: bool,
     recentre: Recentre,
+    /// Take the channel-filter cutoff, the recentring offset and the decimation from the
+    /// **gate-SNR reference snippet**, as the generator does after T-564, rather than re-measuring
+    /// them on the delivered (rung-SNR) snippet.
+    gate_reference_geometry: bool,
     noise: bool,
     lo: bool,
     iq: bool,
@@ -90,6 +94,7 @@ impl Stages {
     const SHIPPED: Stages = Stages {
         old_placement: false,
         recentre: Recentre::Shipped,
+        gate_reference_geometry: true,
         noise: true,
         lo: true,
         iq: true,
@@ -101,11 +106,13 @@ impl Stages {
     const AS_WAS: Stages = Stages {
         old_placement: true,
         recentre: Recentre::Peak,
+        gate_reference_geometry: false,
         ..Stages::SHIPPED
     };
     const NONE: Stages = Stages {
         old_placement: false,
         recentre: Recentre::Off,
+        gate_reference_geometry: true,
         noise: false,
         lo: false,
         iq: false,
@@ -214,10 +221,23 @@ fn build(seed: u64, snr_db: f64, st: Stages) -> Built {
         shaped_linear(n, sps, alpha, |k| syms[k])
     };
     normalise(&mut x);
+    // T-564: the gate-SNR reference snippet the shipped generator settles its geometry from.
+    let emission = x.clone();
 
     let bw = (1.35 * rate).clamp(0.001 * fs, 0.9 * fs);
-    let sigma2 = fs / (bw * 10f64.powf(cfg.snr_db / 10.0));
-    let sigma = (sigma2 / 2.0).sqrt();
+    let sigma_at = |snr_db: f64| (fs / (bw * 10f64.powf(snr_db / 10.0)) / 2.0).sqrt();
+    let sigma = sigma_at(cfg.snr_db);
+    let mut reference = {
+        let mut y = emission;
+        let mut rng = Rng::new(cfg.seed ^ (Class::Qpsk as u64) ^ GEOMETRY_REFERENCE_STREAM);
+        impair(
+            &mut y,
+            sigma_at(geometry_reference_snr_db(Class::Qpsk)),
+            &cfg,
+            fs,
+            &mut rng,
+        )
+    };
     for s in x.iter_mut() {
         let (a, b) = rng.gaussian_pair();
         if st.noise {
@@ -256,28 +276,39 @@ fn build(seed: u64, snr_db: f64, st: Stages) -> Built {
     let mut origin = 0.0;
     let mut stride = 1.0;
     let peak_hz = old_peak_offset_hz(&samples, fs);
-    let centroid_hz = recentre_offset_hz(&samples, fs);
+    // The geometry source: the gate-SNR reference snippet after T-564, the delivered one before.
+    fn geometry<'a>(
+        st: &Stages,
+        reference: &'a [Complex32],
+        samples: &'a [Complex32],
+    ) -> &'a [Complex32] {
+        if st.gate_reference_geometry {
+            reference
+        } else {
+            samples
+        }
+    }
+    let centroid_hz = recentre_offset_hz(geometry(&st, &reference, &samples), fs);
     let applied = match st.recentre {
         Recentre::Off => 0.0,
         Recentre::Peak => peak_hz,
         Recentre::Shipped => centroid_hz,
     };
-    if applied != 0.0 {
-        for (i, s) in samples.iter_mut().enumerate() {
-            let ph = -TAU * applied * i as f64 / fs;
-            *s *= Complex32::new(ph.cos() as f32, ph.sin() as f32);
-        }
-    }
-    let obw_hz = measured_obw(&samples, fs);
+    derotate(&mut samples, applied, fs);
+    derotate(&mut reference, centroid_hz, fs);
+    let obw_hz = measured_obw(geometry(&st, &reference, &samples), fs).min(bw);
     let cutoff = (0.75 * obw_hz / fs).clamp(0.005, 0.49);
-    if st.chan && cutoff < 0.45 {
-        let trimmed = samples.len() > 4 * 95;
-        samples = channel_filter(&samples, cutoff);
-        if trimmed {
-            origin += 47.0;
+    if cutoff < 0.45 {
+        if st.chan {
+            let trimmed = samples.len() > 4 * 95;
+            samples = channel_filter(&samples, cutoff);
+            if trimmed {
+                origin += 47.0;
+            }
         }
+        reference = channel_filter(&reference, cutoff);
     }
-    let obw_hz = measured_obw(&samples, fs);
+    let obw_hz = measured_obw(geometry(&st, &reference, &samples), fs);
     let max_decim = (samples.len() / 2048).max(1);
     let symbol_decim = ((fs / (crate::symbols::SYMBOL_SAMPLES_PER_OBW * obw_hz)).floor() as usize)
         .clamp(1, max_decim);

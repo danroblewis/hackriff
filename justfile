@@ -246,7 +246,7 @@ test-one name:
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
-e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism"
+e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_mauto"
 
 # THREAD CAP, and why it lives here rather than in .config/nextest.toml. These suites run through
 # plain `cargo test`, NOT nextest, so nextest's `test-threads = 8` and its `heavy-serial` group do
@@ -291,7 +291,7 @@ acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check (acceptance
 # have pinned CI red), because m2/m3 are explicitly kept apart for wall time, and because scene
 # simulations with wall-clock dwell budgets already flake under load on a 28-core Mac and would be
 # worse on a 2-vCPU runner. Each also has its own recipe for running one alone.
-acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism
+acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-mauto
 
 # Census: every hk-e2e target on disk must appear in exactly one of the three lists above, and
 # every listed target must exist. This is the guard that makes the explicit `--test` lists safe —
@@ -339,6 +339,14 @@ acceptance-m3 *args:
 # M4 (trunking) acceptance: T-267 control-channel hunting through the mock SDR device.
 acceptance-m4 *args:
     HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m4 {{args}}
+
+# MAUTO acceptance (SIGNAL-087, T-545 phase 2 + T-546 phase 3): blind auto-discovery and
+# auto-decode of a trunked control channel through the mock SDR — detect blindly, measure the
+# symbol structure, auto-select the demod + decode pipeline, and confirm the INVENTORY EMITTER by
+# decoding it, at the -9.6 ppm receiver clock error this project measured on its own HackRF. All
+# seven tests run; T-545's five red proofs went green with T-546 and their `#[ignore]`s are gone.
+acceptance-mauto *args:
+    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_mauto {{args}}
 
 # Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to cargo test.
 acceptance-chirp *args:

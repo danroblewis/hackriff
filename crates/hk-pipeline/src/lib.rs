@@ -53,6 +53,7 @@ pub mod recipes;
 pub mod refine;
 pub mod stats;
 pub mod survey; // T-399
+pub mod synth; // T-546 (ADR-0015 / ADR-0021): why a decode pipeline was chosen
 
 // ADR-0012 §11 attention + memory wiring (pre-added by T-113; the owners fill them in).
 pub mod alarms; // T-122
@@ -109,11 +110,11 @@ pub use recorder::{
 };
 pub use refine::RefineSettings;
 pub use run::{
-    CaptureState, ControlFailure, ControlStats, ControlStatus, DeviceReplay, MAX_RECOVERY_ATTEMPTS,
-    Pipeline, PipelineController, PipelineHandle, REPLUMB_TIMEOUT, Replay, ResolutionSummary,
-    RetuneOutcome, RunSummary, SegmentHold, SourceFactory, SourceInfo, Stopper,
-    WINDOW_SETTLE_TIMEOUT, open_mock_replay, open_replay, recovery_backoff, replay_block_len,
-    replay_once,
+    CaptureState, ControlFailure, ControlStats, ControlStatus, DeviceReplay, ExtraSource,
+    MAX_RECOVERY_ATTEMPTS, MAX_START_SKEW, Pipeline, PipelineController, PipelineHandle,
+    REPLUMB_TIMEOUT, Replay, ResolutionSummary, RetuneOutcome, RunDevice, RunSummary, SegmentHold,
+    SourceFactory, SourceInfo, Stopper, WINDOW_SETTLE_TIMEOUT, open_mock_replay, open_replay,
+    recovery_backoff, replay_block_len, replay_once,
 };
 pub use stats::Counters;
 pub use survey::{ReceiverSurvey, SurveyCadence, SurveyCounts};
