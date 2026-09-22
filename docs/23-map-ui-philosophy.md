@@ -1,0 +1,473 @@
+# 23 — Map-UI design philosophy
+
+**Status: design philosophy, not built.** Proposed by the user on 2026-09-21 as the design brief for
+turning the MCANVAS surface into a full-bleed, Google-Maps-grammar research instrument. This document
+**extends** [`docs/14`](14-ui-rewrite.md) (the MUI thin-client rewrite) and
+[`docs/16 §8`](16-coverage-tile-pyramid.md) (the unified full-spectrum canvas). **It contradicts
+none of their invariants** — §9 is the explicit checklist against them — and where it adds a control,
+a layer or a durable object, that thing lives behind [`docs/api.md`](api.md) and its contract tests,
+because the client stays thin.
+
+This is the *why* and the *shape*. The applied design — the layer model, pins and the chrome
+reframe — is [`docs/24`](24-canvas-as-data-surface.md); the durable-research data model (collections,
+measurements, annotations) is [`docs/25`](25-spectrum-research-workflow.md); and the *what to build
+and in what order* is [`docs/26`](26-map-ui-redesign-tickets.md) (the ticket set and estimate). These
+are companion documents in the same set.
+
+---
+
+## 1. Why a map, and why now
+
+The user's framing is exact and worth quoting rather than paraphrasing:
+
+> In Google Maps, the map itself is a platform for rendering data onto. It's not just an overlay,
+> it's a surface to project other data into. […] Now, Google Maps is not the best for research, and
+> I have always faulted it for that. It's very difficult to create your own collection of pins. It's
+> not easy to use the measurements for anything. […] But I think the Google Maps style UI would be a
+> good basis for it.
+
+Two asks are folded together here, and the design has to serve both without letting either soften the
+other:
+
+1. **Adopt the Google-Maps UI *grammar* for exploration.** Full-screen content, chrome floating on
+   top, pins you hover and click, layers you toggle, an Explore drawer, a bottom sheet for detail.
+   Fifteen years of convergent map-UI practice have made this grammar standard enough to name its
+   parts directly, and hackriff has already half-built the hardest part of it (one WebGL2 surface
+   over a coverage tile pyramid).
+2. **Fix the two things Google Maps is *bad* at.** You cannot build a durable collection of your own
+   marks, and you cannot reuse a measurement — you write it down somewhere else. These are not chrome
+   problems; they are a **state-model** problem, and they are exactly the capabilities a research
+   instrument lives or dies by. A spectrum canvas that is a research tool is *a map that remembers
+   what you found.*
+
+"Why now" is that MCANVAS (`docs/16 §8`, landed 2026-09-17) already delivered the surface these ideas
+need: one WebGL2 context, N scissored panes each with its own `(center_f, span_f, center_t,
+span_t)`, the minimap-as-viewport, a shared tile-texture LRU keyed by `(level_f, level_t, f_block,
+t_block)`, the coverage state machine, and per-pane time-addressable spectrum traces (T-457/T-475).
+What is missing is not the engine — it is the **chrome reframe**, the explicit **layer model**,
+first-class **pins**, the **Explore drawer**, and the **research tooling**. This document is the
+design contract for those, bound so that no later ticket can drift back into a framed, ephemeral UI.
+
+The rest of the document draws on five research lenses — general maps philosophy, the map-as-data-
+surface architecture, professional cartographic/GIS UX, research-grade tooling (Felt, kepler.gl,
+ArcGIS, IQEngine), and the SDR-waterfall prior art (Maia SDR, SDRangel, OpenWebRX, Raven Pro) — cited
+inline and listed in [§ Sources](#sources).
+
+---
+
+## 2. Chrome as overhead; content as the whole canvas
+
+**"Chrome"** is the settled word for the window and application furniture that surrounds content:
+address bars, navigation buttons, frames, toolbars, docked panels. The web platform even encodes a
+fallback *chain* of how much of it to strip, in the web-app-manifest `display` property:
+[`fullscreen` → `standalone` → `minimal-ui` → `browser`](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/display),
+each level removing progressively less chrome
+([web.dev](https://web.dev/articles/fullscreen)). The design target here is the `fullscreen` end of
+that chain: the surface occupies **100vw × 100vh**, and the controls do not live in a frame that
+reserves screen space by shrinking the canvas — they float.
+
+**Full-bleed is earned, not free.** Android's own guidance is unusually honest about the cost:
+immersive chrome-removal trades away the user's easy access to system navigation, so it is justified
+["only when the benefit… goes beyond simply using extra screen space"](https://developer.android.com/design/ui/mobile/guides/layout-and-content/immersive-content).
+A spectrum canvas passes that test for exactly the reason a map does: **panning, zooming, hovering and
+clicking the data *is* the interaction.** You are not reading a page that happens to be large; you are
+manipulating the data directly, so the data deserves every pixel and the controls become things that
+float over it. On hackriff's portable-handheld form factor (a PortaPack replacement), reclaiming the
+frame's worth of pixels is not cosmetic — it is most of the usable screen.
+
+**A frame shrinks content; an overlay floats above it.** This is the concrete geometric difference
+between the current MUI shell and the target. Today the Explore/Decode app-shell *frames* the canvas:
+a left inventory sidebar, a right focus panel and a bottom outputs dock stack around it, each
+permanently subtracting from canvas area (`docs/14`, the Explore layout). The reframe puts every one
+of those controls into the **z-axis** instead — semi-transparent panels docked to the viewport edges,
+able to fade when idle, sitting *above* a full-bleed surface. Design-system vocabulary already names
+this: Fluent's ["layering"](https://en.wikipedia.org/wiki/Fluent_Design_System) and Material's
+["surfaces"](https://m1.material.io/layout/structure.html) both describe a base canvas plus content
+that *floats on top*, as a continuous surface or as discrete cards. Google Maps' own 2024 redesigns
+pushed even the transport-mode carousel down into a swipeable bottom strip specifically
+["to enhance reachability… while keeping the map visible"](https://9to5google.com/2024/07/14/google-maps-android-redesign/) —
+the literal precedent for a detail panel that coexists with a live, pannable surface instead of
+eating its width.
+
+The MCANVAS invariant this obeys, and must keep obeying: **chrome floats in *screen* space; data
+floats in *content* space.** Controls are pinned to the viewport; boxes, pins, the time cursor and
+the axes are anchored in capture-time/frequency and re-lay-out every frame through the pane's own
+mapping (`docs/16 §8.4a`; the overlay-anchoring invariant in root `CLAUDE.md`). The reframe is a
+change to where the *chrome* lives, and touches the data-anchoring rule not at all.
+
+---
+
+## 3. Direct manipulation, and the same gesture everywhere
+
+The interaction principle underneath the whole map grammar is Ben Shneiderman's **direct
+manipulation** (1983, formalized 1997). Its four properties
+([NN/g](https://www.nngroup.com/articles/direct-manipulation/),
+[Shneiderman 1997 PDF](https://www.cs.umd.edu/~ben/papers/Shneiderman1997Direct.pdf)):
+
+1. **Continuous representation** of the object of interest, in its final form;
+2. **Physical, gestural actions** (drag, pinch, wheel) instead of typed command syntax;
+3. **Rapid, incremental, reversible** operations;
+4. whose **effect is immediately visible**.
+
+A waterfall pan/zoom is the canonical case — arguably a purer case than a geographic map, because the
+object being manipulated (a time–frequency window over live data) is continuous in both axes and has
+no "places" to snap between. Drag pans, wheel zooms, and the view responds every frame. The
+consistency demand from the direct-manipulation literature is that **the same gesture must behave the
+same way across content** — pinch-to-zoom on a map must feel identical to pinch-to-zoom on a photo
+([UX Tigers](https://www.uxtigers.com/post/direct-manipulation)). For hackriff that means the pan/zoom
+grammar is one vocabulary over the whole surface: over raw spectrum, over a detection box, over a
+cluster of pins, over the minimap. A gesture never means one thing here and another thing there.
+
+hackriff already has this vocabulary, specified in [`ui/CONTROLS.md`](../ui/CONTROLS.md) under
+"Navigating the surface" (T-456), and this design **adopts it unchanged**:
+
+| Gesture | Effect |
+|---|---|
+| Drag | Pans both axes |
+| Wheel | Zooms both axes, about the cursor |
+| Shift + wheel | Zooms frequency (X) only |
+| Alt/Option + wheel | Zooms time (Y) only |
+| Ctrl/Cmd + wheel, pinch | Uniform zoom |
+| Shift + drag | Marks a **region** (T-458), never pans |
+| Double-click | Sends the active pane there |
+
+The one authoring gesture the research tooling needs — drag-to-select a region — is already
+reconciled with pan by the `Shift + drag` binding (T-458), so adding markers and measurements does
+**not** introduce a second, conflicting gesture grammar. §8 keeps that discipline: every new
+authoring action either reuses `Shift + drag` or lives behind an explicit tool/mode toggle, so the
+canvas keeps one gesture vocabulary.
+
+---
+
+## 4. The line between view and device — the safety model
+
+Direct-manipulation theory draws a sharp line between manipulating the *representation* (reversible,
+local, no external effect) and triggering an *irreversible or external* action (explicit, discrete,
+separately confirmed). Google Maps encodes this line as the difference between "look around" and "get
+directions": you can pan across the whole planet for free, but routing is a deliberate, separate act.
+
+hackriff already encodes the same line, and it is more than an ergonomics nicety here — **it is the
+safety model of a device that transmits nothing but tunes a real radio.** The invariant, from root
+`CLAUDE.md` and `docs/16 §8.4`:
+
+> **A pan or wheel never commands the radio.** Time is always a view over already-captured data.
+> Panning to un-tuned spectrum *offers* a retune; selecting a region *commands* one — a discrete,
+> explicit act through the one gated `DeviceAction` path (one capture at a time, settle gap,
+> `device_id` recorded), snapped to the nearest achievable config and refused if the view moved.
+
+**Full-bleed makes this line more important, not less.** When the canvas is the entire screen and
+every control floats over it, there is more surface to drag across and more temptation to treat a
+gesture as a command. The design keeps the line bright by keeping the two categories physically
+distinct: **view arithmetic in time** (pan, zoom, pause, scrub, split, follow) never touches a device
+route, and **a device command in frequency** (retune to reach un-tuned spectrum) is always a separate,
+confirmed act. This is precisely the taxonomy of §3 — reversible representation vs external action —
+applied to the one place hackriff cannot afford to blur it.
+
+The line stays true the way it already does: with a **spy-client test that asserts an empty call
+list.** T-340 and T-442 both exercise the entire gesture vocabulary against a `fetch` spy and assert
+zero device calls resulted; T-458 does the same for region strokes (six drags including region
+strokes, zero device calls, two selection POSTs). Every control this document adds — layer toggles,
+the Explore drawer, pins, the bottom sheet, measurement authoring — is a *view* or a *durable-state*
+action, and each must pass the same assertion: **exercising it changes the screen or a research
+store, and calls no device route.** The empty call list is not a test detail; it is how the safety
+model stays honest as the chrome grows.
+
+---
+
+## 5. Progressive disclosure and the bottom sheet
+
+Jakob Nielsen's **progressive disclosure** (1995, still current NN/g doctrine) is the information-
+density principle that lets a full-bleed surface stay uncluttered: sequence the interface so the
+initial view shows *what matters most*, and defer secondary detail to on-demand affordances rather
+than showing everything at once
+([NN/g](https://www.nngroup.com/videos/progressive-disclosure/),
+[IxDF](https://ixdf.org/literature/topics/progressive-disclosure)). Shneiderman's mantra states the
+same sequence for spatial data: **overview first, zoom and filter, then details-on-demand.**
+
+The **bottom sheet** is the non-modal disclosure vehicle that map UIs converged on precisely because
+it resolves the conflict between "show detail" and "don't cover the surface." Material's specs
+([M2](https://m2.material.io/components/sheets-bottom),
+[M3](https://m3.material.io/components/bottom-sheets/overview)) and
+[NN/g](https://www.nngroup.com/articles/bottom-sheet/) describe a draggable panel with discrete snap
+states — **peek → half → full** — whose content re-flows per state rather than being hidden wholesale,
+and which never fully obstructs the content beneath it. In hackriff:
+
+- **The detail panel becomes a bottom sheet (or an edge slide-in on wide screens).** Clicking a pin
+  or a detection box opens it at *half*, showing the selected signal; it drags to *full* for the
+  packet inspector or the measurement table, and collapses to a *peek* strip that keeps the canvas
+  live and pannable underneath. This rehomes MUI's right-hand focus panel (`docs/14`, the Explore
+  right panel) into the map idiom without losing any of its content — big frequency, measurements
+  with their measured-at time, ranked explanations, and the action row (Listen, Decode/RDS, Record
+  clip, Stream out, Promote/Delete, Analyze).
+- **The Explore drawer is progressive disclosure applied to *discovery*** (§ below), collapsed by
+  default to a peek strip.
+- **Secondary controls live behind a menu, not all visible.** The default floating control set is
+  minimal — search/go-to-frequency, the layers button, a follow-live control, zoom affordances.
+  Measurement tools, layer management, saved-collection management and the legend are tucked behind a
+  menu or the layers panel, disclosed on demand. ArcGIS Hub's UX guidance frames this as the classic
+  IA move: minimize the choices exposed at once, and assume the user did not arrive at a canonical
+  "front door" ([ArcGIS Hub UX best practices](https://hub.arcgis.com/documents/178d2fd1617d4429a1f63c0f9a1ea5ea)).
+
+**The Explore drawer** deserves its own note, because it is the one wholly new *discovery* affordance.
+Google's Explore strip is a collapsed-by-default bottom sheet that surfaces "interesting places you
+might want to get into" and coexists with the still-pannable map. hackriff's analogue surfaces
+interesting *spectrum*: quiet-but-active bands, recent anomalies, the strongest current signals, and
+**past surveys** (jump-to a prior coverage window). It reads only existing routes —
+`GET /api/scheduler` (points of interest), `GET /api/events`, `GET /api/coverage`,
+`GET /api/analysis/strongest` — and, like every sheet, never modals over the surface.
+
+---
+
+## 6. Semantic zoom = the honesty tiers
+
+**Semantic zoom** changes *what kind* of information is shown as you zoom, not merely the scale of the
+same pixels ([Emergent Mind survey](https://www.emergentmind.com/topics/semantic-zoom)). Google Maps
+is the everyday example: zoom out and individual businesses collapse into a single labelled district;
+zoom in and roads, then building footprints, then street-level detail appear. The literature attaches
+one hard **consistency constraint** to it: *features introduced at a given level persist at all deeper
+levels* — nothing may vanish and then reappear as you cross a zoom threshold, or the user loses the
+thread of what is there.
+
+**hackriff's three honesty tiers *are* semantic zoom.** The `Resolution` tiers already in the pyramid
+(`docs/16`, `resolution.source`) — **`live-iq`** (live-IQ detail), **`spectrum-history`**, and
+**`survey-overview`** — are exactly a semantic-zoom ladder: each zoom level discloses only the detail
+the hardware actually justifies. A wide or deep zoom shows *overview*, not upscaled detail dressed as
+measurement. The semantic-zoom literature gives this design two things:
+
+1. **A vocabulary.** The tiers are not a rendering optimization; they are a semantic-zoom scheme, and
+   naming them that way is why the "state the level per pane" rule (`docs/16 §8.4a`, T-442's
+   `paneStatuses()` and `levelDivergenceNote()`) is the *correct* fix rather than a workaround: an
+   honest semantic-zoom UI states which level it drew, because the same energy legitimately reads
+   differently at a coarser cell.
+2. **A consistency check.** Audit the tiers against the "nothing vanishes then reappears" constraint.
+   A detection present at a coarse tier must not disappear at a finer one and come back; grey
+   (unobserved) must not flicker to observed and back across a threshold. This is the semantic-zoom
+   discipline applied to the coverage map, and it is a concrete acceptance criterion for the tile
+   design, not a vibe.
+
+The tiers **must stay visually distinct** — never upscaled measurement dressed as fresh data. This is
+the same exploration-first honesty the product applies everywhere (the database only *suggests*; grey
+means *genuinely unobserved*), applied to navigation: the UI must never imply detail the front end
+cannot deliver (`docs/16 §8.3`, the honesty-tier invariant).
+
+---
+
+## 7. Figure-ground and honest symbology
+
+Cartography's first design law is that **not all information is equal**
+([Map Library](https://www.maplibrary.org/1201/visual-hierarchy-in-cartography-design/),
+[Esri](https://www.esri.com/arcgis-blog/products/arcgis-pro/mapping/design-principles-for-cartography)).
+A readable map needs a clear **figure-ground** split: the base recedes — low contrast, desaturated —
+so the thematic overlay reads as the figure. Esri states it directly: *"low visual contrast works best
+for basemaps so that the overlaid thematic layers are more visually prominent"*
+([figure-ground](https://www.esri.com/arcgis-blog/products/product/mapping/graphic-design-principles-for-mapping-figure-ground-organization)).
+
+For hackriff the mapping is: **the raw spectrum energy is the ground; detections, pins, annotations
+and coverage-grey are the figure.** The waterfall is denser data than anything drawn on it, yet the
+overlay must dominate. This validates keeping detection boxes, and observed-vs-grey coverage, visually
+distinct from the ramp rather than blended into it — the box invariant and the grey invariant are
+figure-ground discipline in RF clothing.
+
+**Symbology** follows the cartographic vocabulary of *visual variables* — shape encodes category, hue
+encodes category, size encodes quantity — used deliberately, not decoratively. Mapbox's guidance is
+that markers must stay ["legible at sizes as small as 11px"](https://www.mapbox.com/insights/map-design-process),
+with [collision detection and variable label placement](https://docs.mapbox.com/help/dive-deeper/optimize-map-label-placement/)
+so density does not collapse into noise. So hackriff's pins and boxes use a **small, controlled glyph
+vocabulary**: shape and hue encode kind and state (candidate / confirmed / unknown emission), size
+encodes bandwidth or confidence, and labels collision-avoid and suppress-at-density as the frequency
+axis fills.
+
+**State is never encoded in hue alone.** Roughly **8% of men** have red-green colour-vision deficiency
+([Esri colorblind guidance](https://www.esri.com/arcgis-blog/products/arcgis-pro/mapping/designing-maps-for-colorblind-readability),
+[Salesforce Maps](https://www.salesforce.com/blog/how-we-designed-salesforce-maps-to-be-color-blind-friendly/)),
+so candidate/confirmed/unknown and observed/unobserved each carry a **shape or pattern** in addition
+to colour, and the palette avoids red-green pairings (prefer blue-orange or luminance-separated
+pairs). The SDR prior art gives a good pattern to borrow: OpenWebRX colour-codes bookmarks by
+*provenance/trust tier* at a glance — green for bandplan-derived, yellow for shared, blue for personal
+([OpenWebRX bookmarks](https://github.com/jketterl/openwebrx/wiki/How-the-bookmarks-work)) — which
+maps cleanly onto hackriff's "known-DB suggestion vs blind detection vs personal note" distinction and
+keeps the exploration-first rule *visible*: a suggested allocation must never look like a measured
+emitter. That distinction, too, needs a non-hue cue to survive CVD.
+
+**Grey stays reserved for genuinely-unobserved**, and that is the point (`docs/16 §8.1`): across 6 GHz
+most of the canvas is honestly empty, and the shape of what is *not* grey is the survey. Figure-ground
+here has a third term the geographic case lacks — the *absence* of data is itself a figure worth
+reading, and the design must not let a base-map fill or an interpolation paint over it.
+
+---
+
+## 8. The two failures to design against
+
+Google Maps' two research weaknesses, restated as hard requirements. Both are **state-model**
+problems, and the fix is the same shape in each: separate **ephemeral** exploration state (hover,
+transient filter, current viewport) from **durable** research state, give the durable state its own
+persistent surface, and make **export** a first-class path. The full data model is
+[`docs/25`](25-spectrum-research-workflow.md) (forward reference, speculative until it lands); this section
+states the requirements it must meet.
+
+**Failure 1 — no durable collection.** You cannot, in Google Maps, easily build and keep your own
+named collection of marks. Requirement: **collections and annotations are first-class durable state.**
+Felt — "Figma for maps" — is the structural model: every point/line/polygon a user draws is also a
+**row in a real, inspectable, sortable, exportable table**, and a *layer* (a named, toggleable,
+shareable collection) is the unit of organization, not an undifferentiated pile of pins
+([Felt interface tour](https://help.felt.com/getting-started/tour-the-interface)). kepler.gl
+generalizes the same idea as *config-as-data*: a saved workspace is a serializable set of layer
+configs, filters and marker records, distinct from the live data stream
+([kepler.gl](https://docs.kepler.gl/)). For hackriff: markers, collections and annotations are
+backend objects (SigMF-compatible where they annotate IQ, per
+[IQEngine](https://github.com/IQEngine/IQEngine)), and **the table and the canvas are two views of one
+data, always in sync.**
+
+**Failure 2 — no reusable measurement.** In Google Maps a measurement is a one-shot readout you write
+down elsewhere. Requirement: **a measurement is an object with value, unit, place, time and
+provenance** — drawn *on* the canvas and kept, not a tooltip that dies on mouse-up. ArcGIS's
+measurement widget is the pattern (distance/area with selectable units, kept live on the map:
+[ArcGIS Measure](https://pro.arcgis.com/en/pro-app/3.4/help/mapping/navigation/measure.htm)); the
+bioacoustics tools are the closer analogue, because they measure a *spectrogram*: Raven Pro lets a
+user draw a time-frequency selection box and computes reusable, exportable measurements per selection
+([Raven Pro](https://www.ravensoundsoftware.com/software/raven-pro/)), and Inspectrum's Δf/Δt/symbol-
+rate cursors are the SDR version. The provenance requirement generalizes hackriff's existing
+*provenance-per-detection* invariant to **provenance-per-annotation**: every durable mark records what
+view, config and time window produced it, so it stays meaningful outside the moment it was made — the
+cautionary case being Observable notebooks' reproducibility failures from implicit hidden state
+([Observable](https://observablehq.com/blog/from-data-exploration-to-data-apps-with-observable)).
+
+**Export is not an afterthought.** Every collection, measurement set and annotation layer needs a path
+out — file or link, SigMF-adjacent — so the research artifact outlives the session (the Felt sharing
+model, the QGIS/ArcGIS print-composer model of preserving state exactly as authored). A spectrum
+canvas that is a research instrument is a map that remembers what you found, *and lets you take it
+with you.*
+
+---
+
+## 9. What this must not break
+
+The design is an **extension**. Every invariant below is from `docs/16 §8` or root `CLAUDE.md`, and
+this document holds each one. This section is the checklist a later ticket is measured against; a
+proposal that fails any line is wrong, not a trade-off.
+
+- [ ] **One surface over one (time × frequency) window.** Layers, pins, sheets and the Explore drawer
+  are all *views over the current selection*. They never introduce a second coordinate system or a
+  second subject; panes remain where you look *from*, not extra subjects (`docs/16 §8.4`).
+- [ ] **One shared absolute-time axis.** Every time-varying overlay — boxes, pins, measurements,
+  cursor, pane rectangles, the spectrum trace — lays out through the pane's own capture-time mapping,
+  **re-laid-out every render frame in the same pass as the data**, never on the data-poll cadence and
+  never at fixed screen coordinates. Chrome floats in screen space; data floats in content space (§2).
+- [ ] **Grey = genuinely unobserved, and it is the point.** No layer, base style or interpolation may
+  paint over unobserved space; observed-but-not-yet-measured and unknown-whether-we-looked stay
+  distinct marks, not grey (`docs/16 §8.1`, T-441).
+- [ ] **A detection is a time–frequency box `[start, end?]`.** Pins and clusters never fabricate a
+  timespan: a sub-pixel burst renders as a marker or a per-cell count (reading the existing
+  `GET /api/tiles/events` aggregate), never a fattened box that invents duration (the coarse-zoom
+  honesty rule).
+- [ ] **Overlap is an error signal.** The overlay layer never stacks competing boxes as a feature;
+  overlap remains the trigger for backend re-analysis, drawn as such (ADR-0019).
+- [ ] **Navigation = view arithmetic in time + a device command in frequency.** A pan/wheel never
+  commands the radio; region-select on un-tuned spectrum does, through the one gated `DeviceAction`
+  path. The spy-client empty-call-list test covers every new control (§4).
+- [ ] **Pause freezes the view, not the capture.** Per-pane pause is a coordinate change, reaches no
+  route, and does not slow the SDR, the ring or detection (`docs/16 §8.4a`, T-347/T-442).
+- [ ] **The three honesty tiers stay visually distinct**, each pane states the level it drew at, and
+  no zoom fakes resolution the hardware did not capture (§6; `docs/16 §8.3`).
+- [ ] **The client stays thin.** All signal logic and all four durable research stores live in the
+  backend behind `docs/api.md` and its contract tests (T-079); `ui/src` only renders, maps
+  pixels↔(Hz, time), and calls routes. A UI cutover is not evidence a route has no other caller;
+  the guard is a `ui/test` assertion of the *request the client builds* (the T-367 lesson).
+- [ ] **The view opens on the observed extent from the coverage map** (`surface/bootstrap.ts`), never
+  on the whole 1 MHz–6 GHz midpoint and never derived from `frequency.current` (`docs/16 §8`, T-376).
+
+---
+
+## Application summary — where each piece lands
+
+A compact map from this philosophy to the MCANVAS surface, for the ticket doc (`docs/26`) to expand.
+Routes marked *(new)* are the only backend additions; everything else reads a route that already
+exists.
+
+| Piece | What it is | Reads |
+|---|---|---|
+| **Chrome reframe** | 100vw×100vh surface; floating, fade-when-idle overlays; detail as a bottom sheet (peek→half→full) | — (client layout over existing state) |
+| **Layer registry** | Per-pane, two axes: **base style** (ramp/phosphor, T-475) and **overlay layers**, each a pure function of served data, independent visibility + z-order | `GET /api/tiles`, `/api/coverage`, `/api/events` |
+| **Coverage-fog layer** | Grey/unknown/unobserved/excluded as an explicit toggleable figure-ground layer | `GET /api/coverage` |
+| **Detections layer** | Confirmed (prominent) + candidate (weaker) boxes per the box invariant, never stacked | `GET /api/events` |
+| **Artifacts layer** | Image/harmonic/IMD relationships drawn as *linked* overlays tying a spur to its source | `GET /api/inventory` (artifact-of) |
+| **Band-plan priors layer** | Allocations as ranked *explanations* beside measurements — never truth, never pre-populating | *(new)* priors-over-viewport route |
+| **Pins** | First-class markers: rest / hover (MapTip readout) / selected (opens sheet); cluster at coarse zoom, resolve on zoom-in | `GET /api/events`, `/api/tiles/events` |
+| **Explore drawer** | Collapsed bottom sheet: quiet-but-active bands, anomalies, strongest signals, past surveys | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest` |
+| **HUD axes** | Floating frequency (bottom) + time (left) rulers with ticks+labels, content-anchored, fade with chrome — finishes T-459 | — (client, over served timestamps) |
+| **Marker collections** | Named, layer-toggleable collections of time-frequency markers; generalize frequency-only bookmarks | *(new/extended)* collections store |
+| **Saved measurements** | Δf / Δt / bandwidth / duration / symbol-rate objects with value+unit+place+time+provenance, drawn on the canvas and kept | *(new)* measurements store |
+| **Annotations** | Durable, SigMF-compatible, clickable-to-navigate time-frequency notes | *(new)* annotations store |
+| **Saved views** | Named restorable (time × frequency) windows, shareable/exportable | *(new)* views store |
+
+The four durable stores and the band-plan-priors route are the backend surface this design adds; the
+authoring gestures reuse `Shift + drag` (T-458) so the canvas keeps one gesture vocabulary; and every
+new control passes the spy-client empty-call-list test (§4). The rest is presentation over data the
+backend already serves.
+
+---
+
+## Sources
+
+Grouped by the five research lenses. All URLs accessed 2026-09-21.
+
+**Maps philosophy — chrome, direct manipulation, disclosure, layers**
+- Direct Manipulation (NN/g) — https://www.nngroup.com/articles/direct-manipulation/
+- Direct Manipulation (UX Tigers) — https://www.uxtigers.com/post/direct-manipulation
+- Shneiderman, *Direct Manipulation for Comprehensible, Predictable and Controllable UIs* (1997, PDF) — https://www.cs.umd.edu/~ben/papers/Shneiderman1997Direct.pdf
+- Progressive Disclosure (NN/g) — https://www.nngroup.com/videos/progressive-disclosure/
+- What is Progressive Disclosure? (IxDF) — https://ixdf.org/literature/topics/progressive-disclosure
+- Bottom sheets (Material Design M2) — https://m2.material.io/components/sheets-bottom
+- Bottom sheets (Material Design M3) — https://m3.material.io/components/bottom-sheets/overview
+- Bottom Sheets: Definition and UX Guidelines (NN/g) — https://www.nngroup.com/articles/bottom-sheet/
+- Google Maps directions/sheets redesign (9to5Google, Jul 2024) — https://9to5google.com/2024/07/14/google-maps-android-redesign/
+- Immersive content (Android Developers) — https://developer.android.com/design/ui/mobile/guides/layout-and-content/immersive-content
+- Making Fullscreen Experiences (web.dev) — https://web.dev/articles/fullscreen
+- `display` (Web app manifest, MDN) — https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Manifest/Reference/display
+- Fluent Design System (Wikipedia) — https://en.wikipedia.org/wiki/Fluent_Design_System
+- Layout structure (Material Design 1) — https://m1.material.io/layout/structure.html
+- Layers | Maps JavaScript API (Google) — https://developers.google.com/maps/documentation/javascript/layers
+- Data Layer | Maps JavaScript API (Google) — https://developers.google.com/maps/documentation/javascript/datalayer
+
+**Data-surface — sources/layers architecture, pins, clustering**
+- Mapbox GL JS: create and style clusters — https://docs.mapbox.com/mapbox-gl-js/example/cluster/
+- deck.gl documentation — https://deck.gl/docs
+- kepler.gl documentation — https://docs.kepler.gl/
+- keplergl/kepler.gl (GitHub) — https://github.com/keplergl/kepler.gl
+- Marker — Map UI Patterns — https://mapuipatterns.com/marker/
+- Advanced markers: accessibility (Google) — https://developers.google.com/maps/documentation/javascript/advanced-markers/accessible-markers
+- Use layers to find places, traffic, terrain… (Google Maps Help) — https://support.google.com/maps/answer/3092439
+- Controls | Maps JavaScript API (Google) — https://developers.google.com/maps/documentation/javascript/controls
+
+**GIS-UX — figure-ground, symbology, semantic zoom, accessibility**
+- Visual Hierarchy in Cartography (Map Library) — https://www.maplibrary.org/1201/visual-hierarchy-in-cartography-design/
+- Design Principles for Cartography (Esri) — https://www.esri.com/arcgis-blog/products/arcgis-pro/mapping/design-principles-for-cartography
+- Figure-ground Organization (Esri) — https://www.esri.com/arcgis-blog/products/product/mapping/graphic-design-principles-for-mapping-figure-ground-organization
+- Guide to map design (Mapbox) — https://www.mapbox.com/insights/map-design-process
+- Optimize map label placement (Mapbox) — https://docs.mapbox.com/help/dive-deeper/optimize-map-label-placement/
+- Semantic Zoom (Emergent Mind) — https://www.emergentmind.com/topics/semantic-zoom
+- Designing Maps for Colorblind Readability (Esri) — https://www.esri.com/arcgis-blog/products/arcgis-pro/mapping/designing-maps-for-colorblind-readability
+- How We Designed Salesforce Maps to be Color Blind-Friendly — https://www.salesforce.com/blog/how-we-designed-salesforce-maps-to-be-color-blind-friendly/
+- UX Best Practices (ArcGIS Hub) — https://hub.arcgis.com/documents/178d2fd1617d4429a1f63c0f9a1ea5ea
+- Map UI Design (Eleken) — https://www.eleken.co/blog-posts/map-ui-design
+
+**Research tooling — durable collections, measurements, annotations**
+- Tour the interface (Felt Help Center) — https://help.felt.com/getting-started/tour-the-interface
+- kepler.gl user guides — https://docs.kepler.gl/docs/user-guides
+- Measure (ArcGIS Pro) — https://pro.arcgis.com/en/pro-app/3.4/help/mapping/navigation/measure.htm
+- IQEngine (GitHub) — https://github.com/IQEngine/IQEngine
+- From data exploration to data apps (Observable) — https://observablehq.com/blog/from-data-exploration-to-data-apps-with-observable
+
+**SDR-waterfall prior art — rendering, markers, spectrogram research tools**
+- Maia SDR — about / waterfall rendering — https://maia-sdr.org/about/
+- SDRangel spectrum markers — https://github.com/f4exb/sdrangel/blob/master/sdrgui/gui/spectrummarkers.md
+- SigDigger 0.3.0 (collapsible panel UI) — https://batchdrake.github.io/sigdigger-0.3.0/
+- OpenWebRX: how bookmarks work — https://github.com/jketterl/openwebrx/wiki/How-the-bookmarks-work
+- Raven Pro (Cornell Lab of Ornithology) — https://www.ravensoundsoftware.com/software/raven-pro/
+- SPACE: SPectrogram Analysis and Cataloguing Environment (arXiv) — https://arxiv.org/pdf/2207.12454
+
+**Internal (this repo)**
+- `docs/14-ui-rewrite.md` — the MUI thin-client rewrite (Explore/Decode, focus panel, boxes)
+- `docs/16-coverage-tile-pyramid.md` §8 — the unified full-spectrum canvas (MCANVAS)
+- `ui/CONTROLS.md` — the surface gesture vocabulary (T-456/T-458)
+- `docs/api.md` — the thin-client route contract (T-079)

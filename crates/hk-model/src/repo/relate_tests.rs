@@ -74,6 +74,7 @@ fn prov_on(r: &mut Repository, device: &str, port: Option<&str>, lo: f64) -> Pro
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: port.map(Into::into),
         bias_tee: crate::BiasTee::Unknown,

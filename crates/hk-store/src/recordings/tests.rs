@@ -39,6 +39,7 @@ fn prov(repo: &mut Repository, center_hz: f64, fs_hz: f64) -> ProvenanceId {
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: Some("ANT".into()),
         bias_tee: BiasTee::Off,

@@ -140,6 +140,7 @@ fn sample_provenance(cal: CalibrationStateId, spur: SpurMaskId) -> Provenance {
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: Some(41.0),
         antenna_port: None,
         bias_tee: crate::BiasTee::Unknown,
@@ -777,6 +778,53 @@ fn identical_provenance_values_share_one_row_by_content_hash() {
         b.repo.intern_provenance(&nan),
         Err(RepoError::Invalid(_))
     ));
+}
+
+/// T-625: ADC fill is stored *as provenance* — it survives intern → read back, it is part of the
+/// dedup key (two states that differ only in fill are two states), and a row written without it
+/// reads back as `under_filled` rather than as a comfortable default.
+#[test]
+fn adc_fill_is_stored_with_the_gain_state_and_distinguishes_provenance_rows() {
+    let mut b = base();
+    let before: i64 = b
+        .repo
+        .conn
+        .query_row("SELECT count(*) FROM provenance", [], |r| r.get(0))
+        .unwrap();
+
+    let mut nominal = b.prov.clone();
+    nominal.noise_sigma_lsb = Some(2.25);
+    let mut starved = b.prov.clone();
+    starved.noise_sigma_lsb = Some(0.21);
+    let nominal_id = b.repo.intern_provenance(&nominal).unwrap();
+    let starved_id = b.repo.intern_provenance(&starved).unwrap();
+
+    assert_ne!(nominal_id, starved_id);
+    assert_ne!(nominal_id, b.prov_id);
+    assert_eq!(b.repo.intern_provenance(&nominal).unwrap(), nominal_id);
+
+    let read = b.repo.provenance(nominal_id).unwrap();
+    assert_eq!(read.noise_sigma_lsb, Some(2.25));
+    assert_eq!(read.fill_bucket(Some(0.0)), FillBucket::Nominal);
+    assert_eq!(
+        b.repo
+            .provenance(starved_id)
+            .unwrap()
+            .fill_bucket(Some(0.0)),
+        FillBucket::UnderFilled
+    );
+    // The pre-T-625 row in `base()` carries no fill, and an unrecorded fill is not a good one.
+    assert_eq!(
+        b.repo.provenance(b.prov_id).unwrap().fill_bucket(Some(0.0)),
+        FillBucket::UnderFilled
+    );
+
+    let after: i64 = b
+        .repo
+        .conn
+        .query_row("SELECT count(*) FROM provenance", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(after - before, 2);
 }
 
 /// docs/07 §2.6: every Detection has a resolvable provenance chain.

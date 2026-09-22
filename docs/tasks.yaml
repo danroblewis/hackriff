@@ -20843,7 +20843,8 @@ tasks:
   - id: T-625
     milestone: MAUTO
     title: 'ADC fill (sigma in LSB) is the corpus stratification key and nothing stores it - record it as provenance and build the fill ladder'
-    status: todo
+    status: done
+    commit: "6de2da5f"
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20879,10 +20880,48 @@ tasks:
       Filed 2026-09-21 by T-551 (docs/22 section 9). HIGH because every other MAUTO fixture ticket
       stratifies on a key this ticket creates, and because a gain-keyed breakdown is actively
       misleading rather than merely absent. Reads on T-547 (docs/21).
+      DONE 2026-09-22 on task-adcfill. `Provenance.noise_sigma_lsb: Option<f32>` records ADC fill
+      beside the gain state, the overload flag and the clip count - one spelling shared with
+      ADR-0015 section 13's calibration key, optional so pre-T-625 rows keep their dedup hash, and
+      carried on the SigMF `hackriff:provenance` wire (docs/07 section 2.6 + docs/sigmf-extension.md
+      updated with it). `hk_model::FillBucket` is the conditioning key: `nominal` /
+      `under_filled` / `over_clipped`, `Default = UnderFilled`, `classify()` fail-closed so a
+      MISSING or non-finite sigma is `under_filled` and a non-finite clip fraction is
+      `over_clipped`. `hk_dsp::floor::adc_fill_ci8` / `adc_fill_unit_scale` are ADR-0015 section
+      13.3's cheap runtime rule (one pass, pooled per-component sigma about each component's own
+      mean, rails counted). `hkpy.synth.fill` mirrors it and adds the ladder:
+      `python -m hkpy.synth.fill <scenario> --out DIR`, one ci8 recording per rung differing only
+      in `adc_gain_db`, each recording the sigma it was MEASURED at, plus `fill-ladder.json`.
+      MEASURED (noise_floor_rise, 200 ksps, seed 625): rungs land at sigma = 0.134, 0.667, 2.025,
+      23.06, 42.97, 70.40 LSB with clip fractions 0, 0, 0, 0, 0.007, 0.188 -> bucket counts
+      {nominal: 5, under_filled: 1, over_clipped: 0}.
+      FINDING, recorded in docs/22 section 4.4: the six-level ladder NEVER reaches `over_clipped`,
+      because docs/21's sweep stopped at 28.4 % clipped and the boundary is 30 %. The F ladder
+      exercises the under-fill refusal and not the over-clip one; a rung past 30 % would be a rung
+      with no evidence behind it, so the ladder stops where the measurement did. Second finding:
+      the top rung's measured sigma (70.4) falls BELOW its 77 target precisely because it clips -
+      the recorded value is post-ADC, which is why the manifest records measured, never requested.
+      RED PROOF: inverting `classify` so a missing sigma reads `nominal` fails 3 Rust tests
+      (`an_unmeasured_fill_is_under_filled_and_never_nominal`,
+      `noise_sigma_lsb_round_trips_and_is_omitted_when_unmeasured`,
+      `adc_fill_is_stored_with_the_gain_state_and_distinguishes_provenance_rows`) and 2 py tests;
+      dropping the field from the generator's provenance fails 2 more py tests.
+      Targeted: hk-model 495 passed, hk-dsp green, hk-core 157 passed, py 285 passed 2 skipped,
+      ruff + `just precheck hk-model hk-dsp hk-core` clean.
+      NOT DONE, deliberately: no calibration table reads the bucket yet - that is T-660, which owns
+      the `hackriff.calibration/1` loader and cannot start before `hk-synth` exists. The live
+      capture path still writes `noise_sigma_lsb: None` (fail-closed) because measuring it there is
+      a capture-thread cost that T-453's rule says must be measured, not assumed - filed as T-750.
+    result: |
+      Landed on task-adcfill (tip a5de42f4), merged 2026-09-22 as ea91c27c (partial: a stash in another
+      session had dropped MERGE_HEAD, so the runner committed only the 4 new files) + 6de2da5f (the
+      remaining 40 files, a true merge commit naming the tip). Board flipped by hand.
+
   - id: T-626
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: the N5 mismatched-hypothesis negative population - the null the search actually faces'
-    status: todo
+    status: done
+    commit: "6de2da5f"
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20915,6 +20954,47 @@ tasks:
       Filed 2026-09-21 by T-551 (docs/22 sections 4.3 and 9). HIGH because it is the population
       most likely to move ADR-0022's margin, and a margin measured only on the easy nulls is the
       failure ADR-0022 section 3.2 exists to prevent.
+      DONE 2026-09-22 on task-adcfill. Built as FIXTURES, not engine configuration:
+      `hkpy.synth.mismatched_hypothesis` (py/hkpy/synth/mismatch.py), two shapes via
+      `--param population=`.
+      off_grid (default): a real, FRAMED, CRC-valid 2-FSK emitter at 1873 Bd / h = 1.281. Against
+      the declared proposal grid (300..38400 Bd; h in {0.5, 1.0, 2.0}) 0 of 8 rates and 0 of 3
+      indices are within 10 %; nearest are 2400 Bd at 21.96 % and h = 1.0 at 28.14 %. The test
+      RE-MEASURES both out of the samples (mix, firwin to the emission bandwidth, discriminator,
+      zero crossings -> 1872.95 Bd; deviation 1204.6 Hz for a true 1200) and re-checks the CRC with
+      `binascii.crc_hqx`, so the off-grid property is in the IQ and not only in the truth block.
+      adjacent_leakage: the same emitter plus a hard-keyed neighbour 30 kHz away, 34 dB up, 2 kBd,
+      rectangular envelope (sinc skirts, 1/f^2). An A/B against the off_grid control measures
+      +17.6 dB inside the analysed box from a neighbour that is never in it, so any parameter bound
+      from it is a mismatch by construction. A neighbour placed INSIDE the box is REFUSED by the
+      generator: that is two overlapping emissions - the signal model's error signal - not
+      adjacent-channel leakage.
+      MISMATCH vs MISS, the thing the assert harness needed:
+      `hkpy.synth.mismatch.classify_outcome(result, truth)` -> correct / partial / mismatch /
+      abstain. A label (verdict >= framed) with a bound symbol rate outside 2 % of the true one is
+      a MISMATCH, and `grid_snapped` flags the aggravating case where the bound value is a
+      proposal-grid point - it answered the hypothesis it had rather than the signal it saw.
+      `unknown` (any reason) and a sub-framed partial are the WANTED answers. A miss is
+      deliberately NOT a false label: N5 measures over-claim, not recall, and conflating them is
+      how a suite reports a comfortable margin by being bad at finding things. Truth is read only
+      by the harness; nothing is looked up and tuned to.
+      Wired into docs/22: section 4.3's N5 row is now `have`, with the built description and the
+      measured numbers; section 9's ticket table marks T-625/T-626 built. py/README.md documents
+      the new truth kind and the `negative_population` block.
+      RED PROOF: moving the true symbol rate ONTO the grid (2400 Bd) fails 3 tests
+      (`no_grid_hypothesis_can_reach_the_true_parameters`,
+      `the_emitter_is_real_framed_and_at_the_off_grid_rate`,
+      `truth_tells_a_mismatch_from_a_miss_without_the_system_seeing_it`); dropping the adjacent
+      emitter fails the other 3.
+      Targeted: py 293 passed 2 skipped, ruff clean. No Rust touched by this ticket.
+      NOT DONE: the population is not yet RUN against an engine - there is none (MAUTO M-1/M-3).
+      `acceptance_mauto::negative_control` consuming it is T-576/T-627's work, and the n = 200 per
+      shape that docs/22 specifies is a harness-side count, not a generator one.
+    result: |
+      Landed on task-adcfill (tip a5de42f4), merged 2026-09-22 as ea91c27c (partial: a stash in another
+      session had dropped MERGE_HEAD, so the runner committed only the 4 new files) + 6de2da5f (the
+      remaining 40 files, a true merge commit naming the tip). Board flipped by hand.
+
   - id: T-627
     milestone: MAUTO
     title: 'MAUTO-TEST: the coverage manifest and the sealed hold-out - make the corpus sufficiency argument checkable instead of asserted'
@@ -22012,6 +22092,875 @@ tasks:
       board did not parse, here is why" instead of rendering a broken graph - is the supervisor's
       and is not in this ticket; it is worth keeping even after the validators land, because a
       reader that degrades honestly is useful whatever the writers do.
+  - id: T-750
+    milestone: MAUTO
+    title: 'Measure ADC fill on the live capture path - or prove the per-row cost first (T-625 residual)'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: low
+    depends_on: [T-625]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      T-625 landed `Provenance.noise_sigma_lsb` and `hk_dsp::floor::adc_fill_ci8`, and wired the
+      field end to end for SYNTHETIC recordings (`hkpy.synth` writes the measured sigma; the SigMF
+      reader carries it through `SigmfReplaySource`). The LIVE path - `hk-core`'s HackRF source and
+      the mock device - still writes `None`, which the reader treats as `under_filled`: fail-closed
+      and correct, but it means a real capture can never earn a calibration table.
+      WHY IT IS A SEPARATE TICKET, not a T-625 omission: the measurement would run on the CAPTURE
+      THREAD, which gates the ring, and CLAUDE.md's T-453 rule is that per-arriving-block cost is
+      MEASURED, not assumed. `adc_fill_ci8` is one pass over samples already in cache, so the
+      expectation is that it is free - but "expected free" is exactly the claim that rule exists to
+      stop.
+      DO: measure the per-block cost of `adc_fill_ci8` against the existing ring/throughput
+      benchmarks (`crates/hk-core/examples/ring_throughput.rs`), then either wire it into the
+      source's provenance minting at a stated cadence (it is tune-STATE, so it must not mint a new
+      provenance row per block - dedup depends on it being stable, which argues for quantising the
+      recorded sigma or re-minting only on a state change) or record the measured cost as the
+      reason not to.
+      ALSO: `Provenance::fill_flags_disagree` exists and nothing calls it. Once a live sigma is
+      recorded, a disagreement with `quantisation_limited` is a front-end bug ADR-0015 section 13.3
+      says to surface - decide where it surfaces.
+      ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (except the benchmark itself, which is a cost
+      measurement and says so).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 by T-625 (task-adcfill). The dedup interaction is the real design question
+      here, not the DSP: a sigma that moves every block would turn a deduplicated provenance table
+      into one row per block.
+  - id: T-800
+    milestone: MMAP
+    title: 'Design + ADR-0023: map-UI chrome, the layer model, and the research-state stores'
+    status: todo
+    priority: high
+    parallel_group: MAP-DESIGN
+    model: opus
+    effort: high
+    core_interface: true
+    depends_on: []
+    use_cases: [AWARE-042, AWARE-053, RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-00 (L, both). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. The blocking design task. Produce
+      ADR-0023 and the three docs (23/24/25) as specs: the full-bleed layout + overlay taxonomy, the
+      per-pane LAYER registry and paint order over the one WebGL2 context, the PIN model
+      (states/clustering/picking), and the four durable research stores (collections, measurements,
+      annotations, saved views) with their route shapes and provenance stamp. Define the client state-
+      store extensions and the frontend<->API mapping for every new panel. Must EXTEND docs/16 §8 +
+      docs/14, contradict no invariant, and keep the thin-client rule. Justify no new heavyweight FE
+      deps (stay vanilla TS + the existing reactive store). THIN CLIENT: no signal logic in ui/src;
+      every new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a
+      device route). Update docs/api.md + crates/hk-cli/tests/api_contract.rs together (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then HAND
+      BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Blocks everything; land first. Mockup choices the docs left open, to
+      confirm in MAP-00: bottom sheet at every width (no desktop side slide-in); Research is a right
+      slide-in, not the sheet's full state.
+  - id: T-801
+    milestone: MMAP
+    title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
+    status: todo
+    priority: high
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-800]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-01 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Reframe the Explore surface to
+      Google-Maps geometry. The one WebGL2 canvas fills the viewport; the app-shell
+      sidebars/focus/dock stop framing it and become floating overlays (wired in later tickets).
+      Chrome floats in SCREEN space; data overlays stay in CONTENT space and re-lay-out every frame
+      (unchanged MCANVAS rule). Responsive scaffold to phone width, no horizontal page scroll. FE
+      only. THIN CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-
+      call-list test (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md):
+      targeted tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-802
+    milestone: MMAP
+    title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
+    status: todo
+    priority: high
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-801]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-02 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. The primary floating controls as
+      z-axis overlays docked to viewport edges: a Go-to-frequency/search input, the layers-menu
+      button, a live 'my-location' FAB that snaps a pane to the growing edge, and zoom affordances.
+      Semi-transparent, fade when idle. Go-to and the FAB build a DeviceAction only on explicit press
+      (the view/device line); pan/zoom never command the radio. FE only. THIN CLIENT: no signal logic
+      in ui/src; every new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet
+      never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui /
+      just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-803
+    milestone: MMAP
+    title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
+    status: todo
+    priority: high
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-801]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-03 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. A reusable bottom sheet that
+      coexists with the still-live, still-pannable canvas (Material/NNg pattern): three snap states,
+      content reflows per state, never modals over the surface. Hosts the detail sheet (MAP-04) and
+      the Explore drawer (MAP-14). Per-viewer collapse state in localStorage (try/catch, render-
+      correct without it). FE only. THIN CLIENT: no signal logic in ui/src; every new control passes
+      the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device route). TESTING
+      PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then HAND BACK.
+      Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-804
+    milestone: MMAP
+    title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
+    status: todo
+    priority: high
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-803]
+    use_cases: [AWARE-053]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-04 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Rehome MUI's focus panel into the
+      bottom-sheet/slide-in idiom. On selecting a pin/box: big frequency, measurements with their
+      measured-at time (the /api/inventory `measured` object), ranked explanations (suggestions never
+      truth), liveness, and actions (Listen, Decode/RDS, Record clip, Stream out, Promote/Delete,
+      Analyze). Reads existing routes only. FE only. THIN CLIENT: no signal logic in ui/src; every new
+      control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device
+      route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-805
+    milestone: MMAP
+    title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
+    status: todo
+    priority: high
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-801, T-459]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-05 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Finish the open T-459 inside the
+      new layout: real tick rulers (not just the chrome readout line) for both axes, anchored in
+      capture-time/frequency so they move with pan/zoom and re-lay-out every frame, fading with the
+      chrome. Ticks snap to the pane's drawn level; labels state units. Supersedes/absorbs T-459. FE
+      only. THIN CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-
+      call-list test (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md):
+      targeted tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-806
+    milestone: MMAP
+    title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
+    status: todo
+    priority: high
+    parallel_group: MAP-LAYERS
+    model: opus
+    effort: medium
+    depends_on: [T-800, T-802]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-06 (L, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. The projection-surface core
+      (docs/24). A per-pane registry of toggleable layers with explicit z-order/paint order over the
+      one context; a Maps-style layers menu with two independent axes (base ramp/phosphor style vs
+      overlay content), per pane. Each layer is a pure (data, accessor) render. Overlay quads stay
+      strokes/marks (no sampler, no ramp) so a layer can never tint a measurement — keep the byte-
+      identical-with-overlays-on/off guard. FE only. THIN CLIENT: no signal logic in ui/src; every new
+      control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device
+      route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-807
+    milestone: MMAP
+    title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
+    status: todo
+    priority: normal
+    parallel_group: MAP-LAYERS
+    model: sonnet
+    effort: medium
+    depends_on: [T-806]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-07 (S, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Make coverage an explicit
+      toggleable layer with figure-ground styling (base recedes; grey=genuinely unobserved stays
+      honest; the four states drawn distinctly per resolution.grey_rule). Reads GET /api/coverage and
+      the tile coverage plane — no new data. FE only. THIN CLIENT: no signal logic in ui/src; every
+      new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a
+      device route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-
+      crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-808
+    milestone: MMAP
+    title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
+    status: todo
+    priority: high
+    parallel_group: MAP-LAYERS
+    model: sonnet
+    effort: medium
+    depends_on: [T-806]
+    use_cases: [AWARE-053]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-08 (S, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Confirmed (prominent) and
+      candidate (weaker) detections as a layer of time-frequency boxes/events from GET /api/events,
+      honoring the overlap-is-an-error invariant (never hide/stack/z-order overlaps — an overlap
+      reaching the screen is a backend bug to report). Unknowns not hidden by default. FE only. THIN
+      CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-809
+    milestone: MMAP
+    title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
+    status: todo
+    priority: high
+    parallel_group: MAP-LAYERS
+    model: opus
+    effort: medium
+    depends_on: [T-806, T-804]
+    use_cases: [AWARE-053]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-09 (L, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. First-class interactive markers
+      placed in capture-time/frequency (moving with pan/zoom): rest glyph, hover MapTip
+      (centre/bandwidth/family-suggestion/on-air), selected -> opens the detail sheet.
+      Keyboard/hover/click accessible. GPU/quadtree picking sized for dense point sets. Distinguish
+      auto detection markers from human collection markers (MAP-21). FE only. THIN CLIENT: no signal
+      logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-810
+    milestone: MMAP
+    title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
+    status: todo
+    priority: normal
+    parallel_group: MAP-LAYERS
+    model: sonnet
+    effort: medium
+    depends_on: [T-809]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-10 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. At coarse zoom pins cluster from
+      the existing GET /api/tiles/events count-per-cell aggregate and expand into individuals on zoom-
+      in, mirroring the tile pyramid's coarsen/refine. Enforce the coarse-zoom honesty rule: a sub-
+      pixel burst is a minimum-size marker or a count, NEVER an inflated box. FE only. THIN CLIENT: no
+      signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-811
+    milestone: MMAP
+    title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
+    status: todo
+    priority: normal
+    parallel_group: MAP-LAYERS
+    model: sonnet
+    effort: medium
+    depends_on: [T-806]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-11 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Draw artifact-of relationships
+      (image/harmonic/intermod) from /api/inventory relate claims as LINKED overlays that visually tie
+      a spur/image to the source emitter — the signal-relationships goal, geometric tier. Ranked
+      evidence with reasoning, never truth. FE only (reads existing inventory relate fields). THIN
+      CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-812
+    milestone: MMAP
+    title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-LAYERS
+    model: opus
+    effort: medium
+    core_interface: true
+    depends_on: [T-806]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-12 (M, both). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Backend: a read-only GET
+      /api/priors?f_lo&f_hi&t0&t1 returning ranked band-plan/licence allocations as EXPLANATIONS for
+      the viewport, gated identical to /api/events, computed on demand, never a tile channel, never
+      pre-populating the inventory. Update docs/api.md + api_contract.rs together (T-079). FE: a
+      toggleable priors layer drawn as labeled allocation bands with ranked reasoning — the
+      exploration-first DB-suggests invariant rendered. Small backend surface, larger FE. THIN CLIENT:
+      no signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). Update docs/api.md + crates/hk-
+      cli/tests/api_contract.rs together (T-079). TESTING PROTOCOL (CLAUDE.md): targeted tests only
+      (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-813
+    milestone: MMAP
+    title: 'Figure-ground + colorblind-safe encoding pass across all layers'
+    status: todo
+    priority: normal
+    parallel_group: MAP-LAYERS
+    model: sonnet
+    effort: medium
+    depends_on: [T-807, T-808, T-809]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-13 (S, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Apply docs/23 §7 / docs/24 §8:
+      base desaturated and receding, small controlled symbol vocabulary, collision-aware labels, and
+      state (candidate/confirmed/unknown, observed/unobserved) encoded with shape/pattern as well as
+      hue (CVD-safe; no red-green-only). Verify against the honesty-tier distinctness. FE only. THIN
+      CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      lands first, the rest each add one layer module.
+  - id: T-814
+    milestone: MMAP
+    title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
+    status: todo
+    priority: normal
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-803]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-14 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. A collapsed-by-default bottom
+      sheet (peek->half->full) surfacing places to go: quiet-but-active bands, recent anomalies,
+      strongest current signals, and past-survey windows. Reads GET /api/scheduler (POI), /api/events,
+      /api/coverage, /api/analysis/strongest — all existing. Coexists with the live surface; selecting
+      an item pans/zooms (or offers a retune). FE only. THIN CLIENT: no signal logic in ui/src; every
+      new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a
+      device route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-
+      crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-815
+    milestone: MMAP
+    title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
+    status: todo
+    priority: normal
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-814, T-819]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-15 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. In the Explore drawer, list prior
+      survey coverage windows (from the coverage map / observation log via existing routes) and jump
+      the pane to one, restoring the (time x frequency) extent. Distinguish observed-then vs never-
+      looked. FE only. THIN CLIENT: no signal logic in ui/src; every new control passes the spy-client
+      empty-call-list test (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL
+      (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then HAND BACK. Never `just
+      gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-816
+    milestone: MMAP
+    title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-API
+    model: opus
+    effort: medium
+    core_interface: true
+    depends_on: [T-800]
+    use_cases: [RESEARCH-003, RESEARCH-001]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-16 (L, api). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. A durable annotation store: time-
+      frequency notes (text or graphical box/marker) with provenance (device, centre/span, capture
+      window, tier), clickable-to-navigate, paged. GET/POST/PUT/DELETE /api/annotations, audited +
+      503-unavailable like the rest of the control API, SigMF-adjacent export shape (align docs/sigmf-
+      extension.md). Update docs/api.md + api_contract.rs together (T-079). Never fed back into blind
+      detection. THIN CLIENT: no signal logic in ui/src; every new control passes the spy-client
+      empty-call-list test (pan/zoom/layer/sheet never reach a device route). Update docs/api.md +
+      crates/hk-cli/tests/api_contract.rs together (T-079). TESTING PROTOCOL (CLAUDE.md): targeted
+      tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
+      module + migration; a cheaper model's output here is reviewed by Opus before merge.
+  - id: T-817
+    milestone: MMAP
+    title: 'Marker collections: generalize /api/bookmarks to time-frequency markers grouped into named collections'
+    status: todo
+    priority: normal
+    parallel_group: MAP-API
+    model: opus
+    effort: medium
+    core_interface: true
+    depends_on: [T-800]
+    use_cases: [RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-17 (M, api). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Extend the existing frequency-
+      only bookmark store into TIME-FREQUENCY markers grouped into named, toggleable COLLECTIONS:
+      GET/POST/PUT/DELETE /api/collections and members, backward-compatible with existing bookmarks,
+      audited. Update docs/api.md + api_contract.rs together (T-079). THIN CLIENT: no signal logic in
+      ui/src; every new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never
+      reach a device route). Update docs/api.md + crates/hk-cli/tests/api_contract.rs together
+      (T-079). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate),
+      then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
+      module + migration; a cheaper model's output here is reviewed by Opus before merge.
+  - id: T-818
+    milestone: MMAP
+    title: 'Saved measurements store + /api/measurements (value+unit+place+time+provenance)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-API
+    model: opus
+    effort: medium
+    core_interface: true
+    depends_on: [T-800]
+    use_cases: [RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-18 (M, api). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Persist a measurement as an
+      object: value + unit + (f,t) place + time + provenance — Delta-f, Delta-t, bandwidth, duration,
+      symbol-rate/period. GET/POST/PUT/DELETE /api/measurements, audited. The measurement itself is
+      client-computed presentation arithmetic over already-known state (thin-client); the store keeps
+      the durable object. Update docs/api.md + api_contract.rs together (T-079). THIN CLIENT: no
+      signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). Update docs/api.md + crates/hk-
+      cli/tests/api_contract.rs together (T-079). TESTING PROTOCOL (CLAUDE.md): targeted tests only
+      (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
+      module + migration; a cheaper model's output here is reviewed by Opus before merge.
+  - id: T-819
+    milestone: MMAP
+    title: 'Saved views: named, restorable (time x frequency) window extents'
+    status: todo
+    priority: normal
+    parallel_group: MAP-API
+    model: opus
+    effort: medium
+    core_interface: true
+    depends_on: [T-800]
+    use_cases: [AWARE-042]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-19 (S, api). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Named restorable view extents
+      (ArcGIS-bookmark analogue): a saved view is a point in view-arithmetic state, distinct from a
+      device retune. Extend the bookmark store or a small /api/views; shareable/exportable. Update
+      docs/api.md + api_contract.rs together (T-079). THIN CLIENT: no signal logic in ui/src; every
+      new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a
+      device route). Update docs/api.md + crates/hk-cli/tests/api_contract.rs together (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then HAND
+      BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
+      module + migration; a cheaper model's output here is reviewed by Opus before merge.
+  - id: T-820
+    milestone: MMAP
+    title: 'Annotation authoring on the canvas (draw box/marker/label -> create annotation)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-RESEARCH
+    model: opus
+    effort: medium
+    depends_on: [T-816, T-804, T-458]
+    use_cases: [RESEARCH-003, RESEARCH-001]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-20 (L, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. The gesture to author an
+      annotation on the surface (box, marker, or label), coordinated with T-458 (drag pans, so create
+      needs a modifier/mode — one gesture vocabulary, no second interpretation of a drag). Posts to
+      /api/annotations with a provenance stamp; drawn as a distinct human-authored overlay. Depends on
+      T-458 landing the selection-gesture design. THIN CLIENT: no signal logic in ui/src; every new
+      control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device
+      route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-821
+    milestone: MMAP
+    title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-RESEARCH
+    model: opus
+    effort: medium
+    depends_on: [T-817, T-806]
+    use_cases: [RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-21 (L, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. The Felt model: a collection is a
+      named, toggleable-as-a-layer set of markers/annotations, and every mark is ALSO a
+      sortable/filterable ROW in a table; edits in either surface propagate. Toggle a collection
+      on/off as an overlay layer (MAP-06). Reads/writes /api/collections + /api/annotations. THIN
+      CLIENT: no signal logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests
+      only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-822
+    milestone: MMAP
+    title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
+    status: todo
+    priority: normal
+    parallel_group: MAP-RESEARCH
+    model: sonnet
+    effort: medium
+    depends_on: [T-818, T-458]
+    use_cases: [RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-22 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. A measurement mode: drag/cursors
+      to read Delta-f, Delta-t, bandwidth, duration and symbol-rate/period (inspectrum-style,
+      RESEARCH-003); the readout stays ON the canvas and can be SAVED to /api/measurements as a
+      durable object (not a vanishing tooltip). Coordinates with T-458's gesture design. Pure
+      presentation arithmetic over known view state. THIN CLIENT: no signal logic in ui/src; every new
+      control passes the spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device
+      route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-823
+    milestone: MMAP
+    title: 'Export: collections, measurements, annotations out as file/link (SigMF-adjacent)'
+    status: todo
+    priority: normal
+    parallel_group: MAP-RESEARCH
+    model: sonnet
+    effort: medium
+    depends_on: [T-821, T-822]
+    use_cases: [RESEARCH-003]
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-23 (M, both). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. First-class export path for each
+      durable object type so the research artifact outlives the session; SigMF-adjacent for
+      annotations. Offline-first (export when online). No new signal logic. THIN CLIENT: no signal
+      logic in ui/src; every new control passes the spy-client empty-call-list test
+      (pan/zoom/layer/sheet never reach a device route). Update docs/api.md + crates/hk-
+      cli/tests/api_contract.rs together (T-079). TESTING PROTOCOL (CLAUDE.md): targeted tests only
+      (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-824
+    milestone: MMAP
+    title: 'Phone-width + fade/immersive pass across the floating chrome'
+    status: todo
+    priority: normal
+    parallel_group: MAP-CHROME
+    model: sonnet
+    effort: medium
+    depends_on: [T-805, T-814, T-821]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-24 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Responsive to ~400px with no
+      horizontal scroll; chrome fades when idle and returns on interaction; sheets and menus reachable
+      one-handed. Verify the view/device line survives touch (pinch-zoom = view, region-select =
+      retune offer). FE only. THIN CLIENT: no signal logic in ui/src; every new control passes the
+      spy-client empty-call-list test (pan/zoom/layer/sheet never reach a device route). TESTING
+      PROTOCOL (CLAUDE.md): targeted tests only (just test-ui / just test-crate), then HAND BACK.
+      Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+  - id: T-825
+    milestone: MMAP
+    title: 'UI tests + honesty guards for the map-UI and research surfaces'
+    status: todo
+    priority: normal
+    parallel_group: MAP-TEST
+    model: sonnet
+    effort: medium
+    depends_on: [T-809, T-810, T-812, T-820, T-821, T-822]
+    use_cases: []
+    found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
+    acceptance: |
+      MAP-25 (M, ui). SPEC: ui/mockups/map-ui-v1.html (approved by the user 2026-09-22) is the
+      layout+interaction reference, as explorer-v3.html was for MUI; docs/23-26 are the design
+      contract and docs/23 §9 is the checklist every line must hold. Request-shape assertions (assert
+      the request the client BUILDS, not just what it renders — the T-367 gap), byte-identical-data-
+      with-overlays-on/off, no-fabricated-timespan at coarse zoom (pins/counts not boxes), spy-client
+      empty-call-list after the full gesture+layer vocabulary (pan/zoom/layer-toggle never command the
+      radio), and the table<->canvas sync property. Extend ui/test + e2e. THIN CLIENT: no signal logic
+      in ui/src; every new control passes the spy-client empty-call-list test (pan/zoom/layer/sheet
+      never reach a device route). TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui /
+      just test-crate), then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
+  - id: T-761
+    milestone: M2-hardening
+    title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
+    status: done
+    branch: task-opsdir
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-650]
+    use_cases: []
+    found_by: 'the supervisor, 2026-09-22, verifying T-650 on its first live bulk'
+    acceptance: |
+      T-650 SHIPPED WITH A HOLE, AND THE HOLE WAS THE READER IT WAS WRITTEN FOR.
+      On the first live bulk (`task-t633` + `task-adcfill`, 2026-09-22 02:42) the marker behaved
+      exactly as designed: `$HACKRIFF_OPS/bulk-in-progress` appeared before the first merge commit
+      with base, start time, pid, branches and the after-sha. And `just reconcile` in the
+      COORDINATOR's session printed "no in-progress tickets - the board claims nothing is running",
+      with NO warning, while that bulk was staged.
+      CAUSE. `HACKRIFF_OPS` is per-process. The runner is launched with it pointing at the
+      supervisor's session scratchpad; the coordinator's session has it UNSET, so `reconcile`
+      looked in `~/.hackriff-ops` and found nothing. A warning nobody receives is not a warning.
+      This is the same false-quiet the marker exists to remove, reproduced one level up - and it is
+      the same shape as a nextest override whose filter names a package no run can see, and as
+      `Coverage::Unobserved` being allowed to read as quiet.
+      IT WAS THE FOURTH HACKRIFF_OPS-CONSISTENCY INCIDENT OF THE SAME NIGHT. The others: two
+      branches stranded because a queue append went to a file the runner never read; a stale entry
+      left in the other copy; and phantom queue contents. Each was individually benign. This one
+      was not.
+      RESOLUTION. The runner PUBLISHES its choice at the fixed default path: on every start it
+      writes `$HACKRIFF_OPS` into `~/.hackriff-ops/active-ops-dir`. `hkpy.reconcile.ops_dir()`
+      resolves most-specific-first - an explicit `HACKRIFF_OPS`, then that pointer, then the fixed
+      default - so a session that sets nothing still lands in the right directory, and a restart
+      under a different env corrects the pointer rather than leaving a stale claim. A pointer to a
+      directory that no longer exists is IGNORED rather than trusted, so staleness degrades to the
+      default instead of silently hiding the marker again.
+      Also: the warning now states pid liveness BOTH ways ("runner pid N alive" / "IS GONE" / "no
+      runner pid recorded"), which the spec asked for and the first implementation only printed in
+      the dead case.
+      VERIFIED AGAINST THE LIVE BULK, not a fixture: with `HACKRIFF_OPS` unset, `just reconcile`
+      now leads with "A BULK MERGE IS STAGED ON MAIN", naming `task-t633 task-adcfill`, gated-from
+      `93b7596e`, "started 4m ago", "(runner pid 96468 alive)".
+      Five tests in `py/tests/test_reconcile.py` pin the resolution order, the stale-pointer
+      degrade, pid liveness both ways, and the exact 2026-09-22 failure (no env + marker in the
+      runner's directory must still be seen). 19 pass.
+    notes: |
+      NEEDS A RUNNER RESTART to publish the pointer; until then the pointer is whatever last wrote
+      it. STILL OPEN and the same root cause: the merge QUEUE is two files (`ops/merge-queue.txt`
+      in the repo and `$HACKRIFF_OPS/merge-queue.txt`), which produced three of tonight's four
+      incidents. Unifying them is the remaining half and is not done here - this ticket only fixes
+      the marker's visibility. Filed alongside as the open question for whoever owns `ops/`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -81,6 +81,7 @@ pub fn provenance(device_id: &str, center_hz: f64, sample_rate_hz: f64) -> Prove
             bandwidth_hz: sample_rate_hz * 0.75,
         },
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         overload: false,
         temperature_c: None,
         antenna_port: None,

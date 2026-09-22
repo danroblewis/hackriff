@@ -810,6 +810,7 @@ fn provenance_record(
         tune: tune.clone(),
         overload,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: Some(ANTENNA_UNKNOWN.into()),
         // T-325: the state this driver commanded with `set_antenna_enable`. libhackrf offers no

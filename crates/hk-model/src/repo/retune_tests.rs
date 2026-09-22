@@ -85,6 +85,7 @@ fn prov(r: &mut Repository, lo: f64) -> ProvenanceId {
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: None,
         bias_tee: crate::BiasTee::Unknown,
