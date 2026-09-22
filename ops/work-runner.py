@@ -676,8 +676,12 @@ def reap_worktrees(claims, dry):
         if dry:
             log(f"DRY-RUN would reap worktree {wt} ({branch}: {'merged' if merged else 'no commits'})")
             continue
-        r = subprocess.run(["git", "worktree", "remove", wt], cwd=REPO, capture_output=True, text=True)
-        log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+        # Untracked files block `worktree remove`. On a MERGED branch or a claim that ended without
+        # commits (no-work / error / timeout) they are abandoned scratch: force. Otherwise refuse, and say so.
+        claim = next((c for c in claims.values() if c.get("wt") == wt), {})
+        force = merged or claim.get("state") in ("no-work", "error", "timeout")
+        r = subprocess.run(["git", "worktree", "remove"] + (["--force"] if force else []) + [wt], cwd=REPO, capture_output=True, text=True)
+        log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
 def apply_gate_qos(claims):
