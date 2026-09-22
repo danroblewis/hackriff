@@ -8,6 +8,9 @@ The hackriff extension (``docs/sigmf-extension.md``) adds:
 - ``hackriff:truth`` on an annotation: a free-form ground-truth object.
 - ``hackriff:clip_count`` on a capture: clipped ADC samples in that segment (non-negative int).
   Per segment, not in provenance, because provenance is deduplicated by value.
+- ``noise_sigma_lsb`` inside ``hackriff:provenance``: ADC fill, the per-component noise sigma in
+  LSB (T-625, ADR-0015 section 13.3). Absent means *not measured*, which a reader treats as
+  ``under_filled`` -- never as nominal.
 
 Metadata only. Sample I/O belongs to the synthetic generator and replay tooling.
 """
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +95,7 @@ def provenance(
     calibration_state_ref: str | None = None,
     spur_mask_ref: str | None = None,
     timestamp_error_budget_ns: int | None = None,
+    noise_sigma_lsb: float | None = None,
 ) -> dict[str, Any]:
     """Builds a ``hackriff:provenance`` object (Rust ``hk_model::Provenance``)."""
     p: dict[str, Any] = {
@@ -115,6 +120,7 @@ def provenance(
         "calibration_state_ref": calibration_state_ref,
         "spur_mask_ref": spur_mask_ref,
         "timestamp_error_budget_ns": timestamp_error_budget_ns,
+        "noise_sigma_lsb": None if noise_sigma_lsb is None else float(noise_sigma_lsb),
     }
     p.update({k: v for k, v in optional.items() if v is not None})
     _validate_provenance(p, "provenance")
@@ -274,3 +280,13 @@ def _validate_provenance(p: Any, where: str) -> None:
         raise SigmfError(
             f"{where}: timestamp_method {p['timestamp_method']!r} not in {sorted(TIMESTAMP_METHODS)}"
         )
+    sigma = p.get("noise_sigma_lsb")
+    if sigma is not None and (
+        isinstance(sigma, bool)
+        or not isinstance(sigma, (int, float))
+        or not math.isfinite(sigma)
+        or sigma < 0.0
+    ):
+        # ADC fill (T-625, ADR-0015 section 13.3). Absent is allowed and means "not measured",
+        # which the reader treats as `under_filled`; a present-but-nonsense value is not.
+        raise SigmfError(f"{where}: noise_sigma_lsb must be a finite non-negative number")

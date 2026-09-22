@@ -20876,6 +20876,38 @@ tasks:
       Filed 2026-09-21 by T-551 (docs/22 section 9). HIGH because every other MAUTO fixture ticket
       stratifies on a key this ticket creates, and because a gain-keyed breakdown is actively
       misleading rather than merely absent. Reads on T-547 (docs/21).
+      DONE 2026-09-22 on task-adcfill. `Provenance.noise_sigma_lsb: Option<f32>` records ADC fill
+      beside the gain state, the overload flag and the clip count - one spelling shared with
+      ADR-0015 section 13's calibration key, optional so pre-T-625 rows keep their dedup hash, and
+      carried on the SigMF `hackriff:provenance` wire (docs/07 section 2.6 + docs/sigmf-extension.md
+      updated with it). `hk_model::FillBucket` is the conditioning key: `nominal` /
+      `under_filled` / `over_clipped`, `Default = UnderFilled`, `classify()` fail-closed so a
+      MISSING or non-finite sigma is `under_filled` and a non-finite clip fraction is
+      `over_clipped`. `hk_dsp::floor::adc_fill_ci8` / `adc_fill_unit_scale` are ADR-0015 section
+      13.3's cheap runtime rule (one pass, pooled per-component sigma about each component's own
+      mean, rails counted). `hkpy.synth.fill` mirrors it and adds the ladder:
+      `python -m hkpy.synth.fill <scenario> --out DIR`, one ci8 recording per rung differing only
+      in `adc_gain_db`, each recording the sigma it was MEASURED at, plus `fill-ladder.json`.
+      MEASURED (noise_floor_rise, 200 ksps, seed 625): rungs land at sigma = 0.134, 0.667, 2.025,
+      23.06, 42.97, 70.40 LSB with clip fractions 0, 0, 0, 0, 0.007, 0.188 -> bucket counts
+      {nominal: 5, under_filled: 1, over_clipped: 0}.
+      FINDING, recorded in docs/22 section 4.4: the six-level ladder NEVER reaches `over_clipped`,
+      because docs/21's sweep stopped at 28.4 % clipped and the boundary is 30 %. The F ladder
+      exercises the under-fill refusal and not the over-clip one; a rung past 30 % would be a rung
+      with no evidence behind it, so the ladder stops where the measurement did. Second finding:
+      the top rung's measured sigma (70.4) falls BELOW its 77 target precisely because it clips -
+      the recorded value is post-ADC, which is why the manifest records measured, never requested.
+      RED PROOF: inverting `classify` so a missing sigma reads `nominal` fails 3 Rust tests
+      (`an_unmeasured_fill_is_under_filled_and_never_nominal`,
+      `noise_sigma_lsb_round_trips_and_is_omitted_when_unmeasured`,
+      `adc_fill_is_stored_with_the_gain_state_and_distinguishes_provenance_rows`) and 2 py tests;
+      dropping the field from the generator's provenance fails 2 more py tests.
+      Targeted: hk-model 495 passed, hk-dsp green, hk-core 157 passed, py 285 passed 2 skipped,
+      ruff + `just precheck hk-model hk-dsp hk-core` clean.
+      NOT DONE, deliberately: no calibration table reads the bucket yet - that is T-660, which owns
+      the `hackriff.calibration/1` loader and cannot start before `hk-synth` exists. The live
+      capture path still writes `noise_sigma_lsb: None` (fail-closed) because measuring it there is
+      a capture-thread cost that T-453's rule says must be measured, not assumed - filed as T-750.
   - id: T-626
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: the N5 mismatched-hypothesis negative population - the null the search actually faces'
@@ -21762,6 +21794,43 @@ tasks:
       checked, rather than assumed, that 14 OTHER Chrome processes on the box belonged to a
       different agent's live worktree and left those alone - the right instinct, and the reason a
       blanket sweep is not the fix here either.
+  - id: T-750
+    milestone: MAUTO
+    title: 'Measure ADC fill on the live capture path - or prove the per-row cost first (T-625 residual)'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: low
+    depends_on: [T-625]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      T-625 landed `Provenance.noise_sigma_lsb` and `hk_dsp::floor::adc_fill_ci8`, and wired the
+      field end to end for SYNTHETIC recordings (`hkpy.synth` writes the measured sigma; the SigMF
+      reader carries it through `SigmfReplaySource`). The LIVE path - `hk-core`'s HackRF source and
+      the mock device - still writes `None`, which the reader treats as `under_filled`: fail-closed
+      and correct, but it means a real capture can never earn a calibration table.
+      WHY IT IS A SEPARATE TICKET, not a T-625 omission: the measurement would run on the CAPTURE
+      THREAD, which gates the ring, and CLAUDE.md's T-453 rule is that per-arriving-block cost is
+      MEASURED, not assumed. `adc_fill_ci8` is one pass over samples already in cache, so the
+      expectation is that it is free - but "expected free" is exactly the claim that rule exists to
+      stop.
+      DO: measure the per-block cost of `adc_fill_ci8` against the existing ring/throughput
+      benchmarks (`crates/hk-core/examples/ring_throughput.rs`), then either wire it into the
+      source's provenance minting at a stated cadence (it is tune-STATE, so it must not mint a new
+      provenance row per block - dedup depends on it being stable, which argues for quantising the
+      recorded sigma or re-minting only on a state change) or record the measured cost as the
+      reason not to.
+      ALSO: `Provenance::fill_flags_disagree` exists and nothing calls it. Once a live sigma is
+      recorded, a disagreement with `quantisation_limited` is a front-end bug ADR-0015 section 13.3
+      says to surface - decide where it surfaces.
+      ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (except the benchmark itself, which is a cost
+      measurement and says so).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 by T-625 (task-adcfill). The dedup interaction is the real design question
+      here, not the DSP: a sigma that moves every block would turn a deduplicated provenance table
+      into one row per block.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

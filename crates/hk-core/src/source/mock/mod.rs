@@ -1194,6 +1194,7 @@ impl MockSdrSource {
             overload: self.overloaded || (rec.overload && coverage != Coverage::Noise),
             quantisation_limited: floor_psd < 2.0 * quant_psd
                 || (rec.quantisation_limited && g >= 1.0),
+            noise_sigma_lsb: None,
             temperature_c: None,
             antenna_port: Some(coverage.antenna_port().into()),
             bias_tee: self.bias_tee,

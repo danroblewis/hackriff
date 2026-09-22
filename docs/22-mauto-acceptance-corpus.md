@@ -126,6 +126,24 @@ Six fill levels (A3) × {one P row, one N row}, **n = 200 per cell**, with a **c
 - **report** per fill level: C-R pass rate, C-M max bits, demod success, and `resolution.reason` distribution;
 - **bar:** the *under-filled* cell (σ = 0.21 LSB) must be **detected and flagged**, not silently degraded — `Provenance.quantisation_limited` set, and the result carrying the flag rather than a confident answer. T-547 found under-fill swings demod success 19 % → 53 % and collapses `eye_open` to 0.19 from 0.899; an engine that reports the same confidence at both ends of that is over-claiming, and the flag is the only cheap defence.
 
+**Built (T-625, 2026-09-21).** The ladder is `hkpy.synth.fill` — `python -m hkpy.synth.fill
+<scenario> --out DIR [--levels ...]` — one `ci8` recording per rung, differing from its neighbours
+in `adc_gain_db` and in nothing else, each carrying the fill it was *measured* at (never the one it
+was asked for) in `hackriff:provenance.noise_sigma_lsb`, plus a `fill-ladder.json` manifest of
+target σ / gain / measured σ / clip fraction / bucket. Two things it measured that the spec should
+absorb:
+
+- **The six rungs classify into two buckets, and `over_clipped` is unreached.** On
+  `noise_floor_rise` at 200 ksps the rungs land at σ = 0.13, 0.67, 2.02, 23.1, 43.0, 70.4 LSB with
+  clip fractions 0, 0, 0, 0, 0.007, 0.188 — **1 `under_filled`, 5 `nominal`, 0 `over_clipped`**,
+  because ADR-0015 §13.3's clip boundary is 30 % and docs/21's sweep stopped at 28.4 %. The F
+  ladder therefore exercises the *under-fill* refusal and never the *over-clip* one; a scene that
+  exercises the second needs a rung past where the measurement went, and it would be a rung with
+  no evidence behind it. Stated here rather than quietly padded.
+- **The top rung's measured σ falls below its target** (70.4 for 77) precisely because it clips —
+  the recorded value is post-ADC, which is the honest datum and the reason the manifest records
+  measured rather than requested fill.
+
 n = 200 per cell resolves a tail to 7.6 bits, which is **too coarse for an absolute C-M claim** — which is exactly why F is comparative and is *not* used to stratify the C-L/C-M populations. Stratifying the 1000-job negative set across six fill buckets would have cut the tail resolution from 11.0 bits to 7.4 and destroyed A2's power. **That trade is the reason fill is a separate population rather than a cross with the negatives**, and it is stated here so nobody "improves" the suite by crossing them.
 
 ### 4.5 H — the sealed hold-out
