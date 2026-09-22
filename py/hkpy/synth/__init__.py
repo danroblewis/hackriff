@@ -12,7 +12,8 @@ Scenarios (use cases): ``tone`` (building block), ``fsk_burst_train`` (AWARE-036
 T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only -- see
 :mod:`hkpy.synth.acars`), ``trunk_control_channel`` (C23, T-267), ``lora_ism_burst``
 (SIGNAL-062/AWARE-053, T-255: chirps with no stable frequency in 902-928 MHz US ISM -- see
-:mod:`hkpy.synth.lora_scene`), ``retune_diversity`` (AWARE-011, T-586: one region at several
+:mod:`hkpy.synth.lora_scene`), ``mismatched_hypothesis`` (SIGNAL-052/RESEARCH-002, T-626: the N5 mismatched-hypothesis negative
+population -- see :mod:`hkpy.synth.mismatch`), ``retune_diversity`` (AWARE-011, T-586: one region at several
 centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`). Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
@@ -28,7 +29,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hkpy.synth import impairments, lora_scene, occupancy, retune, scenarios, trunk_scene
+from hkpy.synth import (
+    impairments,
+    lora_scene,
+    mismatch,
+    occupancy,
+    retune,
+    scenarios,
+    trunk_scene,
+)
 from hkpy.synth.scene import GENERATOR, GENERATOR_VERSION, SUPPORTED_DATATYPES, _jsonable
 
 
@@ -96,6 +105,12 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "one region surveyed at several centres: fixed-frequency CW emitters and LO-relative "
         "receiver artefacts (DC leakage, an internal spur at a fixed LO offset), so only the "
         "behaviour across retunes separates a real emission from a receiver artefact (T-586)"),
+    "mismatched_hypothesis": ScenarioSpec(
+        mismatch.mismatched_hypothesis, mismatch.MISMATCH_DEFAULTS, ("SIGNAL-052", "RESEARCH-002"),
+        "N5 negative (T-626): a real, framed, CRC-valid 2-FSK emitter whose true symbol rate and "
+        "modulation index lie OUTSIDE the proposal grid, so every hypothesis the search evaluates "
+        "is the wrong one; `population=adjacent_leakage` adds a strong hard-keyed neighbour "
+        "outside the analysed box whose skirts land inside it"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "

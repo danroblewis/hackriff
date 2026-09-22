@@ -20944,6 +20944,42 @@ tasks:
       Filed 2026-09-21 by T-551 (docs/22 sections 4.3 and 9). HIGH because it is the population
       most likely to move ADR-0022's margin, and a margin measured only on the easy nulls is the
       failure ADR-0022 section 3.2 exists to prevent.
+      DONE 2026-09-22 on task-adcfill. Built as FIXTURES, not engine configuration:
+      `hkpy.synth.mismatched_hypothesis` (py/hkpy/synth/mismatch.py), two shapes via
+      `--param population=`.
+      off_grid (default): a real, FRAMED, CRC-valid 2-FSK emitter at 1873 Bd / h = 1.281. Against
+      the declared proposal grid (300..38400 Bd; h in {0.5, 1.0, 2.0}) 0 of 8 rates and 0 of 3
+      indices are within 10 %; nearest are 2400 Bd at 21.96 % and h = 1.0 at 28.14 %. The test
+      RE-MEASURES both out of the samples (mix, firwin to the emission bandwidth, discriminator,
+      zero crossings -> 1872.95 Bd; deviation 1204.6 Hz for a true 1200) and re-checks the CRC with
+      `binascii.crc_hqx`, so the off-grid property is in the IQ and not only in the truth block.
+      adjacent_leakage: the same emitter plus a hard-keyed neighbour 30 kHz away, 34 dB up, 2 kBd,
+      rectangular envelope (sinc skirts, 1/f^2). An A/B against the off_grid control measures
+      +17.6 dB inside the analysed box from a neighbour that is never in it, so any parameter bound
+      from it is a mismatch by construction. A neighbour placed INSIDE the box is REFUSED by the
+      generator: that is two overlapping emissions - the signal model's error signal - not
+      adjacent-channel leakage.
+      MISMATCH vs MISS, the thing the assert harness needed:
+      `hkpy.synth.mismatch.classify_outcome(result, truth)` -> correct / partial / mismatch /
+      abstain. A label (verdict >= framed) with a bound symbol rate outside 2 % of the true one is
+      a MISMATCH, and `grid_snapped` flags the aggravating case where the bound value is a
+      proposal-grid point - it answered the hypothesis it had rather than the signal it saw.
+      `unknown` (any reason) and a sub-framed partial are the WANTED answers. A miss is
+      deliberately NOT a false label: N5 measures over-claim, not recall, and conflating them is
+      how a suite reports a comfortable margin by being bad at finding things. Truth is read only
+      by the harness; nothing is looked up and tuned to.
+      Wired into docs/22: section 4.3's N5 row is now `have`, with the built description and the
+      measured numbers; section 9's ticket table marks T-625/T-626 built. py/README.md documents
+      the new truth kind and the `negative_population` block.
+      RED PROOF: moving the true symbol rate ONTO the grid (2400 Bd) fails 3 tests
+      (`no_grid_hypothesis_can_reach_the_true_parameters`,
+      `the_emitter_is_real_framed_and_at_the_off_grid_rate`,
+      `truth_tells_a_mismatch_from_a_miss_without_the_system_seeing_it`); dropping the adjacent
+      emitter fails the other 3.
+      Targeted: py 293 passed 2 skipped, ruff clean. No Rust touched by this ticket.
+      NOT DONE: the population is not yet RUN against an engine - there is none (MAUTO M-1/M-3).
+      `acceptance_mauto::negative_control` consuming it is T-576/T-627's work, and the n = 200 per
+      shape that docs/22 specifies is a harness-side count, not a generator one.
   - id: T-627
     milestone: MAUTO
     title: 'MAUTO-TEST: the coverage manifest and the sealed hold-out - make the corpus sufficiency argument checkable instead of asserted'

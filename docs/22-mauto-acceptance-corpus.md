@@ -113,9 +113,34 @@ ADR-0021 §8.4's four populations, **plus a fifth this document adds** and justi
 | **N2** | energy without symbols: CW, analog FM voice, analog AM voice | partly (`tone` = CW; **build** the voice scenes) | 200 | `unknown` / `nothing-scored`, `deepest_verdict ≤ demodulated`; 0 ≥ `framed` |
 | **N3** | out-of-catalogue structure: OFDM (non-standard CP), DSSS, 16-QAM, CSS | **build** 3 of 4 (CSS = P9) | 200 | `unsupported-structure` naming the structure + `missing_block`; 0 `solved`; `framed` only where the trace shows a *measured* framing. **Scored separately** |
 | **N4** | real empty capture: the 433 MHz quiet window + **the 50 Ω terminator capture** | partly — **T-375 is a user action, outstanding** (§10) | 200 | as N1, and **a spur is never a label** (`artifact_of`, never a verdict ≥ `demodulated`) |
-| **N5** | **mismatched-hypothesis null: a real signal whose true parameters lie outside the proposal grid**, and a strong adjacent emitter leaking into the analysed box | **build** (mostly parameterisation) | 200 | `unknown` / `tied`, or a *correct* partial result; **never `solved` with wrong parameters**; over-claim counted here |
+| **N5** | **mismatched-hypothesis null: a real signal whose true parameters lie outside the proposal grid**, and a strong adjacent emitter leaking into the analysed box | **have** (`mismatched_hypothesis`, T-626) | 200 | `unknown` / `tied`, or a *correct* partial result; **never `solved` with wrong parameters**; over-claim counted here |
 
 **Why N5 exists and ADR-0021's four populations are not enough.** T-547 measured the null the search actually faces, and it is not noise. On pure noise the 6-bit tables over-claimed **≤ 0.34 bits**; on a **mismatched-parameter** null (right block, wrong symbol rate) they over-claimed **up to 1.75 bits** — five times worse, and that is before an adjacent real emitter is in the window. A negative suite built only from noise, unmodulated energy and out-of-catalogue structure measures the engine against the *friendliest* null available and would report a comfortable margin while the operational null was five times fatter. N5 is the population where C-M's `max analytic_holdout_bits` is most likely to move, and it is pooled into the C-L and C-M counts.
+
+**Built (T-626, 2026-09-22).** `hkpy.synth.mismatched_hypothesis`, two shapes selected by
+`--param population=`:
+
+- `off_grid` (default) — a real, framed, **CRC-valid** 2-FSK emitter at **1873 Bd** and
+  **h = 1.281**. Against the declared proposal grid (300 … 38 400 Bd; h ∈ {0.5, 1.0, 2.0}) **0 of
+  8** rates and **0 of 3** indices are within 10 % — the nearest are 2400 Bd (21.96 % away) and
+  h = 1.0 (28.14 % away), so every hypothesis on the grid is the wrong one and something on the
+  grid always scores best. The rate and index are re-measured out of the samples (discriminator +
+  zero crossings: 1872.95 Bd) and the CRC re-checked with `binascii.crc_hqx`, so the off-grid
+  property is in the IQ, not only in the truth block.
+- `adjacent_leakage` — the same emitter plus a **hard-keyed** neighbour 30 kHz away (34 dB up,
+  2 kBd, rectangular envelope → sinc skirts). It is never inside the analysed box, and an A/B
+  against the `off_grid` control measures **+17.6 dB** inside the box from it, so any parameter
+  bound from it is a mismatch by construction. A neighbour placed *inside* the box is refused by
+  the generator: that is two overlapping emissions, which the signal model calls an error signal,
+  not adjacent-channel leakage.
+
+The truth carries `negative_population` with the grid, both distances, the analysed box, the
+measured leak and the **mismatch-vs-miss rule** (`hkpy.synth.mismatch.classify_outcome`): a label
+≥ `framed` with a bound symbol rate outside 2 % of the true one is a **mismatch**, and
+`grid_snapped` records the aggravating case where it bound a grid value instead;
+`unknown` (any reason) and a sub-`framed` partial are the **wanted** answers. A miss is explicitly
+**not** counted as a false label — N5 measures over-claim, not recall, and conflating the two is
+how a suite reports a comfortable margin by being bad at finding things.
 
 `false_labels` is counted over **N1 ∪ N2 ∪ N4 ∪ N5** (1000 jobs per profile; N3 separately), and C-M's pooled max is taken over the same set at both profiles (**n = 2000**, finest tail 11.0 bits, A2 sensitivity **7.0 bits**). Both improve on §3's table; the frozen assertion stays keyed to `log2(n_actual) + 7.4` so the extra population cannot be spent as slack.
 
@@ -267,8 +292,8 @@ Every scene runs both. **They are reported in two separate columns and are never
 | **T-622** | Check and payload parameterisation on the generic generators: arbitrary CRC width (8/16/24/32), an **arbitrary polynomial not in the RevEng catalogue**, and a **constant-payload** mode | P6, P7, A7, the random-polynomial negatives |
 | **T-623** | Out-of-catalogue structure generators: **OFDM with a non-standard CP**, **DSSS**, **16-QAM** | N3 |
 | **T-624** | Analog-voice negative scenes: **NBFM voice** and **AM voice** as standalone negatives (today they exist only as decoys inside the trunking scenes) | N2 |
-| **T-625** | Record **ADC fill (σ in LSB)** as a first-class provenance/fixture field and add the fill ladder sweep; it is the corpus's stratification key and nothing currently stores it | F, A3, and ADR-0022 §8's counter |
-| **T-626** | The **N5 mismatched-hypothesis population**: emitters whose true parameters lie outside the proposal grid, plus adjacent-emitter leakage into the analysed box | N5 |
+| ~~**T-625**~~ | ~~Record **ADC fill (σ in LSB)**…~~ — **built 2026-09-21**: `Provenance.noise_sigma_lsb`, `hk_model::FillBucket`, `hk_dsp::floor::adc_fill_ci8`, `hkpy.synth.fill` (§4.4) | F, A3, and ADR-0022 §8's counter |
+| ~~**T-626**~~ | ~~The **N5 mismatched-hypothesis population**~~ — **built 2026-09-22** as `hkpy.synth.mismatched_hypothesis` (§4.3) | N5 |
 | **T-627** | The **coverage manifest and the sealed hold-out** in `acceptance_mauto` — the §6.4 / §4.5 instrumentation, which is what makes the sufficiency argument checkable rather than asserted | §6 as a whole |
 
 **Not new tickets, deliberately.** The n ≈ 60 000 negative run and the A2 constant/tail-slope reporting belong to **T-576**, which already owns `acceptance_mauto::false_confirm_budget`; a note has been added there pointing at §3 rather than filing a duplicate. The non-FSK ladder measurement is **T-619**. The correlated-metric defect is **T-616**. The quantile-table declaration is **T-617**. Calibration-table sizing and the fill conditioning key are **T-618**.
