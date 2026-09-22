@@ -129,6 +129,19 @@ export interface PaneReport {
    * keeping up — `ui/test/surface-edge.test.ts` and the canvas journey both read it.
    */
   readonly behind: number;
+  /** Resident tiles whose stated horizon is at or below their own start, so the copy had NOTHING
+   * to say about any row on screen and nothing was drawn from them. Counted apart from
+   * [[behind]] because the two are different states of the same surface: `behind` still put
+   * measured cells on the screen, `blank` left the pane's PENDING ground showing over a tile the
+   * client is holding. A rising `blank` is the "we have it but didn't render it" failure. */
+  readonly blank: number;
+  /** **How far short of its own window top this pane was actually drawn, in ns.** `0` when the
+   * tiles in hand reach the top of the pane. Positive when the newest thing drawn is older than
+   * the instant the pane is showing — which is what the horizon clip does to a pane whose window
+   * runs ahead of `coverage.horizon.as_of_s`. It is the quantity a flat pane is diagnosed by: a
+   * pane can be fully resident, fully observed and still be almost entirely its own PENDING
+   * ground if this is most of its height. */
+  readonly shortNs: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -531,15 +544,21 @@ export class Surface {
       // own box and rectangle — the same pass that lays out everything else, never a mode a host
       // sets. `lat` then stands for `this.lattices.detail` everywhere below, so a pane drawn from
       // the overview tier addresses, falls back, pins and cancels entirely inside that lattice.
-      const { tier, lat, levelF, levelT, addrs, clamped } = tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any");
+      // The tier this pane drew from last frame, so the budget is a ceiling it crosses rather than
+      // a line it sits on — see [[tierFor]] for what a flapping tier costs the tile route.
+      const { tier, lat, levelF, levelT, addrs, clamped } =
+        tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any", this.lastTier.get(pane.id) ?? null);
+      this.lastTier.set(pane.id, tier);
       viewports.push({ box: pane.box, levelF, levelT, lat });
-      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0;
+      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0;
+      let drawnToNs = -Infinity;
       for (const a of addrs) {
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
           const region = extentOf(lat, a);
           const shown = this.drawUpToHorizon(pane, lat, region, res.entry, "tile", r);
           if (shown.behind) behind++;
+          if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
           // The cells of this tile that are inside this pane's box — the measurement the viewport
           // mode is a scale over. A resident tile draws its own extent, so the texture's extent and
           // the region are the same box — **clipped at the horizon** (T-532) when the answer stops
@@ -562,6 +581,7 @@ export class Surface {
           const region = extentOf(lat, a);
           const shown = this.drawUpToHorizon(pane, lat, region, stand, "fallback", r);
           if (shown.behind) behind++;
+          if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
           // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
           // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
           // extent, not the child's. Getting that pair the wrong way round would read a different
@@ -586,7 +606,8 @@ export class Surface {
           this.cache.prefetch(a);
         }
       }
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind });
+      const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
