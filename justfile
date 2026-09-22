@@ -349,7 +349,7 @@ timing:
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
-e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_mauto"
+e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_multipath acceptance_mauto"
 
 # THE ONE PLACE an hk-e2e target set becomes a test command (T-631). Every recipe below calls
 # this, so hk-e2e's runner and its parallelism are defined once rather than copied eight times —
