@@ -662,6 +662,11 @@ pub(crate) struct Tile {
     pub col_t: Option<usize>,
     /// Level 0: the highest column already closed (later values for it take the late path).
     pub col_done: Option<usize>,
+    /// T-584: level 0, the highest row already folded upwards by live coarse maintenance. A row
+    /// is folded **once**, when the ingest clock has left it by `seal_lag` — not when its column
+    /// closes — so every in-place late update ([`Tile::add_late_occupancy`] and
+    /// [`Tile::add_value`]'s own writes to a closed cell) is already in the cell by then.
+    pub folded_through: Option<usize>,
     pub col: Vec<ColEntry>,
     /// T-571: the **in-progress top row** of a coarse node that downsamples time, as
     /// `(row, f_lo, f_hi)` — the row producer rows are currently being folded into and the union
@@ -702,6 +707,7 @@ impl Tile {
             },
             col_t: None,
             col_done: None,
+            folded_through: None,
             col: Vec::new(),
             row_pending: None,
         };
@@ -728,6 +734,7 @@ impl Tile {
         self.prov.clear();
         self.col_t = None;
         self.col_done = None;
+        self.folded_through = None;
         self.col.clear();
         self.row_pending = None;
     }
@@ -751,6 +758,14 @@ impl Tile {
         }
         self.hist[row].fill(0);
         had
+    }
+
+    /// Whether time row `t` holds any folded frame (T-584): what makes it worth folding upwards.
+    #[inline]
+    pub fn row_has_data(&self, t: usize) -> bool {
+        self.count[t * self.nf..(t + 1) * self.nf]
+            .iter()
+            .any(|&c| c > 0)
     }
 
     #[inline]
@@ -794,6 +809,11 @@ impl Tile {
     }
 
     /// Occupancy for a value whose column has already closed (percentiles are not revisited).
+    ///
+    /// **T-584:** together with [`Tile::add_value`]'s own writes this is the whole of a late
+    /// frame's contribution to a cell, and every part of it but the percentiles is foldable, so
+    /// a row folded upwards *after* the frame arrives carries it. That is why the fold waits for
+    /// the ingest clock to leave the row rather than for its column to close.
     pub fn add_late_occupancy(&mut self, t: usize, f: usize, v_db: f32, thr: f32, dur_s: f64) {
         let i = t * self.nf + f;
         if v_db > thr {
@@ -818,8 +838,10 @@ impl Tile {
     /// pushed and closed wholly inside one block (the last column closes at the seal itself,
     /// before `update_floor` runs). No seal falls between a column's pushes and its close.
     ///
-    /// Returns the index of the column it closed (T-571: the **row that has just become final**,
-    /// which is what live coarse maintenance folds upwards), or `None` when no column was open.
+    /// Returns the index of the column it closed, or `None` when no column was open. **T-584: a
+    /// closed column is not a finished row** — a frame for that cell can still arrive and be
+    /// folded into it in place — so this is not the trigger for folding it upwards; see
+    /// [`super::Pyramid::fold_finished_rows`].
     pub fn close_column(
         &mut self,
         margin: f32,

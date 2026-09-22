@@ -4740,7 +4740,7 @@ tasks:
   - id: T-265
     milestone: MAUTO
     title: 'ADR-0017 TM-10: incremental decode - extending a region decodes only the newly-arrived part'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-262
@@ -4752,6 +4752,9 @@ tasks:
     model: opus
     effort: high
     core_interface: true
+    commit: 203a6489
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-266
     milestone: M4
     title: 'M4 trunking data model: TrunkSystem, CallRecord, GrantEvent, with a three-state encryption column'
@@ -4848,7 +4851,7 @@ tasks:
   - id: T-272
     milestone: M4
     title: 'M4 P25 Phase 2 TDMA slot attribution'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-269
@@ -4926,6 +4929,9 @@ tasks:
         future scene adds more messages; it is a property of the fixture, not a decoder bug.
       - SIGNAL-081 (P25 Phase 2 TDMA trunk following) is NOT claimed: it asks for both slots to be
         demodulated, and the TDMA traffic side is still undecoded (docs/18 row updated to say so).
+    commit: 084660a9
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
@@ -5037,7 +5043,7 @@ tasks:
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: M5C
@@ -5053,6 +5059,7 @@ tasks:
       plus one stated accuracy caveat, not new detection logic. Escalation rule applies as-is if
       the 8-bit/no-preselection radiometric-accuracy write-up turns out to need real DSP derivation
       rather than a stated caveat."
+    commit: aa200484
   - id: T-279
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
@@ -5821,7 +5828,7 @@ tasks:
     title: 'P25 decode has no independent oracle: the native TSBK decoder is checked only against a scene this repo also wrote'
     milestone: M4
     priority: medium
-    status: todo
+    status: done
     deps: [T-268]
     parallel_group: M4A
     acceptance: 'T-268 decided BUILD over WRAP for sound reasons (no compliant CC recording exists, so wrapping would need a compliant ENCODER first, and a GPLv3 binary as a hard CI dependency would make the blind acceptance test SKIP in CI). That decision is right for the RUNTIME and leaves a real hole in VERIFICATION: the decoder and the generator were written from the same reading of the same references, so a shared misreading passes both. Close it the way C23 Testing already says to - compare against Trunk Recorder or SDRTrunk on the SAME IQ, as an ORACLE not a runtime, behind the C22 plugin boundary per ADR-0010, and gate it on hardware/off-air tier so CI never depends on it. Blocked until a real off-air P25 capture exists (user-triggered); until then record explicitly in the module header that no independent oracle has confirmed this decoder'
@@ -5835,6 +5842,8 @@ tasks:
       SDRTrunk/OP25/DSD+ offline over the same IQ, behind the C22 plugin boundary, hardware/off-air
       tier only, cross-validated against a spectrogram-derived grant/activity check so no single
       decoder authors the answer key.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
     result: |
       2026-09-22: STILL BLOCKED on a real off-air P25 capture (T-544's BART attempt was negative,
       docs/19 section 7) - no oracle harness was built, per the ticket's own acceptance text. Did
@@ -5851,6 +5860,7 @@ tasks:
       edit), 1 skipped. `just precheck hk-detect` clean. Not chasing: finding another off-air P25
       system to capture from is out of scope for this ticket (capture is user-triggered per the
       acceptance text) and not something I can do from this worktree.
+    commit: 977a2dc6
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
@@ -5986,7 +5996,7 @@ tasks:
     milestone: M3
     title: 'The last confidently-wrong call: one chirped-FSK at 20 dB sits at the low tail of its own generator,
       and the fix must not be a shorter window'
-    status: todo
+    status: done
     priority: low
     deps:
     - T-298
@@ -6017,6 +6027,7 @@ tasks:
       Commits: 4fd2eb69
       Observed, not chased: wfm's dev density is itself heavy-tailed (z2_p99 5.502, z3 p99 4.73, up to 9 of 28 dims beyond 2 sigma at p99), so the T-248 tail term is effectively inert against wfm. Measured with the builtin densities over DEV_SEEDS 0..60 at analog gate+{0,5,10,15}. Not investigated why.
       Use cases: SIGNAL-062
+    commit: 73eb2a4e
   - id: T-307
     milestone: M3
     title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
@@ -6394,7 +6405,7 @@ tasks:
   - id: T-323
     milestone: M5
     title: A full GNSS receiver means wrapping GNSS-SDR as a plugin, not reimplementing tracking loops
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-322
@@ -6407,6 +6418,7 @@ tasks:
       front-end AGC), and real S4 for PROP-033. LICENCE: GNSS-SDR is GPLv3 and stays behind the plugin process
       boundary per ADR-0010 - verify the boundary holds before depending on it. Do not let the wrapper become
       a second path into blind detection: it consumes a dwell and emits evidence, exactly as hk-gnss does'
+    commit: 8b8faca2
   - id: T-324
     milestone: M5
     title: SIGNAL-032 GNSS forensics needs a broadcast-ephemeris context feed, so it sequences after the
@@ -6444,7 +6456,7 @@ tasks:
   - id: T-326
     milestone: M5
     title: 'Every GNSS sensitivity figure rests on synthetic IQ: the settling capture has not been taken'
-    status: todo
+    status: blocked
     priority: normal
     deps:
     - T-274
@@ -6459,6 +6471,10 @@ tasks:
       widens the Doppler search beyond the current 5 kHz. HARDWARE CAPTURE IS USER-TRIGGERED - do not touch
       the HackRF while the user''s demo holds it, and do not enable a bias-tee without the user present,
       since the wrong port can damage hardware'
+    needs: user
+    blocked_on: "user HIL session: an active GNSS antenna (datasheet 3.0-3.3 V, <50 mA) on the HackRF bias-tee, a DC-safe splitter to a u-blox reference, and the HackRF free of the demo"
+    notes: |
+      2026-09-22 (coordinator): code on task-t326 (f6f8f7c7: Doppler search covers the receiver clock + a real-capture harness) is held unqueued - T-326 is on the 09-22 defer list; queue it with the capture session.
   - id: T-327
     milestone: M3
     title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
@@ -7568,7 +7584,7 @@ tasks:
     milestone: M3
     title: T-203 is marked done but ADR-0016 section 10 assigns it a store and three routes that do not
       exist
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-363
@@ -7637,10 +7653,13 @@ tasks:
       (section "Open questions"), including the tract-in-the-default-build one that T-203 answered in
       practice; nobody has gone back to mark them resolved. That is a broader ADR-hygiene job across
       the M3 ADR, not this ticket's attribution fix.
+    commit: 357a8745
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-366
     milestone: M3
     title: ADR-0016 section 7s ML exit-gate row is asserted nowhere, so it is vacuously satisfiable
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-363
@@ -7728,6 +7747,9 @@ tasks:
         worktree's justfile, nor on main (`git show main:justfile` has no `task` recipe). The report was
         therefore appended as a `result:` block on docs/tasks.yaml on this branch, which is what
         ops/work-runner.py's own brief text describes.
+    commit: 5ca29aae
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-367
     milestone: M2-hardening
     title: 'The two edge navigators control the wrong axes: the vertical must be time-for-this-frequency-range,
@@ -15687,7 +15709,7 @@ tasks:
   - id: T-511
     milestone: MSDR
     title: The serving layer holds N live controls, and device-control routes take a device selector
-    status: todo
+    status: done
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
@@ -15705,6 +15727,8 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
     result: |
       AWARE-011. The serving layer holds N live controls and device routes take a selector.
 
@@ -15756,10 +15780,12 @@ tasks:
       free-space floor and 2436370432 bytes are free". `df` shows 2.5 GiB free on / (100% on
       /System/Volumes/Data). The test's own message says this is the machine, not the code. They
       touch nothing this ticket changed; a merge gate on a full-disk machine will fail them.
+    commit: 2d13c7ab
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
-    status: todo
+    status: in-progress
+    branch: task-t512
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
@@ -16315,7 +16341,7 @@ tasks:
   - id: T-534
     milestone: MLIVE
     title: --loop silently stops looping after any re-plumb or capture recovery
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -16346,10 +16372,11 @@ tasks:
       Targeted tests: `cargo nextest run -p hk-pipeline` over the binaries loop_survives_replumb, loop_capture_time, retune_replumb_fails, degrade_dont_crash, history_survives_retune and occupancy_retune, plus the lib reopen tests: 21/21 pass. `just precheck hk-pipeline`: fmt clean, clippy clean.
 
       Surfaced, not chased: nextest flags `hk-pipeline presence::tests::a_returning_signal_reopens_the_same_emitter_and_never_spans_the_silence` as LEAK (it passed; a leaked handle or subprocess). It is unrelated to this diff. A reopened source also gets no gains or baseband filter re-sent, only the window. The scheduler already re-sends its step. User-set gains on a looping live-class run would reset to the pass's defaults on each wrap. I did not observe this failing, so I am noting it only.
+    commit: 616617f3
   - id: T-535
     milestone: MLIVE
     title: A capture-recovery gap still answers 410 - the reader cannot tell recovery from the end
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -16369,6 +16396,9 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-530's report.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): delivered by T-541 (1262e2a0): capture.rs sets RECOVERY_SUCCESSOR_GRACE on a recoverable read failure, so the stream lifecycle calls finish_between_windows_for instead of finish(); regression test recovery_spectrum_handshake::a_handshake_during_a_capture_recovery_is_not_410. Worker CANCEL proposal verified; recorded as done-by, not cancelled.
+    commit: 1262e2a0
   - id: T-536
     milestone: M2-hardening
     title: A re-plumb stalls every always-on reader for seconds while a multi-GB IQ ring opens
@@ -18066,7 +18096,7 @@ tasks:
   - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
-    status: in-progress
+    status: done
     branch: task-t556
     priority: normal
     parallel_group: MAUTOD
@@ -18113,10 +18143,13 @@ tasks:
       - the whole roadmap rests on a per-decoder wrapping cost that nobody has measured.
       A negative result is a good outcome and should be written up as one.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
+    commit: 243f8f02
   - id: T-557
     milestone: MAUTO
     title: 'DECODER COVERAGE: how a protocol crosses the licence boundary as PARAMETERS - the GNU-Radio-informed template, so the reference set grows the MAUTO library without copying code'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -18169,6 +18202,9 @@ tasks:
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
+    commit: f4e1e3d6
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
@@ -19096,7 +19132,7 @@ tasks:
   - id: T-583
     milestone: MLIVE
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
-    status: todo
+    status: done
     priority: medium
     parallel_group: PIPE
     core_interface: true
@@ -19122,6 +19158,9 @@ tasks:
       read); if no, the canvas should say what it is showing rather than quietly trailing.
       Assert with COUNTS (a node's newest populated row against level 0's newest closed row),
       never a wall-clock budget.
+    commit: 2a9261d7
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-579
     milestone: MLIVE
     title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
@@ -19158,7 +19197,7 @@ tasks:
   - id: T-580
     milestone: MLIVE
     title: The client fetches known-grey regions in full - short-circuit unobserved spans before the request, not after
-    status: todo
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -19186,6 +19225,9 @@ tasks:
       NOT wall-clock (user, 2026-09-21) - request counts only.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: 6780b191
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-581
     milestone: MLIVE
     title: Rework the tile in-flight cap once T-571/T-572 land - one mutex and a cap of 4 starve the panes
@@ -19219,7 +19261,7 @@ tasks:
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
-    status: todo
+    status: done
     priority: medium
     parallel_group: PIPE
     core_interface: true
@@ -19245,6 +19287,9 @@ tasks:
       on a crash. MEASURE THE SIZE FIRST with a count assertion - frames folded per node against
       the on-demand control, with deliberate disorder in the fixture - because the answer decides
       whether this is worth a mechanism at all.
+    commit: af143981
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
   - id: T-585
     milestone: MLIVE
     title: Coarse-tile residency is one open accumulator per node - hold committed rows encoded instead
@@ -19902,7 +19947,7 @@ tasks:
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
-    status: todo
+    status: done
     priority: low
     parallel_group: DETECT
     model: sonnet
@@ -19931,6 +19976,7 @@ tasks:
       Use cases: AWARE-011
     notes: |
       Review (fix attempt 1) found: py/tests/test_synth.py::test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo asserted every artefact truth's kind was in ("dc-offset", "lo-spur"), so it failed against the new iq-image artefact added for part (b). Fixed by branching the check: dc-offset/lo-spur still assert a fixed LO offset; iq-image asserts its invariant f - 2*f_LO is fixed instead, plus a new IQ-domain tone-power check for the image at each centre's own baseband offset. Merged main (clean, no conflicts). Re-ran targeted tests: py/tests/test_synth.py (71 passed, 2 skipped), hk-detect rules:: (4 passed), hk-e2e t586_retune_diversity (2 passed, no leak this run). just precheck hk-detect hk-e2e and just lint-py both clean.
+    commit: dbd6da82
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
@@ -20669,7 +20715,7 @@ tasks:
   - id: T-614
     milestone: M2-hardening
     title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
-    status: todo
+    status: done
     priority: normal
     parallel_group: DETECT
     model: opus
@@ -20717,6 +20763,7 @@ tasks:
       1. hk-pipeline runtime_attach `chains_attached_and_detached_mid_run_drop_no_always_on_samples`: a load-flake on the attach count. The count needs >= 18 of 20. At load avg 11-27 it got 17, 17, 18 at the branch base (HEAD~1 src) and 11-16 with this change. Neither variant writes a demodulation in that test, so the FSK path is not involved. It is timing-bound (a sleep loop over a real-time-paced replay). For the deflaker.
       2. hk-e2e acceptance_m3 `m3_scene::m3_repeated_unknowns_form_one_visible_cluster` fails in isolation at the branch base: "[T-206] 1 emitters over three appearances". Three runs through the device at +0, +1.5 and +3 MHz leave ONE emitter in the repo, so there are never three members to cluster. With this change it also fails, on the earlier assertion: the same 1 emitter, but 0 visible clusters instead of 1. It is a real, pre-existing failure. It needs its own root cause (possibly the three runs sharing one data dir while only one run's emitter survives).
       Also not chased: the C15 cascade (`classify_and_record`) in the fsk chain still writes its own posterior for these emitters. That is a separate estimator, outside this ticket.
+    commit: 37c20467
   - id: T-615
     milestone: MAUTO
     title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
@@ -20951,7 +20998,7 @@ tasks:
   - id: T-619
     milestone: MAUTO
     title: 'Extend the T-547 ladder measurement to the AM/OOK and C4FM paths before either ships an evidence()'
-    status: todo
+    status: done
     priority: medium
     parallel_group: MAUTOD
     model: opus
@@ -20973,6 +21020,9 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-547. Not urgent, but it is a precondition on those blocks publishing
       evidence(), the same way T-547 was for the FSK path.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
+    commit: e3155ea7
   - id: T-628
     milestone: MAUTO
     title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
@@ -21090,7 +21140,7 @@ tasks:
   - id: T-630
     milestone: MCANVAS
     title: One greedy tab holds all four server slots, so a second client's boot is a coin flip - the tile route needs a fair share, not a bigger cap
-    status: todo
+    status: done
     priority: high
     parallel_group: CANVAS-FE
     model: opus
@@ -21141,6 +21191,8 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
     result: |
       DONE. The decision: (a) + (c) together - a per-client SHARE of the in-flight budget, plus a
       slot reserved for a client with nothing on screen yet. The cap (TILE_MAX_IN_FLIGHT = 4) is
@@ -21209,10 +21261,11 @@ tasks:
       free-space floor and 1893339136 bytes are free" - seen directly in an `hk serve` log), and the
       test's own tile address is recomputed from `unix_now()` per call over a 1.28 s time cell.
       Coordinator to decide whether that is a ticket.
+    commit: 92299cb5
   - id: T-622
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -21317,6 +21370,7 @@ tasks:
         (the targeted subsets above, which include every test that imports `hkpy.synth.fsk` or
         `scenarios.fsk_burst_train`, all pass). Flagging as observed evidence only, not filing a ticket
         per the filing rule.
+    commit: 7edf0882
   - id: T-623
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
@@ -21777,7 +21831,7 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: todo
+    status: blocked
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
@@ -21813,6 +21867,9 @@ tasks:
       range the coordinator reserved; T-631..T-659 were being taken by another agent at the time.
       Blocked on `hk-synth`, i.e. on MAUTO M-1/M-2 actually starting. Not `core_interface` itself -
       the contract it implements is ADR-0015 section 13, which is already written.
+
+      2026-09-22 (coordinator): worker handed back BLOCKED (branch task-t660, T-660-result.md): crates/ has no hk-synth; T-616/617/618 are measurement-only and scaffold nothing. Do not re-dispatch until M-1 lands.
+    blocked_on: MAUTO M-1 (hk-synth crate scaffold) has not started and ADR-0015 is PROVISIONAL; MAUTO is unscheduled until after M3. No M-1 ticket exists yet.
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
@@ -22567,7 +22624,7 @@ tasks:
   - id: T-800
     milestone: MMAP
     title: 'Design + ADR-0023: map-UI chrome, the layer model, and the research-state stores'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAP-DESIGN
     model: opus
@@ -22600,6 +22657,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Blocks everything; land first. Mockup choices the docs left open, to
       confirm in MAP-00: bottom sheet at every width (no desktop side slide-in); Research is a right
       slide-in, not the sheet's full state.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
     result: |
       DONE 2026-09-22 (branch task-t800). MAP-00 delivered as ADR-0023 + three normative spec
       sections, an api.md reservation and one contract test. No product code changed; the only
@@ -22697,10 +22756,12 @@ tasks:
       - ADR-0023 is PROVISIONAL and says what promotes it: MAP-06 (the registry), MAP-09/MAP-10 (the
         pin budget, MEASURED) and MAP-16 (the first store with its contract tests) landing and
         holding.
+    commit: d002cc23
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: todo
+    status: in-progress
+    branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
     model: sonnet
@@ -23548,7 +23609,7 @@ tasks:
   - id: T-763
     milestone: M2-hardening
     title: The merge suite has gone from a 21.4 min median to ~34 min in two days, and it is test-bound rather than build-bound
-    status: todo
+    status: done
     priority: high
     parallel_group: OPS
     model: opus
@@ -23586,6 +23647,8 @@ tasks:
       Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
       this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
       place.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
     result: |
       MEASURED. The headline was two different quantities compared to each other, plus one real,
       located 5-minute step. No full suite was run; every number below is read back out of
@@ -23653,10 +23716,11 @@ tasks:
         feaca9d406c6/scratchpad/gate-timings.jsonl (mtime 09-22 06:00); its run ids are disjoint
         from the live file's. I did NOT touch shared ops state - the runner writes it concurrently.
         The merge-runner-log parser above makes the loss much less damaging either way.
+    commit: d880c4e5
   - id: T-764
     milestone: M2-hardening
     title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'
-    status: todo
+    status: done
     priority: high
     parallel_group: OPS
     model: opus
@@ -23711,6 +23775,9 @@ tasks:
       board did not parse, here is why" instead of rendering a broken graph - is the supervisor's
       and is not in this ticket; it is worth keeping even after the validators land, because a
       reader that degrades honestly is useful whatever the writers do.
+
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
+    commit: 7cfd3f9e
   - id: T-840
     milestone: M2-hardening
     title: 'The merge runner commits without re-checking that the merge it gated is still staged, so a lost MERGE_HEAD becomes a single-parent commit'
@@ -23746,7 +23813,7 @@ tasks:
   - id: T-841
     milestone: M2-hardening
     title: 'Two sessions allocate ticket ids as max+1 on different branches, so both file the same id and the board only finds out after merge'
-    status: todo
+    status: done
     priority: high
     parallel_group: OPS
     model: opus
@@ -23776,6 +23843,9 @@ tasks:
       A disjoint-range convention (the coordinator handing each agent its own block of ids at
       spawn) is already in informal use and worked - no collision came from an AGENT on
       2026-09-22, only from two SESSIONS. That is evidence for (a) and worth stating.
+    commit: baf90034
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED - main was fast-forwarded to 81a24c6f (25 branches, no gate; user decision during the merge crisis). commit = this ticket's own commit on main.
   - id: T-842
     milestone: M2-hardening
     title: 'reconcile inspects only in-progress tickets, so a ticket that goes todo -> merged is invisible to the tool built to catch a stale board'

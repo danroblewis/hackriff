@@ -70,6 +70,30 @@ Each: **hypothesis**, **setup**, **pass/fail**, **effort**, **where it runs**.
 - **Effort:** ~3–4 days; two HackRFs.
 - **Runs on:** Mac + 2× HackRF; low priority.
 
+### S8: Cost of a wrapped GNU Radio decoder (T-556, done 2026-09-22)
+- **Hypothesis (docs/18 §2.4):** a GNU Radio OOT wrapped as a subprocess plugin (ADR-0003/0010)
+  is a cheap way to add decoder coverage, and a shared GR host could amortise its runtime.
+- **Setup:** gr-lora_sdr (SIGNAL-053) and gr-satellites (SIGNAL-034) were wrapped behind the §9
+  plugin contract: `hackriff-v1` cf32 in, NDJSON out, run under the real `PluginInstance`.
+  - The LoRa fixture is synthetic with a hidden truth list; gr-satellites is checked for parity
+    with its stock CLI.
+  - Measured: RSS/CPU/start-up, kill and restart, drops, and one process versus two.
+  - The Jetson side was assessed from the Ubuntu 22.04 arm64 package indices, not run.
+- **Result: runtime PASS, integration mixed.**
+  - Runtime: 27/55 MB private memory, 2.4–3 %/11.5 % of an M3 core at real time, ready in
+    0.3/1.6 s warm and 4–12 s after a relink.
+  - Exact host-time stamping needed an 8-line fork patch to gr-lora_sdr and is **infeasible for
+    gr-satellites** (arrival-stamped only).
+  - Runtime install on JetPack 6: ~1.1 GB, 375 packages, with a GR/pybind11 version skew
+    against the Mac.
+  - A shared GR host saves ~one runtime floor (~38 MiB) per decoder and costs fault isolation:
+    **per-decoder processes stand.**
+  - Per-decoder cost after the first: 2–4 h to a parity-checked arrival-stamped wrap; 1.5–3 days
+    to product grade where the OOT can carry sample offsets.
+- **Unblocks:** docs/18 §2.4 (now measured); the direction that GNU Radio's reference set is a
+  specification source for native recipes, with wrapping a narrow opt-in tier. Write-up:
+  [`spikes/t556-gnuradio-wrap/README.md`](../spikes/t556-gnuradio-wrap/README.md).
+
 ## 3. Recommended spike order (provisional — user picks)
 
 1. **S4 (detection in overload)** and **S5 (blind estimation)** first — they run on the Mac + HackRF the user has *now*, need no Jetson, and de-risk the two highest-uncertainty, highest-impact assumptions (R3, R4). They also produce the first real SigMF fixtures for the test suite ([docs/10](10-test-strategy.md)).

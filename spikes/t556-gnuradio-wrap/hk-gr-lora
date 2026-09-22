@@ -1,0 +1,6 @@
+#!/bin/sh
+# T-556 spike launcher: the manifest's executable. GNU Radio's Python + the OOT prefix, then exec
+# (exec keeps the adapter the process-group leader the host supervises; no daemons, no setsid).
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/env.sh"
+exec "$GR_PY" "$here/hk_gr_lora.py" "$@"

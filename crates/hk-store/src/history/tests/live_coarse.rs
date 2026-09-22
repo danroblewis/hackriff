@@ -526,6 +526,188 @@ fn a_restart_keeps_the_open_tiles_rows_in_every_coarse_node() {
     );
 }
 
+/// A run of `per_cell` frames per time cell. `disorder` swaps the arrival order of the two frames
+/// either side of every `disorder`-th cell boundary, so the earlier of the two arrives after its
+/// own time cell has already closed. Frame content is a function of the frame's own time, so a
+/// swap changes arrival order and nothing else.
+fn run_frames(p: &mut Pyramid, secs: i64, per_cell: i64, disorder: i64) {
+    let dur = S / per_cell;
+    let n = secs * per_cell;
+    let mut times: Vec<i64> = (0..n).map(|k| T0 + k * dur).collect();
+    let mut c = disorder;
+    while disorder > 0 && c * per_cell < n {
+        let i = (c * per_cell) as usize;
+        times.swap(i - 1, i);
+        c += disorder;
+    }
+    for &t in &times {
+        let mut rng = Rng((t as u64) ^ 0x9E37_79B9_7F4A_7C15);
+        let psd: Vec<f32> = (0..N_BINS)
+            .map(|b| {
+                let floor = -100.0 + 10.0 * rng.gamma(4).log10() as f32;
+                lin(floor + if b % 23 == 5 { 40.0 } else { 0.0 })
+            })
+            .collect();
+        p.ingest(&frame(t, dur, 0.0, BW, &psd)).unwrap();
+    }
+}
+
+/// The frames every node holds over a run of `secs`, live against the on-demand control, and the
+/// live store's own out-of-order count: `(live, control, frames_out_of_order)`.
+fn live_vs_control(
+    shape: ViewLattice,
+    secs: i64,
+    lag: Duration,
+    checkpoint: Option<Duration>,
+    disorder: i64,
+) -> (Vec<u64>, Vec<u64>, u64) {
+    let flush = ts(T0 + 4096 * S);
+    let whole = FreqRange::new(0.0, N_BINS as f64 * BW);
+    let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
+
+    // The control re-folds the open producer on every read, so it never had the hole — and it
+    // runs the same frames under the same lag, so it accepts and refuses exactly what live does.
+    let ctl_dir = TempDir::new("t584-ctl");
+    let mut ctl = Pyramid::open(
+        &ctl_dir.0,
+        PyramidConfig {
+            seal_lag: lag,
+            checkpoint_interval: checkpoint,
+            ..on_demand(shape)
+        },
+    )
+    .unwrap();
+    run_frames(&mut ctl, secs, 4, disorder);
+    ctl.seal_through(flush).unwrap();
+    for l in 0..shape.f_levels * shape.t_levels {
+        ctl.materialize(l, whole, span).unwrap();
+    }
+    let want = frames_per_node(&ctl, shape, secs);
+
+    let dir = TempDir::new("t584-live");
+    let mut p = Pyramid::open(
+        &dir.0,
+        PyramidConfig {
+            seal_lag: lag,
+            checkpoint_interval: checkpoint,
+            ..cfg_for(shape)
+        },
+    )
+    .unwrap();
+    run_frames(&mut p, secs, 4, disorder);
+    // Sealed past every coarse block, so neither store carries the in-progress-row lag (T-583)
+    // — nor, for the live one, the `seal_lag` a finished row now waits out (T-584).
+    p.seal_through(flush).unwrap();
+    assert_eq!(p.stats().frames_late, ctl.stats().frames_late);
+    (
+        frames_per_node(&p, shape, secs),
+        want,
+        p.stats().frames_out_of_order,
+    )
+}
+
+/// Nodes whose frame count is short of the control, as `name lo/hi -x%`.
+fn shortfall(shape: ViewLattice, got: &[u64], want: &[u64]) -> Vec<String> {
+    got.iter()
+        .zip(want)
+        .enumerate()
+        .filter(|(_, (g, w))| g != w)
+        .map(|(l, (g, w))| {
+            let (i, j) = shape.coords(l);
+            format!(
+                "({i},{j}) {g}/{w} -{:.2}%",
+                100.0 * (*w - *g) as f64 / *w as f64
+            )
+        })
+        .collect()
+}
+
+/// **T-584: a frame whose time cell has already closed reaches every coarse node, not just
+/// level 0.**
+///
+/// A late frame is folded into its level-0 cell **in place** — [`Tile::add_value`] writes the
+/// count, the max, the power sum and the observed seconds, and [`Tile::add_late_occupancy`] the
+/// occupancy. T-571's cascade folded a row upwards the instant its **column closed**, which is
+/// earlier: the row had gone up before the frame arrived, so the value sat on disk at level 0 and
+/// was absent from every zoom above it — the same "present at the finest zoom, gone when you zoom
+/// out" shape T-571 fixed for checkpoints, and for the same reason.
+///
+/// Two ordinary windows produce it, and this test drives both at once: mild frame disorder inside
+/// a cell, and every frame arriving in the cell a checkpoint has just closed (at the shipped 60 s
+/// interval over a 1 s cell, one cell in sixty for the rest of its second).
+///
+/// # What the fix is, and what the two pairs here measure
+///
+/// A row is folded upwards when the ingest clock has left its cell by `seal_lag` — the store's
+/// own declared tolerance for frames arriving out of order, the number that already decides when
+/// a *tile* may seal, applied one level down. So:
+///
+/// - **`seal_lag` zero** — no tolerance declared, which is what every other test in this file
+///   configures — is T-571's behaviour exactly, and it is the first pair here: the loss is real
+///   and is printed as a percentage. That pair is this test's control against going vacuously
+///   green, in the same run, over the same frames.
+/// - **`seal_lag` at the shipped 2 s** is the second pair, and it must match the on-demand
+///   control node for node.
+#[test]
+fn a_frame_arriving_after_its_cell_closed_reaches_every_coarse_node() {
+    let secs = 240;
+    // Every tenth cell boundary, and a checkpoint every ten seconds: the shipped 60:1
+    // checkpoint-to-cell ratio compressed, so a short run still crosses the window many times.
+    let (disorder, checkpoint) = (10, Some(Duration::from_secs(10)));
+
+    // --- the control: no disorder tolerance declared, which is what T-571 shipped ---
+    let none = lat(48);
+    let (got, want, late) = live_vs_control(none, secs, Duration::ZERO, checkpoint, disorder);
+    let short = shortfall(none, &got, &want);
+    println!(
+        "  seal_lag 0 (T-571's rule): {late} frames arrived after their cell closed; nodes \
+         short: {}",
+        if short.is_empty() {
+            "none".to_string()
+        } else {
+            short.join(", ")
+        }
+    );
+    assert!(
+        late > 0,
+        "no frame arrived out of order, so this test judged nothing"
+    );
+    assert_eq!(
+        got[none.index(0, 0)],
+        want[none.index(0, 0)],
+        "node (0, 0) must hold every frame either way — the defect is above it, not at it"
+    );
+    assert!(
+        !short.is_empty(),
+        "with no tolerance declared the late frames must be missing from the coarse nodes, or \
+         the equality below proves nothing"
+    );
+
+    // --- the shipped 2 s: every late frame reaches every node ---
+    let shipped = lat(49);
+    let (got, want, late) =
+        live_vs_control(shipped, secs, Duration::from_secs(2), checkpoint, disorder);
+    let short = shortfall(shipped, &got, &want);
+    println!(
+        "  seal_lag 2 s: {late} frames arrived after their cell closed; nodes short: {}",
+        if short.is_empty() {
+            "none".to_string()
+        } else {
+            short.join(", ")
+        }
+    );
+    assert!(late > 0, "the same frames must still be arriving late");
+    assert!(
+        want.iter().all(|&w| w > 0),
+        "the control holds nothing, so an equality below would be vacuous"
+    );
+    assert_eq!(
+        got, want,
+        "a coarse node is short of the control: a frame that arrived after its time cell closed \
+         reached level 0 and no zoom above it"
+    );
+}
+
 /// The newest row of `level` that holds anything, read **straight out of the accumulators** — so
 /// it is what the live cascade has propagated, before any read-time preview. Absolute ns.
 fn newest_committed_row_ns(p: &Pyramid, level: usize) -> Option<i64> {
