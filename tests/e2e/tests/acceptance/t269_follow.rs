@@ -254,6 +254,40 @@ fn t269_a_normal_run_follows_a_grant_inside_the_window_and_logs_the_one_outside_
             .any(|c| c.reasons.iter().any(|r| r == "silence-timeout")),
         "[{T269}] a call ended without saying what ended it"
     );
+    // ---- T-308: every call this run wrote says WHICH of the three things its missing end means.
+    // A followed call carries the instant observation stopped, so an end that was measured and a
+    // window that simply ran out are never the same row; an unfollowable grant carries neither,
+    // because nothing was ever watched. Nothing here may close a call at the window's edge.
+    for c in &followed {
+        assert!(
+            c.observed_until.is_some(),
+            "[{T269}] a followed call does not say how far it was watched, so its missing end              cannot be told from 'still running': {:?}",
+            c.reasons
+        );
+        match c.ending() {
+            hk_model::CallEnding::Observed(t) => assert!(
+                c.observed_until.is_some_and(|o| o >= t),
+                "[{T269}] a call ended after the observation that measured it"
+            ),
+            hk_model::CallEnding::Truncated { .. } => assert!(
+                c.duration_is_lower_bound()
+                    && c.reasons.iter().any(|r| r == "window-ended")
+                    && c.t_end.is_none(),
+                "[{T269}] a truncated call must say so and keep t_end NULL: {:?}",
+                c.reasons
+            ),
+            hk_model::CallEnding::Unobserved => {
+                panic!("[{T269}] a followed call claims it was never watched")
+            }
+        }
+    }
+    assert!(
+        call_rows
+            .iter()
+            .filter(|c| c.reasons.iter().any(|r| r == "grant-outside-window"))
+            .all(|c| c.ending() == hk_model::CallEnding::Unobserved),
+        "[{T269}] a grant this receiver could not reach claims an observation boundary"
+    );
     // The call is linked into the grant stream, so the record and the messages are one story.
     let started: Vec<_> = grants
         .iter()

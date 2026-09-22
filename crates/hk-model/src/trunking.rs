@@ -756,8 +756,27 @@ pub struct CallRecord {
     pub system: TrunkSystemId,
     /// When the call started.
     pub t_start: Timestamp,
-    /// When it ended. `None` while it is still open, or when its end was never observed.
+    /// When it ended. `None` while it is still open, or when its end was never observed —
+    /// [`observed_until`](Self::observed_until) is what tells those two apart.
     pub t_end: Option<Timestamp>,
+    /// The last instant this receiver was **actually observing** the call's channel (T-308).
+    ///
+    /// A measurement about the receiver, not about the call: it is where observation stopped.
+    /// With `t_end` it decides which of three things a row means — see [`CallRecord::ending`]:
+    ///
+    /// | `t_end` | `observed_until` | meaning |
+    /// |---|---|---|
+    /// | `Some` | `Some` | the end was **observed** (a silence timeout) |
+    /// | `None` | `Some` | **truncated**: present at `observed_until`, nothing claimed after it |
+    /// | `None` | `None` | never observed at all (outside the window, or an unmapped channel) |
+    ///
+    /// The middle row is why the field exists. A transmission still keyed when the buffered
+    /// window ends has no observed end, and writing the window's edge into `t_end` would
+    /// manufacture a boundary the radio never produced; leaving only `t_end = NULL` made it
+    /// indistinguishable from "still running to the live edge". A truncated call's duration is a
+    /// **lower bound** ([`observed_duration_ns`](Self::observed_duration_ns)), and nothing
+    /// downstream may read its absent `t_end` as an end that was seen.
+    pub observed_until: Option<Timestamp>,
     /// Talkgroup, when decoded.
     pub talkgroup: Option<String>,
     /// Unit (radio) id, when decoded.
@@ -779,7 +798,60 @@ pub struct CallRecord {
     pub reasons: Vec<String>,
 }
 
+/// What a call's row says about how it ended — the three states `t_end` alone could not express
+/// (T-308).
+///
+/// Reading it is how a consumer is kept from treating "we stopped looking" as "it stopped".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallEnding {
+    /// The end was **measured** on the air (T-269's silence timeout). The duration is exact.
+    Observed(Timestamp),
+    /// The call was still running when observation stopped. It was present at `observed_until`
+    /// and **nothing at all is known after it**; the duration is a lower bound.
+    Truncated {
+        /// The last instant the channel was watched.
+        observed_until: Timestamp,
+    },
+    /// The channel was never watched: the grant fell outside the tuned window, or its channel
+    /// number could not be mapped. The call happened; this receiver did not see any of it.
+    Unobserved,
+}
+
 impl CallRecord {
+    /// How this call ended, as the row can actually support — see [`CallEnding`].
+    pub fn ending(&self) -> CallEnding {
+        match (self.t_end, self.observed_until) {
+            (Some(t), _) => CallEnding::Observed(t),
+            (None, Some(observed_until)) => CallEnding::Truncated { observed_until },
+            (None, None) => CallEnding::Unobserved,
+        }
+    }
+
+    /// Whether the end in `t_end` was **observed**. False for a truncated or unobserved call, so
+    /// a gate written against it fails closed.
+    pub fn end_is_observed(&self) -> bool {
+        self.t_end.is_some()
+    }
+
+    /// Whether [`observed_duration_ns`](Self::observed_duration_ns) is a **lower bound** rather
+    /// than the call's length: true exactly when the call was truncated.
+    pub fn duration_is_lower_bound(&self) -> bool {
+        self.t_end.is_none() && self.observed_until.is_some()
+    }
+
+    /// How long the call was **observed** for, ns: exact when its end was seen, a lower bound when
+    /// it was truncated (ask [`duration_is_lower_bound`](Self::duration_is_lower_bound)), and
+    /// `None` when the channel was never watched at all.
+    pub fn observed_duration_ns(&self) -> Option<i64> {
+        match self.ending() {
+            CallEnding::Observed(t) => Some(t.as_unix_nanos() - self.t_start.as_unix_nanos()),
+            CallEnding::Truncated { observed_until } => {
+                Some(observed_until.as_unix_nanos() - self.t_start.as_unix_nanos())
+            }
+            CallEnding::Unobserved => None,
+        }
+    }
+
     /// Opens a call from a grant, **carrying the grant's encryption state verbatim**.
     ///
     /// This is the constructor the late-entry case goes through: a grant update with no header
@@ -790,6 +862,10 @@ impl CallRecord {
             system: grant.system,
             t_start: grant.t,
             t_end: None,
+            // Nothing has been watched yet. A caller that follows the channel fills this in with
+            // where its observation actually stopped; one that cannot follow (outside the window,
+            // unmapped channel) correctly leaves it `None`.
+            observed_until: None,
             talkgroup: grant.talkgroup.clone(),
             unit_id: grant.unit_id.clone(),
             channel: grant.channel.clone(),
@@ -827,6 +903,21 @@ impl CallRecord {
             .is_some_and(|e| e.as_unix_nanos() < self.t_start.as_unix_nanos())
         {
             return Err(bad("a call's end precedes its start"));
+        }
+        // Observation cannot stop before the call it observed started, and a call whose end was
+        // seen was by construction still being watched at that end (T-308).
+        if let Some(seen) = self.observed_until {
+            if seen.as_unix_nanos() < self.t_start.as_unix_nanos() {
+                return Err(bad("a call was observed until before it started"));
+            }
+            if self
+                .t_end
+                .is_some_and(|e| seen.as_unix_nanos() < e.as_unix_nanos())
+            {
+                return Err(bad(
+                    "a call's observed end is later than the observation that measured it",
+                ));
+            }
         }
         if self.reasons.len() > CALL_REASONS_MAX {
             return Err(bad(format!(
@@ -1032,6 +1123,59 @@ mod tests {
         assert!(GrantKind::parse("nonsense").is_err());
         assert!(EncryptionEvidence::parse("vibes").is_err());
         assert!(LabelSource::parse("guess").is_err());
+    }
+
+    /// T-308: the three things `t_end IS NULL` used to mean are three different answers, and a
+    /// truncated call's duration announces itself as a lower bound.
+    #[test]
+    fn a_call_says_whether_its_end_was_observed_or_only_unwatched() {
+        let g = GrantEvent::new(TrunkSystemId::new(), GrantKind::Grant, t(10));
+
+        // 1. Never watched: the grant was outside the window, or its channel was unmapped.
+        let unobserved = CallRecord::from_grant(&g, false);
+        assert_eq!(unobserved.ending(), CallEnding::Unobserved);
+        assert!(!unobserved.end_is_observed());
+        assert_eq!(unobserved.observed_duration_ns(), None);
+        assert!(!unobserved.duration_is_lower_bound());
+
+        // 2. Truncated: still keyed when the buffered window ran out. Present at t(14), and
+        //    NOTHING is claimed after it — in particular not an end.
+        let mut truncated = unobserved.clone();
+        truncated.observed_until = Some(t(14));
+        truncated.validate().unwrap();
+        assert_eq!(
+            truncated.ending(),
+            CallEnding::Truncated {
+                observed_until: t(14)
+            }
+        );
+        assert!(!truncated.end_is_observed(), "nothing measured an end");
+        assert_eq!(truncated.t_end, None, "the window edge is not an end");
+        assert_eq!(truncated.duration_ns(), None, "no end, so no duration");
+        assert_eq!(truncated.observed_duration_ns(), Some(4_000_000_000));
+        assert!(
+            truncated.duration_is_lower_bound(),
+            "4 s is how long it was watched, not how long it ran"
+        );
+
+        // 3. Observed: a silence timeout on the granted channel ended it, while still watching.
+        let mut observed = truncated.clone();
+        observed.t_end = Some(t(13));
+        observed.validate().unwrap();
+        assert_eq!(observed.ending(), CallEnding::Observed(t(13)));
+        assert!(observed.end_is_observed());
+        assert!(!observed.duration_is_lower_bound());
+        assert_eq!(observed.observed_duration_ns(), Some(3_000_000_000));
+        assert_eq!(observed.duration_ns(), Some(3_000_000_000));
+
+        // A row cannot claim an end later than the observation that supposedly measured it, nor
+        // observation that stopped before the call began.
+        let mut contradictory = observed.clone();
+        contradictory.t_end = Some(t(20));
+        assert!(contradictory.validate().is_err());
+        let mut backwards = truncated.clone();
+        backwards.observed_until = Some(t(9));
+        assert!(backwards.validate().is_err());
     }
 
     #[test]

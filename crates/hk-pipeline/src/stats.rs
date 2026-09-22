@@ -389,6 +389,16 @@ counter_group!(
         /// Calls whose end was **observed**, by a silence timeout on the granted channel. The
         /// rest carry `t_end = NULL`, which the model defines as "still open, or never observed".
         cc_calls_closed,
+        /// T-308: calls still keyed when the buffered window ended — written **open and
+        /// truncated** (`t_end` NULL, `observed_until` set), never closed at the window's edge.
+        /// Each one's duration is a lower bound, and the count is how often the dwell, not the
+        /// radio, decided where a call stopped being measured.
+        cc_calls_truncated,
+        /// T-308: truncated calls a later pass **continued** — the same row grown across an
+        /// unobserved gap no longer than the silence timeout itself. Counted apart from
+        /// `cc_calls`, because a continuation is not a new call. Ordinarily zero: the built-in
+        /// hunt's gap between passes is 9.5 s, 105x the bound.
+        cc_calls_continued,
         /// T-270: calls a decoded encryption indication flagged as **encrypted**. Metadata about
         /// the call, never its content — nothing is decrypted, and no audio exists to suppress.
         cc_calls_encrypted,

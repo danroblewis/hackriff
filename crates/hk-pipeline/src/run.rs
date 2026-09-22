@@ -2937,7 +2937,8 @@ impl RunSummary {
         line(format!(
             "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s) + {} CAC(s), {} grant(s) \
              mapped / {} unmapped / {} outside window; {} followed ({} refused, {} silent), {} \
-             call(s) ({} closed on silence)",
+             call(s) ({} closed on silence, {} truncated when the window ended, {} continued \
+             across passes)",
             c("/chains/cc_confirmed"),
             c("/chains/cc_tsbks"),
             c("/chains/cc_csbks"),
@@ -2950,6 +2951,10 @@ impl RunSummary {
             c("/chains/cc_follow_silent"),
             c("/chains/cc_calls"),
             c("/chains/cc_calls_closed"),
+            // T-308: printed beside the closed count, because "open" and "we stopped looking" are
+            // different answers and a person reading the summary is entitled to both.
+            c("/chains/cc_calls_truncated"),
+            c("/chains/cc_calls_continued"),
         ));
         // T-271. Printed unconditionally, and that is deliberate: a run that found nothing is
         // exactly the run where a person needs to know that some trunked systems cannot be found at
