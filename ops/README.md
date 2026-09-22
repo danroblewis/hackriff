@@ -96,8 +96,10 @@ confirms the evidence), and only then queues the branch. Workers never edit `doc
 process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a
 permanent `taskpolicy -c background` QoS clamp (efficiency cores only on Apple Silicon) — so the count
 is `WORK_CAP` = (28 − 14) / 3 = 4 and the gate always has its reserve. No load heuristics, no gate-time
-throttling, no suspending workers. (`cpulimit` was measured inert on macOS on 2026-09-22 - it is not
-used.) Disk floor 20 GB.
+throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` from the HiGarfield fork**
+(`$HACKRIFF_OPS/bin/cpulimit`; build it with `git clone https://github.com/HiGarfield/cpulimit && make`
+and copy `src/cpulimit` there) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
+the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. Disk floor 20 GB.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)

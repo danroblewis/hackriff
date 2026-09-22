@@ -63,15 +63,16 @@ LANDED = f"{S}/landed.jsonl"
 # whole process tree: CARGO_BUILD_JOBS and NEXTEST_TEST_THREADS (environment - every rustc and test
 # runner it spawns obeys them) plus a `taskpolicy -c background` QoS clamp at launch, which on Apple
 # Silicon confines the tree to the efficiency cores. So a worker costs ~WORKER_CORES, the count is
-# CAP, and the gate always has its reserve. (cpulimit was measured inert on macOS, see launch().)
-# No load-average admission, no gate-time throttling, no suspend/resume: a known bound per worker
-# is the whole mechanism.
+# CAP, and the gate always has its reserve. A cpulimit FORK (see launch()) is the hard ceiling on
+# top. No load-average admission, no gate-time throttling, no suspend/resume: a known bound per
+# worker is the whole mechanism.
 CORES = int(os.environ.get("WORK_CORES", "28"))
 GATE_RESERVE = int(os.environ.get("WORK_GATE_RESERVE", "14"))
 WORKER_JOBS = os.environ.get("WORK_WORKER_JOBS", "2")            # cargo build jobs per worker
 WORKER_TEST_THREADS = os.environ.get("WORK_WORKER_TEST_THREADS", "2")
 WORKER_CORES = int(os.environ.get("WORK_WORKER_CORES", "3"))    # what one worker may occupy at peak
 CAP = int(os.environ.get("WORK_CAP", str(max(1, (CORES - GATE_RESERVE) // WORKER_CORES))))
+CPULIMIT = os.environ.get("WORK_CPULIMIT", f"{S}/bin/cpulimit")   # the HiGarfield fork; see launch()
 PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
 LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "40"))   # a tripwire only; the budget is the mechanism
 # Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
@@ -303,14 +304,18 @@ def launch(t, dry):
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    # The bound, inherited by the whole tree: the CARGO/NEXTEST limits in env (every rustc and test
-    # runner the worker spawns obeys them) and a permanent `background` QoS clamp (efficiency cores
-    # only on Apple Silicon, low priority). `cpulimit` was tried as a third layer on 2026-09-22 and
-    # measured INERT on macOS - 0 % effect on a tree (-i), a single process, or an attached pid - so
-    # it is not here: a wrapper that looks like a bound and is not would be worse than none.
-    p = subprocess.Popen(["taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+    # The bound, inherited by the whole tree, three layers: (1) CPULIMIT - the HiGarfield fork of
+    # cpulimit, built from source into $HACKRIFF_OPS/bin (Homebrew's opsengine build is INERT on
+    # Apple Silicon: measured 0 % effect; the fork, `-l 200 -i` over four busy loops, measured 164 %
+    # of CPU in aggregate - a real ceiling by SIGSTOP/SIGCONT, descendants included); (2) a permanent
+    # `background` QoS clamp (efficiency cores only, low priority); (3) CARGO/NEXTEST limits in env
+    # so the build and test runners never ask for more. Without the fork binary, layers 2-3 still hold.
+    cmd_prefix = [CPULIMIT, "-l", str(WORKER_CORES * 100), "-i", "--"] if os.path.exists(CPULIMIT) else []
+    if not cmd_prefix and not getattr(launch, "_warned", False):
+        log(f"NOTE: no cpulimit at {CPULIMIT} (build: git clone https://github.com/HiGarfield/cpulimit && make; copy src/cpulimit there) - QoS + env limits only"); launch._warned = True
+    p = subprocess.Popen(cmd_prefix + ["taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; {'cpulimit ' + str(WORKER_CORES * 100) + '% + ' if cmd_prefix else ''}background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
