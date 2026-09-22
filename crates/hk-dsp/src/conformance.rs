@@ -170,6 +170,7 @@ pub fn provenance(center_hz: f64, sample_rate_hz: f64, lna_db: f64) -> Provenanc
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: None,
         bias_tee: hk_model::BiasTee::Unknown,

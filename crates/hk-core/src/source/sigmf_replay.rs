@@ -818,6 +818,7 @@ fn synthesised_provenance(
             bandwidth_hz: sample_rate_hz,
         },
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         overload: false,
         temperature_c: None,
         antenna_port: None,

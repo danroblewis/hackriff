@@ -47,6 +47,7 @@ fn prov() -> Provenance {
         },
         overload: false,
         quantisation_limited: false,
+        noise_sigma_lsb: None,
         temperature_c: None,
         antenna_port: Some("ANT".into()),
         bias_tee: BiasTee::Off,

@@ -48,6 +48,7 @@ SMALL: dict[str, dict] = {
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
+    "mismatched_hypothesis": {"duration_s": 0.3},
 }
 
 

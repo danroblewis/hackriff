@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from hkpy import sigmf
+from hkpy.synth import fill
 
 GENERATOR = "hkpy.synth"
 GENERATOR_VERSION = "0.1.0"
@@ -105,6 +106,9 @@ class CaptureSeg:
     #: Analogue noise density in dBFS/Hz, when the scenario knows it (used to decide IQ-image visibility).
     floor_dbfs_per_hz: float | None = None
     clip_count: int = 0
+    #: ADC fill measured on the written samples, per-component sigma in LSB (T-625). ``None``
+    #: for a datatype with no ADC, which a reader treats as ``under_filled``.
+    noise_sigma_lsb: float | None = None
 
 
 @dataclass
@@ -274,8 +278,9 @@ class Scene:
 
     # ---- output ---------------------------------------------------------------------------
 
-    def quantise(self) -> tuple[bytes, np.ndarray]:
-        """Returns the data bytes and a per-sample clipped mask (either component at full scale)."""
+    def quantise(self) -> tuple[bytes, np.ndarray, np.ndarray]:
+        """Returns the data bytes, a per-sample clipped mask (either component saturated) and the
+        written samples as an ``(n, 2)`` component array (``int8`` for ``ci8``)."""
         iq = np.stack([self.x.real, self.x.imag], axis=-1)
         if self.datatype == "ci8":
             scaled = iq * CI8_SCALE
@@ -284,17 +289,20 @@ class Scene:
         else:
             clipped = (np.abs(iq) > 1.0).any(axis=-1)
             data = np.clip(iq, -1.0, 1.0).astype("<f4")
-        return data.reshape(-1).tobytes(), clipped
+        return data.reshape(-1).tobytes(), clipped, data
 
     def write(self, out_dir: Path) -> Path:
-        data, clipped = self.quantise()
+        data, clipped, written = self.quantise()
         for cap in self.captures:
-            cap.clip_count = int(clipped[cap.sample_start : cap.sample_start + cap.sample_count].sum())
+            span = slice(cap.sample_start, cap.sample_start + cap.sample_count)
+            cap.clip_count = int(clipped[span].sum())
+            cap.noise_sigma_lsb = self._fill_sigma_lsb(written[span])
         self._annotate_overload(clipped)
 
         total_clips = int(clipped.sum())
         first = self.captures[0]
         glob_prov = self._provenance(first, total_clips, self.n_samples)
+        total_sigma = self._fill_sigma_lsb(written)
         lo = min(c.center_hz for c in self.captures) - self.sample_rate / 2
         hi = max(c.center_hz for c in self.captures) + self.sample_rate / 2
         meta = sigmf.new_meta(
@@ -336,6 +344,10 @@ class Scene:
             "quantisation_noise_dbfs": quantisation_noise_dbfs(self.datatype),
             "clip_count": total_clips,
             "clip_fraction": total_clips / self.n_samples,
+            # ADC fill (T-625). Hidden truth beside the recorded provenance value, so a test can
+            # tell "the generator knew" from "the reader measured".
+            "noise_sigma_lsb": total_sigma,
+            "fill_bucket": fill.fill_bucket(total_sigma, total_clips / max(self.n_samples, 1)),
             "overload": glob_prov["overload"],
             "overload_rule": f"clip_fraction > {OVERLOAD_CLIP_FRACTION:g}",
             "impairments": self.impairments,
@@ -373,10 +385,24 @@ class Scene:
             "timestamp_method": "synthetic",
             "antenna_port": "synthetic",
             "timestamp_error_budget_ns": 0,
+            "noise_sigma_lsb": cap.noise_sigma_lsb,
         }
         if _PROVENANCE_TAKES_CLIP_COUNT:
             kwargs["clip_count"] = clips
         return sigmf.provenance(DEVICE_ID, **kwargs)
+
+    def _fill_sigma_lsb(self, written: np.ndarray) -> float | None:
+        """ADC fill for this span: per-component sigma in LSB, or ``None`` when there is no ADC.
+
+        A ``cf32_le`` recording was never converted, so there is no fill to report and nothing may
+        invent one: the reader then classifies it ``under_filled`` and credits calibrated metrics
+        0 bits, which is the fail-closed direction (ADR-0015 section 13.3). T-547's float control
+        is exactly this case, and it is the control precisely because it skipped the ADC.
+        """
+        if self.datatype != "ci8":
+            return None
+        sigma, _ = fill.measure_fill(written)
+        return sigma
 
     def _annotate_overload(self, clipped: np.ndarray, max_regions: int = 256) -> None:
         idx = np.flatnonzero(clipped)

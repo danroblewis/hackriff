@@ -930,6 +930,7 @@ mod watch_tests {
             },
             overload: false,
             quantisation_limited: false,
+            noise_sigma_lsb: None,
             temperature_c: None,
             antenna_port: None,
             bias_tee: hk_model::BiasTee::Unknown,

@@ -249,6 +249,24 @@ pub struct Provenance {
     /// signals are limited by the 8-bit ADC rather than by thermal noise (spike S4). Stable per
     /// gain state, so it does not defeat deduplication.
     pub quantisation_limited: bool,
+    /// **ADC fill**: the per-component noise standard deviation in ADC LSB under this state
+    /// (ADR-0015 §13.3, T-625). `None` means *not measured*, which is
+    /// [`FillBucket::UnderFilled`] — never `nominal`.
+    ///
+    /// This is the variable the evidence tables are conditioned on, and it is **not** the
+    /// LNA/VGA/amp setting: T-547 (docs/21 §4) applied 51 dB of gain with the ADC skipped and
+    /// reproduced the float calibration table to 0.02 bits on every metric, with a bit-identical
+    /// demodulator success rate. Every metric in the set is a ratio or a power-normalised
+    /// statistic, so gain on float IQ is exactly a no-op; the ADC is what moves them, and within
+    /// the ADC it is under-fill (σ = 0.21 LSB costs 1.0–1.6 bits) rather than clipping (28 %
+    /// clipped costs ≤ 0.34 bits). A table or a dashboard keyed on gain is keyed on a no-op.
+    ///
+    /// It is a property of the *state*, like the gain it is not, so it deduplicates with the rest
+    /// of this record. Omitted from the JSON form when absent, so provenance written before T-625
+    /// reads back as unmeasured and its canonical JSON — and therefore its dedup hash — is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noise_sigma_lsb: Option<f32>,
     /// Board temperature, °C, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature_c: Option<f64>,
@@ -323,6 +341,96 @@ impl Provenance {
             .map(|c| c.fundamental_hz)
             .collect()
     }
+
+    /// This state's ADC-fill bucket (ADR-0015 §13.3), given the span's clip fraction.
+    ///
+    /// The clip fraction is *not* part of Provenance — it is a per-span measurement and lives on
+    /// `Detection::clip_count` / the SigMF `hackriff:clip_count` key — so the caller supplies it
+    /// from whatever span it is scoring. Pass `None` when nothing measured it; that can never
+    /// promote a window, only fail to demote it.
+    pub fn fill_bucket(&self, clip_fraction: Option<f64>) -> FillBucket {
+        FillBucket::classify(self.noise_sigma_lsb, clip_fraction)
+    }
+
+    /// Whether [`Self::quantisation_limited`] and the measured fill contradict each other.
+    ///
+    /// ADR-0015 §13.3: `quantisation_limited` stays the coarse flag (floor within 3 dB of the ADC
+    /// quantisation floor) and the two must agree; a disagreement is a front-end bug worth
+    /// surfacing, not a number to silently prefer. `false` when σ was never measured — there is
+    /// nothing to contradict, and the *absence* is already handled by
+    /// [`FillBucket::classify`] failing closed.
+    pub fn fill_flags_disagree(&self, clip_fraction: Option<f64>) -> bool {
+        self.noise_sigma_lsb.is_some()
+            && self.quantisation_limited
+                != (self.fill_bucket(clip_fraction) == FillBucket::UnderFilled)
+    }
+}
+
+/// The ADC-fill boundary below which no calibration cell exists, in ADC LSB (ADR-0015 §13.3).
+///
+/// **Derived, not chosen.** docs/21 §3's sweep is the only evidence for a boundary anywhere: the
+/// rows from σ = 0.57 to σ = 77 LSB sit within 0.34 bits of each other, so an interior boundary
+/// would manufacture a distinction the data cannot see, while σ = 0.21 LSB is 1.64 bits away and
+/// breaks `eye_open` outright. Two regimes were measured, so two regimes are what exist.
+pub const UNDER_FILL_SIGMA_LSB: f32 = 0.5;
+
+/// The clip fraction above which no calibration cell exists (ADR-0015 §13.3).
+///
+/// This is a boundary of the **measurement**, not of the physics: docs/21's null corpus reached
+/// 28.4 % clipped — costing ≤ 0.34 bits, which *refutes* clipping as the hazard — and stopped.
+/// Beyond where it stopped there is no table, for the same reason there is none below
+/// [`UNDER_FILL_SIGMA_LSB`].
+pub const OVER_CLIP_FRACTION: f64 = 0.30;
+
+/// The ADC-fill bucket a window's calibrated evidence is conditioned on (ADR-0015 §13.3, T-625).
+///
+/// **Two buckets plus a refusal, because two is what the measurement buys.** Only [`Self::Nominal`]
+/// has a calibration table; [`Self::UnderFilled`] and [`Self::OverClipped`] have none, so every
+/// calibrated metric in such a window scores 0.0 bits and the window is marked. The analytic
+/// metrics — the only ones ADR-0022 lets pay for a confirm — are unaffected either way.
+///
+/// [`Default`] is [`Self::UnderFilled`]: an unmeasured fill is not a good fill, the same rule that
+/// makes [`BiasTee::Unknown`] not `Off` and `Coverage::Unobserved` not quiet. The failure direction
+/// is *less* evidence, never more.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FillBucket {
+    /// σ ≥ [`UNDER_FILL_SIGMA_LSB`] **and** clip fraction ≤ [`OVER_CLIP_FRACTION`]: one table per
+    /// (metric, null, n), δ ≤ 0.34 bits across σ = 0.57 → 77 LSB.
+    Nominal,
+    /// σ < [`UNDER_FILL_SIGMA_LSB`], **or σ not measured at all.** No table.
+    #[default]
+    UnderFilled,
+    /// Clip fraction > [`OVER_CLIP_FRACTION`]. No table — unmeasured on the null side.
+    OverClipped,
+}
+
+impl FillBucket {
+    /// Whether a calibration table exists for this bucket. `false` means every calibrated metric
+    /// in the window scores 0.0 bits.
+    pub fn has_calibration_table(self) -> bool {
+        matches!(self, Self::Nominal)
+    }
+
+    /// Classifies a window from its measured fill, fail-closed at every unknown.
+    ///
+    /// `noise_sigma_lsb` is the per-component noise σ in ADC LSB and `clip_fraction` the fraction
+    /// of samples at full scale. **`None` σ is [`Self::UnderFilled`], never [`Self::Nominal`]**;
+    /// a non-finite σ likewise. A `None` clip fraction is "no clipping measured", which cannot by
+    /// itself promote a window — it only fails to demote one — while a non-finite clip fraction is
+    /// [`Self::OverClipped`], because a number that is not a number is not a small one.
+    pub fn classify(noise_sigma_lsb: Option<f32>, clip_fraction: Option<f64>) -> Self {
+        let filled = noise_sigma_lsb.is_some_and(|s| s.is_finite() && s >= UNDER_FILL_SIGMA_LSB);
+        if !filled {
+            return Self::UnderFilled;
+        }
+        if clip_fraction.is_some_and(|c| !c.is_finite() || c > OVER_CLIP_FRACTION) {
+            return Self::OverClipped;
+        }
+        Self::Nominal
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +450,7 @@ mod tests {
             },
             overload: false,
             quantisation_limited: false,
+            noise_sigma_lsb: Some(2.25),
             temperature_c: None,
             antenna_port: Some("A1".into()),
             bias_tee: BiasTee::On,
@@ -364,6 +473,124 @@ mod tests {
         assert_eq!(json["clock_source"], "internal");
         assert_eq!(json["timestamp_method"], "host-arrival");
         assert_eq!(serde_json::from_value::<Provenance>(json).unwrap(), p);
+    }
+
+    /// T-625 / ADR-0015 §13.3: **missing σ is `under_filled`, not `nominal`.** The whole point of
+    /// the field is the fail-closed direction, so this is the test that must go red first if the
+    /// default ever drifts to "assume it was fine".
+    #[test]
+    fn an_unmeasured_fill_is_under_filled_and_never_nominal() {
+        let mut p = sample();
+        p.noise_sigma_lsb = None;
+        assert_eq!(p.fill_bucket(None), FillBucket::UnderFilled);
+        assert_eq!(p.fill_bucket(Some(0.0)), FillBucket::UnderFilled);
+        assert!(!p.fill_bucket(None).has_calibration_table());
+        assert_eq!(FillBucket::default(), FillBucket::UnderFilled);
+        // A non-finite σ is not a measurement either.
+        p.noise_sigma_lsb = Some(f32::NAN);
+        assert_eq!(p.fill_bucket(Some(0.0)), FillBucket::UnderFilled);
+    }
+
+    /// The ladder docs/22 §2 axis A3 asks for, classified: **six levels, two buckets.** One
+    /// under-filled rung, five nominal, and — the finding — **no rung reaches `over_clipped`**,
+    /// because the σ = 77 LSB row clipped 28.4 % and the boundary is 30 %.
+    #[test]
+    fn the_six_level_fill_ladder_collapses_to_two_buckets() {
+        // (σ LSB, clip fraction) as docs/21 §3 measured them.
+        let ladder = [
+            (0.21f32, 0.0f64),
+            (0.6, 0.0),
+            (2.0, 0.0),
+            (23.0, 0.0),
+            (43.0, 0.008),
+            (77.0, 0.284),
+        ];
+        let buckets: Vec<FillBucket> = ladder
+            .iter()
+            .map(|&(s, c)| FillBucket::classify(Some(s), Some(c)))
+            .collect();
+        assert_eq!(
+            buckets
+                .iter()
+                .filter(|b| **b == FillBucket::UnderFilled)
+                .count(),
+            1
+        );
+        assert_eq!(
+            buckets
+                .iter()
+                .filter(|b| **b == FillBucket::Nominal)
+                .count(),
+            5
+        );
+        assert_eq!(
+            buckets
+                .iter()
+                .filter(|b| **b == FillBucket::OverClipped)
+                .count(),
+            0,
+            "the measured ladder stops at 28.4 % clipped, below the 30 % boundary: {buckets:?}"
+        );
+        // The boundary itself: at exactly 0.5 LSB there is a table; a hair below there is not.
+        assert_eq!(
+            FillBucket::classify(Some(UNDER_FILL_SIGMA_LSB), Some(0.0)),
+            FillBucket::Nominal
+        );
+        assert_eq!(
+            FillBucket::classify(Some(UNDER_FILL_SIGMA_LSB - 0.001), Some(0.0)),
+            FillBucket::UnderFilled
+        );
+        // Past where the measurement stopped, there is no table either.
+        assert_eq!(
+            FillBucket::classify(Some(77.0), Some(OVER_CLIP_FRACTION + 0.001)),
+            FillBucket::OverClipped
+        );
+        assert_eq!(
+            FillBucket::classify(Some(77.0), Some(f64::NAN)),
+            FillBucket::OverClipped
+        );
+    }
+
+    /// σ rides on the wire beside the gain state, is omitted when absent (so pre-T-625 records
+    /// keep their dedup hash), and round-trips.
+    #[test]
+    fn noise_sigma_lsb_round_trips_and_is_omitted_when_unmeasured() {
+        let mut p = sample();
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["noise_sigma_lsb"], 2.25);
+        assert_eq!(serde_json::from_value::<Provenance>(json).unwrap(), p);
+
+        p.noise_sigma_lsb = None;
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("noise_sigma_lsb").is_none());
+        assert_eq!(
+            serde_json::from_value::<Provenance>(json.clone()).unwrap(),
+            p
+        );
+        // A record written before the field existed reads back as unmeasured.
+        assert_eq!(
+            serde_json::from_value::<Provenance>(json)
+                .unwrap()
+                .fill_bucket(None),
+            FillBucket::UnderFilled
+        );
+    }
+
+    /// The coarse flag and the measured fill must agree; a disagreement is surfaced, never
+    /// resolved silently in favour of either.
+    #[test]
+    fn quantisation_flag_disagreeing_with_measured_fill_is_reported() {
+        let mut p = sample();
+        p.noise_sigma_lsb = Some(2.0);
+        p.quantisation_limited = false;
+        assert!(!p.fill_flags_disagree(Some(0.0)));
+        p.quantisation_limited = true;
+        assert!(p.fill_flags_disagree(Some(0.0)));
+        p.noise_sigma_lsb = Some(0.21);
+        assert!(!p.fill_flags_disagree(Some(0.0)));
+        // Nothing measured, nothing to contradict.
+        p.noise_sigma_lsb = None;
+        assert!(!p.fill_flags_disagree(Some(0.0)));
     }
 
     /// T-325: the three bias-tee states are distinct on the wire, and `unknown` is not `off`.
