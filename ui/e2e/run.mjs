@@ -38,8 +38,26 @@
 // (canvas-journey.e2e.mjs), that backend too. The kill walks the OS parent-child tree from the spec's
 // pid (`killSpecTree` below) rather than relying on process groups, because that is the one
 // relationship Chrome's own detachment cannot escape.
-import { readdirSync, readFileSync } from "node:fs";
+//
+// **Cleanup must not depend on how THIS process dies (T-740).** The timeout above, and the
+// SIGINT/SIGTERM handlers below, both call `killSpecTree` — but a run ended any OTHER way (a
+// coordinator stopping it, a gate timeout, a SIGKILL from a parent process) used to exit with no
+// sweep at all, and Chrome does not exit when its parent does (that is exactly why `cdp.mjs` gives it
+// its own process group). Measured: ten orphaned Chrome processes survived for three hours after one
+// such kill, contending for the machine the whole time. SIGINT and SIGTERM are trappable, so those
+// two sweep synchronously, same as the timeout. **SIGKILL of run.mjs itself cannot be trapped by
+// anything in this file** — Node offers no hook for it — so that one case is handled differently and
+// explicitly, not left as a silent gap: every run records its own pid and every child it has spawned
+// so far (across every lane) in a lock file (`LOCK_DIR`, `persistLock` below), and the FIRST thing the
+// NEXT run does, before starting a browser or a backend of its own, is `sweepStaleRuns()` — read every
+// lock file, and for any whose recorded pid is no longer alive, kill every child it had recorded (and
+// their own descendants, same `killSpecTree` walk). A killed run's orphans therefore survive until the
+// next invocation of this file, and are swept then; see `ui/e2e/selftest-orphan-sweep.mjs`, which
+// proves the SIGINT/SIGTERM legs clean synchronously and the SIGKILL leg cleans at the next run's
+// start.
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startBackend, assertRealCsp, tileCost } from "./backend.mjs";
@@ -47,6 +65,63 @@ import { findChrome } from "./cdp.mjs";
 import { waitForSurfaceHistory } from "./harness.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// One JSON file per run, `{pid, startedAt, children}` — the record `sweepStaleRuns()` reads at the
+// START of the NEXT run to find what a SIGKILLed run left behind. Lives in the OS tmp dir, not
+// `ui/e2e/`, so it survives independent of this checkout and is naturally per-machine.
+const LOCK_DIR = path.join(os.tmpdir(), "hk-e2e-runs");
+try { mkdirSync(LOCK_DIR, { recursive: true }); } catch { /* already exists */ }
+const LOCK_FILE = path.join(LOCK_DIR, `${process.pid}.json`);
+const trackedChildren = new Set();
+
+/** Rewrite this run's own lock file with its current child set. Best-effort: a failed write only
+ * means THIS run's SIGKILL case would go unswept next time, never a correctness problem for the run
+ * in progress. */
+function persistLock() {
+  try {
+    writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, startedAt: Date.now(), children: [...trackedChildren] }));
+  } catch { /* best effort */ }
+}
+function trackChild(pid) { trackedChildren.add(pid); persistLock(); }
+function untrackChild(pid) { trackedChildren.delete(pid); persistLock(); }
+function clearLock() { try { unlinkSync(LOCK_FILE); } catch { /* already gone, or never written */ } }
+
+/**
+ * Sweep every lock file left by a run whose pid is no longer alive — the SIGKILL case, handled here
+ * because it is the one case nothing else in this file can catch. A lock file whose pid IS alive
+ * belongs to a run genuinely still in flight (this repo runs up to four agents at once) and is never
+ * touched. Runs before anything else in this file starts a browser or a backend, so a killed run's
+ * orphans never contend with the run doing the sweeping.
+ */
+function sweepStaleRuns() {
+  let names = [];
+  try { names = readdirSync(LOCK_DIR); } catch { return; }
+  for (const name of names) {
+    if (!/^\d+\.json$/.test(name)) continue;
+    const file = path.join(LOCK_DIR, name);
+    let entry;
+    try { entry = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
+    if (typeof entry?.pid !== "number") { try { unlinkSync(file); } catch { /* ignore */ } continue; }
+    let alive = true;
+    try { process.kill(entry.pid, 0); } catch { alive = false; }
+    if (alive) continue; // a concurrent run genuinely still in flight — leave it alone
+    const victims = (entry.children ?? []).flatMap((pid) => killSpecTree(pid));
+    if (victims.length) {
+      console.log(`e2e: swept ${victims.length} orphaned process(es) left by a killed run (pid ${entry.pid}, ` +
+        `dead since it could not clean up after itself): [${victims.join(", ")}]`);
+    }
+    try { unlinkSync(file); } catch { /* already gone */ }
+  }
+}
+sweepStaleRuns();
+persistLock(); // publish this run's own pid immediately, so a run killed before spawning anything is
+                // still visible to the NEXT run's sweep (with an empty children list — nothing to kill).
+// A clean lock file means the NEXT run's sweep has nothing to do for THIS run — covers every exit
+// this process can observe (normal completion, an uncaught throw, `process.exit` from anywhere,
+// SIGINT/SIGTERM below); only a SIGKILL of this process skips this handler, which is exactly the
+// case `sweepStaleRuns()` exists for.
+process.on("exit", clearLock);
+
 const only = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const discovered = readdirSync(HERE)
   .filter((f) => f.endsWith(".e2e.mjs") && (only.length === 0 || only.some((o) => f.includes(o))))
@@ -137,13 +212,16 @@ const t0 = Date.now();
 const backends = [];
 const stopAll = () => { for (const b of backends) { try { b.stop(); } catch { /* already gone */ } } };
 process.on("exit", stopAll);
-// The specs currently running, if any — so a SIGINT/SIGTERM to THIS process (a developer's Ctrl-C, or
-// the gate's own deadline) also takes down whatever they spawned, rather than leaving a Chrome
-// or an `hk serve` they started to survive this process's own death.
+// Every spec currently running, across every lane — kept only so a lane's timeout can name and race
+// one particular child. Signal cleanup (next) does not use it: a SIGINT/SIGTERM to THIS process (a
+// developer's Ctrl-C, or the gate's own deadline) sweeps every child `trackChild` currently knows
+// about — every lane's backend, every spec process AND the readiness-probe browser each `startLane`
+// opens directly (outside any spec) — not just the running specs, because a check that only ever
+// looked at `activeSpecs` was blind to exactly that browser.
 const activeSpecs = new Set();
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
-    for (const c of activeSpecs) killSpecTree(c.pid);
+    for (const pid of [...trackedChildren]) killSpecTree(pid);
     stopAll();
     process.exit(130);
   });
@@ -185,11 +263,23 @@ function descendantPids(pid) {
  * is killed both as a plain pid and as a process-group leader (`-pid`) — the latter is a no-op
  * (caught) for anything that is not one, and is exactly what reaches Chrome's isolated group.
  *
+ * **Two gathers before any kill (T-740).** A Chrome that has JUST launched keeps forking helper
+ * processes (GPU, network, storage, renderer) for a couple hundred ms — a kill landing mid-startup
+ * (exactly what an outside SIGINT/SIGTERM/SIGKILL cannot schedule around) can snapshot the tree
+ * before some of them exist. Re-gathering once, a short pause later, catches almost all of that
+ * window while `pid` is still alive to be walked from; killing `pid` first would orphan anything
+ * forked after, with no ancestor left to find it through.
+ *
  * Returns the pids it attempted, for the caller to report — this is the "no orphans" guarantee's own
  * evidence, checkable independently with `pgrep`.
  */
 function killSpecTree(pid) {
-  const victims = [pid, ...descendantPids(pid)];
+  const first = descendantPids(pid);
+  execFileSync("sleep", ["0.3"]); // synchronous: this function runs on a signal/timeout path with
+                                   // nothing else to do meanwhile, and 300 ms is well under any
+                                   // caller's own deadline.
+  const second = descendantPids(pid);
+  const victims = [pid, ...new Set([...first, ...second])];
   for (const p of victims) {
     try { process.kill(-p, "SIGKILL"); } catch { /* not a group leader, or already gone */ }
     try { process.kill(p, "SIGKILL"); } catch { /* already gone */ }
@@ -216,6 +306,8 @@ function runSpec(file, env) {
       detached: true,
     });
     activeSpecs.add(child);
+    trackChild(child.pid); // in the lock file too: if THIS process is SIGKILLed mid-spec, the next
+                            // run's sweep still finds this spec (and, via descendantPids, its Chrome).
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => { out += d; });
@@ -235,6 +327,7 @@ function runSpec(file, env) {
       clearTimeout(timer);
       if (grace) clearTimeout(grace);
       activeSpecs.delete(child);
+      untrackChild(child.pid);
       resolve({ status: timedOut ? 1 : (status ?? 1), timedOut, out });
     };
     // `close` (both pipes drained) is what completes the output block, but it is NOT guaranteed to
@@ -251,12 +344,23 @@ function runSpec(file, env) {
 async function startLane(i) {
   const backend = await startBackend({ port: lanePortBase(i) });
   backends.push(backend);
+  trackChild(backend.proc.pid); // recorded in the lock file, so a SIGKILL of THIS process still lets
+                                  // the next run's sweep find and kill this lane's backend if it
+                                  // survives.
   const csp = await assertRealCsp(backend.origin);
   // The server's own backpressure cap, read HERE rather than from a test: over the cap
   // `/api/tiles` answers 503, so a test process asking for it while its own browser holds four
   // reads in flight gets refused — the harness would have manufactured the very condition it
   // exists to detect.
-  const cov = await waitForSurfaceHistory(backend.origin, backend.token);
+  // T-740: this call owns a Chrome directly (not through any spec), so it is tracked exactly like
+  // the backend and every spec's process — `onSpawn` fires the instant the pid exists, before any of
+  // the polling below (or Chrome's own helper-process forking) that could be interrupted by a signal.
+  let readinessBrowserPid = null;
+  const cov = await waitForSurfaceHistory(backend.origin, backend.token, {
+    onSpawn: (pid) => { readinessBrowserPid = pid; trackChild(pid); },
+  });
+  if (readinessBrowserPid) untrackChild(readinessBrowserPid); // waitForSurfaceHistory's own
+                                                                // `finally` already closed it normally
   // AFTER the readiness page, not before, and this order is load-bearing: that page leaves up to
   // `in_flight_limit` tile reads outstanding, and the server counts them until they finish. Since
   // `tileCost` retries a 503, asking for the cap here doubles as the drain — the next page opens

@@ -657,6 +657,15 @@ test-ui-e2e-selftest:
 test-ui-e2e-selftest-timeout:
     cd ui && npm run e2e:selftest-timeout
 
+# T-740's own non-vacuity check: proves cleanup of a spec's Chrome/backend does not depend on how
+# `run.mjs` itself exits. Kills a real `run.mjs` (driving the hang fixture) with SIGINT, SIGTERM and
+# the untrappable SIGKILL in turn, asserting process counts (not wall-clock) at each step; the SIGKILL
+# leg proves the orphans genuinely survive it, then proves the NEXT `run.mjs` invocation sweeps them
+# to baseline before starting anything of its own. ~1 minute. Not part of any gate, same as the two
+# selftests above.
+test-ui-e2e-selftest-orphans:
+    cd ui && npm run e2e:selftest-orphans
+
 # Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
 serve fixture *args:
     cargo run -p hk-cli --bin hk -- serve --replay "{{fixture}}" {{args}}

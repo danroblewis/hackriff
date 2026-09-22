@@ -11,7 +11,8 @@
     "test": "node test/run.mjs",
     "e2e": "node e2e/run.mjs",
     "e2e:selftest": "node e2e/selftest.mjs",
-    "e2e:selftest-timeout": "node e2e/selftest-timeout.mjs"
+    "e2e:selftest-timeout": "node e2e/selftest-timeout.mjs",
+    "e2e:selftest-orphans": "node e2e/selftest-orphan-sweep.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
