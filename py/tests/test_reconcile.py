@@ -210,3 +210,65 @@ def test_the_warning_precedes_the_findings_in_the_rendered_output(tmp_path, monk
     rec.main(["--board", str(board)])
     out = capsys.readouterr().out
     assert out.index("PROVISIONAL") < out.index("reconcile:"), "the warning must come first"
+
+
+# --- finding the runner's ops directory ---------------------------------------------------------
+#
+# The marker only works if the reader can see it. These pin the resolution order and the failure
+# that motivated it: on 2026-09-22 a bulk was staged, `bulk-in-progress` existed, and `reconcile`
+# in a session with no HACKRIFF_OPS reported "nothing is running" — the marker was written to the
+# runner's own directory and read from the default one.
+
+
+def test_an_explicit_env_var_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    assert rec.ops_dir() == tmp_path
+
+
+def test_the_runners_pointer_is_followed_when_no_env_is_set(tmp_path, monkeypatch):
+    home, runner = tmp_path / "home", tmp_path / "runner-scratch"
+    (home / ".hackriff-ops").mkdir(parents=True)
+    runner.mkdir()
+    (home / ".hackriff-ops" / "active-ops-dir").write_text(f"{runner}\n", encoding="utf-8")
+    monkeypatch.delenv("HACKRIFF_OPS", raising=False)
+    monkeypatch.setattr(rec.Path, "home", staticmethod(lambda: home))
+    assert rec.ops_dir() == runner
+
+
+def test_a_stale_pointer_degrades_to_the_default_instead_of_hiding_the_marker(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".hackriff-ops").mkdir(parents=True)
+    (home / ".hackriff-ops" / "active-ops-dir").write_text(
+        str(tmp_path / "deleted-scratchpad") + "\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("HACKRIFF_OPS", raising=False)
+    monkeypatch.setattr(rec.Path, "home", staticmethod(lambda: home))
+    assert rec.ops_dir() == home / ".hackriff-ops"
+
+
+def test_a_marker_in_the_runners_dir_is_seen_without_any_env(tmp_path, monkeypatch):
+    """The exact 2026-09-22 failure, as a test: no HACKRIFF_OPS, marker in the runner's directory."""
+    home, runner = tmp_path / "home", tmp_path / "runner-scratch"
+    (home / ".hackriff-ops").mkdir(parents=True)
+    runner.mkdir()
+    (home / ".hackriff-ops" / "active-ops-dir").write_text(f"{runner}\n", encoding="utf-8")
+    (runner / "bulk-in-progress").write_text(
+        "base=deadbeef\npid=%d\nbranches=task-a task-b\n" % os.getpid(), encoding="utf-8"
+    )
+    monkeypatch.delenv("HACKRIFF_OPS", raising=False)
+    monkeypatch.setattr(rec.Path, "home", staticmethod(lambda: home))
+    out = rec.bulk_warning()
+    assert "PROVISIONAL" in out, "the marker must be visible to a session that sets nothing"
+    assert "task-a task-b" in out
+
+
+def test_the_warning_states_pid_liveness_either_way(tmp_path, monkeypatch):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    (tmp_path / "bulk-in-progress").write_text(
+        "base=deadbeef\npid=%d\nbranches=task-a\n" % os.getpid(), encoding="utf-8"
+    )
+    assert "alive" in rec.bulk_warning()
+    (tmp_path / "bulk-in-progress").write_text(
+        "base=deadbeef\npid=%d\nbranches=task-a\n" % (2**22 - 1), encoding="utf-8"
+    )
+    assert "IS GONE" in rec.bulk_warning()
