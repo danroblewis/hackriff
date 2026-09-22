@@ -1077,8 +1077,14 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
    splits the bucket. The budget above then multiplies by the number of buckets, which is why it
    is stated per cell.
 5. **All of it, on blocks that were never measured.** Everything above rests on the FSK path at
-   n = 112 plus one classifier feature. **T-619** extends the measurement to AM/OOK and C4FM; a
-   different dependence structure there changes §13.1's table, not its rule.
+   n = 112 plus one classifier feature. **T-619** extended the measurement to AM/OOK and C4FM
+   (docs/21 §10, 2026-09-22): §13.1's rule survives and its table gains two groups
+   (`{eye_open, snr, evm}` on AM/OOK, `{evm, offset_ratio}` on C4FM, the first at ρ = 1.000
+   exactly), and **item 4's trigger fired** — the null side was measured to 77 % clipped and the
+   AM/OOK metrics over-claim 5–6 bits there, so the `nominal` bucket must split or tighten
+   (measured: σ ≥ 1.0 LSB and clip ≤ 10 % holds every path to ≤ 1.2 bits at a 6-bit claim). That
+   amendment is not taken here. docs/21 §10.4 also shows the runtime rule must measure the
+   **noise floor's** fill, not the window's.
 
 ### 13.6 Deltas to §§1–12
 
