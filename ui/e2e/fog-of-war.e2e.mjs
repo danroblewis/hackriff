@@ -133,10 +133,24 @@ function windowOf(where) {
 const MHz = (hz) => (hz / 1e6).toFixed(4);
 const spanOf = (v) => `${MHz(v.loHz)}-${MHz(v.hiHz)} MHz (± ${MHz(v.halfHz)})`;
 
-async function get(backend, p) {
-  const r = await fetch(`${backend.origin}${p}`, { headers: { authorization: `Bearer ${backend.token}` } });
-  assert.ok(r.ok, `GET ${p} -> ${r.status}`);
-  return r.json();
+/**
+ * `GET` against the backend, **retrying its backpressure** — the same shape as
+ * `canvas-journey.e2e.mjs`'s and `scan-everything.e2e.mjs`'s `get` (T-690).
+ *
+ * `/api/tiles` answers `503` over `cost.in_flight_limit` concurrent reads and takes its slot
+ * before it does any work, and this file's own browser holds up to four of them — so a bare
+ * `fetch` here manufactures the refusal and then reads it as an answer. A `503` is "busy now",
+ * never "no". `/api/coverage` shares the history lock behind it. Every premise this file waits on
+ * goes through here, so one unretried refusal ended the whole journey.
+ */
+async function get(backend, p, { tries = 40, waitMs = 200 } = {}) {
+  for (let i = 0; ; i++) {
+    const r = await fetch(`${backend.origin}${p}`, { headers: { authorization: `Bearer ${backend.token}` } });
+    if (r.ok) return r.json();
+    assert.ok(r.status === 503 && i < tries,
+      `GET ${p} -> ${r.status}${r.status === 503 ? ` after ${i} retries of the route's backpressure` : ""}`);
+    await new Promise((res) => setTimeout(res, waitMs));
+  }
 }
 
 /** The capture window the mock front end reports it is using, right now. */

@@ -609,10 +609,22 @@ const TIME_ROOM = 2.5;
 
 /** The surface's time extent and zoom floor, from the two routes that state them. */
 async function timeRoom() {
-  const get = async (p) => {
-    const r = await fetch(`${ORIGIN}${p}${p.includes("?") ? "&" : "?"}token=${TOKEN}`);
-    if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
-    return r.json();
+  // **Retries the route's backpressure** (T-690). `/api/tiles` takes its slot before it does any
+  // work and answers `503` over `cost.in_flight_limit`; the earlier tests in this file leave the
+  // shared route busy, so a bare `fetch` here manufactures the refusal and then reads it as a
+  // broken server. Observed exactly that: this premise threw `GET /api/tiles → 503` 182 ms into
+  // the test, before its own 120 s wait for the record to grow had a chance to run once. A `503`
+  // is "busy now", never "no" — the same rule the product's own bootstrap follows.
+  const get = async (p, { tries = 40, waitMs = 200 } = {}) => {
+    for (let i = 0; ; i++) {
+      const r = await fetch(`${ORIGIN}${p}${p.includes("?") ? "&" : "?"}token=${TOKEN}`);
+      if (r.ok) return r.json();
+      if (r.status !== 503 || i >= tries) {
+        throw new Error(`GET ${p} → ${r.status}` +
+          (r.status === 503 ? ` after ${i} retries of the route's backpressure` : ""));
+      }
+      await new Promise((res) => setTimeout(res, waitMs));
+    }
   };
   const nav = await get("/api/navigation");
   const tile = await get("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8");

@@ -1253,11 +1253,15 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     // is the same defect one step along.
     const wTuned = await tunedWindow(backend);
     const inner = { loHz: wTuned.centerHz - wTuned.spanHz * 0.15, hiHz: wTuned.centerHz + wTuned.spanHz * 0.15 };
-    const into = await navigate(page, at, inner);
+    // Twice `navigate`'s default step budget, and for a stated reason rather than a nudge: this
+    // target is 30 % of the tuned window (test 1's is 60 %), and the reopened view starts on the
+    // whole observed extent plus a margin, so it is about twice as many wheel steps of zoom. The
+    // budget is a count of gestures, not a duration.
+    const into = await navigate(page, at, inner, { steps: 80 });
     t.diagnostic(`into the tuned window in ${into.steps} gesture(s): ${spanOf(into.view)} ⊂ ${spanOf(wTuned)}`);
     assert.ok(into.view.loHz >= wTuned.loHz && into.view.hiHz <= wTuned.hiHz,
       `the viewport never got inside the tuned window: ${spanOf(into.view)} vs ${spanOf(wTuned)} after ` +
-      `${into.steps} steps — there is no live tile over data here to lose`);
+      `${into.steps} steps — there is no live tile over data here to lose.\ntrail: ${into.trail.join(" -> ")}`);
     // A pan in frequency can drop a following pane; put it back before the subject is chosen.
     await goLive(page);
 
