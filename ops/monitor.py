@@ -1567,6 +1567,22 @@ def sysstats():
         "disk": disk,
     }
 
+_GATHER_LOCK = threading.Lock()
+_GATHER_CACHE = {"at": 0.0, "data": None}
+
+def gather_cached(max_age=2.5):
+    """One gather() per ~2.5 s, shared by every client. gather() costs ~3 s (ps, git per
+    worktree, the board) and the server is threaded, so every poller used to start its own:
+    on 2026-09-22 the process sat at 440 % CPU and 2.1 GB and stopped answering. Late
+    threads wait on the lock and get the fresh copy instead of computing another.
+    """
+    with _GATHER_LOCK:
+        if _GATHER_CACHE["data"] is not None and time.time() - _GATHER_CACHE["at"] < max_age:
+            return _GATHER_CACHE["data"]
+        data = gather()
+        _GATHER_CACHE.update(at=time.time(), data=data)
+        return data
+
 def gather():
     tk = tasks()
     smap = tk.get("status_map", {})
@@ -2419,7 +2435,7 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/data.json"):
             try:
-                body = json.dumps(gather()).encode()
+                body = json.dumps(gather_cached()).encode()
                 self.send_response(200); self.send_header("Content-Type", "application/json")
             except Exception as e:
                 body = json.dumps({"error": str(e)}).encode(); self.send_response(500); self.send_header("Content-Type", "application/json")
