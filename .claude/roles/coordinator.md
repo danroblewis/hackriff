@@ -8,6 +8,8 @@ Run `just reconcile` **before launching anything** (see the `reconcile` skill). 
 ## Task state
 `docs/tasks.yaml` is the single source of truth. Update `status` (todo/in-progress/blocked/done) + commit/PR links as work proceeds. `blocked` requires `blocked_on` (what specifically unblocks it — a user decision, hardware, or another ticket); a ticket with no real blocker is `todo`/`deferred`, not `blocked`. A fresh session resumes from `tasks.yaml` + `docs/planning-log.md` + git.
 
+**Board commits are validated at the commit, not at the gate (T-764).** Direct board commits run no gate — which is how a board that no YAML loader accepts reached `main` on 2026-09-22 and blanked the dashboard. `.githooks/pre-commit` now runs `hkpy.boardcheck` over the STAGED `docs/tasks.yaml` before any commit that touches it, and it **fails closed**: unreadable board, missing `pyyaml`, missing checker → the commit is refused. Run `just setup-git` once per clone to install it (`ops/merge-runner.sh` does this at startup). If a board commit is refused, fix the board — do not reach for `--no-verify`.
+
 **Manage tickets, never just report them.** Before filing anything, search for an existing ticket (see the `file-ticket` skill). If one exists, **amend its requirements, re-scope it, or add dependents** — do not file a duplicate and do not just report "it exists." A `todo` behind an in-progress dep still gets driven: push the dep, then it.
 
 ## Delegating to workers

@@ -628,10 +628,16 @@ lint-py:
 # .git/config and is NOT, so a fresh clone has the attribute pointing at nothing and git fails
 # the merge with "custom merge driver hkboard lacks command line". Run this once per clone.
 # `ops/merge-runner.sh` also calls it at startup, so the automated path cannot miss it.
+#
+# It also points git at `.githooks/`, whose `pre-commit` validates docs/tasks.yaml before any
+# commit that touches it (T-764). The gate only runs on merges, and the board is committed
+# DIRECTLY several times an hour, so the gate cannot be where the board's integrity lives. The
+# path is relative, so each worktree uses its own copy of the hook.
 setup-git:
     @git config merge.hkboard.name "append-only merge for docs/tasks.yaml (T-582)"
     @git config merge.hkboard.driver "uv run --locked --project py python -m hkpy.boardmerge %O %A %B"
-    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml"
+    @git config core.hooksPath .githooks
+    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml; hooks -> .githooks"
 
 # THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
 #
