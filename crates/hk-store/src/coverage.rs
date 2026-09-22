@@ -48,6 +48,16 @@
 //! key and the history source key are hashed from — so the long-horizon spans are device-local too.
 //! The caller collects the spans from whichever of those it has and this module folds them.
 //!
+//! **T-596 adds a third, and it is the same shape again:** the observation log gains a record only
+//! when a dwell *seals*, so between a retune and the seal (up to 60 s) the log says nothing about
+//! the band the radio is sitting on. The ring journal normally covers that gap; when the ring is
+//! **refused** — T-588's was, because the disk was full, which is a portable device's field
+//! failure mode — nothing does, and 18 s of measured rows read `unobserved`. So the dwell in
+//! flight is published to [`crate::observation::ObservationStore::note_open_dwell`] and read back
+//! as a record, through this same [`spans_from_records`]: the same claim as a sealed dwell, the
+//! same `dc_excluded` notch, and no new state — a cell must not change colour when the
+//! bookkeeping catches up to samples that never changed.
+//!
 //! # The time axis (T-421, `docs/16` §6.3 / §7 step 1)
 //!
 //! T-368 folded those spans onto the **frequency** axis and collapsed time, so one grid answered

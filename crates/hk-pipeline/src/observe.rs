@@ -140,6 +140,8 @@ impl ObservationLog {
                 self.device_id.clone(),
             ),
             queue: self.writer.queue(),
+            store: self.store(),
+            device_id: self.device_id.clone(),
             fixed: fixed_tuning.is_some(),
             counters,
             current: None,
@@ -176,6 +178,7 @@ impl ObservationLog {
         InteractiveObserver {
             rule: rule(fft_bins),
             survey_id,
+            store: self.store(),
             device_id,
             queue: self.writer.queue(),
             seq0: counters.tune_seq.load(Ordering::SeqCst),
@@ -277,6 +280,10 @@ struct InFlight {
 pub(crate) struct Observer {
     recorder: ObservationRecorder,
     queue: ObservationQueue,
+    /// T-596: the log's open-dwell slot, so the step in flight is evidence of coverage before it
+    /// seals. See [`hk_store::observation::ObservationStore::note_open_dwell`].
+    store: ObservationStore,
+    device_id: Option<String>,
     fixed: bool,
     counters: Arc<Counters>,
     current: Option<InFlight>,
@@ -315,6 +322,34 @@ impl Observer {
                 c.settled_ns = Some(now_ns.max(c.step.t_start.as_unix_nanos()));
             }
         }
+        self.publish_open();
+    }
+
+    /// T-596: the step in flight, published to the log's open-dwell slot so the live edge is
+    /// covered between the retune and the seal. Replaced every tick (one slot per front end), and
+    /// dropped by [`Self::close`] the instant the sealed record can speak for it.
+    fn publish_open(&self) {
+        let Some(c) = self.current.as_ref() else {
+            return;
+        };
+        let (center, rate) = if self.fixed {
+            self.tune()
+        } else {
+            (c.step.center_hz, c.step.rate_hz)
+        };
+        let obs = StepObservation {
+            step: c.step,
+            center_hz: center,
+            rate_hz: rate,
+            settled: c.settled_ns.map(Timestamp::from_unix_nanos),
+            end: Timestamp::from_unix_nanos(self.last_now_ns),
+            dropped_samples: self.dropped().saturating_sub(c.dropped0),
+            overload: false,
+        };
+        match self.recorder.open_dwell(&obs) {
+            Some(rec) => self.store.note_open_dwell(rec),
+            None => self.store.clear_open_dwell(self.device_id.as_deref()),
+        }
     }
 
     fn tune(&self) -> (f64, f64) {
@@ -330,6 +365,8 @@ impl Observer {
 
     fn close(&mut self, end_ns: i64) {
         let Some(c) = self.current.take() else { return };
+        // The sealed record now speaks for this window; the provisional one must not double up.
+        self.store.clear_open_dwell(self.device_id.as_deref());
         let (center, rate) = if self.fixed {
             self.tune()
         } else {
@@ -398,6 +435,11 @@ struct OpenTune {
 pub(crate) struct InteractiveObserver {
     rule: WindowRule,
     survey_id: Option<SurveyId>,
+    /// T-596: the log's open-dwell slot (see [`Observer::publish_open`]). This is the path that
+    /// T-588 measured: an interactive record seals only when the tune changes or after
+    /// [`INTERACTIVE_RECORD_MAX_NS`], so without it the log says nothing about the band the radio
+    /// is sitting on for up to a minute after every retune.
+    store: ObservationStore,
     /// The front end this observer's records name (T-378); see `ObservationLog::device_id`.
     device_id: Option<String>,
     queue: ObservationQueue,
@@ -443,29 +485,30 @@ impl InteractiveObserver {
             None => self.start(center_bits, rate_bits, seq, now),
         }
         self.last_now_ns = now;
+        self.publish_open(now);
     }
 
-    fn start(&mut self, center_bits: u64, rate_bits: u64, intent: u64, start_ns: i64) {
-        self.open = Some(OpenTune {
-            center_bits,
-            rate_bits,
-            intent,
-            start_ns,
-            dropped0: lost_samples(&self.counters),
-        });
+    /// T-596: the tune in flight, published to the log's open-dwell slot.
+    fn publish_open(&self, now_ns: i64) {
+        match self.open.as_ref().and_then(|o| self.record(o, now_ns)) {
+            Some(rec) => self.store.note_open_dwell(rec),
+            None => self.store.clear_open_dwell(self.device_id.as_deref()),
+        }
     }
 
-    fn close(&mut self, end_ns: i64) {
-        let Some(o) = self.open.take() else { return };
+    /// The dwell record for `o` ending at `end_ns`, or `None` when no time has passed. One
+    /// builder, so the provisional record and the sealed one cannot drift apart: the span is the
+    /// only difference between them.
+    fn record(&self, o: &OpenTune, end_ns: i64) -> Option<DwellRecord> {
         if end_ns <= o.start_ns {
-            return;
+            return None;
         }
         let span = TimeRange::new(
             Timestamp::from_unix_nanos(o.start_ns),
             Timestamp::from_unix_nanos(end_ns),
         );
         let reason = Reason::Interactive { intent: o.intent };
-        let rec = ObservationRecord::Dwell(DwellRecord {
+        Some(DwellRecord {
             schema: ATTENTION_SCHEMA_VERSION,
             survey_id: self.survey_id,
             seq: self.records,
@@ -484,9 +527,29 @@ impl InteractiveObserver {
             dropped_samples: lost_samples(&self.counters).saturating_sub(o.dropped0),
             overload: false,
             provenance_ref: None,
+        })
+    }
+
+    fn start(&mut self, center_bits: u64, rate_bits: u64, intent: u64, start_ns: i64) {
+        self.open = Some(OpenTune {
+            center_bits,
+            rate_bits,
+            intent,
+            start_ns,
+            dropped0: lost_samples(&self.counters),
         });
+    }
+
+    fn close(&mut self, end_ns: i64) {
+        let Some(o) = self.open.take() else { return };
+        // The sealed record now speaks for this window (T-596); drop the provisional one first so
+        // no reader can ever see both.
+        self.store.clear_open_dwell(self.device_id.as_deref());
+        let Some(rec) = self.record(&o, end_ns) else {
+            return;
+        };
         self.records += 1;
-        offer(&self.queue, &self.counters, rec);
+        offer(&self.queue, &self.counters, ObservationRecord::Dwell(rec));
     }
 }
 
@@ -628,6 +691,115 @@ mod tests {
             store.stats().written.load(Ordering::Relaxed) + dropped,
             offered,
             "every record not dropped was written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **T-596 — the dwell in flight is evidence of coverage before it seals.**
+    ///
+    /// An interactive record is written when the tune changes or after
+    /// [`INTERACTIVE_RECORD_MAX_NS`] (60 s) of a steady tune, so for up to a minute after every
+    /// retune the log holds nothing for the band the radio is sitting on. With the IQ ring refused
+    /// — T-588 hit exactly that, because the **disk was full** — the coverage map then has no
+    /// evidence at all for the live edge, and 18 s of measured rows read `unobserved`.
+    ///
+    /// Counted, not timed: the open slot holds exactly one dwell, its extent is the whole of the
+    /// steady tune so far, its window is the tuning (notch and all, so T-595's `excluded` mark
+    /// survives at the live edge), and the log has sealed **zero** records for it. When the tune
+    /// does change, the sealed record takes over and the slot is empty again — never both.
+    ///
+    /// RED without the fix: drop `publish_open` from `InteractiveObserver::tick` and the open
+    /// slot is empty while the log holds nothing, which is the 18 s of grey.
+    #[test]
+    fn the_tune_in_flight_is_published_as_an_open_dwell_before_any_record_seals() {
+        let dir = std::env::temp_dir().join(format!("hk-t596-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = ObservationLog::open_with(
+            ObservationLogConfig::new(dir.join("observations")),
+            Some(TEST_DEVICE.into()),
+            None,
+        )
+        .unwrap();
+        let store = log.store();
+        let counters = Arc::new(Counters::default());
+        let mut obs = log.interactive(1024, None, Arc::clone(&counters));
+
+        let t0: i64 = 1_789_297_800_000_000_000;
+        let (centre, rate) = (446_000_000.0f64, 2e6f64);
+        let tune = |c: f64, r: f64, now: i64| {
+            counters
+                .tune_center_bits
+                .store(c.to_bits(), Ordering::SeqCst);
+            counters.tune_rate_bits.store(r.to_bits(), Ordering::SeqCst);
+            counters.stream_time_ns.store(now, Ordering::SeqCst);
+            counters.tune_seq.fetch_add(1, Ordering::SeqCst);
+        };
+
+        tune(centre, rate, t0);
+        obs.tick();
+        // 18 s later — the span T-588 measured as grey — still far short of the 60 s seal.
+        counters
+            .stream_time_ns
+            .store(t0 + 18_000_000_000, Ordering::SeqCst);
+        obs.tick();
+
+        let open = store.open_dwells();
+        assert_eq!(open.len(), 1, "one front end, one open dwell: {open:?}");
+        let ObservationRecord::Dwell(d) = &open[0] else {
+            panic!("the open record is a dwell: {open:?}")
+        };
+        assert_eq!(d.device_id.as_deref(), Some(TEST_DEVICE));
+        assert_eq!(d.observed.start.as_unix_nanos(), t0);
+        assert_eq!(
+            d.observed.end.as_unix_nanos(),
+            t0 + 18_000_000_000,
+            "the open dwell runs to the newest sample, which is what the live edge needs"
+        );
+        assert_eq!(d.window.center_hz, centre);
+        assert_eq!(d.window.sample_rate_hz, rate);
+        assert!(
+            d.window.dc_excluded.is_some(),
+            "the open dwell declares the same DC notch as the sealed one, so T-595's \
+             \"excluded\" mark does not flip when the seal catches up: {:?}",
+            d.window
+        );
+        // And nothing has sealed: this is the whole point.
+        store.flush();
+        let records = store
+            .query(&RecordQuery {
+                freq: FreqRange::new(centre - rate, centre + rate),
+                span: TimeRange::new(
+                    Timestamp::from_unix_nanos(t0 - 1),
+                    Timestamp::from_unix_nanos(t0 + 60_000_000_000),
+                ),
+                tier: None,
+                cursor: 0,
+                limit: 64,
+            })
+            .records;
+        assert!(
+            records.is_empty(),
+            "no record has sealed yet - the open dwell is the only evidence: {records:?}"
+        );
+
+        // The retune closes it: the sealed record speaks, and the slot never doubles up.
+        tune(centre + 4e6, rate, t0 + 20_000_000_000);
+        obs.tick();
+        let open = store.open_dwells();
+        assert_eq!(open.len(), 1, "one open dwell, the new tune's: {open:?}");
+        let ObservationRecord::Dwell(d2) = &open[0] else {
+            panic!("{open:?}")
+        };
+        assert_eq!(
+            d2.window.center_hz,
+            centre + 4e6,
+            "the slot holds the tune the radio is on NOW, never the closed one"
+        );
+        drop(obs);
+        drop(log);
+        assert!(
+            store.open_dwells().is_empty(),
+            "the segment ended: the last tune closed into a record and the slot is empty"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

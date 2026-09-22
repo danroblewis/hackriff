@@ -285,6 +285,43 @@ impl ObservationRecorder {
         }
     }
 
+    /// The step **in flight**, as a provisional dwell record (T-596).
+    ///
+    /// Same fields the sealed record will carry, over `[settled, o.end]` instead of the step's
+    /// whole extent — so it rasterises through the same `spans_from_records` and, in particular,
+    /// declares the same `dc_excluded` notch T-595 marks `excluded`. It accumulates nothing and
+    /// emits nothing: a peek, not a record. `None` until the tuning has settled (before that the
+    /// radio has not yet been demonstrated to be on this window) or if no time has passed.
+    ///
+    /// A sweep hop gets one too. Its sealed form is a visit inside a [`SweepRecord`] rather than a
+    /// dwell, but the *claim* — this window, over this interval, on this front end — is the same,
+    /// and the coverage map reads both the same way.
+    pub fn open_dwell(&self, o: &StepObservation) -> Option<DwellRecord> {
+        let settled = o.settled?;
+        if o.end <= settled {
+            return None;
+        }
+        let reason = o.step.purpose.reason();
+        Some(DwellRecord {
+            schema: ATTENTION_SCHEMA_VERSION,
+            survey_id: self.survey_id,
+            seq: o.step.seq,
+            plan_version: o.step.plan_version,
+            site: self.site,
+            device_id: self.device_id.clone(),
+            reason,
+            tier: reason.tier(),
+            window: self.rule.window(o.center_hz, o.rate_hz),
+            rf_path: o.step.rf_path,
+            planned: TimeRange::new(o.step.t_start, o.step.t_end()),
+            observed: TimeRange::new(settled, o.end),
+            preempted: false,
+            dropped_samples: o.dropped_samples,
+            overload: o.overload,
+            provenance_ref: None,
+        })
+    }
+
     /// Closes the open sweep record (end of run, plan change, checkpoint).
     pub fn flush(&mut self, out: &mut impl FnMut(ObservationRecord)) {
         let Some(s) = self.open.take() else { return };

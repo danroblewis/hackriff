@@ -19427,6 +19427,66 @@ tasks:
       read unobserved is zero, counted over a stated number of rows.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      WORKED on task-t596, in two passes; the first pass failed the merge gate and was pulled.
+      ROOT CAUSE: a record reaches the observation log only when a dwell SEALS - on a retune or
+      after `INTERACTIVE_RECORD_MAX_NS` (60 s) - so between a retune and the seal the log holds no
+      evidence for the band the radio is sitting on and measuring. The ring journal normally covers
+      that gap (a segment per provenance change); with the ring REFUSED nothing does.
+      THE MARK IS NOT A NEW ONE: it is `observed`, with T-595's `Analysis` axis unchanged and the DC
+      notch inside it still `excluded`. The samples are sampled and the analysis has run over the
+      rows that exist; only the bookkeeping is outstanding, so a cell must not change colour when
+      the seal catches up to samples that never changed. `Coverage` stays TWO variants. What is new
+      is a third SOURCE, so the answer says which evidence carried the live edge.
+      WHERE: `ObservationStore` gains a per-device open-dwell slot on its OWN lock
+      (`note_open_dwell` / `clear_open_dwell` / `open_dwells`, hk-store/src/observation/log.rs) -
+      deliberately not `query()`, so a provisional record never reaches the occupancy, POI or report
+      paths that count sealed visits. Both observers publish it every control tick
+      (`Observer::publish_open` and `InteractiveObserver::publish_open`, hk-pipeline/src/observe.rs;
+      `ObservationRecorder::open_dwell` in hk-core builds the scheduler's), and `close()` drops it
+      the instant the sealed record can speak, so no reader ever sees both.
+      SERVED: `Evidence::collect` (hk-api/src/coverage.rs) folds the open dwells through the SAME
+      `hk_store::spans_from_records`, so `/api/coverage`, `/api/tiles` and the coverage
+      short-circuit all see it. `sources[]` gains `{"kind":"open-dwell", ...}`; docs/api.md moved
+      with it (T-079). No client change.
+      THE GATE FAILURE, AND THE FIX FOR IT: the first pass folded the open dwell in UNCLIPPED, so a
+      dwell open since before the record horizon painted `observed` over rows the same answer's
+      `horizon` declared `"unknown"` (T-413/T-507) - the response contradicted itself and the fix
+      was pointed backwards into the exact class of lie this ticket exists to remove. It failed
+      `hk-cli::api_contract::unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`
+      (row 4 of 8 `observed` against `horizon.unknown_from_row: 4`). `open_dwell_spans` now takes
+      `Memory::oldest_record` and CLIPS each open dwell to start at it, dropping it entirely when no
+      surviving record anywhere gives the horizon anything to admit. The dwell in flight may extend
+      the answer FORWARD to the live edge and never overrule it backward: it is provisional and
+      unsealed, and "we do not know whether we looked" is not "we did" - the same fail-closed rule
+      as `Coverage::Unobserved` is not quiet. It costs the ticket nothing, because the gap after a
+      retune lies after the last sealed record by construction.
+      ORDER AGAINST T-532 (decided at the merge with main): the open dwell is folded into `spans`
+      BEFORE `newest_record`/`as_of_s` is taken. T-532's rule is that the forward horizon comes from
+      the same spans the planes are rasterised from so summary and body cannot disagree; the open
+      dwell's spans rasterise, so taking the horizon first would publish `as_of_s` at the last SEAL
+      beside a plane claiming `observed` for seconds after it - the split T-532 closed - and a
+      client honouring `as_of_s` would discard exactly the live-edge rows this ticket serves. The
+      asymmetry is the invariant: an unsealed record may move the horizon FORWARD (a statement about
+      this answer's freshness) and may not move `oldest_record` BACKWARD (this server's statement
+      about what it has forgotten).
+      COUNTS: `hk-api` tiles::tests::the_live_edge_is_observed_when_the_iq_ring_is_refused_and_the_
+      dwell_has_not_sealed - cells holding a `max_db` that read `unobserved`/`unknown` == 0 over
+      2048 measured cells (floors N*N/4 overall AND N*N/8 at the live edge, so it cannot pass on
+      zero of zero). RED with the fold removed: 1024 of 2048 greyed.
+      RED PROOFS, all run and reverted: the tiles count above (1024/2048); `hk-pipeline`
+      observe::tests::the_tune_in_flight_is_published_as_an_open_dwell_before_any_record_seals
+      without `publish_open` (0 open dwells); `hk-api`
+      coverage::tests::the_dwell_in_flight_carries_the_live_edge_and_never_overrules_an_unknown_row
+      without the clip (5 `unknown` rows read `observed`) and with the fold moved after
+      `newest_record` (`as_of_s` 7260 instead of 7280, beside a plane observed through 7280).
+      TARGETED: hk-api 221/221, hk-cli::api_contract 53/53, hk-pipeline observe 5/5,
+      hk-store+hk-core 359/359. precheck clean. Never ran the gate.
+      FOLLOW-UP FILED: T-680 (should the open dwell also SET `oldest_record`).
+      ALSO FOLDED IN: T-640, the same fail-open pointed the other way - `ring_available` measured
+      a HANDLE rather than a ring that can answer, so a refused ring served `"unobserved"` over
+      rows with no tune record. Same branch, same file; see that entry.
+
 
   - id: T-592
     milestone: M2-hardening
@@ -20968,6 +21028,43 @@ tasks:
       Filed 2026-09-21 by T-621, which found it while putting the refused ring under test and was
       scoped out of `crates/hk-api/src/coverage.rs` (T-596 held that file at the time). Small and
       self-contained; the refused-ring test that exercises it already exists.
+  - id: T-680
+    milestone: MLIVE
+    title: Decide whether the dwell in flight should also SET the record horizon, not only be clipped to it
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-596]
+    use_cases: [AWARE-011]
+    found_by: 'T-596, 2026-09-21, as the design alternative it deliberately did not take'
+    acceptance: |
+      T-596 serves the dwell IN FLIGHT as coverage (so a refused IQ ring cannot grey the live edge)
+      and CLIPS it to `Memory::oldest_record`, so a provisional record can never turn a row the same
+      answer calls `"unknown"` into `"observed"`. The alternative, considered and rejected there,
+      is to let the open dwell also CONTRIBUTE to `oldest_record` - i.e. treat it as one of the tune
+      records the horizon is computed from.
+      THE ARGUMENT FOR IT: it is arguably the more honest answer. The open dwell IS a tune record
+      the server still holds, in memory, undiscarded. Over the interval it has been running we do
+      know we looked, so calling those rows "we no longer know whether we looked" is false, and the
+      clip makes the answer conservative rather than correct. Today the two halves are consistent
+      only because the clip silences the open dwell there.
+      THE ARGUMENT AGAINST, and why T-596 did not do it: it rewrites a SHIPPED contract - T-507's
+      `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so` asserts
+      `horizon.unknown_rows` on a server whose ring has discarded its first seconds, and this would
+      empty that band - and it lets an UNSEALED claim redefine the server's own statement about what
+      it has forgotten. `oldest_record` is a statement about memory; a record that has not been
+      written is a poor thing to compute memory from, and the failure mode (a long-lived open dwell
+      quietly asserting that nothing was ever forgotten) is silent.
+      DECIDE WITH EVIDENCE, and if it changes, change T-507's contract test deliberately and say so
+      in docs/api.md rather than letting it fall out. Note that the FORWARD horizon already works
+      the other way: T-596 folds the open dwell in before `as_of_s` is taken, because the forward
+      horizon must agree with the plane. Whether the two horizons SHOULD be asymmetric is exactly
+      this ticket's question.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
