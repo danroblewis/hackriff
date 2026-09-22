@@ -5770,6 +5770,22 @@ tasks:
       SDRTrunk/OP25/DSD+ offline over the same IQ, behind the C22 plugin boundary, hardware/off-air
       tier only, cross-validated against a spectrogram-derived grant/activity check so no single
       decoder authors the answer key.
+    result: |
+      2026-09-22: STILL BLOCKED on a real off-air P25 capture (T-544's BART attempt was negative,
+      docs/19 section 7) - no oracle harness was built, per the ticket's own acceptance text. Did
+      the part that does not depend on the capture: crates/hk-detect/src/trunk/tsbk.rs's module
+      header now says explicitly, in its own section ("No independent oracle has confirmed this
+      decoder (T-299)"), that the decoder and its test fixtures share one author's reading of the
+      same references, so a shared misreading would pass both, and that nothing here has been
+      checked against a second, independently-written implementation on the same IQ. It names the
+      docs/19 section 5.3 oracle design (Trunk Recorder/OP25/SDRTrunk offline, C22 plugin boundary,
+      hardware/off-air tier, cross-validated against a spectrogram-derived check) as what to build
+      once a capture exists, and points at T-544's negative BART result as why none exists yet.
+      No decoder logic changed. Targeted test: `just test-crate hk-detect` - 199 tests run, 199
+      passed (1 reported leaky, pre-existing and unrelated to this change - a doc comment only
+      edit), 1 skipped. `just precheck hk-detect` clean. Not chasing: finding another off-air P25
+      system to capture from is out of scope for this ticket (capture is user-triggered per the
+      acceptance text) and not something I can do from this worktree.
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
@@ -22095,6 +22111,103 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Blocks everything; land first. Mockup choices the docs left open, to
       confirm in MAP-00: bottom sheet at every width (no desktop side slide-in); Research is a right
       slide-in, not the sheet's full state.
+    result: |
+      DONE 2026-09-22 (branch task-t800). MAP-00 delivered as ADR-0023 + three normative spec
+      sections, an api.md reservation and one contract test. No product code changed; the only
+      non-doc file touched is crates/hk-cli/tests/api_contract.rs.
+
+      WHAT CHANGED
+      - docs/adr/0023-map-ui-and-research-state.md (NEW, PROVISIONAL): the decision record. Context,
+        three options-considered blocks, seven decisions, consequences. Indexed in docs/adr/README.md.
+      - docs/23 -> SPEC. New normative §10 (the layout contract: four z-bands where the BAND decides
+        the coordinate system; chrome docking + idle fade and what fade may never hide; the sheet and
+        Research slide-in; the tool-mode gesture table; responsive/touch/a11y floors) and §11 (panel
+        -> client slice -> route for every new surface, with the two rows that may reach a device
+        route called out). Header now names the mockup as the layout reference and ADR-0023 as the
+        decision record.
+      - docs/24 -> SPEC. New normative §13 (layer registry), §14 (pins), §15 (the four client
+        slices). §12's ticket table marked superseded by docs/26; the "docs/23 §7 forthcoming"
+        cross-reference resolved.
+      - docs/25 -> SPEC. New normative §10 (the store contract: four stores/one pattern, the
+        server-stamped provenance object, one paging contract, the cursors-not-a-value POST rule,
+        audit/availability/device-line, the bookmarks facade and /api/views, nothing feeds
+        detection). Its R-1..R-8 sketch marked superseded with an R->MAP mapping.
+      - docs/16 §8.7 (NEW) and docs/14 "The map-UI reframe" (NEW): the EXTENDS the ticket asked for.
+        16 §8.7 states the three couplings back into the engine; 14 maps every MUI panel to its new
+        home and closes the three capabilities T-445 recorded as homeless.
+      - docs/api.md: new "Reserved: the map-UI research routes (MMAP)" table (14 route rows across
+        /api/annotations, /api/collections, /api/markers, /api/measurements, /api/views, /api/priors)
+        plus the six rules they all inherit. Reserved, NOT served; each owning ticket lands its route
+        and its contract test together (T-079).
+      - crates/hk-cli/tests/api_contract.rs: mmap_research_routes_are_reserved_and_gated.
+      - docs/26: header updated (approved, in tasks.yaml as T-800..T-825); MAP-19 and MAP-20 details
+        updated with the choices MAP-00 settled. docs/README.md: rows for 23/24/25/26 added.
+
+      THE FIVE DESIGN CALLS (the parts that were genuinely open, not transcription)
+      1. A layer declares a FIXED PLANE - data | overlay | dom - and planes render in that order,
+         with z ordering only WITHIN a plane. "Layer" had meant three mechanisms across docs/24;
+         left loose, the first layer ticket could have put a coverage wash in the stroke pass. Only
+         the data plane (the one cell rule / one ramp) may paint a cell, so an overlay remains
+         structurally incapable of tinting a measurement.
+      2. Overlay layers compose into the ONE EXISTING `marks` hook in ui/src/app/centre/surface.ts
+         (marks: (pane, edge) => OverlayQuad[]). MAP-06 refactors that call site into a registry; it
+         adds no second render path, so the byte-identical-with-overlays-off guard keeps full force
+         over a surface with ten times the layers.
+      3. Pins are band-1 DOM laid out IN THE RENDER FRAME, capped at 400 elements per pane behind
+         clustering, picked with a CPU quadtree. GPU picking is deferred with a STATED trigger
+         (>2 ms layout+hit-test per pane at the cap) rather than assumed away; MAP-09/MAP-10 owe the
+         measurement (the T-453 discipline applied to the client).
+      4. Resolved a real contradiction in the approved doc set: docs/23 §3 said authoring reuses
+         Shift+drag, docs/25 §9 said authoring is a mode. Settled in favour of the MODE, which
+         re-binds only the BARE drag; Shift+drag keeps one meaning in every mode, and a region it
+         marks feeds every extent-taking action, so authoring adds no gesture and costs the
+         navigate-first user nothing. Closes T-445 open capability #2. Both docs patched to agree.
+      5. Saved views get their OWN /api/views store (docs/26 MAP-19 left "bookmark store or
+         /api/views" open): a view is a view-arithmetic tuple with follow_live and no frequency
+         centre, so filing it as a marker would give it a false place.
+      Plus the two mockup choices the ticket asked to confirm: bottom sheet at EVERY width (one
+      component, one state machine, width-capped and bottom-left docked on wide screens), and
+      Research as a RIGHT SLIDE-IN, not a sheet state - because the sheet is selection-scoped and
+      ephemeral while Research is durable and cross-window, docs/25 §1 requires that difference to be
+      visible, and "click a row -> the mark selects -> the sheet fills" needs both open at once.
+
+      NO NEW FRONTEND DEPENDENCY, justified four ways in ADR-0023 §6: the approved mockup implements
+      every new surface in ~700 lines of vanilla TS/CSS; the existing store already provides selector
+      subscriptions with change-equality, the only reactive primitive the panels need; a framework
+      scheduler would add a SECOND render cadence competing with the per-frame RAF pass, which is
+      exactly the T-388 defect class this design is bound not to re-create; and a virtual-DOM diff
+      cannot be allowed near band 1, which must be positioned in the render frame.
+
+      THE api.md + api_contract.rs PAIRING (T-079). MAP-00 specifies routes; MAP-12 and MAP-16..19
+      implement them. So api.md reserves the shapes and the test asserts the half that is assertable
+      today, written so it does NOT have to be deleted as the routes land: without a token every
+      reserved path answers 401 (auth runs before dispatch in http.rs, so this holds whether or not
+      the route exists, and it is exactly the property a store of a researcher's notes must keep once
+      it does); with a valid token it either 404s "no such endpoint" (not landed) or answers its own
+      contract, and may never 401. It also asserts every reserved path is in docs/api.md, so the
+      table cannot drift while the tickets are open. Deliberately NOT a tripwire that four later
+      tickets must delete.
+
+      TESTS (targeted only, per CLAUDE.md)
+      - cargo nextest run -p hk-cli -E 'binary(api_contract) and
+        test(/mmap_research_routes|every_route_in_the_route_table/)': 2/2 PASS.
+        (See RESULT line below for the measured run.)
+      - just precheck hk-cli: clean.
+      - No ui/src or crate source changed, so no UI or DSP suite is in the diff's blast radius.
+
+      SURFACED, CORRECTLY NOT CHASED (for the coordinator to file or fold into the owning ticket)
+      - docs/24 §3(b) lists coverage-fog as an OVERLAY layer. §13.3 corrects it to a data-plane layer
+        and says why; the older prose is left as the argument. MAP-07 must build to §13.3, not §3(b).
+      - docs/26 MAP-15 depends on MAP-19 (saved views) but the ticket text is about past SURVEY
+        coverage windows, which come from the coverage map/observation log, not the saved-views
+        store. The dependency may be spurious; worth a look before MAP-15 is scheduled.
+      - every_route_in_the_route_table_is_documented matches a route by "this line contains the
+        method and the path", so a reserved row could satisfy it for a real route that lands
+        undocumented. Bounded: each owning ticket replaces its reserved row with the real contract.
+        Not worth a stricter matcher today; noted so nobody is surprised.
+      - ADR-0023 is PROVISIONAL and says what promotes it: MAP-06 (the registry), MAP-09/MAP-10 (the
+        pin budget, MEASURED) and MAP-16 (the first store with its contract tests) landing and
+        holding.
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
@@ -22984,6 +23097,73 @@ tasks:
       Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
       this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
       place.
+    result: |
+      MEASURED. The headline was two different quantities compared to each other, plus one real,
+      located 5-minute step. No full suite was run; every number below is read back out of
+      ops/merge-runner.log, which holds 48 full gates.
+
+      1. THE INSTRUMENTATION WAS NOT RECORDING THE RUNS THAT MATTER. $HACKRIFF_OPS/
+         gate-timings.jsonl held 33 runs, of which 31 were written BY THE TEST SUITE ITSELF -
+         py/tests/test_gate.py's round-trip through gate.main() used the real $HACKRIFF_OPS, so
+         every `just test-py` appended a 0.0 s `py` record to the production history (their
+         `root` is a pytest tmpdir). Exactly TWO real `full` gates were in there against 48 the
+         runner had run. Fixed: the test now points at its own tmp dir (verified - the log length
+         is unchanged across a run of test_gate.py). The per-suite history that survived is the
+         line gate.py PRINTS beside each gatelog.append(), captured in merge-runner.log since
+         before the structured log existed; `just cycle-time --suites` now reads it back.
+
+      2. 21.4 AND 34.0 ARE NOT THE SAME MEASUREMENT. The 21.4 in CLAUDE.md is cycle-time's BRANCH
+         table: gate start -> MERGED, passing gates only, ALL CLASSES POOLED - a 17 s `py` gate
+         and a 40 min `full` one in one median. The 34.0 the guard reported is `full` only with
+         failed and bulk runs included. Most of the apparent 60 % is that.
+
+      3. LIKE FOR LIKE, 24 complete passing `full` gates, 09-20 23:37 -> 09-22 05:06 (earlier half
+         -> recent half): TOTAL 30.0 -> 34.7 min (+16 %). Per phase: lint 60 -> 63 s (the lld gain
+         is real and holds); the Rust workspace suite 16.9 -> 19.1 min (THE ONE THAT MOVED); the
+         acceptance suite 3.7 -> 5.3 min; the UI e2e suite 7.5 -> 8.0 min.
+
+      4. THE RUST SUITE'S GROWTH IS ONE STEP, NOT TEST-COUNT GROWTH. nextest wall 462 -> 756 s at
+         the 09-21 04:55 gate while the count moved 2395 -> 2403 (+0.3 %); over the whole window
+         2302 -> 2485 (+8 %) cannot explain +64 %. In that same run four hk-classify binaries
+         (accuracy_sweep, below_gate_absorption, open_set_stats, verifier_gain) went from
+         never-slow to past the 60/120/180 s SLOW thresholds and stayed there, and
+         hk-estimate::receiver_lines went >60 s -> >240 s (later >300 s). The test FILES are weeks
+         old; they got ~3x dearer. That gate carried T-246 and T-589, which change the classifier
+         internals those sweeps exercise.
+
+      5. BUDGET UNCHANGED AT 35 MIN, deliberately, with the reasoning in BUDGET_S: ~5 min sitting
+         in 5 named binaries is a defect to shrink, not a new price for the loop.
+
+      Code: cycletime.parse_suite_runs/suite_stats + `just cycle-time --suites` (per CLASS and per
+      SUITE, complete passing runs only); rolling_medians now excludes FAILED runs (the gate aborts
+      at the first failure, so a failed run measures a PREFIX - 24 of the 48 full gates never
+      reached the UI e2e suite at all, and counting them makes a broken suite look fast);
+      test_gate.py isolated from the production log; docs/10 + CLAUDE.md + justfile corrected;
+      .config/nextest.toml notes that T-436's "the heavy-serial group IS the critical path" is now
+      STALE - all five dominating binaries are outside the group.
+
+      Tests: py/tests/test_cycle_time.py (5 new, pass) + py/tests/test_gate.py (80, pass) +
+      test_nextest_config.py. `just precheck` clean (no Rust crates touched; ruff/format clean).
+
+      OBSERVED, NOT CHASED (evidence, for the coordinator to decide):
+      - THE REAL CYCLE COST IS RE-GATES, NOT DURATION. 36 gate failures against 44 runner gates;
+        HALF of all full gates never finish their suite set. One failure costs a whole re-gate plus
+        a requeue - more than the entire 4.7 min of drift this ticket was filed for. The UI e2e
+        suite alone aborted 9 of them (its exit-1s at 09-21 04:30, 06:02, 09:29, 12:03, 15:08,
+        15:50, 18:22, 09-22 00:42, 04:31).
+      - THE FIVE SLOW BINARIES ARE THE LEVER: ~300 s recoverable, and they are the new critical
+        path. Shrinking hk-classify's four sweeps and hk-estimate::receiver_lines is worth a
+        ticket; it needs someone who can judge the statistical power those sweeps are buying.
+      - T-631 DID LAND A GAIN, smaller than predicted: the acceptance suite's day-median went
+        300 s (09-21, mostly pre-T-631) -> 262 s (09-22), against the 390 -> 230 s it measured in
+        isolation. Directionally right; invisible in the total because the Rust suite grew more.
+      - $HACKRIFF_OPS/gate-timings.jsonl LOST ~460 records around 06:15 on 09-22, when nearly every
+        file in ~/.hackriff-ops was rewritten (uniform 06:15 mtimes, and an `active-ops-dir` file
+        appears). A copy of the pre-loss content with 126 gate_end records including 61 `full` runs
+        is at /private/tmp/claude-501/-Users-daniellewis-hackriff/573a0024-6d5e-4600-b164-
+        feaca9d406c6/scratchpad/gate-timings.jsonl (mtime 09-22 06:00); its run ids are disjoint
+        from the live file's. I did NOT touch shared ops state - the runner writes it concurrently.
+        The merge-runner-log parser above makes the loss much less damaging either way.
   - id: T-764
     milestone: M2-hardening
     title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'

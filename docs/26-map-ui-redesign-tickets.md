@@ -1,6 +1,6 @@
 # Map-UI redesign — proposed tickets
 
-Proposal from the map-ui-research workflow (2026-09-21). **Not yet in `docs/tasks.yaml`** — review, then the coordinator appends approved ones. Thin-client rule holds: most are `ui/` presentation; `layer=api|both` marks the few needing backend/API additions. See [docs/23](23-map-ui-philosophy.md), [docs/24](24-canvas-as-data-surface.md), [docs/25](25-spectrum-research-workflow.md).
+Proposal from the map-ui-research workflow (2026-09-21), **approved by the user 2026-09-22 and in `docs/tasks.yaml` as T-800…T-825** (MAP-`nn` = T-8`nn`), milestone **MMAP**. Thin-client rule holds: most are `ui/` presentation; `layer=api|both` marks the few needing backend/API additions. The design contract is [docs/23](23-map-ui-philosophy.md) (§10–§11 normative), [docs/24](24-canvas-as-data-surface.md) (§13–§15 normative) and [docs/25](25-spectrum-research-workflow.md) (§10 normative), decided in [ADR-0023](adr/0023-map-ui-and-research-state.md); the layout reference is [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html).
 
 ## Tickets
 
@@ -93,10 +93,10 @@ Backend. Extend the existing frequency-only bookmark store into TIME-FREQUENCY m
 Backend. Persist a measurement as an object: value + unit + (f,t) place + time + provenance — Delta-f, Delta-t, bandwidth, duration, symbol-rate/period. GET/POST/PUT/DELETE /api/measurements, audited. The measurement itself is client-computed presentation arithmetic over already-known state (thin-client); the store keeps the durable object. Update docs/api.md + api_contract.rs together (T-079).
 
 ### MAP-19 — Saved views: named, restorable (time x frequency) window extents  (S, api)
-Backend. Named restorable view extents (ArcGIS-bookmark analogue): a saved view is a point in view-arithmetic state, distinct from a device retune. Extend the bookmark store or a small /api/views; shareable/exportable. Update docs/api.md + api_contract.rs together (T-079).
+Backend. Named restorable view extents (ArcGIS-bookmark analogue): a saved view is a point in view-arithmetic state, distinct from a device retune. **Settled by MAP-00: its own small `/api/views` store, not an extension of the bookmark/marker store** — a view has no frequency *centre* in the sense a marker does, so filing it as one would give it a false place (docs/25 §10.6). Same pattern as the other three stores; shareable/exportable. Update docs/api.md + api_contract.rs together (T-079).
 
 ### MAP-20 — Annotation authoring on the canvas (draw box/marker/label -> create annotation)  (L, ui)
-FE. The gesture to author an annotation on the surface (box, marker, or label), coordinated with T-458 (drag pans, so create needs a modifier/mode — one gesture vocabulary, no second interpretation of a drag). Posts to /api/annotations with a provenance stamp; drawn as a distinct human-authored overlay. Depends on T-458 landing the selection-gesture design.
+FE. The gesture to author an annotation on the surface (box, marker, or label). **Settled by MAP-00 (docs/23 §10.4):** an explicit, visible **tool mode** re-binds only the *bare* drag; `Shift + drag` keeps its one meaning (mark a region) in every mode, so authoring adds no gesture to the vocabulary. Posts to /api/annotations with a provenance stamp; drawn as a distinct human-authored overlay. Depends on T-458 landing the selection-gesture design.
 
 ### MAP-21 — Collections panel + table view synced with the canvas (every mark is also a row)  (L, ui)
 FE. The Felt model: a collection is a named, toggleable-as-a-layer set of markers/annotations, and every mark is ALSO a sortable/filterable ROW in a table; edits in either surface propagate. Toggle a collection on/off as an overlay layer (MAP-06). Reads/writes /api/collections + /api/annotations.

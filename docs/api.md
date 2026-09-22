@@ -2181,6 +2181,52 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 
 **Staging.** The switch is flag-gated (`HK_LISTEN_PIPELINE=1`, default off) before it is defaulted on, and only for the modes that have blocks (WFM/NBFM/AM). USB/LSB/CW have no blocks and keep the existing chain. See ADR-0015 §12.9 for the numbered stages and what is observable after each.
 
+## Reserved: the map-UI research routes (MMAP, T-800 / ADR-0023)
+
+**These routes are SPECIFIED and RESERVED, not yet served.** T-800 (MAP-00) fixed their shapes so the
+four stores are four instances of one pattern rather than four designs; each owning ticket lands its
+route **and** its contract test in the same change (T-079). Until then a request to one of these paths
+answers `404 no such endpoint` **after** the ordinary `401` auth check — asserted by
+`api_contract.rs::mmap_research_routes_are_reserved_and_gated`, which also pins that they stay
+token-gated once they exist. Full contracts: [`docs/25 §10`](25-spectrum-research-workflow.md) (the
+four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023](adr/0023-map-ui-and-research-state.md).
+
+| Method | Path | Ticket | Body / query | Answer |
+|---|---|---|---|---|
+| GET | `/api/annotations` | MAP-16 | `f_lo`,`f_hi`,`t0`,`t1` **required**; `limit`? (200, max 2000), `cursor`? | `{annotations, count, matched, next_cursor}` |
+| POST | `/api/annotations` | MAP-16 | `{kind ("text"\|"box"\|"marker"), f_lo_hz, f_hi_hz, t0_s, t1_s, label, body?, collection_id?, view}` | `Annotation` (201, audited) |
+| GET/PUT/DELETE | `/api/annotations/{id}` | MAP-16 | any create field on PUT | `Annotation` / `{deleted}` |
+| GET | `/api/collections` | MAP-17 | `limit`? (500, max 2000), `cursor`? | `{collections, count, matched, next_cursor}` |
+| POST | `/api/collections` | MAP-17 | `{name, note?, color?}` | `Collection` (201, audited) |
+| GET/PUT/DELETE | `/api/collections/{id}` | MAP-17 | any create field; `{visible}` toggles | `Collection` / `{deleted, members_deleted}` |
+| GET/POST | `/api/collections/{id}/markers` | MAP-17 | `{name, f_center_hz, bandwidth_hz?, t_center_s?, duration_s?, note?, view}` | `{markers, …}` / `Marker` (201, audited) |
+| GET/PUT/DELETE | `/api/markers/{id}` | MAP-17 | any create field (`null` clears optionals) | `Marker` / `{deleted}` |
+| GET | `/api/measurements` | MAP-18 | `collection`?, `f_lo`/`f_hi`/`t0`/`t1`?, `limit`?, `cursor`? | `{measurements, …}` |
+| POST | `/api/measurements` | MAP-18 | `{kind, cursors, n?, note?, collection_id?, view}` — **`value`/`unit` in the body is `400 invalid`** | `Measurement` (201, audited) |
+| GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | `{cursors?, note?, collection_id?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
+| GET/POST | `/api/views` | MAP-19 | `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
+| GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | any create field | `SavedView` / `{deleted}` |
+| GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
+
+**Rules every one of them inherits** (`docs/25 §10`):
+
+- **Provenance is stamped by the server.** The client sends only `view` — the view context it was on
+  (`center_hz`, `span_hz`, `t_capture`, `tier`, `device_id`?). The server adds `actor` (a token
+  fingerprint, never the token), `authored_s` (wall clock) and `authored: true`, and keeps
+  `t_capture` (capture clock) and `authored_s` strictly apart. A request supplying a server-owned
+  provenance field is `400 invalid`.
+- **One paging contract**, the `/api/events` one. "Durable" is not "unbounded".
+- **Audited like `/api/bookmarks*`/`/api/selections*`**, and `503 unavailable` for every mutating
+  endpoint when there is no audit log.
+- **No entry ever carries a `device` key.** Authoring is a view act and reaches no radio; the one
+  research act that may command it is *restoring* a saved view whose frequency lies outside the tuned
+  window, which uses the ordinary gated retune offer (see "Device actions").
+- **`/api/bookmarks` is not replaced.** It becomes a compatibility facade over one reserved,
+  un-deletable collection; the bookmark rows and the collection's frequency-only markers are the same
+  rows.
+- **Nothing in these stores feeds blind detection** — on create or on import. They mint no candidate,
+  set no family and never pre-populate the inventory.
+
 ## Route table completeness
 
 `crates/hk-api/src/http.rs::ROUTES` is the single source of truth for what answers under `/api/` and `/ws/`; `crates/hk-cli/tests/api_contract.rs::every_route_in_the_route_table_is_documented` asserts every entry in it appears (method and path together) somewhere in this file, so this document cannot silently fall behind the server.
