@@ -48,6 +48,8 @@ BULKMARK=$S/bulk-in-progress
 # this script already keeps rather than counted a second way.
 LANDED=$S/landed.jsonl
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
+# Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
+BULK_MAX=${BULK_MAX:-15}
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
@@ -419,6 +421,14 @@ while true; do
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     set -- $ready
+    # BATCH CAP (user, 2026-09-22: "reduce batch size to 15"). A 20-branch batch that goes red
+    # is 20 branches' worth of isolation; the rest of the queue keeps its order and goes in the
+    # next batch, so nothing is dropped - the tail is written back BEFORE anything runs.
+    if [ "$#" -gt "$BULK_MAX" ]; then
+      log "BULK cap: $# ready, taking the first $BULK_MAX; the other $(( $# - BULK_MAX )) stay queued in order"
+      i=0; for b in "$@"; do i=$((i+1)); [ "$i" -gt "$BULK_MAX" ] && echo "$b" >> "$QUEUE"; done
+      set -- "${@:1:$BULK_MAX}"
+    fi
     if [ "$#" -eq 1 ]; then
       process "$1" || echo "$1" >> "$QUEUE"
     elif [ "$#" -ge 2 ]; then
