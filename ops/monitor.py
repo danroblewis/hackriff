@@ -1428,18 +1428,37 @@ def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
     mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
-    coord_path = f"{PROJ}/{COORD}.jsonl"
-    if os.path.exists(coord_path):
-        s = session_summary(coord_path, "coordinator")
-        if s: s["status"] = None; s["running"] = s["age_s"] < 180; out.append(s)
-    subs = glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True)
-    subs = [p for p in subs if os.path.getmtime(p) > time.time() - 1800]
-    subs.sort(key=os.path.getmtime, reverse=True)
+    # EVERY live session and its subagents, not only the coordinator's (user, 2026-09-22: the
+    # supervisor's triage/fix/merge/SDET agents were invisible here). A session is a top-level
+    # transcript under PROJ; its subagents live in <session>/subagents/. The coordinator is the
+    # id in $HACKRIFF_OPS/coordinator-session when that file exists (the COORD constant went
+    # stale the first time the coordinator was relaunched), else the COORD constant; the
+    # session whose subagent dir this monitor's own launcher used is the supervisor.
+    coord_id = COORD
+    try:
+        coord_id = open(os.path.join(SCRATCH, "coordinator-session")).read().strip() or COORD
+    except Exception:
+        pass
+    sessions = [p for p in glob.glob(f"{PROJ}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+    role_of = {}
+    for p in sorted(sessions, key=os.path.getmtime, reverse=True):
+        sid = os.path.basename(p)[:-6]
+        role = "coordinator" if sid == coord_id else ("supervisor" if os.path.isdir(f"{PROJ}/{sid}/subagents") else "session")
+        role_of[sid] = role
+        s = session_summary(p, role)
+        if s: s["status"] = None; s["running"] = s["age_s"] < 180; s["session"] = sid[:8]; out.append(s)
+    subs = [p for sid in role_of for p in glob.glob(f"{PROJ}/{sid}/subagents/*.jsonl") + glob.glob(f"{PROJ}/{sid}/**/*.jsonl", recursive=True)]
+    subs = sorted({p for p in subs if os.path.getmtime(p) > time.time() - 1800}, key=os.path.getmtime, reverse=True)
     ACTIVE = 210   # a subagent quiet longer than this is treated as no longer running
     best = {}       # dedupe by task id, keep the freshest transcript
     for p in subs:
         s = session_summary(p, "agent")
         if not s: continue
+        parent = p[len(PROJ) + 1:].split("/", 1)[0]
+        s["parent"] = role_of.get(parent, "session")
+        # No ticket in the label: name the agent by what it was asked to do.
+        kw = re.search(r"\b(deflak\w*|SDET|hand-merge|merge|fix|review|audit|triage|capture)\b", s["label"], re.IGNORECASE)
+        s["kind"] = (kw.group(1).lower() if kw else "agent")
         m = re.search(r"(?:task|fixing task|implementing task)\s+(T-\d+)", s["label"], re.IGNORECASE)
         if m:
             tid = m.group(1).upper()
@@ -1453,7 +1472,9 @@ def agents(status_map):
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
         key = tid or p
         if key not in best or s["age_s"] < best[key]["age_s"]:
-            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            s["name"] = tid or f"{s['parent']} · {s['kind']}"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            if not tid:
+                s["label"] = f"{s['parent']}'s agent · " + str(s.get("label", ""))[:100]
             best[key] = s
     # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
     # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
