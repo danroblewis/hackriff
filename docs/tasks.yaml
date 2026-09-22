@@ -21954,6 +21954,64 @@ tasks:
       Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
       this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
       place.
+  - id: T-764
+    milestone: M2-hardening
+    title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-762]
+    use_cases: []
+    found_by: 'the supervisor, 2026-09-22, after a malformed board reached main and broke the dashboard'
+    acceptance: |
+      WHAT HAPPENED. T-640's title contained `sources[iq-ring].available: true`, unquoted. To a
+      YAML loader that colon-space is a nested mapping, so `yaml.safe_load` rejected the WHOLE
+      file ("mapping values are not allowed here"). Every textual guard in
+      `py/tests/test_task_board.py` passed, `hkpy.reconcile` parsed it leniently and was fine, and
+      the gate stayed green - so the break reached `main` invisibly and surfaced only as a broken
+      dashboard graph, which is the worst way to learn about it.
+      THE INSIGHT THAT MAKES THIS MORE THAN A LINT TICKET, and it is uncomfortable: **it arrived
+      through a DIRECT BOARD COMMIT, and those are UNGATED.** The coordinator commits the board
+      several times an hour - "Board: flip nine tickets", "File T-700", "File T-760" - and none of
+      those commits runs a gate. So a gate-layer check would NOT have caught this break, and will
+      not catch the next one. The board's integrity currently rests on whoever is committing
+      remembering to check, which is exactly what failed.
+      TWO LAYERS, AND THE SECOND IS THE POINT.
+      1. GATE LAYER: `py/tests/test_task_board.py` asserts the board strict-parses, so a malformed
+         board fails any gated merge that touches it. NOTE the live constraint before choosing how:
+         **`pyyaml` is deliberately NOT a dependency of `py/`** (`hkpy.boardmerge` says so, and the
+         whole board toolchain is stdlib). T-762 already added a stdlib guard for the exact
+         construct that has ever broken it - a plain scalar containing `": "` - RED-proved. If you
+         want true strict-parse coverage instead, TAKING THE DEPENDENCY IS A DELIBERATE DECISION:
+         argue it in this ticket, do not smuggle it in with the fix.
+      2. COMMIT-PATH LAYER, which is the one that would have caught this: validate before ANY
+         commit that touches `docs/tasks.yaml` - the coordinator's direct board commits AND the
+         runner's merge commits.
+      IT MUST FAIL CLOSED. If the checker cannot run at all - missing interpreter, missing file,
+      unreadable board - the commit is REFUSED, not allowed. A validator that silently no-ops is
+      how this class recurs, and it is the same shape as three other defects found the same day:
+      a nextest override naming a package no run could see (T-631), a staged-bulk marker written
+      where its only reader never looked (T-761), and this file's own guards passing on a file a
+      loader rejects.
+      IT MUST COVER BOTH WRITERS. `hkpy.boardmerge` resolves `docs/tasks.yaml` automatically for
+      the merge driver, so a bad resolution can produce a malformed board with NO HUMAN IN THE
+      LOOP. `_validate` is the natural home for that half - it already refuses a resolution it
+      cannot vouch for, so extend what it vouches for.
+      DoD: a malformed board cannot reach `main` by any route. Demonstrate it by attempting the
+      exact 2026-09-22 break - an unquoted title containing `": "` - down EACH path in turn (a
+      direct board commit; a driver-resolved merge; a gated merge) and showing each one refuses
+      it. A DoD that only proves the gated path is not this ticket.
+      ASSERT WITH THE REFUSAL, NOT THE ABSENCE: show the check rejecting a known-bad board, not
+      merely passing on a good one, or the guard can rot into a no-op undetected.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 at the user's request, via the supervisor, who identified the ungated
+      direct-commit path as the hole. The dashboard's own half - `ops/monitor.py` reporting "the
+      board did not parse, here is why" instead of rendering a broken graph - is the supervisor's
+      and is not in this ticket; it is worth keeping even after the validators land, because a
+      reader that degrades honestly is useful whatever the writers do.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
