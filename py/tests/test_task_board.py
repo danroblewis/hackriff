@@ -312,3 +312,31 @@ def test_status_is_from_the_boards_own_vocabulary(records) -> None:
         + "\n  ".join(f"{i}: {s!r}" for i, s in bad)
         + "\nA status reconcile does not recognise makes the ticket invisible to it."
     )
+
+
+def test_the_board_parses_as_strict_yaml_and_ids_are_unique() -> None:
+    """The board must load under the SAME strict parser its consumers use.
+
+    Every other guard in this file is textual. `ops/monitor.py` (the task graph and the "Up next"
+    queue) and any future tool that reaches for `yaml.safe_load` reject the whole file on ANY
+    strict-YAML fault - an unquoted `: ` inside a scalar (T-640's title, 2026-09-22, which blanked
+    the dashboard while every textual guard passed), a tab, a bad indent, an unquoted `#` or `%`,
+    a stray `- `. So parse it for real, with the loader the dashboard uses. Fault-injected: T-640's
+    original title, a tab indent and a duplicate id are each caught.
+
+    While the document is loaded, check the one property a text scan cannot see across a merge:
+    ids are unique. Two sessions allocating `max+1` on different branches (2026-09-22: T-761..T-764
+    filed on two branches at once) merge textually clean and only collide as a parsed document.
+
+    `pyyaml` (MIT) is a declared dev dependency of `py/` for exactly this; run under `uv`.
+    """
+    yaml = pytest.importorskip("yaml", reason="pyyaml is a declared dev dependency of py/; run under uv")
+    try:
+        doc = yaml.safe_load(TASKS.read_text())
+    except yaml.YAMLError as e:  # pragma: no cover - the message IS the test output
+        pytest.fail(f"docs/tasks.yaml is not strict YAML; the dashboard cannot load it:\n{e}")
+    tasks = doc.get("tasks") or []
+    assert len(tasks) > 100, f"strict parse found only {len(tasks)} tasks"
+    ids = [str(t.get("id")) for t in tasks]
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    assert not dupes, f"duplicate ticket ids after a merge: {dupes} - renumber one side (never reuse an id)"
