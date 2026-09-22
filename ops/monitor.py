@@ -1449,7 +1449,11 @@ def agents(status_map):
         if s: s["status"] = None; s["running"] = s["age_s"] < 180; s["session"] = sid[:8]; out.append(s)
     subs = [p for sid in role_of for p in glob.glob(f"{PROJ}/{sid}/subagents/*.jsonl") + glob.glob(f"{PROJ}/{sid}/**/*.jsonl", recursive=True)]
     subs = sorted({p for p in subs if os.path.getmtime(p) > time.time() - 1800}, key=os.path.getmtime, reverse=True)
-    ACTIVE = 210   # a subagent quiet longer than this is treated as no longer running
+    # A subagent quiet longer than this is treated as no longer running. 900 s, not 210: a
+    # triage agent running one browser spec or a scoped nextest binary writes nothing to its
+    # transcript for 5-10 minutes, and 210 s hid the supervisor's fix agent mid-run (2026-09-22).
+    # Work-runner workers have pid liveness from the claims file and do not depend on this.
+    ACTIVE = 900
     best = {}       # dedupe by task id, keep the freshest transcript
     for p in subs:
         s = session_summary(p, "agent")
