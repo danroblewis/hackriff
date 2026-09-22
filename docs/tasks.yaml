@@ -16943,7 +16943,7 @@ tasks:
   - id: T-563
     milestone: M2-hardening
     title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -17026,7 +17026,7 @@ tasks:
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
-    status: review
+    status: done
     branch: task-t564
     priority: high
     parallel_group: M3A
@@ -20376,6 +20376,144 @@ tasks:
       characterisations the "current" match row can be an older one. Separate question from this
       ticket; not filed.
 
+  - id: T-614
+    milestone: M2-hardening
+    title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-545 while building the BART phase-2 blind suite, and it is the inverse of the gap
+      that ticket was looking for. The estimator gives `estimated_params` to the bursty ANALOGUE FM
+      neighbours - labelling them `"2fsk"`, `mod_order: 2`, deviation 2390 Hz - while the confirmed
+      digital C4FM control channel gets `null`.
+      So the failure is not "no answer for the digital signal". It is a CONFIDENT WRONG ANSWER for
+      an analogue one, in the same run, from the same estimator. An analogue FM burst has no symbol
+      alphabet at all; calling it 2-FSK with a deviation is the confidently-wrong outcome the
+      open-set stance exists to prevent, and it is worse than abstaining because a ranked
+      explanation built on it inherits the error.
+      Establish why the estimator commits rather than abstains here - is it that nothing in the
+      chain can return "analogue, no symbols", or that the abstention exists and is not reached?
+      T-589 found exactly that second shape (a stage structurally unable to fire looked like a
+      stage that fired and agreed), so check before concluding.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): over a scene containing both analogue
+      FM bursts and a digital channel, the analogue emissions do NOT receive a symbol-rate or
+      mod_order claim, and the count of each is reported so the test cannot pass on zero.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-615
+    milestone: MAUTO
+    title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-545]
+    use_cases: [SIGNAL-085]
+    acceptance: |
+      FOUND BY T-545, which was asked to rule on the `[851, 869] MHz` trigger band and did: a band
+      gate is not a frequency lookup, so it does not break the blind rule. BUT the ruling exposes a
+      gap it correctly did not close: SIGNAL-085's actual claim is to find a 100 %-duty narrowband
+      four-level emission ANYWHERE, and what runs is band-gated, so the use case as written is not
+      what is tested.
+      This matters beyond tidiness. The project's stance is that the known-signal database offers
+      ranked suggestions AFTER blind detection and never starts the search; a band gate is a
+      weaker version of the same shortcut - it does not look a frequency up, but it does decide
+      where to look from a prior rather than from the signal. The 902-928 MHz burst scene (T-254)
+      is the model for what measurement-driven looks like.
+      Decide whether the gate is a permanent engineering constraint (cost, dwell budget) that
+      should be recorded as one, or a scaffold to remove. If it stays, SIGNAL-085's text should say
+      so, because a use case that claims more than the test delivers is the same defect as a UI
+      implying resolution it never captured.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
+      trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-620
+    milestone: M2-hardening
+    title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
+    status: todo
+    priority: normal
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-563's lever-3 measurement: docs/capabilities/*.md cards are NOT the problem - all
+      14 are 107-125 lines, exactly the cheap, scoped-small design CLAUDE.md describes. The cost is
+      ADRs. `docs/adr/*.md` ranges 23-799 lines; the largest are named by open+closed tickets a LOT:
+      ADR-0016 (784 lines) by 49 tickets, ADR-0017 (530 lines) by 28, ADR-0015 (681 lines) by 24,
+      ADR-0013 (560 lines) by 19, ADR-0012 (799 lines) by 16, ADR-0011 (558 lines) by 15. CLAUDE.md
+      tells agents to "read the ADRs a task names", with no per-task pointer to a section, so a task
+      that names ADR-0016 for one contract (say, the taxonomy-versioning rule) has no way to avoid
+      paying for the whole 784-line document, every time a fresh agent is briefed into that area -
+      and a fresh agent is briefed into ADR-0016's area on the order of once every couple of tickets,
+      given 49 references.
+      THE FIX IS NOT TO SHRINK THE ADRs. CLAUDE.md: "changing an ACCEPTED ADR goes to Fable + the
+      user" - this ticket must not edit ADR content, and splitting/summarising one is a change to a
+      settled document, not a formatting nit.
+      WHAT TO DO INSTEAD: (a) add a short "date/agents cite this ADR mostly for: <section>" pointer
+      to each `use_cases`/task-entry citation going forward, OR (b) add a table of contents with
+      line-anchored section names at the top of the 6+ large ADRs (a structural aid, arguably not a
+      decision change - confirm with Fable/the user before landing it, per the ADR-change rule) so a
+      brief can say "ADR-0016 SS3-4" instead of "ADR-0016", OR (c) if neither is cheap, at minimum
+      change the *briefing convention* in CLAUDE.md/coordinator role docs so a task entry that names
+      a >300-line ADR also names the section, going forward - cheapest lever, no ADR content touched.
+      MEASURE, do not assume: before landing anything, get a rough token cost of "read ADR-0016 in
+      full" vs "read the ~80-line section a task actually needs" from a live brief, so the fix is
+      justified by a number rather than the plausible story above.
+    notes: |
+      Filed by T-563 (2026-09-21), which found this while checking lever 3 (context re-reading) and
+      deliberately did not fix it itself - editing ADR content is a Fable+user decision, and the
+      cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
+      nit.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
@@ -20475,104 +20613,6 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-547. Not urgent, but it is a precondition on those blocks publishing
       evidence(), the same way T-547 was for the FSK path.
-  - id: T-614
-    milestone: M2-hardening
-    title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
-    status: todo
-    priority: normal
-    parallel_group: DETECT
-    model: opus
-    effort: medium
-    depends_on: []
-    use_cases: []
-    acceptance: |
-      FOUND BY T-545 while building the BART phase-2 blind suite, and it is the inverse of the gap
-      that ticket was looking for. The estimator gives `estimated_params` to the bursty ANALOGUE FM
-      neighbours - labelling them `"2fsk"`, `mod_order: 2`, deviation 2390 Hz - while the confirmed
-      digital C4FM control channel gets `null`.
-      So the failure is not "no answer for the digital signal". It is a CONFIDENT WRONG ANSWER for
-      an analogue one, in the same run, from the same estimator. An analogue FM burst has no symbol
-      alphabet at all; calling it 2-FSK with a deviation is the confidently-wrong outcome the
-      open-set stance exists to prevent, and it is worse than abstaining because a ranked
-      explanation built on it inherits the error.
-      Establish why the estimator commits rather than abstains here - is it that nothing in the
-      chain can return "analogue, no symbols", or that the abstention exists and is not reached?
-      T-589 found exactly that second shape (a stage structurally unable to fire looked like a
-      stage that fired and agreed), so check before concluding.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): over a scene containing both analogue
-      FM bursts and a digital channel, the analogue emissions do NOT receive a symbol-rate or
-      mod_order claim, and the count of each is reported so the test cannot pass on zero.
-      Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-615
-    milestone: MAUTO
-    title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
-    status: todo
-    priority: normal
-    parallel_group: DETECT
-    model: opus
-    effort: medium
-    depends_on: [T-545]
-    use_cases: [SIGNAL-085]
-    acceptance: |
-      FOUND BY T-545, which was asked to rule on the `[851, 869] MHz` trigger band and did: a band
-      gate is not a frequency lookup, so it does not break the blind rule. BUT the ruling exposes a
-      gap it correctly did not close: SIGNAL-085's actual claim is to find a 100 %-duty narrowband
-      four-level emission ANYWHERE, and what runs is band-gated, so the use case as written is not
-      what is tested.
-      This matters beyond tidiness. The project's stance is that the known-signal database offers
-      ranked suggestions AFTER blind detection and never starts the search; a band gate is a
-      weaker version of the same shortcut - it does not look a frequency up, but it does decide
-      where to look from a prior rather than from the signal. The 902-928 MHz burst scene (T-254)
-      is the model for what measurement-driven looks like.
-      Decide whether the gate is a permanent engineering constraint (cost, dwell budget) that
-      should be recorded as one, or a scaffold to remove. If it stays, SIGNAL-085's text should say
-      so, because a use case that claims more than the test delivers is the same defect as a UI
-      implying resolution it never captured.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
-      trigger band is found, or the ticket records why it cannot be.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-620
-    milestone: M2-hardening
-    title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
-    status: todo
-    priority: normal
-    parallel_group: CI
-    model: opus
-    effort: medium
-    core_interface: false
-    depends_on: []
-    use_cases: []
-    acceptance: |
-      FOUND BY T-563's lever-3 measurement: docs/capabilities/*.md cards are NOT the problem - all
-      14 are 107-125 lines, exactly the cheap, scoped-small design CLAUDE.md describes. The cost is
-      ADRs. `docs/adr/*.md` ranges 23-799 lines; the largest are named by open+closed tickets a LOT:
-      ADR-0016 (784 lines) by 49 tickets, ADR-0017 (530 lines) by 28, ADR-0015 (681 lines) by 24,
-      ADR-0013 (560 lines) by 19, ADR-0012 (799 lines) by 16, ADR-0011 (558 lines) by 15. CLAUDE.md
-      tells agents to "read the ADRs a task names", with no per-task pointer to a section, so a task
-      that names ADR-0016 for one contract (say, the taxonomy-versioning rule) has no way to avoid
-      paying for the whole 784-line document, every time a fresh agent is briefed into that area -
-      and a fresh agent is briefed into ADR-0016's area on the order of once every couple of tickets,
-      given 49 references.
-      THE FIX IS NOT TO SHRINK THE ADRs. CLAUDE.md: "changing an ACCEPTED ADR goes to Fable + the
-      user" - this ticket must not edit ADR content, and splitting/summarising one is a change to a
-      settled document, not a formatting nit.
-      WHAT TO DO INSTEAD: (a) add a short "date/agents cite this ADR mostly for: <section>" pointer
-      to each `use_cases`/task-entry citation going forward, OR (b) add a table of contents with
-      line-anchored section names at the top of the 6+ large ADRs (a structural aid, arguably not a
-      decision change - confirm with Fable/the user before landing it, per the ADR-change rule) so a
-      brief can say "ADR-0016 SS3-4" instead of "ADR-0016", OR (c) if neither is cheap, at minimum
-      change the *briefing convention* in CLAUDE.md/coordinator role docs so a task entry that names
-      a >300-line ADR also names the section, going forward - cheapest lever, no ADR content touched.
-      MEASURE, do not assume: before landing anything, get a rough token cost of "read ADR-0016 in
-      full" vs "read the ~80-line section a task actually needs" from a live brief, so the fix is
-      justified by a number rather than the plausible story above.
-    notes: |
-      Filed by T-563 (2026-09-21), which found this while checking lever 3 (context re-reading) and
-      deliberately did not fix it itself - editing ADR content is a Fable+user decision, and the
-      cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
-      nit.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-628
     milestone: MAUTO
     title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
@@ -20609,46 +20649,6 @@ tasks:
       granted voice channels are followed and their call count matches the unshifted run's. Prove
       the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-532
-    milestone: MLIVE
-    title: A kept tile answer may not claim the radio never looked at time it never saw
-    status: done
-    priority: high
-    parallel_group: PIPE
-    core_interface: true
-    model: opus
-    depends_on: [T-501, T-505]
-    use_cases: [AWARE-011, AWARE-042]
-    acceptance: |
-      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
-      never had a board block, which is why `just reconcile` could not see it.
-      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
-      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
-      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
-      the third hop, and it is two things.
-      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
-      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
-      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
-      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
-      40 ms it is ~32 rows of THE grey over rows the radio recorded.
-      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
-      gate was charged per TILE rather than per PASS over the edge.
-      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
-      from the same spans the planes are rasterised from; the renderer draws nothing past it and
-      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
-      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
-      merely measured.
-    branch: task-t505-v2
-    notes: |
-      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
-      worktree, because they share their conflict files.
-      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
-      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
-      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
-      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
-      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
-      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
-      did not exist on the original branch - T-528 landed after it was cut.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
