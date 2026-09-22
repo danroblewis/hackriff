@@ -105,6 +105,15 @@ reviewer and fix/resume runs, and `ops/launch.sh` wraps the coordinator/supervis
 `ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. Budget of
 28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
 sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
+
+**The gate runs alone (user, 2026-09-22).** The bounded budget was not enough: the SDET review
+measured untouched crates of small unit tests running 18–79× dearer during shared gates. So the two
+runners now cycle: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
+in `merge-queue.txt`, and while a gate runs; running workers finish and join the queue (nothing is
+suspended); the merge runner **starts a gate only when the claims file shows no running worker**
+(`workers_drained`, capped at `WORKER_DRAIN_MAX` = 45 min so a stuck worker cannot hold every merge);
+when the batch lands the queue drops below the threshold and dispatch resumes. `just gate` therefore
+measures the code, not the neighbours.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)
