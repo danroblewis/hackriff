@@ -20847,54 +20847,6 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). This is the instrumentation that makes
       docs/22 section 6's sufficiency argument checkable; without it the argument is prose.
-  - id: T-640
-    milestone: MLIVE
-    title: A refused IQ ring reports available:true with zero spans, so rows with no tune record are served unobserved instead of unknown
-    status: done
-    branch: task-t596
-    priority: normal
-    parallel_group: PIPE
-    model: opus
-    effort: low
-    depends_on: []
-    use_cases: [AWARE-011]
-    found_by: "T-621's agent, 2026-09-21, while putting the refused IQ ring under test; handed to T-596, which holds crates/hk-api/src/coverage.rs"
-    acceptance: |
-      `Evidence::collect` set `ring_available: state.iq_buffer.is_some()` - whether a ring HANDLE is
-      wired, not whether a tune journal could answer. A ring whose allocation was REFUSED for lack
-      of free space still presents that handle and still answers `/api/iqbuffer`, while holding no
-      journal and contributing zero spans, so it reported `sources[iq-ring].available: true`.
-      `Evidence::unknown_rows` reads `no_tune_history` from that flag, so a server with a refused
-      ring and no observation log served `"unobserved"` - a positive claim that the radio did not
-      look - over rows it has no tune record of at all, where the rule says `"unknown"`.
-      It is the fail-open T-596 closed pointed the other way: an unsealed dwell may not paint
-      `observed` over `unknown`, and a refused ring may not paint `unobserved` over it either.
-      "We cannot say" is neither - the same reasoning as `Coverage::Unobserved` is not quiet and
-      `BiasTee::Unknown` is not `Off`.
-    result: |
-      DONE on task-t596 (the file is that branch's). PREDICATE: `ring_can_answer(status)` =
-      the ring status's own `enabled` ("the run buffers IQ", which every no-buffer case - `refused`,
-      `locked`, `incompatible`, disabled by configuration - reports as false with a `reason`) AND
-      `allocation != "allocating"` (an enabled ring still being laid down holds nothing: "nothing is
-      buffered until it completes"). A status that does not say, or says a non-boolean, is NOT read
-      as available: it fails closed on to `"unknown"`, the answer that claims least. Measured off
-      the status `Memory::of` already reads, so there is no second `status()` call, and carried as
-      `Memory::ring_can_answer` into the `ring_available` that `unknown_rows` reads.
-      COUNTS, `hk-api` coverage::tests::a_refused_ring_is_not_available_and_its_rows_are_unknown_
-      rather_than_grey, ten rows x one cell with no observation log so the ring is the only source
-      there could be: refused ring -> 10 `"unknown"`, 0 `"unobserved"`, `available: false` beside 0
-      spans; allocating ring -> the same; enabled ring holding one segment -> `available: true`,
-      1 span, 1 `unobserved` + 5 `observed` + 4 `unobserved`, which is the non-vacuity half (the
-      predicate must not pass by calling every ring dead).
-      RED with the old `is_some()` predicate restored: the refused case serves 10 `"unobserved"`
-      rows - ten rows of "nothing looked" asserted by a ring that never opened.
-      docs/api.md now states what `sources[].available` means.
-      FOLLOW-UP, NOT DONE HERE: T-621's refused-ring contract test in
-      `crates/hk-cli/tests/api_contract.rs` deliberately asserts `spans == 0` and asserts NEITHER
-      value of `available`, because pinning today's would have enshrined this defect. With this
-      landed that assertion can be tightened to `available: false`. That file belongs to task-t621
-      and was not touched here.
-
   - id: T-680
     milestone: MLIVE
     title: Decide whether the dwell in flight should also SET the record horizon, not only be clipped to it
