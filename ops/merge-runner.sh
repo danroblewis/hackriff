@@ -310,7 +310,8 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
   tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
-  [ -z "$tests" ] && { log "TRIAGE: no FAIL lines found (lint/build failure?) - not a flake candidate"; return 1; }
+  TRIAGE_KIND="test"
+  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
   # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
@@ -406,6 +407,20 @@ try_bulk(){
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then
     git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    # A red with NO test FAIL line is lint, a build error or the UI unit step - a property of
+    # main+batch as a whole that every isolated gate would reproduce (2026-09-22 14:34: a
+    # TypeScript type error on main itself; isolating 6 branches would have been 6 identical
+    # reds, 6 attempt-ledger strikes and ~90 min). So: rewind, put the batch BACK in the queue
+    # in order, flag it once, and wait for a fix to be queued - never isolate.
+    if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
+      for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+      printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+      log "BULK gate FAILED without a test FAIL (lint/build/ui-unit) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; lint/build/ui-unit red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
+      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
+      rm -f "$BULKMARK"
+      return 0
+    fi
     log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
   else
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
@@ -470,6 +485,14 @@ while true; do
     ready=$(ready_filter $queued)
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
+    # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
+    # hold it until the queue changes (a fix branch appears, or a branch is withdrawn).
+    if [ -f "$S/suite-broken" ] && [ "$(echo $ready | tr ' ' '\n' | sort | tr '\n' ' ')" = "$(cat "$S/suite-broken")" ]; then
+      for b in $ready; do echo "$b" >> "$QUEUE"; done
+      [ -z "${SUITE_HOLD_SAID:-}" ] && { log "HOLD: the same batch failed without a test FAIL; waiting for the queue to change (a fix)"; SUITE_HOLD_SAID=1; }
+      sleep 8; continue
+    fi
+    rm -f "$S/suite-broken"; SUITE_HOLD_SAID=""
     set -- $ready
     # BATCH CAP (user, 2026-09-22: "reduce batch size to 15"). A 20-branch batch that goes red
     # is 20 branches' worth of isolation; the rest of the queue keeps its order and goes in the
