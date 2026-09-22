@@ -149,7 +149,7 @@ build:
 # `cargo test` if nextest isn't installed.
 # See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
-test: (_coordinator-only "test") test-rust test-doc test-py test-ui
+test: (_coordinator-only "test") nextest-config-check test-rust test-doc test-py test-ui
 
 # HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
 # (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
@@ -174,6 +174,28 @@ test-rust:
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
         cargo test $scope
     fi
+
+# T-631: a nextest override must be reachable by a nextest run that reads it.
+#
+# `.config/nextest.toml`'s first override pinned `package(hk-e2e)` into the serial `heavy-serial`
+# group, and its header explained at length why hk-e2e is heavy. IT HAD NEVER APPLIED TO A TEST:
+# every recipe that ran hk-e2e used plain `cargo test`, which does not read that file, and every
+# recipe that used nextest passed `--workspace --exclude hk-e2e`. 125 tests were believed
+# serialised for months of commits and were not — a protection everyone reasons about that does
+# not exist, which is worse than no protection at all.
+#
+# So this compares the two files that have to agree: the packages named by override filters, and
+# the package scope of the justfile's nextest invocations. It fails when a named package is
+# outside every one of them, or names no workspace member (the same defect by typo).
+# `just test-crate <crate>` and `just test-one` deliberately do NOT count as evidence — their
+# scope comes from whoever types them, and counting them would have made this check pass on the
+# very tree that shipped the bug.
+#
+# It is a member of `just test` rather than only a pytest because it is the cheap one: pure text,
+# no build, milliseconds, and it names the file and the filter when it fires.
+# Fail if a .config/nextest.toml override names a package no nextest run can ever see (T-631).
+nextest-config-check:
+    uv run --locked --project py python -m hkpy.nextest_config
 
 # nextest doesn't run doctests, so `just test` runs them separately.
 test-doc:
@@ -248,21 +270,50 @@ e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
 e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_mauto"
 
-# THREAD CAP, and why it lives here rather than in .config/nextest.toml. These suites run through
-# plain `cargo test`, NOT nextest, so nextest's `test-threads = 8` and its `heavy-serial` group do
-# not apply to them at all. The gap is not theoretical: `heavy-serial` covers
-# `package(hk-pipeline) and test(listen)`, while the test that sank a gate on 2026-09-21 -
-# `hk-e2e` `acceptance_m0` `listen::signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches` -
-# lives in `hk-e2e`, so it was protected by neither and drove a real server's listener cap at full
-# default parallelism under a loaded gate. It passed alone in 24.8 s.
-# `RUST_TEST_THREADS` is cargo test's own variable, so the cap applies however the recipe is
-# invoked and stays overridable (`RUST_TEST_THREADS=1 just acceptance`).
-# This REDUCES FALSE REDS; it is not a fix for a timing-bound test, exactly as CLAUDE.md says of
-# the nextest cap. T-603 owns making that test deterministic.
-# M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to cargo test, e.g. `just acceptance -- --nocapture`
+# THE ONE PLACE an hk-e2e target set becomes a test command (T-631). Every recipe below calls
+# this, so hk-e2e's runner and its parallelism are defined once rather than copied eight times —
+# the copies are what let `RUST_TEST_THREADS` reach two recipes and miss the other six.
+#
+# IT RUNS NEXTEST, which is the whole point. `.config/nextest.toml`'s first override pinned
+# `package(hk-e2e)` into a serial group and HAD NEVER APPLIED TO A TEST, because these recipes used
+# plain `cargo test` (which never reads that file) and every recipe that did use nextest passed
+# `just _crate-scope hk-e2e`, i.e. `--workspace --exclude hk-e2e`. 125 tests were believed
+# serialised and were not. Now the config governs them: the `e2e-bounded` group caps hk-e2e at 6
+# concurrent tests, the number T-603 MEASURED (the M0 binary failed 2 of 3 at cargo test's default
+# 28-way in-binary parallelism and passed 4 of 4 at 6), and `just nextest-config-check` fails if an
+# override ever again names a package no nextest run can see.
+#
+# It is also FASTER than what it replaces. Measured 2026-09-21 over the 82 tests of the acceptance
+# gate, all green in every model: `cargo test` at RUST_TEST_THREADS=6 took 390 s; nextest with the
+# group at max-threads = 1 took 1133 s; nextest with the group at 6 took 230 s. nextest pools every
+# test across the eleven binaries into one queue, while `cargo test` drains the binaries one after
+# another — listen_live's single 67 s test used to have the box to itself.
+#
+# `{{args}}` go to whichever runner is in use, so they are nextest's flags on any machine that has
+# it. Note `--no-capture` pins nextest to ONE thread (that is why `acceptance-ci` no longer passes
+# it, and why a failure's output is better read from nextest's own per-test capture).
+# The `cargo test` path is a fallback for a machine without cargo-nextest and keeps the
+# `RUST_TEST_THREADS` cap so it is never the unprotected 28 again.
+_e2e-run targets *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v cargo-nextest >/dev/null 2>&1; then
+        expr=""
+        for t in {{targets}}; do expr="${expr:+$expr + }binary($t)"; done
+        exec cargo nextest run -p hk-e2e -E "$expr" {{args}}
+    fi
+    echo "_e2e-run: cargo-nextest not found; falling back to plain 'cargo test' at RUST_TEST_THREADS=${RUST_TEST_THREADS:-6} (.config/nextest.toml's e2e-bounded group does NOT apply on this path)" >&2
+    flags=()
+    for t in {{targets}}; do flags+=(--test "$t"); done
+    exec env RUST_TEST_THREADS="${RUST_TEST_THREADS:-6}" cargo test -p hk-e2e "${flags[@]}" {{args}}
+
+# M0 slice acceptance suite (T-024, docs/11 §1.1): 7 use cases through the composed pipeline. Missing uv or LFS fixtures fail; only readsb-dependent parts skip. Extra args go to the runner, e.g. `just acceptance --no-capture` (which serialises — see `_e2e-run`).
 acceptance *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build -p hk-plugins --bins
-    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 RUST_TEST_THREADS=${RUST_TEST_THREADS:-6} cargo test -p hk-e2e --test {{e2e_slice}} {{args}}
+    export HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1
+    just _e2e-run "{{e2e_slice}}" {{args}}
 
 # The hk-e2e harness targets: the composed pipeline, mock device, Listen, recording, streaming,
 # refinement and the C-stage floor acceptance, driven through the e2e harness. These are not
@@ -270,20 +321,24 @@ acceptance *args:
 # `just test` excludes hk-e2e wholesale, so until T-357 they were in no recipe at all and CI's
 # accreted `cargo test -p hk-e2e` was the only thing running them. Fixtures and the synthetic
 # generator are required here, not optional: a gate that skips is a gate that passes for the wrong
-# reason (the T-346/T-353 defect). Extra args go to cargo test.
+# reason (the T-346/T-353 defect). Extra args go to the runner (see `_e2e-run`).
+# The hk-e2e harness targets: pipeline, mock device, Listen, recording, streaming, refinement, floor.
 e2e-harness *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    flags=()
-    for t in {{e2e_harness}}; do flags+=(--test "$t"); done
-    HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 RUST_TEST_THREADS="${RUST_TEST_THREADS:-6}" cargo test -p hk-e2e "${flags[@]}" {{args}}
+    export HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1
+    just _e2e-run "{{e2e_harness}}" {{args}}
 
 # THE acceptance gate: what CI's acceptance job runs, and one tracked definition rather than a copy
 # of it in the workflow (T-353's rule, applied to the opposite sign of drift). The M0 vertical slice
 # plus the harness targets, after the census that keeps the target lists honest. Deliberately NOT
 # the milestone exit gates — see `acceptance-milestones`. Anyone can run this locally; it is the
 # same command CI runs.
-acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check (acceptance "--" "--nocapture") (e2e-harness "--" "--nocapture")
+# T-631 dropped the `-- --nocapture` it used to pass to both: under nextest that becomes
+# `--no-capture`, which pins the run to ONE thread and would undo the measured `e2e-bounded`
+# concurrency. nextest captures per test and prints the output of the ones that FAILED, which is
+# what the flag was there for and is easier to read than 82 interleaved suites.
+acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check acceptance e2e-harness
 
 # The milestone exit gates in one command: M2 attention, M3 classification, M4 trunking, chirp.
 # Deliberate, coordinator-run at milestone boundaries — kept out of CI's per-push gate because they
@@ -328,17 +383,26 @@ e2e-targets-check:
     [ "$fail" -eq 0 ] || exit 1
     echo "e2e-targets-check: $(printf '%s\n' "$found" | wc -l | tr -d ' ') hk-e2e targets, all accounted for"
 
-# M2 attention acceptance suite (T-124): a time-compressed multi-day occupancy scene through the mock SDR under the bandit scheduler (FCO vs hidden truth, busier-than-usual alarm, false alarms, gain step, survey report coverage/POI) plus the recorded bandit vs round-robin simulator comparison. Kept apart from `acceptance` for wall time. Extra args go to cargo test.
+# M2 attention acceptance suite (T-124): a time-compressed multi-day occupancy scene through the mock SDR under the bandit scheduler (FCO vs hidden truth, busier-than-usual alarm, false alarms, gain step, survey report coverage/POI) plus the recorded bandit vs round-robin simulator comparison. Kept apart from `acceptance` for wall time. Extra args go to the runner (see `_e2e-run`).
 acceptance-m2 *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m2 {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_m2 {{args}}
 
-# M3 classification acceptance suite (T-206, the M3 exit gate, ADR-0016 §7): blind accuracy over the full synthetic acceptance grid against the five a-priori floors (top-1, top-2, wrong-label, unknown recall, false-known), reported per family and per SNR bin, plus blind scenes through the mock SDR for classification, signature match and clustering of repeated unknowns. ~1700 classified snippets, so it is kept apart from `acceptance` for wall time. Extra args go to cargo test.
+# M3 classification acceptance suite (T-206, the M3 exit gate, ADR-0016 §7): blind accuracy over the full synthetic acceptance grid against the five a-priori floors (top-1, top-2, wrong-label, unknown recall, false-known), reported per family and per SNR bin, plus blind scenes through the mock SDR for classification, signature match and clustering of repeated unknowns. ~1700 classified snippets, so it is kept apart from `acceptance` for wall time. Extra args go to the runner (see `_e2e-run`).
 acceptance-m3 *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m3 {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_m3 {{args}}
 
 # M4 (trunking) acceptance: T-267 control-channel hunting through the mock SDR device.
 acceptance-m4 *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_m4 {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_m4 {{args}}
 
 # MAUTO acceptance (SIGNAL-087, T-545 phase 2 + T-546 phase 3): blind auto-discovery and
 # auto-decode of a trunked control channel through the mock SDR — detect blindly, measure the
@@ -346,15 +410,24 @@ acceptance-m4 *args:
 # decoding it, at the -9.6 ppm receiver clock error this project measured on its own HackRF. All
 # seven tests run; T-545's five red proofs went green with T-546 and their `#[ignore]`s are gone.
 acceptance-mauto *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_mauto {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_mauto {{args}}
 
-# Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to cargo test.
+# Chirp acceptance (T-255, CLAUDE.md invariant 1): LoRa up-chirps in 902-928 MHz US ISM through the mock SDR — a signal with a time extent and no stable frequency, against a steady carrier and fixed-frequency bursts as controls. Extra args go to the runner (see `_e2e-run`).
 acceptance-chirp *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_chirp {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_chirp {{args}}
 
-# ISM burst acceptance (T-254, CLAUDE.md invariant 1): the 902-928 MHz short-burst playground through the mock SDR and the IQ ring - bounded time extents, one emitter per burst, ephemera catalogued as past events, plus the 100.3 MHz field case. Extra args go to cargo test.
+# ISM burst acceptance (T-254, CLAUDE.md invariant 1): the 902-928 MHz short-burst playground through the mock SDR and the IQ ring - bounded time extents, one emitter per burst, ephemera catalogued as past events, plus the 100.3 MHz field case. Extra args go to the runner (see `_e2e-run`).
 acceptance-ism *args:
-    HK_E2E_REQUIRE_SYNTH=1 cargo test -p hk-e2e --test acceptance_ism {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_ism {{args}}
 
 # T-364: re-derive both curves of the burst-recall vs open-set trade (docs/17), over N seed bases
 # so every figure carries its draw spread (ADR-0016 §7.2). Runs the shipped feature set and the
