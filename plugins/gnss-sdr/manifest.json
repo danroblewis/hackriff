@@ -1,0 +1,40 @@
+{
+  "manifest_version": 1,
+  "id": "gnss-sdr",
+  "version": "0.1.0",
+  "licence": "GPL-3.0-or-later",
+  "description": "GPS L1 C/A full receiver (T-323): GNSS-SDR exec'd as a subprocess behind hk-plugin-gnss-sdr, never linked (ADR-0010). The wrapper records each contiguous dwell of ci8 L1 IQ to a scratch file, runs gnss-sdr (acquisition, DLL/PLL tracking, nav decode, RTKLIB PVT) over it, and emits its RINEX 3 observations and NMEA fixes as decode lines of schema hackriff.gnss/1: one per observation epoch plus one dwell summary. Evidence only: no identity (no Emitter upsert) and no annotation. It buffers to disk, so it reports ready at once.",
+  "executable": "hk-plugin-gnss-sdr",
+  "args": [
+    "--gnss-sdr", "{param.gnss_sdr}",
+    "--dwell-s", "{param.dwell_s}",
+    "--min-dwell-s", "{param.min_dwell_s}",
+    "--obs-rate-ms", "{param.obs_rate_ms}"
+  ],
+  "params": {
+    "gnss_sdr": "gnss-sdr",
+    "dwell_s": "60",
+    "min_dwell_s": "36",
+    "obs_rate_ms": "100"
+  },
+  "input": {
+    "kind": "iq",
+    "datatype": "ci8",
+    "center_hz": { "min": 1570000000, "max": 1581000000 },
+    "ready_signal": true
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.gnss/1",
+    "content_class": "unrestricted"
+  },
+  "restart": { "backoff_initial_ms": 500, "backoff_max_ms": 60000, "max_restarts": 5, "window_s": 600 },
+  "limits": {
+    "input_queue_bytes": 16777216,
+    "stall_timeout_ms": 10000,
+    "ready_timeout_ms": 5000,
+    "max_message_bytes": 1048576,
+    "stderr_lines": 200,
+    "nice": 10
+  }
+}
