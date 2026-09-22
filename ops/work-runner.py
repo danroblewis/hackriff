@@ -68,6 +68,13 @@ PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
 # behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
+# THE GATE COMES FIRST. 2026-09-22 08:06-09:55: three docs-only branches (t800, t763, t299) each failed
+# an individual gate on a different load-sensitive test while 6-8 workers built beside it at load ~17,
+# and every failure costs a 50-minute isolation pass. So while a gate runs, admission drops to
+# GATE_CAP workers and GATE_LOAD_MAX load; the original CLAUDE.md rule (4 builders INCLUDING the
+# gate) was this, and raising the cap to 8 without it was the mistake.
+GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "3"))
+GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "10"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -386,9 +393,12 @@ def reap(claims, dry):
             attention(tid, c["branch"], "BLOCKED", why[18:220])
             record_done(c, "blocked", res)
         elif dirty:
-            c["state"] = "uncommitted"
-            attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
             record_done(c, "uncommitted", res)
+            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
+                claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why")
+            else:
+                c["state"] = "uncommitted"
+                attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
         elif ahead == 0:
             c["state"] = "no-work"
             attention(tid, c["branch"], "NO_WORK", f"worker exited after {age_min:.0f} min with no commits; see {d}/out.json")
@@ -580,7 +590,8 @@ def candidates(tasks, claims):
 
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
-    cap = CAP - (1 if gate_running() else 0)
+    gate = gate_running()
+    cap = min(CAP - 1, GATE_CAP) if gate else CAP
     free = cap - len(running)
     if free <= 0:
         return False
@@ -588,8 +599,9 @@ def dispatch(claims, dry):
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
         return False
     load1 = os.getloadavg()[0]
-    if load1 > LOAD_MAX:
-        log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} ({len(running)} running)")
+    lmax = GATE_LOAD_MAX if gate else LOAD_MAX
+    if load1 > lmax:
+        log(f"HOLD: load {load1:.0f} > {lmax:.0f} ({len(running)} running{', gate running' if gate else ''})")
         return False
     free = min(free, PER_TICK)
     try:
@@ -693,7 +705,7 @@ def tick(dry):
         frontier["held_groups"] = held
     except Exception:
         pass
-    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "cap": CAP - (1 if gate_running() else 0),
+    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "gate_cap": GATE_CAP, "gate_load_max": GATE_LOAD_MAX, "cap": (min(CAP - 1, GATE_CAP) if gate_running() else CAP),
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
               "load_max": LOAD_MAX, "per_tick": PER_TICK}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
