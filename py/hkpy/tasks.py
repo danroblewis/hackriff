@@ -37,7 +37,7 @@ from hkpy.boardmerge import split
 # The board's own status vocabulary (py/tests/test_task_board.py,
 # test_status_is_from_the_boards_own_vocabulary): a status this CLI or `reconcile` does not
 # recognise is a ticket invisible to both. Adding a state is a decision taken there, not here.
-STATUS_VOCAB = {"todo", "in-progress", "blocked", "done", "deferred", "cancelled", "reverted"}
+STATUS_VOCAB = {"todo", "in-progress", "blocked", "done", "deferred", "cancelled", "reverted", "planned"}  # planned: in the plan, not scheduled (2026-09-22)
 
 # Characters/patterns that make a YAML plain scalar ambiguous or illegal unquoted. Mirrors the
 # faults `test_task_board.py` actually checks for (an all-digit value reading as an int/octal, a
@@ -522,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_board_arg(p: argparse.ArgumentParser) -> None:
         # `result`/`note` already spend `--file` on the body text (per spec), so the board path
         # is `--board` for these two subcommands only.
-        p.add_argument("--board", dest="file", type=Path, default=None, help="board file (default docs/tasks.yaml)")
+        p.add_argument("--file", type=Path, default=None, help="board file (default docs/tasks.yaml)")
 
     p = sub.add_parser("show", help="print a ticket's raw block")
     p.add_argument("id")
@@ -546,14 +546,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("result", help="set the `result:` block (replaces any existing one)")
     p.add_argument("id")
-    p.add_argument("--file", dest="file_arg", help="read the result text from this file")
+    p.add_argument("--from", dest="file_arg", help="read the result text from this file")
     p.add_argument("--text", help="the result text, inline")
     add_board_arg(p)
     p.set_defaults(func=cmd_result)
 
     p = sub.add_parser("note", help="append to the `notes:` block (creates it if absent)")
     p.add_argument("id")
-    p.add_argument("--file", dest="file_arg", help="read the note text from this file")
+    p.add_argument("--from", dest="file_arg", help="read the note text from this file")
     p.add_argument("--text", help="the note text, inline")
     add_board_arg(p)
     p.set_defaults(func=cmd_note)

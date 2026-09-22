@@ -108,8 +108,8 @@ reconcile *args:
 #   just task show T-nnn                 print a ticket's raw block
 #   just task list [--status S] [--milestone M] [--ready] [--group G] [--json]
 #   just task set T-nnn key=value ...     replace/add scalar fields (refuses bad status/blocked)
-#   just task result T-nnn (--file|--text)   set the `result:` block
-#   just task note T-nnn (--file|--text)     append to the `notes:` block
+#   just task result T-nnn (--from|--text)   set the `result:` block
+#   just task note T-nnn (--from|--text)     append to the `notes:` block
 #   just task new --title T --milestone M [...]   file a ticket, allocating its id
 #   just task validate                    strict-parse + the board's own invariants
 task *args:

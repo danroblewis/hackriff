@@ -230,15 +230,15 @@ def test_set_refuses_to_clobber_a_multiline_field(board: Path, capsys) -> None:
 
 
 def test_result_sets_a_fresh_block(board: Path) -> None:
-    assert run(["result", "T-002", "--text", "worked fine.", "--board", str(board)]) == 0
+    assert run(["result", "T-002", "--text", "worked fine.", "--file", str(board)]) == 0
     doc = yaml.safe_load(_text(board))
     t2 = next(t for t in doc["tasks"] if t["id"] == "T-002")
     assert t2["result"].strip() == "worked fine."
 
 
 def test_result_replaces_an_existing_block(board: Path) -> None:
-    run(["result", "T-001", "--text", "first result.", "--board", str(board)])
-    run(["result", "T-001", "--text", "second, replacing.", "--board", str(board)])
+    run(["result", "T-001", "--text", "first result.", "--file", str(board)])
+    run(["result", "T-001", "--text", "second, replacing.", "--file", str(board)])
     doc = yaml.safe_load(_text(board))
     t1 = next(t for t in doc["tasks"] if t["id"] == "T-001")
     assert "first result" not in t1["result"]
@@ -246,7 +246,7 @@ def test_result_replaces_an_existing_block(board: Path) -> None:
 
 
 def test_note_appends_to_an_existing_block(board: Path) -> None:
-    assert run(["note", "T-003", "--text", "second note line", "--board", str(board)]) == 0
+    assert run(["note", "T-003", "--text", "second note line", "--file", str(board)]) == 0
     doc = yaml.safe_load(_text(board))
     t3 = next(t for t in doc["tasks"] if t["id"] == "T-003")
     assert "first note line" in t3["notes"]
@@ -254,7 +254,7 @@ def test_note_appends_to_an_existing_block(board: Path) -> None:
 
 
 def test_note_creates_the_block_when_absent(board: Path) -> None:
-    assert run(["note", "T-002", "--text", "a note", "--board", str(board)]) == 0
+    assert run(["note", "T-002", "--text", "a note", "--file", str(board)]) == 0
     doc = yaml.safe_load(_text(board))
     t2 = next(t for t in doc["tasks"] if t["id"] == "T-002")
     assert "a note" in t2["notes"]
@@ -263,14 +263,14 @@ def test_note_creates_the_block_when_absent(board: Path) -> None:
 def test_result_from_a_file(board: Path, tmp_path: Path) -> None:
     report = tmp_path / "report.txt"
     report.write_text("multi\nline\nresult\n", encoding="utf-8")
-    assert run(["result", "T-002", "--file", str(report), "--board", str(board)]) == 0
+    assert run(["result", "T-002", "--from", str(report), "--file", str(board)]) == 0
     doc = yaml.safe_load(_text(board))
     t2 = next(t for t in doc["tasks"] if t["id"] == "T-002")
     assert t2["result"].splitlines() == ["multi", "line", "result"]
 
 
 def test_result_requires_body(board: Path, capsys) -> None:
-    assert run(["result", "T-002", "--board", str(board)]) != 0
+    assert run(["result", "T-002", "--file", str(board)]) != 0
     assert "nothing to write" in capsys.readouterr().err
 
 
