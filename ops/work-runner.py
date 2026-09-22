@@ -77,6 +77,10 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # a fresh agent (or the coordinator) rediscovering everything. Capped like the merge runner's own
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
+# A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
+# todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
+# and review/gate escalations are NOT released: those need a person.
+RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
 MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
 MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
@@ -431,8 +435,28 @@ Your final message must end with exactly one line: HANDBACK: DONE  or  HANDBACK:
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 
+def release_stale_claims(claims, tasks_by_id):
+    changed = False
+    for tid, c in list(claims.items()):
+        if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+            if tasks_by_id.get(tid, {}).get("status") == "todo":
+                log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
+                del claims[tid]; changed = True
+    return changed
+
+
 def handle_gate_failures(claims, dry):
-    """Merge-runner GATE_FAIL lines for branches this runner queued -> resume the worker to fix."""
+    """Merge-runner GATE_FAIL lines for branches this runner queued -> resume the worker to fix.
+    Also: claims left in review-failed (from before the review-fix path existed) get the same path."""
+    for tid, c in list(claims.items()):
+        if c.get("state") == "review-failed" and c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+            try:
+                text = str(result_of(f"{WORKDIR}/{tid}/review.json").get("result", ""))
+                fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "VERDICT: FAIL (see review.json)")
+            except Exception:
+                fail = "VERDICT: FAIL (see review.json)"
+            if not dry:
+                claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {WORKDIR}/{tid}/review.json)")
     try:
         lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l]
     except FileNotFoundError:
@@ -630,6 +654,10 @@ def reap_worktrees(claims, dry):
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
+    try:
+        changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
+    except Exception as e:
+        log(f"release_stale_claims error: {e}")
     try:
         sync_board(claims, dry)
     except Exception as e:
