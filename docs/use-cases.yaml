@@ -204,8 +204,9 @@ use_cases:
   - context-feeds
   hardware_fit: needs-accessory
   accessory: dish or Yagi (directional antenna) + LNA
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a directional antenna to resolve the Sun from sky background; the 8-bit front end with no preselector has no absolute NF and drifts with gain/temperature, so treat G/T as a relative, site-calibrated estimate rather than a lab-grade figure.
   test_tier: field
 - id: SPACE-010
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -222,8 +223,9 @@ use_cases:
   - context-feeds
   hardware_fit: needs-accessory
   accessory: Ku-band LNB + dish (IF 950-2150 MHz)
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Gated on a dish behind a Ku-band LNB; the LNB's own gain drift with temperature dominates the 8-bit front end's contribution, but neither is calibrated out of the box, so the outage depth is a relative drop against a same-day baseline, not an absolute-power measurement.
   test_tier: field
 - id: SPACE-011
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1133,8 +1135,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: VLF/LF front end + soundcard for 10 kHz-1 MHz
-  fit_flags: null
-  fit_note: The 1 MHz-1 GHz portion is native; P.372 curves are built-in reference data.
+  fit_flags:
+  - marginal-8bit
+  fit_note: The 1 MHz-1 GHz portion is native; P.372 curves are built-in reference data. The 8-bit HackRF has no preselector, so urban IMD and out-of-band overload raise the measured floor above true ambient noise; report the survey as this receiver's floor, not an absolute site measurement, without a filtered front end.
   test_tier: field
 - id: SPACE-051
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1291,8 +1294,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA + 1420 MHz filter
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a horn or small dish, an LNA and a 1420 MHz filter since receiver noise dominates at this frequency; the 8-bit front end's dynamic range and IMD without a preselector still limit the achievable SNR after all that gain, so treat the line depth as approximate rather than lab-calibrated.
   test_tier: field
 - id: SPACE-058
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1490,8 +1494,9 @@ use_cases:
   - position-time
   hardware_fit: native
   accessory: null
-  fit_flags: null
-  fit_note: A dipole drift scan suffices; the sky model is built-in reference data.
+  fit_flags:
+  - marginal-8bit
+  fit_note: A dipole drift scan suffices; the sky model is built-in reference data. "Absolutely calibrate" is aspirational on this front end — with no factory NF and 8-bit dynamic range, gain/temperature drift over the drift-scan integration limits the achievable calibration accuracy, so treat the fit as relative to the sky model rather than metrology-grade.
   test_tier: field
 - id: SPACE-067
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1536,8 +1541,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: Yagi or dish + LNA (for Cyg A / Cas A)
-  fit_flags: null
-  fit_note: Sun transits work natively with a modest antenna.
+  fit_flags:
+  - marginal-8bit
+  fit_note: Sun transits work natively with a modest antenna; Cyg A and Cas A are far weaker and need a Yagi or dish plus LNA to lift them out of the 8-bit front end's dynamic range floor, and without a preselector urban IMD can still masquerade as transit amplitude.
   test_tier: field
 - id: SPACE-069
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -8077,8 +8083,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: calibrated noise source
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a calibrated ENR noise source cycled hot/cold; the 8-bit ADC's own quantization floor and any front-end IMD (no preselector) inflate the measured Y-factor, so the resulting NF is an estimate bounded by the receiver chain, not a lab-instrument-grade figure.
   test_tier: hil
 - id: RESEARCH-055
   theme: Unknown Signals, Security Research, Lab Engineering & ML
