@@ -20442,6 +20442,60 @@ tasks:
       ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the test behaves correctly BOTH with a ring and with the ring refused.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-630
+    milestone: MCANVAS
+    title: One greedy tab holds all four server slots, so a second client's boot is a coin flip - the tile route needs a fair share, not a bigger cap
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: 'task-fixshared, 2026-09-21, measured while fixing four canvas e2e failures'
+    acceptance: |
+      MEASURED, NOT INFERRED, and explicitly left unfixed rather than tuned away. While the first tab
+      saturates `GET /api/tiles`, the SECOND tab's boot is marginal: mounted in 8.2 s and 11.7 s after
+      7 refusals in the clean runs, and FAILED OUTRIGHT TWICE before T-505's tier hysteresis landed
+      ("GET /api/tiles refused every attempt"). T-501's finer fidelity floor makes the first tab
+      hungrier, so this gets worse, not better.
+      THE MECHANISM IS ALREADY NAMED BY THE ROUTE'S OWN REFUSAL TEXT: the in-flight cap is
+      `in_flight_limit 4` GLOBAL, first-come-first-served. A client that enumerates a large viewport
+      takes all four slots and keeps them, because it re-asks the instant one frees. Nothing in the
+      route knows there is a second client, so a new client's FIRST request - the one it cannot start
+      without - competes on equal terms with the thousandth request of a tab that is already drawn.
+      THE DECISION THIS TICKET EXISTS TO MAKE IS A FAIR-SHARE POLICY, NOT A CONSTANT.
+      Raising the cap is the wrong answer and is out of scope: it moves the failure, keeps the
+      unfairness, and spends the capacity T-489/T-453 measured on the capture thread. Weigh instead:
+        (a) per-client share of the in-flight budget, so N clients get ceil(cap/N) each and a new
+            client is guaranteed at least one slot;
+        (b) admission priority by what the request IS - a client's bootstrap/first-paint enumeration
+            outranks an already-drawn client's fill, the same reasoning as T-457's visible-fetch
+            precedence and T-459's "no visible fetch is starved";
+        (c) both: a reserved slot for any client with nothing on screen yet, with the rest shared.
+      Whatever is chosen, a client identity has to exist on the route for the policy to be expressible;
+      say in the ticket resolution whether that is a connection, a session, or a declared client id,
+      and what happens when a client disappears without telling the server (a leaked share is the
+      failure mode T-454 already paid for once - a leaked slot keeps leaking).
+      ASSERT WITH COUNTS AND ORDERING, NOT WALL-CLOCK (user, 2026-09-21). The existing harness is the
+      place: `ui/e2e/surface-contention.e2e.mjs` already opens a SECOND TAB into the first tab's tile
+      storm and already declares itself INCONCLUSIVE if the probe was never refused, so it cannot bank
+      a green on a race it lost. Extend it:
+        - the second tab reaches first paint within a STATED number of its own requests, not a stated
+          number of seconds, with the first tab deliberately saturating;
+        - refusals seen by the second tab before its first successful tile is bounded and stated;
+        - the first tab's peak in-flight never exceeds its share, read from the status line;
+        - and the whole thing goes RED when the share is removed (prove it against the current
+          first-come-first-served route, which is the natural red baseline).
+      DO NOT weaken T-455's existing bounds to make room - they condition permission on the MECHANISM
+      (a refusal must be SEEN to halve the client's operating cap), which is the property that made
+      this measurable at all.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-ui`, and the e2e specs named), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
+      ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
+      four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
