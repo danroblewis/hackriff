@@ -157,7 +157,13 @@ process(){
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
-  if just gate-merge >>"$LOG" 2>&1; then
+  local gate_line rc; gate_line=$(wc -l < "$LOG")
+  just gate-merge >>"$LOG" 2>&1; rc=$?
+  # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
+  # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
+  # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
+  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge"; rc=$?; fi
+  if [ "$rc" -eq 0 ]; then
     # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
     #
     # `git commit` with no MERGE_HEAD writes an ORDINARY commit of whatever is in the index. On
@@ -247,9 +253,14 @@ ready_filter(){
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
 FLAKY=$S/flaky.jsonl
-flake_retry(){ # base gate_log_start_line tickets -> exit 0 if the retried gate passed
-  local base=$1 from=$2 tickets=$3 tests filter t rc
-  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+FAIL \[' | awk '{print $NF}' | sort -u)
+flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
+  # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
+  # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
+  # `--base` gate would diff the wrong thing.
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t rc
+  # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
+  # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
+  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
   [ -z "$tests" ] && { log "TRIAGE: no FAIL lines found (lint/build failure?) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
@@ -259,11 +270,11 @@ flake_retry(){ # base gate_log_start_line tickets -> exit 0 if the retried gate 
   if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
     log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
     printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
-    ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
-    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> isolating"
+    ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
     return $rc
   fi
-  log "TRIAGE: a test FAILS alone -> a real defect in this batch; isolating"
+  log "TRIAGE: a test FAILS alone -> a real defect in this merge"
   return 1
 }
 
@@ -324,9 +335,9 @@ try_bulk(){
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
   # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
-  # recorded in flaky.jsonl, and the whole gate is retried ONCE with the machine to itself
-  # (gate-exclusive: the work runner suspends its workers). Only a test that fails alone, or a
-  # second red gate, still isolates.
+  # recorded in flaky.jsonl, and the whole gate is retried ONCE (workers are bounded, so the
+  # gate's reserved cores are the gate's - nothing is suspended). Only a test that fails alone,
+  # or a second red gate, still isolates.
   if [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
