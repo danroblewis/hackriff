@@ -5,7 +5,9 @@
 # contend for shared resources (ports, real OS threads/timing, spawned daemon
 # processes) so they don't race each other under load:
 #   - tests/e2e (hk-e2e): the harness + M0 acceptance suite drive the whole pipeline
-#     end to end and spawn real processes/servers.
+#     end to end and spawn real processes/servers. These are bounded rather than serialised,
+#     in their own `e2e-bounded` group at max-threads = 6 — see the measurement beside it
+#     (T-631), and note that hk-e2e only started reading this file at all in T-631.
 #   - hk-pipeline: tests named listen*/retune*/lossless*/refine*/stream* exercise
 #     live retune/listen/streaming timing against a running pipeline, and
 #     replumb_never_pays_for_the_ring (T-536) asserts a wall-clock bound on how long a
@@ -155,9 +157,40 @@ test-threads = 8
 [test-groups.heavy-serial]
 max-threads = 1
 
+# T-631: hk-e2e RUNS UNDER NEXTEST, AND ITS LIMIT IS THE ONE THAT WAS MEASURED.
+#
+# This override used to say `test-group = 'heavy-serial'` and HAD NEVER APPLIED TO A TEST.
+# Every recipe that ran hk-e2e used plain `cargo test`, which does not read this file, and
+# every recipe that used nextest passed `just _crate-scope hk-e2e` — `--workspace --exclude
+# hk-e2e`. 125 tests were believed serialised for months and were not. `just
+# nextest-config-check` (py/hkpy/nextest_config.py) now fails on exactly that shape, so an
+# override whose package no nextest run can see cannot come back.
+#
+# The justfile's `acceptance` / `e2e-harness` / `acceptance-m*` recipes now run nextest, so
+# this group decides hk-e2e's parallelism — and it is SIX, not one. Measured 2026-09-21 on
+# the 28-core dev Mac at load ~10-18, over the 82 tests of the acceptance gate (the M0 slice
+# plus the ten harness targets), all green in every model:
+#
+#   cargo test, RUST_TEST_THREADS=6 (what the gate ran before)   390 s
+#   nextest, this group at max-threads = 1                      1133 s   +12.4 min
+#   nextest, this group at max-threads = 6                       230 s   -2.7 min
+#
+# So serialising outright would have added ~58 % to a gate whose median is 21.4 min (T-543),
+# to buy a constraint stronger than the one the evidence asks for: T-603 measured the M0
+# binary FAILING 2 of 3 at cargo test's default 28-way in-binary parallelism and passing
+# 4 of 4 at 6. Six is the number that was measured; one is a guess in the safe direction that
+# a gate pays for on every ticket. Six also beats the old recipe outright, because nextest
+# pools all 82 tests across the eleven binaries into one queue while `cargo test` drains the
+# binaries one after another (listen_live's single 67 s test used to have the box to itself).
+#
+# Raise or lower this from a measurement, not from a feeling. `--no-capture` pins nextest to
+# one thread and makes this group irrelevant; that is why `acceptance-ci` no longer passes it.
+[test-groups.e2e-bounded]
+max-threads = 6
+
 [[profile.default.overrides]]
 filter = 'package(hk-e2e)'
-test-group = 'heavy-serial'
+test-group = 'e2e-bounded'
 
 [[profile.default.overrides]]
 filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'

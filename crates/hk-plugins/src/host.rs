@@ -179,6 +179,12 @@ pub struct PluginStats {
     /// The plugin can account for the input it is given: it sent a `ready` line (T-223), or its
     /// manifest declares no `input.ready_signal` and its process is attached ([`PluginState::Running`]).
     pub ready: bool,
+    /// The child has produced at least one byte on stdout or stderr: the **only** evidence it
+    /// reached its first instruction (T-540). `state == Running`, `starts` and even `ready` for a
+    /// manifest without `input.ready_signal` all tick from the host's own bookkeeping whether or
+    /// not the child ever ran. Any budget whose subject is the child — readiness, queue room,
+    /// no-progress after the input ends — must be measured from here, not from the spawn.
+    pub signs_of_life: bool,
     /// Records offered to a plugin process that had not reported itself ready (0 without a
     /// readiness signal). Counted **per process** (T-224): the flag re-arms at every restart, so
     /// each record is judged against the process it was offered to, and a restart can never
@@ -389,6 +395,7 @@ impl Shared {
             } else {
                 proc.state == PluginState::Running
             },
+            signs_of_life: lock(&self.life).is_some(),
             records_offered_before_ready: get(&c.offered_before_ready),
             content_ceiling: self.ceiling,
             records_offered: get(&c.offered),
@@ -430,6 +437,16 @@ impl PluginMonitor {
     /// Counters and state.
     pub fn stats(&self) -> PluginStats {
         self.shared.stats()
+    }
+
+    /// When the running child produced its **first byte** of output, or `None` while it has
+    /// produced none (T-540). Cleared at every (re)start, so it always names the running process.
+    ///
+    /// This is the observational boundary every "has it got there yet?" budget hangs off: before
+    /// it, elapsed time says nothing about the child, because a freshly linked binary really is
+    /// `posix_spawn`ed in ~193 µs and then executes nothing for up to ~30 s (T-493).
+    pub fn first_output_at(&self) -> Option<Instant> {
+        *lock(&self.shared.life)
     }
 
     /// The log ring, tagged with the output ceiling.
@@ -614,6 +631,17 @@ impl PluginInstance {
         self.shared.stats()
     }
 
+    /// When the running child produced its first byte of output; see
+    /// [`PluginMonitor::first_output_at`].
+    pub fn first_output_at(&self) -> Option<Instant> {
+        *lock(&self.shared.life)
+    }
+
+    /// The manifest's limits (the budgets a producer judges this plugin against).
+    pub fn limits(&self) -> crate::manifest::ResourceLimits {
+        self.shared.manifest.limits
+    }
+
     /// Waits up to `timeout` for the plugin to report itself ready (the `ready` line, T-223), and
     /// returns whether it is. A producer that can pause should hold its first record until this
     /// returns `true`: a decoder is attached (`Running`) as soon as its process reads stdin, but
@@ -622,12 +650,31 @@ impl PluginInstance {
     /// sample time. A manifest without `input.ready_signal` is ready as soon as it is attached.
     /// The wait also ends when the plugin fails or stops; a producer that cannot pause (a live
     /// chain) uses a bounded timeout and feeds anyway, counting what it did.
+    ///
+    /// `timeout` is judged on the two budgets (T-629): a `ready` line is *output*, so a child
+    /// that has produced no byte at all has not reached the thing being waited for, and until it
+    /// does the longer `startup_timeout` applies. From the first byte on, `timeout` runs as
+    /// given, so a decoder that starts and then fails to signal is caught exactly as fast as
+    /// before. Without this the bound measures the dynamic loader on a freshly linked binary
+    /// (T-493), which is what made this whole family flaky.
     pub fn wait_ready(&self, timeout: Duration) -> bool {
+        let startup = self.shared.manifest.limits.startup_timeout;
+        let began = Instant::now();
         let mon = self.monitor();
-        mon.wait_for(timeout, |s| {
-            s.ready || matches!(s.state, PluginState::Failed | PluginState::Stopped)
-        });
-        mon.stats().ready
+        loop {
+            let s = mon.stats();
+            if s.ready || matches!(s.state, PluginState::Failed | PluginState::Stopped) {
+                return mon.stats().ready;
+            }
+            let (budget, from) = match *lock(&self.shared.life) {
+                Some(byte) => (timeout, byte),
+                None => (timeout.max(startup), began),
+            };
+            if from.elapsed() >= budget {
+                return mon.stats().ready;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Kills the plugin, stops supervising, and returns the final counters.
@@ -642,9 +689,17 @@ impl PluginInstance {
     /// starting up (not yet reading) is waited for too: the wait ends on the plugin's exit, or
     /// after `idle` without progress (input consumed, lines stored, state), when it is killed.
     /// Never touches capture: records are no longer pushed once this is called.
+    ///
+    /// `idle` is judged on **two budgets**, told apart by observation exactly as the hang
+    /// watchdog's are (T-540): "nothing has happened for `idle`" is evidence about a child that
+    /// has run, and says nothing at all about one that has not reached its first instruction yet.
+    /// So before the child's first byte the longer `startup_timeout` governs, and from that byte
+    /// on `idle` runs from the later of the byte and the last progress. The expiry names which
+    /// one it was, so a plugin that never ran is never reported as a plugin that stalled.
     pub fn finish(mut self, idle: Duration) -> PluginStats {
         self.shared.finishing.store(true, Ordering::Release);
         self.shared.wake.notify_all();
+        let startup = self.shared.manifest.limits.startup_timeout;
         let attacher = self.feed.attacher();
         let mut input_ended = false;
         let mut last = None;
@@ -673,11 +728,32 @@ impl PluginInstance {
             if last != Some(progress) {
                 last = Some(progress);
                 since = Instant::now();
-            } else if since.elapsed() >= idle {
-                self.shared.log(format!(
-                    "host: no progress for {idle:?} after the input ended; stopping the plugin"
-                ));
-                break;
+            } else {
+                let life = *lock(&self.shared.life);
+                let (budget, from) = match life {
+                    Some(byte) => (idle, since.max(byte)),
+                    None => (idle.max(startup), since),
+                };
+                if from.elapsed() >= budget {
+                    // Both messages carry "no progress for" so one search covers either budget,
+                    // and each then names what never arrived: a decoder that ran and wedged and
+                    // one that never reached its first instruction are different faults.
+                    self.shared.log(match life {
+                        Some(byte) => format!(
+                            "host: no progress for {budget:?} after the input ended, measured \
+                             from the plugin's first output {:?} ago (responsiveness budget); \
+                             stopping it",
+                            byte.elapsed()
+                        ),
+                        None => format!(
+                            "host: no progress for {:?} after the input ended and the plugin has \
+                             produced no output at all (startup budget {budget:?}: it may never \
+                             have reached its first instruction); stopping it",
+                            from.elapsed()
+                        ),
+                    });
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(5));
         }

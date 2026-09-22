@@ -27,6 +27,16 @@ const WORK = path.join(UI_DIR, ".e2e-selftest");
  * `expect` names the file whose assertions must break. It is checked, not decorative: a fault that
  * fails the *other* guard is a fault the tier caught by accident, and the point of this run is to
  * know which guard sees which defect.
+ *
+ * **It may be an ARRAY, for a defect whose only signature is a lower-bound measurement** (T-690).
+ * `t454-forget-abandoned-slots` is the one: what it does is run more reads at once than the client
+ * accounts for, and the only thing that can see that from outside is wire concurrency — which
+ * `surface-nav` itself documents as a LOWER bound, since Chrome opens at most six connections per
+ * origin and hides anything past it. Measured the same day, same tree: `live-edge` saw peak 5
+ * against a cap of 4 while `surface-nav` saw peak 4. Naming one of them would make the verdict a
+ * coin toss about which file happened to catch the excess, so the claim is "a concurrency guard
+ * saw it" and the array says which ones are allowed to be the one. It is NOT a wildcard: any file
+ * outside the list is still the wrong guard.
  */
 const FAULTS = [
   {
@@ -64,7 +74,7 @@ export const __selftestMark = __selftestPredicate(1);
     // at the steady-state one — which is worth saying plainly, because an earlier draft of this
     // entry claimed the opposite and the run disagreed.
     name: "t454-forget-abandoned-slots",
-    expect: "surface-nav.e2e.mjs",
+    expect: ["surface-nav.e2e.mjs", "live-edge.e2e.mjs"],
     what: "T-454, the other half: abandoned requests stop being charged to the budget, so a client " +
       "that aborts on every viewport change asks the route for slots it is still using. Refusals " +
       "then continue indefinitely rather than stopping once the controller has converged.",
@@ -91,6 +101,56 @@ export const __selftestMark = __selftestPredicate(1);
       const from = "this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));";
       if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
       return src.replace(from, "/* injected by ui/e2e/selftest.mjs — never back off */");
+    },
+  },
+  {
+    // **T-521/ADR-0020, and the first standing fault for `fog-of-war.e2e.mjs`** (T-690). That file
+    // is the guard for one of the user's two top features and had no FAULTS entry at all, so its
+    // non-vacuity had never been measured by anything that re-checks itself.
+    //
+    // The smallest edit that is the defect: `tile.ts` decodes the server's `shadow` plane and then
+    // refuses to use it, so every unobserved cell takes THE grey whether or not a last-known value
+    // exists for it. The shadow tier is served, decoded and thrown away — which is exactly the
+    // failure ADR-0020 exists to prevent, stated as "we have it but didn't render it". The file's
+    // SERVER-side claims (the `shadow` plane carries a run over departed band A; band C carries
+    // none) all still pass, which is the point: this is a rendering defect and the guard that must
+    // see it is the pixel one.
+    name: "t520-shadow-drawn-as-grey",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-521/ADR-0020: the client decodes the server's `shadow` plane and then draws those " +
+      "cells as THE grey anyway, so spectrum the radio swept and left is indistinguishable from " +
+      "spectrum it never looked at — the one thing the last-known tier exists to prevent.",
+    file: "surface/tile.ts",
+    patch: (src) => {
+      const from = "      if (Number.isFinite(sv)) { state[i] = CELL.SHADOW; value[i] = sv; } else { state[i] = CELL.UNOBSERVED; value[i] = NaN; }";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in surface/tile.ts: shadow branch`);
+      return src.replace(from,
+        "      // injected by ui/e2e/selftest.mjs — the shadow plane is decoded and then ignored\n" +
+        "      { void sv; state[i] = CELL.UNOBSERVED; value[i] = NaN; }");
+    },
+  },
+  {
+    // **T-532, and the first standing fault for `canvas-journey.e2e.mjs`** (T-690). Same hole: the
+    // file carries the live-edge grey claim and the grey-tracks-coverage claim and nothing ever
+    // put either defect back.
+    //
+    // The smallest edit that is it: `drawUpToHorizon` stops clamping a tile to how far forward its
+    // coverage evidence reaches (`coverage.horizon.as_of_s`), so the rows past that horizon are
+    // drawn from a plane that cannot speak about them — as UNOBSERVED, i.e. THE grey. That is the
+    // pre-T-532 behaviour verbatim: measured 10-38 % of the live-edge zone grey before the fix and
+    // 0.0 % after, over a band the server reports fully observed.
+    name: "t532-draw-past-the-coverage-horizon",
+    expect: "canvas-journey.e2e.mjs",
+    what: "T-532: a tile is drawn beyond how far forward its own coverage evidence reaches, so the " +
+      "newest rows — recorded, folded and served — are painted THE grey, the one colour that may " +
+      "only mean the radio never looked.",
+    file: "surface/surface.ts",
+    patch: (src) => {
+      const from = "    if (!Number.isFinite(asOf as number) || (asOf as number) >= region.t1Ns) {";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/surface.ts: drawUpToHorizon");
+      return src.replace(from,
+        "    // injected by ui/e2e/selftest.mjs — ignore the horizon and draw the whole tile\n" +
+        "    if (true) {");
     },
   },
   {
@@ -138,7 +198,10 @@ export const __selftestMark = __selftestPredicate(1);
       "addressed\" instead of waiting the refusal out.",
     file: "surface/preview.ts",
     patch: (src) => {
-      const from = "const retries = bp.retries ?? 5;";
+      // The anchor moved when T-690 restated the budget in TIME rather than in attempts; it is
+      // still the one line that decides how many times the bootstrap will ask again, which is the
+      // only thing this fault is about.
+      const from = "const retries = bp.retries ?? retriesForBudget(backoffMs, maxBackoffMs, RETRY_BUDGET_MS);";
       if (!src.includes(from)) throw new Error(`selftest: anchor not found in preview.ts: ${from}`);
       return src.replace(from, "const retries = 0; // injected by ui/e2e/selftest.mjs — give up on the first 503");
     },
@@ -350,7 +413,14 @@ function runSuite(dist) {
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
   return {
     status: r.status, out,
-    failedFiles: (out.match(/failed: ([^\n]+)/)?.[1] ?? "").split(", ").filter(Boolean),
+    // **Anchored to the RUNNER's own summary line, not to the first "failed: " in the output**
+    // (T-690). Unanchored, this matched whatever a spec happened to print first — observed
+    // picking up a `canvas-journey` diagnostic and reporting the failed file as
+    // `injected fault (T-508): the device has gone"`, which then made `byTheRightGuard` false and
+    // the summary below say FAIL about a fault the right guard had caught. A verdict read from
+    // the wrong line is worse than no verdict, because this file's whole job is attribution.
+    failedFiles: (out.match(/^e2e: \d+\/\d+ files passed[^\n]*?; failed: ([^\n]+)$/m)?.[1] ?? "")
+      .split(", ").filter(Boolean),
   };
 }
 
@@ -374,10 +444,11 @@ for (const fault of faults) {
   const dist = build(fault);
   const t0 = Date.now();
   const { status, out, failedFiles } = runSuite(dist);
-  const alreadyRed = baseline.failedFiles.includes(fault.expect);
+  const expects = Array.isArray(fault.expect) ? fault.expect : [fault.expect];
+  const alreadyRed = expects.some((e) => baseline.failedFiles.includes(e));
   const caught = status !== 0;
-  const byTheRightGuard = failedFiles.includes(fault.expect);
-  results.push({ fault, caught, byTheRightGuard, alreadyRed, failedFiles, ms: Date.now() - t0 });
+  const byTheRightGuard = expects.some((e) => failedFiles.includes(e));
+  results.push({ fault, expects, caught, byTheRightGuard, alreadyRed, failedFiles, ms: Date.now() - t0 });
   console.log(out.split("\n").filter((l) => /^(e2e:|✔|✖|ℹ|  \d)/.test(l)).join("\n"));
   console.log(caught
     ? `-> RED, as it must be (${failedFiles.join(", ") || "runner aborted"}) in ${((Date.now() - t0) / 1000).toFixed(1)} s`
@@ -393,10 +464,10 @@ for (const r of results) {
   const verdict = !ok ? "FAIL" : r.alreadyRed ? "INCONCLUSIVE" : "PASS";
   if (!ok) bad++;
   console.log(`${verdict}  ${r.fault.name}  ` +
-    `expected ${r.fault.expect} to fail; failed: ${r.failedFiles.join(", ") || "(none — suite stayed green)"}  ` +
+    `expected ${r.expects.join(" or ")} to fail; failed: ${r.failedFiles.join(", ") || "(none — suite stayed green)"}  ` +
     `[${(r.ms / 1000).toFixed(1)} s]` +
-    (r.alreadyRed ? `\n         ${r.fault.expect} is ALREADY red on this tree without the fault, so this run` +
-      " does not prove the guard sees it. Re-run once that guard is green." : ""));
+    (r.alreadyRed ? `\n         ${r.expects.join(" or ")} is ALREADY red on this tree without the fault, so this` +
+      " run does not prove the guard sees it. Re-run once that guard is green." : ""));
 }
 if (bad) console.log(`\n${bad} fault(s) the browser tier does not catch, or catches with the wrong guard.`);
 process.exit(bad ? 1 : 0);

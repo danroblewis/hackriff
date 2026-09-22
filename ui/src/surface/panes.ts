@@ -697,6 +697,11 @@ export interface PaneStatus {
   /** **Resident tiles whose answer does not reach the live edge** (T-532) — see
    * [[PaneReport.behind]]. Not part of `pending`: the tile arrived, its newest rows had not. */
   readonly behind: number;
+  /** Resident tiles that drew NOTHING because their horizon is at or below their own start
+   * ([[PaneReport.blank]]) — held, and yet the pane's ground is what is on screen. */
+  readonly blank: number;
+  /** [[PaneReport.shortNs]]: how far short of this pane's own window top the drawing reached. */
+  readonly shortNs: number;
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
@@ -785,6 +790,8 @@ export function paneStatuses(
       fallbacks: r.fallbacks,
       pending: r.pending,
       behind: r.behind,
+      blank: r.blank,
+      shortNs: r.shortNs,
       differsFrom,
     });
   }

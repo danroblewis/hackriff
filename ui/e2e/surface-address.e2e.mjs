@@ -58,7 +58,7 @@ async function ask(path, { tries = 40, waitMs = 150 } = {}) {
 function addrOf(url) {
   const q = new URL(url).searchParams;
   const n = (k, d) => (q.has(k) ? Number(q.get(k)) : d);
-  return { levelF: n("level_f"), levelT: n("level_t"), fIndex: n("f_index"), tIndex: n("t_index"), cells: n("cells", 256) };
+  return { scheme: q.get("scheme") ?? "view", levelF: n("level_f"), levelT: n("level_t"), fIndex: n("f_index"), tIndex: n("t_index"), cells: n("cells", 256) };
 }
 
 /**
@@ -75,15 +75,37 @@ function addrOf(url) {
 async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) {
   // The lattice, read off the SERVER rather than restated here: a test that compared the client
   // against its own copy of the number would agree with the copy.
-  const probe = await ask("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8");
-  assert.equal(probe.status, 200, "the lattice probe must answer, or there is no lattice to test against");
-  const axes = (await probe.json()).axes;
-  const lat = { f0Hz: axes.frequency.cell_hz, t0Ns: axes.time.cell_s * 1e9 };
-  // The ceiling the PAGE was given: the server's declaration, unless the caller stated one for it.
-  const capF = caps ? caps.capF : (axes.frequency.max_level ?? axes.frequency.levels - 1);
-  const capT = caps ? caps.capT : (axes.time.max_level ?? axes.time.levels - 1);
-  t.diagnostic(`the page's lattice: level_f 0..${capF}, level_t 0..${capT} `
-    + `(route declares ${axes.frequency.levels} x ${axes.time.levels} levels, cell ${lat.f0Hz} Hz x ${axes.time.cell_s} s)`);
+  // **There are TWO lattices now, and a level index means a different cell on each (T-505).** The
+  // canvas picks a tier per viewport, per frame, by the tile budget: the detail tier (`scheme=view`)
+  // answers the tuned window and the overview tier (`scheme=overview`, anchored on scheme 1)
+  // answers the wide-and-long ones, which on this fixture is the minimap. A single `lat`/`capF`
+  // read off the detail probe and applied to every request the page made is then two different
+  // mistakes at once: it calls a legitimate overview address off-lattice, and it looks for the
+  // coarse end of the frequency axis on a lattice the page stopped using for the coarse end. So
+  // each scheme is probed for its own declaration and each request is judged against the lattice
+  // it actually names (T-564: partition by kind rather than counting one heap).
+  const latticeOf = async (scheme) => {
+    const q = `/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8` +
+      (scheme === "view" ? "" : `&scheme=${scheme}`);
+    const r = await ask(q);
+    assert.equal(r.status, 200, `the ${scheme} lattice probe must answer, or there is no lattice to test against`);
+    const axes = (await r.json()).axes;
+    return {
+      f0Hz: axes.frequency.cell_hz, t0Ns: axes.time.cell_s * 1e9,
+      capF: axes.frequency.max_level ?? axes.frequency.levels - 1,
+      capT: axes.time.max_level ?? axes.time.levels - 1,
+      levels: `${axes.frequency.levels} x ${axes.time.levels}`, tCellS: axes.time.cell_s,
+    };
+  };
+  const lattices = { view: await latticeOf("view"), overview: await latticeOf("overview") };
+  // The caller may still state the detail tier's ceiling for a page it shimmed.
+  if (caps) { lattices.view.capF = caps.capF; lattices.view.capT = caps.capT; }
+  const lat = { f0Hz: lattices.view.f0Hz, t0Ns: lattices.view.t0Ns };
+  const capF = lattices.view.capF, capT = lattices.view.capT;
+  for (const [name, L] of Object.entries(lattices)) {
+    t.diagnostic(`the page's ${name} lattice: level_f 0..${L.capF}, level_t 0..${L.capT} `
+      + `(route declares ${L.levels} levels, cell ${L.f0Hz} Hz x ${L.tCellS} s)`);
+  }
 
   const page = await browser.page(undefined, initScript ? { initScript } : undefined);
   await page.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
@@ -124,7 +146,23 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // chrome) and put addresses on the wire, and the page's addressing must have reached the COARSE
   // end of the frequency axis — which is where the reported defect lives. A run that stopped short
   // of the ceiling would pass every assertion below and prove nothing.
-  assert.ok(tiles.length >= 4, `the zoom-out must have produced tile requests (got ${tiles.length})`);
+  // **Non-vacuity, counted where the gesture's work actually lands.** This used to demand four
+  // requests from the gesture window alone. That was a volume assumption, and T-505 invalidated it
+  // deliberately: the minimap moved to the overview tier, whose tiles are megahertz wide and
+  // minutes tall, so a device-wide zoom-out that used to enumerate hundreds of detail addresses now
+  // resolves to a handful — and the pane's own coarse tiles are often already resident from the
+  // parent pin. Measured under a shared, aged backend: 2. A threshold raised or lowered to suit
+  // that tests nothing, so the premise is stated as what it is actually for — the gesture must have
+  // put addresses on the wire ACROSS THE SCHEMES THE PAGE USES — and the movement claim above
+  // (from the chrome, cache-independent) carries the rest.
+  const schemesUsed = new Set(everyTile.map((r) => addrOf(r.url).scheme));
+  assert.ok(tiles.length >= 1,
+    `the zoom-out produced no tile requests at all (got ${tiles.length}); the page cannot be ` +
+    "addressing anything, so nothing below is a measurement");
+  assert.ok(schemesUsed.has("view") && schemesUsed.has("overview"),
+    `the page only ever addressed ${[...schemesUsed].join(", ")}. Both tiers must be exercised or ` +
+    "this file is testing one lattice and calling it the surface (T-505: the canvas picks a tier " +
+    "per viewport by the tile budget, so a run that touched one tier proves nothing about the other).");
 
   // **Why the ceiling is measured over the page's whole life and not over the gesture alone**
   // (T-460/T-479). `capF` is only ever reached by the parent PIN — one level above what any
@@ -143,8 +181,26 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // addressing, and it would go red for anyone who fixed that storm. Counting distinct addressing
   // over the page's whole life asks the question the premise is actually about — *did the client's
   // addressing reach the ceiling* — and, unlike the old form, cannot be satisfied by repetition.
-  const coarsest = Math.max(...everyTile.map((r) => addrOf(r.url).levelF));
-  assert.equal(coarsest, capF, "the page's addressing must actually reach the top of the frequency axis");
+  //
+  // **And it is measured PER SCHEME, because the coarse end moved (T-505).** The page no longer
+  // reaches the detail lattice's own `max_level` by zooming out — past the tile budget it switches
+  // to the overview tier instead, so the coarse end of the surface is now the top of the OVERVIEW
+  // lattice's frequency axis. Comparing every request's `level_f` against the detail lattice's
+  // `capF` read 11 against 9 and said "the addressing must reach the top", when what it had found
+  // was a level 11 that is perfectly on-lattice for the scheme that named it.
+  const coarsestOf = (scheme) => {
+    const xs = everyTile.map((r) => addrOf(r.url)).filter((a) => a.scheme === scheme);
+    return xs.length ? Math.max(...xs.map((a) => a.levelF)) : null;
+  };
+  const reach = Object.fromEntries(Object.keys(lattices).map((k) => [k, coarsestOf(k)]));
+  t.diagnostic(`coarsest level_f addressed per scheme: ` +
+    Object.entries(reach).map(([k, v]) => `${k}=${v}/${lattices[k].capF}`).join(" "));
+  assert.equal(reach.overview, lattices.overview.capF,
+    `the page's addressing reached level_f ${reach.overview} on the OVERVIEW tier, against that ` +
+    `lattice's ceiling of ${lattices.overview.capF}. Since T-505 the coarse end of the surface is ` +
+    "the overview lattice's top, not the detail lattice's: a zoom-out past the tile budget switches " +
+    "tier rather than climbing further on the fine one. A run that stopped short of this ceiling " +
+    "would pass every assertion below and prove nothing about the addressing that was reported.");
 
   // **And no third check over the gesture's own wire traffic.** The obvious one — "the gesture
   // asked for the coarsest level it says it drew" — is cache-sensitive in exactly the way the old
@@ -152,18 +208,27 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // passes or fails on how warm the server was, which is how it behaved when tried (green alone,
   // red in the full suite). "The gestures moved the view" is asserted above, from the chrome, and
   // that is the cache-independent form of the same claim.
-  const gestureCoarsest = Math.max(...tiles.map((r) => addrOf(r.url).levelF));
-  t.diagnostic(`${tiles.length} gesture tile requests (coarsest level_f ${gestureCoarsest}); ` +
-    `${everyTile.length} over the page's life, coarsest level_f = ${coarsest}`);
-  return { tiles, lat, capF, capT };
+  const perScheme = (rs) => Object.entries(
+    rs.map((r) => addrOf(r.url)).reduce((m, a) => {
+      m[a.scheme] = Math.max(m[a.scheme] ?? -1, a.levelF); return m;
+    }, {})).map(([k, v]) => `${k}:${v}`).join(" ") || "none";
+  t.diagnostic(`${tiles.length} gesture tile requests (coarsest level_f by scheme ${perScheme(tiles)}); ` +
+    `${everyTile.length} over the page's life, coarsest by scheme ${perScheme(everyTile)}`);
+  return { tiles, lat, capF, capT, lattices };
 }
 
 /** Every request that named a node outside the lattice the page was handed. */
-function offLattice({ tiles, lat, capF, capT }) {
+function offLattice({ tiles, lattices }) {
   const out = [];
   for (const r of tiles) {
     const a = addrOf(r.url);
-    const fTile = lat.f0Hz * 2 ** a.levelF * a.cells, tTile = lat.t0Ns * 2 ** a.levelT * a.cells;
+    // **Judged against the lattice the request NAMES.** A `scheme=overview` address expressed in
+    // the detail lattice's cells is a different tile and a different ceiling (T-505), and reading
+    // one against the other is how a legitimate level 11 came to look off-lattice.
+    const L = lattices[a.scheme];
+    if (!L) { out.push(`${JSON.stringify(a)} names a scheme this file has no lattice for <- ${r.url}`); continue; }
+    const { capF, capT } = L;
+    const fTile = L.f0Hz * 2 ** a.levelF * a.cells, tTile = L.t0Ns * 2 ** a.levelT * a.cells;
     const bad =
       !(Number.isSafeInteger(a.levelF) && a.levelF >= 0 && a.levelF <= capF) ||
       !(Number.isSafeInteger(a.levelT) && a.levelT >= 0 && a.levelT <= capT) ||

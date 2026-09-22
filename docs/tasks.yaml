@@ -15392,7 +15392,8 @@ tasks:
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
-    status: in-review
+    status: done
+    commit: 666f51fb
     priority: high
     parallel_group: SDR
     core_interface: true
@@ -19402,7 +19403,8 @@ tasks:
   - id: T-596
     milestone: MLIVE
     title: With the IQ ring refused, coverage lags the live edge by a whole dwell - 18 s of measured rows read unobserved
-    status: todo
+    status: done
+    commit: b0cb0517
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -19427,6 +19429,66 @@ tasks:
       read unobserved is zero, counted over a stated number of rows.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      WORKED on task-t596, in two passes; the first pass failed the merge gate and was pulled.
+      ROOT CAUSE: a record reaches the observation log only when a dwell SEALS - on a retune or
+      after `INTERACTIVE_RECORD_MAX_NS` (60 s) - so between a retune and the seal the log holds no
+      evidence for the band the radio is sitting on and measuring. The ring journal normally covers
+      that gap (a segment per provenance change); with the ring REFUSED nothing does.
+      THE MARK IS NOT A NEW ONE: it is `observed`, with T-595's `Analysis` axis unchanged and the DC
+      notch inside it still `excluded`. The samples are sampled and the analysis has run over the
+      rows that exist; only the bookkeeping is outstanding, so a cell must not change colour when
+      the seal catches up to samples that never changed. `Coverage` stays TWO variants. What is new
+      is a third SOURCE, so the answer says which evidence carried the live edge.
+      WHERE: `ObservationStore` gains a per-device open-dwell slot on its OWN lock
+      (`note_open_dwell` / `clear_open_dwell` / `open_dwells`, hk-store/src/observation/log.rs) -
+      deliberately not `query()`, so a provisional record never reaches the occupancy, POI or report
+      paths that count sealed visits. Both observers publish it every control tick
+      (`Observer::publish_open` and `InteractiveObserver::publish_open`, hk-pipeline/src/observe.rs;
+      `ObservationRecorder::open_dwell` in hk-core builds the scheduler's), and `close()` drops it
+      the instant the sealed record can speak, so no reader ever sees both.
+      SERVED: `Evidence::collect` (hk-api/src/coverage.rs) folds the open dwells through the SAME
+      `hk_store::spans_from_records`, so `/api/coverage`, `/api/tiles` and the coverage
+      short-circuit all see it. `sources[]` gains `{"kind":"open-dwell", ...}`; docs/api.md moved
+      with it (T-079). No client change.
+      THE GATE FAILURE, AND THE FIX FOR IT: the first pass folded the open dwell in UNCLIPPED, so a
+      dwell open since before the record horizon painted `observed` over rows the same answer's
+      `horizon` declared `"unknown"` (T-413/T-507) - the response contradicted itself and the fix
+      was pointed backwards into the exact class of lie this ticket exists to remove. It failed
+      `hk-cli::api_contract::unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`
+      (row 4 of 8 `observed` against `horizon.unknown_from_row: 4`). `open_dwell_spans` now takes
+      `Memory::oldest_record` and CLIPS each open dwell to start at it, dropping it entirely when no
+      surviving record anywhere gives the horizon anything to admit. The dwell in flight may extend
+      the answer FORWARD to the live edge and never overrule it backward: it is provisional and
+      unsealed, and "we do not know whether we looked" is not "we did" - the same fail-closed rule
+      as `Coverage::Unobserved` is not quiet. It costs the ticket nothing, because the gap after a
+      retune lies after the last sealed record by construction.
+      ORDER AGAINST T-532 (decided at the merge with main): the open dwell is folded into `spans`
+      BEFORE `newest_record`/`as_of_s` is taken. T-532's rule is that the forward horizon comes from
+      the same spans the planes are rasterised from so summary and body cannot disagree; the open
+      dwell's spans rasterise, so taking the horizon first would publish `as_of_s` at the last SEAL
+      beside a plane claiming `observed` for seconds after it - the split T-532 closed - and a
+      client honouring `as_of_s` would discard exactly the live-edge rows this ticket serves. The
+      asymmetry is the invariant: an unsealed record may move the horizon FORWARD (a statement about
+      this answer's freshness) and may not move `oldest_record` BACKWARD (this server's statement
+      about what it has forgotten).
+      COUNTS: `hk-api` tiles::tests::the_live_edge_is_observed_when_the_iq_ring_is_refused_and_the_
+      dwell_has_not_sealed - cells holding a `max_db` that read `unobserved`/`unknown` == 0 over
+      2048 measured cells (floors N*N/4 overall AND N*N/8 at the live edge, so it cannot pass on
+      zero of zero). RED with the fold removed: 1024 of 2048 greyed.
+      RED PROOFS, all run and reverted: the tiles count above (1024/2048); `hk-pipeline`
+      observe::tests::the_tune_in_flight_is_published_as_an_open_dwell_before_any_record_seals
+      without `publish_open` (0 open dwells); `hk-api`
+      coverage::tests::the_dwell_in_flight_carries_the_live_edge_and_never_overrules_an_unknown_row
+      without the clip (5 `unknown` rows read `observed`) and with the fold moved after
+      `newest_record` (`as_of_s` 7260 instead of 7280, beside a plane observed through 7280).
+      TARGETED: hk-api 221/221, hk-cli::api_contract 53/53, hk-pipeline observe 5/5,
+      hk-store+hk-core 359/359. precheck clean. Never ran the gate.
+      FOLLOW-UP FILED: T-680 (should the open dwell also SET `oldest_record`).
+      ALSO FOLDED IN: T-640, the same fail-open pointed the other way - `ring_available` measured
+      a HANDLE rather than a ring that can answer, so a refused ring served `"unobserved"` over
+      rows with no tune record. Same branch, same file; see that entry.
+
 
   - id: T-592
     milestone: M2-hardening
@@ -19647,7 +19709,8 @@ tasks:
   - id: T-603
     milestone: M2-hardening
     title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
-    status: todo
+    status: done
+    commit: c7ade3dc
     priority: high
     parallel_group: PIPE
     model: opus
@@ -19679,6 +19742,63 @@ tasks:
       under deliberate load before and after - "it passes now" on a quiet machine is the evidence
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
+    notes: |
+      WORKED 2026-09-21 on branch task-t603 (worker). WHAT WAS VARIED, AND THE NUMBERS.
+      Not load: 24 single-test runs at 8-way PROCESS parallelism (load ~21) passed 24 of 24. The
+      variable that reproduces it is IN-BINARY parallelism - the one thing the acceptance path
+      actually changes, since `just acceptance` runs plain `cargo test`. Running the whole
+      `acceptance_m0` binary at cargo test's DEFAULT thread count (28 here, what the gate ran
+      before the RUST_TEST_THREADS cap) failed the listen test in 2 OF 3 RUNS at load 16-19, and
+      failed it at BOTH of its assertions:
+        - once at listen.rs:234 with the gate's exact message `[SIGNAL-062/listen] second
+          listener` - the SECOND listener refused. The refusal (which the old assertion never
+          printed, and which is why triage learns nothing from it) is `504 probe-timeout: no
+          samples for the probe`: the probe is starved of ring samples, not a cap decision.
+        - once at listen.rs:236 `expect_err("third listener refused")` - the THIRD listener
+          ADMITTED, because a slot had been freed between the two requests.
+      ROOT CAUSE OF THE FREED SLOT, named and fixed: `/ws/open/listen` pings every
+      `ondemand_ping_interval` and drops a peer it has not heard from for `ondemand_peer_timeout`
+      (5 s / 20 s, `hk-api/src/http.rs`), ending the chain `closed_client` and releasing its slot.
+      tungstenite answers a ping only from inside a read, and the test held its audio socket
+      UNREAD across the whole cap step - an implicit 20 s window that a loaded box exceeds.
+      THE FIX (tests/e2e/tests/acceptance/listen.rs only):
+        - `is_listener_limit()`: the cap's verdict is `503 busy` NAMING the listener limit. The
+          other `503 busy` is the CPU budget; `503 replumbing`, `409 outside-window`, `504
+          probe-timeout` and `422 no-analog-mode` are transient states of the SOURCE and say
+          nothing about the cap.
+        - `open_admitted()`: re-issues a request refused for a non-cap reason, a BOUNDED NUMBER OF
+          ATTEMPTS (8), printing each refusal; the cap's own refusal still fails on the first try.
+          No wall-clock wait was lengthened anywhere.
+        - `touch()`: reads one record between requests, so the peer stays responsive by ORDERING
+          rather than by finishing inside an implicit 20 s window.
+        - the cap step waits on the ADMISSION EVENT - `listen.active` reaching `max_listeners`,
+          the count `Slot::claim` itself reads - then issues one more request. One admitted past
+          the cap is a violation iff `listen.active > max_listeners`, the cap's own arithmetic; it
+          cannot be read off `detached`, because a chain releases its slot BEFORE counting itself
+          detached. If a slot is freed under the step, the step re-runs instead of recording a
+          verdict about a cap that was not full, and says so with the counters.
+        - the final counter assertion is `refused_busy == busy_seen`, the number this test
+          provoked, rather than a hard-coded 1.
+      AFTER: at the parallelism the recipe actually uses (`--test-threads 6`, which `just
+      acceptance` now sets) 4 of 4 full-binary runs passed with ZERO retries. At 28 threads, 9 of
+      12 passed (was 1 of 3). RED PROOF: with the cap broken in
+      `crates/hk-pipeline/src/chains/budget.rs` (`listeners >= max_l` -> `>= max_l + 1`), the fixed
+      test failed 2 of 2 at listen.rs with "3 listeners are running at once with max_listeners =
+      2"; budget.rs restored, test green.
+      THE 3 OF 12 THAT STILL FAIL AT 28 THREADS ARE NOT THE CAP AND ARE NOW DIAGNOSED IN ONE LINE:
+      at that oversubscription the replay source is starved (the first open takes the 504
+      probe-timeout; `frames` reaches 1), and the second, RANGE-selected listener attaches and is
+      immediately ended `closed_client` while the audio socket is still alive - so two slots are
+      never held at once and the cap has no verdict to give. Filed as T-633; not papered over.
+      THE AUDIT (the count the ticket asked for): ALL 125 hk-e2e tests are outside the nextest
+      group that claims them. `.config/nextest.toml`'s FIRST override pins `package(hk-e2e)` into
+      heavy-serial and has never applied to a single run - every recipe that runs hk-e2e uses plain
+      `cargo test`, and every nextest recipe excludes hk-e2e by name. Of the 125, 20 drive the live
+      LOOPING harness and so assert against transient pipeline state; this ticket fixes 1 and the
+      other 19 still read any refusal as a verdict. Filed T-631 (the dead override) and T-632 (the
+      19 tests, by file).
+      NOT TOUCHED: `.config/nextest.toml` and the `justfile` are unchanged by this branch, so it
+      does not force the full gate on their account.
   - id: T-604
     milestone: M2-hardening
     title: The bridge re-plumb test read a 503 body that had not arrived yet - a tungstenite tail race, not the wait it looked like
@@ -20068,7 +20188,8 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
-    status: review
+    status: done
+    commit: 7d061f18
     branch: task-t605
     priority: high
     parallel_group: PIPE
@@ -20134,6 +20255,46 @@ tasks:
       characterisations the "current" match row can be an older one. Separate question from this
       ticket; not filed.
 
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
   - id: T-614
     milestone: M2-hardening
     title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
@@ -20232,46 +20393,6 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-532
-    milestone: MLIVE
-    title: A kept tile answer may not claim the radio never looked at time it never saw
-    status: done
-    priority: high
-    parallel_group: PIPE
-    core_interface: true
-    model: opus
-    depends_on: [T-501, T-505]
-    use_cases: [AWARE-011, AWARE-042]
-    acceptance: |
-      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
-      never had a board block, which is why `just reconcile` could not see it.
-      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
-      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
-      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
-      the third hop, and it is two things.
-      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
-      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
-      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
-      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
-      40 ms it is ~32 rows of THE grey over rows the radio recorded.
-      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
-      gate was charged per TILE rather than per PASS over the edge.
-      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
-      from the same spans the planes are rasterised from; the renderer draws nothing past it and
-      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
-      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
-      merely measured.
-    branch: task-t505-v2
-    notes: |
-      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
-      worktree, because they share their conflict files.
-      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
-      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
-      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
-      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
-      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
-      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
-      did not exist on the original branch - T-528 landed after it was cut.
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
@@ -20495,7 +20616,8 @@ tasks:
   - id: T-621
     milestone: M2-hardening
     title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
-    status: todo
+    status: done
+    commit: "43873178"
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20528,6 +20650,47 @@ tasks:
       ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the test behaves correctly BOTH with a ring and with the ring refused.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Worked 2026-09-21 on task-t621. BOTH shapes, because they answer different questions and
+      compose: (a) the two existing tests now STATE their precondition and fail on it in the
+      server's own words; (b) the refused ring itself is a new, documented test case.
+      (a) `iq_ring_unavailable(addr)` / `require_iq_ring(addr)` in
+      `crates/hk-cli/tests/api_contract.rs` read `GET /api/iqbuffer` and fail the moment the
+      allocation has SETTLED into any non-`"allocating"` state while `enabled: false`, quoting the
+      route's own `reason` ("... needs 8388608 bytes above the 2147483648-byte free-space floor and
+      1048576 bytes are free"). Called inside both `wait_for` closures, so the answer is a STATE,
+      never a clock: every `enabled: false` allocation except `"allocating"` is terminal. Measured:
+      with the ring refused both tests now fail in 0.07 s naming the refusal, where before they
+      burned 60 s and 90 s and then failed on an assertion about coverage. No skip anywhere - the
+      gate cannot go green for a missing precondition.
+      (b) New test `coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey`.
+      A portable device fills its disk, so this is a real product state, and the test says what the
+      coverage record is then: the refusal is disclosed in full (`enabled: false`,
+      `allocation: "refused"`, a `reason` whose three byte counts are asserted to be the ones that
+      actually refuse it, `fs_*`/`min_free_bytes` null as documented); `sources[iq-ring]`
+      contributes ZERO spans; the OTHER tune history (`observation-log`) still answers and the tuned
+      band is still `observed` at the fixture's own centre and rate - a lost SOURCE is not evidence
+      that nothing looked; and the control band 2.4 GHz away is still `unobserved`, not `unknown`.
+      THE SEAM, and it fills no disk: `ServeOptions::iq_buffer_hooks`
+      (`hk_cli::pipeline::IqBufferHooksOverride`) with an `IqBufferHooks::fs_space` reporting 1 MiB
+      free of 8 GiB. The default floor (10 % within 2..8 GiB) is then 2 GiB, so not even two slots
+      fit and the documented `"refused"` path runs. `HK_IQ_BUFFER_MIN_FREE` is the same seam from
+      outside and is what the failure message tells a human to reach for.
+      NO `docs/api.md` CHANGE: the refusal contract (`allocation: "refused"` + `reason`;
+      `fs_free_bytes`/`fs_total_bytes`/`min_free_bytes` null when disabled) is ALREADY documented
+      there. This ticket makes the tests catch up with the docs, not the other way round.
+      EVIDENCE. Ring present: all four `coverage_*` contract tests pass unchanged. Ring refused:
+      the new test passes (62 s - it waits for one 60 s `SweepRecord::MAX_SPAN_NS` observation
+      record, the cadence the "log alone answers" property inherently needs, bounded at 90 s and
+      state-gated). Non-vacuity: with `Evidence::collect` mutated to drop the observation log, the
+      new test FAILS and all three pre-existing coverage tests still PASS - it guards a real
+      coverage defect none of them sees. Mutation reverted.
+      DEFECT FOUND, DELIBERATELY NOT FIXED HERE (filed as T-640): a REFUSED ring still reports
+      `sources[iq-ring].available: true` with zero spans, because the flag is
+      `state.iq_buffer.is_some()` - whether a ring HANDLE is wired, not whether a tune journal could
+      answer. `crates/hk-api/src/coverage.rs` was off limits to this ticket (T-596 held it), so the
+      new test asserts `spans == 0` and says in a comment why it asserts neither value of
+      `available`: pinning today's would enshrine the defect, pinning tomorrow's would fail now.
   - id: T-630
     milestone: MCANVAS
     title: One greedy tab holds all four server slots, so a second client's boot is a coin flip - the tile route needs a fair share, not a bigger cap
@@ -20787,6 +20950,212 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). This is the instrumentation that makes
       docs/22 section 6's sufficiency argument checkable; without it the argument is prose.
+  - id: T-631
+    milestone: M2-hardening
+    title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
+    status: done
+    commit: 1577b449
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 by T-603, which reproduced the listen acceptance failure 2 times in 3.
+      `.config/nextest.toml` has, as its FIRST override, `filter = 'package(hk-e2e)' ->
+      test-group = heavy-serial` (max-threads = 1), and its header says the group exists because
+      "tests/e2e (hk-e2e): the harness + M0 suite drive the whole pipeline end to end and spawn
+      real processes/servers". THAT OVERRIDE HAS NEVER APPLIED TO A SINGLE TEST RUN. Every recipe
+      that runs hk-e2e - the M0 slice recipe, the harness recipe, the six milestone recipes, and
+      therefore the CI acceptance job - uses PLAIN `cargo test`, which does not read
+      `.config/nextest.toml` at all; and every recipe that DOES use nextest (`just test-rust`,
+      `just test-doc`, `just test-seq`) excludes hk-e2e by name through `just _crate-scope
+      hk-e2e`. So all 125 `#[test]`s in hk-e2e run with nextest's config believing it covers them
+      and cargo test's semantics actually governing them. T-603 added
+      `RUST_TEST_THREADS=${RUST_TEST_THREADS:-6}` to the two recipes, which caps the
+      self-parallelism but leaves the config lying.
+      DECIDE AND MAKE THE TREE SAY IT, one of:
+        (a) run the hk-e2e suites through nextest (`cargo nextest run -p hk-e2e -E
+            'binary(acceptance_m0)'`), which makes the group real and lets the per-binary
+            serialisation be expressed where every other suite expresses it; or
+        (b) DELETE the `package(hk-e2e)` override and state in both files that hk-e2e's
+            parallelism is `RUST_TEST_THREADS` in the justfile, nowhere else.
+      Whichever is chosen, the measurement that must survive is T-603's: the M0 binary at cargo
+      test's DEFAULT parallelism (28 on this box) failed the listen test in 2 of 3 runs at load
+      ~16-19; at 8-way parallelism 24 of 24 single-test runs passed. State the number the recipes
+      end up with and why.
+      Touching `.config/nextest.toml` or the `justfile` forces the FULL gate by design.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603) from the audit its ticket asked for. T-603
+      fixed the one test that sank a gate; this is the structural half.
+      WORKED 2026-09-21 on branch task-e2eguard (worker). CHOSE (a), RUN hk-e2e UNDER NEXTEST -
+      but at max-threads = 6, not 1. MEASURED over the acceptance gate's 82 tests (the M0 slice
+      plus the ten harness targets), all 82 green in all three models, 28-core Mac at load ~10-18:
+        cargo test, RUST_TEST_THREADS=6 (what the gate ran)        390 s
+        nextest, heavy-serial as written (max-threads = 1)        1133 s   +12.4 min
+        nextest, new `e2e-bounded` group (max-threads = 6)         230 s    -2.7 min
+      So honouring the override AS WRITTEN would have added ~58 % to a 21.4 min median gate
+      (T-543) to buy a constraint stronger than the evidence asks for: T-603 measured the M0
+      binary failing 2 of 3 at cargo test's default 28-way in-binary parallelism and passing 4 of
+      4 at 6. Six is the measured number. Six is also FASTER than the path it replaces, because
+      nextest pools all 82 tests across the eleven binaries into one queue while `cargo test`
+      drains the binaries one after another (listen_live's single 67 s test used to have the box
+      to itself). Deleting the override would have kept the 390 s path and left hk-e2e outside the
+      config a second time.
+      SHIPPED: a new `e2e-bounded` test-group in `.config/nextest.toml` carrying the measurement;
+      `just _e2e-run`, the ONE place an hk-e2e target set becomes a command, used by all eight
+      recipes (M0 slice, harness, six milestones) instead of RUST_TEST_THREADS reaching two of
+      them and the other six running at the unprotected 28; `acceptance-ci` no longer passes
+      `-- --nocapture`, which under nextest becomes `--no-capture` and pins the run to ONE thread.
+      A `cargo test` fallback remains for a box without cargo-nextest and keeps the thread cap.
+      CLAUDE.md's Testing paragraph corrected - it still claimed tests/e2e was in `heavy-serial`.
+      THE GUARD, which is the deliverable: `just nextest-config-check` (`py/hkpy/nextest_config.py`,
+      `py/tests/test_nextest_config.py`) fails when an override's filter names a package that no
+      nextest invocation in the justfile can ever see, or that is no workspace member at all (the
+      same defect by typo). Parameterised recipes - `test-crate`, `test-one` - deliberately do NOT
+      count as evidence, since their scope comes from whoever types them; counting them would have
+      made the check pass on the exact tree that shipped this bug. It ran RED on that tree, naming
+      the file, the filter and the excluding recipe, before anything was changed. It is a member
+      of `just test` (not only a pytest) so it runs first and cheapest on a full gate.
+  - id: T-632
+    milestone: M2-hardening
+    title: 19 live-harness hk-e2e tests still read ANY on-demand refusal as a verdict, the defect T-603 fixed in one of them
+    status: done
+    commit: 1577b449
+    priority: medium
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      AUDIT 2026-09-21 (T-603). 20 of hk-e2e's 125 tests drive the LIVE, LOOPING blind harness
+      (`blind_live*` / `listen_service`), so they assert against transient pipeline state rather
+      than a stored product. A Listen/tap open on such a run can be refused for reasons that say
+      nothing about what the test is asserting: `503 replumbing` between segments, `409
+      outside-window`, `504 probe-timeout` when the probe is starved of ring samples, `422
+      no-analog-mode` when the probe lands on a chunk with nothing recognisable in it. T-603
+      reproduced exactly that - and its mirror image, a slot FREED between two requests, which
+      turned an expected refusal into an admission - 2 times in 3 at cargo test's default
+      parallelism.
+      ONE of the 20 (`acceptance_m0 listen::signal_062_...`) now retries non-verdict refusals and
+      asserts on counts and ordering. THE OTHER 19 DO NOT:
+        - `tests/e2e/tests/stream_external.rs` (2): opens `/ws/open/listen` directly and
+          `panic!("refused: {t}")` on any non-header first frame. No retry at all.
+        - `tests/e2e/tests/concurrent_demod.rs` (5): its `open()` retries 409 and code
+          `replumbing` only, so 422/504 and the CPU-budget `503 busy` are fatal.
+        - `tests/e2e/tests/refine.rs` (2) and `tests/e2e/tests/listen_live.rs` (1): retry
+          `matches!(e.status, 409 | 503)` only - 422 and 504 are fatal.
+        - `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` (9): `tail()` opens a
+          stage/inspector tap over TCP and fails the test on a refusal frame in `read_header`.
+      FIX SHAPE, from T-603: name the refusals that are the SUBJECT of the assertion (a cap's
+      `503 busy` at the listener limit, a legal gate's 403) and fail on those immediately; re-issue
+      the others a BOUNDED NUMBER OF ATTEMPTS, printing each. Bound attempts, never wall clock -
+      lengthening a wait makes the failure rarer, which is the pattern this project rejects. Where
+      a test asserts a cap or a count, assert the count the admission path itself reads
+      (`listen.active`), not what a request happened to do in time.
+      AND THE OTHER HALF T-603 FOUND: `/ws/open/listen` (and every `/ws/open/*`) PINGS its peer
+      every `ondemand_ping_interval` and DROPS one it has not heard from for
+      `ondemand_peer_timeout` (5 s / 20 s), ending the chain `closed_client` and freeing its slot.
+      tungstenite answers a ping only from inside a read, so any test that opens a WebSocket
+      stream and then does something else for a while is holding a socket the server is entitled
+      to reap - an implicit 20 s window that only a loaded box exceeds. `stream_external.rs` holds
+      exactly such a socket. Read one record between steps (T-603's `touch()`), do not lengthen
+      anything.
+      VERIFY LIKE T-603 DID: reproduce before the change at cargo test's default parallelism
+      (`--test-threads 28` on the M0/harness binaries), state n-of-m before and after, and prove
+      each fixed assertion still goes RED for the real defect it is there to catch.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603). Related: T-631 (why none of these are covered
+      by the nextest group that claims them).
+      WORKED 2026-09-21 on branch task-e2eguard (worker), after T-631 in the same worktree.
+      ALL 19 ANSWERED; none left permissive, none left unexamined.
+      SUBJECT REFUSALS, the question each one had to answer first:
+        - `concurrent_demod.rs` (5): ITS SUBJECT IS `503 busy`. Its budget step asserts a fourth
+          listener and a tap past `max_chains` are refused naming "listener limit: 3 of 3" and
+          "chain budget: 3 of 3 chains". That refusal is now returned on the FIRST try and is
+          never re-issued. What used to be fatal and is not a verdict about anything - `422
+          no-analog-mode`, `504 probe-timeout` - is re-issued. (One of the five,
+          `a_seq_gap_is_loss_unless_the_stream_declared_it`, opens nothing at all; it parses.)
+        - `stream_external.rs` (2), `refine.rs` (2), `listen_live.rs` (1), the nine tutorial tests
+          in `tutorial_{rds,adsb,pocsag,acars}.rs`: NO refusal is any of their subjects - they
+          assert recovered payloads, a stalled client, a refined centre, decoded frames. So every
+          refusal is re-issued and a capacity `503 busy` still fails immediately, because nothing
+          in those tests should ever fill a budget.
+      THE SHAPE, shared rather than copied: `acceptance/common.rs` now carries `OPEN_TRIES = 8`,
+      `is_capacity_verdict` and `open_retrying`, used by the four harness/acceptance binaries that
+      include it; the four tutorial `tail()`s (verbatim copies of each other) read their header
+      SYNCHRONOUSLY with bounded re-issue instead of deferring the failure to `finish()`, so a
+      refusal now names the target at the call site.
+      BOUND ON ATTEMPTS, NOT WALL CLOCK, and that replaced something worse than nothing: the old
+      helpers polled inside 60/120 s DEADLINES, which shrink as the box gets busier - exactly when
+      the transient refusals get likelier - so load was being converted into failure. A count of
+      re-issues does not move with load. Nothing was lengthened.
+      RED PROOFS, both reproduced on this branch:
+        - `concurrent_demod three_fm_stations_...` with `max_listeners` raised from 3 to 9 (the
+          cap admits past what the test asserts): FAIL in 19.1 s at `a fourth listener is refused`.
+          The subject refusal is still fatal and was not retried away.
+        - `tutorial_acars` pointed at `inspector/{id}/no-such-node` (a tap that can never open):
+          FAIL in 0.35 s, printing all eight attempts and then `8 opens in a row produced no
+          stream header`. The bounded re-issue terminates and reports instead of hanging or
+          silently returning an empty stream. 0.35 s, against the 600 s LIMIT the old deadline
+          would have leaned on.
+      THE PING FUSE: NONE OF THE 19 CARRIES IT. The reap is `/ws/open/*`-only
+      (`hk-api/src/ondemand.rs`; `tcp.rs` has a handshake timeout and no peer timeout). Of the 19,
+      only `stream_external::fm_audio_streams_...` opens a WebSocket at all, and it reads
+      continuously from header to its 100th frame; the tutorials and the fsk test use TCP taps and
+      the rest use the in-process `StreamOpener`, where there is no socket to reap. The stalled
+      TCP client in that same test is a different mechanism (drop-not-block, then disconnect) and
+      is the test's subject.
+      TARGETED RUN: 18 of 18 green under `cargo nextest run -p hk-e2e` over stream_external,
+      concurrent_demod, refine, listen_live and the tutorial + listen tests of acceptance_m0,
+      91.9 s, zero retries, zero re-issues printed on a quiet box.
+  - id: T-633
+    milestone: M2-hardening
+    title: Under a starved source a range-selected Listen chain attaches and is immediately closed_client, while an emitter-selected one on the same station survives
+    status: done
+    branch: task-t633
+    priority: medium
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 (T-603), 3 times in 12, reproducibly, at cargo test's default in-binary
+      parallelism (28 threads on the M0 acceptance binary, ~28 pipelines at once on a 28-core
+      box). In that state the mock replay source is starved: the first Listen open is refused
+      `504 probe-timeout: no samples for the probe`, and the run's `listen.frames` counter reaches
+      1. What then happens, from the counters printed by the test at each retry:
+        - an EMITTER-selected listener on the truth station attaches and STAYS alive (the test
+          reads it, so it is not a liveness-ping reap - `active: 1, running: 1` throughout);
+        - a RANGE-selected listener (`f_lo`/`f_hi` around the same station, from the inventory
+          row) attaches - `attached` increments - and is ended `closed_client` within
+          milliseconds, before the test's next `/api/status` call. Eight times in a row, a fresh
+          one each time: `attached` 2,3,4... with `detached` and `closed_client` following one
+          behind and `active` never leaving 1.
+      `closed_client` means "the client went away: WebSocket close, reset, unresponsive peer,
+      Stop" - and none of those is plausible for a socket the test opened milliseconds earlier and
+      has not touched. So EITHER the end is misattributed (a chain ending for a source reason -
+      starvation, a duplicate channel claim against the first chain, a segment boundary - counted
+      as the client going away), OR the client really is being dropped and the write path is
+      losing the connection under starvation. Both are worth knowing: `closed_client` is the
+      counter an operator would read to blame their own client.
+      FIND OUT WHICH, on the pipeline side, not in the test: reproduce by starving the source
+      (that is the only condition needed - no 28-way test run is required to hold the ring back),
+      and make the chain's end carry the reason it actually had. Assert with counts and ordering:
+      a chain that ends for a source reason must count itself under the matching `closed_*`
+      counter, and the test for it should be a hk-pipeline test, not an e2e one.
+      Note the asymmetry is the clue: same station, same instant, emitter target survives and
+      range target does not. `crates/hk-pipeline/src/chains/analog.rs`'s `claim_emission` (the
+      duplicate-channel claim) and `listen.rs`'s `End` variants are where to look first.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603), which made this visible by printing the
+      listen counters at each retry instead of asserting "second listener". T-603's own fix is
+      correct regardless - it no longer reports a cap verdict when the cap was never full - and
+      passes 4 of 4 at the parallelism the recipe uses; this is the residue that only appears at
+      28-way oversubscription.
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
@@ -20886,65 +21255,514 @@ tasks:
       ONE worktree in sequence, not three agents contending for one file. This one goes first - it
       is already written and measured.
       The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
-  - id: T-633
+  - id: T-640
     milestone: M2-hardening
-    title: A Listen chain's end carries the reason it actually had; a peer the server reaped is no longer counted closed_client
+    title: A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got
     status: done
-    priority: medium
+    commit: "43873178"
+    priority: normal
     parallel_group: PIPE
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'task-t621, 2026-09-21, measured on a server whose ring was refused through the fs_space seam'
+    acceptance: |
+      MEASURED, not inferred. With the IQ ring REFUSED (`GET /api/iqbuffer`: `enabled: false`,
+      `allocation: "refused"`), `GET /api/coverage` still answers
+      `sources[{"kind": "iq-ring", "available": true, "spans": 0, "named_spans": 0,
+      "device_known": true}]`. The flag comes from `Evidence::collect` in
+      `crates/hk-api/src/coverage.rs`: `ring_available: state.iq_buffer.is_some()` - whether a ring
+      HANDLE is wired into the API state, not whether a tune journal could answer. The handle exists
+      even when the ring was refused, so the row claims a source that contributed nothing and never
+      could.
+      WHY IT MATTERS, AND IT IS A FAIL-OPEN. The field's own documented meaning is "a client can
+      tell 'this record had nothing here' from 'this record was not consulted'" - and here it says
+      the opposite of both. Worse, `Evidence::unknown_rows` decides `no_tune_history` from exactly
+      these flags: `!ring_available && !log_available`. A server with a refused ring and no
+      observation log would therefore serve `"unobserved"` for rows it has NO tune record of, where
+      the rule says `"unknown"`. That is the cheap answer winning when the state is unsure, which is
+      the one thing coverage state is not allowed to do (`Coverage::Unobserved` is not quiet,
+      `BiasTee::Unknown` is not `Off`).
+      DoD: `available` reports whether the ring could be READ as a tune history (open and
+      buffering), not whether a handle exists; `device_known` on a source that answered nothing is
+      re-examined at the same time (`0 == 0` currently reads as "yes, known"). Then extend
+      `coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey` in
+      `crates/hk-cli/tests/api_contract.rs` - which today asserts `spans == 0` and deliberately
+      asserts NEITHER value of `available`, with a comment saying why - to pin the corrected value,
+      and add the no-log case that proves the `"unknown"` rows. Update `docs/api.md` alongside if
+      the field's stated meaning needs sharpening (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-621, which found it while putting the refused ring under test and was
+      scoped out of `crates/hk-api/src/coverage.rs` (T-596 held that file at the time). Small and
+      self-contained; the refused-ring test that exercises it already exists.
+  - id: T-680
+    milestone: MLIVE
+    title: Decide whether the dwell in flight should also SET the record horizon, not only be clipped to it
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-596]
+    use_cases: [AWARE-011]
+    found_by: 'T-596, 2026-09-21, as the design alternative it deliberately did not take'
+    acceptance: |
+      T-596 serves the dwell IN FLIGHT as coverage (so a refused IQ ring cannot grey the live edge)
+      and CLIPS it to `Memory::oldest_record`, so a provisional record can never turn a row the same
+      answer calls `"unknown"` into `"observed"`. The alternative, considered and rejected there,
+      is to let the open dwell also CONTRIBUTE to `oldest_record` - i.e. treat it as one of the tune
+      records the horizon is computed from.
+      THE ARGUMENT FOR IT: it is arguably the more honest answer. The open dwell IS a tune record
+      the server still holds, in memory, undiscarded. Over the interval it has been running we do
+      know we looked, so calling those rows "we no longer know whether we looked" is false, and the
+      clip makes the answer conservative rather than correct. Today the two halves are consistent
+      only because the clip silences the open dwell there.
+      THE ARGUMENT AGAINST, and why T-596 did not do it: it rewrites a SHIPPED contract - T-507's
+      `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so` asserts
+      `horizon.unknown_rows` on a server whose ring has discarded its first seconds, and this would
+      empty that band - and it lets an UNSEALED claim redefine the server's own statement about what
+      it has forgotten. `oldest_record` is a statement about memory; a record that has not been
+      written is a poor thing to compute memory from, and the failure mode (a long-lived open dwell
+      quietly asserting that nothing was ever forgotten) is silent.
+      DECIDE WITH EVIDENCE, and if it changes, change T-507's contract test deliberately and say so
+      in docs/api.md rather than letting it fall out. Note that the FORWARD horizon already works
+      the other way: T-596 folds the open dwell in before `as_of_s` is taken, because the forward
+      horizon must agree with the plane. Whether the two horizons SHOULD be asymmetric is exactly
+      this ticket's question.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+  - id: T-720
+    milestone: M2-hardening
+    title: The six milestone acceptance recipes now run under nextest but have never been measured there
+    status: todo
+    priority: low
+    parallel_group: OPS
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      T-631 routed all eight hk-e2e recipes through `just _e2e-run`, so `acceptance-m2`,
+      `acceptance-m3`, `acceptance-m4`, `acceptance-mauto`, `acceptance-chirp` and `acceptance-ism`
+      run under nextest in the `e2e-bounded` group at max-threads = 6. Only the CI acceptance set
+      (M0 slice + harness, 82 tests) was MEASURED: 390 s under the old `cargo test` path, 230 s
+      under nextest at 6. The six milestone gates were converted on the same argument but never
+      timed, and the conversion changes two things for them at once: they lose cargo test's
+      DEFAULT 28-way in-binary parallelism (none of them carried a RUST_TEST_THREADS cap, so they
+      were the most exposed suites in the tree), and they gain process-per-test isolation.
+      Run each once and record its wall clock and pass count, the way T-631 did. The expected
+      result is that they get faster and steadier; the point of the ticket is that "expected" is
+      not "measured", and these are milestone EXIT gates, where a surprise costs most.
+      If one of them is slower under nextest, say by how much and why before changing anything.
+    notes: |
+      Filed 2026-09-21 by T-631 (worker, task-e2eguard). Not a defect - a measurement that was
+      deliberately not done inside T-631's scope, recorded rather than implied.
+
+  - id: T-721
+    milestone: M2-hardening
+    title: tail() is a verbatim fourfold copy across the tutorial acceptance files, and T-632 had to edit all four
+    status: todo
+    priority: low
+    parallel_group: PIPE
+    model: haiku
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` each carry a
+      BYTE-IDENTICAL `struct Tail`, `fn tail()` and `impl Tail::finish()`. They are modules of the
+      same binary and all four already `use crate::common::*`, so there is no reason for four
+      copies. T-632 had to make the same edit four times to give the tap open a bounded re-issue,
+      and a fifth file (`m2_scene.rs`) has an unrelated `tail_z` that makes grep noisier.
+      Move `Tail`/`tail`/`finish` into `acceptance/common.rs` beside `open_retrying` (which T-632
+      put there for exactly this reason), and have the four tutorials call it. `TAG` differs per
+      file, so it becomes a parameter, as it already is for `open_retrying`.
+      Pure refactor: the four tutorial tests must pass unchanged afterwards, and the diff must
+      delete more than it adds.
+    notes: |
+      Filed 2026-09-21 by T-632 (worker, task-e2eguard), which lived the cost. Deliberately not
+      done inside T-632: that ticket's subject was which refusal each test is about, and folding a
+      four-file refactor into it would have hidden the behavioural change in a move diff.
+
+  - id: T-722
+    milestone: M2-hardening
+    title: heavy-serial's max-threads = 1 has never been measured against a bounded alternative for the crates that are in it
+    status: todo
+    priority: normal
+    parallel_group: OPS
     model: opus
     effort: medium
     depends_on: []
     use_cases: []
-    branch: task-t633
     acceptance: |
-      ANSWERED 2026-09-22 (worker, task-t633), reproduced deterministically in hk-pipeline, no
-      28-way run and no e2e needed. The verdict is (b) with an (a)-shaped consequence: THE CLIENT
-      REALLY IS DROPPED, BUT IT IS THIS SERVER THAT DROPS IT, AND THE END WAS MISATTRIBUTED TO THE
-      CLIENT. `/ws/open/listen` pings every `ondemand_ping_interval` and reaps a peer unheard for
-      `ondemand_peer_timeout` (`hk-api/src/ondemand.rs::watch` -> `PeerEnd::Unresponsive`), which
-      drops the session guard; `chains/listen.rs` saw only a dropped guard and broke `End::Client`
-      unconditionally, so a server-side reap, a connection reset and an unattributed drop were all
-      counted under the one counter an operator reads to blame their own client.
-      WHY RANGE DIFFERED FROM EMITTER AT THE SAME STATION: nothing in the pipeline distinguishes
-      them - `resolve` returns the same extent for both and the probe, gate, admission and demod
-      paths are identical. The difference is WHICH SOCKET THE CLIENT IS READING. A WebSocket client
-      answers a ping only from inside a read; T-603's test read the emitter socket between requests
-      (its own fix) and never read the range socket after its header. Starvation is the necessary
-      condition twice over: a starved chain publishes nothing, so the client has nothing to read on
-      that socket, and it stretches the step past the peer timeout. So the surviving listener was
-      the one being read, not the one selected by emitter.
-      THE FIX. `hk_stream::SessionEnd`/`SessionEndSlot` on `OpenedStream`: the transport records
-      how the peer went away BEFORE dropping the guard. `ondemand.rs` maps close-frame/FIN/data ->
-      `Client`, the server's own reap -> `Unresponsive`, reset or I/O error -> `Transport`; the TCP
-      front end attributes its blocking read the same way. `listen.rs` gains `End::Unresponsive`,
-      `End::Transport` and `End::Unattributed` with counters `closed_unresponsive`,
-      `closed_transport`, `closed_unattributed` - an end nobody attributed stays unattributed
-      rather than resolving to the convenient label. `Session::session_end` also gives a SOURCE
-      reason precedence: a chain whose ring has already closed is counted `closed_segment` /
-      `closed_source` whichever thread dropped the guard first.
-      TESTS (counts and ordering, never wall-clock): `crates/hk-pipeline/tests/listen_end_reason.rs`.
-      `a_peer_the_server_reaped_is_not_counted_as_the_client_going_away` - 6 sockets opened and
-      never read must be `closed_unresponsive` 6 / `closed_client` 0, then 3 close frames move
-      `closed_client` to exactly 3 and nothing else. `a_starved_source_reaps_only_the_socket_nobody_
-      is_reading_and_does_not_blame_the_client` - two chains on the IDENTICAL extent under one held
-      radio: the read socket stays `running`, the unread one is reaped `closed_unresponsive` 1 /
-      `closed_client` 0, with `closed_squelch` and `closed_idle` both 0. RED PROOF: restoring
-      `break End::Client` fails both, 6 and 1 under `closed_client`. `listen_lifecycle`'s
-      "all 50 closed_client" assertion was the old behaviour written down and is now split.
+      T-631 measured, for hk-e2e's 82 acceptance tests, that `max-threads = 1` cost 1133 s where
+      `max-threads = 6` cost 230 s and both were 82/82 green - a 4.9x wall-clock difference for a
+      constraint that the evidence (T-603: 2-of-3 failures at 28, 4-of-4 at 6) never asked for.
+      `heavy-serial` is still max-threads = 1 for everything else in it: all of hk-api and hk-cli,
+      hk-pipeline's listen/retune/lossless/refine/stream tests plus eight named binaries,
+      hk-core's ring_concurrency/ring_stress, hk-demod::refine_wfm_real, and six individually
+      named tests. NONE of those numbers was ever measured against a bounded alternative either;
+      `1` was chosen in T-077 as the obviously-safe value and has never been revisited, while
+      `.config/nextest.toml`'s own header (T-383) already records that membership did NOT help
+      three of the four flakes filed against it.
+      So: measure it. For each membership block, time `just test` with the block at 1 and at a
+      bounded value (2, 4, 6), on the same commit and comparable load, and report wall clock AND
+      pass/fail counts per run - the second number is the one that decides it, and a block that
+      only passes at 1 must STAY at 1 with the measurement recorded beside it. Expect the answer
+      to differ per block: hk-cli spawns a daemon and binds ports (contention is real), while
+      hk-demod::refine_wfm_real is a CPU-bound optimizer whose problem is the box being busy at
+      all, which no group setting fixes.
+      Do NOT change a value without the number beside it. That is the whole lesson of T-631.
     notes: |
-      Filed 2026-09-21 by T-603. Worked 2026-09-22 on branch `task-t633` from the gated commit
-      a9037506 (the block itself was on `task-t603`, mid-gate, so this entry was appended fresh).
-      MEASURED RESIDUE, NOT CHASED: one of the 50 lifecycle sessions ends `closed_transport`
-      instead of `closed_client` - an abrupt hang-up with records still unread reaches the server
-      as an RST, not a FIN. That is TCP, not a defect, and the two are deliberately kept apart
-      (an RST does not say the client went away), so the lifecycle test asserts the union for the
-      abrupt group. If an operator ever sees `closed_transport` climbing on browser clients, that
-      is the thing to look at.
-      NOT DONE HERE: the source-precedence branch of `session_end` closes a real race (the guard is
-      dropped by the very socket shutdown a finished producer causes) but has no RED test - the
-      window is microseconds and the chain reaches `Next::Closed` on its own first in every
-      scripted ordering tried. Kept as a cheap correctness net, claimed as nothing more.
+      Filed 2026-09-21 by T-631 (worker, task-e2eguard), which surfaced this and correctly did not
+      chase it: its brief was the inert hk-e2e override, and re-tuning six other membership blocks
+      on the strength of one crate's measurement would be the same guess in the other direction.
+      Relevant history in the file's own header: T-344, T-383 and T-436.
+
+  - id: T-629
+    milestone: M2-hardening
+    title: "The plugin-readiness test family: five gate flakes, one mechanism - a budget on a freshly linked subprocess started at the spawn instead of at the child's first byte"
+    status: done
+    priority: high
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FIVE SIGHTINGS, ONE MECHANISM (2026-09-21). Each was triaged on its own and each "passed
+      alone", which is why it took five:
+      1. hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait
+         - the most frequent. Failed a gate at 46.07 s; passes alone in 4.7-19 s. task-flakes could
+         not reproduce it in 42 runs incl. 12 cold relinks; it failed under load 3+ more times.
+      2. tests/e2e/tests/acceptance/signal_001.rs: `plugin_fed_before_ready == 0` (readsb chain).
+         Passes alone in 6.34 s. Its own comment already recorded "the first one did, under load".
+      3. hk-pipeline::retune_is_the_one_device_action::only_a_retune_stops_the_running_segment -
+         `survey <id> not found`. SEE BELOW: this one is NOT in the family.
+      4/5. hk-plugins::readsb and hk-plugins::host - the T-493 cold link: a child spawned in 193 us
+         that then executes nothing for up to 30 s. Reproduces at load 9, absent at load 150: the
+         trigger is a FRESH LINK, not CPU pressure, and every gate relinks.
+      THE MECHANISM. Four separate places asked "has this subprocess got there yet?" and answered
+      it with a wall clock started at the parent's convenience - the spawn, the last push, the end
+      of input - while the subject of the budget had not reached its first instruction. T-540 fixed
+      exactly one of them (the hang watchdog) with the right rule: the child's FIRST BYTE on stdout
+      or stderr is the only evidence it ran, so the budget runs from there and a longer
+      `startup_timeout` covers the silence before it. The other three kept their spawn-relative
+      clocks:
+        - `PluginInstance::finish(idle)` - the no-progress window after the input ends (settle_s);
+        - `chains/plugin.rs::wait_ready_or_stop` - the readiness wait (`ready_timeout`);
+        - `chains/plugin.rs::wait_for_room` - the lossless backpressure wait (PLUGIN_WAIT_STALL).
+      REPRODUCED, not inferred, by relinking the plugin binary before every run - the actual gate
+      condition, and the thing every earlier load loop was missing:
+        sighting 1 (hk-dummy-plugin relinked): BEFORE 2 failures / 14 runs, AFTER 0 / 28.
+          The failures show `0 plugin decodes, 149 records dropped` in 33 s runs - the 30 s settle
+          window expiring against a child that had not run. Three passing runs in the same arm
+          also took 32-33 s: the window was racing the loader and sometimes won.
+        sighting 2 (hk-plugin-readsb relinked): BEFORE 7 failures / 24 runs, AFTER 0 / 36.
+          Every failure logs `plugin readsb was not ready within 30s; feeding anyway`, then
+          decodes all 16 squitters with 0 records dropped - readsb was healthy, it had simply not
+          started. 232 records fed before ready, 1 readiness timeout, in 38 s runs.
+        WITHOUT a relink: 0 failures in 20 runs at load 13 and 0 in 150 runs at load 35. That is
+        why load loops kept coming back clean and five triages in a row concluded "cannot
+        reproduce".
+      THE FIX (all four places now use one rule, `chains/plugin.rs::budget` / the same shape in
+      `host.rs`): before the child's first byte, the manifest's `startup_timeout` governs; from
+      that byte on, the caller's own budget runs, measured from the later of the byte and the last
+      change being watched. Nothing is slower once the child has started, so genuine-hang detection
+      is unchanged, and every expiry message now names WHAT NEVER ARRIVED (ran-but-never-signalled
+      vs never-produced-a-byte) instead of only how long it waited.
+      New observational API: `PluginStats::signs_of_life`, `PluginMonitor::first_output_at()`,
+      `PluginInstance::first_output_at()`/`limits()`. T-493's `wait_started` test helper now reads
+      the host's own first-byte record instead of its counter proxy.
+      RED-WHEN-BROKEN, deterministically, using hk-dummy-plugin's `--cold-start-ms` (the loader
+      stall in miniature): two new tests in crates/hk-pipeline/tests/data_path.rs -
+      `a_cold_starting_plugin_is_waited_for_because_the_ready_bound_runs_from_its_first_output`
+      and `a_cold_starting_plugin_is_not_cut_off_by_the_end_of_input_settle_window` - each failed
+      6 of 6 runs on the old code and passes on the new one, in 5-7 s. They assert counts and
+      ordering (records 1..n, fed-before-ready, ready timeouts), never elapsed time.
+      THE TESTS STILL HAVE TEETH, each proved by breaking what it protects:
+        - readiness bound stops expiring (`NeverSignalled` -> `Ready`): `a_live_chain_feeds_a_
+          plugin_that_never_reports_ready_after_its_bounded_wait` red on "the live chain gave up
+          on readiness exactly once", 0 vs 1.
+        - readiness wait skipped entirely: `signal_001` red with 232 records fed before ready, and
+          the new message distinguishes it from the flake shape by saying "0 readiness timeouts";
+          the new cold-start test red with 300.
+        - `finish` made patient after the first byte too (the over-correction this fix could have
+          been): the new `hk-plugins::startup_budget::d_finish_still_stops_a_plugin_that_started_
+          and_then_wedged_on_the_short_budget` red in 8 s, because the host now logs the budget it
+          actually applied ("no progress for 8s" where 400 ms was asked for).
+      Also added: a unit test for the rule itself, `chains::plugin::tests::a_budget_on_a_
+      subprocess_runs_from_its_first_byte_and_from_the_startup_budget_before_it`, because the
+      three callers are hard to drive to expiry in an integration test without a 30 s replay.
+      SIGHTING 3 IS A SEPARATE, STILL-OPEN BUG - do not fold it in. That test runs with
+      `cfg.settings.chains = Some(Vec::new())`: no plugin, no subprocess, so it cannot be this
+      mechanism. `survey <id> not found` comes from `finish_survey` finding NO ROW for a survey the
+      same run inserted at start-up, which means the closing connection read a database without it.
+      Ruled out by reading the code: no DELETE on `survey` anywhere; `migrate()` runs in an
+      IMMEDIATE transaction so concurrent opens serialise; every temp dir is unique per pid; the
+      insert is autocommitted before the run starts. NOT reproduced in 170 runs (20 at load ~13,
+      150 at load ~35). T-629 added the only thing that will settle it: the close-path error now
+      names the database file and what that file held for the id
+      (`crates/hk-pipeline/src/run.rs`, "closing the survey: ... [survey <id> in <path>: ...]"), so
+      the next sighting is evidence instead of a sixth triage. Leave the test alone until then - it
+      has not been quarantined, retried or widened.
+      NOT DONE, DELIBERATELY: no `retries`, no `heavy-serial` pin, no widened timeout. task-flakes
+      spent a day removing a `retries = 1` and a serial pin that existed only to prop up a
+      wall-clock bound.
+    notes: |
+      Filed by the deflaker on branch task-plugready (2026-09-21). Files: crates/hk-plugins/src/host.rs,
+      crates/hk-plugins/tests/common/mod.rs, crates/hk-pipeline/src/chains/plugin.rs,
+      crates/hk-pipeline/src/run.rs, crates/hk-pipeline/tests/data_path.rs,
+      tests/e2e/tests/acceptance/signal_001.rs.
+      Related: T-493 (cold link measured), T-540 (the watchdog's two budgets), T-603 (hk-e2e runs
+      through plain `cargo test`, so nextest's serial group and thread cap never applied to
+      sighting 2 at all).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-650
+    milestone: M2-hardening
+    title: A staged bulk leaves main carrying ungated commits and nothing says so, so every reading taken in that window is wrong
+    status: done
+    branch: task-bulkmark
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-582]
+    use_cases: []
+    found_by: 'the coordinator, 2026-09-21, after the third incident caused by the same window'
+    acceptance: |
+      `ops/merge-runner.sh`'s bulk path COMMITS EACH MERGE AS IT GOES and rewinds only if the gate
+      then fails, so for the 15-25 minutes a bulk gate runs, `main` carries commits that have not
+      passed a gate and may be reset away. Nothing declared that window, so every tool and every
+      person sampling main inside it read a PROVISIONAL state as a settled one.
+      THREE INCIDENTS, ALL THE SAME CAUSE, ALL ON 2026-09-21:
+      1. `task-t547` was deleted on an `ahead=0` reading taken while its merge was staged. It had to
+         be recovered from the merge commit's second parent (`e097ce8a^2` = `20bbfa87`).
+      2. A batch was announced as landed from a `git log --merges` snapshot taken during the bulk.
+         The gate then failed and rewound it. Caught only because a field was missing from the API.
+      3. `task-plugready` was cut from staged-but-ungated main and silently absorbed T-596's,
+         T-546's and T-547's work (3 hits of `open_dwell` in its `coverage.rs` against 0 on main;
+         git warned of multiple merge bases). T-596 was later pulled with a regression, so merging
+         that branch would have landed unfixed code. It had to be rebuilt from clean main.
+      RESOLUTION. The bulk declares itself. `ops/merge-runner.sh` writes
+      `$HACKRIFF_OPS/bulk-in-progress` (base, start time, pid, branch list; `after` once the batch is
+      staged) BEFORE the first merge commit, so there is no instant in which main is provisional and
+      nothing says so, and removes it on a gate pass and on a rewind.
+      IT IS DELIBERATELY NOT REMOVED when the runner dies mid-bulk or when the gate fails with HEAD
+      moved: in both of those cases main really is left carrying ungated commits, so the marker is
+      TRUE, not stale, and clearing it would be the same false-quiet this ticket exists to remove -
+      the same reasoning as `Coverage::Unobserved` is not quiet and `BiasTee::Unknown` is not `Off`.
+      `hkpy.reconcile` leads with the warning, ABOVE the findings rather than beside them, because
+      it invalidates all of them at once rather than qualifying any one: it names the branches, the
+      gated-from base, how long the window has been open, whether the runner pid is still alive, and
+      the three actions that each caused an incident - do not delete a branch, do not flip a ticket
+      to done, do not cut a new worktree from main.
+      NON-VACUITY PROVED: four tests in `py/tests/test_reconcile.py`, and two deliberate defects each
+      caught by the guard named for it - emitting the warning AFTER the findings fails
+      `test_the_warning_precedes_the_findings_in_the_rendered_output`, and treating a dead runner as
+      "window over" fails `test_a_dead_runner_leaves_the_warning_standing_because_main_is_still_ungated`.
+      The reconcile skill and the module docstring both carry the `ahead=0` distinction in words.
+    notes: |
+      Filed and resolved 2026-09-21 by the coordinator. The id is deliberately clear of the T-63x
+      range that three in-flight agents were told to file into; ids are permanent and gaps are normal.
+      Changing `ops/merge-runner.sh` needs a RUNNER RESTART to take effect - the running process
+      executes its own inode and `self_version()` only reports the drift, by design (swapping code
+      under a live gate is worse than running old code). The supervisor owns that restart.
+  - id: T-690
+    milestone: M2-hardening
+    title: 'ui/e2e specs that only hold on a FRESH backend: three pass alone, fail in the 13-spec suite'
+    status: done
+    commit: 6ec27058
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FILED 2026-09-21 by task-e2estate, the sibling of T-582's class: not one bug but a DEFECT
+      CLASS in ui/e2e. `canvas-journey.e2e.mjs`, `fog-of-war.e2e.mjs` and `surface-region.e2e.mjs`
+      failed inside `just test-ui-e2e` and passed alone, sinking every full gate and with it
+      unrelated branches.
+
+      TRIAGE, DONE BEFORE ANY FIX, each spec run ALONE via `npm run e2e -- <spec>`:
+        - canvas-journey  1/1 files, 6/6 tests, 226 s, WHILE THE SYSTEM LOAD AVERAGE WAS 29;
+        - fog-of-war      1/1 files, 1/1 tests, 82.6 s, all three ADR-0020 claims held (live A
+          meanLuma 117.9 / grey 0.0 %; departed A 53.5 / ink 40.1 %; never-swept C grey 100.0 %,
+          1 distinct colour; re-swept A 119.2; 2 device calls, both centre changes);
+        - surface-region  1/1 files, 4/4 tests, 11.0 s, 73 requests after the drags, 2 selection
+          POSTs, 0 device calls.
+
+      **LOAD IS NOT THE TRIGGER, AND THAT IS THE FINDING.** canvas-journey passed at load 29.
+      So this is NOT a load-flake, no wait may be lengthened and no retry may be added. (T-629
+      burned five triage rounds this week assuming load when the real trigger was a relink:
+      0 failures in 150 runs at load 35 without one, 7 in 24 with one. Name the variable you
+      actually vary.)
+
+      THE MECHANISM: `ui/e2e/run.mjs` starts ONE `hk serve` (`startBackend()`) and runs all 13
+      specs against it, sorted. By the time these three run that backend is many minutes old:
+      the tile route has a deep queue (task-fixshared measured `queue 47` at ~2561 ms a tile,
+      two minutes of honest backlog), the coverage map has grown, the client's AIMD operating
+      cap has been driven around by earlier specs, and storage has accumulated. These specs
+      assert things that are only true of a FRESH backend while running against an AGED one.
+      Two of the three (canvas-journey, fog-of-war) bring their OWN backend, so for those the
+      aged party is the machine and the co-resident shared server, not their own store - the
+      class is "assertion conditioned on a quantity that only holds when nothing else is
+      happening", of which backend age is the commonest instance.
+
+      **THE RULE, AND IT IS THE POINT OF THIS TICKET: the fix is to condition each assertion on
+      the MECHANISM, never to reset the world.** Giving each spec its own fresh backend is
+      REFUSED: an aged, contended backend is the realistic case and it catches real defects a
+      fresh one hides - it is exactly how task-fixshared found the flapping `tierFor` predicate
+      (4104 client-side cancellations in one spec against 1718 on a quiet one, the AIMD cap
+      driven to 1 of 4 and held there, a second tab that could not boot at all). Resetting the
+      world would delete that coverage, and is the same mistake as quarantining. Quarantine,
+      skip and retry are all forbidden here: a test that fails in isolation is a real bug, and
+      these do not fail in isolation, so they are guards written against one server age.
+      Worked examples of the correct shape, from task-fixshared: `surface-nav` stopped counting
+      every tile request started after the last gesture as speculation and now partitions by
+      what the ADDRESS IS (a first-time address is the gesture's own enumeration still draining;
+      a RE-ASK is an address this page was already answered for with nothing on screen changed);
+      `surface-address` stopped judging every request against the detail probe's `axes` and now
+      partitions by scheme and REQUIRES both tiers to be exercised.
+      DoD: each of the three assertions restated against its mechanism, still non-vacuous and
+      still able to catch the defect it exists to catch (proved by `just test-ui-e2e-selftest`,
+      which reinstates known defects and requires a RED); `just test-ui-e2e` 13/13 twice in a
+      row. Assert with counts and ordering, never wall-clock (user, 2026-09-21).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only - here that is `just test-ui-e2e` and
+      `just test-ui`. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by task-e2estate. Successor in kind to task-fixshared (`surface-address`,
+      `surface-nav`), which named this failure class and fixed the first two of it.
+
+      MEASURED, over five full-suite runs on this branch. The class turned out to be WIDER than
+      the three specs it was reported for - across those runs five different files went red, never
+      the same set twice, and each was one of these. THE VARIABLE, named: the tile route's SERVICE
+      RATE, and with it the client's AIMD operating cap. Same page, same gestures, same product:
+        - `~167 ms/tile`, operating cap 4/4, queue 0   (this file with one other spec)
+        - `~3612 ms/tile`, operating cap 1/4, queue 28 (this file in the 13-spec suite)
+      a twenty-one-fold difference, measured off the client's own status line. Every failure below
+      is a guard that took a quantity produced by that rate as if it were a property of the
+      product.
+        1. `surface-region` test 4 - "the drags moved nothing at all, so this proves nothing".
+           Non-vacuity read as a count of `/api/tiles` requests in a ~1 s window: 112 on the fast
+           route, 0 on the slow one, with the page panning correctly in both. Restated per GESTURE
+           LEG on the page's own state: a pan leg must MOVE THE VIEW, the shift leg must COMMIT
+           EXACTLY ONE REGION and hold the window. (Now passes with 0 tile requests in the window.)
+        2. `canvas-journey` test 1 - `tiles.length >= 4`, the same volume premise: 234 requests on
+           the fast route, 3 on the slow one. Restated as a bounded WAIT ON THE COUNT: the
+           gesture's own enumeration is given time to reach the wire, and the same >= 4 bound is
+           then judged. Its failure also CASCADED - the file shares one page across six tests, so
+           an aborted test 1 left the pane parked on the whole surface and tests 2 and 3 failed
+           about something else entirely. Tests 2 and 3 now reopen and state their own premise.
+        3. `canvas-journey` wide leg / tests 3 and 4 - `paneGeometry` read BEFORE a wait of up to
+           25 s and sampled after, the exact asymmetry T-564 fixed in the inside leg. Re-read at
+           each measurement.
+        4. `fog-of-war` - two tuned sleeps (3 s, and 10 s tuned up from 3 s when 3 s measured
+           7/26 = 27 % against a 30 % gate) that are wall-clock budgets for an amount of CAPTURE,
+           plus a fixed 2200 ms settle before every pixel census. Replaced by polls on the SERVER's
+           own coverage over the window since each retune (a premise, never the claim) and by the
+           pane's own `0 pending` readout. The ADR-0020 claims are untouched.
+        5. `surface-nav` (2) and (2b) - "no refusal during the steady window" and "no serial probe
+           refused while the page is idle". Both are claims about the route's ACCOUNTING that were
+           written as claims about its RATE: `/api/tiles` takes its slot before it does any work,
+           so a full budget refuses whether the slots are leaked or busy with reads this page is
+           still waiting for. (2b) now makes the claim only over probes taken while the client held
+           NOTHING (0 in flight, 0 abandoned, queue 0) - where a refusal is unattributable and can
+           only be a leak - plus a turnover floor so it is never vacuous. (2) is now bounded by the
+           number of additive increases the client made in the same window: AIMD's own contract,
+           one refusal per probe upward, which still forbids the pinned-at-the-ceiling regime
+           `t454-never-back-off` produces (8 refusals, 0 increases).
+        6. `surface-contention` - the one PRODUCT defect the class exposed, and the same mistake in
+           `ui/src`: `probeSurface`'s bootstrap retry was five attempts with an UNCAPPED doubling
+           backoff - 4.65 s, most of it asleep - so a second tab meeting a route with all four
+           slots held gave up with "GET /api/tiles refused every attempt". That is a bet on the
+           route's rate. The bound is now stated in TIME (`RETRY_BUDGET_MS`, 20 s) with the wait
+           CAPPED (`MAX_BACKOFF_MS`, 1 s) so the client keeps asking on a cadence, and the attempt
+           count is DERIVED from the budget so the two cannot drift. The real answer to one greedy
+           tab holding every slot is still the fair-share decision on the route itself, T-630; this
+           only stops the client giving up while the route is still working.
+
+        7. THE SAME MISTAKE ONE LAYER DOWN, found by using the suite as evidence: the tier's own
+           `GET` helpers split two ways on backpressure. `canvas-journey` and `scan-everything`
+           retry a `503` ("a 503 is 'busy now', never 'no'"); `fog-of-war`, `surface-nav`,
+           `surface-retune` and `fog-of-war`'s tile replay treated it as a broken server. Each of
+           those is a PREMISE, so a refusal ended the test before its subject ran - measured,
+           `surface-nav`'s `timeRoom` threw `GET /api/tiles -> 503` 182 ms into T-456, before its
+           own 120 s wait for the record to grow had run once. All four retry now, and the tile
+           replay counts its reasons so "the route was busy" and "that band was never drawn" can
+           no longer be reported with the same words.
+        8. NOT A TEST DEFECT AT ALL, but worth recording because it distorted every measurement in
+           this ticket: TEN ORPHANED CHROME PROCESSES from a killed e2e run were still running
+           after THREE HOURS, contending for CPU and GPU throughout. `run.mjs`'s `killSpecTree`
+           only walks the tree of a spec it timed out; a runner killed from outside (an agent's
+           Ctrl-C, a `pkill` on `run.mjs`) leaves Chrome behind, because `cdp.mjs` deliberately
+           puts it in its own process group. Anyone triaging this class should check
+           `pgrep -f "Chrome for Testing"` before believing a rate measurement.
+
+      ALSO ADDED: the first standing selftest faults for `fog-of-war.e2e.mjs`
+      (`t520-shadow-drawn-as-grey` - the client decodes the server's shadow plane and draws THE
+      grey anyway) and for `canvas-journey.e2e.mjs` (`t532-draw-past-the-coverage-horizon` - a tile
+      drawn beyond how far forward its own coverage evidence reaches). Both files carried standing
+      claims - T-521 is the guard for ADR-0020, one of the user's two top features - and neither
+      had any fault in `ui/e2e/selftest.mjs`, so their non-vacuity had never been re-checked by
+      anything.
+
+      AND TWO REPORTING DEFECTS IN `selftest.mjs` ITSELF, both found by relying on its verdicts:
+      `failedFiles` came from an UNANCHORED `/failed: ([^\n]+)/` over the whole captured output,
+      so it matched whatever a spec printed first - observed reporting the failed file as
+      `injected fault (T-508): the device has gone"` and then saying FAIL about a fault the right
+      guard had caught. And `expect` may now be an ARRAY, used for exactly one fault:
+      `t454-forget-abandoned-slots`'s only outward signature is wire concurrency, which
+      `surface-nav` itself documents as a LOWER bound (Chrome opens at most six connections per
+      origin), and on the same tree the same day `live-edge` saw peak 5 against a cap of 4 while
+      `surface-nav` saw peak 4. Naming one made the verdict a coin toss about which file caught
+      the excess.
+  - id: T-740
+    milestone: M2-hardening
+    title: "run.mjs's killSpecTree only sweeps a spec it timed out, so a run killed from outside leaves Chrome behind for hours"
+    status: todo
+    priority: normal
+    parallel_group: OPS
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'task-e2estate, 2026-09-21, while measuring the tile route under T-690'
+    acceptance: |
+      MEASURED. **Ten orphaned Chrome processes were found running for THREE HOURS** after an e2e
+      run was killed from outside, and they were contending for the machine the whole time.
+      `ui/e2e/run.mjs`'s `killSpecTree` walks a spec's whole process tree - its Chrome, Chrome's
+      renderer/GPU children, and any `hk serve` that spec started - but it is only invoked on the
+      path where the RUNNER ITSELF times a spec out. A run killed by anything else (a coordinator
+      stopping it, a gate timeout, SIGKILL from a parent) exits without sweeping, and every browser
+      it started survives.
+      WHY THIS IS MORE THAN TIDINESS, and why it is filed against the ticket it distorted: T-690's
+      whole subject is that these specs fail as a function of the TILE ROUTE'S SERVICE RATE
+      (measured 167 ms/tile at cap 4/4 against 3612 ms/tile at cap 1/4). Ten stray browsers are a
+      direct, invisible input to that rate. The leak did not just waste the machine - it silently
+      poisoned the measurements of the investigation trying to explain the failures. A test harness
+      whose cleanup depends on HOW it died will mislead whoever debugs it next, in exactly the way
+      it already did.
+      DoD: cleanup that does not depend on the exit path - process-group kill, an exit/signal
+      handler that sweeps every spawned child, or a supervisor that reaps by marker - so that
+      SIGINT, SIGTERM, SIGKILL-of-the-parent and a normal finish all leave zero orphaned browsers.
+      SIGKILL of the runner cannot be trapped, so say explicitly how that case is handled (a
+      pre-registered process group, or a sweep at the NEXT run's start) rather than leaving it as
+      the silent gap.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: browsers alive before, during and after, over a stated
+      number of runs, for each way of ending the run. Prove it RED by reinstating the exit-path
+      dependence.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 by the coordinator from T-690 finding 8. The agent that found them also
+      checked, rather than assumed, that 14 OTHER Chrome processes on the box belonged to a
+      different agent's live worktree and left those alone - the right instinct, and the reason a
+      blanket sweep is not the fix here either.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

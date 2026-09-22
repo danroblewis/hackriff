@@ -3018,6 +3018,251 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ---- T-596: the live edge with the IQ ring refused ----------------------------------------
+
+    /// **T-596 — a full disk must not make the canvas lie about where the radio looked.**
+    ///
+    /// Measured by T-588 with `iq_buffer: None`: **18 rows (18 s) of `max_db` carried
+    /// `state: unobserved`** right after a retune. The observation log gains a record only when a
+    /// dwell **seals** — on the next retune, or after `INTERACTIVE_RECORD_MAX_NS` (60 s) of a
+    /// steady tune — so between the retune and the seal the log says nothing about the band the
+    /// radio is sitting on. With an IQ ring that gap is covered by the ring journal, whose
+    /// segments open on every provenance change. **The ring was refused because the disk was
+    /// full** ("needs 134217728 bytes above the 8589934592-byte free-space floor and 4789297152
+    /// bytes are free"), and a portable device *will* fill its disk: this is the field failure
+    /// mode, and the honest way to survive it is to say what the radio is on, not to grey it.
+    ///
+    /// Same invariant as T-595 — data exists and is drawn grey — but the **live edge** rather than
+    /// the history horizon, and it composes with T-595 rather than competing: the dwell in flight
+    /// is *the same claim* as the sealed one, so it gets no mark of its own (assertion 1), and it
+    /// declares the same DC notch, so the notch still reads `"excluded"` at the live edge and does
+    /// not flip when the seal catches up (assertion 2).
+    ///
+    /// The fixture is the retune T-588 drove: era A is sealed in the log, era B is the tune the
+    /// radio is on *now* and exists only as the open dwell. **No IQ ring at all** — the refusal.
+    ///
+    /// Assertions, counted, with floors so none can pass on zero of zero:
+    ///
+    /// 1. **no cell holding a `max_db` reads `unobserved` or `unknown`**, over ≥ `N*N/4` measured
+    ///    cells, of which ≥ `N*N/8` are in era B's rows — the count T-588 measured as 18;
+    /// 2. era B's DC notch reads `"excluded"` (T-595's mark, at the live edge);
+    /// 3. era B's rows are `"observed"` where the open dwell reaches, so the evidence is really
+    ///    the open dwell and not era A's sealed record leaking forward;
+    /// 4. grey still means something: spectrum era B never reached stays `"unobserved"` and the
+    ///    store holds nothing there;
+    /// 5. the answer **says** which evidence carried it: `sources` reports the IQ ring
+    ///    unavailable and the `open-dwell` source non-empty.
+    ///
+    /// RED without the fix: drop the `open_dwell_spans` call from `Evidence::collect` and
+    /// assertion 1 counts every era-B cell as grey (measured: 1024 of 2048).
+    #[test]
+    fn the_live_edge_is_observed_when_the_iq_ring_is_refused_and_the_dwell_has_not_sealed() {
+        let dir = temp_dir("t596-open-dwell");
+        let secs = N as i64;
+        let f_cell = 6250.0;
+        let tile_hz = f_cell * N as f64;
+        let dc_half = 15e3;
+
+        let mut p = hk_store::Pyramid::open(&dir, PyramidConfig::default()).unwrap();
+        let t_cell = p.geometry().levels[0].t_cell_ns;
+        let t0 = T_INDEX * t_cell * N as i64;
+        let f_lo = F_INDEX as f64 * f_cell * N as f64;
+
+        // Era A: the lower half, sealed. Era B: the retune the radio is on now — the middle half,
+        // so it overlaps era A (proving the rows are era B's own coverage) and stops a quarter
+        // short of the top, which is the never-tuned control.
+        let (rate_a, rate_b) = (tile_hz / 2.0, tile_hz / 2.0);
+        let (centre_a, centre_b) = (f_lo + tile_hz / 4.0, f_lo + tile_hz / 2.0);
+        let eras = [
+            (centre_a, rate_a, 0, secs / 2),
+            (centre_b, rate_b, secs / 2, secs),
+        ];
+
+        const NB: usize = 256;
+        for (centre, rate, k0, k1) in eras {
+            let bin_hz = rate / NB as f64;
+            let psd = [1e-9f32; NB];
+            for k in k0..k1 {
+                p.ingest(&hk_store::history::FrameInput::new(
+                    Timestamp::from_unix_nanos(t0 + k * t_cell),
+                    t_cell,
+                    centre - rate / 2.0,
+                    bin_hz,
+                    hk_model::PowerUnit::Dbfs,
+                    &psd,
+                ))
+                .unwrap();
+            }
+        }
+        let mut state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            // The refusal. A full disk leaves the server with no ring journal at all, and the
+            // observation log is then the only evidence of where the radio looked.
+            iq_buffer: None,
+            ..ApiState::default()
+        };
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        // Era A sealed; era B is the dwell in flight, exactly as the observer publishes it.
+        store.append(&notched_dwell(
+            centre_a,
+            rate_a,
+            dc_half,
+            t0,
+            t0 + (secs / 2) * t_cell,
+        ));
+        store.flush();
+        let open = notched_dwell(
+            centre_b,
+            rate_b,
+            dc_half,
+            t0 + (secs / 2) * t_cell,
+            t0 + secs * t_cell,
+        );
+        let hk_model::attention::observation::ObservationRecord::Dwell(open) = open else {
+            unreachable!("notched_dwell builds a dwell")
+        };
+        store.note_open_dwell(open);
+        assert!(
+            store
+                .query(&hk_store::observation::RecordQuery {
+                    freq: FreqRange::new(f_lo, f_lo + tile_hz),
+                    span: hk_model::TimeRange::new(
+                        Timestamp::from_unix_nanos(t0),
+                        Timestamp::from_unix_nanos(t0 + secs * t_cell),
+                    ),
+                    tier: None,
+                    cursor: 0,
+                    limit: 64,
+                })
+                .records
+                .len()
+                == 1,
+            "the open dwell must NOT be a queryable record: a provisional record must not reach \
+             the occupancy, POI or report paths that count sealed visits"
+        );
+        state.observations = Some(store);
+
+        let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let states: Vec<String> = v["coverage"]["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let sel = v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+        let runs = v["coverage"]["planes"][sel]["runs"].as_array().unwrap();
+        let mut plane: Vec<&str> = Vec::with_capacity(N * N);
+        for pair in runs.chunks(2) {
+            let s = pair[0].as_u64().unwrap() as usize;
+            for _ in 0..pair[1].as_u64().unwrap() {
+                plane.push(&states[s]);
+            }
+        }
+        assert_eq!(plane.len(), N * N, "the plane is the tile's own grid: {v}");
+        let max_db = v["grid"]["max_db"].as_array().unwrap();
+        assert_eq!(max_db.len(), N * N, "{v}");
+
+        // 1. The invariant, counted over both eras and over era B on its own — the live edge is
+        //    the half that had no evidence at all, so a floor on the whole tile is not enough.
+        let row_b0 = N / 2;
+        let measured = max_db.iter().filter(|x| !x.is_null()).count();
+        let measured_b = (row_b0 * N..N * N)
+            .filter(|&i| !max_db[i].is_null())
+            .count();
+        assert!(
+            measured >= N * N / 4 && measured_b >= N * N / 8,
+            "the fixture must judge real measurements, not zero of zero: {measured} of {}, \
+             {measured_b} of them at the live edge",
+            N * N
+        );
+        let greyed: Vec<usize> = (0..N * N)
+            .filter(|&i| {
+                !max_db[i].is_null() && (plane[i] == "unobserved" || plane[i] == "unknown")
+            })
+            .collect();
+        assert!(
+            greyed.is_empty(),
+            "{} of {measured} cells hold a measurement and are drawn grey - a full disk made the \
+             canvas lie about where the radio looked. First at row {}, cell {} ({:.4} MHz), \
+             state {:?}",
+            greyed.len(),
+            greyed[0] / N,
+            greyed[0] % N,
+            (f_lo + (greyed[0] % N) as f64 * f_cell) / 1e6,
+            plane[greyed[0]]
+        );
+
+        // 2. T-595's mark survives at the live edge: the open dwell declares the same notch.
+        let inside: Vec<usize> = (0..N)
+            .filter(|&f| {
+                let lo = f_lo + f as f64 * f_cell;
+                lo >= centre_b - dc_half && lo + f_cell <= centre_b + dc_half
+            })
+            .collect();
+        assert!(
+            inside.len() >= 2,
+            "the fixture must judge notch cells: {inside:?}"
+        );
+        let row = row_b0 + N / 4;
+        for &f in &inside {
+            assert_eq!(
+                plane[row * N + f],
+                "excluded",
+                "the open dwell's DC notch at {:.4} MHz must read \"excluded\", the same mark it \
+                 will carry once it seals: {:?}",
+                (f_lo + f as f64 * f_cell) / 1e6,
+                &plane[row * N + f - 1..row * N + f + 2]
+            );
+        }
+
+        // 3. Era B's own band is observed at a frequency era A never covered — so the evidence is
+        //    the open dwell, not the sealed record leaking forward in time.
+        let past_a = ((tile_hz * 0.625) / f_cell) as usize;
+        assert_eq!(
+            plane[row * N + past_a],
+            "observed",
+            "{:.4} MHz is inside era B and outside era A: {:?}",
+            (f_lo + past_a as f64 * f_cell) / 1e6,
+            &plane[row * N + past_a - 1..row * N + past_a + 2]
+        );
+
+        // 4. Grey still means something: the top quarter, which no era ever reached.
+        assert_eq!(
+            plane[row * N + N - 1],
+            "unobserved",
+            "spectrum the radio never tuned must stay grey, or assertion 1 passes by observing \
+             everything"
+        );
+        assert!(
+            max_db[row * N + N - 1].is_null(),
+            "and the store must hold nothing there, or this is the bug rather than the control"
+        );
+
+        // 5. The answer says which evidence carried it.
+        let sources = v["coverage"]["sources"].as_array().unwrap();
+        let src = |kind: &str| -> Value {
+            sources
+                .iter()
+                .find(|s| s["kind"] == json!(kind))
+                .unwrap_or_else(|| panic!("source {kind} missing: {sources:?}"))
+                .clone()
+        };
+        assert_eq!(
+            src("iq-ring")["available"],
+            json!(false),
+            "the ring was refused, and the answer must say so"
+        );
+        assert!(
+            src("open-dwell")["spans"].as_u64().unwrap() > 0,
+            "the live edge was carried by the dwell in flight, and the answer must say so: {:?}",
+            src("open-dwell")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ---- T-461: the coverage short-circuit ---------------------------------------------------
 
     /// One dwell over `lo..hi` for `[t0, t1)`, by a named front end — the record that makes a band

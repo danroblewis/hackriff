@@ -235,18 +235,65 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const FOLLOWING = `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]')]` +
     `.map((v) => v.getAttribute('data-following')).join(",")`;
   const followingBefore = await page.eval(FOLLOWING);
+  /** The client's own queue depth, off the status line it already prints ("queue N"). */
+  const queueDepth = async () => Number((await page.eval(STATUS)).match(/queue (\d+)/)?.[1] ?? -1);
+  const queueAtStart = await queueDepth();
+  /**
+   * The client's own outstanding work, off the status line it already prints:
+   * `N+M/L in flight · queue Q` — N issued, M charged for abandoned reads, L the operating cap.
+   *
+   * **This is the premise that decides what a refusal MEANS** (T-690). `/api/tiles` takes its slot
+   * before it does any work, so a full budget refuses the probe below whether the slots are held
+   * by reads nobody will ever collect (T-454's leak — a defect) or by reads THIS PAGE IS STILL
+   * WAITING FOR (backpressure — correct). Those are opposite findings, and the only thing that
+   * tells them apart is whether the client has anything outstanding.
+   */
+  const outstanding = async () => {
+    const st = await page.eval(STATUS);
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight/);
+    return {
+      inflight: Number(f?.[1] ?? -1), abandoned: Number(f?.[2] ?? -1),
+      queue: Number(st.match(/queue (\d+)/)?.[1] ?? -1),
+    };
+  };
   const probes = [];
+  const probeFrom = Date.now();
+  // Where the steady window's own cap samples start, so an additive increase the GESTURES paid for
+  // cannot license a refusal inside this window.
+  const capsAtSteadyStart = caps.length;
   for (let i = 0; i < STEADY_STATE_MS / 500; i++) {
     await new Promise((r) => setTimeout(r, 500));
     await sampleCap();
     if (i % 2 === 1) {
+      const held = await outstanding();
       const t0 = Date.now();
       const status = await fetch(probeUrl).then((r) => r.status, () => 0);
-      probes.push({ status, ms: Date.now() - t0 });
+      // IDLE means the client is holding nothing and wants nothing: no request in flight, no
+      // abandoned read still charged, and an empty queue. A refusal HERE is unattributable to
+      // this page and is therefore the leak, stated from outside the client.
+      probes.push({ status, ms: Date.now() - t0, held, idle: held.inflight === 0 && held.abandoned === 0 && held.queue === 0 });
     }
   }
+  const probeTo = Date.now();
   const followingAfter = await page.eval(FOLLOWING);
+  const queueAtEnd = await queueDepth();
   const frozen = (f) => f.length > 0 && !f.split(",").includes("true");
+  // **The MAP is a viewport too, and since T-505 it is a viewport on its own lattice.** `FOLLOWING`
+  // above asks only about `[data-viewport="pane"]`, so the still-view premise has never covered the
+  // minimap — and the minimap follows the live edge whatever the panes do. Before T-505 that cost
+  // nothing here: the map drew from the same lattice at a coarse level, where one tile is megahertz
+  // wide and minutes tall, so it re-asked for nothing inside an 8 s window. It now draws from the
+  // OVERVIEW tier, and its requests are a different scheme on a different lattice.
+  //
+  // So the claim is partitioned by scheme rather than counted in one heap (T-564's move). What the
+  // frozen panes draw from is `scheme=view`, and THAT is what must be silent; the map's own
+  // `scheme=overview` traffic is legitimate — it is following — and is reported with its premise
+  // instead of being counted as the panes' speculation. Lumping them made this assertion say
+  // "17 requests, therefore speculation" about a viewport that was doing its job.
+  const mapFollowing = await page.eval(
+    `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="minimap"]')]` +
+    `.map((v) => v.getAttribute('data-following')).join(",")`);
+  const schemeOf = (r) => new URL(r.url).searchParams.get("scheme") ?? "view";
 
   // ——— the evidence, gathered and PRINTED before anything is asserted ———
   // A failing guard whose first assertion hides the rest of the picture is a guard people bisect by
@@ -254,7 +301,39 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const tileReqs = page.requests.filter((r) => r.url.includes("/api/tiles"));
   const refused = page.requests.filter((r) => r.status === 503);
   const steadyRefusals = refused.filter((r) => r.startedMs >= navigationEnded);
-  const steadyRequests = tileReqs.filter((r) => r.startedMs >= navigationEnded).length;
+  const steady = tileReqs.filter((r) => r.startedMs >= navigationEnded);
+  const steadyRequests = steady.length;
+  const steadyByScheme = new Map();
+  for (const r of steady) steadyByScheme.set(schemeOf(r), (steadyByScheme.get(schemeOf(r)) ?? 0) + 1);
+  // **A request that starts after the gestures is not the same thing as a request the gestures did
+  // not want.** The client asks through a queue behind the route's in-flight cap, so the last
+  // gesture's own addresses keep going out for as long as that queue takes to drain — measured on
+  // this run: `queue 30` at ~1537 ms a tile, which is forty seconds of honest backlog inside an
+  // 8 s window. Counting those as speculation is counting the rate limit.
+  //
+  // So the window is partitioned by what the address IS, not by when it was sent (T-564's move):
+  //
+  //  - a **first-time** address is the tail of the gestures' own enumeration — wanted, queued
+  //    before this window began, and arriving late because the route is slow;
+  //  - a **re-ask** is an address this page already put on the wire and is asking for again with
+  //    nothing on screen changed. That is the speculation T-471's prefetch ring was made of, and
+  //    it is unbounded by construction — its ring re-asked the same addresses every frame, 27-33
+  //    of them inside this window, which is exactly what this partition catches and a raw count
+  //    could only catch by being lucky about the queue depth.
+  //
+  // **And "already asked" means already ANSWERED.** A request the client aborted mid-gesture — and
+  // it aborts thousands, one per frame the box moved — never came back with anything, so asking
+  // for it again is the only way the pane can ever draw it. Counting an unanswered abort as a
+  // repeat would make the claim "never retry what you cancelled", which is the opposite of what
+  // this file wants: T-454's whole subject is that an abandoned read must be re-driven rather than
+  // leaked. So the set is the addresses that came back `200`.
+  const askedBefore = new Set(tileReqs
+    .filter((r) => r.startedMs < navigationEnded && r.status === 200)
+    .map((r) => r.url));
+  const steadyDetailReqs = steady.filter((r) => schemeOf(r) === "view");
+  const steadyDetail = steadyDetailReqs.length;
+  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.url));
+  const steadyFirstTime = steadyDetail - steadyReasks.length;
   const status = await page.eval(STATUS);
   const backpressure = Number(status.match(/(\d+) backpressure/)?.[1] ?? -1);
   const cancelled = Number(status.match(/(\d+) cancelled/)?.[1] ?? 0);
@@ -267,12 +346,28 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `${steadyRefusals.length} during ${(STEADY_STATE_MS / 1000).toFixed(0)} s of steady state ` +
     `(${steadyRequests} requests) · ${backpressure} counted by the client`);
   const probeRefusals = probes.filter((p) => p.status === 503);
+  t.diagnostic(`cache over the run: ${status}`);
+  t.diagnostic(`steady-state DETAIL requests: ${steadyFirstTime} first-time (the gestures' own ` +
+    `backlog draining) + ${steadyReasks.length} re-asked · client queue ${queueAtStart} -> ${queueAtEnd}`);
+  t.diagnostic(`steady-state requests by scheme: ` +
+    `${[...steadyByScheme].map(([k, n]) => `${k}=${n}`).join(" ") || "none"} · map following [${mapFollowing}]`);
   t.diagnostic(`panes following the live edge across the steady window: [${followingBefore}] -> ` +
     `[${followingAfter}] (${frozen(followingBefore) && frozen(followingAfter)
       ? "all frozen: the still-view claim applies" : "one is live: claim not made"})`);
+  const idleProbes = probes.filter((p) => p.idle);
+  const idleRefusals = idleProbes.filter((p) => p.status === 503);
+  // Tile reads the route COMPLETED for the page during the probe window, counted from CDP's own
+  // network log rather than from anything the client says about itself: a `200` whose body
+  // finished inside the window. This is the budget turning over, measured from outside.
+  const served = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200 &&
+    r.endedMs !== null && r.endedMs >= probeFrom && r.endedMs <= probeTo).length;
   t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
     `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
     `statuses ${probes.map((p) => p.status).join(" ")} · ${probes.map((p) => `${p.ms}ms`).join(" ")}`);
+  t.diagnostic(`  of those, ${idleProbes.length} were taken while the client held NOTHING ` +
+    `(0 in flight, 0 abandoned, queue 0) — ${idleRefusals.length} of them refused · ` +
+    `client state per probe: ${probes.map((p) => `${p.held.inflight}+${p.held.abandoned}/q${p.held.queue}`).join(" ")}`);
+  t.diagnostic(`  route turnover across the probe window: ${served} tile read(s) completed 200 for the page`);
   if (refused.length) {
     t.diagnostic(`refusals at: ${refused.map((r) => `${r.startedMs - loadedAt}ms`).join(" ")} after load`);
   }
@@ -295,11 +390,31 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // suffers (refusals arriving indefinitely) while permitting the probe that prevents it. Measured
   // zero over 25 s and ~3 700 requests on the fixed client; before the fix, refusals continued
   // throughout.
-  assert.equal(steadyRefusals.length, 0,
+  // **BOUNDED BY THE SEARCH THAT PAID FOR IT, not by zero (T-690).** This was
+  // `steadyRefusals.length === 0`, and its own premise — "after the AIMD controller has FOUND ITS
+  // SHARE" — is the thing that stops being true on a slow route. AIMD only raises on a completion,
+  // so with the gestures' backlog still draining (measured here: queue 41 -> 26 at ~1424 ms a
+  // tile) the client is still SEARCHING during this window: it probes upward, gets refused once,
+  // and halves. The cap trace says so in order — `2×20 3×7 4×3 2×4` — and one refusal is what that
+  // costs. Calling it "a slot that was never released" makes a load meter out of the assertion.
+  //
+  // So it is bounded by the mechanism that licenses it: **an additive increase may cost at most
+  // one refusal**, which is AIMD's own contract, counted over THIS window's cap samples. What it
+  // still forbids is the regime the user suffers and the one `t454-never-back-off` produces — a
+  // client pinned at the ceiling, refused over and over, never raising because it never fell
+  // (measured there: 8 refusals against 0 rises). Counts and ordering, never a duration.
+  const steadyCaps = caps.slice(capsAtSteadyStart);
+  const capRises = steadyCaps.reduce((n, c, i) => n + (i > 0 && c > steadyCaps[i - 1] ? 1 : 0), 0);
+  t.diagnostic(`operating cap across the steady window: ${steadyCaps.join(" ")} — ${capRises} additive ` +
+    `increase(s), ${steadyRefusals.length} refusal(s) of ${steadyRequests} request(s)`);
+  assert.ok(steadyRefusals.length <= capRises,
     `the tile route refused ${steadyRefusals.length} of ${steadyRequests} tile requests during ` +
-    `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which NOTHING moved the view. After the AIMD ` +
-    "controller has found its share, backpressure must stop: a refusal here is not discovery, it " +
-    "is a slot that was never released — the leak T-454's abandoned-slot accounting exists to close.");
+    `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which NOTHING moved the view, while the client ` +
+    `raised its operating cap only ${capRises} time(s) (cap trace over the window: ` +
+    `${steadyCaps.join(" ")}). A refusal is permitted only as the cost of an additive increase — ` +
+    "that is what makes backpressure a SEARCH. More refusals than increases is backpressure as a " +
+    "REGIME: a client pinned at the ceiling, or a slot that was never released — the leak T-454's " +
+    "abandoned-slot accounting exists to close.");
 
   // (2b) …AND THE WINDOW WAS ACTUALLY ASKED. (2) is a claim about a set the page may leave empty —
   // measured empty on this fixture, every run — so on its own it certifies nothing. These two say
@@ -310,14 +425,41 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   assert.ok(probes.length >= 4,
     `only ${probes.length} slot probes were made during the steady-state window — too few for (2) ` +
     "to be a test rather than a formality");
-  assert.deepEqual(probeRefusals, [],
-    `the tile route refused ${probeRefusals.length} of ${probes.length} single, serial tile ` +
-    `requests made while the page was idle (statuses: ${probes.map((p) => p.status).join(" ")}). ` +
-    "Nothing else was asking, so the budget those slots came out of was held by reads this client " +
+  // **THE LEAK, STATED WHERE IT IS UNAMBIGUOUS (T-690).** This used to be `probeRefusals == []`
+  // — every refusal a leak — and that is a claim about the route's SERVICE RATE, not about its
+  // accounting. `/api/tiles` takes its slot before it does any work, so whether a serial probe
+  // lands between the page's own reads depends entirely on how long one read takes:
+  //
+  //     this file with one other spec  · ~167 ms/tile  · queue 0  -> 8 of 8 probes answered
+  //     this file in the 13-spec suite · ~3612 ms/tile · queue 28 -> 8 of 8 probes refused
+  //
+  // and in the second run the client held two slots and wanted twenty-eight more tiles. Those
+  // refusals are the route being BUSY WITH WORK THIS PAGE IS WAITING FOR, which is backpressure
+  // working, not a slot that was never released. Calling them a leak makes the guard a load
+  // meter. So the claim is made where the two cannot be confused: a probe taken while the client
+  // holds NOTHING AND WANTS NOTHING can only be refused by a slot nobody is waiting for.
+  //
+  // On a quiet route every probe is an idle probe and the original bound is recovered exactly.
+  assert.deepEqual(idleRefusals.map((p) => p.status), [],
+    `the tile route refused ${idleRefusals.length} of ${idleProbes.length} single, serial tile ` +
+    "requests made while THE CLIENT HELD NOTHING AT ALL — 0 in flight, 0 abandoned, queue 0 " +
+    `(all ${probes.length} probe statuses: ${probes.map((p) => p.status).join(" ")}; client state ` +
+    `at each: ${probes.map((p) => `${p.held.inflight}+${p.held.abandoned}/q${p.held.queue}`).join(" ")}). ` +
+    "Nothing was asking, so the budget those slots came out of was held by reads this client " +
     "abandoned and the server is still producing — T-454's leak, from outside the client.");
-  assert.ok(probes.every((p) => p.status === 200),
-    `a steady-state slot probe did not get an answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
-    "a probe that errors proves nothing either way, so the assertion above would be vacuous");
+  // …AND THE BUDGET WAS SEEN TO TURN OVER, so the assertion above is never satisfied by a route
+  // that answered nobody. A window in which no probe was answered AND no tile read completed for
+  // the page is a budget that is simply stuck, whatever the client is holding — the leak's other
+  // face, and the one the idle partition cannot see because a stuck route never lets the client
+  // reach idle. Counts, not durations.
+  const answeredProbes = probes.filter((p) => p.status === 200).length;
+  assert.ok(answeredProbes + served > 0,
+    `across the whole steady-state window the tile route answered ${answeredProbes} of ` +
+    `${probes.length} serial probes AND completed ${served} tile reads for the page: its slot ` +
+    "budget never turned over at all. Whoever holds those slots is not giving them back.");
+  assert.ok(probes.every((p) => p.status === 200 || p.status === 503),
+    `a steady-state slot probe did not get an HTTP answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
+    "a probe that errors proves nothing either way, so the assertions above would be vacuous");
 
   // (2c) A FROZEN VIEW THAT NOTHING TOUCHES ASKS FOR NOTHING. The premise is measured at both ends
   // of the window, not assumed: every pane is off the live edge, so nothing new can be wanted, and
@@ -325,11 +467,25 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // speculation is not free: every speculative read that a later gesture aborts leaves the server
   // producing a tile nobody will read, holding the slot (2) and (2b) are about.
   if (frozen(followingBefore) && frozen(followingAfter)) {
-    assert.equal(steadyRequests, 0,
-      `the page made ${steadyRequests} tile requests during ${(STEADY_STATE_MS / 1000).toFixed(0)} s ` +
-      "in which nothing moved the view and no pane was following the live edge. With nothing new on " +
-      "screen to draw, a tile request is speculation — and speculation a later gesture aborts is a " +
-      "server slot spent on a read nobody will ever look at (T-471).");
+    assert.deepEqual(steadyReasks.map((r) => new URL(r.url).search).slice(0, 5), [],
+      `the page RE-ASKED ${steadyReasks.length} DETAIL-tier addresses it had already been ANSWERED ` +
+      "for, " +
+      `during ${(STEADY_STATE_MS / 1000).toFixed(0)} s in which nothing moved the view and no pane ` +
+      `was following the live edge (queue ${queueAtStart} -> ${queueAtEnd}; scheme=view ` +
+      `${steadyFirstTime} first-time + ${steadyReasks.length} re-asked; all schemes: ` +
+      `${[...steadyByScheme].map(([k, n]) => `${k}=${n}`).join(" ") || "none"}; the map's own ` +
+      `following state: [${mapFollowing}]). With nothing new on screen to draw, asking a second ` +
+      "time for what you already asked for is speculation — and speculation a later gesture aborts " +
+      "is a server slot spent on a read nobody will ever look at (T-471). First-time addresses are " +
+      "NOT counted here: they are the last gesture's own enumeration still draining through the " +
+      "route's in-flight cap, which is the rate limit and not a decision. Nor is the map's " +
+      "overview-tier traffic: the map follows the live edge whatever the panes do, and since T-505 " +
+      "it draws from its own lattice (T-564: partition by kind, do not count one heap).");
+    assert.ok(queueAtEnd <= queueAtStart,
+      `the client's tile queue GREW from ${queueAtStart} to ${queueAtEnd} across ` +
+      `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which nothing moved the view. A frozen surface ` +
+      "may drain a backlog; it may not accumulate one, and a queue that grows with no input is the " +
+      "same defect the re-ask assertion above is about, spelled as depth instead of as repetition.");
   } else {
     t.diagnostic(`a pane was still following the live edge ([${followingBefore}] -> [${followingAfter}]), ` +
       "so new rows were legitimately wanted: the still-view claim is NOT made this run");
@@ -453,10 +609,22 @@ const TIME_ROOM = 2.5;
 
 /** The surface's time extent and zoom floor, from the two routes that state them. */
 async function timeRoom() {
-  const get = async (p) => {
-    const r = await fetch(`${ORIGIN}${p}${p.includes("?") ? "&" : "?"}token=${TOKEN}`);
-    if (!r.ok) throw new Error(`GET ${p} → ${r.status}`);
-    return r.json();
+  // **Retries the route's backpressure** (T-690). `/api/tiles` takes its slot before it does any
+  // work and answers `503` over `cost.in_flight_limit`; the earlier tests in this file leave the
+  // shared route busy, so a bare `fetch` here manufactures the refusal and then reads it as a
+  // broken server. Observed exactly that: this premise threw `GET /api/tiles → 503` 182 ms into
+  // the test, before its own 120 s wait for the record to grow had a chance to run once. A `503`
+  // is "busy now", never "no" — the same rule the product's own bootstrap follows.
+  const get = async (p, { tries = 40, waitMs = 200 } = {}) => {
+    for (let i = 0; ; i++) {
+      const r = await fetch(`${ORIGIN}${p}${p.includes("?") ? "&" : "?"}token=${TOKEN}`);
+      if (r.ok) return r.json();
+      if (r.status !== 503 || i >= tries) {
+        throw new Error(`GET ${p} → ${r.status}` +
+          (r.status === 503 ? ` after ${i} retries of the route's backpressure` : ""));
+      }
+      await new Promise((res) => setTimeout(res, waitMs));
+    }
   };
   const nav = await get("/api/navigation");
   const tile = await get("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8");
@@ -657,9 +825,34 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // observed, which is the only window where "is it still drawing?" is a question about drawing.
   await page.click(BUTTON("Fit to coverage"));
   await page.frames(8);
-  await new Promise((r) => setTimeout(r, 1200));
+  // **Wait for the page to SAY it is drawn, not for a constant.** This was a 1200 ms sleep, which
+  // was long enough when a level-0 tile was 1.6 MHz x 256 s. Since T-501 the finest tier is the
+  // display plan's own bin and row, so the fitted viewport is cut into several times as many tiles
+  // and 1200 ms lands mid-fill: measured here at 92.5 % dominant against a 92 % bound — the census
+  // was reading how far the fetch had got, not whether the renderer draws. The pane reports its own
+  // residency in the chrome, so that is what the wait is on. A pane that never becomes resident is
+  // a real defect and still fails, now with the counts saying so.
+  const paneCounts = `(document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-counts')?.textContent ?? '')`;
+  //
+  // **Stand-ins count as drawn, and deliberately.** A coarse stand-in is a real ancestor tile with
+  // real cells in it — the surface's own way of showing something honest while the finer answer is
+  // in flight — so a pane drawn with six of them is drawing, which is the only thing the census
+  // below is a question about. What must be zero is `pending`: that is the pane's own statement
+  // that some of what is on screen is its bare ground.
+  const filled = await page.waitFor("the fitted pane to report itself drawn (0 pending)",
+    `/· 0 pending/.test(${paneCounts}) && !/^0 tiles/.test(${paneCounts})`,
+    { timeoutMs: 30000 }).then(() => true, () => false);
+  const counts = await page.eval(paneCounts);
+  t.diagnostic(`after "Fit to coverage" the pane reports: ${counts}${filled ? "" : " (NEVER became resident)"}`);
+  assert.ok(filled, `the fitted pane never finished drawing: ${counts}. A census over a pane that is ` +
+    "still fetching measures the tile route, not the renderer.");
+  // **And the rectangle is re-read here.** `rect` was taken before the gestures, and the chrome's
+  // height is not constant across them — T-505 puts the tier inside every viewport row's level
+  // cell, so a row wraps and un-wraps as the level changes and the canvas moves with it. Sampling
+  // the stale box reads the page around the canvas, which is a flat fill by construction.
+  const shotRect = await page.$rect('[data-slot="canvas"]');
   const shots = await page.shot(path.join(ART, "surface-gestures.png"));
-  const c = census(shots, { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) });
+  const c = census(shots, { x: Math.round(shotRect.x), y: Math.round(shotRect.y), w: Math.round(shotRect.w), h: Math.round(shotRect.h) });
   assert.ok(c.distinct >= 32 && c.dominantShare < 0.92,
     `after the gestures the canvas is a flat fill: ${c.distinct} colours, dominant ${c.dominant} at ${(c.dominantShare * 100).toFixed(1)} %`);
 });

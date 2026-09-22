@@ -16,6 +16,15 @@ DONELOG=$S/merge-done.txt
 LOG=$S/merge-runner.log
 # T-534: per-branch gate-attempt ledger, "<branch> <tip-sha> <attempts>" one per line.
 ATTEMPTS=$S/merge-attempts.txt
+# T-582 follow-on: a bulk COMMITS EACH MERGE AS IT GOES and only rewinds if the gate fails, so for
+# the 15-25 minutes a bulk gate runs, `main` carries commits that HAVE NOT PASSED A GATE and may be
+# reset away. Anything sampling main in that window - a reconcile, an `ahead` count, a fresh branch
+# cut from main - is reading a PROVISIONAL state. That cost three separate incidents on 2026-09-21:
+# a branch deleted on ahead=0 that had to be recovered from a merge commit's second parent, a batch
+# announced as landed from `git log --merges` that the gate then rewound, and a worker branch cut
+# from staged-but-ungated main that silently absorbed three other tickets' work.
+# So the bulk declares itself. The file exists ONLY while main is provisional.
+BULKMARK=$S/bulk-in-progress
 # T-543: one JSON line per LANDED ticket - {ticket, branch, first_commit_ts, merge_ts,
 # land_minutes, gate_attempts}. `merge-done.txt` records THAT a branch merged; this records
 # what it COST, which is the number T-543 exists to watch. Written next to the gate's own
@@ -189,6 +198,10 @@ try_bulk(){
   log "BULK attempt (${#branches[@]}): ${branches[*]}"
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would bulk-merge: $tickets"; return 0; fi
   base=$(git -C "$REPO" rev-parse HEAD)
+  # Declare the provisional window BEFORE the first merge commit, so there is no instant in which
+  # main carries an ungated commit and nothing says so.
+  { echo "base=$base"; echo "started=$(date '+%Y-%m-%d %H:%M:%S')"; echo "pid=$$";
+    echo "branches=${branches[*]}"; } > "$BULKMARK"
   # A branch that will not merge is the branch to SET ASIDE, not a reason to un-merge the ones
   # that did. Rewinding the whole batch on the first conflict is what happened on 2026-09-21:
   # `task-t559` conflicted on the justfile (two recipes added at the same line) and the other
@@ -217,6 +230,7 @@ try_bulk(){
   if [ "${#merged[@]}" -eq 0 ]; then
     log "BULK every branch conflicted -> nothing to gate"
     git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    rm -f "$BULKMARK"
     return 0
   fi
   # Re-point the batch at what actually merged, so the gate, the done-log, the landed ledger and
@@ -227,6 +241,7 @@ try_bulk(){
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
   tickets="${tickets# }"
   after=$(git -C "$REPO" rev-parse HEAD)
+  echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -238,6 +253,7 @@ try_bulk(){
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
+    rm -f "$BULKMARK"
     notify_ok "MERGED batch ($tickets); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
     return 0
   fi
@@ -248,6 +264,10 @@ try_bulk(){
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  BULK_FAIL_HEAD_MOVED" >> "$NEEDS"
   fi
+  # A rewind restores main to a gated commit, so the window is over. The HEAD-MOVED branch does NOT
+  # rewind and main is left carrying ungated commits, so the marker STAYS - that is precisely the
+  # case a person has to be told about, and the stale marker is the telling.
+  if [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ]; then rm -f "$BULKMARK"; fi
   return 1
 }
 

@@ -270,3 +270,61 @@ fn c_a_plugin_that_never_runs_is_killed_on_the_startup_budget() {
     inst.shutdown();
     println!("C: never-started plugin killed after {took:?} on the {STARTUP:?} startup budget");
 }
+
+/// T-629: the same two budgets, applied to [`PluginInstance::finish`]'s no-progress window.
+///
+/// `finish` waits for the plugin to flush and exit after its input ends, and stops it after
+/// `idle` without progress. That window had the defect T-540 removed from the watchdog: it ran
+/// from the end of input, so a child still in the loader was killed for "not making progress"
+/// before it had executed one instruction — 0 decodes, which is
+/// `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait`
+/// failing a gate at 46 s.
+///
+/// This test pins the **tight** half, the one the fix could have thrown away: a plugin that has
+/// written to stderr and then stops reading is still stopped on the caller's own short `idle`,
+/// not on the 120 s startup budget. The patient half is
+/// `a_cold_starting_plugin_is_not_cut_off_by_the_end_of_input_settle_window` in hk-pipeline.
+///
+/// The assertion is on the host's own account of which budget expired, not on a wall clock: the
+/// message names the responsiveness budget only when the child's first byte had arrived.
+#[test]
+fn d_finish_still_stops_a_plugin_that_started_and_then_wedged_on_the_short_budget() {
+    let m = manifest(
+        // `--stall` writes its "started" line and then never reads stdin: a child that has run.
+        &["--stall"],
+        json!({
+            "input_queue_bytes": 1 << 20,
+            "stall_timeout_ms": 2_000,
+            // 20x `idle` below. The host logs the budget it actually applied, so charging this
+            // one instead — the over-correction this fix could have been — is caught by the
+            // message, not by how long the test took.
+            "startup_timeout_ms": 8_000,
+        }),
+    );
+    let mut inst = spawn(m);
+    let mon = inst.monitor();
+    common::wait_started(&mon);
+    // A few records only: the queue never fills, so the hang watchdog is not what stops this run.
+    for i in 0..4 {
+        inst.push(rec(i)).unwrap();
+    }
+    let idle = Duration::from_millis(400);
+    let s = inst.finish(idle);
+    let text = log(&mon);
+    assert!(
+        text.contains(&format!("no progress for {idle:?}"))
+            && text.contains("responsiveness budget"),
+        "finish did not stop the wedged plugin on its own short budget ({idle:?}): {s:?}\n{text}"
+    );
+    assert!(
+        !text.contains("startup budget"),
+        "a plugin that had already written to stderr was judged as never having started: {text}"
+    );
+    assert_eq!(
+        (s.stall_kills, s.startup_kills),
+        (0, 0),
+        "the watchdog, not finish, stopped this run: {s:?}\n{text}"
+    );
+    assert_eq!(s.decodes, 0, "{s:?}");
+    println!("D: finish stopped a wedged plugin on idle={idle:?}; {s:?}");
+}

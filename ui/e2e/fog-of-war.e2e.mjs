@@ -133,10 +133,24 @@ function windowOf(where) {
 const MHz = (hz) => (hz / 1e6).toFixed(4);
 const spanOf = (v) => `${MHz(v.loHz)}-${MHz(v.hiHz)} MHz (± ${MHz(v.halfHz)})`;
 
-async function get(backend, p) {
-  const r = await fetch(`${backend.origin}${p}`, { headers: { authorization: `Bearer ${backend.token}` } });
-  assert.ok(r.ok, `GET ${p} -> ${r.status}`);
-  return r.json();
+/**
+ * `GET` against the backend, **retrying its backpressure** — the same shape as
+ * `canvas-journey.e2e.mjs`'s and `scan-everything.e2e.mjs`'s `get` (T-690).
+ *
+ * `/api/tiles` answers `503` over `cost.in_flight_limit` concurrent reads and takes its slot
+ * before it does any work, and this file's own browser holds up to four of them — so a bare
+ * `fetch` here manufactures the refusal and then reads it as an answer. A `503` is "busy now",
+ * never "no". `/api/coverage` shares the history lock behind it. Every premise this file waits on
+ * goes through here, so one unretried refusal ended the whole journey.
+ */
+async function get(backend, p, { tries = 40, waitMs = 200 } = {}) {
+  for (let i = 0; ; i++) {
+    const r = await fetch(`${backend.origin}${p}`, { headers: { authorization: `Bearer ${backend.token}` } });
+    if (r.ok) return r.json();
+    assert.ok(r.status === 503 && i < tries,
+      `GET ${p} -> ${r.status}${r.status === 503 ? ` after ${i} retries of the route's backpressure` : ""}`);
+    await new Promise((res) => setTimeout(res, waitMs));
+  }
 }
 
 /** The capture window the mock front end reports it is using, right now. */
@@ -145,6 +159,51 @@ async function tunedWindow(backend) {
   const w = nav.windows?.[0];
   assert.ok(w, `the mock reported no capture window: ${JSON.stringify(nav.windows)}`);
   return { loHz: w.f_lo_hz, hiHz: w.f_hi_hz, spanHz: w.span_hz, centerHz: w.center_hz };
+}
+
+/**
+ * Poll the SERVER's own coverage for one band **over the window since `sinceS`** until it reports
+ * `observed` for at least `want` of the cells where the answer is known, and return what it last
+ * said.
+ *
+ * **Why this replaces the two tuned sleeps this file used to carry** (T-690). Both of them —
+ * "let history accumulate at B" (3 s) and "let real capture time accumulate at the re-swept band"
+ * (10 s, tuned up from 3 s when 3 s measured 7/26 = 27 % against a 30 % gate) — are wall-clock
+ * budgets for an amount of CAPTURE. How much capture happens in ten seconds is a property of the
+ * machine, not of the product: on a contended box the mock's ingest, the fold and the tile route
+ * all run slower, and the same sleep buys a fraction of the rows. A budget in the wrong unit is
+ * exactly what this repo keeps finding filed as "flake".
+ *
+ * The window is scoped to `[sinceS, now]` and not to all time, which is the whole point: band A
+ * was observed at the start of this run, so an unscoped query would answer "observed" for it
+ * forever and the wait would be a no-op. Scoped, it asks the only question that is a premise —
+ * *has the radio observed here SINCE it was sent here* — and `unknown` is kept out of the
+ * denominator for the same reason `canvas-journey.e2e.mjs`'s `coverage` keeps it out.
+ *
+ * It is a PREMISE, not the claim: the pixel claims that follow (shadow is dimmer than live;
+ * re-swept is brighter than shadow) are untouched and still carry the whole of ADR-0020. It
+ * reports rather than throws, so a radio that genuinely never resumed observing still reaches the
+ * caller's assertion and fails there with the measured number.
+ */
+async function waitForObservedSince(backend, targetHz, sinceS, { want = 0.5, timeoutMs = 60000, everyMs = 500 } = {}) {
+  const t0 = Date.now();
+  let last = { observed: 0, known: 0, share: 0 };
+  for (;;) {
+    const q = new URLSearchParams({
+      f_lo: String(Math.round(targetHz - 1e6)), f_hi: String(Math.round(targetHz + 1e6)),
+      cells: "16", rows: "16",
+      t0: String(Math.round(sinceS)), t1: String(Math.round(Date.now() / 1000)),
+    });
+    const cov = await get(backend, `/api/coverage?${q}`).catch(() => null);
+    const cells = cov?.any?.cells ?? [];
+    const observed = cells.filter((c) => c?.state === "observed").length;
+    const unknown = cells.filter((c) => c?.state === "unknown").length;
+    const known = cells.length - unknown;
+    last = { observed, known, share: known ? observed / known : 0 };
+    if (last.share >= want) return { ...last, ms: Date.now() - t0, reached: true };
+    if (Date.now() - t0 > timeoutMs) return { ...last, ms: Date.now() - t0, reached: false };
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
 }
 
 /** Poll until the mock has put something in the coverage map, so the page opens ON the capture. */
@@ -363,21 +422,47 @@ async function retuneTo(page, backend, at, targetHz, viewSpanHz, label) {
  */
 async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanHz = 80e6 } = {}) {
   const reqs = page.requests.slice(sinceIdx).filter((r) => r.url.includes("/api/tiles"));
+  const why = { refused: 0, failed: 0, shapeless: 0, tooWide: 0, elsewhere: 0 };
   for (let i = reqs.length - 1; i >= 0; i--) {
-    let json;
-    try {
-      const resp = await fetch(reqs[i].url, { headers: { authorization: `Bearer ${backend.token}` } });
-      if (!resp.ok) continue;
-      json = await resp.json();
-    } catch { continue; }
+    let json = null;
+    // **A 503 is the route saying "ask again", not "this tile does not cover your band"** (T-690).
+    // `/api/tiles` takes its slot before it does any work and the page itself holds up to four of
+    // them, so this replay is a FIFTH reader of a shared budget — and it was skipping every
+    // candidate the route happened to be busy for, then reporting the absence as "no pane tile
+    // response covers band A". Observed exactly that way in a 13-spec run, 8 s into the file, on a
+    // route this file's own page was saturating. So a refusal is retried on a capped cadence, the
+    // same answer the product's own bootstrap gives it, and the reasons are counted so an honest
+    // absence and a route that was busy can never again be reported with the same words.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      let resp = null;
+      try {
+        resp = await fetch(reqs[i].url, { headers: { authorization: `Bearer ${backend.token}` } });
+      } catch { break; }
+      if (resp.status === 503) { await new Promise((r) => setTimeout(r, Math.min(1000, 100 * 2 ** attempt))); continue; }
+      if (!resp.ok) break;
+      try { json = await resp.json(); } catch { json = null; }
+      break;
+    }
+    if (!json) { why.refused++; continue; }
     const g = json.grid;
-    if (!g || !(g.nf > 0) || !(g.f_cell_hz > 0)) continue;
+    if (!g || !(g.nf > 0) || !(g.f_cell_hz > 0)) { why.shapeless++; continue; }
     const spanHz = g.nf * g.f_cell_hz;
-    if (spanHz > maxSpanHz) continue;
-    if (targetHz < g.f_lo_hz || targetHz >= g.f_lo_hz + spanHz) continue;
+    if (spanHz > maxSpanHz) { why.tooWide++; continue; }
+    if (targetHz < g.f_lo_hz || targetHz >= g.f_lo_hz + spanHz) { why.elsewhere++; continue; }
     return { url: reqs[i].url, json, spanHz };
   }
-  return null;
+  return { none: true, tried: reqs.length, why };
+}
+
+/** `findPaneTileFor`'s answer, or a failure that says WHICH reason it ran out of. */
+function tileOrWhy(found, label) {
+  assert.ok(found && !found.none,
+    `${label}. Of ${found?.tried ?? 0} pane tile request(s) replayed: ` +
+    `${found?.why?.refused ?? 0} the route would not answer even after retrying its 503, ` +
+    `${found?.why?.shapeless ?? 0} carried no usable grid, ${found?.why?.tooWide ?? 0} were wider ` +
+    `than a pane's, ${found?.why?.elsewhere ?? 0} covered other spectrum. A route that was busy ` +
+    "and a band that was never drawn are different findings.");
+  return found;
 }
 
 /** Every cell of a coverage RLE plane, decoded once: `states[code]` per (row, col), row-major, row
@@ -560,12 +645,36 @@ function inspect(img, rect, greyRgb, inkRgb, tol = 2) {
   return { n, grey, ink, greyShare: n ? grey / n : 0, inkShare: n ? ink / n : 0, census: census(img, rect) };
 }
 
-/** Let tiles arrive and the frame settle, then shoot. */
-async function draw(page, ms = 2200) {
+/**
+ * Let tiles arrive and the frame settle, then shoot.
+ *
+ * **The settle is the PAGE's own statement that it has drawn, with the constant only as a floor**
+ * (T-690). A fixed 2200 ms is a bet on the tile route's service rate: measured across this repo's
+ * own runs that rate moves by more than twenty-fold between a quiet box and a full suite, so the
+ * bet decides whether the census below reads the product's answer or reads how far the fetch had
+ * got. The pane already publishes the answer — `· 0 pending` in its own chrome — so that is what
+ * is waited on. Coarse stand-ins are NOT waited out (surface-nav's rule, T-564): a stand-in is a
+ * real ancestor tile with real cells in it, so a pane drawn with some is drawing. `pending` is the
+ * pane's own statement that part of what is on screen is its bare ground, and that is the state no
+ * pixel claim here may be measured in.
+ *
+ * It reports rather than throws — the caller's assertion is the right place for "the pane never
+ * drew", with the counts in it.
+ */
+async function draw(page, { settleMs = 600, timeoutMs = 25000 } = {}) {
   await page.frames(4);
-  await new Promise((r) => setTimeout(r, ms));
+  const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
+  const drew = await page.waitFor("the pane to report itself drawn (0 pending)",
+    `/· 0 pending/.test(${counts}) && !/^0 tiles/.test(${counts})`, { timeoutMs })
+    .then(() => true, () => false);
+  // A short settle after the page says it is drawn: the last upload and the frame that uses it are
+  // not the same tick. A floor, not a budget — it is not waiting for the route.
+  await new Promise((r) => setTimeout(r, settleMs));
   await page.frames(4);
-  return page.shot();
+  const img = await page.shot();
+  img.drew = drew;
+  img.counts = await page.eval(counts);
+  return img;
 }
 
 // ---------------------------------------------------------------------------
@@ -610,14 +719,16 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   t.diagnostic(`record covers the pane after ${wr0.ms} ms (age ${wr0.ageS?.toFixed?.(1) ?? "?"} s, pane span bound ${wr0.paneS?.toFixed?.(1) ?? "?"} s, ruler "${wr0.ruler}")${wr0.timedOut ? " — TIMED OUT, measuring anyway" : ""}`);
   const gA = await paneGeometry(page);
   const roiA = roiOf(gA.pane);
-  const liveA = inspect(await draw(page), roiA, marks.greyRgb, marks.inkRgb);
+  const imgA0 = await draw(page);
+  const liveA = inspect(imgA0, roiA, marks.greyRgb, marks.inkRgb);
   t.diagnostic(`LIVE A baseline: meanLuma ${liveA.census.meanLuma.toFixed(1)}, grey ${(liveA.greyShare * 100).toFixed(1)}%, ` +
-    `ink ${(liveA.inkShare * 100).toFixed(1)}%, distinct ${liveA.census.distinct}`);
+    `ink ${(liveA.inkShare * 100).toFixed(1)}%, distinct ${liveA.census.distinct} · drawn with "${imgA0.counts}"` +
+    (imgA0.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
   assert.ok(liveA.census.distinct >= 4, `band A at boot is not a real render (only ${liveA.census.distinct} distinct colours) — this run proves nothing`);
   assert.ok(liveA.greyShare < 0.5, `band A at boot already reads mostly grey (${(liveA.greyShare * 100).toFixed(1)}%) — this run has no live baseline to lose`);
 
-  const tileA0 = await findPaneTileFor(page, backend, A_HZ, { sinceIdx: 0 });
-  assert.ok(tileA0, "no pane tile response covers band A while it is live — cannot establish the server-side baseline");
+  const tileA0 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: 0 }),
+    "no pane tile response covers band A while it is live — cannot establish the server-side baseline");
   {
     const cov = decodeCoveragePlane(tileA0.json.coverage);
     const nr = edgeRowsCoverage(cov, A_HZ, tileA0.json.shadow.edge_s);
@@ -629,11 +740,20 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // PHASE 2 — move away: retune to band B, far outside the recording.
   // ===========================================================================
   const toB = await retuneTo(page, backend, at, B_HZ, 200e3, "move to B");
+  // The premise window opens where the RADIO arrived, not where the navigation started: `retuneTo`
+  // returns only once the mock reports the new centre, so rows before this instant are rows the
+  // front end was still somewhere else for and would only dilute the share.
+  const sinceB = Date.now() / 1000;
   t.diagnostic(`retuned away: said ${MHz(toB.said.centerHz)} MHz, radio now at ${MHz(toB.tuned.centerHz)} ± ${MHz(toB.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(toB.tuned.centerHz - A_HZ) > 100e6, "the retune to band B did not actually leave band A's neighbourhood");
   await waitForResident(page);
-  // Let history accumulate at B and the shadow search have something recent to answer with.
-  await new Promise((r) => setTimeout(r, 3000));
+  // Wait for the SERVER to say the radio is really producing at B — the premise "we moved away and
+  // are now recording somewhere else" — rather than sleeping a constant and hoping (T-690). The
+  // shadow search over band A needs a live edge that has moved on; this is that, measured.
+  const atB = await waitForObservedSince(backend, B_HZ, sinceB, { want: 0.2 });
+  t.diagnostic(`band B observed by the server since the retune, after ${atB.ms} ms: ` +
+    `${atB.observed}/${atB.known} known cells` +
+    (atB.reached ? "" : " — NEVER REACHED the premise, measuring anyway"));
 
   // ===========================================================================
   // PHASE 3 — CLAIM 1: band A, now unobserved, renders SHADOW — not grey, dimmer than live.
@@ -643,12 +763,14 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   assertNoDeviceCalls(page, sinceMoveIdx, "panning back to look at departed band A");
   await waitForResident(page);
   const gA2 = await paneGeometry(page);
-  const shadowA = inspect(await draw(page), roiOf(gA2.pane), marks.greyRgb, marks.inkRgb);
+  const imgA1 = await draw(page);
+  const shadowA = inspect(imgA1, roiOf(gA2.pane), marks.greyRgb, marks.inkRgb);
   t.diagnostic(`SHADOW A (departed): meanLuma ${shadowA.census.meanLuma.toFixed(1)}, grey ${(shadowA.greyShare * 100).toFixed(1)}%, ` +
-    `ink ${(shadowA.inkShare * 100).toFixed(1)}%, distinct ${shadowA.census.distinct}`);
+    `ink ${(shadowA.inkShare * 100).toFixed(1)}%, distinct ${shadowA.census.distinct} · drawn with "${imgA1.counts}"` +
+    (imgA1.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
 
-  const tileA1 = await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx });
-  assert.ok(tileA1, "no pane tile response covers band A after the move — cannot check the server's shadow plane");
+  const tileA1 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx }),
+    "no pane tile response covers band A after the move — cannot check the server's shadow plane");
   const covA1 = decodeCoveragePlane(tileA1.json.coverage);
   const edgeS1 = tileA1.json.shadow.edge_s;
   const nrA1 = edgeRowsCoverage(covA1, A_HZ, edgeS1);
@@ -686,12 +808,14 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   assertNoDeviceCalls(page, sinceCIdx, "panning to never-swept band C");
   await waitForResident(page);
   const gCgeom = await paneGeometry(page);
-  const greyC = inspect(await draw(page), roiOf(gCgeom.pane), marks.greyRgb, marks.inkRgb);
+  const imgC = await draw(page);
+  const greyC = inspect(imgC, roiOf(gCgeom.pane), marks.greyRgb, marks.inkRgb);
   t.diagnostic(`GREY C (never swept): meanLuma ${greyC.census.meanLuma.toFixed(1)}, grey ${(greyC.greyShare * 100).toFixed(1)}%, ` +
-    `ink ${(greyC.inkShare * 100).toFixed(1)}%, distinct ${greyC.census.distinct}`);
+    `ink ${(greyC.inkShare * 100).toFixed(1)}%, distinct ${greyC.census.distinct} · drawn with "${imgC.counts}"` +
+    (imgC.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
 
-  const tileC = await findPaneTileFor(page, backend, C_HZ, { sinceIdx: sinceCIdx });
-  assert.ok(tileC, "no pane tile response covers band C — cannot check it against the server");
+  const tileC = tileOrWhy(await findPaneTileFor(page, backend, C_HZ, { sinceIdx: sinceCIdx }),
+    "no pane tile response covers band C — cannot check it against the server");
   const covC = decodeCoveragePlane(tileC.json.coverage);
   const nrC = edgeRowsCoverage(covC, C_HZ, tileC.json.shadow.edge_s);
   t.diagnostic(`SERVER band C: edge row ${nrC.edgeRow}, window [${nrC.from},${nrC.to}] unobserved ${nrC.unobserved}/${nrC.total}; whole-tile shadow.runs = ${tileC.json.shadow.runs}`);
@@ -718,22 +842,28 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // ===========================================================================
   const sinceReswIdx = page.requests.length;
   const back = await retuneTo(page, backend, at, A_HZ, A_VIEW_SPAN_HZ, "re-sweep A");
+  const sinceResweep = Date.now() / 1000;
   t.diagnostic(`re-swept: said ${MHz(back.said.centerHz)} MHz, radio now at ${MHz(back.tuned.centerHz)} ± ${MHz(back.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(back.tuned.centerHz - A_HZ) < 3e6, `re-sweeping did not bring the radio back near band A: ${JSON.stringify(back.tuned)}`);
   await waitForResident(page);
-  // Let real capture time accumulate at the re-swept band before reading "freshly observed" near
-  // the edge: `edgeRowsCoverage` looks at a real-seconds-wide window ending at the tile's own fold
-  // horizon (`shadow.edge_s`), and a too-short wait here samples mostly "observed, not yet folded"
-  // rows rather than measured ones — not a product defect, an under-wait (measured: 3 s produced
-  // 7/26 = 27%, just under the 30% gate; 10 s is comfortably inside the fixture's own 5 s loop).
-  await new Promise((r) => setTimeout(r, 10000));
+  // `edgeRowsCoverage` below looks at a real-seconds-wide window ending at the tile's own fold
+  // horizon (`shadow.edge_s`), so it needs real capture at the re-swept band to have accumulated
+  // and been folded. That used to be a 10 s sleep, tuned up from 3 s when 3 s measured 7/26 = 27 %
+  // against the 30 % gate — a wall-clock budget for an amount of capture, which is the wrong unit
+  // the moment the box is busy (T-690). Wait on the quantity instead, from the server, bounded.
+  const backAgain = await waitForObservedSince(backend, A_HZ, sinceResweep, { want: 0.5 });
+  t.diagnostic(`band A observed again by the server since the re-sweep, after ${backAgain.ms} ms: ` +
+    `${backAgain.observed}/${backAgain.known} known cells` +
+    (backAgain.reached ? "" : " — NEVER REACHED the premise, measuring anyway"));
   const gA3 = await paneGeometry(page);
-  const reswptA = inspect(await draw(page), roiOf(gA3.pane), marks.greyRgb, marks.inkRgb);
+  const imgA2 = await draw(page);
+  const reswptA = inspect(imgA2, roiOf(gA3.pane), marks.greyRgb, marks.inkRgb);
   t.diagnostic(`RE-SWEPT A: meanLuma ${reswptA.census.meanLuma.toFixed(1)}, grey ${(reswptA.greyShare * 100).toFixed(1)}%, ` +
-    `ink ${(reswptA.inkShare * 100).toFixed(1)}%, distinct ${reswptA.census.distinct}`);
+    `ink ${(reswptA.inkShare * 100).toFixed(1)}%, distinct ${reswptA.census.distinct} · drawn with "${imgA2.counts}"` +
+    (imgA2.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
 
-  const tileA2 = await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx });
-  assert.ok(tileA2, "no pane tile response covers band A after re-sweeping");
+  const tileA2 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx }),
+    "no pane tile response covers band A after re-sweeping");
   const covA2 = decodeCoveragePlane(tileA2.json.coverage);
   const nrA2 = edgeRowsCoverage(covA2, A_HZ, tileA2.json.shadow.edge_s);
   t.diagnostic(`SERVER band A (re-swept): edge row ${nrA2.edgeRow}, window [${nrA2.from},${nrA2.to}] observed ${nrA2.observed}/${nrA2.total}`);

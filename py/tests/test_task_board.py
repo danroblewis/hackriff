@@ -284,3 +284,31 @@ def test_no_ticket_block_carries_a_key_twice() -> None:
         "these blocks declare a key more than once, which is what a lost `- id:` line looks like "
         "(the second ticket's keys land inside the first): " + "; ".join(offenders)
     )
+
+
+def test_status_is_from_the_boards_own_vocabulary(records) -> None:
+    """An off-vocabulary status hides a ticket from the tool that exists to find it.
+
+    `hkpy.reconcile` selects in-progress work by matching the string `in-progress` exactly. So a
+    ticket written `in_progress` — one underscore — is not merely cosmetically wrong: it is
+    INVISIBLE to the check whose entire job is catching stale in-progress claims. That happened
+    (T-690, 2026-09-21), and it happened in the ticket that was itself blocking eight merges.
+    Two more spellings of the same idea had accumulated unnoticed: `in-review` and `review`.
+
+    This is the board's version of a rule the codebase keeps restating: a value that is *usually*
+    from a small set is not checked against that set anywhere, so a typo degrades silently instead
+    of failing. Same family as `commit:` parsing as a YAML number, and as a nextest override whose
+    filter names a package no run can see — the config is wrong and nothing says so.
+
+    `reverted` is deliberately IN the vocabulary: it is a real, distinct outcome (T-484), not a
+    misspelling. The point of the guard is that adding a state must be a decision taken here,
+    not something that arrives by typo.
+    """
+    allowed = {"todo", "in-progress", "blocked", "done", "deferred", "cancelled", "reverted"}
+    bad = [(i, f["status"]) for i, f in records if f.get("status") not in allowed]
+    assert not bad, (
+        "these tickets carry a status outside the board's vocabulary "
+        f"({sorted(allowed)}):\n  "
+        + "\n  ".join(f"{i}: {s!r}" for i, s in bad)
+        + "\nA status reconcile does not recognise makes the ticket invisible to it."
+    )

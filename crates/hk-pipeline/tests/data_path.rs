@@ -133,11 +133,17 @@ fn ready_manifest_with_bound(
 /// the same way. It costs nothing when the plugin is healthy: `finish` returns as soon as the
 /// process stops, and this file's live tests still run in ~5 s.
 fn coverage_plan(center: f64, manifest: &Path) -> serde_json::Value {
+    coverage_plan_settle(center, manifest, 30.0)
+}
+
+/// [`coverage_plan`] with an explicit `settle_s`, for the tests that pin what that window is
+/// measured against (T-629).
+fn coverage_plan_settle(center: f64, manifest: &Path, settle_s: f64) -> serde_json::Value {
     json!({ "pipeline": { "chains": [{
         "id": "dummy-coverage",
         "trigger": "coverage",
         "freq_hz": [[center - 0.5e6, center + 0.5e6]],
-        "nodes": [{ "node": "plugin", "manifest": manifest.to_string_lossy(), "settle_s": 30.0 }]
+        "nodes": [{ "node": "plugin", "manifest": manifest.to_string_lossy(), "settle_s": settle_s }]
     }] } })
 }
 
@@ -356,6 +362,15 @@ fn a_stop_during_the_readiness_wait_ends_the_run_without_waiting_out_the_bound()
 /// manifest's `ready_timeout_ms`, counts the timeout, then feeds it anyway, and every record fed
 /// to the process that never accounted for itself is counted (`plugin_fed_before_ready`, which
 /// before T-224 stayed 0 for a plugin that never reported ready at all).
+///
+/// T-629: what the 500 ms bound is measured from is now the **plugin's first byte of output**,
+/// not the spawn, so this test's subject is the decoder rather than the dynamic loader. Under
+/// load it used to fail on `"the plugin decoded what it was fed"` (0 decodes, 46 s) because the
+/// chain's end-of-input settle window and this readiness bound were both charged to a child that
+/// had not reached its first instruction. Both budgets now run from that byte
+/// (`crates/hk-pipeline/src/chains/plugin.rs::budget`), so the counts below are decided by what
+/// the plugin did, in order, and by nothing on a wall clock. The cold-start case is pinned
+/// explicitly by the two `a_cold_starting_plugin_*` tests at the end of this file.
 #[test]
 fn a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait() {
     let src = TempDir::new("readytimeout-src");
@@ -398,7 +413,9 @@ fn a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait()
     );
     assert!(
         s.counter("/chains/plugin_decodes") > 0,
-        "the plugin decoded what it was fed"
+        "the plugin was fed {} samples and decoded none of them: no decode line ever arrived \
+         from a plugin that had produced output and been fed",
+        s.counter("/chains/plugin_samples")
     );
 }
 
@@ -803,4 +820,179 @@ fn fsk_bits_are_published_like_the_other_content_streams() {
         found * 10 >= n * 8,
         "truth payload bits found in {found} of {n} bursts"
     );
+}
+
+/// T-629, the readiness half. **The readiness bound is a budget on a subprocess, so it runs from
+/// the moment that subprocess starts — its first byte of output — not from the spawn.**
+///
+/// `--cold-start-ms` is the cold-link phenomenon in miniature (T-493/T-540): the child exists,
+/// holds its pipes and has not executed one instruction, so it has written nothing. Here it is
+/// silent for 4 s and then reports ready 50 ms after it runs, against a 1 s `ready_timeout`.
+/// Judged from the spawn, that plugin is "not ready within 1 s" and the chain feeds a decoder
+/// that is still in the loader — which is `signal_001`'s `plugin_fed_before_ready == 0` going red
+/// under load, and this file's own live test giving up on a plugin that was about to answer.
+/// Judged from the first byte, the 1 s bound is untouched and the plugin is waited for.
+///
+/// The assertions are counts and ordering, never elapsed time: nothing was fed before ready, the
+/// readiness wait did not time out, and every record the plugin read was decoded in order.
+#[test]
+fn a_cold_starting_plugin_is_waited_for_because_the_ready_bound_runs_from_its_first_output() {
+    let src = TempDir::new("coldready-src");
+    let dir = TempDir::new("coldready");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let meta = tone_recording(&src.0, "live", 2.4e6, 1.5, 1090e6, None);
+    let manifest = ready_manifest_with_bound(
+        &src.0,
+        &exe,
+        &[
+            "--every",
+            "1",
+            "--profile",
+            "adsb-like",
+            // Silent in the loader for 4 s, then ready 50 ms after it runs.
+            "--cold-start-ms",
+            "4000",
+            "--ready-after-ms",
+            "50",
+        ],
+        1_000,
+        "cold-ready.json",
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        coverage_plan(1090e6, &manifest),
+        Pacing::RealTime { speed: 1.0 },
+    );
+    assert!(!cfg.lossless, "a live chain, so the bounded wait applies");
+    let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(180));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    let fed = s.counter("/chains/plugin_samples");
+    let decodes = s.counter("/chains/plugin_decodes");
+    eprintln!(
+        "cold-start readiness: {fed} samples fed, {} before ready, {decodes} decodes, {} \
+         ready timeouts",
+        s.counter("/chains/plugin_fed_before_ready"),
+        s.counter("/chains/plugin_ready_timeouts"),
+    );
+    assert_eq!(
+        s.counter("/chains/plugin_ready_timeouts"),
+        0,
+        "the chain gave up on a plugin that had not produced one byte yet: the readiness bound \
+         was charged to the loader, not to the decoder"
+    );
+    assert_eq!(
+        s.counter("/chains/plugin_fed_before_ready"),
+        0,
+        "records reached the decoder while it was still starting up"
+    );
+    assert!(fed > 0, "the chain fed the plugin nothing at all");
+    // Every record the plugin read was decoded, in order, none lost: the wait cost no input.
+    let repo = repo(&dir.0);
+    let mut records: Vec<u64> = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"]
+        .iter()
+        .flat_map(|icao| {
+            repo.decodes_for_identity(&hk_model::DecodedIdentity {
+                scheme: IdentityScheme::AdsbIcao,
+                value: (*icao).to_owned(),
+            })
+            .unwrap()
+        })
+        .map(|d| d.metadata["records"].as_u64().unwrap())
+        .collect();
+    records.sort_unstable();
+    assert!(!records.is_empty(), "the plugin decoded nothing");
+    assert_eq!(
+        records,
+        (1..=records.len() as u64).collect::<Vec<_>>(),
+        "the plugin's reads are not 1..n: records were fed to it before it was ready"
+    );
+    assert_eq!(decodes, records.len() as u64);
+}
+
+/// T-629, the end-of-input half. **`settle_s` is a no-progress budget on a subprocess, so it runs
+/// from that subprocess's first byte too.**
+///
+/// After the input ends the chain waits for the plugin to flush and exit, and stops it after
+/// `settle_s` with no progress (T-103). "No progress for 2 s" is evidence about a decoder that is
+/// running; it is no evidence at all about one the loader has not started, whose input sits
+/// queued and whose counters cannot move. This plugin is silent for 4 s against a 2 s window:
+/// judged from the end of input it is killed with 0 decodes (the `plugin_decodes > 0` failure the
+/// live test reports under load, T-383); judged from its first byte it decodes every record.
+#[test]
+fn a_cold_starting_plugin_is_not_cut_off_by_the_end_of_input_settle_window() {
+    let src = TempDir::new("coldsettle-src");
+    let dir = TempDir::new("coldsettle");
+    let Some(exe) = dummy_plugin(&dir.0) else {
+        return;
+    };
+    let meta = tone_recording(&src.0, "live", 2.4e6, 1.5, 1090e6, None);
+    // A 32 MiB queue holds the whole replay, so "was it decoded?" is about the settle window and
+    // never about a full queue.
+    let manifest = dummy_manifest(
+        &src.0,
+        &exe,
+        &[
+            "--every",
+            "1",
+            "--profile",
+            "adsb-like",
+            "--cold-start-ms",
+            "4000",
+        ],
+        32 << 20,
+    );
+    let (cfg, replay, _input) = blind_replay_config(
+        &dir.0,
+        &meta,
+        // 2 s: shorter than the cold start, so the window is what decides. A live chain uses it
+        // as given (a lossless one allows at least PLUGIN_WAIT_STALL).
+        coverage_plan_settle(1090e6, &manifest, 2.0),
+        Pacing::RealTime { speed: 1.0 },
+    );
+    assert!(
+        !cfg.lossless,
+        "a live chain, so settle_s is the window used"
+    );
+    let (s, fired) = wait_guarded(start(cfg, replay), Duration::from_secs(180));
+    eprintln!("{}", s.to_text());
+    assert!(!fired, "the run did not finish; the watchdog stopped it");
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.counter("/chains/attached"), 1);
+    assert_eq!(s.counter("/chains/plugin_dropped"), 0);
+    let repo = repo(&dir.0);
+    let mut records: Vec<u64> = ["a1b2c0", "a1b2c1", "a1b2c2", "a1b2c3"]
+        .iter()
+        .flat_map(|icao| {
+            repo.decodes_for_identity(&hk_model::DecodedIdentity {
+                scheme: IdentityScheme::AdsbIcao,
+                value: (*icao).to_owned(),
+            })
+            .unwrap()
+        })
+        .map(|d| d.metadata["records"].as_u64().unwrap())
+        .collect();
+    records.sort_unstable();
+    eprintln!(
+        "cold-start settle: {} decodes, records {:?}",
+        s.counter("/chains/plugin_decodes"),
+        records
+    );
+    assert!(
+        !records.is_empty(),
+        "the cold-starting plugin decoded nothing: the settle window was charged to a process \
+         that had not produced one byte"
+    );
+    assert_eq!(records.first(), Some(&1), "the first record was decoded");
+    assert_eq!(
+        records,
+        (1..=records.len() as u64).collect::<Vec<_>>(),
+        "every record the plugin read was decoded, none lost"
+    );
+    assert_eq!(s.counter("/chains/plugin_decodes"), records.len() as u64);
 }

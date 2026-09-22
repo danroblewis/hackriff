@@ -531,11 +531,22 @@ async function waitForCoverage(backend, timeoutMs) {
   }
 }
 
-/** `GET` against a backend, as the app's own client would. */
-async function get(backend, path) {
-  const r = await fetch(`${backend.origin}${path}`, { headers: { authorization: `Bearer ${backend.token}` } });
-  assert.ok(r.ok, `GET ${path} -> ${r.status}`);
-  return r.json();
+/**
+ * `GET` against a backend, as the app's own client would — **retrying its backpressure** (T-690).
+ *
+ * The same shape as `canvas-journey.e2e.mjs`'s and `scan-everything.e2e.mjs`'s `get`. `/api/tiles`
+ * takes its slot before it does any work and answers `503` over `cost.in_flight_limit`, and this
+ * file's own browser holds reads in flight — so a bare `fetch` manufactures the refusal and then
+ * reads it as a broken server. A `503` is "busy now", never "no".
+ */
+async function get(backend, path, { tries = 40, waitMs = 200 } = {}) {
+  for (let i = 0; ; i++) {
+    const r = await fetch(`${backend.origin}${path}`, { headers: { authorization: `Bearer ${backend.token}` } });
+    if (r.ok) return r.json();
+    assert.ok(r.status === 503 && i < tries,
+      `GET ${path} -> ${r.status}${r.status === 503 ? ` after ${i} retries of the route's backpressure` : ""}`);
+    await new Promise((res) => setTimeout(res, waitMs));
+  }
 }
 
 /**

@@ -391,10 +391,37 @@ function evaluate(lat: Lattice, tier: ViewTier, box: Box, wPx: number, hPx: numb
  *
  * Total by construction: if neither tier fits the budget the cheaper one is used, so this always
  * returns the smallest enumeration available rather than failing.
+ *
+ * ## `was`: the budget is a ceiling to cross, not a line to sit on
+ *
+ * This function is pure in the box, and it is called **per pane, per frame**. A drag or a wheel
+ * moves the box continuously, so a viewport whose detail enumeration sits near
+ * [[VIEWPORT_TILE_BUDGET]] crosses it in both directions on consecutive frames — and each crossing
+ * is a complete change of address set. `TileCache.setViewports` cancels what the new viewports no
+ * longer want, so an oscillating tier cancels and re-issues the whole screen's worth of tiles at
+ * frame rate.
+ *
+ * Measured, on the run that found it (four canvas specs against one shared backend): **4104
+ * client-side cancellations in a single spec** against 1718 on a quiet one, the route's AIMD
+ * operating cap driven to **1 of 4 and held there** for the rest of the run — it only rises on a
+ * completion, and nothing completes — 24 tile requests that never retire, a tail of requests still
+ * arriving after the gestures ended, and a **second tab that could not boot at all**: "GET
+ * /api/tiles refused every attempt". One flapping predicate, and it reads as four different bugs.
+ *
+ * So the switch is hysteretic: `was` is the tier this viewport drew from last frame, and coming
+ * back **down** to the detail tier needs the detail enumeration to fit in half the budget, not
+ * merely to touch it. Half rather than a second tuned constant: the return threshold has to be
+ * strictly below the outbound one and it has to stay tied to the number that matters, which is the
+ * same reasoning that made this a budget rather than a span in the first place. `was = null` — a
+ * first frame, or any caller that does not track it — is exactly the old behaviour, so every
+ * pinned count in `ui/test/surface-lattice.test.ts` is a claim about the same function.
  */
-export function tierFor(set: LatticeSet, box: Box, wPx: number, hPx: number, device = "any"): TierChoice {
+export function tierFor(
+  set: LatticeSet, box: Box, wPx: number, hPx: number, device = "any", was: ViewTier | null = null,
+): TierChoice {
   const d = evaluate(set.detail, "detail", box, wPx, hPx, device);
-  if (d.addrs.length <= VIEWPORT_TILE_BUDGET) return d;
+  const budget = was === "overview" ? VIEWPORT_TILE_BUDGET / 2 : VIEWPORT_TILE_BUDGET;
+  if (d.addrs.length <= budget) return d;
   const o = evaluate(set.overview, "overview", box, wPx, hPx, device);
   return o.addrs.length < d.addrs.length ? o : d;
 }
