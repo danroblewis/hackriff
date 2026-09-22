@@ -1676,7 +1676,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
-    <div class="card" id=mergecard style="flex:0 1 auto;max-height:62%;min-height:0"><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
+    <div class="card" id=mergecard><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
     <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
