@@ -87,6 +87,12 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "the TSBK scene plus two more granted voice channels inside the window (T-270): one "
         "granted with the service-options encryption bit set, and one announced ONLY by a grant "
         "update -- late entry, no header, so nothing ever stated its encryption state"),
+    "trunk_p25p2_control_channel": ScenarioSpec(
+        trunk_scene.trunk_control_channel, trunk_scene.TRUNK_P25P2_DEFAULTS, (),
+        "the TSBK scene plus a P25 Phase 2 TDMA band plan (T-272): an IDEN_UP_TDMA identifier "
+        "whose channel type names two slots per carrier, and two talkgroups granted on "
+        "ALTERNATING SLOTS of one frequency -- consecutive channel numbers that an FDMA reading "
+        "would turn into two different, wrong frequencies"),
     "trunk_dmr_control_channel": ScenarioSpec(
         trunk_scene.trunk_dmr_control_channel, trunk_scene.TRUNK_DMR_DEFAULTS, (),
         "a DMR Tier III control channel (BS-data frame sync + CSBKs with the 0xA5A5-masked CRC) "

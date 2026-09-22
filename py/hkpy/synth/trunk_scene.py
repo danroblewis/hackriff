@@ -107,6 +107,33 @@ TRUNK_CC_DEFAULTS: dict[str, Any] = {
     # its traffic looks. 851.2 MHz is +187.5 kHz, raster channel 15, also inside the window.
     "late_entry_target_hz": 851.2e6,
     "late_entry_talkgroup": 4812,
+    # --- P25 Phase 2 (T-272). OFF by default, so the T-267/T-268/T-269/T-270 fixtures stay
+    # byte-identical: the branches guarded by it emit no extra TSBK and consume no randomness when
+    # it is off.
+    #
+    # A Phase 2 system's CONTROL channel is a Phase 1 channel -- the same C4FM, the same TSBKs --
+    # so what makes this scene Phase 2 is the band plan it announces: an IDEN_UP_TDMA entry whose
+    # channel type names two slots per carrier. Two talkgroups are then granted on ALTERNATING
+    # SLOTS of one frequency, which is C23's TDMA slot mix-up pitfall in its exact form: read as
+    # FDMA, the two channel numbers become two different (wrong) frequencies and the two
+    # talkgroups are attributed to channels that do not exist.
+    "phase2": False,
+    "p2_iden": 2,
+    # Channel type 3 = two slots per carrier.
+    "p2_channel_type": 3,
+    "p2_base_hz": 851.0e6,
+    "p2_spacing_hz": 12500.0,
+    # The ONE frequency both talkgroups share. Chosen as a frequency first, like every other target
+    # here; its channel number is derived from the TDMA band plan, so a decoder still has to divide
+    # by the slot count it read off the air to arrive at it. +162.5 kHz from the tuned centre is
+    # raster channel 13 -- inside the window, and clear of the control channel (3), the decoy (-5),
+    # the followed channel (5), the encrypted (9) and late-entry (15) channels and every NBFM
+    # neighbour.
+    "p2_target_hz": 851.175e6,
+    "p2_slot0_talkgroup": 7001,
+    "p2_slot0_source": 1111,
+    "p2_slot1_talkgroup": 7002,
+    "p2_slot1_source": 2222,
 }
 
 #: The same scene with TSBK content switched on (T-268).
@@ -114,6 +141,10 @@ TRUNK_TSBK_DEFAULTS: dict[str, Any] = {**TRUNK_CC_DEFAULTS, "tsbk": True}
 
 #: The TSBK scene plus the encrypted and late-entry granted channels (T-270).
 TRUNK_ENCRYPTED_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "encryption": True}
+
+#: The TSBK scene plus a P25 Phase 2 TDMA band plan and two talkgroups on alternating slots of one
+#: frequency (T-272).
+TRUNK_P25P2_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "phase2": True}
 
 
 def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
@@ -220,6 +251,74 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
             },
         }
 
+    # --- P25 Phase 2 (T-272). A TDMA band plan, announced twice like every other identifier so it
+    # has to clear the same agreement gate, and two grants naming consecutive channel numbers on
+    # it: one frequency, two slots, two talkgroups.
+    p2_truth: dict[str, Any] | None = None
+    if bool(p.get("phase2", False)):
+        p2_iden = int(p["p2_iden"])
+        if p2_iden in (iden, u_iden):
+            raise ValueError("the TDMA identifier must differ from the FDMA and unannounced ones")
+        ctype = int(p["p2_channel_type"])
+        slots = tk.TDMA_SLOTS_PER_CHANNEL_TYPE[ctype]
+        if slots < 2:
+            raise ValueError("a Phase 2 scene needs a channel type with more than one slot")
+        p2_base, p2_spacing = float(p["p2_base_hz"]), float(p["p2_spacing_hz"])
+        p2_hz = float(p["p2_target_hz"])
+        steps = (p2_hz - p2_base) / p2_spacing
+        if steps != int(steps) or not 0 <= steps * slots <= 0xFFF:
+            raise ValueError(f"p2_target_hz {p2_hz} is not a channel of the TDMA band plan")
+        p2_channel = int(steps)
+        if p2_hz in {target_hz, follow_hz}:
+            raise ValueError("the Phase 2 channel must be a frequency of its own")
+        tdma_args = tk.iden_up_tdma_args(p2_iden, ctype, p2_base, p2_spacing)
+        tdma_block = tk.tsbk(tk.TSBK_OP_IDEN_UP_TDMA, tdma_args)
+        slot_tgs = [int(p["p2_slot0_talkgroup"]), int(p["p2_slot1_talkgroup"])]
+        slot_srcs = [int(p["p2_slot0_source"]), int(p["p2_slot1_source"])]
+        slot_chan16 = [tk.tdma_channel_number(p2_iden, p2_channel, k, slots) for k in (0, 1)]
+        # Inserted near the FRONT of the cycle, not appended to it. A hunt buffers a window and
+        # decodes the blocks it holds, so a message late in a long cycle can fall off the end of
+        # every window -- and the cycle length and the window period here happen to be
+        # commensurate, so "late" means late in *every* pass, not merely some. Both agreements for
+        # the TDMA identifier and both slot grants therefore sit in the first five frames, which
+        # keeps what this scene tests independent of how much of the cycle a window happens to
+        # span. The two agreements are adjacent for the same reason; the gate is that two messages
+        # agree bit for bit, not that they are spread out.
+        cycle[1:1] = [
+            ("iden-up-tdma", tdma_block),
+            ("iden-up-tdma", tdma_block),
+            ("grant-p2-slot0",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                     tk.grant_args(slot_chan16[0], slot_tgs[0], source=slot_srcs[0]))),
+            ("grant-p2-slot1",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                     tk.grant_args(slot_chan16[1], slot_tgs[1], source=slot_srcs[1]))),
+        ]
+        p2_truth = {
+            "iden": p2_iden,
+            "channel_type": ctype,
+            "slots": slots,
+            "base_hz": p2_base,
+            "spacing_hz": p2_spacing,
+            "target_hz": p2_hz,
+            "channel": p2_channel,
+            "slot_channel_16bit": slot_chan16,
+            "slot_talkgroups": slot_tgs,
+            "slot_sources": slot_srcs,
+            # What an FDMA reading of the SAME two channel numbers would produce: two different
+            # frequencies, both wrong, neither of which any row may ever report.
+            "wrong_frequencies_if_read_as_fdma_hz": [
+                p2_base + p2_spacing * (p2_channel * slots + k) for k in (0, 1)
+            ],
+            "expected": {
+                "protocol": "p25-phase2",
+                "calls": "two, on ONE frequency, attributed to slots 0 and 1 with their own "
+                         "talkgroups",
+                "timing": "both slots key one carrier, so call boundaries are the shared "
+                          "envelope's (`tdma-shared-envelope`), not per-slot",
+            },
+        }
+
     dibits = tk.frames_from_blocks([b for _, b in cycle], n_frames)
     frames = [{"index": i, "kind": cycle[i % len(cycle)][0],
                "block_hex": cycle[i % len(cycle)][1].hex()} for i in range(n_frames)]
@@ -260,6 +359,10 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
     }
     if enc_truth is not None:
         truth["encryption"] = enc_truth
+    if p2_truth is not None:
+        truth["phase2"] = p2_truth
+        # A system announcing a TDMA band plan is Phase 2, however Phase 1 its control channel is.
+        truth["expected"]["protocol"] = "p25-phase2"
     return dibits, frames, truth
 
 
@@ -415,7 +518,8 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
             raise ValueError("a keying needs a positive on and off time")
 
         def place_voice(target_hz: float, rng_name: str, talkgroup: int, chan16: int,
-                        what: str) -> tuple[list[tuple[float, float]], float]:
+                        what: str, *, tdma_slots: list[dict[str, Any]] | None = None
+                        ) -> tuple[list[tuple[float, float]], float]:
             """Repeated keyings on one granted voice channel, and the offset it sits at.
 
             Every granted channel in this scene is placed by this one function, so the encrypted
@@ -453,6 +557,9 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                             burst_start_s=b0, burst_duration_s=b1 - b0,
                             granted_by_channel_16bit=chan16,
                             talkgroup=talkgroup,
+                            # On a TDMA carrier one emission carries BOTH slots: the samples are
+                            # one keying, and which slot was talking is not separable from them.
+                            **({"tdma_slots": tdma_slots} if tdma_slots else {}),
                         ),
                     )
                 t_key += on_s + off_s
@@ -477,6 +584,22 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         })
         tsbk_truth["expected"]["follow_grant"] = "followed: a call record with measured boundaries"
         tsbk_truth["expected"]["grant_target"] = "outside-window: logged, never followed"
+
+        # The Phase 2 channel: ONE emission on ONE frequency, carrying both slots. Placed by the
+        # same function as every other granted channel, so nothing in the samples says it is TDMA
+        # -- only the band plan the control channel announced does, which is the point of the test
+        # it serves (T-272).
+        p2 = tsbk_truth.get("phase2")
+        if p2 is not None:
+            p2_keyings, p2_off = place_voice(
+                float(p2["target_hz"]), "voice-p2",
+                int(p2["slot_talkgroups"][0]), int(p2["slot_channel_16bit"][0]),
+                "p2_target_hz",
+                tdma_slots=[{"slot": k, "talkgroup": int(tg)}
+                            for k, tg in enumerate(p2["slot_talkgroups"])],
+            )
+            p2["keyings_s"] = [[a, b] for a, b in p2_keyings]
+            p2["offset_hz"] = p2_off
 
         # The encrypted and late-entry channels, placed by the same function and therefore
         # indistinguishable in the samples (T-270).

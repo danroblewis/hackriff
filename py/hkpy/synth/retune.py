@@ -8,6 +8,13 @@ The physics this fixture exists to exercise is a two-line rule:
   product — is manufactured at a fixed offset from the **local oscillator**, so it moves with the
   centre, to a *new absolute frequency*, every time the radio is retuned.
 
+T-599 adds a third artefact family, the **IQ image**: a line mirrored about `2*f_LO` (an emission
+or blocker at `f` appears an image at `2*f_LO - f`; `hk_model::retune::RetuneSlope::Image`, slope
+2). T-586's own fixture deliberately left this untested end to end — mirroring any of its own
+emitters collides with the emitter grid — so this scene carries an independent virtual source
+frequency (never itself emitted; only its image is) chosen so the mirror clears the emitter grid,
+the DC line and the LO-relative spur at every centre, the same layout guard the other lines pass.
+
 Everything in the scene is therefore the same object to a single-capture detector: a narrow CW
 line in white noise. Only the behaviour across centres separates the two classes, which is exactly
 the property under test, and the reason nothing here is modulated — modulation would let a test
@@ -49,6 +56,12 @@ RETUNE_DEFAULTS: dict[str, Any] = {
     # Baseband offset of the internal LO-relative spur, so it appears at centre + this.
     "lo_spur_offset_hz": 370e3,
     "lo_spur_power_dbfs": -30.0,
+    # T-599: virtual source frequency of an IQ image (never itself emitted). The image appears at
+    # 2*centre - image_source_hz, moving at twice the LO's own step, and this value was chosen (by
+    # search over the fixture's own layout guard) so the image clears every other line at every
+    # centre; see the module docstring.
+    "image_source_hz": 101.5e6,
+    "image_power_dbfs": -30.0,
     "noise_dbfs": -40.0,
     # The DC/LO-leakage artefact: one line at baseband 0 in every capture, i.e. always at the
     # tuned centre. Applied by hkpy.synth.impairments after the scene is built.
@@ -79,6 +92,7 @@ def retune_diversity(ctx: Any) -> tuple[list[Scene], dict[str, Any]]:
     centers = [float(c) for c in p["centers_hz"]]
     emitters = [float(f) for f in p["emitter_offsets_hz"]]
     spur_offset = float(p["lo_spur_offset_hz"])
+    image_source = float(p["image_source_hz"])
     dwell = int(round(float(p["dwell_s"]) * fs))
     settle = int(p["settle_samples"])
     min_sep = float(p["min_separation_hz"])
@@ -89,7 +103,8 @@ def retune_diversity(ctx: Any) -> tuple[list[Scene], dict[str, Any]]:
     # pair can never masquerade as the invariant breaking.
     usable_half = 0.42 * fs
     for c in centers:
-        lines = sorted([*emitters, c, c + spur_offset])
+        f_img = 2.0 * c - image_source
+        lines = sorted([*emitters, c, c + spur_offset, f_img])
         for f in lines:
             if abs(f - c) > usable_half:
                 raise ValueError(
@@ -143,11 +158,28 @@ def retune_diversity(ctx: Any) -> tuple[list[Scene], dict[str, Any]]:
              "lo_slope": 1.0, "capture_index": i, "tuner_center_hz": center,
              "mechanism": "internal spur at a fixed offset from the LO"})
 
+        # T-599: an IQ image, mirrored about 2*f_LO (slope 2), unlike the LO-locked spur above
+        # (slope 1). image_offset is the baseband offset that puts the tone at f_img.
+        f_img = 2.0 * center - image_source
+        image_offset = f_img - center
+        power_img = float(p["image_power_dbfs"])
+        _tone(scene, start, dwell, image_offset, power_img, "iq-image")
+        scene.annotate(
+            start, dwell, f_img, f_img, "iq-image",
+            {"role": "artefact", "kind": "iq-image", "center_hz": f_img,
+             "offset_hz": image_offset, "bandwidth_hz": 0.0, "power_dbfs": power_img,
+             "power_dbm": power_img + cap.calibration_k_db, "lo_relative": True,
+             "lo_slope": 2.0, "invariant_hz": -image_source, "image_of_hz": image_source,
+             "capture_index": i, "tuner_center_hz": center,
+             "mechanism": "IQ image of a fixed source, mirrored about 2*f_LO"})
+
     scene.scenario_truth["retune_diversity"] = {
         "centers_hz": centers,
         "emitters_hz": emitters,
         "lo_relative_offsets_hz": [0.0, spur_offset],
+        "image_source_hz": image_source,
         "rule": "a real emission keeps its absolute frequency across centres; a receiver artefact "
-                "keeps its offset from the LO and so moves to a new absolute frequency",
+                "keeps its offset from the LO and so moves to a new absolute frequency; an IQ "
+                "image moves at twice the LO's own step",
     }
     return [scene], {}

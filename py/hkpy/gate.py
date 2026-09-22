@@ -94,7 +94,8 @@ DOCS = "docs"
 PY = "py"
 
 #: Classes in the order they are reported when a change spans more than one.
-CLASS_ORDER = (FULL, UI, DOCS, PY)
+OPS = "ops"
+CLASS_ORDER = (FULL, UI, DOCS, PY, OPS)
 
 #: Phases. CI runs the two separately (two jobs, one recipe call each — T-358); a local
 #: `just gate` runs both. The classification is identical either way: the phase only says
@@ -108,6 +109,16 @@ PHASES = (PHASE_ALL, PHASE_CHECK, PHASE_ACCEPTANCE)
 #: M0 slice + harness targets) rather than bare `acceptance`, so the gate an agent runs
 #: locally and the gate CI runs are one definition rather than two similar ones.
 SUITES: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {
+    # Orchestration: ops/ scripts, .claude/ roles-agents-skills-hooks, prompts/. None of it is
+    # linked into a crate or read by a suite, so the full workspace run proves nothing about it -
+    # and on 2026-09-22 four docs/ops-only branches each burned a 50-minute full gate and lost it
+    # to a load-sensitive Rust test they could not have touched. What CAN break here is a bash
+    # script or a Python tool, so: syntax-check the scripts and run the Python suite (which also
+    # validates the board).
+    OPS: {
+        PHASE_CHECK: (("just", "ops-check"), ("just", "lint-py"), ("just", "test-py")),
+        PHASE_ACCEPTANCE: (),
+    },
     FULL: {
         PHASE_CHECK: (("just", "lint"), ("just", "test")),
         PHASE_ACCEPTANCE: (("just", "acceptance-ci"), ("just", "test-ui-e2e")),
@@ -230,6 +241,9 @@ _RULES: tuple[tuple[str, str, str, str], ...] = (
     ("exact", "docs/use-cases.yaml", PY, "machine-readable use cases - the Python suite reads it"),
     ("prefix", "docs/", DOCS, "documentation"),
     ("prefix", "py/", PY, "Python tooling (orchestration/research only)"),
+    ("prefix", "ops/", OPS, "orchestration scripts - not linked into any crate"),
+    ("prefix", ".claude/", OPS, "roles, agents, skills, hooks - prompts and hook scripts"),
+    ("prefix", "prompts/", OPS, "model-selection and briefing prompts"),
 )
 
 _UNCLASSIFIED = "unclassified path — the gate fails closed"
@@ -736,6 +750,39 @@ def head_sha(root: str) -> str | None:
     return out.strip() if out and out.strip() else None
 
 
+def keep_junit(root: str, run_id: str, n: int, cmd: list[str], since: float) -> list[str]:
+    """Copy every nextest JUnit report this suite wrote into `$HACKRIFF_OPS/junit/<run_id>/`.
+
+    User, 2026-09-22: a 36-minute gate with no per-test record is unmeasurable — "we should be
+    recording whatever the normal machine-readable output is for the test suite". nextest writes
+    one `target/nextest/<profile>/junit.xml` per run when `.config/nextest.toml` names a
+    `[profile.default.junit] path`, and OVERWRITES it on the next run — `just test` and
+    `just acceptance-ci` both run under the default profile — so the gate copies it away after
+    each suite, keyed by run id and suite order, before the next suite can clobber it. Every
+    `<testcase>` carries its `time`, and the file order is the run order, so a slow gate can be
+    read test by test (`ops/monitor.py` renders the newest). Only files written during this
+    suite are taken (`since`): a stale report from an earlier run is not this suite's evidence.
+    Never fails the gate — a missing report is a missing measurement, not a red.
+    """
+    import glob
+
+    kept: list[str] = []
+    try:
+        dest = os.path.join(gatelog.ops_dir(), "junit", run_id)
+        for src in sorted(glob.glob(os.path.join(root, "target", "nextest", "*", "junit.xml"))):
+            if os.path.getmtime(src) < since:
+                continue
+            profile = os.path.basename(os.path.dirname(src))
+            suite = "-".join(cmd[1:]) or cmd[0]
+            os.makedirs(dest, exist_ok=True)
+            out = os.path.join(dest, f"{n:02d}-{suite}-{profile}.xml")
+            shutil.copyfile(src, out)
+            kept.append(out)
+    except OSError as e:  # pragma: no cover - best effort by design
+        print(f"gate: junit    = not kept ({e})", file=sys.stderr)
+    return kept
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="just gate",
@@ -884,12 +931,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"gate: timing   = run {run_id} -> {gatelog.log_path()}", flush=True)
 
     result = 0
-    for cmd in commands:
+    for n, cmd in enumerate(commands, 1):
         print(f"gate: running {' '.join(cmd)}", flush=True)
         cmd_started = time.monotonic()
+        wall_started = time.time()
         rc = subprocess.run(cmd, cwd=root, env=env, check=False).returncode
         elapsed = time.monotonic() - cmd_started
         gatelog.append(gatelog.suite_record(run_id, cmd=cmd, seconds=elapsed, rc=rc))
+        for kept in keep_junit(root, run_id, n, cmd, since=wall_started):
+            print(f"gate: junit    = {kept}", flush=True)
         print(f"gate: {' '.join(cmd)} took {elapsed:.0f}s (exit {rc})", flush=True)
         if rc != 0:
             print(f"gate: FAILED {' '.join(cmd)} (exit {rc})", file=sys.stderr)

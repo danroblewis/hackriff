@@ -101,6 +101,20 @@ gate-merge *args: (_coordinator-only "gate-merge")
 reconcile *args:
     uv run --locked --project py python -m hkpy.reconcile {{args}}
 
+# THE TASK BOARD CLI (user, 2026-09-22): docs/tasks.yaml is edited through THIS, never by hand -
+# a PreToolUse hook bans direct Edit/Write/sed-i/redirect edits to it in worktrees. Text-level
+# operations on one ticket's block (py/hkpy/tasks.py), never a whole-file YAML re-dump; every
+# write is re-read and re-validated, restoring the original bytes on any failure.
+#   just task show T-nnn                 print a ticket's raw block
+#   just task list [--status S] [--milestone M] [--ready] [--group G] [--json]
+#   just task set T-nnn key=value ...     replace/add scalar fields (refuses bad status/blocked)
+#   just task result T-nnn (--from|--text)   set the `result:` block
+#   just task note T-nnn (--from|--text)     append to the `notes:` block
+#   just task new --title T --milestone M [...]   file a ticket, allocating its id
+#   just task validate                    strict-parse + the board's own invariants
+task *args:
+    uv run --locked --project py python -m hkpy.tasks {{args}}
+
 # IS IT SAFE TO LAUNCH ANOTHER BUILDING AGENT (T-559)? CLAUDE.md's worktree-launch cap is "at
 # most 4 Rust-building agents" - but a count-the-cargo-processes check misses the `hk serve`
 # processes agents leave running (e2e harnesses, demo servers, replay servers), which is exactly
@@ -122,6 +136,12 @@ builders *args:
 # Run it when the loop feels slow; the point is that a slow-down shows up as data before anyone
 # has to notice it. First measurement, 2026-09-20: gate median 21.4 min, but QUEUE WAIT median
 # 119.7 min and commit->merge median 272.6 min - the gate is ~8 % of a ticket's cycle.
+#
+# T-763: that 21.4 pools every class (a 17 s `py` gate and a 40 min `full` one in one median) and
+# counts only gates that MERGED, so it is not comparable to the full-class number the budget guard
+# reports - which is where "60 % slower in two days" came from. `--suites` answers the question
+# that matters, per CLASS and per SUITE, from the per-suite lines in merge-runner.log: which half
+# of the gate moved. Complete passing runs only; an aborted gate measures a prefix, not the suite.
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
@@ -134,6 +154,13 @@ budget-check:
 # p50/p90 of the gate, per class and per phase, from $HACKRIFF_OPS/gate-timings.jsonl, plus
 # whether any class's ROLLING MEDIAN is over budget. `py/tests/test_gate.py` asserts the same
 # budgets, so a slow-down trips a test instead of waiting for someone to notice it.
+# The `ops` gate class (py/hkpy/gate.py): orchestration scripts are not linked into any crate, so
+# their gate is a syntax check of every script plus the Python suite.
+ops-check:
+    for f in ops/*.sh .claude/hooks/*.sh; do bash -n "$f" || exit 1; done
+    for f in ops/*.py; do python3 -m py_compile "$f" || exit 1; done
+    @echo "ops-check: scripts parse"
+
 gate-stats:
     uv run --locked --project py python -m hkpy.cycletime --stats
 
@@ -270,6 +297,17 @@ test-crate crate:
 # e.g. `just test-one replumbing_is_503` or `just test-one listen_lifecycle`.
 test-one name:
     cargo nextest run -E 'test({{name}}) or binary({{name}})'
+
+# The `timing` tier (user, 2026-09-22): the throughput tests `.config/nextest.toml` keeps OUT of
+# every gate run by `default-filter`, run here and nowhere else - one at a time, on a quiet box or
+# nightly, the way HIL (T5) runs. `just gate` never calls this. Not a quarantine: nothing is
+# #[ignore]d, and this is the only recipe that runs them, so a red here is a real finding about
+# the real-time path's headroom on THIS machine. Log the load average with the result.
+timing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "timing tier: load $(uptime | sed 's/.*load averages*: *//')" >&2
+    cargo nextest run --workspace -P timing
 
 # The hk-e2e test targets, split into the three sets the gates are built from and listed by name.
 # `cargo test -p hk-e2e` auto-discovers every tests/e2e/tests/*.rs, which is how CI's acceptance job
@@ -622,10 +660,16 @@ lint-py:
 # .git/config and is NOT, so a fresh clone has the attribute pointing at nothing and git fails
 # the merge with "custom merge driver hkboard lacks command line". Run this once per clone.
 # `ops/merge-runner.sh` also calls it at startup, so the automated path cannot miss it.
+#
+# It also points git at `.githooks/`, whose `pre-commit` validates docs/tasks.yaml before any
+# commit that touches it (T-764). The gate only runs on merges, and the board is committed
+# DIRECTLY several times an hour, so the gate cannot be where the board's integrity lives. The
+# path is relative, so each worktree uses its own copy of the hook.
 setup-git:
     @git config merge.hkboard.name "append-only merge for docs/tasks.yaml (T-582)"
     @git config merge.hkboard.driver "uv run --locked --project py python -m hkpy.boardmerge %O %A %B"
-    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml"
+    @git config core.hooksPath .githooks
+    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml; hooks -> .githooks"
 
 # THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
 #

@@ -145,14 +145,14 @@ export class Page {
   constructor(conn, sessionId) {
     this.conn = conn; this.sessionId = sessionId;
     this.console = []; this.exceptions = [];
-    /** Every request this page made, in order: `{url, status, error, startedMs, endedMs}`. */
+    /** Every request this page made, in order: `{url, status, error, startedMs, respondedMs, endedMs}`. */
     this.requests = [];
     /** Live and peak concurrency, per url predicate name — see `watchConcurrency`. */
     this.watches = [];
   }
 
   #sent(m) {
-    const rec = { id: m.requestId, url: m.request.url, method: m.request.method, status: null, error: null, startedMs: Date.now(), endedMs: null, counted: true };
+    const rec = { id: m.requestId, url: m.request.url, method: m.request.method, status: null, error: null, startedMs: Date.now(), respondedMs: null, endedMs: null, counted: true };
     this.requests.push(rec);
     this.#open.set(m.requestId, rec);
     for (const w of this.watches) if (w.match(rec.url)) { w.live++; w.peak = Math.max(w.peak, w.live); }
@@ -176,6 +176,12 @@ export class Page {
     const r = this.#open.get(m.requestId);
     if (!r) return;
     r.status = m.response.status;
+    // **When the SERVER let go of its slot** (T-630), which is not when the body finished
+    // streaming. A concurrency measured to `endedMs` would count a request the route has already
+    // answered as still holding a slot, and so would report a client that obeys its share as one
+    // that does not — the same like-for-like rule `#release` is written for, recorded rather than
+    // only acted on so a test can reconstruct the peak per status.
+    r.respondedMs = Date.now();
     this.#release(r);
   }
   #done(id, error) {

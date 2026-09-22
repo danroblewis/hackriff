@@ -36,8 +36,9 @@ pub use demod::{
     FskSymbols, TimingSeedMethod,
 };
 pub use receiver::{
-    ClusterPrior, DemodPriors, DemodSeed, FskBurst, FskReceiver, FskReceiverConfig,
-    STANDARD_RATES_BD, SeedSource, SyncPrior, TrialOutcome,
+    AlphabetEvidence, ClusterPrior, DemodPriors, DemodSeed, FrameEvidence, FskBurst, FskReceiver,
+    FskReceiverConfig, PERIODIC_BITS_MAX_LAG, PERIODIC_BITS_MIN_CORR, STANDARD_RATES_BD,
+    SeedSource, SyncPrior, TrialOutcome, periodic_bits,
 };
 pub use record::{
     EmitterClassification, FRAMING_IDENTITY_SCHEME, FSK_FAMILY, FramedRecordContext,

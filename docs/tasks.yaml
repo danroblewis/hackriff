@@ -4861,6 +4861,71 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    result: |
+      P25 Phase 2 is decoded from the band plan, and a grant's slot is attributed (C23 TDMA
+      slot mix-up pitfall). Acceptance met: two talkgroups granted on alternating slots of ONE
+      frequency produce two distinct CallRecords with correct slot attribution.
+
+      What changed
+      - hk-detect/trunk/tsbk.rs: IDEN_UP_TDMA (opcode 0x33) decoded -- iden(4) channel-type(4)
+        tx-offset(14) spacing(10) base(32); `TDMA_SLOTS_PER_CHANNEL_TYPE` maps the channel type
+        to slots (1/1/1/2/4, op25's `slots_per_carrier`). `ChannelMap::resolve` now returns
+        `f = base + spacing * (channel / slots)` with `slot = channel % slots` on a TDMA plan
+        (`Resolved::Mapped` gained `slots` + `slot`). `protocol_of` names P25Phase2 when a
+        corroborated TDMA entry exists -- the band plan is the only thing that can say, since a
+        Phase 2 control channel IS a Phase 1 channel. Verified two independent ways: against
+        op25's `iden_up_tdma` / `channel_id_to_frequency` / `channel_id_to_tdma_slot`, and by
+        arithmetic on the published worked example this module already reproduced (channel 1554,
+        spacing field 100 -> 771.718750 MHz only if divided by 2 first; the FDMA reading is
+        9.7 MHz out). A reserved channel type (5-15) is REFUSED, not defaulted to 2: a guessed
+        slot count is a wrong frequency and a wrong slot at once.
+      - hk-model: `ChannelPlanEntry.slots` (+ migration 0016, `NOT NULL DEFAULT 1 CHECK 1..4`),
+        `downlink_hz` divides by it and `slot_of` is new. A plan stored without its slot count is
+        ambiguous between the FDMA and TDMA readings, so a consumer re-deriving a frequency from
+        the database would land half a channel out -- the pitfall preserved in the DB.
+      - hk-pipeline/chains/trunk.rs: grant_event carries `slot`, the slot count and the mapping
+        it used; the follower's dedup key is now (frequency, slot) instead of frequency alone,
+        which is what stops two talkgroups on one carrier merging into one call. The DDC is still
+        paid ONCE per frequency -- targets are grouped by frequency and each slot's call is
+        written from that one envelope measurement. Every TDMA call carries the new
+        `tdma-shared-envelope` reason: nothing here demodulates the two-slot bursts, so the
+        boundaries are the shared carrier's and the row says so rather than implying per-slot
+        timing this build never measured.
+      - hk-detect/trunk/support.rs: P25 Phase 2 moves Unimplemented -> Decoded, with a reason
+        that states both what it decodes and what it still does not (the TDMA traffic side).
+      - py/hkpy/synth: `iden_up_tdma_args` + `tdma_channel_number`, and a `phase2` branch on the
+        trunk scene registered as scenario `trunk_p25p2_control_channel` -- a TDMA band plan plus
+        two talkgroups granted on consecutive channel numbers of one frequency, with the
+        frequency chosen first and the channel numbers derived from the plan (blind).
+      - tests/e2e t272_p25p2.rs (wired into acceptance_m4): blind through the mock SDR; asserts
+        the system is named p25-phase2, the stored plan carries slots, two distinct CallRecords
+        on one frequency with slots 0/1 and their own talkgroups, the `tdma-shared-envelope`
+        reason, and that NEITHER frequency an FDMA misreading produces (851.350 / 851.3625 MHz)
+        appears anywhere -- not as a call, a grant or even an outside-window refusal.
+      - docs/07 §2.28/§2.29 and docs/18's P25 Phase 2 "unknown" row updated. No API route
+        changed, so docs/api.md is untouched.
+
+      Tests (targeted)
+      - `cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)'`: 8/8 pass, including the new
+        t272 test (t267/t268/t269/t270/t271/t287/t345 unaffected -- their scenes keep `phase2`
+        off and are byte-identical).
+      - `cargo nextest run -p hk-model -p hk-detect`: 534 pass.
+      - `cargo nextest run -p hk-pipeline --no-fail-fast`: 331 pass.
+      - `py -m pytest tests/test_synth.py`: 65 pass; `just lint-py` clean.
+      - `just precheck hk-model hk-detect hk-pipeline hk-e2e`: fmt + clippy clean.
+
+      Surfaced, not chased
+      - LOAD FLAKE, not mine: on the first (loaded) hk-pipeline run
+        `live_edge_tiles::the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture`
+        failed; run alone it passes (5/5 in that binary), and the full re-run was 331/331. Nothing
+        in this diff touches the live tile path. For the deflaker.
+      - The synthetic scene's phase-2 messages had to be inserted near the FRONT of the control
+        channel's message cycle: a hunt decodes only the first ~9 blocks of the window it buffers,
+        and with the 11-frame cycle the pass period was commensurate with the cycle length, so a
+        message late in the cycle was late in EVERY pass and never decoded. Worth knowing if a
+        future scene adds more messages; it is a property of the fixture, not a decoder bug.
+      - SIGNAL-081 (P25 Phase 2 TDMA trunk following) is NOT claimed: it asks for both slots to be
+        demodulated, and the TDMA traffic side is still undecoded (docs/18 row updated to say so).
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
@@ -5770,6 +5835,22 @@ tasks:
       SDRTrunk/OP25/DSD+ offline over the same IQ, behind the C22 plugin boundary, hardware/off-air
       tier only, cross-validated against a spectrogram-derived grant/activity check so no single
       decoder authors the answer key.
+    result: |
+      2026-09-22: STILL BLOCKED on a real off-air P25 capture (T-544's BART attempt was negative,
+      docs/19 section 7) - no oracle harness was built, per the ticket's own acceptance text. Did
+      the part that does not depend on the capture: crates/hk-detect/src/trunk/tsbk.rs's module
+      header now says explicitly, in its own section ("No independent oracle has confirmed this
+      decoder (T-299)"), that the decoder and its test fixtures share one author's reading of the
+      same references, so a shared misreading would pass both, and that nothing here has been
+      checked against a second, independently-written implementation on the same IQ. It names the
+      docs/19 section 5.3 oracle design (Trunk Recorder/OP25/SDRTrunk offline, C22 plugin boundary,
+      hardware/off-air tier, cross-validated against a spectrogram-derived check) as what to build
+      once a capture exists, and points at T-544's negative BART result as why none exists yet.
+      No decoder logic changed. Targeted test: `just test-crate hk-detect` - 199 tests run, 199
+      passed (1 reported leaky, pre-existing and unrelated to this change - a doc comment only
+      edit), 1 skipped. `just precheck hk-detect` clean. Not chasing: finding another off-air P25
+      system to capture from is out of scope for this ticket (capture is user-triggered per the
+      acceptance text) and not something I can do from this worktree.
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
@@ -5925,6 +6006,17 @@ tasks:
       and refuted: lag-product PAPR measures a coherent carrier not a sweep (chirped-FSK 2.61 but am 2.52,
       ssb 2.47), and per-window IF slope consistency does not separate (keying dominates the drift within
       a window). Report a negative honestly if the remainder cannot be closed without tuning'
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 13:35).
+      Negative result: the remainder stays documented, and no code, constant or density changed. The named case is already closed. Held-out chirped-FSK seed 1700074 (20 dB) abstains on main (open set 1.000). Bisected: T-404 (b3fac0e2, the IF level-count rewrite) closed it, and in the same commit flipped 8-FSK seed 1700039 (20 dB) from abstaining (open 0.392) to analog/wfm at plausibility 1.000. So wrong-family is still 1 of 396; only the snippet changed.
+      The new case has the same shape: a low-tail draw of its own generator. It resolves 2 IF levels where its 20 dB peers resolve 3-7 (if_modality 2.00, if_local_modality 1.86), and those peers escape wfm only narrowly (m 1.98-2.62 vs wfm m_p95 1.596).
+      The tail-term route was measured and refuted. wfm's own dev members are heavy-tailed on every order statistic (|z| p99: 2nd 5.50, 3rd 4.73, 4th 4.17; up to 9 dims beyond 2 sigma), and 1700039's 3.58/2.18/2.06/2.05 sits under all of them. Only a p95 operating point would catch it, and T-248 measured that pushing known top-1 below the 0.90 floor. Narrowing T-404's KDE kernel (0.30) or IF_LOCAL_WINDOW would be fitting the seed.
+      The finding is recorded where the wrong-family count is printed (tests/e2e/tests/acceptance/m3_grid.rs).
+      Tests: HK_E2E_REQUIRE_SYNTH=1 cargo nextest run -p hk-e2e -E 'binary(acceptance_m3) & test(/m3_unknown_recall/)' -> exit 0 (1 passed; unknown recall 0.9924, false-known 0.0076; wrong-family 1 of 396 (held-out:8fsk -> analog))
+      precheck exit 0
+      Commits: 4fd2eb69
+      Observed, not chased: wfm's dev density is itself heavy-tailed (z2_p99 5.502, z3 p99 4.73, up to 9 of 28 dims beyond 2 sigma at p99), so the T-248 tail term is effectively inert against wfm. Measured with the builtin densities over DEV_SEEDS 0..60 at analog gate+{0,5,10,15}. Not investigated why.
+      Use cases: SIGNAL-062
   - id: T-307
     milestone: M3
     title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
@@ -7494,6 +7586,57 @@ tasks:
       dormant until a durable hk-store-backed ShadowSink exists, because wiring observe now would record
       into a buffer nobody drains. Do not mark anything done that is not; the board''s value is that status
       means something'
+    result: |
+      AMENDED THE ADR; did not build. The ticket's either/or resolves on evidence that was already on
+      the board: T-203's acceptance reads "Mac provider plus CPU reference; conformance suite;
+      batching defaults; inference only on CFAR-surviving detections; shadow mode records predictions
+      without acting", and its scope_audit_2026_09_15 narrows it further to "the model host itself:
+      runtime load/unload, batching, model@version provenance, inference gated to CFAR-surviving
+      detections, and the provider conformance suite". NEITHER MENTIONS A STORE OR A ROUTE. T-203
+      delivered exactly that, including the ShadowSink trait and the in-memory sink its unit tests
+      need. So T-203 did not close early - ADR-0016 section 10's hk-store/hk-api cells were a
+      planning-time allocation that the re-scope left behind, and the ADR was stale. `done` stands.
+      Corroboration that this was the one stale row, not a general drift: every other M3 route in
+      section 9 did land - /api/taxonomy, /api/signatures, /api/signatures/match, /api/clusters,
+      /api/clusters/{id}/promote and /api/datasets are all in docs/api.md - while `grep -n '/api/ml'
+      docs/api.md` returns nothing, `crates/hk-store/src/ml/` and `crates/hk-api/src/ml.rs` do not
+      exist, and MemoryShadowSink is the only ShadowSink in the tree (host.rs:243).
+      WHY NOT BUILD IT. ADR-0016 section 4.6 gates each family off/shadow/active on evidence, and
+      T-204 measured that no family earns even shadow (fsk AUROC 0.326 against classical 0.824,
+      false-known rate 1.000 against 0.325). Nothing produces a shadow record today, so a
+      hk-store writer and three routes over it would be a store nothing writes to and an operator
+      surface over an empty table - the capability-with-no-caller pattern T-363 counted seven prior
+      instances of, and which this ticket's own framing ("wiring observe now would record into a
+      buffer nobody drains") argues against. Building it here would have satisfied the letter of the
+      acceptance by committing the exact defect the acceptance is about.
+      CHANGES. (1) docs/adr/0016-classification-contracts.md: section 9's three /api/ml rows and
+      section 10's ownership cells move from T-203 to the new T-844; a dated "Amendment 2026-09-22
+      (T-365)" subsection under section 10 states the defect, the evidence that the ADR rather than
+      the ticket was stale, and why the cells were reassigned instead of implemented; section 6's
+      shadow-mode bullet gains a "Landed vs. owed" line separating the trait and MemoryShadowSink
+      (landed, T-203) from the NDJSON writer and routes (owed, T-844); the M3 task-graph table gains
+      a T-844 row and T-203's row loses "+ store" and "ml routes"; and the header's "Nothing in this
+      ADR is implemented yet" - materially false since M3 landed and the same reader-cannot-tell
+      defect class - is marked stale with a pointer to the per-task cells. (2)
+      crates/hk-ml/src/lib.rs: reason 3 of the dormancy section said "section 10 assigns all of it to
+      T-203; none of it landed", which left the same ambiguity in the crate docs; it now names T-844
+      and records the finding. (3) docs/tasks.yaml: T-844 filed, scoped so it CANNOT land the sink
+      alone - it requires a real producer and a falsifiable non-vacuity pair (remove the wiring, a
+      test fails; remove the sink, a different test fails), and makes deleting the hk-ml dormancy
+      prose part of the work, since crates/hk-ml/tests/no_production_caller.rs is built to fail the
+      day a caller appears.
+      TESTS. `cargo nextest run -p hk-ml` - 31 passed, 0 failed (conformance.rs and
+      no_production_caller.rs included; the only change to the crate is a doc comment, and
+      no_production_caller still passes, which is the assertion that nothing was silently wired).
+      `python3 -m pytest py/tests/test_task_board.py` - 11 passed, so T-844 satisfies the board's
+      schema invariants. `just precheck hk-ml` clean.
+      NOT CHASED, for the coordinator. docs/api.md has no "planned" section for the /api/ml routes at
+      all, so unlike the other M3 routes there is nothing there to grow - T-844's acceptance says to
+      add the rows and the api_contract.rs tests together per T-079, which is the right place for it,
+      not here. Separately, ADR-0016 remains PROVISIONAL with five open questions for the user
+      (section "Open questions"), including the tract-in-the-default-build one that T-203 answered in
+      practice; nobody has gone back to mark them resolved. That is a broader ADR-hygiene job across
+      the M3 ADR, not this ticket's attribution fix.
   - id: T-366
     milestone: M3
     title: ADR-0016 section 7s ML exit-gate row is asserted nowhere, so it is vacuously satisfiable
@@ -7515,6 +7658,76 @@ tasks:
       Prove non-vacuity the T-287/T-297 way: construct the state the clause forbids and show the assertion
       catching it. If that cannot be done until shadow is real, say so and sequence this behind T-365 rather
       than landing a test that cannot fail'
+    result: |
+      ADR-0016 §7's ML exit-gate row is now asserted, and the assertion is shown to be able to fail.
+
+      WHAT CHANGED
+      - crates/hk-ml/src/exit_gate.rs (new): the §7 ML row as a pure predicate over observables —
+        `MlGateSnapshot { modes, rows, shadow_records, lost_samples }` -> `Vec<GateViolation>`.
+        Rule shape: (1) every ML-attributed `Classification` row must name a model that is `active`
+        for some consumer — which is exactly "shadow changes no Classification row", and is no weaker
+        for an off/unloaded model; (2) every `active` mode must carry §4.6 enable evidence and not have
+        been reached by `force`; (3) lost ring samples are a violation *when ML is on*, and are not this
+        row's business when it is off (the run's own suites own loss-free capture either way).
+        `MlGateSnapshot::from_host` reads the modes and evidence out of a live host — the seam the
+        wiring change takes.
+      - crates/hk-ml/src/host.rs: `a_forced_active_model_without_evidence_fails_the_adr_0016_s7_exit_gate`
+        — the T-287/T-297 non-vacuity proof against a REAL host: the one path that can reach `active`
+        with no evidence today is a forced `set_mode` (§4.6 audits it rather than refusing), so that
+        state is constructed through the real API and the gate is shown catching it; a real shadow
+        `observe()` prediction recorded as a classification is caught as clause 1; the same host with
+        evidence and no force passes.
+      - tests/e2e/tests/acceptance/m3_ml.rs (new, wired into tests/e2e/tests/acceptance_m3.rs):
+        the gate row measured over a real run through the mock SDR. `m3_ml_the_exit_gate_row_holds_...`
+        builds the snapshot from what the run persisted (ML-attributed rows read from the classification
+        history; shadow records counted from `<store>/ml/shadow/` if it exists; lost samples from the run
+        summary) and asserts no violation, printing
+        `[T-206] ML: off (clause 3 not exercised); modes 0, ML-attributed classification rows 0, ...`
+        so a green row is never mistaken for evidence ML ran.
+        `m3_ml_exit_gate_catches_the_states_the_adr_row_forbids` takes THAT run's own snapshot and
+        constructs each forbidden state on it, asserting each is reported — and asserts that sample loss
+        with ML off is NOT reported, so this row does not quietly absorb another suite's assertion.
+        `m3_ml_the_dormant_premise_of_this_gate_is_still_guarded` couples the empty-mode-table premise to
+        hk-ml's no-production-caller tripwire: delete that guard (which is exactly what the wiring change
+        is told to do) and the M3 acceptance suite fails until `modes_in_force` is given a real
+        enumeration via `from_host`.
+      - docs/adr/0016-classification-contracts.md §7: a "where each row is asserted" note after the exit
+        gate table — what now asserts the ML row, that it holds today *because nothing is on* and says so,
+        and where the non-vacuity proofs live.
+      - crates/hk-ml/src/lib.rs + tests/no_production_caller.rs: the dormancy note and its tripwire now
+        say they are the premise of a gate row, so removing them is a gate change and not a cleanup.
+      - tests/e2e/Cargo.toml: hk-ml as a dev-dependency (with the reason).
+
+      WHY THIS FORM, GIVEN THE TICKET'S TRAP
+      The host is dormant (T-363), so any test asserting "ML behaved" would be near-vacuous. What landed
+      instead asserts a predicate over a REAL run, satisfied today by measurement rather than by nothing
+      checking: no mode in force, no ML-attributed row, no loss. It goes red the day an ML-attributed
+      `Classification` row appears without an `active`-with-evidence model behind it, the day `active` is
+      forced without evidence, or the day ML is on and the ring drops samples. T-365 was NOT needed first:
+      the forbidden states are constructible today, two of them through the real model-host API.
+
+      TESTS (targeted, per CLAUDE.md)
+      - `cargo nextest run -p hk-ml` — 38 passed, 0 failed (includes the new host test and the 6 new
+        exit_gate unit tests; the no_production_caller tripwire still passes, i.e. nothing here wired the
+        host).
+      - `cargo nextest run -p hk-e2e -E 'binary(acceptance_m3) and test(m3_ml)'` with
+        HK_E2E_REQUIRE_SYNTH=1 — 3 passed, 0 failed.
+      - `just precheck hk-ml hk-e2e` — fmt clean, clippy clean.
+      The whole M3 milestone suite was NOT run (worker protocol: targeted tests only); the new module is
+      additive to that binary and does not touch m3_grid/m3_scene.
+
+      SURFACED, NOT CHASED
+      - The §7 exit-gate table's other rows were not audited for the same defect. The ML row is the one
+        T-363 named and the only one this ticket scoped; whether e.g. the "Regression: M0/M1/M2 acceptance
+        unchanged" row is asserted anywhere is unexamined here. Worth one sweep ticket over the whole
+        table, given this is the second instance of the shape (T-206, T-366).
+      - Clause 3's antecedent stays unreachable until a host is wired; when T-365's durable sink lands,
+        `shadow_records()` in m3_ml.rs starts counting real records and turns it on with no code change,
+        but nobody has verified the `<store>/ml/shadow/` path it reads against what T-365 will write.
+      - The brief's reporting command (`just task result T-366 --from <file>`) does not exist in this
+        worktree's justfile, nor on main (`git show main:justfile` has no `task` recipe). The report was
+        therefore appended as a `result:` block on docs/tasks.yaml on this branch, which is what
+        ops/work-runner.py's own brief text describes.
   - id: T-367
     milestone: M2-hardening
     title: 'The two edge navigators control the wrong axes: the vertical must be time-for-this-frequency-range,
@@ -15492,6 +15705,57 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      AWARE-011. The serving layer holds N live controls and device routes take a selector.
+
+      hk-api: new `LiveControls` (live_control.rs) - an ordered collection keyed by device_id,
+      with `select(Option<&str>)`, `primary()`, `iter()`, `device_ids()`, and `LiveControls::new`
+      refusing a set a selector could not address (duplicate device_id, or >1 handle reporting
+      none - "nothing said" is never a key, the T-325 rule). `SelectError` carries the wire
+      answer: NotLive 409 not_live, Ambiguous 400 device_required, Unknown 404 unknown_device.
+      `ApiState.live_control: Option<Arc<dyn LiveControl>>` -> `ApiState.live_controls:
+      LiveControls`; `Option<Arc<dyn LiveControl>>` and `Arc<dyn LiveControl>` both `Into` it, so
+      hk-cli's single-device composition is unchanged (`serve_api` takes `impl Into<LiveControls>`).
+
+      ONE GATE PER DEVICE came free and is asserted, not assumed: each `SourceLiveControl` already
+      carries its own `DeviceGate`, so holding radio A's gate refuses A with 409 device_busy and
+      leaves B servable (t511_the_device_gate_is_per_device_not_per_server). There is no
+      server-wide gate left to share.
+
+      Routes: `device_id` is an optional body field on all six device routes (center, rate,
+      window, gains, bias_tee, baseband_filter). Omitted = "the device", legal only with exactly
+      one front end; with several it is 400 device_required listing the ids, NOT a default to the
+      first (moving a radio nobody named is the BiasTee::Unknown/Coverage::Unobserved defect).
+      Unknown id 404, non-string 400 invalid. `device.id` on the answer AND in the audit entry is
+      the front end the selector RESOLVED to (audit resolves it from the request best-effort, and
+      logs null rather than a guess when it does not resolve). `GET /api/control/state` gained
+      `devices: [{device_id, device, tuning}]`; its singular `device`/`tuning` stay the same on a
+      one-device run and are null when the run holds more than one, because then there is no "the"
+      device. `max_live_span_hz` is now the widest across front ends. navigation.windows_json was
+      NOT changed (already a list) - only its "what would have to change to report N" comment,
+      which is now history; `frequency.current` stays the default device's, as api.md always said.
+
+      Docs updated together (T-079): docs/api.md (new "Which radio: the device selector (T-511)"
+      section, route bodies/errors, error-code list, state row, device_busy per front end, the
+      navigation paragraph) and docs/14-ui-rewrite.md's matching paragraph.
+
+      Tests (targeted): `cargo nextest run -p hk-api` 231/231 pass, including 4 new HTTP tests
+      (control_api.rs: selector routing with a two-device rig where the unselected radio records
+      ZERO calls; state enumeration; per-device gate; one-device omission) and 3 new unit tests in
+      live_control.rs. `hk-cli -E 'binary(api_contract) and test(t511...)'` passes the new contract
+      test t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it (devices[] agrees
+      with device/tuning and with /api/navigation windows[]; omitted selector retunes; wrong
+      selector 404 and the front end does NOT move). binary(control_http) 2/2. `just test-ui`
+      50/50 files, so T-340's spy assertions stay green (ui/ untouched). `just precheck hk-api
+      hk-cli` clean.
+
+      OBSERVED, not chased - environment, not this diff: two api_contract tests fail on this
+      machine for lack of disk. `coverage_answers_per_cell_in_time_...` and
+      `the_timeline_spans_the_capture_window_and_draws_it` both need the IQ ring, and the server
+      refuses to allocate it: "the IQ capture ring needs 8388608 bytes above the 8589934592-byte
+      free-space floor and 2436370432 bytes are free". `df` shows 2.5 GiB free on / (100% on
+      /System/Volumes/Data). The test's own message says this is the machine, not the code. They
+      touch nothing this ticket changed; a merge gate on a full-disk machine will fail them.
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
@@ -15532,7 +15796,8 @@ tasks:
   - id: T-514
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
-    status: todo
+    status: done
+    commit: "5ceb7e09"
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
@@ -16068,6 +16333,19 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-474's report.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (T-534). The `--loop` reopen policy now belongs to the run, not to its first segment.
+
+      Changed (crates/hk-pipeline/src/run.rs):
+      - `Common` now holds `reopen: Option<Arc<Mutex<SourceFactory>>>`, set once in `start_multi`. `start_segment` no longer takes a `reopen` parameter. Every segment's capture thread now reopens through the run's one factory: the first segment, one a `replumb()` starts, and one a `recover()` starts. Before this, `replumb()` and `recover()` passed `None`, so a looping replay ended at the recording's end after any re-plumb or capture recovery.
+      - Second half, found while writing the test: a source reopened on a live run (`live_window_class` && controllable) is now sent the **commanded** window (`set_sample_rate`, then `tune`) before its first read. Otherwise the reopened source starts at its own default window, not where a re-plumb or an in-place retune had moved the run, and the segment's WindowGuard drops every block of the new pass until WINDOW_SETTLE_TIMEOUT. Fixed-window runs (plain replay, scheduler-driven) re-send nothing, so their behaviour is unchanged.
+
+      Regression test: crates/hk-pipeline/tests/loop_survives_replumb.rs. A scripted receiver behind the device contract plays a finite "pass" (the recording), and a factory reopens it. The test first checks the run wraps at all. It then re-plumbs with a rate change and asserts the replay still wraps (+2 loops) and that the reopened pass was sent and moved to the commanded rate. Finally it forces a capture recovery (`fail_reads_for(2)`) and asserts the replay still wraps.
+      - Against the unfixed run.rs it fails as the ticket describes: after the re-plumb, `finished: true, capture: Ended`, and loops stop.
+
+      Targeted tests: `cargo nextest run -p hk-pipeline` over the binaries loop_survives_replumb, loop_capture_time, retune_replumb_fails, degrade_dont_crash, history_survives_retune and occupancy_retune, plus the lib reopen tests: 21/21 pass. `just precheck hk-pipeline`: fmt clean, clippy clean.
+
+      Surfaced, not chased: nextest flags `hk-pipeline presence::tests::a_returning_signal_reopens_the_same_emitter_and_never_spans_the_silence` as LEAK (it passed; a leaked handle or subprocess). It is unrelated to this diff. A reopened source also gets no gains or baseband filter re-sent, only the window. The scheduler already re-sends its step. User-set gains on a looping live-class run would reset to the pass's defaults on each wrap. I did not observe this failing, so I am noting it only.
   - id: T-535
     milestone: MLIVE
     title: A capture-recovery gap still answers 410 - the reader cannot tell recovery from the end
@@ -16426,7 +16704,8 @@ tasks:
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
-    status: todo
+    status: in-progress
+    branch: task-t560
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -17787,7 +18066,8 @@ tasks:
   - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
-    status: todo
+    status: in-progress
+    branch: task-t556
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17963,7 +18243,8 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: todo
+    status: in-progress
+    branch: task-t565
     priority: normal
     parallel_group: SYN-E
     model: opus
@@ -18618,7 +18899,8 @@ tasks:
   - id: T-578
     milestone: M2-hardening
     title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
-    status: todo
+    status: in-progress
+    branch: task-t578
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -19640,6 +19922,15 @@ tasks:
       likely. A fixture whose emitter grid leaves room for the mirrors would close it.
       ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 13:19).
+      (a) spur_decision now checks the DC rule before ref-harmonic, so a box on both the tuned centre and a 10 MHz-grid harmonic (e.g. tuned to exactly 100.0 MHz) is labelled dc, the more specific rule; added a regression test. (b) hkpy.synth.retune's retune_diversity fixture now injects a third artefact family, an IQ image of an independent virtual source frequency placed so its mirror clears the emitter grid, DC line and LO-relative spur at every centre; tests/e2e's t586_retune_diversity acceptance test asserts the image is classified under RetuneSlope::Image across all three centres and never confused with the absolute or LO-locked classes -- with counts and frequencies, not wall-clock. Review round 1 found py/tests/test_synth.py's own generator-physics test still assumed only dc-offset/lo-spur artefact kinds; fixed by branching that check for iq-image (fixed invariant f - 2*f_LO, plus an IQ-domain tone-power check at each centre's own baseband offset). Merged main cleanly (no conflicts).
+      Tests: cargo nextest run -p hk-detect -E 'test(rules::)' -> exit 0 (4 passed); cargo nextest run -p hk-e2e -E 'test(t586)' -> exit 0 (2 passed, no leak notice on re-run); uv run --locked pytest tests/test_synth.py (py/) -> exit 0 (71 passed, 2 skipped (pre-existing multimon_ng skips, unrelated)); just lint-py -> exit 0 (ruff: all checks passed)
+      precheck exit 0
+      Commits: 9f9c8100, 57db784a, 3921b971, 367ee584
+      Use cases: AWARE-011
+    notes: |
+      Review (fix attempt 1) found: py/tests/test_synth.py::test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo asserted every artefact truth's kind was in ("dc-offset", "lo-spur"), so it failed against the new iq-image artefact added for part (b). Fixed by branching the check: dc-offset/lo-spur still assert a fixed LO offset; iq-image asserts its invariant f - 2*f_LO is fixed instead, plus a new IQ-domain tone-power check for the image at each centre's own baseband offset. Merged main (clean, no conflicts). Re-ran targeted tests: py/tests/test_synth.py (71 passed, 2 skipped), hk-detect rules:: (4 passed), hk-e2e t586_retune_diversity (2 passed, no leak this run). just precheck hk-detect hk-e2e and just lint-py both clean.
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
@@ -20404,6 +20695,28 @@ tasks:
       mod_order claim, and the count of each is reported so the test cannot pass on zero.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      T-614 DONE (branch task-t614).
+
+      WHY THE ESTIMATOR COMMITTED: nothing in the chain could return "analogue, no symbols". The abstention was never there to be reached. `FskBurst::estimated_params` (crates/hk-demod/src/fsk/receiver.rs) hard-coded `mod_order: Some(2)` and copied the demodulator's rate and deviation from whatever trial `FskReceiver::run` chose. With the pipeline's priors (`standard_rates: true`, no sync, no cluster) and C14 not trusting the burst, that trial is the best-lock standard-rate guess that nothing confirmed. The seed already recorded `c14_trusted` / `sync_confirmed` / `source`, but the parameters never read those fields. `write_framed_bursts` then stored a `2fsk` Demodulation for every demodulated burst, and a `2fsk` emitter classification and fingerprint.
+
+      FIX (hk-demod only):
+      - `FskBurst::alphabet_evidence_framed(FrameEvidence)` returns `AlphabetEvidence::Measured(why)` or `Abstained(why)`. The alphabet counts as measured only for: a valid frame CRC, or a confirmed sync prior; otherwise it is vetoed if the bits are periodic (`periodic_bits`: |autocorr| >= 0.8 at some lag 1..=64); otherwise the framing sync was found in the burst, or the rate was C14's trusted clock or a cluster prior. An unconfirmed standard-rate trial abstains.
+      - `estimated_params[_framed]`: symbol_rate, deviation and mod_order are None unless the alphabet was measured. The CFO then falls back to C13's measurement.
+      - `write_framed_bursts`: a burst whose alphabet was not measured gets no `2fsk` Demodulation row (and so no Decode, which needs one). The 2-FSK fingerprint rate and deviation, and the Bitstream rate, are medians over measured bursts only. If no burst was measured, the emitter gets no `2fsk` family or classification.
+      - The periodicity veto closes the tone case structure.rs had deferred to T-614, on the burst path: a sliced sinusoid repeats at some lag <= 64 at any rate. It matters when C14 trusts a tone's clock line at 2x the tone frequency.
+
+      TEST (goes RED without the fix): crates/hk-demod/tests/t614_analogue_fm_abstains.rs. One scene: tone NBFM bursts (1 kHz, +/-2.5 kHz, as T-545), voice-like NBFM bursts, and a 4800 Bd 2-FSK channel. Each goes through FskReceiver with the pipeline's priors, then infer_framing, then write_framed_bursts, and is read back as docs/07 Demodulation/EstimatedParams. Counts:
+      - before the fix: ToneFm 7/7 and VoiceFm 7/7 bursts stored mod_order 2 with a rate (e.g. 9599 Bd at 2215 Hz dev), so RED.
+      - after the fix: ToneFm 0/7 (periodic veto), VoiceFm 0/7 (unconfirmed standard-rate), Fsk2 17/17 stored mod_order 2 at 4800.0 Bd. The test fails if there are fewer than 4 analogue bursts, or if fewer than half the digital bursts keep mod_order 2.
+      - Unit test `a_sliced_tone_is_periodic_at_any_rate_and_data_is_not`.
+
+      TARGETED RESULTS: `just test-crate hk-demod` 57/57 pass. hk-pipeline aware_036_pipeline, data_path and sweep_residency pass (15 run, 1 skipped). hk-e2e: smoke, acceptance_m0 aware_036, acceptance_ism t254, acceptance_mauto signal_087 (all six) and 3 of the 4 acceptance_m3 m3_scene tests pass. `just precheck hk-demod` is clean.
+
+      SURFACED, NOT CHASED (both fail WITHOUT this change too):
+      1. hk-pipeline runtime_attach `chains_attached_and_detached_mid_run_drop_no_always_on_samples`: a load-flake on the attach count. The count needs >= 18 of 20. At load avg 11-27 it got 17, 17, 18 at the branch base (HEAD~1 src) and 11-16 with this change. Neither variant writes a demodulation in that test, so the FSK path is not involved. It is timing-bound (a sleep loop over a real-time-paced replay). For the deflaker.
+      2. hk-e2e acceptance_m3 `m3_scene::m3_repeated_unknowns_form_one_visible_cluster` fails in isolation at the branch base: "[T-206] 1 emitters over three appearances". Three runs through the device at +0, +1.5 and +3 MHz leave ONE emitter in the repo, so there are never three members to cluster. With this change it also fails, on the earlier assertion: the same 1 emitter, but 0 visible clusters instead of 1. It is a real, pre-existing failure. It needs its own root cause (possibly the three runs sharing one data dir while only one run's emitter survives).
+      Also not chased: the C15 cascade (`classify_and_record`) in the fsk chain still writes its own posterior for these emitters. That is a separate estimator, outside this ticket.
   - id: T-615
     milestone: MAUTO
     title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
@@ -20828,6 +21141,74 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+    result: |
+      DONE. The decision: (a) + (c) together - a per-client SHARE of the in-flight budget, plus a
+      slot reserved for a client with nothing on screen yet. The cap (TILE_MAX_IN_FLIGHT = 4) is
+      UNCHANGED, as the ticket required.
+
+      CLIENT IDENTITY: a DECLARED id (`?client=`), not a connection and not a session. A tab's tile
+      reads go over a pool of connections (so a connection is not a client) and every tab of one
+      browser carries the same API token (so a session is not one either). The page makes an opaque
+      id per PAGE LOAD (`ui/src/surface/clientid.ts`, `crypto.randomUUID`), never persisted: a
+      reload is a newcomer, and its predecessor's abandoned reads are not charged to it. Format
+      `[A-Za-z0-9-_.:]{1,64}`; anything else, or none, shares one ANONYMOUS bucket that behaves
+      exactly as the route did before (so `curl`, the CLI and the contract tests are unaffected).
+
+      DISAPPEARING CLIENTS (the T-454 leak shape): slots cannot leak - a `TileSlot` holds its
+      client's counter by `Arc` and decrements both counters on `Drop`, whatever the exit path, even
+      if the table entry was evicted meanwhile. The SHARE cannot leak either: the table is a cache of
+      who is asking NOW, and an entry holding no slots and silent for `TILE_CLIENT_IDLE` (10 s) is
+      swept, returning its share to the clients still here. At most 64 identities are tracked; past
+      that the coldest idle one is dropped, and if every tracked client is busy a new identity is
+      served from the anonymous bucket rather than growing the table.
+
+      THE POLICY: `in_flight_share = ceil(cap / clients)`, computed over clients that are asking -
+      INCLUDING one whose only request so far was refused, which is what shrinks the incumbent's
+      share the moment a newcomer appears. On top of it, while any client that has never been SERVED
+      a tile is asking, already-drawn clients are admitted only to `cap - 1` (`cost.reserved: 1`).
+      The reserve costs nothing when nobody is bootstrapping: it is armed by the newcomer's own first
+      (refused) request and disarmed by its first success.
+
+      WIRE: `cost.in_flight_share`, `.in_flight_held`, `.clients`, `.client`, `.reserved`,
+      `.fair_share`; the 503 names `limit N, share M` and why. docs/api.md and
+      `crates/hk-cli/tests/api_contract.rs` updated together (T-079). The client adopts the share as
+      its CEILING in both directions (a share that grew because a tab closed is as true as one that
+      shrank); T-455's mechanism is untouched - the operating cap still only halves on a SEEN
+      refusal and only rises by AIMD. The preview status line now reads
+      `1+0/2 in flight (share 2)`.
+
+      MEASURED (browser tier, `ui/e2e/surface-contention.e2e.mjs`, extended to assert counts and
+      ordering, never wall-clock):
+        - fair share ON:  second tab's first SERVED tile was its request #1 after 0 refusals; boot
+          285 ms; first tab's peak ADMITTED concurrency 1 over the contention window (bound: its
+          share, 2); its status line "1+0/1 in flight (share 1)". GREEN.
+        - fair share OFF (`HK_TILE_FAIR_SHARE=off`, the pre-T-630 first-come-first-served route,
+          which exists only as this baseline): first tab's peak 3 of 4 while the second booted, boot
+          4049 ms. RED on exactly the share assertion, with the status line also stating share 4.
+        So the guard is proved non-vacuous against the natural baseline. The spec also stages the
+        race (the second tab's Chrome page is created BEFORE the first tab's storm starts, because
+        opening a tab takes longer than the storm lasts on a young record) and measures the first
+        tab's peak over requests that OVERLAP the window rather than start in it - measured the
+        naive way first, and it reported "0 requests" over a window in which the second tab was
+        refused three times.
+
+      TESTS RUN (targeted): `just test-ui` 50/50 files; `cargo nextest -p hk-api tiles::tests` 27/27
+      (4 new: share, bootstrap reserve, vanishing client, anonymous bucket);
+      `ui/e2e/surface-contention.e2e.mjs` green + red-baseline as above. `just precheck hk-api
+      hk-cli` clean.
+
+      SURFACED, NOT CHASED (pre-existing, evidence): `hk-cli::api_contract
+      tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell` fails on this
+      machine - `resolution.answered` is null where `json!(0)` is expected, because every coverage
+      source (`iq-ring`, `observation-log`, `open-dwell`) reports `spans: 0`, so the tile
+      short-circuits as uniformly unobserved. TRIAGED: reverted `crates/hk-api` + `crates/hk-cli` to
+      this branch's base commit (0f6bbf17) in place and it fails IDENTICALLY there (same assertion,
+      shifted only by the 19 lines this branch adds), so it is not this diff. Likely environmental:
+      the machine's data volume was below `hk`'s 8 GB IQ-ring free-space floor during the first runs
+      ("allocation refused: the IQ capture ring needs 72000000 bytes above the 8589934592-byte
+      free-space floor and 1893339136 bytes are free" - seen directly in an `hk serve` log), and the
+      test's own tile address is recomputed from `unix_now()` per call over a 1.28 s time cell.
+      Coordinator to decide whether that is a ticket.
   - id: T-622
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
@@ -20862,6 +21243,80 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). Pairs with T-575, which implements the gate
       these fixtures exercise; neither blocks the other.
+    result: |
+      ## T-622: check and payload parameterisation on the generic FSK generator
+
+      **What changed** (`py/hkpy/synth/fsk.py`, `py/hkpy/synth/scenarios.py`, `py/tests/test_synth.py`,
+      `py/README.md`):
+
+      - `fsk.py`: a generic RevEng-model CRC engine, `crc_generic(data, width, poly, init, refin,
+        refout, xorout)`, bit-serial, any width 8..32 - verified bit-for-bit against
+        `crates/hk-estimate/src/framing/crc.rs`'s `CrcCore` via every catalogue entry's ASCII
+        `"123456789"` check value (CCITT-FALSE, KERMIT, XMODEM, ARC, CRC-32, CRC-8/SMBUS, CRC-8/MAXIM-DOW).
+        A Python mirror of that Rust `CATALOGUE` (`CRC_CATALOGUE`, 28 entries, widths 8/16/32 - the Rust
+        catalogue carries no width-24 entry, so every width-24 check is off-catalogue by construction)
+        plus `crc_catalogue_name()` and `crc_params_for(width, poly_hex)` (canonical template-fixed
+        defaults per width: init = all-ones, no reflection, no xorout, matching the existing
+        CRC-16/CCITT-FALSE style).
+      - `scenarios.py`'s `fsk_burst_train` (AWARE-036) gains exactly the three parameters the ticket
+        names, on `FSK_DEFAULTS`:
+        - `check_width` (8/16/24/32, default 16) - the check field width; `fsk_layout()` reflects the
+          real width in `frame.layout` instead of the old hard-coded `crc16`/16 entry.
+        - `check_poly_hex` (default `None` = the canonical default poly for `check_width`; an explicit
+          hex string lands off the RevEng catalogue on purpose - docs/22 A7's "random polynomial" row).
+        - `constant_payload` (default `False`) - a beacon mode: `seq` is frozen at 0 and `temp_dc` never
+          increments, so every burst carries byte-identical payload and CRC (docs/22 P7).
+        - **Default behaviour is unchanged byte-for-byte**: `check_width=16`, `check_poly_hex=None` ->
+          poly 0x1021, init 0xFFFF, no reflection, xorout 0 = exactly the old hard-coded
+          `crc16_ccitt_false`, and `crc_catalogue_name()` on the defaults resolves to
+          `"CRC-16/CCITT-FALSE"` - existing fixtures, determinism tests and every consumer that read
+          `t["crc"]["algorithm"]`/`t["frame"]["crc_hex"]` are unaffected.
+      - Truth (`hackriff:truth`) now carries, per docs/22's requirement ("polynomial, width, start bit,
+        tail, bit order and the payloads"): `crc.width`, `crc.poly`/`init`/`xorout` (hex strings sized to
+        the width), `crc.refin`/`refout`, `crc.start_bit` (bit offset where the covered payload begins),
+        `crc.covered_bits`, `crc.tail_bits` (0 - check is the last field), `crc.bit_order`,
+        `crc.in_reveng_catalogue` + `crc.catalogue_name`, and `constant_payload` on both the per-burst
+        emission truth and `scenario_truth["emitter"]`.
+
+      **New tests** in `py/tests/test_synth.py`:
+      - `test_fsk_check_width_is_parameterised_and_round_trips` (parametrised 8/16/24/32): generates,
+        decodes truth, and independently recomputes the CRC via `fsk.crc_generic` over the truth's own
+        stated params, asserting it matches `frame.crc_hex` and the layout's check-field width.
+      - `test_fsk_off_catalogue_polynomial_is_flagged_and_not_recognised`: `check_poly_hex="0x8F45"` at
+        width 16 is confirmed off-catalogue (`in_reveng_catalogue=False`, `catalogue_name=None`), and the
+        no-override default is confirmed still exactly `CRC-16/CCITT-FALSE`.
+      - `test_fsk_constant_payload_beacon_repeats_the_same_frame`: with `constant_payload=True`, every
+        burst's `payload_hex`/`crc_hex` is identical across >= 3 bursts (one distinct value however many
+        frames) versus the default run, which varies frame to frame - the ground truth distinguishing
+        `differences` (ADR-0022 SS4.2, stays 1 for a beacon) from `distinct_valid` (would count every
+        valid frame) that P7's "does NOT confirm on repeat count alone" assertion needs.
+
+      **Not done / correctly out of scope:** the ticket's DoD said "and on T-621's OOK generator if it
+      has landed" - T-621 on the current board is an unrelated ticket (IQ-ring disk-floor test fix), and
+      no generic OOK/ASK generator with a check exists in `py/hkpy/synth` yet (`mismatch.py`'s
+      `adjacent-interferer` kind="ook" is a different, non-check emitter). Per the ticket's own
+      conditional wording, that half is skipped rather than invented; whoever lands the OOK generator
+      should pick up the same three-parameter shape from this ticket's `fsk.py` helpers
+      (`crc_generic`/`crc_params_for`/`crc_catalogue_name`/`CRC_CATALOGUE` are generator-agnostic).
+
+      **Testing** (targeted only, per CLAUDE.md - never `just gate`):
+      - `uv run --project py pytest py/tests/test_synth.py -q` -> 65 passed, 2 skipped (pre-existing
+        skips, unrelated).
+      - `uv run --project py pytest py/tests/test_synth.py -k fsk -q` -> 9 passed (3 new + 6 existing FSK
+        tests, including the AWARE-036 demod-to-truth-bits test with the default CRC-16 unchanged).
+      - `uv run --project py pytest py/tests/test_stream_examples.py py/tests/test_mismatched_hypothesis.py -q`
+        -> 13 passed (both consume `fsk.crc16_ccitt_false`/`mismatch.py`, unaffected).
+      - `just lint-py` (ruff) -> clean.
+      - Manual `just synth fsk_burst_train` round-trips at width 8, 24, 32 (with an explicit off-catalogue
+        32-bit poly) and `constant_payload=true`, plus `--list` showing the three new defaults; inspected
+        the emitted `hackriff:truth` for each (repeated payload/CRC under `constant_payload`, correct
+        hex-width CRC and `in_reveng_catalogue=false` for the custom polynomials).
+      - `just precheck` not applicable - no Rust crate touched, only `py/`.
+      - Did **not** run the full `just test-py` (367 tests, whole py suite) - it exceeded a 300 s bound
+        under load on this machine; that is a load/timeout observation, not a regression I introduced
+        (the targeted subsets above, which include every test that imports `hkpy.synth.fsk` or
+        `scenarios.fsk_burst_train`, all pass). Flagging as observed evidence only, not filing a ticket
+        per the filing rule.
   - id: T-623
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
@@ -22095,6 +22550,103 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Blocks everything; land first. Mockup choices the docs left open, to
       confirm in MAP-00: bottom sheet at every width (no desktop side slide-in); Research is a right
       slide-in, not the sheet's full state.
+    result: |
+      DONE 2026-09-22 (branch task-t800). MAP-00 delivered as ADR-0023 + three normative spec
+      sections, an api.md reservation and one contract test. No product code changed; the only
+      non-doc file touched is crates/hk-cli/tests/api_contract.rs.
+
+      WHAT CHANGED
+      - docs/adr/0023-map-ui-and-research-state.md (NEW, PROVISIONAL): the decision record. Context,
+        three options-considered blocks, seven decisions, consequences. Indexed in docs/adr/README.md.
+      - docs/23 -> SPEC. New normative §10 (the layout contract: four z-bands where the BAND decides
+        the coordinate system; chrome docking + idle fade and what fade may never hide; the sheet and
+        Research slide-in; the tool-mode gesture table; responsive/touch/a11y floors) and §11 (panel
+        -> client slice -> route for every new surface, with the two rows that may reach a device
+        route called out). Header now names the mockup as the layout reference and ADR-0023 as the
+        decision record.
+      - docs/24 -> SPEC. New normative §13 (layer registry), §14 (pins), §15 (the four client
+        slices). §12's ticket table marked superseded by docs/26; the "docs/23 §7 forthcoming"
+        cross-reference resolved.
+      - docs/25 -> SPEC. New normative §10 (the store contract: four stores/one pattern, the
+        server-stamped provenance object, one paging contract, the cursors-not-a-value POST rule,
+        audit/availability/device-line, the bookmarks facade and /api/views, nothing feeds
+        detection). Its R-1..R-8 sketch marked superseded with an R->MAP mapping.
+      - docs/16 §8.7 (NEW) and docs/14 "The map-UI reframe" (NEW): the EXTENDS the ticket asked for.
+        16 §8.7 states the three couplings back into the engine; 14 maps every MUI panel to its new
+        home and closes the three capabilities T-445 recorded as homeless.
+      - docs/api.md: new "Reserved: the map-UI research routes (MMAP)" table (14 route rows across
+        /api/annotations, /api/collections, /api/markers, /api/measurements, /api/views, /api/priors)
+        plus the six rules they all inherit. Reserved, NOT served; each owning ticket lands its route
+        and its contract test together (T-079).
+      - crates/hk-cli/tests/api_contract.rs: mmap_research_routes_are_reserved_and_gated.
+      - docs/26: header updated (approved, in tasks.yaml as T-800..T-825); MAP-19 and MAP-20 details
+        updated with the choices MAP-00 settled. docs/README.md: rows for 23/24/25/26 added.
+
+      THE FIVE DESIGN CALLS (the parts that were genuinely open, not transcription)
+      1. A layer declares a FIXED PLANE - data | overlay | dom - and planes render in that order,
+         with z ordering only WITHIN a plane. "Layer" had meant three mechanisms across docs/24;
+         left loose, the first layer ticket could have put a coverage wash in the stroke pass. Only
+         the data plane (the one cell rule / one ramp) may paint a cell, so an overlay remains
+         structurally incapable of tinting a measurement.
+      2. Overlay layers compose into the ONE EXISTING `marks` hook in ui/src/app/centre/surface.ts
+         (marks: (pane, edge) => OverlayQuad[]). MAP-06 refactors that call site into a registry; it
+         adds no second render path, so the byte-identical-with-overlays-off guard keeps full force
+         over a surface with ten times the layers.
+      3. Pins are band-1 DOM laid out IN THE RENDER FRAME, capped at 400 elements per pane behind
+         clustering, picked with a CPU quadtree. GPU picking is deferred with a STATED trigger
+         (>2 ms layout+hit-test per pane at the cap) rather than assumed away; MAP-09/MAP-10 owe the
+         measurement (the T-453 discipline applied to the client).
+      4. Resolved a real contradiction in the approved doc set: docs/23 §3 said authoring reuses
+         Shift+drag, docs/25 §9 said authoring is a mode. Settled in favour of the MODE, which
+         re-binds only the BARE drag; Shift+drag keeps one meaning in every mode, and a region it
+         marks feeds every extent-taking action, so authoring adds no gesture and costs the
+         navigate-first user nothing. Closes T-445 open capability #2. Both docs patched to agree.
+      5. Saved views get their OWN /api/views store (docs/26 MAP-19 left "bookmark store or
+         /api/views" open): a view is a view-arithmetic tuple with follow_live and no frequency
+         centre, so filing it as a marker would give it a false place.
+      Plus the two mockup choices the ticket asked to confirm: bottom sheet at EVERY width (one
+      component, one state machine, width-capped and bottom-left docked on wide screens), and
+      Research as a RIGHT SLIDE-IN, not a sheet state - because the sheet is selection-scoped and
+      ephemeral while Research is durable and cross-window, docs/25 §1 requires that difference to be
+      visible, and "click a row -> the mark selects -> the sheet fills" needs both open at once.
+
+      NO NEW FRONTEND DEPENDENCY, justified four ways in ADR-0023 §6: the approved mockup implements
+      every new surface in ~700 lines of vanilla TS/CSS; the existing store already provides selector
+      subscriptions with change-equality, the only reactive primitive the panels need; a framework
+      scheduler would add a SECOND render cadence competing with the per-frame RAF pass, which is
+      exactly the T-388 defect class this design is bound not to re-create; and a virtual-DOM diff
+      cannot be allowed near band 1, which must be positioned in the render frame.
+
+      THE api.md + api_contract.rs PAIRING (T-079). MAP-00 specifies routes; MAP-12 and MAP-16..19
+      implement them. So api.md reserves the shapes and the test asserts the half that is assertable
+      today, written so it does NOT have to be deleted as the routes land: without a token every
+      reserved path answers 401 (auth runs before dispatch in http.rs, so this holds whether or not
+      the route exists, and it is exactly the property a store of a researcher's notes must keep once
+      it does); with a valid token it either 404s "no such endpoint" (not landed) or answers its own
+      contract, and may never 401. It also asserts every reserved path is in docs/api.md, so the
+      table cannot drift while the tickets are open. Deliberately NOT a tripwire that four later
+      tickets must delete.
+
+      TESTS (targeted only, per CLAUDE.md)
+      - cargo nextest run -p hk-cli -E 'binary(api_contract) and
+        test(/mmap_research_routes|every_route_in_the_route_table/)': 2/2 PASS.
+        (See RESULT line below for the measured run.)
+      - just precheck hk-cli: clean.
+      - No ui/src or crate source changed, so no UI or DSP suite is in the diff's blast radius.
+
+      SURFACED, CORRECTLY NOT CHASED (for the coordinator to file or fold into the owning ticket)
+      - docs/24 §3(b) lists coverage-fog as an OVERLAY layer. §13.3 corrects it to a data-plane layer
+        and says why; the older prose is left as the argument. MAP-07 must build to §13.3, not §3(b).
+      - docs/26 MAP-15 depends on MAP-19 (saved views) but the ticket text is about past SURVEY
+        coverage windows, which come from the coverage map/observation log, not the saved-views
+        store. The dependency may be spurious; worth a look before MAP-15 is scheduled.
+      - every_route_in_the_route_table_is_documented matches a route by "this line contains the
+        method and the path", so a reserved row could satisfy it for a real route that lands
+        undocumented. Bounded: each owning ticket replaces its reserved row with the real contract.
+        Not worth a stricter matcher today; noted so nobody is surprised.
+      - ADR-0023 is PROVISIONAL and says what promotes it: MAP-06 (the registry), MAP-09/MAP-10 (the
+        pin budget, MEASURED) and MAP-16 (the first store with its contract tests) landing and
+        holding.
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
@@ -22984,6 +23536,73 @@ tasks:
       Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
       this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
       place.
+    result: |
+      MEASURED. The headline was two different quantities compared to each other, plus one real,
+      located 5-minute step. No full suite was run; every number below is read back out of
+      ops/merge-runner.log, which holds 48 full gates.
+
+      1. THE INSTRUMENTATION WAS NOT RECORDING THE RUNS THAT MATTER. $HACKRIFF_OPS/
+         gate-timings.jsonl held 33 runs, of which 31 were written BY THE TEST SUITE ITSELF -
+         py/tests/test_gate.py's round-trip through gate.main() used the real $HACKRIFF_OPS, so
+         every `just test-py` appended a 0.0 s `py` record to the production history (their
+         `root` is a pytest tmpdir). Exactly TWO real `full` gates were in there against 48 the
+         runner had run. Fixed: the test now points at its own tmp dir (verified - the log length
+         is unchanged across a run of test_gate.py). The per-suite history that survived is the
+         line gate.py PRINTS beside each gatelog.append(), captured in merge-runner.log since
+         before the structured log existed; `just cycle-time --suites` now reads it back.
+
+      2. 21.4 AND 34.0 ARE NOT THE SAME MEASUREMENT. The 21.4 in CLAUDE.md is cycle-time's BRANCH
+         table: gate start -> MERGED, passing gates only, ALL CLASSES POOLED - a 17 s `py` gate
+         and a 40 min `full` one in one median. The 34.0 the guard reported is `full` only with
+         failed and bulk runs included. Most of the apparent 60 % is that.
+
+      3. LIKE FOR LIKE, 24 complete passing `full` gates, 09-20 23:37 -> 09-22 05:06 (earlier half
+         -> recent half): TOTAL 30.0 -> 34.7 min (+16 %). Per phase: lint 60 -> 63 s (the lld gain
+         is real and holds); the Rust workspace suite 16.9 -> 19.1 min (THE ONE THAT MOVED); the
+         acceptance suite 3.7 -> 5.3 min; the UI e2e suite 7.5 -> 8.0 min.
+
+      4. THE RUST SUITE'S GROWTH IS ONE STEP, NOT TEST-COUNT GROWTH. nextest wall 462 -> 756 s at
+         the 09-21 04:55 gate while the count moved 2395 -> 2403 (+0.3 %); over the whole window
+         2302 -> 2485 (+8 %) cannot explain +64 %. In that same run four hk-classify binaries
+         (accuracy_sweep, below_gate_absorption, open_set_stats, verifier_gain) went from
+         never-slow to past the 60/120/180 s SLOW thresholds and stayed there, and
+         hk-estimate::receiver_lines went >60 s -> >240 s (later >300 s). The test FILES are weeks
+         old; they got ~3x dearer. That gate carried T-246 and T-589, which change the classifier
+         internals those sweeps exercise.
+
+      5. BUDGET UNCHANGED AT 35 MIN, deliberately, with the reasoning in BUDGET_S: ~5 min sitting
+         in 5 named binaries is a defect to shrink, not a new price for the loop.
+
+      Code: cycletime.parse_suite_runs/suite_stats + `just cycle-time --suites` (per CLASS and per
+      SUITE, complete passing runs only); rolling_medians now excludes FAILED runs (the gate aborts
+      at the first failure, so a failed run measures a PREFIX - 24 of the 48 full gates never
+      reached the UI e2e suite at all, and counting them makes a broken suite look fast);
+      test_gate.py isolated from the production log; docs/10 + CLAUDE.md + justfile corrected;
+      .config/nextest.toml notes that T-436's "the heavy-serial group IS the critical path" is now
+      STALE - all five dominating binaries are outside the group.
+
+      Tests: py/tests/test_cycle_time.py (5 new, pass) + py/tests/test_gate.py (80, pass) +
+      test_nextest_config.py. `just precheck` clean (no Rust crates touched; ruff/format clean).
+
+      OBSERVED, NOT CHASED (evidence, for the coordinator to decide):
+      - THE REAL CYCLE COST IS RE-GATES, NOT DURATION. 36 gate failures against 44 runner gates;
+        HALF of all full gates never finish their suite set. One failure costs a whole re-gate plus
+        a requeue - more than the entire 4.7 min of drift this ticket was filed for. The UI e2e
+        suite alone aborted 9 of them (its exit-1s at 09-21 04:30, 06:02, 09:29, 12:03, 15:08,
+        15:50, 18:22, 09-22 00:42, 04:31).
+      - THE FIVE SLOW BINARIES ARE THE LEVER: ~300 s recoverable, and they are the new critical
+        path. Shrinking hk-classify's four sweeps and hk-estimate::receiver_lines is worth a
+        ticket; it needs someone who can judge the statistical power those sweeps are buying.
+      - T-631 DID LAND A GAIN, smaller than predicted: the acceptance suite's day-median went
+        300 s (09-21, mostly pre-T-631) -> 262 s (09-22), against the 390 -> 230 s it measured in
+        isolation. Directionally right; invisible in the total because the Rust suite grew more.
+      - $HACKRIFF_OPS/gate-timings.jsonl LOST ~460 records around 06:15 on 09-22, when nearly every
+        file in ~/.hackriff-ops was rewritten (uniform 06:15 mtimes, and an `active-ops-dir` file
+        appears). A copy of the pre-loss content with 126 gate_end records including 61 `full` runs
+        is at /private/tmp/claude-501/-Users-daniellewis-hackriff/573a0024-6d5e-4600-b164-
+        feaca9d406c6/scratchpad/gate-timings.jsonl (mtime 09-22 06:00); its run ids are disjoint
+        from the live file's. I did NOT touch shared ops state - the runner writes it concurrently.
+        The merge-runner-log parser above makes the loss much less damaging either way.
   - id: T-764
     milestone: M2-hardening
     title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'
@@ -23181,6 +23800,49 @@ tasks:
       to the rule and wants its own review. Until then the guard runs in `just test` and catches
       it on any diff that touches code. The remaining hole is a docs-ONLY diff, which is how this
       one got in.
+  - id: T-844
+    milestone: M3
+    title: C38 durable shadow sink in hk-store plus the three /api/ml routes, landed with a producer
+      so the path is not vacuous
+    status: todo
+    priority: normal
+    deps:
+    - T-203
+    - T-204
+    parallel_group: M3C
+    core_interface: true
+    model: opus
+    effort: high
+    area: crates/hk-store (new src/ml/), crates/hk-api (new ml.rs), docs/api.md
+    found_by: 'T-365 2026-09-22: ADR-0016 section 10 assigned this to T-203, which reads status done
+      and whose acceptance never contained it'
+    acceptance: |
+      ADR-0016 section 6 specifies the durable half of shadow mode and section 9 the operator surface
+      over it; the section 10 amendment of 2026-09-22 (filed by T-365) moves both off T-203 - whose
+      acceptance and scope_audit_2026_09_15 covered only the model host, batching, provenance, CFAR
+      gating and the conformance suite, all of which landed - and onto this ticket. What is owed:
+      hk-store/src/ml/** writing {Prediction, classical decision, snr_bin, subject} to ml/shadow/ as
+      hourly CRC-line NDJSON (256 MiB, 30 days) with per-SNR agreement aggregates; a ShadowSink
+      implementation over it, replacing hk_ml::host::MemoryShadowSink as the production sink;
+      hk-api/src/ml.rs serving GET /api/ml/shadow, GET /api/ml/models and PUT /api/ml/models/{id}/mode
+      (audited, active needs enable evidence or force); and the matching rows in docs/api.md plus
+      contract tests in crates/hk-cli/tests/api_contract.rs, per T-079.
+      DO NOT LAND THE SINK ALONE. crates/hk-ml/src/lib.rs records the model host as dormant BY DESIGN
+      behind three conditions - a model installed in a registry, a family clearing ADR-0016 section
+      4.6, and this durable sink - and T-204 measured that no family earns even shadow on the dev
+      evidence (fsk AUROC 0.326 against classical 0.824, false-known 1.000 against 0.325). A writer
+      with nothing writing to it and routes over an empty table would be the ninth instance of the
+      capability-with-no-caller pattern T-363 counted. So this ticket lands the sink TOGETHER WITH a
+      real producer: ModelHost::observe wired on a path that runs, gated so that a family still only
+      reaches shadow on section 4.6 evidence.
+      NON-VACUITY, as a falsifiable pair in the style of T-287 and T-297: remove the wiring and a test
+      that asserts a shadow record reached hk-store must fail; remove the hk-store sink and a
+      different test must fail. Deleting the dormancy section in crates/hk-ml/src/lib.rs is part of
+      the work - crates/hk-ml/tests/no_production_caller.rs is designed to fail the day a caller
+      appears, precisely so whoever wires it comes back and updates that prose instead of leaving it
+      to mislead the next reader. If the section 4.6 evidence still does not support wiring any
+      producer when this is picked up, do not force it: say so and leave the ticket open rather than
+      landing a vacuous half.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

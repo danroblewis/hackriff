@@ -927,6 +927,7 @@ dependencies = [
  "hk-demod",
  "hk-detect",
  "hk-dsp",
+ "hk-ml",
  "hk-model",
  "hk-pipeline",
  "hk-plugins",
@@ -959,8 +960,11 @@ version = "0.1.0"
 dependencies = [
  "hk-dsp",
  "hk-model",
+ "hk-plugins",
+ "hk-stream",
  "num-complex",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

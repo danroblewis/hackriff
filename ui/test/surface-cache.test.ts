@@ -28,7 +28,7 @@ function data(a: TileAddr, bytes = BYTES, t1Ns: number | null = null): TileData 
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
     measured: { nf: 2, nt: 2 },
-    rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null,
+    rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 
@@ -61,6 +61,12 @@ function harness(opts: TileCacheOptions = {}) {
     cache, calls, urls, waiting,
     uploads: () => uploads,
     destroys: () => destroys,
+    /** Settle with a tile carrying the route's own `cost` numbers (T-630). */
+    async settle2(a: TileAddr, cost: { serverInFlightLimit: number | null; serverInFlightShare: number | null }) {
+      waiting.get(keyOf(a))!.resolve({ ...data(a), ...cost });
+      waiting.delete(keyOf(a));
+      await flush();
+    },
     async settle(a: TileAddr, bytes = BYTES) {
       waiting.get(keyOf(a))!.resolve(data(a, bytes));
       waiting.delete(keyOf(a));
@@ -1361,4 +1367,39 @@ test("ONE contended answer does not set the live lane's clock — the cadence su
   // And the bound it must not have traded away: a lane that is GENUINELY expensive still gets rarer
   // on its own. That is the run above ("a fixed share of MEASURED capacity"), where every answer
   // costs 600 ms, so the minimum over the window IS 600 ms and the duty cap still binds.
+});
+
+test("T-630: the client operates at the SHARE the route states, and gets it back when it grows", async () => {
+  // The share is this client's allowance of the server's four slots — `ceil(4 / clients)` — and it
+  // moves in both directions, because another tab arriving and another tab closing are both true.
+  // A monotonically-falling ceiling (the pre-T-630 rule, which only ever had a server-wide cap to
+  // read) would pin this cache at one slot for the rest of the session over a tab long gone.
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock });
+  assert.equal(h.cache.inFlightCeiling, 4);
+
+  // A second client arrives; the refusal is how this one finds out.
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4, share 2)", 2));
+  assert.equal(h.cache.inFlightCeiling, 2, "the ceiling is the share, not the server-wide cap");
+  assert.equal(h.cache.inFlightLimit, 2, "…and the operating cap cannot exceed it");
+  assert.equal(h.cache.stats.busyRefusals, 1, "T-455's mechanism is untouched: a refusal was SEEN");
+
+  // An answer states it too, so a tab that is already drawn learns on its next tile — no refusal
+  // needed — that half the slots are no longer its to take.
+  clock = 1000;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.settle2(addr(1), { serverInFlightLimit: 4, serverInFlightShare: 1 });
+  assert.equal(h.cache.inFlightCeiling, 1);
+
+  // The other clients go away: the share comes back, and with it the ceiling this cache may
+  // recover to. It is the CEILING that moves — the operating cap still only rises by AIMD.
+  clock = 2000;
+  h.cache.beginFrame(); h.cache.acquire(addr(2)); h.cache.endFrame();
+  await flush();
+  await h.settle2(addr(2), { serverInFlightLimit: 4, serverInFlightShare: 4 });
+  assert.equal(h.cache.inFlightCeiling, 4, "a share that grew is as true as one that shrank");
+  assert.equal(h.cache.inFlightLimit, 1, "but permission to use it is still earned, never granted");
 });

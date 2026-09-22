@@ -1064,7 +1064,11 @@ impl hk_api::attention::AttentionControl for PipelineAttention {
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
-/// handle for device settings.
+/// handles for device settings.
+///
+/// `live_controls` is **every** front end this run holds (T-511): none for a replay or a
+/// scheduler-driven run, one for today's single-SDR run, N when N are composed. `Option<Arc<dyn
+/// LiveControl>>` converts into it, so a single-device caller writes what it always did.
 pub fn serve_api(
     bind: SocketAddr,
     ui_dist: Option<PathBuf>,
@@ -1072,8 +1076,9 @@ pub fn serve_api(
     handle: &PipelineHandle,
     token: Token,
     tag: &str,
-    live_control: Option<Arc<dyn LiveControl>>,
+    live_controls: impl Into<hk_api::LiveControls>,
 ) -> anyhow::Result<Server> {
+    let live_controls = live_controls.into();
     let counters = handle.counters();
     // The pipeline writes the inventory (TrackInventory, chain record writers, plugin Ingest)
     // into this database; the API reads it through `query_inventory` only. Bookmarks live in the
@@ -1124,14 +1129,17 @@ pub fn serve_api(
         // is a driver over the interactive retune path, not the scheduler this run does not drive.
         // T-517: with the run's own bin width, so a coarse step widens the window only where the
         // detection/history bins stay exactly as wide.
-        scan: live_control.clone().map(|lc| {
+        // T-511: the sweep drives **one** front end — the run's default. A per-device sweep is a
+        // separate decision (`crate::scan`'s arbitration is written for one radio), and the wire
+        // says which one it commissions.
+        scan: live_controls.primary().cloned().map(|lc| {
             let fft = handle.detection_fft_len();
             Arc::new(
                 hk_api::scan::ScanRunner::new(lc)
                     .with_bin_width(Arc::new(move |fs| hk_pipeline::detection_bin_hz(fs, fft))),
             )
         }),
-        live_control,
+        live_controls,
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),
         audit: Some(Arc::new(audit)),
@@ -1169,7 +1177,7 @@ pub fn serve_api(
             handle.data_dir().to_path_buf(),
         ))),
         // T-438: the tile route's ingest-backpressure cap, per server.
-        tiles_in_flight: Default::default(),
+        tile_admission: Default::default(),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

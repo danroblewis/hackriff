@@ -1,6 +1,8 @@
 # Spectrum research workflow: collections, measurements, annotations
 
-**Status: PROVISIONAL — design brief, 2026-09-21.** This extends the unified canvas
+**Status: SPEC (T-800 / MAP-00, 2026-09-22) — §10 is the normative store contract MAP-16…MAP-19
+build to; §1–§9 are the argument behind it.** Design brief 2026-09-21, approved 2026-09-22; decision
+record [ADR-0023](adr/0023-map-ui-and-research-state.md). This extends the unified canvas
 ([docs/16 §8, "MCANVAS"](16-coverage-tile-pyramid.md)) and the UI rewrite
 ([docs/14](14-ui-rewrite.md)); it contradicts neither and reuses their invariants throughout. It
 specifies the **durable research state** that turns the canvas from a viewer into a research
@@ -516,9 +518,116 @@ authoring modes add *durable-object* creation in the same content-space coordina
   same gated `DeviceAction` offer as every other retune — authoring the view did not move the radio;
   choosing to look there later might.
 
+## §10. The store contract (normative)
+
+*The contract MAP-16 (annotations), MAP-17 (collections + markers), MAP-18 (measurements) and MAP-19
+(saved views) build to. §1–§9 argue it; this section is what a reviewer checks an implementation
+against. Rationale: [ADR-0023](adr/0023-map-ui-and-research-state.md) §5. Each ticket updates
+[`docs/api.md`](api.md) and `crates/hk-cli/tests/api_contract.rs` **together** (T-079); the shapes are
+reserved in `docs/api.md` under "Reserved: the map-UI research routes" before any client exists.*
+
+### §10.1 Four stores, one pattern
+
+| Store | Objects | Route family | Ticket |
+|---|---|---|---|
+| Marker collections | `Collection`, `Marker` | `/api/collections`, `/api/collections/{id}/markers`, `/api/markers/{id}` | MAP-17 |
+| Saved measurements | `Measurement` | `/api/measurements[/{id}]` | MAP-18 |
+| Annotations | `Annotation` | `/api/annotations[/{id}]` | MAP-16 |
+| Saved views | `SavedView` | `/api/views[/{id}]` | MAP-19 |
+
+The object shapes are §3, §4, §5 and §6 above and are normative as written. MAP-16 lands the shared
+pattern (paging, provenance, audit, error shape); MAP-17–19 are instances of it, which is why four
+stores is one design and not four.
+
+### §10.2 One provenance stamp, written by the backend
+
+Every object in all four stores carries the §2 `provenance` block, **stamped by the server**, never
+accepted from the client:
+
+- The client sends only the **view context it was on** (`center_hz`, `span_hz`, `t_capture`, `tier`,
+  and the pane's `device_id` where it has one). The server records what that means, adds `actor` (a
+  token fingerprint — **never the token**), `authored_s`, and `authored: true`.
+- **`t_capture` is on the capture clock; `authored_s` is on the wall clock; they are never
+  conflated.** This is the bug the UI has found five times (T-379/T-384/T-389 and the inspector); a
+  browser instant compared against capture time is wrong by the replay's offset. A measurement refers
+  to *when the air was*; the audit trail records *when the human acted*.
+- A request whose `provenance` block contains a server-owned field (`actor`, `authored_s`,
+  `authored`) is **`400 invalid`**. Provenance is evidence, not input.
+
+### §10.3 One paging contract — "durable" is not "unbounded"
+
+Every list route takes the `/api/events` paging contract: `limit`, `cursor`; answers carry `count`,
+`matched` and `next_cursor`. Every list route also accepts the optional window box
+`f_lo`/`f_hi`/`t0`/`t1`; **`GET /api/annotations` requires it**, because a long research session
+accumulates annotations the way the catalogue accumulates events.
+
+| Route | `limit` default | max |
+|---|---|---|
+| `GET /api/annotations` | 200 | 2000 |
+| `GET /api/collections`, `…/markers`, `/api/measurements`, `/api/views` | 500 | 2000 |
+
+A list route that could grow without limit is a defect whichever store it belongs to.
+
+### §10.4 `POST /api/measurements` carries cursors, never a value
+
+The thin-client rule, made enforceable by the contract instead of by review:
+
+- The body carries `kind`, `cursors` (the place), optional `n`, `note`, `collection_id`. A body
+  containing **`value` or `unit` is `400 invalid`**.
+- The backend computes `value`/`unit` **from the data under that place** and stamps provenance. A −3 dB
+  bandwidth is a function of the noise floor and the actual −3 dB points; a symbol rate is a function
+  of the signal. Neither is a function of where a cursor landed, so neither may be computed in
+  `ui/src`.
+- The client's **live drag readout is ephemeral presentation arithmetic** over its own pixel↔(Hz, s)
+  maps — the same class it already does for the hover readout and the retune snap. *Saving* is what
+  crosses into an object.
+- A `PUT` that moves a cursor re-computes the value server-side. There is no path by which a stored
+  value is something the client computed and the backend merely filed.
+
+### §10.5 Audit, availability, and the device line
+
+- Every mutating request (`POST`/`PUT`/`DELETE`) on all four stores is **audited** exactly as
+  `/api/bookmarks*` and `/api/selections*` are: token id (never the token), peer, action, body,
+  old/new, status.
+- **No audit log ⇒ every mutating endpoint answers `503 unavailable`**, consistent with the rest of
+  the control API.
+- **No entry ever carries a `device` key.** Authoring a durable object is a view act and reaches no
+  radio (§9). The only research act that may command the radio is *restoring* a saved view whose
+  frequency extent lies outside the tuned window, which inherits the ordinary gated `DeviceAction`
+  offer and gets no exemption.
+- Error shape follows the control API: `400 invalid`, `404 not_found`, `409 conflict` (a supplied id
+  that already exists), `503 unavailable` (no store / no audit log), `405` with `Allow` for a wrong
+  method, `401` before dispatch for a missing or wrong token.
+
+### §10.6 `/api/bookmarks` becomes a facade; `/api/views` is its own store
+
+- **Bookmarks.** On first start with a collection store, existing bookmarks migrate into a reserved,
+  un-deletable collection (`"Bookmarks"`), each as a frequency-only marker (`t_center_s = null`),
+  preserving id, name, note and timestamps. `/api/bookmarks*` stays live as a **compatibility facade**
+  over that one collection — same shapes, same audit action names. New clients use `/api/collections`;
+  the two see the same rows. Two stores for one idea is the drift the canvas cutover existed to kill.
+- **Saved views are not markers.** A view is a serialised point in view-arithmetic state —
+  `(center_f, span_f)`, an optional `(center_t, span_t)`, `follow_live`, an optional pane layout — and
+  has no frequency *centre* in the sense a marker does. Filing it as a marker would give it a false
+  place. It gets its own small store, `/api/views`, on the same pattern. (This settles the option
+  MAP-19 left open.)
+
+### §10.7 Nothing here feeds blind detection
+
+An authored mark mints no candidate, moves no threshold, confirms no emitter, sets no family and
+never pre-populates the inventory — **on create or on import**. Detection's inputs are the air. On
+SigMF export an annotation is a `hackriff:annotation` block with `authored: true`, structurally
+distinct from the `hackriff:truth` ground-truth block a blind acceptance test asserts against, so a
+researcher's notes on a fixture can never contaminate its hidden truth list.
+
 ---
 
 ## Proposed tickets and time estimate
+
+> **Superseded as a plan by [`docs/26`](26-map-ui-redesign-tickets.md)** (the approved MAP-00…MAP-25
+> set, in `docs/tasks.yaml` as T-800…T-825): R-1 → MAP-17, R-2 → MAP-18, R-3 → MAP-16, R-4 → MAP-19,
+> R-5 → folded into all four as the shared §10.2 stamp, R-6 → MAP-20/MAP-22, R-7 → MAP-21,
+> R-8 → MAP-23. Kept for the reasoning behind the sequencing.
 
 The user asked for a proposed ticket set and a time estimate. These slot into the MCANVAS
 follow-up family (T-457–T-459, T-470–T-475) and depend on the chrome/layers/pins work in docs/24; the
