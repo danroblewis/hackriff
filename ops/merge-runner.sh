@@ -10,6 +10,21 @@
 set -uo pipefail
 REPO=/Users/daniellewis/hackriff
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"; mkdir -p "$S"
+# T-761: SAY WHERE THE OPS STATE IS, at a location everyone can find without being told.
+#
+# `HACKRIFF_OPS` is per-process, so the runner and the coordinator can disagree about where the
+# queue, the log and the staged-bulk marker live — and on 2026-09-22 they did, four times: two
+# branches were stranded because a queue append went to a file the runner never read, a stale
+# entry sat in the other copy, and — worst — T-650's `bulk-in-progress` marker was INVISIBLE to
+# the coordinator's `just reconcile`, which is the one reader it was written for. A warning nobody
+# receives is the false-quiet the marker exists to remove, reproduced one level up.
+#
+# So the runner publishes its own choice at the FIXED default path. Anything that needs the ops
+# state reads this pointer instead of guessing, and a session with no `HACKRIFF_OPS` at all lands
+# in the right directory. The pointer is written on every start, so a restart under a different
+# env corrects it rather than leaving a stale claim.
+mkdir -p "$HOME/.hackriff-ops"
+printf '%s\n' "$S" > "$HOME/.hackriff-ops/active-ops-dir"
 QUEUE=$S/merge-queue.txt
 NEEDS=$S/merge-needs-attention.txt
 DONELOG=$S/merge-done.txt
