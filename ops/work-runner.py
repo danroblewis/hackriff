@@ -199,7 +199,10 @@ def disk_free_gb():
 
 
 def gate_running():
-    return os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
+    # `gate-wanted` is the merge runner waiting for the running workers to drain so the gate can
+    # run alone: to dispatch it is the same as a gate in progress, or the drain never completes.
+    return (os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
+            or os.path.exists(f"{S}/gate-wanted"))
 
 
 def queue_depth():
