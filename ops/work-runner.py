@@ -72,6 +72,13 @@ DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
+# A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
+# with the failure, so the agent that wrote the code fixes it with its context intact, instead of
+# a fresh agent (or the coordinator) rediscovering everything. Capped like the merge runner's own
+# attempts; the coordinator hears about it only when the cap is spent.
+FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
+MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
+MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
 MODEL_ALIAS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "claude-fable-5-1"}
 EFFORTS = ("low", "medium", "high")
@@ -354,8 +361,10 @@ def reap(claims, dry):
                 attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
                 record_done(c, "review-fail", res)
             continue
-        res = result_of(f"{d}/out.json")
+        res = result_of(c.get("out") or f"{d}/out.json")
         text = str(res.get("result", ""))
+        if res.get("session_id"):
+            c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
         if res.get("is_error"):
@@ -382,6 +391,68 @@ def reap(claims, dry):
             c["state"] = "queued"
             record_done(c, "done", res)
             enqueue(c["branch"])
+    changed |= handle_gate_failures(claims, dry)
+    return changed
+
+
+def launch_fix(c, fail_line):
+    tid, branch, wt = c["ticket"], c["branch"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
+    n = c.get("fix_attempts", 0) + 1
+    prompt = f"""Your branch {branch} FAILED its merge gate on main (attempt {n} of {FIX_ATTEMPTS}). The runner's line:
+{fail_line}
+The full gate log is {MERGE_LOG}; find your run with `grep -n 'GATE FAILED {branch}\\|FAIL \\[\\|FAILED just\\|error\\[' {MERGE_LOG} | tail -40`.
+TRIAGE FIRST, in your worktree {wt}: merge main in (`git merge main`), then run the failing test ALONE
+(`cargo nextest run -p <crate> -E 'test(/<name>/)'` or `just test-ui`). Fails alone = a real bug: fix it.
+Passes alone but failed in the gate = load-sensitive: make it deterministic (never a retry, never a skip).
+If the failure is in code you did not touch and is a known bug on main, say so precisely and hand back BLOCKED.
+Then: targeted tests, `just precheck <crates>`, commit on {branch}, `just task note {tid} --text "<what the gate found and what you changed>"`.
+Same rules as before: never touch the main checkout, never the full gate, never edit docs/tasks.yaml by hand.
+Your final message must end with exactly one line: HANDBACK: DONE  or  HANDBACK: BLOCKED <why>
+"""
+    cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
+           "--output-format", "json", "--max-budget-usd", BUDGET_USD]
+    out_path = f"{d}/fix{n}.json"
+    out = open(out_path, "w")
+    err = open(f"{d}/run.log", "a")
+    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S), start_new_session=True, text=True)
+    p.stdin.write(prompt)
+    p.stdin.close()
+    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid}")
+    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+
+
+def handle_gate_failures(claims, dry):
+    """Merge-runner GATE_FAIL lines for branches this runner queued -> resume the worker to fix."""
+    try:
+        lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l]
+    except FileNotFoundError:
+        return False
+    by_branch = {c["branch"]: tid for tid, c in claims.items() if c.get("branch")}
+    changed = False
+    for line in lines:
+        parts = line.split()
+        branch = parts[2] if len(parts) > 2 else ""
+        tid = by_branch.get(branch)
+        if not tid:
+            continue
+        c = claims[tid]
+        if line in c.get("gate_fails_seen", []) or c.get("state") != "queued":
+            continue
+        c.setdefault("gate_fails_seen", []).append(line)
+        changed = True
+        if dry:
+            log(f"DRY-RUN would resume {tid} to fix: {line}")
+            continue
+        if not c.get("session_id") or not os.path.isdir(c.get("wt", "")):
+            c["state"] = "gate-failed"
+            attention(tid, branch, "GATE_FAIL_NO_SESSION", "no worker session or worktree to resume; needs a person")
+        elif c.get("fix_attempts", 0) >= FIX_ATTEMPTS:
+            c["state"] = "gate-failed"
+            attention(tid, branch, "GATE_FAIL_ESCALATE", f"{FIX_ATTEMPTS} fix attempts spent; needs a person")
+        else:
+            claims[tid] = launch_fix(c, line)
     return changed
 
 
