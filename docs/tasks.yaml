@@ -17214,7 +17214,7 @@ tasks:
   - id: T-547
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: does the evidence-bits ladder survive 8-bit quantisation and gain state? Measure the calibrated nulls before any block implements evidence()'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -17265,6 +17265,20 @@ tasks:
       Nothing here needs hk-synth to exist. The metrics are already computed by M1 blocks; this
       is a measurement harness over them plus a write-up.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      LANDED 2026-09-21 on task-t547: docs/21-evidence-bits-under-quantisation.md, plus the
+      harness crates/hk-pipeline/examples/t547_ladder.rs and pointers from ADR-0015 section 2.2
+      and ADR-0022 section 9. Verdict CONDITIONAL. Conditioning key is ADC FILL LEVEL (sigma in
+      LSB / Provenance.quantisation_limited), not gain and not clip fraction: a control that
+      applies 51 dB of gain but skips the ADC reproduces the float table to 0.02 bits on every
+      metric, and 28% clipping costs <= 0.34 bits while sigma = 0.21 LSB costs 1.0-1.6 bits and
+      breaks eye_open outright. delta = 1.8 bits at a claimed 6 bits, 3.3 at 8; whether the law
+      is additive or saturating is NOT resolvable at n = 820 and is said so. Real captures add a
+      further ~2 bits of spread that cannot be attributed without T-375's terminator capture.
+      Three findings outside the receiver question: snr and evm as FskDemod computes them are one
+      statistic (rho = -0.989) so ADR-0015 section 1.3's sum double-counts; eye_open's quantile
+      table is non-invertible at 4 and 6 bits; a table of N windows cannot express more than
+      log2 N bits, which prices the 12-bit caps. Follow-ups T-616..T-619.
+
   - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
@@ -20447,6 +20461,105 @@ tasks:
       granted voice channels are followed and their call count matches the unshifted run's. Prove
       the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-616
+    milestone: MAUTO
+    title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      DESIGN / ADR change, no code. T-547 (docs/21 section 5.1) measured the dependence between the
+      seven calibrated metrics on 820 matched windows: snr and evm as hk_demod::fsk::FskDemod
+      computes them are a deterministic monotone map of one another (Spearman rho = -0.989, both
+      derived from the same (a, var) pair), line_violations and bit_structure sit at -0.706 (both
+      statistics of one bit sequence), and timing_var against snr at -0.52.
+      ADR-0015 section 1.3 defines evidence_bits = sum_j min(b_j, cap_j) - L_j. A sum of
+      significances is a log-probability only if the terms are independent under the null. They
+      are not. The 12-bit S0-S3 cap partially hides this, which is worse than it failing loudly.
+      DoD: an ADR-0015 amendment that states the combination rule within a stage - the obvious
+      safe choice is the MAXIMUM over metrics known to be dependent, not the sum - names which
+      MetricIds are in which dependence group for the blocks that exist, and says what a block
+      must declare when it publishes two metrics from one estimate. Also state what this does to
+      the 12-bit caps (they were sized for a sum). Must land before any block implements
+      Block::evidence, because the grouping is part of the contract.
+  - id: T-617
+    milestone: MAUTO
+    title: 'Calibration tables must declare their achievable bit levels and their n (eye_open is non-invertible at 4 and 6 bits)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      DESIGN, then a small schema change. T-547 (docs/21 sections 5.2, 5.3) measured two hard
+      limits on the synth/calibration/<block>.json design of ADR-0015 section 2.2:
+      (a) eye_open takes only 66 distinct values over 4200 noise windows at n = 112 symbols, with
+      an atom exactly at the 4-bit and 6-bit quantiles: asking that table for a 6-bit threshold
+      returns one worth 2.41 bits. The float reference is wrong by 3.6 bits before any ADC is
+      involved, so this is a property of the statistic at that support, not of the receiver.
+      (b) a table sampled with N windows cannot express more than log2 N bits: at N = 4200 the
+      ceiling is 12.04 bits, and bit_structure stops at 9.71 because of a 5-window atom.
+      ADR-0015 section 1.3 caps S0-S3 at 12 bits and S4 at 32.
+      DoD: the calibration-table schema carries, per (metric, n), the levels it can actually
+      express and the N it was sampled with; a block returns an explicit "cannot express b bits
+      here" rather than a silently wrong threshold; and ADR-0015's caps are restated against what
+      calibration can reach (32 bits is unreachable by calibration in principle). A Rust test
+      asserts a table rejects a level above its own ceiling.
+  - id: T-618
+    milestone: MAUTO
+    title: 'M-2: condition calibration tables on ADC FILL (sigma in LSB), not gain; size the sampling budget'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547, T-617]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      T-547 (docs/21 sections 3, 4) established the conditioning key M-2 must build in rather than
+      retrofit: it is the ADC FILL LEVEL, the per-component noise sigma in LSB, and NOT the
+      LNA/VGA/amp setting and NOT the clip fraction. The control is decisive - applying 51 dB of
+      gain without the ADC reproduces the float table to 0.02 bits on every metric and leaves the
+      demodulator's success rate bit-identical - so "stable across gain states" in ADR-0015 was
+      naming the wrong variable. Clipping is benign (28% clipped costs <= 0.34 bits at a 6-bit
+      claim); under-fill is the hazard (sigma = 0.21 LSB costs 1.0-1.6 bits and collapses
+      eye_open to 0.91 bits realised for a 6-bit claim, while changing the demod success rate from
+      19% to 53%).
+      DoD: (a) the generator writes one table per fill bucket, with the bucket boundaries derived
+      from measurement rather than chosen, and a documented cheap runtime rule for the degenerate
+      end (sigma < 0.5 LSB); (b) the sampling budget is stated per (block, support n, fill
+      bucket) cell against T-617's log2 N ceiling - >= 4096 windows to touch 12 bits once and
+      ~40k for an interval - and is budgeted, not discovered; (c) Provenance already carries
+      quantisation_limited and the clip count, so name which field the runtime reads and whether
+      sigma_LSB needs to join them (docs/07).
+  - id: T-619
+    milestone: MAUTO
+    title: 'Extend the T-547 ladder measurement to the AM/OOK and C4FM paths before either ships an evidence()'
+    status: todo
+    priority: medium
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-001, RESEARCH-008]
+    acceptance: |
+      T-547 measured exactly one path: the M1 2-FSK demodulator plus hk_classify's
+      if_local_bimodality, at one support (112 symbols). docs/21 section 7 says plainly that there
+      is no reason to assume delta transfers. AM/OOK envelope bimodality and the C4FM path
+      (hk_demod::fsk::c4fm) have different statistics and different failure modes under
+      under-fill; PSK EVM has no block at all yet (ADR-0015 section 1.1's Costas gap).
+      DoD: the same harness (crates/hk-pipeline/examples/t547_ladder.rs, extended) run over the
+      AM/OOK and C4FM metrics at two supports, reporting per metric the same four things docs/21
+      reports: whether a fixed table is valid, what it must be conditioned on, the measured
+      spread with its n, and a GO/CONDITIONAL/NO-GO. Append a section to docs/21 rather than
+      starting a new note. Cheap to run (the noise corpus takes ~90 s for 4200 windows x 12
+      conditions on 8 threads); it is the write-up that costs.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-547. Not urgent, but it is a precondition on those blocks publishing
+      evidence(), the same way T-547 was for the FSK path.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
