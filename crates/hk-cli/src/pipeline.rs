@@ -34,7 +34,7 @@ use hk_api::{
 };
 use hk_core::{
     DeviceInfo, HackRfDriver, MockClock, MockEnd, MockOptions, MockSdrDriver, NamedGain,
-    OpenRequest, Pacing, Source, SourceCapabilities, SourceControl, SourceDriver,
+    OpenRequest, Pacing, RtlSdrDriver, Source, SourceCapabilities, SourceControl, SourceDriver,
 };
 use hk_model::cluster::most_restrictive;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
@@ -1259,13 +1259,27 @@ pub(crate) fn config_for(
 /// `hackrf` → the first device, `hackrf:<serial>` → that one; anything else is not a HackRF
 /// source.
 pub fn hackrf_serial(spec: &str) -> Option<Option<String>> {
-    match spec {
-        "hackrf" => Some(None),
-        s => s
-            .strip_prefix("hackrf:")
-            .filter(|serial| !serial.is_empty())
-            .map(|serial| Some(serial.to_owned())),
+    device_serial("hackrf", spec)
+}
+
+/// `rtlsdr` → the first dongle, `rtlsdr:<serial>` → that one (T-514).
+///
+/// **Prefer the serial form.** A USB index changes when anything else is plugged in, so `rtlsdr`
+/// alone can open a different radio between two runs and file its measurements under the wrong
+/// provenance; `rtl_test -t` lists the serials.
+pub fn rtlsdr_serial(spec: &str) -> Option<Option<String>> {
+    device_serial("rtlsdr", spec)
+}
+
+/// `<driver>` → the first device, `<driver>:<serial>` → that one; `None` for any other spec.
+fn device_serial(driver: &str, spec: &str) -> Option<Option<String>> {
+    if spec == driver {
+        return Some(None);
     }
+    spec.strip_prefix(driver)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .filter(|serial| !serial.is_empty())
+        .map(|serial| Some(serial.to_owned()))
 }
 
 /// The content class of every window tiling `plan`'s regions at rate `fs`.
@@ -1295,7 +1309,7 @@ pub fn mock_path(spec: &str) -> Option<PathBuf> {
 
 /// `spec` names a device (the live HackRF One or the mock SDR), not a recording played back.
 pub fn is_device_spec(spec: &str) -> bool {
-    hackrf_serial(spec).is_some() || mock_path(spec).is_some()
+    hackrf_serial(spec).is_some() || rtlsdr_serial(spec).is_some() || mock_path(spec).is_some()
 }
 
 /// The mock device as the binaries run it: like the radio, in real time from the wall clock,
@@ -1344,14 +1358,22 @@ pub fn mock_fault_from_env() -> anyhow::Result<Option<hk_core::MockFault>> {
     }
 }
 
-/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One) or
-/// `mock:<file.sigmf-meta>` (the mock SDR, `None` if the recording cannot be opened; [`open_live`]
-/// reports why). SoapySDR plugs in here later behind the same `SourceDriver` contract.
+/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One),
+/// `rtlsdr` / `rtlsdr:<serial>` (RTL-SDR, T-514) or `mock:<file.sigmf-meta>` (the mock SDR,
+/// `None` if the recording cannot be opened; [`open_live`] reports why). SoapySDR plugs in here
+/// later behind the same `SourceDriver` contract.
+///
+/// Each driver reports its own capabilities, and the open request is built from them
+/// ([`LiveArgs::named_gains`] only sets stages the device has), so `--lna` reaches the RTL-SDR's
+/// one combined gain knob and `--vga` / `--amp` are simply not offered there.
 pub fn driver_for(spec: &str) -> Option<(Box<dyn SourceDriver>, Option<String>)> {
     if let Some(path) = mock_path(spec) {
         let options = cli_mock_options_for(&path);
         let driver = MockSdrDriver::new(path, options).ok()?;
         return Some((Box::new(driver), None));
+    }
+    if let Some(serial) = rtlsdr_serial(spec) {
+        return Some((Box::new(RtlSdrDriver) as Box<dyn SourceDriver>, serial));
     }
     hackrf_serial(spec).map(|serial| (Box::new(HackRfDriver) as Box<dyn SourceDriver>, serial))
 }
@@ -1486,8 +1508,8 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
             (driver, request)
         } else {
             anyhow::bail!(
-                "unsupported live source {spec:?}: use hackrf, hackrf:<serial> or \
-             mock:<file.sigmf-meta>"
+                "unsupported live source {spec:?}: use hackrf, hackrf:<serial>, rtlsdr, \
+             rtlsdr:<serial> or mock:<file.sigmf-meta>"
             );
         };
     let caps = driver.capabilities();
@@ -1836,8 +1858,8 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
     }
     let Some(path) = args.source.strip_prefix("sigmf:").map(PathBuf::from) else {
         anyhow::bail!(
-            "unsupported --source {:?}: use hackrf, hackrf:<serial>, mock:<file.sigmf-meta> or \
-             sigmf:<file.sigmf-meta>",
+            "unsupported --source {:?}: use hackrf, hackrf:<serial>, rtlsdr, rtlsdr:<serial>, \
+             mock:<file.sigmf-meta> or sigmf:<file.sigmf-meta>",
             args.source
         );
     };
@@ -2329,6 +2351,39 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no samples");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// T-514: `rtlsdr` / `rtlsdr:<serial>` names the RTL-SDR driver, and the serial form is what
+    /// actually pins the radio — an index would move when anything else is plugged in.
+    #[test]
+    fn rtlsdr_specs_select_the_rtl_driver_by_serial() {
+        assert_eq!(rtlsdr_serial("rtlsdr"), Some(None));
+        assert_eq!(
+            rtlsdr_serial("rtlsdr:7673444264"),
+            Some(Some("7673444264".into()))
+        );
+        assert_eq!(rtlsdr_serial("rtlsdr:"), None);
+        assert_eq!(rtlsdr_serial("rtlsdrx"), None);
+        assert_eq!(rtlsdr_serial("hackrf"), None);
+        assert_eq!(hackrf_serial("rtlsdr"), None);
+        assert!(is_device_spec("rtlsdr") && is_device_spec("rtlsdr:7673444264"));
+        let (driver, serial) = driver_for("rtlsdr:7673444264").expect("an RTL-SDR spec");
+        assert_eq!(driver.name(), "rtlsdr");
+        assert_eq!(serial.as_deref(), Some("7673444264"));
+        // The capabilities the CLI would plan against are the RTL's, not the HackRF's.
+        let caps = driver.capabilities();
+        assert_eq!(caps.driver, "rtl-sdr");
+        assert!(!caps.supports_frequency(2.4e9) && !caps.sample_rates.supports(20e6));
+        // `--lna` reaches its one gain knob; `--vga` / `--amp` are not offered on this device.
+        let gains = LiveArgs {
+            lna_db: 28.0,
+            vga_db: 20.0,
+            amp: true,
+            ..LiveArgs::default()
+        }
+        .named_gains(&caps)
+        .expect("only the stages the device has");
+        assert_eq!(gains, vec![NamedGain::new("lna", 28.0)]);
     }
 
     /// T-049: `mock:<file>` opens like a device, with the recording's own tuning unless given, and

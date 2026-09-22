@@ -45,8 +45,9 @@ pub use hk_pipeline::class::{FM_BROADCAST_HZ, RowPlan, SPECTRUM_DATATYPE, row_pl
 /// Where `hk serve` gets samples.
 #[derive(Clone, Debug)]
 pub enum ServeSource {
-    /// A device: the live HackRF One (`hackrf` or `hackrf:<serial>`) or the mock SDR
-    /// (`mock:<file.sigmf-meta>`, `hk serve --device`), driven through the same live path.
+    /// A device: the live HackRF One (`hackrf` or `hackrf:<serial>`), an RTL-SDR
+    /// (`rtlsdr` or `rtlsdr:<serial>`, T-514) or the mock SDR (`mock:<file.sigmf-meta>`,
+    /// `hk serve --device`), all driven through the same live path.
     HackRf {
         /// Source spec.
         spec: String,
