@@ -21197,7 +21197,8 @@ tasks:
   - id: T-633
     milestone: M2-hardening
     title: Under a starved source a range-selected Listen chain attaches and is immediately closed_client, while an emitter-selected one on the same station survives
-    status: todo
+    status: done
+    branch: task-t633
     priority: medium
     parallel_group: PIPE
     model: opus

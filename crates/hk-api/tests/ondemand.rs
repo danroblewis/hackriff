@@ -102,6 +102,7 @@ impl StreamOpener for Fake {
             header: h,
             handle,
             session: Box::new(Guard(Arc::clone(&self.stopped))),
+            end: hk_stream::SessionEndSlot::default(),
         })
     }
 }
@@ -299,6 +300,7 @@ impl StreamOpener for Ticking {
             header: h,
             handle,
             session: Box::new(LiveGuard(Arc::clone(&self.live), stop)),
+            end: hk_stream::SessionEndSlot::default(),
         })
     }
 }

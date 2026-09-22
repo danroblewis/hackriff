@@ -342,6 +342,14 @@ pub(crate) fn serve(
     ) {
         Ok((id, conn)) => {
             let end = watch(&mut stream, &conn, config);
+            // T-633: tell the producer how the session ended BEFORE its guard is dropped, so a
+            // peer this server reaped for silence, or a connection that faulted, is not counted
+            // as the client going away.
+            opened.end.set(match end {
+                PeerEnd::Closed | PeerEnd::Message => hk_stream::SessionEnd::Client,
+                PeerEnd::Unresponsive => hk_stream::SessionEnd::Unresponsive,
+                PeerEnd::Reset => hk_stream::SessionEnd::Transport,
+            });
             opened.handle.close(id);
             let _ = stream.shutdown(Shutdown::Both);
             if std::env::var_os("HK_PIPELINE_DEBUG").is_some() {
