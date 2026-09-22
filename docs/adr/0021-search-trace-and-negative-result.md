@@ -422,6 +422,8 @@ A **label** is a verdict ≥ `framed` reported to the user. A **confirm** is a l
 
 ### 8.4 The guard test: `acceptance_mauto::negative_control`
 
+> **The corpus this suite runs on is specified in [docs/22](../22-mauto-acceptance-corpus.md)** (T-551, frozen 2026-09-21): the four populations below plus an **N5 mismatched-hypothesis** population, the per-claim trial counts, the sufficiency argument and the coverage manifest. It amends nothing here.
+
 **Protocol, unchanged from §7 and non-negotiable:** fixtures replay **through the mock SDR** behind the ordinary device interface; jobs start via `POST /api/analyze`; targets come from **blind detection** (an inventory emitter or burst the run found) or an ad-hoc band — **never a truth frequency**. Truth is loaded only by the assert harness. Jobs are bounded by `max_evaluations`, never by wall (ADR-0021 §5), so the suite is deterministic.
 
 **Four negative populations, because "nothing to find" has four shapes that fail differently:**

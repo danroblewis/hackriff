@@ -20496,6 +20496,211 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+  - id: T-622
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-062, SIGNAL-001]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 4.1 P6/P7 and 2 axis A7). ADR-0022 replaced ADR-0015's
+      guessed confirm constants with a derived gate, and the two rows that exercise exactly what
+      CHANGED cannot be generated today.
+      1. ARBITRARY CHECK WIDTH (8/16/24/32) on the generic generators. ADR-0022 section 4.3 lowered
+         the width floor from 16 to 8, so "a CRC-8 emitter, template-fixed, confirms at 3 differing
+         frames" (ADR-0022 section 10.1 A3) is a required recall row - and the case the OLD rule
+         refused outright. `fsk_burst_train` emits CRC-16 and nothing else.
+      2. AN ARBITRARY POLYNOMIAL NOT IN THE RevEng CATALOGUE, so a structured signal exists whose
+         check cannot be looked up. ADR-0015 section 7's "partial quality for unknowns" row and
+         docs/22's over-claim accounting both need it.
+      3. A CONSTANT-PAYLOAD BEACON mode: the same bytes every frame. ADR-0022 section 4.2 replaced
+         `distinct_valid` with `differences` precisely because repeated payloads over-credit an
+         emitter, and the assertion is that such a beacon does NOT confirm on repeat count alone.
+         Nothing in the corpus can currently produce one.
+      Truth annotations carry the polynomial, width, start bit, tail, bit order and the payloads,
+      so the assert harness can distinguish `differences` from `distinct_valid` without the system
+      seeing either.
+      DoD: the three parameters exposed on the generic FSK generator (and on T-621's OOK generator
+      if it has landed), with truth written and `just synth` round-tripping them.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Pairs with T-575, which implements the gate
+      these fixtures exercise; neither blocks the other.
+  - id: T-623
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-052, RESEARCH-002]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N3). ADR-0021 section 8.4's N3 population is
+      "REAL structure, no block": synthetic OFDM with a non-standard cyclic prefix, DSSS, CSS and
+      16-QAM. Only CSS exists (`lora_ism_burst`). The other three have no generator, so the
+      population that tests `unsupported-structure` - the result ADR-0021 section 7A.5 says the
+      product should be PROUD of - is three-quarters empty.
+      BUILD the three scenes. Each must be genuinely structured (a real CP, a real spreading code,
+      a real constellation), not noise dressed up, because the whole assertion is that the engine
+      MEASURES the structure, names it, names its `missing_block`, and still never reports
+      `solved`. Hidden truth records the structure kind and its parameters and nothing the engine
+      is allowed to use.
+      WHY IT MATTERS BEYOND COUNTING. docs/22 section 6.3 G1 states the limit honestly: you cannot
+      sample the complement of the catalogue, so N3 is a HELD-OUT set of KNOWN unknowns, not a
+      sample of the unknown. That makes the three structures chosen here the entire empirical basis
+      for the open-set behaviour claim, which is a reason to build them well rather than a reason
+      to treat them as optional.
+      DoD: three scenarios registered, truth annotated, `just synth` producing each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Note T-033/T-040 already record that steady
+      OFDM reads NoiseLike to the floor tracker - the same fixture serves both.
+  - id: T-624
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: standalone analog-voice negatives (NBFM voice, AM voice) for the N2 population'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: [SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N2). ADR-0021 section 8.4's N2 is "energy
+      without symbols: CW carrier, analog FM voice, AM voice". `tone` gives CW; analog voice exists
+      ONLY as decoy content inside the trunking scenes, where it cannot be run as its own negative
+      population at a controlled SNR and fill.
+      BUILD standalone NBFM-voice and AM-voice scenes with a controllable SNR, ADC fill and burst
+      structure, carrying `hackriff:truth` of `{"kind": "none"}` in the sense that matters: real
+      energy, no symbol alphabet.
+      THE POINT OF THE POPULATION, which is not obvious from its size: T-614 found the parameter
+      estimator giving bursty ANALOGUE FM a confident `"2fsk"` label with a 2390 Hz deviation. That
+      is the N2 failure mode in the estimator; N2 is where the synthesis engine's version of it
+      would appear, and the assertion is `deepest_verdict <= demodulated`, 0 labels >= `framed`.
+      DoD: two scenarios registered with truth, `just synth` producing each at several SNRs.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Cheapest row in the corpus and it covers the
+      failure T-614 already observed in a neighbouring component.
+  - id: T-625
+    milestone: MAUTO
+    title: 'ADC fill (sigma in LSB) is the corpus stratification key and nothing stores it - record it as provenance and build the fill ladder'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [RESEARCH-001, RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 2 axis A3, 4.4 and 7.1), resting on T-547's measurement.
+      THE FINDING THIS IMPLEMENTS. T-547 measured that GAIN STATE MOVES THE EVIDENCE TAILS BY
+      NOTHING: a control applying 51 dB of gain with the ADC skipped reproduced the float
+      calibration table to 0.02 bits on every metric, with a bit-identical demod success rate. What
+      moves them is the ADC, and specifically the FILL: under-fill at sigma = 0.21 LSB costs 1.0-1.6
+      bits and swings demod success 19% -> 53%, while 28% CLIPPING costs <= 0.34 bits. So ADR-0015
+      section 2.2's phrase "across gain states" names the wrong variable, and any corpus, dashboard
+      or confirm-rate breakdown keyed on gain is keyed on a no-op.
+      WHAT TO DO.
+      1. Record ADC fill - the measured noise sigma in LSB - as a first-class provenance field
+         beside `quantisation_limited`, `overload` and the per-capture clip count, for both real
+         captures and `hkpy.synth` output. It is the key docs/22 stratifies on and the key
+         ADR-0022 section 8's decision-rate counter should break confirms down by. Nothing stores
+         it today.
+      2. Add the fill ladder as a runnable sweep over docs/22 section 2's six levels (0.21, 0.6,
+         2.0, 23, 43, 77 LSB / 28% clipped) - `adc_gain_db` already exists in
+         `hkpy.synth.impairments`, so this is a sweep and a recorded field, not new DSP.
+      3. Make the UNDER-FILL case detectable at runtime: sigma < 0.5 LSB is one cheap check and
+         T-547 found four of five real captures sit at 2.0-2.4 LSB, so the boundary is far from
+         normal operation but the failure is silent when crossed.
+      DoD: the field written and read end to end; the ladder reproducible; docs/22 section 4.4's
+      comparative report producible. NO threshold is set by this ticket - docs/22 section 4.4's
+      only bar is that an under-filled input is FLAGGED rather than silently answered.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). HIGH because every other MAUTO fixture ticket
+      stratifies on a key this ticket creates, and because a gain-keyed breakdown is actively
+      misleading rather than merely absent. Reads on T-547 (docs/21).
+  - id: T-626
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: the N5 mismatched-hypothesis negative population - the null the search actually faces'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-052, RESEARCH-002]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N5), and it is the one place where the corpus
+      spec ADDS to ADR-0021's four negative populations rather than detailing them.
+      THE ARGUMENT. ADR-0021 section 8.4's N1/N2/N3/N4 are noise, unmodulated energy,
+      out-of-catalogue structure and a real quiet capture. T-547 measured what the search's ACTUAL
+      null looks like and it is none of those: on pure noise the 6-bit calibrated tables over-claimed
+      <= 0.34 bits, but on a MISMATCHED-PARAMETER null - right block, wrong symbol rate - they
+      over-claimed up to 1.75 bits. FIVE TIMES WORSE, before any adjacent real emitter is in the
+      window. A negative suite built only from the four listed populations measures the engine
+      against the friendliest null available and would report a comfortable margin while the
+      operational null was five times fatter. ADR-0022's whole confidence rests on that margin
+      (section 10.1 A2).
+      BUILD the population as FIXTURES, not as engine configuration, because the blind rule forbids
+      steering the search: emitters whose true parameters lie OUTSIDE the proposal grid (a
+      non-decade symbol rate, a deviation ratio outside the operator's range) so the engine
+      necessarily evaluates wrong-parameter hypotheses in quantity; and scenes where a strong
+      adjacent emitter leaks into the analysed box.
+      ASSERTION: `unknown` with `reason: tied`, or a correct partial result - NEVER `solved` with
+      wrong parameters. Over-claim is counted here, and N5 is pooled into the false-label count and
+      into ADR-0022 A2's max-analytic-bits statistic.
+      DoD: the scenes generatable with truth, and the population wired into docs/22's counts.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 sections 4.3 and 9). HIGH because it is the population
+      most likely to move ADR-0022's margin, and a margin measured only on the easy nulls is the
+      failure ADR-0022 section 3.2 exists to prevent.
+  - id: T-627
+    milestone: MAUTO
+    title: 'MAUTO-TEST: the coverage manifest and the sealed hold-out - make the corpus sufficiency argument checkable instead of asserted'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [RESEARCH-002, SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 4.5, 6.2 and 6.4). A fixture corpus that is merely PRESENT
+      passes by covering what someone happened to think of, and its gaps are invisible from inside
+      it - the corpus cannot report an absence it does not represent. Two mechanisms make the gap
+      observable, and neither is a scene.
+      1. THE COVERAGE MANIFEST. The suite emits, every run, the DECLARED axis product from docs/22
+         section 2 with one mark per cell: `populated` (with n), `declared unreachable` (with the
+         reason and ticket, e.g. "OOK: no generator, T-621"), or `unmarked`. The third mark is the
+         point: a cell nobody thought about shows up as unmarked and is a FAILURE OF THE MANIFEST,
+         not of the engine. The M-12 review reads the manifest BEFORE any pass rate. Same
+         discipline as the canvas coverage map - an honest empty cell beats a silently absent one,
+         and `Coverage::Unobserved` is not `quiet`.
+      2. THE SEALED HOLD-OUT. 20% of every generated scene family, selected by a RULE
+         (`sha256(scene_id || seed) mod 5 == 0`) and not by judgement, is generated and truthed and
+         then not run until the M-12 review. If sealed-set performance differs materially from the
+         open set, the open set has been overfit - which is "the corpus covers only what someone
+         thought of", made measurable. The sealer cannot be gamed by the process that built the
+         corpus because it is a hash.
+      ALSO IN SCOPE: the expected-failure rows (docs/22 section 6.2 item 3) - at least one row per
+      family placed deliberately past the edge (6 dB at 112 symbols) and asserted to FAIL HONESTLY:
+      below `framed`, `reason: nothing-scored`, no over-claim. A corpus with no expected-failure
+      rows cannot distinguish a strong engine from a permissive threshold.
+      DoD: the manifest produced and diffable run to run; the hold-out rule implemented and its
+      selection reproducible; the expected-failure rows present and RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). This is the instrumentation that makes
+      docs/22 section 6's sufficiency argument checkable; without it the argument is prose.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

@@ -340,6 +340,8 @@ So the dependency is real but bounded: **T-547 does not gate this ADR, and T-547
 
 ## 10. How it is tested
 
+> **The fixture corpus A1/A2/A3 run on is specified in [docs/22](../22-mauto-acceptance-corpus.md)** (T-551, frozen 2026-09-21). One thing there is load-bearing for §10.1: a sample of `n` negative decisions resolves a tail no finer than `log2(n)` bits, so **A2's `18.0` is a function of `n`** — at n = 1600 it detects optimism above 7.4 bits (conservative against §3's 9.7-bit margin), and at a smaller n the same constant would read green with no power at all. docs/22 §3 freezes `n` alongside the constant. It amends nothing here.
+
 Protocol is ADR-0021 §8.4's, unchanged and non-negotiable: fixtures replay **through the mock SDR** behind the ordinary device interface, jobs start via `POST /api/analyze`, targets come from **blind detection** or an ad-hoc band and **never** from a truth frequency, truth is loaded only by the assert harness, and jobs are bounded by `max_evaluations` rather than by wall so the suite is deterministic.
 
 ### 10.1 Three assertions, because one of them has no power and one of them is passed by doing nothing
