@@ -772,6 +772,13 @@ def dispatch(claims, dry):
     #   2. no dispatch once QUEUE_PAUSE branches wait in merge-queue.txt - running workers
     #      finish and join the queue, the box empties, the gate takes the batch.
     # Nothing is suspended; a worker that has started always runs to its hand-back.
+    # HARD PAUSE (user, 2026-09-22, "have we fully paused new development yet?"): a file, not a
+    # condition. Every conditional hold above has a gap (the bulk marker cleared and four workers
+    # started inside a minute, 14:36); this one has none. Create $HACKRIFF_OPS/dispatch-paused
+    # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
+    if os.path.exists(f"{S}/dispatch-paused"):
+        log(f"HOLD: dispatch-paused file present ({len(running)} running)")
+        return False
     if gate_running():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
         return False
