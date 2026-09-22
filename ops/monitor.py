@@ -1093,6 +1093,37 @@ def agents(status_map):
         if key not in best or s["age_s"] < best[key]["age_s"]:
             s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, "")
             best[key] = s
+    # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
+    # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
+    # under the coordinator's. 2026-09-22: two workers were 6 min into real work and the panel
+    # showed none. Liveness comes from the runner's claim (pid) first, transcript age second.
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+    except Exception:
+        claims = {}
+    def _alive(pid):
+        try:
+            os.kill(int(pid), 0); return True
+        except Exception:
+            return False
+    for d in glob.glob(f"{PROJ}--claude-worktrees-*"):
+        m = re.match(r"t(\d+)$", d.rsplit("-worktrees-", 1)[1])
+        tid = f"T-{m.group(1)}" if m else None
+        if not tid or status_map.get(tid) in ("done", "cancelled"):
+            continue
+        files = [p for p in glob.glob(f"{d}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+        if not files:
+            continue
+        s = session_summary(max(files, key=os.path.getmtime), "agent")
+        if not s:
+            continue
+        c = claims.get(tid, {})
+        alive = c.get("state") == "running" and _alive(c.get("pid"))
+        if not alive and s["age_s"] > ACTIVE:
+            continue
+        s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, "")
+        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
 
