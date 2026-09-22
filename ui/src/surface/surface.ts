@@ -394,6 +394,12 @@ export class Surface {
 
   private lattices: LatticeSet;
 
+  /** The tier each pane drew from on the previous frame, by pane id — the memory [[tierFor]]'s
+   * hysteresis needs. Panes come and go, and a pane this map has never seen is `null`, which is
+   * the plain budget rule; nothing here has to be cleaned up when one disappears beyond the
+   * entry it leaves behind, which is one string and one enum. */
+  private lastTier = new Map<string, ViewTier>();
+
   constructor(
     readonly canvas: HTMLCanvasElement,
     lattice: Lattice | LatticeSet,
