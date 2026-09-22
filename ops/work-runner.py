@@ -75,6 +75,9 @@ CAP = int(os.environ.get("WORK_CAP", str(max(1, (CORES - GATE_RESERVE) // WORKER
 CPULIMIT = os.environ.get("WORK_CPULIMIT", f"{S}/bin/cpulimit")   # the HiGarfield fork; see launch()
 PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
 LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "40"))   # a tripwire only; the budget is the mechanism
+# Dispatch pauses once this many branches wait in merge-queue.txt (user, 2026-09-22): the
+# running workers drain, the box empties, and the merge gate runs the batch alone.
+QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 # Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
 # behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
@@ -197,6 +200,14 @@ def disk_free_gb():
 
 def gate_running():
     return os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
+
+
+def queue_depth():
+    """Branches waiting in merge-queue.txt (non-comment, non-blank lines)."""
+    try:
+        return sum(1 for l in open(f"{S}/merge-queue.txt") if l.strip() and not l.lstrip().startswith("#"))
+    except OSError:
+        return 0
 
 
 def main_safe_to_commit():
@@ -752,6 +763,19 @@ def dispatch(claims, dry):
     if load1 > LOAD_MAX:
         log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
         return False
+    # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
+    #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
+    #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
+    #   2. no dispatch once QUEUE_PAUSE branches wait in merge-queue.txt - running workers
+    #      finish and join the queue, the box empties, the gate takes the batch.
+    # Nothing is suspended; a worker that has started always runs to its hand-back.
+    if gate_running():
+        log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
+        return False
+    depth = queue_depth()
+    if depth >= QUEUE_PAUSE:
+        log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
+        return False
     free = min(free, PER_TICK)
     try:
         tasks = board()
@@ -863,7 +887,8 @@ def tick(dry):
         pass
     status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
-              "load_max": LOAD_MAX, "per_tick": PER_TICK}
+              "load_max": LOAD_MAX, "per_tick": PER_TICK,
+              "queue_depth": queue_depth(), "queue_pause": QUEUE_PAUSE}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 

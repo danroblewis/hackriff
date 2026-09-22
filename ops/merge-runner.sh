@@ -216,6 +216,37 @@ process(){
   return 0
 }
 
+# THE GATE RUNS ALONE (user, 2026-09-22): no gate starts while a worker is running. The work
+# runner stops dispatching once WORK_QUEUE_PAUSE branches wait here (and while a gate runs), so
+# the running workers finish and the box empties; this is the other half. The SDET review of
+# 2026-09-22 measured why: during shared gates, untouched crates of small unit tests ran 18-79x
+# dearer (hk-recipe 79x) - contention, not code. Workers are counted from the work runner's
+# claims (state=running), not from ps, so a wrapper process or a reviewer is not mistaken for
+# one. After WORKER_DRAIN_MAX seconds of waiting the gate runs anyway and says so: a stuck
+# worker must not hold every merge (the work runner releases stale claims after 4 h).
+WORKER_DRAIN_MAX=${WORKER_DRAIN_MAX:-2700}
+DRAIN_SINCE=""
+workers_running(){
+  python3 - "$S/work-claims.json" <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(sum(1 for c in d.values() if c.get("state") == "running"))
+except Exception:
+    print(0)
+PY
+}
+workers_drained(){ # 0 = no worker running (or waited long enough), 1 = wait
+  local n; n=$(workers_running)
+  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; return 0; fi
+  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $n worker(s) running - the gate runs alone, dispatch is paused, waiting for them to hand back"; }
+  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
+    log "WAIT over: $n worker(s) still running after $WORKER_DRAIN_MAX s - gating anyway (a stuck worker must not hold every merge)"
+    DRAIN_SINCE=""; return 0
+  fi
+  return 1
+}
+
 # preconditions for touching main; 0 = OK to proceed, 1 = wait
 main_ready(){
   cd "$REPO" || return 1
@@ -428,7 +459,7 @@ while true; do
   for qb in $queued; do
     case " $SEEN_QUEUED " in *" $qb "*) ;; *) SEEN_QUEUED="$SEEN_QUEUED $qb"; log "QUEUED $qb";; esac
   done
-  if [ -n "$queued" ] && main_ready; then
+  if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
