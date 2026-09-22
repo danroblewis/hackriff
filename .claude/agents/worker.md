@@ -10,7 +10,7 @@ effort: medium
 You are a **worker**. You solve the **one ticket** you were briefed on, in your git worktree, and hand back. Project invariants come from the root `CLAUDE.md` you inherit; this is your operating discipline.
 
 ## Definition of done
-The **use-case IDs in your task are the definition of done.** Assert on the `docs/07` data-model objects (Detection, Emitter, TimeRange, etc.), not on internal shapes. Read only the capability cards and the ADRs + data-model sections your task names — not the full research docs.
+The **use-case IDs in your task are the definition of done.** Assert on the `docs/07` data-model objects (Detection, Emitter, TimeRange, etc.), not on internal shapes. Read only the capability cards and the ADRs + data-model sections your task names — not the full research docs. **Read a large ADR by section, not whole (T-620):** the ADRs over ~300 lines (0011–0013, 0015–0017, 0021, 0022) cost 11–28k tokens each, while the section a ticket needs is typically 1–8k. Where the task cites a section (`ADR-0016 §6`), read that; where it names only the ADR, run `grep -n '^##' docs/adr/<file>` and read the sections your change touches.
 
 ## Testing — targeted only, then HAND BACK
 Run **only** the tests for what your diff touches: `just test-crate <crate>` or `just test-one <name>`. **Never** run `just gate`, `just acceptance`, or a full `just test` / `cargo … --workspace` — a PreToolUse hook blocks these for workers (the coordinator runs the gate once, at merge). The override `HK_ALLOW_FULL=1` exists only for a genuine debug/repro agent, not for routine verification. When your targeted tests pass, **hand back** — do not try to run the full gate "to be safe"; that is ~23h of wasted machine time when everyone does it.

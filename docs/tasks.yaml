@@ -20726,6 +20726,32 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      T-620 DONE (option c: briefing convention only; no ADR content touched, so no Fable/user sign-off needed).
+
+      MEASURED (bytes/4 as the token estimate, since no tokenizer is available offline; treat it as rough, about ±20%):
+      - Large ADRs, read whole: 0011 15k tok, 0012 27k, 0013 15k, 0015 28k, 0016 21k, 0017 19k, 0021 14k, 0022 11k.
+        The median top-level section is 450-920 tokens. The largest section is 3.7-7.6k (ADR-0016 §7 is the biggest at 7.6k).
+      - Live briefs: T-844 names "ADR-0016 section 6". §6 is 48 lines, about 1.2k tokens, against 21k for the whole ADR,
+        so about 17x (§6 + §10 amendment = 2.4k, about 9x). T-366 needs §7 (377 lines, 7.7k tokens), about 2.8x.
+        ADR-0016 §1 (the taxonomy-versioning rule the ticket uses as its example) is 18 lines, about 0.4k tokens, about 49x.
+      - Board: 447 ADR citations, and only 166 name a section. So at least 281 existing citations can't be narrowed by a
+        citation convention alone.
+
+      CHANGED:
+      - ops/work-runner.py brief template: new "READING ADRs" paragraph. Read a >300-line ADR by the section cited, or list
+        its sections with `grep -n '^##'` and read only the ones the change touches. This covers the ~281 existing
+        un-sectioned citations, because it acts at the reader, not the citation.
+      - .claude/agents/worker.md: the same rule for Agent-tool workers.
+      - .claude/roles/coordinator.md + .claude/skills/file-ticket/SKILL.md: task entries and briefs that name a >300-line
+        ADR also name the section ("ADR-0016 §6").
+      - CLAUDE.md: the "read the ADRs a task names" line now says "by section" for large ADRs.
+
+      TESTS: docs/ops text only. `python3 -m py_compile ops/work-runner.py` ok. No Rust touched, so no precheck crate.
+
+      NOT CHASED: option (b), line-anchored TOCs inside the ADRs, would edit ADR files and needs Fable + user sign-off.
+      Grep-listing the sections gives most of the same benefit without it. The ADR list in the rule is hard-coded as
+      "today"; it goes stale as ADRs grow, so it says "over ~300 lines (wc -l)" as the actual criterion.
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
