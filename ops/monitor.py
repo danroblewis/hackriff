@@ -398,15 +398,19 @@ function wireNodes(){
   setVB();
   gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); });
 }
-wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb)return;
-  const r=wrap.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
-  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), nh=nw*(vb.h/vb.w);
-  vb.x=(vb.x+fx*vb.w)-fx*nw; vb.y=(vb.y+fy*vb.h)-fy*nh; vb.w=nw; vb.h=nh; setVB();
+// Pointer -> SVG user units via the screen CTM. The old code scaled dy by vb.h/r.height, which is
+// only right when the graph is height-limited; a wide LR graph is width-limited under
+// preserveAspectRatio=meet, so a full-screen vertical drag moved the graph a fraction (2026-09-22).
+function svgPt(x,y){ const q=svgEl.createSVGPoint(); q.x=x; q.y=y; return q.matrixTransform(svgEl.getScreenCTM().inverse()); }
+wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb||!svgEl)return;
+  const p=svgPt(e.clientX,e.clientY);                       // zoom about the cursor: this point stays put
+  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), k=nw/vb.w;
+  vb.x=p.x-(p.x-vb.x)*k; vb.y=p.y-(p.y-vb.y)*k; vb.w=nw; vb.h=vb.h*k; setVB();
 },{passive:false});
 wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
 wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
   if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
-  if(dragMoved){ vb.x-=dx*(vb.w/r.width); vb.y-=dy*(vb.h/r.height); px=e.clientX; py=e.clientY; setVB(); } });
+  if(dragMoved){ const a=svgPt(px,py), b=svgPt(e.clientX,e.clientY); vb.x-=(b.x-a.x); vb.y-=(b.y-a.y); px=e.clientX; py=e.clientY; setVB(); } });
 function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); }
   down=false; dragMoved=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
 wrap.addEventListener('pointerup',endDrag);
@@ -474,6 +478,13 @@ def stage_status():
         if "SMOKE FAIL" in l: smoke = "fail"; break
     return {"alive": alive, "source": rd("hk-serve-source").replace("source: ", ""),
             "built": rd("hk-serve-built-commit"), "smoke": smoke, "lines": lines}
+
+def _ms_of(tid):
+    try:
+        return next((t.get("milestone", "") for t in load_tasks_yaml() if t.get("id") == tid), "")
+    except Exception:
+        return ""
+
 
 def merge_status():
     """Is the coordinator handling the merge queue right now? Distinguishes a
@@ -558,9 +569,15 @@ def merge_status():
         bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
         for b in bm.get("branches", "").split():
             if b not in {t["branch"] for t in testing}:
-                testing.append({"branch": b, "ticket": _tk(b), "bulk": True, "started": bm.get("started", "")})
+                testing.append({"branch": b, "ticket": _tk(b), "bulk": True, "started": bm.get("started", ""), "milestone": _ms_of(_tk(b))})
     except Exception:
         pass
+    if not gate and any(t.get("bulk") for t in testing):
+        gate = "bulk gate (%d branches)" % sum(1 for t in testing if t.get("bulk"))
+        try:
+            elapsed = time.time() - time.mktime(time.strptime(bm.get("started", ""), "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            pass
     tbranch = {t["branch"] for t in testing}
     ahead = []
     try:
@@ -573,7 +590,7 @@ def merge_status():
             except Exception:
                 n = 0
             if n > 0:
-                ahead.append({"branch": b, "ticket": _tk(b), "commits": n})
+                ahead.append({"branch": b, "ticket": _tk(b), "commits": n, "milestone": _ms_of(_tk(b))})
     except Exception:
         pass
     # What "ahead of main" MEANS depends on the work runner's claim: a worker still running (the
@@ -1089,6 +1106,7 @@ def ticket_detail(tid):
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
+    mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
     coord_path = f"{PROJ}/{COORD}.jsonl"
     if os.path.exists(coord_path):
         s = session_summary(coord_path, "coordinator")
@@ -1114,7 +1132,7 @@ def agents(status_map):
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
         key = tid or p
         if key not in best or s["age_s"] < best[key]["age_s"]:
-            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, "")
+            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
             best[key] = s
     # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
     # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
@@ -1144,7 +1162,7 @@ def agents(status_map):
         alive = c.get("state") == "running" and _alive(c.get("pid"))
         if not alive and s["age_s"] > ACTIVE:
             continue
-        s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, "")
+        s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
         s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
         best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
@@ -1244,6 +1262,7 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .bd{overflow:auto;min-height:0;flex:1}
 .counts{display:flex;gap:6px;flex-wrap:wrap}
 .chip{font:11px var(--mono);padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--mut)}
+.chip.ms{color:var(--lav);border-color:rgba(163,149,224,.35);padding:1px 6px}
 .chip.done{color:var(--teal)}.chip.in-progress{color:var(--amber)}.chip.blocked,.chip.paused{color:var(--coral)}.chip.todo{color:var(--lav)}
 .chip.ms{color:var(--dim);border-color:var(--line);letter-spacing:.04em}
 .qsec{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:10px 0 5px;display:flex;justify-content:space-between}
@@ -1367,7 +1386,7 @@ async function tick(){
   // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
   {
     const testing=mg.testing||[], ahead=mg.ahead||[];
-    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' · '+t.commits+' commit'+(t.commits===1?'':'s')+' ahead of main'):''}</span></div>`;
+    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> ${t.milestone?`<span class="chip ms">${esc(t.milestone)}</span> `:''}<span style="color:#5A6973">${esc(t.branch)}${t.commits?(' · '+t.commits+' commit'+(t.commits===1?'':'s')+' ahead of main'):''}</span></div>`;
     const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
     const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
     const mage=mg.merge_age_s||mg.elapsed_s||0;
@@ -1395,7 +1414,7 @@ async function tick(){
   const idleWhy = mg.state==='merging' ? 'no builder agents — coordinator merging ('+esc(mg.msg||'')+')'
     : mg.state==='gating' ? 'no builder agents — coordinator gating ('+esc(mg.gate)+' '+dur(mg.elapsed_s)+')'
     : 'no agents running — coordinator idle';
-  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
+  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.milestone?` <span class="chip ms">${esc(a.milestone)}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
   const W=d.worktrees||[]; $('#wtn').textContent=W.length+' trees';
   $('#wts').innerHTML=W.map(w=>{
     const badge = w.is_main ? (w.uncommitted?`<span class="badge chg">${w.uncommitted} uncommitted</span>`:`<span class="badge clean">clean</span>`)
@@ -1416,7 +1435,7 @@ async function tick(){
         : r.ahead>0?`<span class="qi ready">${r.ahead} commit${r.ahead===1?'':'s'} · queued</span>`
         : r.building?`<span class="qi building">building</span>`
         : `<span class="qi wait" title="in-progress but 0 commits vs main — likely merged already (board lag) or not started; reconcile will resolve">0 vs main — check board</span>`;
-      qh+=`<div class="qrow ${r.merging?'merging':''}"><b>${tk_(r.id)}</b>${tag}<span class=qt title="${esc(r.title)}">${esc(r.title)}</span></div>`;
+      qh+=`<div class="qrow ${r.merging?'merging':''}"><b>${tk_(r.id)}</b>${r.milestone?`<span class="chip ms">${esc(r.milestone)}</span>`:''}${tag}<span class=qt title="${esc(r.title)}">${esc(r.title)}</span></div>`;
     });
   } else qh+=`<div class=qrow><span class=qt>nothing waiting to merge</span></div>`;
   const up=q.upcoming||[];
