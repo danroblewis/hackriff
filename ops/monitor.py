@@ -345,8 +345,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     # "Opening" a milestone (click its node) shows EVERY ticket under it - done, todo, deferred,
     # cancelled excepted - regardless of scope and the status filters, until it is clicked again.
     opened = {x["id"] for x in tl if _nm_ms(x.get("milestone")) in set(open_ms) and x.get("status") != "cancelled"}
-    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep | opened
-    # ALWAYS keep the dependency chain leading to any anchor, whatever its status/filter
+    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
+    # ALWAYS keep the dependency chain leading to any NORMAL anchor, whatever its status/filter
     nodes = {}
     stack = list(anchors)
     seen = set()
@@ -358,6 +358,12 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         for dp in deps(x):
             if dp not in seen:
                 stack.append(dp)
+    # An OPENED milestone adds exactly its own tickets - no chain walk in either direction. The
+    # walk above turned "open M2" into the whole graph (2026-09-22); edges to tickets outside the
+    # drawn set are simply not drawn.
+    for tid in opened:
+        if tid not in nodes:
+            nodes[tid] = node_for(tid)
     cls = {"in-progress": "inprog", "todo": "todo", "blocked": "blocked", "paused": "blocked",
            "review": "review", "deferred": "deferred", "done": "done", "cancelled": "done"}
     def label(x):
