@@ -203,16 +203,16 @@ def runtime_states(smap):
             st[tid] = state; why[tid] = reason
     try:  # failures first: they win over every other state
         for l in open(os.path.join(SCRATCH, "merge-needs-attention.txt")):
-            f = l.split()
-            if len(f) >= 4 and f[3].startswith(("GATE_FAIL", "CONFLICT", "GAVE_UP", "UNCHANGED")):
-                put(_tk_of_branch(f[2]) if f[2].startswith("task-") else f[2], "failed", f[3])
+            f = l.split()   # date time branch ticket KIND detail...
+            if len(f) >= 5 and f[4].startswith(("GATE_FAIL", "CONFLICT", "GAVE_UP", "UNCHANGED")):
+                put(_tk_of_branch(f[2]) if f[3].startswith("task-") else f[3], "failed", f[4].split("(")[0])
     except Exception:
         pass
     try:
         for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
-            f = l.split()
-            if len(f) >= 4 and f[3] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
-                put(f[2], "failed", f[3])
+            f = l.split()   # date time branch ticket KIND detail...
+            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
+                put(f[3], "failed", f[4])
     except Exception:
         pass
     try:
@@ -233,8 +233,10 @@ def runtime_states(smap):
             put(_tk_of_branch(l.strip()), "queued", "merge queue")
     except Exception:
         pass
+    working = set()
     try:
         claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        working = {tid for tid, c in claims.items() if c.get("state") == "running" and c.get("kind") == "work"}
         for tid, c in claims.items():
             if c.get("state") == "running" and c.get("kind") == "review":
                 put(tid, "review", "reviewer stage")
@@ -245,9 +247,12 @@ def runtime_states(smap):
     except Exception:
         pass
     try:
-        for r in work_queue(smap, [], [])["upcoming"][:8]:
-            if r.get("ready"):
-                put(r["id"], "next", "up next")
+        shown = 0
+        for r in work_queue(smap, [], [])["upcoming"]:
+            if r.get("ready") and r["id"] not in working and r["id"] not in st:
+                put(r["id"], "next", "up next"); shown += 1
+            if shown >= 8:
+                break
     except Exception:
         pass
     return st, why
