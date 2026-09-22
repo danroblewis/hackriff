@@ -209,8 +209,10 @@ never append to any merge queue - the runner does that after you hand back.
 DONE MEANS: the acceptance below is met, targeted tests pass, `just precheck <crates you touched>` is clean, and
 everything is COMMITTED on {branch} with a message that starts "{t['id']}: " and ends with the line
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Update this ticket's entry in docs/tasks.yaml on your branch: append a `result: |` block (what changed, test
-results, anything you surfaced but correctly did not chase). Do NOT change its status - the runner does.
+Record your result on your branch with the task CLI, never by editing docs/tasks.yaml (a hook denies that):
+write your report to a file, then `just task result {t['id']} --from <that file>` (what changed, test results,
+anything you surfaced but correctly did not chase). `just task show {t['id']}` prints the ticket. Do NOT change its
+status - the runner does.
 
 TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate <crate>`, `cargo nextest run -p <crate>
 -E 'binary(<name>)'`, `just test-ui`. NEVER `just gate`, `just acceptance` or the full suite (a hook blocks
