@@ -10511,6 +10511,305 @@ fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
 /// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
 const FINE_STEPS: u64 = 3334;
 const COARSE_STEPS: u64 = 418;
+/// T-533 — **the measurement plane on the wire, and the transfer coding under it.**
+///
+/// A live tile's body was 1 878 289 B, of which `grid.max_db` was 1 197 118 B: JSON decimal text,
+/// seventeen significant digits a cell, for values whose destination is an R16F texture. Two
+/// levers, asserted here because `docs/api.md` now promises both:
+///
+///  1. **`?planes=f16`** spells that one plane as base64 little-endian binary16. This checks the
+///     two spellings are the SAME grid — cell for cell, absence for absence — because that is what
+///     makes it a representation and not a second answer; that the wire STATES its type, byte order,
+///     transfer and absent-value rather than leaving them to be inferred; and that an encoding this
+///     server does not serve is a `400` naming it, never a quiet fall back to the other one.
+///  2. **`Accept-Encoding: gzip`** compresses the response. The decompressed bytes must be
+///     byte-identical to the plain answer: a transfer coding may never change what was said.
+#[test]
+fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let tile = |fi: u64, ti: u64, extra: &str| {
+        format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}{extra}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, ""));
+    assert_eq!(st, 200, "{probe}");
+    // Even the tile the coverage map answers on its own states its encoding: a reader that has to
+    // look at which fields are present to learn the spelling reads the wrong one when a field is
+    // legitimately missing.
+    assert_eq!(
+        probe["grid"]["encoding"]["planes"],
+        json!("json"),
+        "{probe}"
+    );
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    let t_now = || (unix_now() / (t_cell * N as f64)) as u64;
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &tile(f_index, t_now(), "")).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|c| c > 0)
+        },
+    );
+
+    // **Two reads of one grid, and it has to BE one grid.** A tile at the live edge grows between
+    // two HTTP requests — measured: a cell that was `null` in the first read carried a level in
+    // the second, milliseconds later — and a comparison across that is a comparison of two
+    // different tiles. So the address used here is **two tile-heights behind the edge**, whose
+    // extent is entirely in the past and whose rows are folded, and the pair is re-read until both
+    // spellings report the same `observed_cells`. That equality is the premise of everything below
+    // it, so it is checked rather than assumed.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (settled, plain, packed) = loop {
+        let ti = t_now().saturating_sub(2);
+        let (st_a, a) = get(addr, &tile(f_index, ti, "&planes=json"));
+        let (st_b, b) = get(addr, &tile(f_index, ti, "&planes=f16"));
+        let cells = |v: &Value| v["grid"]["observed_cells"].as_u64().unwrap_or(0);
+        if st_a == 200 && st_b == 200 && cells(&a) > 0 && cells(&a) == cells(&b) {
+            break (ti, a, b);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never got one settled grid in both spellings: {st_a}/{st_b}, \
+             observed {}/{}",
+            cells(&a),
+            cells(&b)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    assert_eq!(plain["grid"]["encoding"]["planes"], json!("json"));
+    assert_eq!(packed["grid"]["encoding"]["planes"], json!("f16"));
+    // Absent, not empty, in each direction: an empty array would read as a grid of no cells.
+    assert!(plain["grid"]["planes"].is_null(), "{}", plain["grid"]);
+    assert!(packed["grid"]["max_db"].is_null(), "{}", packed["grid"]);
+    // The three planes JSON spells more cheaply than binary16 does are untouched by `f16` — the
+    // mode packs the plane that wins and no other (measured: `frames` is 131 073 B as text against
+    // 349 528 B as base64 `u32`).
+    for k in ["occupancy_max", "coverage", "frames"] {
+        assert!(packed["grid"][k].is_array(), "{k}: {}", packed["grid"]);
+    }
+
+    let plane = &packed["grid"]["planes"]["max_db"];
+    assert_eq!(plane["type"], json!("f16"), "{plane}");
+    assert_eq!(plane["byte_order"], json!("little-endian"), "{plane}");
+    assert_eq!(plane["transfer"], json!("base64"), "{plane}");
+    assert_eq!(plane["absent"], json!("nan"), "{plane}");
+    assert_eq!(plane["cells"], json!(N * N), "{plane}");
+    assert_eq!(plane["bytes"], json!(N * N * 2), "{plane}");
+    assert_eq!(
+        plane["scale"], plain["grid"]["semantics"]["series"]["max_db"]["scale"],
+        "the packed plane must name the SAME scale the JSON one is served in"
+    );
+
+    // The values, cell for cell. Equal to within binary16's own precision — which is the precision
+    // the R16F texture keeps either way — and `null` matched by a non-finite, never by a zero.
+    let cells = plain["grid"]["max_db"].as_array().unwrap();
+    let bytes = b64_decode(plane["data"].as_str().unwrap());
+    assert_eq!(bytes.len(), cells.len() * 2, "{plane}");
+    let mut observed = 0usize;
+    for (i, cell) in cells.iter().enumerate() {
+        let bits = u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+        let v = f16_to_f32(bits);
+        match cell.as_f64() {
+            None => assert!(!v.is_finite(), "cell {i}: null in JSON, {v} packed"),
+            Some(want) => {
+                assert!(
+                    (v as f64 - want).abs() < 0.07,
+                    "cell {i}: {want} dB in JSON, {v} dB packed"
+                );
+                observed += 1;
+            }
+        }
+    }
+    assert!(
+        observed > 0,
+        "no cell carried a level, so the comparison above would pass on two empty grids"
+    );
+    // Smaller, stated as a value: the plane is two bytes a cell however loud the band is, which is
+    // the property decimal text does not have.
+    let as_text = plain["grid"]["max_db"].to_string().len();
+    let as_plane = plane["data"].as_str().unwrap().len();
+    assert_eq!(as_plane, (cells.len() * 2).div_ceil(3) * 4, "{plane}");
+    assert!(as_plane * 2 < as_text, "{as_plane} B packed vs {as_text} B");
+
+    // An encoding this server does not serve: refused, and the refusal names it and the choices.
+    let (st, e) = get(addr, &tile(f_index, settled, "&planes=f8"));
+    assert_eq!(st, 400, "{e}");
+    let msg = e["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("f8") && msg.contains("json, f16"), "{msg}");
+
+    // ---- the transfer coding ------------------------------------------------------------------
+    let path = tile(f_index, settled, "&planes=f16");
+    let (st, _, plainb) = get_encoded(addr, &path, None);
+    assert_eq!(st, 200);
+    let (st, enc, gz) = get_encoded(addr, &path, Some("gzip"));
+    assert_eq!(st, 200);
+    assert_eq!(
+        enc.as_deref(),
+        Some("gzip"),
+        "the route ignored accept-encoding"
+    );
+    assert!(
+        gz.len() * 2 < plainb.len(),
+        "gzip returned {} B against {} B — measured on a live tile it is about ninefold",
+        gz.len(),
+        plainb.len()
+    );
+    // **A transfer coding may not change what was said.** Same JSON, byte for byte after inflating.
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(&gz[..])
+        .read_to_end(&mut inflated)
+        .expect("the body must be a gzip member");
+    let (a, b): (Value, Value) = (
+        serde_json::from_slice(&inflated).unwrap(),
+        serde_json::from_slice(&plainb).unwrap(),
+    );
+    assert_eq!(a["grid"]["planes"], b["grid"]["planes"]);
+    assert_eq!(a["key"], b["key"]);
+    // A caller that says it cannot read gzip is not sent gzip.
+    let (_, enc, _) = get_encoded(addr, &path, Some("gzip;q=0"));
+    assert_eq!(enc, None, "`gzip;q=0` is a refusal and must be honoured");
+    // And a short body is not worth a gzip member's own header and trailer. The premise — that
+    // this route's answer IS short — is read from the uncompressed answer rather than assumed, so
+    // the day it grows past the threshold this reads as the premise changing and not as the rule
+    // breaking.
+    let (_, _, uncompressed) = get_encoded(addr, "/api/status", None);
+    let (_, enc, _) = get_encoded(addr, "/api/status", Some("gzip"));
+    assert_eq!(
+        enc,
+        (uncompressed.len() >= 4096).then(|| "gzip".to_owned()),
+        "a {} B body was {}compressed",
+        uncompressed.len(),
+        if enc.is_some() { "" } else { "not " }
+    );
+
+    // ---- the four spellings, RE-MEASURED on the tile size the canvas actually renders ----------
+    //
+    // T-700 relands this onto a `tiles.rs` that T-571 (live incremental maintenance) and T-595
+    // (`excluded`) rewrote, so the 2026-09-20 figures are quoted nowhere: the four bodies are read
+    // back to back HERE, from ONE address, and the ordering between them is asserted. Byte counts,
+    // never wall clock (the ticket's own rule) — `cost.build_ms` is printed because the honest
+    // half of this result is that it does NOT move, and a future read of this log should see that.
+    let big = format!(
+        "/api/tiles?level_f=0&level_t=0&f_index={}&t_index={}&cells=256",
+        (STATION_HZ / (f_cell * N as f64 * 8.0)).floor() as u64,
+        (settled as f64 / 8.0) as u64,
+    );
+    let read = |extra: &str, ae: Option<&str>| {
+        let (st, enc, body) = get_encoded(addr, &format!("{big}{extra}"), ae);
+        assert_eq!(st, 200, "{}{extra}", big);
+        (enc, body.len())
+    };
+    let (_, json_b) = read("&planes=json", None);
+    let (gz_enc, json_gz_b) = read("&planes=json", Some("gzip"));
+    let (_, f16_b) = read("&planes=f16", None);
+    let (f16_gz_enc, f16_gz_b) = read("&planes=f16", Some("gzip"));
+    let build_ms = |extra: &str| {
+        get(addr, &format!("{big}{extra}")).1["cost"]["build_ms"]
+            .as_f64()
+            .unwrap_or(f64::NAN)
+    };
+    eprintln!(
+        "T-700 / T-533 re-measured (256x256 tile, one address, four spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B\n           f16 + gzip        {f16_gz_b} B   build_ms {:.1}   -> {:.1}x",
+        build_ms("&planes=json"),
+        build_ms("&planes=f16"),
+        json_b as f64 / f16_gz_b as f64,
+    );
+    assert_eq!(gz_enc.as_deref(), Some("gzip"));
+    assert_eq!(f16_gz_enc.as_deref(), Some("gzip"));
+    // **Both levers pay and neither subsumes the other.** JSON decimal text is high-entropy by
+    // construction, so compressing it is not the same as not sending it: the packed body must beat
+    // the JSON one, the gzipped packed body must beat the gzipped JSON one, and the two together
+    // must beat either alone. Ordering, not magic numbers — the magnitudes move with the fixture.
+    assert!(f16_b < json_b, "{f16_b} B packed vs {json_b} B as JSON");
+    assert!(
+        json_gz_b < json_b && f16_gz_b < f16_b,
+        "gzip did not shrink"
+    );
+    assert!(
+        f16_gz_b < json_gz_b && f16_gz_b < f16_b,
+        "packed+gzipped {f16_gz_b} B must beat gzip alone ({json_gz_b} B) and f16 alone ({f16_b} B)"
+    );
+    // The headline claim, asserted rather than quoted: an order of magnitude off the wire.
+    assert!(
+        f16_gz_b * 8 < json_b,
+        "the two levers together were {}x, not the order of magnitude this ticket exists for \
+         ({json_b} B -> {f16_gz_b} B)",
+        json_b / f16_gz_b.max(1)
+    );
+
+    stop_server(serving);
+}
+
+/// A GET with an explicit `Accept-Encoding`: `(status, Content-Encoding, raw body bytes)`.
+///
+/// Raw, because the point is what came off the socket — a helper that transparently inflated would
+/// make the assertion about itself.
+fn get_encoded(
+    addr: SocketAddr,
+    path: &str,
+    accept: Option<&str>,
+) -> (u16, Option<String>, Vec<u8>) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let ae = accept.map_or(String::new(), |a| format!("Accept-Encoding: {a}\r\n"));
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n{ae}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status = head[9..12].parse().unwrap();
+    let enc = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Encoding: "))
+        .map(str::to_owned);
+    (status, enc, raw[split + 4..].to_vec())
+}
+
+/// Standard base64 decode, for reading a packed plane back (T-533).
+fn b64_decode(s: &str) -> Vec<u8> {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let val = |c: u8| A.iter().position(|&a| a == c).expect("base64 alphabet") as u32;
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    for c in b.chunks(4) {
+        let pad = c.iter().filter(|&&x| x == b'=').count();
+        let n = (val(c[0]) << 18)
+            | (val(c[1]) << 12)
+            | (if pad < 2 { val(c[2]) } else { 0 } << 6)
+            | (if pad < 1 { val(c[3]) } else { 0 });
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    out
+}
+
+/// One IEEE 754 binary16, as the sixteen bits the wire sent (T-533).
+fn f16_to_f32(b: u16) -> f32 {
+    let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+    let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+    match e {
+        0 => s * m * 2f32.powi(-24),
+        31 => f32::NAN,
+        _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+    }
+}
 
 /// **T-511 — the device selector on the wire, against a real server.**
 ///
