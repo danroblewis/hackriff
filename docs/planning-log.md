@@ -5542,7 +5542,8 @@ retries existed for exactly two timing tests; the other five known-timing tests 
 3. **A fixed resource budget, not heuristics** (user's call, replacing an earlier suspend/resume
    mechanism that terminated and resumed workers — dumb, and only needed because nothing bounded
    them). 28 cores: the gate reserved 14; each worker bounded to ~3 by limits its whole process tree
-   inherits — `CARGO_BUILD_JOBS=2`, `NEXTEST_TEST_THREADS=2`, and a permanent `background` QoS clamp
+   inherits — `cpulimit -l 300 -i` as the hard ceiling (SIGSTOP/SIGCONT duty-cycling, children
+   included), `CARGO_BUILD_JOBS=2`, `NEXTEST_TEST_THREADS=2`, and a permanent `background` QoS clamp
    (E-cores only) — so the worker count is a known 4 and the gate never competes.
 4. *(folded into 3)*
 5. **One retry** for the five named load-sensitive tests in `.config/nextest.toml`, each with its
