@@ -57,10 +57,39 @@ MERGE_QUEUE = f"{S}/merge-queue.txt"
 BULKMARK = f"{S}/bulk-in-progress"
 LANDED = f"{S}/landed.jsonl"
 
-CAP = int(os.environ.get("WORK_CAP", "4"))              # Rust builders incl. a running gate
+# Agents are cheap while they think (~1% CPU each, measured 2026-09-22); builds are what saturate
+# the 28 cores. So the ceiling is on AGENTS (8), and admission per tick is dynamic: the 1-minute
+# load average must be under WORK_LOAD_MAX, disk over the floor, and a running gate counts as one
+# builder. At most WORK_PER_TICK launches per tick so the load ramps instead of bursting.
+CAP = int(os.environ.get("WORK_CAP", "8"))
+LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "20"))
+PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
+# Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
+# behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
+# re-merge (the merge runner skips the conflicting branch), so allow a few per group.
+GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
+# THE GATE COMES FIRST. 2026-09-22 08:06-09:55: three docs-only branches (t800, t763, t299) each failed
+# an individual gate on a different load-sensitive test while 6-8 workers built beside it at load ~17,
+# and every failure costs a 50-minute isolation pass. So while a gate runs, admission drops to
+# GATE_CAP workers and GATE_LOAD_MAX load; the original CLAUDE.md rule (4 builders INCLUDING the
+# gate) was this, and raising the cap to 8 without it was the mistake.
+GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "5"))
+GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "18"))   # the gate alone runs this box at 8-13; workers are on E-cores meanwhile
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
+REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
+# A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
+# with the failure, so the agent that wrote the code fixes it with its context intact, instead of
+# a fresh agent (or the coordinator) rediscovering everything. Capped like the merge runner's own
+# attempts; the coordinator hears about it only when the cap is spent.
+FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
+# A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
+# todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
+# and review/gate escalations are NOT released: those need a person.
+RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
+MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
+MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
 MODEL_ALIAS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "claude-fable-5-1"}
 EFFORTS = ("low", "medium", "high")
@@ -79,6 +108,13 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Poke the coordinator's pane the way the merge runner does; the file is the record, this is the wake-up.
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
+            subprocess.run(["tmux", "send-keys", "-t", "dev", "-l", f"WORK-RUNNER: {ticket} {kind} - {detail[:160]} See {NEEDS}."], capture_output=True)
+            subprocess.run(["tmux", "send-keys", "-t", "dev", "Enter"], capture_output=True)
+    except Exception:
+        pass
 
 
 def sh(args, cwd=REPO, timeout=120, check=False):
@@ -145,8 +181,14 @@ def alive(pid):
 
 # ---------- environment guards ----------
 def disk_free_gb():
-    st = os.statvfs(REPO)
-    return st.f_bavail * st.f_frsize / 1e9
+    """`df`'s number, not statvfs: on APFS they differ by the purgeable space (12 GB on 2026-09-22),
+    and CLAUDE.md's floor is stated in df terms ("only df counts")."""
+    try:
+        out = subprocess.run(["df", "-k", REPO], capture_output=True, text=True, timeout=10).stdout.splitlines()
+        return int(out[-1].split()[3]) * 1024 / 1e9
+    except Exception:
+        st = os.statvfs(REPO)
+        return st.f_bavail * st.f_frsize / 1e9
 
 
 def gate_running():
@@ -192,8 +234,10 @@ never append to any merge queue - the runner does that after you hand back.
 DONE MEANS: the acceptance below is met, targeted tests pass, `just precheck <crates you touched>` is clean, and
 everything is COMMITTED on {branch} with a message that starts "{t['id']}: " and ends with the line
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Update this ticket's entry in docs/tasks.yaml on your branch: append a `result: |` block (what changed, test
-results, anything you surfaced but correctly did not chase). Do NOT change its status - the runner does.
+Record your result on your branch with the task CLI, never by editing docs/tasks.yaml (a hook denies that):
+write your report to a file, then `just task result {t['id']} --from <that file>` (what changed, test results,
+anything you surfaced but correctly did not chase). `just task show {t['id']}` prints the ticket. Do NOT change its
+status - the runner does.
 
 TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate <crate>`, `cargo nextest run -p <crate>
 -E 'binary(<name>)'`, `just test-ui`. NEVER `just gate`, `just acceptance` or the full suite (a hook blocks
@@ -219,11 +263,12 @@ def launch(t, dry):
         log(f"DRY-RUN would dispatch {tid} [{model}/{effort}] group={t.get('parallel_group')} -> {branch}")
         return None
     if sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
-        attention(tid, branch, "BRANCH_EXISTS", "a branch already exists; someone worked this by hand - reconcile it")
-        return None
-    sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
-    if os.path.isdir(f"{REPO}/target") and not os.path.exists(f"{wt}/target"):
-        subprocess.run(["cp", "-c", "-R", "-p", f"{REPO}/target", f"{wt}/target"], capture_output=True)
+        if os.path.isdir(wt):
+            log(f"REUSE {tid}: branch and worktree exist with no commits - a dispatch that never ran")
+        else:
+            sh(["git", "worktree", "add", wt, branch], check=True)
+    else:
+        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
@@ -232,13 +277,22 @@ def launch(t, dry):
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     if effort in EFFORTS:
         cmd += ["--effort", effort]
+    # The build-target clone (`cp -c`, an APFS clone) walks main's whole target tree and takes
+    # minutes; done inline it blocked every tick for that long (2026-09-22: two dispatches took
+    # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
+    # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
+    # it alive through both phases, and the tick returns at once. The brief is read from its file.
+    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env, start_new_session=True, text=True)
-    p.stdin.write(brief)
-    p.stdin.close()
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt}")
+    # QoS: a worker runs at `utility` + nice 10 from birth, below the gate's default tier for CPU and
+    # I/O. While a gate runs, apply_gate_qos() drops every worker to `background`, which on Apple
+    # Silicon means the efficiency cores only - the 20 P-cores of this M3 Ultra belong to the gate.
+    p = subprocess.Popen(["taskpolicy", "-c", "utility", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+                         stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; utility QoS)")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
@@ -286,12 +340,18 @@ def record_done(claim, outcome, res):
                             "model": claim.get("model"), "outcome": outcome}) + "\n")
 
 
-def enqueue(branch):
+def enqueue(branch, wt=None):
     lines = [l.strip() for l in open(MERGE_QUEUE)] if os.path.exists(MERGE_QUEUE) else []
     if branch not in lines:
         with open(MERGE_QUEUE, "a") as f:
             f.write(branch + "\n")
     log(f"QUEUED {branch} for merge")
+    # A worker's build output is real disk (not a clone) - ~4-8 GB each, and twenty of them emptied
+    # a 45 GB margin in 20 minutes (2026-09-22). Once the branch is queued the target is dead weight;
+    # the source tree stays so a gate-failure fix can resume and rebuild (sccache makes that cheap).
+    if wt and os.path.isdir(os.path.join(wt, "target")):
+        shutil.rmtree(os.path.join(wt, "target"), ignore_errors=True)
+        log(f"RECLAIM {wt}/target (branch queued)")
 
 
 def reap(claims, dry):
@@ -322,15 +382,22 @@ def reap(claims, dry):
             if "VERDICT: PASS" in text:
                 c["state"] = "queued"
                 record_done(c, "review-pass", res)
-                enqueue(c["branch"])
+                enqueue(c["branch"], c.get("wt"))
             else:
-                c["state"] = "review-failed"
                 fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
-                attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
                 record_done(c, "review-fail", res)
+                # A review FAIL names a concrete defect; the worker that wrote the code fixes it with
+                # its context intact, same path as a gate failure, same attempt cap.
+                if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)")
+                else:
+                    c["state"] = "review-failed"
+                    attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
             continue
-        res = result_of(f"{d}/out.json")
+        res = result_of(c.get("out") or f"{d}/out.json")
         text = str(res.get("result", ""))
+        if res.get("session_id"):
+            c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
         if res.get("is_error"):
@@ -343,9 +410,12 @@ def reap(claims, dry):
             attention(tid, c["branch"], "BLOCKED", why[18:220])
             record_done(c, "blocked", res)
         elif dirty:
-            c["state"] = "uncommitted"
-            attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
             record_done(c, "uncommitted", res)
+            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
+                claims[tid] = launch_fix(dict(c, kind="work"), f"UNCOMMITTED {len(dirty)} modified files left uncommitted in {c['wt']} (ahead={ahead}): finish and COMMIT them if they are the ticket's work and tests pass, otherwise `git checkout -- .` and hand back BLOCKED with why")
+            else:
+                c["state"] = "uncommitted"
+                attention(tid, c["branch"], "UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
         elif ahead == 0:
             c["state"] = "no-work"
             attention(tid, c["branch"], "NO_WORK", f"worker exited after {age_min:.0f} min with no commits; see {d}/out.json")
@@ -356,7 +426,92 @@ def reap(claims, dry):
         else:
             c["state"] = "queued"
             record_done(c, "done", res)
-            enqueue(c["branch"])
+            enqueue(c["branch"], c.get("wt"))
+    changed |= handle_gate_failures(claims, dry)
+    return changed
+
+
+def launch_fix(c, fail_line):
+    tid, branch, wt = c["ticket"], c["branch"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
+    n = c.get("fix_attempts", 0) + 1
+    kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
+    prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
+{fail_line}
+If this is a review finding, fix exactly what it names (the reviewer's full text is in the file it cites), then
+re-run the targeted tests and hand back; the branch is reviewed again before it is queued.
+The full gate log is {MERGE_LOG}; find your run with `grep -n 'GATE FAILED {branch}\\|FAIL \\[\\|FAILED just\\|error\\[' {MERGE_LOG} | tail -40`.
+TRIAGE FIRST, in your worktree {wt}: merge main in (`git merge main`), then run the failing test ALONE
+(`cargo nextest run -p <crate> -E 'test(/<name>/)'` or `just test-ui`). Fails alone = a real bug: fix it.
+Passes alone but failed in the gate = load-sensitive: make it deterministic (never a retry, never a skip).
+If the failure is in code you did not touch and is a known bug on main, say so precisely and hand back BLOCKED.
+Then: targeted tests, `just precheck <crates>`, commit on {branch}, `just task note {tid} --text "<what the gate found and what you changed>"`.
+Same rules as before: never touch the main checkout, never the full gate, never edit docs/tasks.yaml by hand.
+Your final message must end with exactly one line: HANDBACK: DONE  or  HANDBACK: BLOCKED <why>
+"""
+    cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
+           "--output-format", "json", "--max-budget-usd", BUDGET_USD]
+    out_path = f"{d}/fix{n}.json"
+    out = open(out_path, "w")
+    err = open(f"{d}/run.log", "a")
+    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S), start_new_session=True, text=True)
+    p.stdin.write(prompt)
+    p.stdin.close()
+    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid}")
+    return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+
+
+def release_stale_claims(claims, tasks_by_id):
+    changed = False
+    for tid, c in list(claims.items()):
+        if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+            if tasks_by_id.get(tid, {}).get("status") == "todo":
+                log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
+                del claims[tid]; changed = True
+    return changed
+
+
+def handle_gate_failures(claims, dry):
+    """Merge-runner GATE_FAIL lines for branches this runner queued -> resume the worker to fix.
+    Also: claims left in review-failed (from before the review-fix path existed) get the same path."""
+    for tid, c in list(claims.items()):
+        if c.get("state") == "review-failed" and c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+            try:
+                text = str(result_of(f"{WORKDIR}/{tid}/review.json").get("result", ""))
+                fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "VERDICT: FAIL (see review.json)")
+            except Exception:
+                fail = "VERDICT: FAIL (see review.json)"
+            if not dry:
+                claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {WORKDIR}/{tid}/review.json)")
+    try:
+        lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l]
+    except FileNotFoundError:
+        return False
+    by_branch = {c["branch"]: tid for tid, c in claims.items() if c.get("branch")}
+    changed = False
+    for line in lines:
+        parts = line.split()
+        branch = parts[2] if len(parts) > 2 else ""
+        tid = by_branch.get(branch)
+        if not tid:
+            continue
+        c = claims[tid]
+        if line in c.get("gate_fails_seen", []) or c.get("state") != "queued":
+            continue
+        c.setdefault("gate_fails_seen", []).append(line)
+        changed = True
+        if dry:
+            log(f"DRY-RUN would resume {tid} to fix: {line}")
+            continue
+        if not c.get("session_id") or not os.path.isdir(c.get("wt", "")):
+            c["state"] = "gate-failed"
+            attention(tid, branch, "GATE_FAIL_NO_SESSION", "no worker session or worktree to resume; needs a person")
+        elif c.get("fix_attempts", 0) >= FIX_ATTEMPTS:
+            c["state"] = "gate-failed"
+            attention(tid, branch, "GATE_FAIL_ESCALATE", f"{FIX_ATTEMPTS} fix attempts spent; needs a person")
+        else:
+            claims[tid] = launch_fix(c, line)
     return changed
 
 
@@ -420,7 +575,11 @@ def sync_board(claims, dry):
 def candidates(tasks, claims):
     by_id = {t["id"]: t for t in tasks}
     running = [c for c in claims.values() if c.get("state") == "running"]
-    busy_groups = {c.get("group") for c in running if c.get("group")}
+    per_group = {}
+    for c in running:
+        if c.get("group"):
+            per_group[c["group"]] = per_group.get(c["group"], 0) + 1
+    busy_groups = {g for g, n in per_group.items() if n >= GROUP_CAP}
     out = []
     for t in tasks:
         tid = t["id"]
@@ -433,7 +592,14 @@ def candidates(tasks, claims):
         if t.get("parallel_group") in busy_groups:
             continue
         if sh(["git", "rev-parse", "--verify", "-q", branch_of(tid)]).strip():
-            continue  # someone is on it by hand
+            # A branch with commits, or a dirty worktree, is someone's work: leave it. A branch with
+            # NO commits and a clean (or absent) worktree is a dispatch that never ran - this runner
+            # killed mid-tick on 2026-09-22 left exactly that - and launch() reuses it.
+            ahead = int(sh(["git", "rev-list", "--count", f"main..{branch_of(tid)}"]).strip() or 0)
+            wt = worktree_of(tid)
+            dirty = os.path.isdir(wt) and any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+            if ahead or dirty:
+                continue
         out.append(t)
     out.sort(key=lambda t: (not is_user(t), PRI.get(t.get("priority", "normal"), 2), ticket_num(t["id"])))
     return out
@@ -441,25 +607,32 @@ def candidates(tasks, claims):
 
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
-    cap = CAP - (1 if gate_running() else 0)
+    gate = gate_running()
+    cap = min(CAP - 1, GATE_CAP) if gate else CAP
     free = cap - len(running)
     if free <= 0:
         return False
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
         return False
+    load1 = os.getloadavg()[0]
+    lmax = GATE_LOAD_MAX if gate else LOAD_MAX
+    if load1 > lmax:
+        log(f"HOLD: load {load1:.0f} > {lmax:.0f} ({len(running)} running{', gate running' if gate else ''})")
+        return False
+    free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
         return False
     changed = False
-    taken = set()   # one launch per parallel_group per tick, on top of the running-claim check
+    taken = {}   # launches per parallel_group this tick, on top of the running-claim count
     for t in candidates(tasks, claims):
         if free <= 0:
             break
         g = t.get("parallel_group")
-        if g and g in taken:
+        if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue
         c = launch(t, dry)
         if c or dry:
@@ -467,24 +640,118 @@ def dispatch(claims, dry):
                 claims[t["id"]] = dict(c, state="running")
                 changed = True
             if g:
-                taken.add(g)
+                taken[g] = taken.get(g, 0) + 1
             free -= 1
     return changed
+
+
+def reap_worktrees(claims, dry):
+    """Disk is the binding resource (29 GB free on 2026-09-22, ~10 GB per built worktree), and the
+    merge runner removes a worktree only when IT merges the branch. Orphans - killed sessions,
+    no-work dispatches, merged-by-hand branches - stay forever. Remove a worktree when its branch
+    is MERGED into main, or when it is clean with NO commits ahead and no live claim; never one
+    that is dirty, has unmerged commits, belongs to a running claim, or is younger than
+    REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
+    if os.path.exists(BULKMARK):
+        return   # main is provisional during a bulk gate: "merged" cannot be trusted
+    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    out = sh(["git", "worktree", "list", "--porcelain"])
+    paths = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ") and "/.claude/worktrees/" in l]
+    for wt in paths:
+        if wt in live or not os.path.isdir(wt):
+            continue
+        if time.time() - os.path.getmtime(wt) < REAP_AFTER_MIN * 60:
+            continue
+        branch = sh(["git", "branch", "--show-current"], cwd=wt).strip()
+        if not branch:
+            continue
+        dirty = any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+        if dirty:
+            continue
+        ahead = int(sh(["git", "rev-list", "--count", f"main..{branch}"]).strip() or 0)
+        if ahead:
+            continue   # unmerged commits, whatever main says: 2026-09-22 a provisional bulk merge on main
+                       # read as "merged" and this reaped a worktree holding 4 newer commits
+        merged = bool(sh(["git", "log", "main", "--merges", "--format=%H", "--fixed-strings", "--grep", branch, "-n", "1"]).strip())
+        if dry:
+            log(f"DRY-RUN would reap worktree {wt} ({branch}: {'merged' if merged else 'no commits'})")
+            continue
+        r = subprocess.run(["git", "worktree", "remove", wt], cwd=REPO, capture_output=True, text=True)
+        log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+
+
+def apply_gate_qos(claims):
+    """The macOS stand-in for a cgroup: while a gate runs, every worker process group goes to
+    background QoS (E-cores only, throttled I/O); when it ends they come back to utility. Applied to
+    every pid in the group each tick, so children spawned since are caught too."""
+    gate = gate_running()
+    for tid, c in claims.items():
+        if c.get("state") != "running":
+            continue
+        pgid = c.get("pid")
+        pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+        if not pids:
+            continue
+        want = "bg" if gate else "fg"
+        if c.get("qos") == want and len(pids) == c.get("qos_n"):
+            continue
+        flag = "-b" if gate else "-B"
+        for pid in pids:
+            subprocess.run(["taskpolicy", flag, "-p", pid], capture_output=True)
+        if c.get("qos") != want:
+            log(f"QOS {tid}: {'background (E-cores) while the gate runs' if gate else 'restored to utility'} ({len(pids)} processes)")
+        c["qos"] = want; c["qos_n"] = len(pids)
 
 
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
     try:
+        apply_gate_qos(claims)
+    except Exception as e:
+        log(f"apply_gate_qos error: {e}")
+    try:
+        changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
+    except Exception as e:
+        log(f"release_stale_claims error: {e}")
+    try:
         sync_board(claims, dry)
     except Exception as e:
         log(f"sync_board error: {e}")
+    try:
+        reap_worktrees(claims, dry)
+    except Exception as e:
+        log(f"reap_worktrees error: {e}")
     changed |= dispatch(claims, dry)
-    if changed and not dry:
+    if not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
-    status = {"tick": int(time.time()), "running": running, "cap": CAP - (1 if gate_running() else 0),
-              "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb())}
+    frontier = {}
+    try:
+        tasks = board(); by = {t["id"]: t for t in tasks}
+        per_group = {}
+        for c in claims.values():
+            if c.get("state") == "running" and c.get("group"):
+                per_group[c["group"]] = per_group.get(c["group"], 0) + 1
+        held = {}
+        for t in tasks:
+            if t.get("status") != "todo" or t["id"] in claims:
+                continue
+            if t.get("needs") in ("user", "hardware") or t.get("blocked_on") or t.get("dispatch") == "manual":
+                frontier["not_for_runner"] = frontier.get("not_for_runner", 0) + 1
+            elif any(by.get(d, {}).get("status") not in ("done", "cancelled") for d in deps_of(t) if d in by):
+                frontier["waiting_on_deps"] = frontier.get("waiting_on_deps", 0) + 1
+            elif per_group.get(t.get("parallel_group"), 0) >= GROUP_CAP:
+                frontier["held_by_group"] = frontier.get("held_by_group", 0) + 1
+                held[t.get("parallel_group")] = held.get(t.get("parallel_group"), 0) + 1
+            else:
+                frontier["dispatchable"] = frontier.get("dispatchable", 0) + 1
+        frontier["held_groups"] = held
+    except Exception:
+        pass
+    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "gate_cap": GATE_CAP, "gate_load_max": GATE_LOAD_MAX, "cap": (min(CAP - 1, GATE_CAP) if gate_running() else CAP),
+              "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
+              "load_max": LOAD_MAX, "per_tick": PER_TICK}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 

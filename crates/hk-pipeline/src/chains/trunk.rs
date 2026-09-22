@@ -222,6 +222,14 @@ const WINDOW_ENDED: &str = "window-ended";
 /// Machine reason: the channel was already active in the window's first frame, so the call was
 /// joined in progress — and its encryption state is therefore `unknown`, never `clear`.
 const LATE_ENTRY: &str = "late-entry";
+/// Machine reason: the call is one slot of a TDMA carrier, so its boundaries were measured on the
+/// **shared** carrier envelope rather than on that slot's own bursts (T-272).
+///
+/// Both slots of a P25 Phase 2 channel key one carrier, and this build demodulates no TDMA burst
+/// timing, so the envelope says when the *channel* was up and the control channel says whose call
+/// it was. Recording the reason is what keeps a two-slot call list from reading as two
+/// independently timed measurements.
+const TDMA_SHARED_ENVELOPE: &str = "tdma-shared-envelope";
 
 /// A control channel this chain has already written, and the band plan decoded off it.
 ///
@@ -270,14 +278,25 @@ fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp)
             f_hz,
             iden,
             channel_number,
+            slots,
+            slot,
             decoded_at,
         } => {
             ev.f_hz = Some(f_hz);
+            // The TDMA slot, when the band plan is a TDMA one. `None` on an FDMA plan: there is no
+            // slot, and writing 0 would claim a measurement nobody made (T-272).
+            ev.slot = slot;
             ev.detail = json!({
                 "opcode": opcode,
                 "iden": iden,
                 "channel_number": channel_number,
-                "mapping": "base + spacing * channel",
+                "slots": slots,
+                "slot": slot,
+                "mapping": if slots > 1 {
+                    "base + spacing * (channel / slots); slot = channel % slots"
+                } else {
+                    "base + spacing * channel"
+                },
                 "iden_decoded_at_ns": decoded_at.as_unix_nanos(),
             });
         }
@@ -1075,9 +1094,11 @@ fn outside_window_event(
     ev.talkgroup = g.talkgroup.clone();
     ev.unit_id = g.unit_id.clone();
     ev.channel = g.channel.clone();
+    ev.slot = g.slot;
     ev.f_hz = g.f_hz;
     ev.detail = json!({
         "reason": OUTSIDE_WINDOW,
+        "slot": g.slot,
         "granted_by": g.kind.as_str(),
         "window_center_hz": tune_center,
         "window_usable_hz": usable_hz,
@@ -1112,9 +1133,13 @@ fn follow_grants(
     }
     let usable_hz = USABLE_FRACTION * fs;
 
-    // One target per distinct resolved frequency. A control channel repeats a grant and its
-    // updates many times in half a second, and that is one call, not twenty.
-    let key = |g: &GrantEvent| g.f_hz.unwrap_or(f64::NAN).round();
+    // One target per distinct resolved frequency **and slot**. A control channel repeats a grant
+    // and its updates many times in half a second, and that is one call, not twenty — but on a
+    // TDMA system two talkgroups share one carrier on alternating slots, and keying those on
+    // frequency alone would merge them into a single call attributed to whichever grant arrived
+    // first. That is C23's TDMA slot mix-up pitfall, and the slot in the key is what stops it
+    // (T-272). An FDMA grant carries `slot: None`, so nothing about the Phase 1 path changes.
+    let key = |g: &GrantEvent| (g.f_hz.unwrap_or(f64::NAN).round() as i64, g.slot);
     let mut targets: Vec<&GrantEvent> = Vec::new();
     for ev in events.iter().filter(|e| e.f_hz.is_some()) {
         match targets.iter_mut().find(|t| key(t) == key(ev)) {
@@ -1187,15 +1212,29 @@ fn follow_grants(
                 .total_cmp(&(fb - tune_center).abs())
                 .then(fa.total_cmp(&fb))
         });
-        if inside.len() > node.max_follows {
-            add(
-                &c.cc_follow_refused,
-                (inside.len() - node.max_follows) as u64,
-            );
-            inside.truncate(node.max_follows);
-        }
+        // ---- One CHANNEL per distinct frequency, whatever the slot. The slots of a TDMA carrier
+        // are one RF channel: down-converting it twice would pay the DDC twice for the same
+        // samples and measure the same envelope twice. So the targets are grouped by frequency
+        // here, the channel is measured once, and each slot's call is written from that one
+        // measurement (T-272). `inside` is already sorted by distance from the tuned centre, so
+        // the members of a group are adjacent.
+        let mut groups: Vec<(f64, Vec<&GrantEvent>)> = Vec::new();
         for g in &inside {
             let f = g.f_hz.unwrap_or(f64::NAN);
+            match groups.last_mut() {
+                Some((gf, members)) if gf.to_bits() == f.to_bits() => members.push(g),
+                _ => groups.push((f, vec![g])),
+            }
+        }
+        if groups.len() > node.max_follows {
+            add(
+                &c.cc_follow_refused,
+                (groups.len() - node.max_follows) as u64,
+            );
+            groups.truncate(node.max_follows);
+        }
+        for (f, members) in &groups {
+            let f = *f;
             let Some(ch) = channel_frames(buf, base, t_start, prov, f - tune_center, raster) else {
                 inc(&c.errors);
                 continue;
@@ -1214,7 +1253,10 @@ fn follow_grants(
                 let src = ch.source_index + (frame * ch.frame_len) as f64 * ch.source_per_output;
                 t_start.saturating_add_nanos(((src - base as f64).max(0.0) * 1e9 / fs) as i64)
             };
-            for (first, last, ended) in runs {
+            for (g, (first, last, ended)) in members
+                .iter()
+                .flat_map(|g| runs.iter().copied().map(move |r| (g, r)))
+            {
                 let (start, end) = (at(first), ended.then(|| at(last + 1)));
                 // Active in the window's very first frame means the transmission began before this
                 // window: late entry. C23's pitfall is that its encryption state is then UNKNOWN
@@ -1228,6 +1270,16 @@ fn follow_grants(
                     .push(if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED }.to_owned());
                 if first == 0 {
                     call.reasons.push(LATE_ENTRY.to_owned());
+                }
+                // A TDMA call's boundaries are the SHARED CARRIER's, not that slot's. Both slots
+                // of a P25 Phase 2 channel key the same carrier, and nothing here demodulates the
+                // two-slot bursts, so the envelope this measured cannot say which slot was
+                // talking when. The slot attribution comes from the grant — which is exactly what
+                // the control channel stated — and the row says that the timing does not
+                // (T-272). Silence about it would present per-slot timing this build never
+                // measured, the same defect as implying resolution nobody captured.
+                if call.slot.is_some() {
+                    call.reasons.push(TDMA_SHARED_ENVELOPE.to_owned());
                 }
                 // ---- The encryption check, at the point a voice path would be opened (C23
                 // §Methods "encryption check before the vocoder", T-270).
@@ -1255,9 +1307,17 @@ fn follow_grants(
                 open.talkgroup = g.talkgroup.clone();
                 open.unit_id = g.unit_id.clone();
                 open.channel = g.channel.clone();
+                open.slot = g.slot;
                 open.f_hz = g.f_hz;
                 open.detail = json!({
                     "reason": if late { LATE_ENTRY } else { "grant-followed" },
+                    "slot": g.slot,
+                    // What the boundaries are, and are not, on a shared TDMA carrier.
+                    "timing": if g.slot.is_some() {
+                        TDMA_SHARED_ENVELOPE
+                    } else {
+                        "channel envelope"
+                    },
                     // What the encryption check decided, and therefore why no audio exists.
                     "voice": voice_reason,
                     "encryption": call.encryption.state(),
@@ -1273,6 +1333,7 @@ fn follow_grants(
                     close.call = Some(call.id);
                     close.talkgroup = g.talkgroup.clone();
                     close.channel = g.channel.clone();
+                    close.slot = g.slot;
                     close.f_hz = g.f_hz;
                     close.detail = json!({
                         "reason": SILENCE_TIMEOUT,

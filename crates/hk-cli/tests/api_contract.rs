@@ -7496,6 +7496,25 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["extent"]["nf"], json!(N), "{probe}");
     assert_eq!(probe["grid"]["cells"], json!(N * N), "{probe}");
     assert_eq!(probe["cost"]["in_flight_limit"], json!(4), "{probe}");
+    // T-630: the cap is server-wide, the SHARE is this client's, and an undeclared caller shares
+    // the anonymous bucket — so `curl` and the CLI meet exactly the route they met before.
+    assert_eq!(probe["cost"]["in_flight_share"], json!(4), "{probe}");
+    assert_eq!(probe["cost"]["clients"], json!(1), "{probe}");
+    assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
+    assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
+    assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // A client that names itself is a client of its own, and two of them halve the share. The
+    // second client here has never been served, so it is also what arms the bootstrap reserve.
+    let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{mine}");
+    assert_eq!(mine["cost"]["client"], json!("tab-one"), "{mine}");
+    assert_eq!(mine["cost"]["clients"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_share"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_limit"], json!(4), "{mine}");
+    // An id that is not one is not an error: it shares the anonymous bucket.
+    let (st, odd) = get(addr, &format!("{}&client=not%20an%20id", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{odd}");
+    assert_eq!(odd["cost"]["client"], json!("-"), "{odd}");
     // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
     assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
     assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");
@@ -8712,6 +8731,82 @@ fn every_route_in_the_route_table_is_documented() {
         missing.is_empty(),
         "routes missing from docs/api.md: {missing:#?}"
     );
+}
+
+/// T-800 (MAP-00, ADR-0023): the MMAP research routes are **reserved, not yet served**, and they
+/// stay token-gated the day they are.
+///
+/// `docs/api.md` "Reserved: the map-UI research routes" fixes the four durable stores' shapes
+/// (annotations, collections/markers, measurements, views) and the band-plan-priors query before
+/// any of them has code, so MAP-12 and MAP-16..MAP-19 are five instances of one contract rather
+/// than five designs. This test is the half of that pairing (T-079) which can be asserted today,
+/// and it is written so it does **not** have to be deleted as the routes land:
+///
+/// - **Without a token, every reserved path answers `401`** — auth runs *before* dispatch
+///   (`http.rs`), so this holds whether or not the route exists, and it is exactly the property a
+///   reserved name must keep once it does exist. A store of a researcher's notes that answered an
+///   unauthenticated caller would be a real defect, and this is what would catch it.
+/// - **With a token, a reserved path either 404s (not landed yet) or answers its own contract.**
+///   It may never answer `401` with a valid token, and it may never 404 *without* one, which is
+///   what pins the ordering.
+/// - **Every reserved path is documented**, so the table cannot quietly drift out of `docs/api.md`
+///   while the tickets are open.
+#[test]
+fn mmap_research_routes_are_reserved_and_gated() {
+    // (method, path) exactly as docs/api.md reserves them. Paths with an `{id}` are probed with a
+    // concrete id: a served route answers 404 `not_found` for it, which is indistinguishable from
+    // "not served" on purpose — the shape is the owning ticket's test to assert, not this one's.
+    const RESERVED: &[(&str, &str)] = &[
+        ("GET", "/api/annotations"),
+        ("POST", "/api/annotations"),
+        ("GET", "/api/collections"),
+        ("POST", "/api/collections"),
+        ("GET", "/api/markers"),
+        ("GET", "/api/measurements"),
+        ("POST", "/api/measurements"),
+        ("GET", "/api/views"),
+        ("POST", "/api/views"),
+        ("GET", "/api/priors"),
+    ];
+
+    let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", doc_path.display()));
+    assert!(
+        doc.contains("## Reserved: the map-UI research routes"),
+        "docs/api.md must carry the reserved MMAP route table (T-800)"
+    );
+    for (_, path) in RESERVED {
+        assert!(
+            doc.lines().any(|l| l.contains(path)),
+            "{path} is reserved in the contract test but not in docs/api.md"
+        );
+    }
+
+    let (_dir_guard, serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    for (method, path) in RESERVED {
+        let body = (*method == "POST").then_some("{}");
+
+        // Unauthenticated: 401, before anything about whether the endpoint exists.
+        let (st, v) = call(addr, method, path, None, body);
+        assert_eq!(st, 401, "{method} {path} unauthenticated: {v}");
+        let (st, v) = call(addr, method, path, Some("Bearer nope"), body);
+        assert_eq!(st, 401, "{method} {path} with a wrong token: {v}");
+
+        // Authenticated: not yet served (404 `no such endpoint`), or the route's own answer —
+        // never a 401, which would mean the gate and the dispatch had swapped order.
+        let (st, v) = call(addr, method, path, Some(&bearer), body);
+        assert_ne!(st, 401, "{method} {path} refused a valid token: {v}");
+        if st == 404 {
+            assert_eq!(
+                v.get("error").and_then(|e| e.as_str()),
+                Some("no such endpoint"),
+                "{method} {path} is not served yet, so it must 404 as an unknown endpoint: {v}"
+            );
+        }
+    }
+    stop_server(serving);
 }
 
 /// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
@@ -10416,3 +10511,105 @@ fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
 /// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
 const FINE_STEPS: u64 = 3334;
 const COARSE_STEPS: u64 = 418;
+
+/// **T-511 — the device selector on the wire, against a real server.**
+///
+/// The serving layer holds N live controls keyed by `device_id`, and the routes that reach a radio
+/// take a `device_id` selector. This run holds exactly one front end (the mock SDR), which is the
+/// case the invariant protects: **with one device the selector may be omitted and behaviour is
+/// unchanged.** Asserted here rather than in a unit test because "the client's existing bodies
+/// still work" is a statement about the wire.
+///
+/// Four things, all by value:
+///
+/// 1. `GET /api/control/state` enumerates the front ends in `devices`, and with one it agrees with
+///    the singular `device`/`tuning` — so a client can discover the selector it would pass;
+/// 2. the ids in `devices` are the same ids `GET /api/navigation`'s `windows` lights segments
+///    from: one enumeration of the run's radios, not two;
+/// 3. a device route with **no** selector still retunes, and answers `device.id` naming the radio
+///    it moved;
+/// 4. a selector naming another radio is refused `404 unknown_device` and **the front end does not
+///    move** — a wrong name is not "the only device, so they must have meant it".
+#[test]
+fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // (1) the enumeration, and its agreement with the singular default.
+    let (st, v) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{v}");
+    let devices = v["devices"]
+        .as_array()
+        .unwrap_or_else(|| panic!("control/state must enumerate its front ends: {v}"));
+    assert_eq!(devices.len(), 1, "this run holds one front end: {v}");
+    let device_id = devices[0]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"))
+        .to_owned();
+    assert!(device_id.starts_with("mock:"), "{v}");
+    assert_eq!(devices[0]["device_id"], v["device"]["device_id"], "{v}");
+    assert_eq!(devices[0]["tuning"], v["tuning"], "{v}");
+
+    // (2) the same radio, seen as a capture window.
+    let (st, nav) = get(addr, "/api/navigation");
+    assert_eq!(st, 200, "{nav}");
+    let windows = nav["windows"].as_array().expect("windows");
+    assert_eq!(windows.len(), 1, "{nav}");
+    assert_eq!(windows[0]["device_id"], json!(device_id), "{nav}");
+
+    // (3) no selector: unchanged, and the answer names the radio that moved.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 2e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(
+        st, 200,
+        "an omitted selector is correct with one device: {r}"
+    );
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_default = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+
+    // The selector given explicitly names the same radio and is accepted.
+    let moved2 = step * (((FIXTURE_CENTER_HZ + 3e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{moved2:?},\"device_id\":{}}}",
+            json!(device_id)
+        ),
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_named = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+    assert!(
+        (after_named - after_default).abs() > 1.0,
+        "the named selector moved the radio: {r}"
+    );
+
+    // (4) a selector naming a radio this run does not hold: refused, and nothing moved.
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{:?},\"device_id\":\"mock:not-this-radio\"}}",
+            FIXTURE_CENTER_HZ
+        ),
+    );
+    assert_eq!(st, 404, "{r}");
+    assert_eq!(r["code"], json!("unknown_device"), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains(&device_id),
+        "the refusal names what this run does hold: {r}"
+    );
+    let (_, v) = get(addr, "/api/control/state");
+    assert_eq!(
+        v["tuning"]["center_hz"].as_f64(),
+        Some(after_named),
+        "a refused selector must not move the front end: {v}"
+    );
+
+    stop_server(serving);
+}

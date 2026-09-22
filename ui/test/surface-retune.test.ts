@@ -535,7 +535,7 @@ function tileData(a: TileAddr): TileData {
     addr: a, key: keyOf(a), nf: 1, nt: 1, value: new Float32Array([-90]),
     state: new Uint8Array([CELL.OBSERVED]), tier: "live-iq", answeredLevel: a.levelF,
     fold: { frequency: "exact", time: "exact" }, rangeDb: { lo: -100, hi: -60 },
-    bytes: 1024, serverInFlightLimit: null,
+    bytes: 1024, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

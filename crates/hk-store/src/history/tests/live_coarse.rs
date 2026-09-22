@@ -388,11 +388,12 @@ fn a_checkpoint_does_not_swallow_the_row_it_closes() {
     .unwrap();
     run(&mut ctl, secs);
     // **Both stores are sealed past EVERY coarse block before they are compared**, and that is
-    // load-bearing rather than tidiness. An unsealed live store is legitimately behind at each
-    // time level — the cascade commits every N, so a chain of in-progress rows lags the edge by
-    // 2^j − 1 finest rows (T-583) — while the on-demand control folds open producers and lags by
-    // nothing. Measured, that lag alone is 1, 2 and 4 rows at time levels 1, 2 and 3, which is
-    // the same shape as the defect and would mask it. Sealing well past the run ends every
+    // load-bearing rather than tidiness. An unsealed live store's ACCUMULATORS are
+    // legitimately behind at each time level — the cascade commits every N, so a chain of
+    // in-progress rows lags the edge by up to 2^j finest rows (measured: 0, 2, 4 and 8 at time
+    // levels 0 to 3) — while the on-demand control folds open producers and lags by nothing. That
+    // is the same shape as the defect and would mask it. A read undoes the lag (T-583), but this
+    // test compares node against node, and both sides here are read the same way. Sealing well past the run ends every
     // coarse tile's block, which flushes every pending row.
     let flush = ts(T0 + 2048 * S);
     ctl.seal_through(flush).unwrap();
@@ -472,7 +473,8 @@ fn a_restart_keeps_the_open_tiles_rows_in_every_coarse_node() {
 
     // The control is the same store WITHOUT the restart: the run is identical, so any node that
     // differs differs because of the reopen. Both are sealed past every coarse block first, so
-    // neither carries the in-progress-row lag (T-583) that would otherwise be read as a loss.
+    // neither has rows in flight, which T-583's read-time preview would otherwise fold into one
+    // side's answer and not the other's.
     let flush = ts(T0 + 2048 * S);
     let ctl_dir = TempDir::new("live-restart-ctl");
     let mut ctl = Pyramid::open(&ctl_dir.0, cfg()).unwrap();
@@ -521,5 +523,206 @@ fn a_restart_keeps_the_open_tiles_rows_in_every_coarse_node() {
         got, want,
         "a coarse node lost rows across the restart: the reloaded open level-0 tile was not \
          re-folded"
+    );
+}
+
+/// The newest row of `level` that holds anything, read **straight out of the accumulators** — so
+/// it is what the live cascade has propagated, before any read-time preview. Absolute ns.
+fn newest_committed_row_ns(p: &Pyramid, level: usize) -> Option<i64> {
+    let g = p.geometry().levels[level];
+    p.open[level]
+        .iter()
+        .filter_map(|(&(_, tb), t)| {
+            (0..t.nt)
+                .rev()
+                .find(|&r| (0..t.nf).any(|f| t.count[r * t.nf + f] > 0))
+                .map(|r| (tb * t.nt as i64 + r as i64) * g.t_cell_ns)
+        })
+        .max()
+}
+
+/// The newest row a **read** of `level` answers as observed, as the absolute ns its cell starts at.
+fn newest_read_row_ns(p: &Pyramid, level: usize, secs: i64) -> Option<i64> {
+    let h = query(
+        p,
+        (0.0, N_BINS as f64 * BW),
+        (T0, T0 + secs * S),
+        Resolution::Level(level as u8),
+    );
+    (0..h.nt)
+        .rev()
+        .find(|&t| (0..h.nf).any(|f| h.cell(t, f).observed()))
+        .map(|t| h.time_of(t).as_unix_nanos())
+}
+
+/// **T-583: a zoomed-out node shows its IN-PROGRESS row instead of trailing the live edge.**
+///
+/// T-571 measured the trail and left the product call open. It is answered *show it*, for the
+/// reason CLAUDE.md gives twice: *"whenever data exists for that window it must be shown"*, and
+/// *"a level that downsamples every N rows adjusts its in-progress top row as rows arrive"*. The
+/// rows exist, recorded and held; a node that waits for its own commit is "we have it but didn't
+/// render it", and at four time levels over a 1 s cell it was up to 7 s of it.
+///
+/// The trail is **still there in the accumulators** — the cascade must keep propagating on commit,
+/// which is what makes it exactly-once — so this test measures it there first, in rows, and that
+/// measurement is the proof the assertion below judges something. The fix is on the read.
+#[test]
+fn a_coarse_node_shows_its_in_progress_row_instead_of_trailing_the_live_edge() {
+    // 98 rows leaves the finest level closed through row 96 with row 97 still buffering, which is
+    // the *worst* phase for the cascade: the 2 s node has not committed (96, 97), so neither the
+    // 4 s nor the 8 s node has heard of second 96 at all.
+    let secs = 98;
+    let shape = lat(48);
+    let n_levels = shape.f_levels * shape.t_levels;
+    let dir = TempDir::new("live-inprogress");
+    let mut p = Pyramid::open(&dir.0, cfg_for(shape)).unwrap();
+    run(&mut p, secs);
+    // NOT sealed: this is the live edge, which is the only place the trail exists.
+
+    // --- the trail, measured in the accumulators, per node ---
+    let closed_ns = p.open[0]
+        .iter()
+        .filter_map(|(&(_, tb), t)| t.col_done.map(|c| (tb * t.nt as i64 + c as i64) * S))
+        .max()
+        .expect("the finest level has closed a row");
+    let mut trail = vec![0i64; n_levels];
+    for (l, trail) in trail.iter_mut().enumerate() {
+        let cell = p.geometry().levels[l].t_cell_ns;
+        // The row of this node that COVERS the finest closed row is the newest it could hold.
+        let want = closed_ns.div_euclid(cell) * cell;
+        // No open tile at all is the extreme of the same trail: the node's last block sealed and
+        // its next has not been opened, because nothing has committed into it yet.
+        let got = newest_committed_row_ns(&p, l).unwrap_or(want - cell);
+        *trail = (want - got) / S;
+    }
+    println!("  the cascade's own trail, in finest rows, per node:");
+    for j in 0..shape.t_levels {
+        let row: Vec<String> = (0..shape.f_levels)
+            .map(|i| format!("({i},{j}) {}", trail[shape.index(i, j)]))
+            .collect();
+        println!("    {}", row.join("  "));
+    }
+    assert!(
+        trail.iter().any(|&t| t > 0),
+        "no node is behind, so the read assertions below are vacuous — the phase of this run no \
+         longer exercises the trail"
+    );
+
+    // --- what a READ answers: no node trails, at any zoom ---
+    let base = newest_read_row_ns(&p, 0, secs).expect("the finest level answers a row");
+    assert_eq!(
+        base,
+        closed_ns + S,
+        "the finest level must answer its own open column (T-453's `column_preview`), or the \
+         comparison below is against the wrong edge"
+    );
+    for l in 0..n_levels {
+        let (i, j) = shape.coords(l);
+        let cell = p.geometry().levels[l].t_cell_ns;
+        let got = newest_read_row_ns(&p, l, secs)
+            .unwrap_or_else(|| panic!("node ({i},{j}) answered no row at all"));
+        assert!(
+            got <= base && base < got + cell,
+            "node ({i},{j}) trails the live edge: its newest row starts at {}, which does not \
+             cover the finest level's newest row at {}",
+            (got - T0) / S,
+            (base - T0) / S
+        );
+    }
+
+    // --- and it is the same data, folded once: every node holds every frame, none twice ---
+    let got = frames_per_node(&p, shape, secs);
+    // The control folds open producers on every read, so it trails by nothing by construction —
+    // the value this read must now match, from a scheme that never had the defect.
+    let ctl_dir = TempDir::new("live-inprogress-ctl");
+    let mut ctl = Pyramid::open(&ctl_dir.0, on_demand(shape)).unwrap();
+    run(&mut ctl, secs);
+    let whole = FreqRange::new(0.0, N_BINS as f64 * BW);
+    let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
+    for l in 0..n_levels {
+        let _ = ctl.materialize(l, whole, span);
+    }
+    let want = frames_per_node(&ctl, shape, secs);
+    println!(
+        "  frames per node at the live edge: node (0,0) {}, coarsest {} (control {})",
+        got[0],
+        got[shape.index(shape.f_levels - 1, shape.t_levels - 1)],
+        want[shape.index(shape.f_levels - 1, shape.t_levels - 1)]
+    );
+    assert!(
+        want.iter().all(|&w| w > 0),
+        "the control holds nothing, so the equality below would be vacuous"
+    );
+    assert_eq!(
+        got, want,
+        "a node is short of (or ahead of) the whole run: the preview lost a row, or folded one \
+         twice"
+    );
+    assert!(
+        p.preview_rows_folded() > 0,
+        "no row was folded on the read path, so nothing was previewed"
+    );
+}
+
+/// **The preview costs a read of elapsed time nothing, and capture nothing at all.**
+///
+/// T-453's constraint is that work on the capture thread is paid whether or not anyone looks. The
+/// preview is therefore on the read, like `column_preview`: it runs only where rows are in flight
+/// *below the address being read*, which is the live edge and nowhere else.
+#[test]
+fn previewing_the_in_progress_row_costs_capture_nothing_and_elapsed_reads_nothing() {
+    let secs = 200;
+    let shape = lat(49);
+    let n_levels = shape.f_levels * shape.t_levels;
+    let dir = TempDir::new("live-preview-cost");
+    let mut p = Pyramid::open(&dir.0, cfg_for(shape)).unwrap();
+    run(&mut p, secs);
+    assert_eq!(
+        p.preview_rows_folded(),
+        0,
+        "capture folded a preview row: the read path's work must not run on the capture thread"
+    );
+
+    // An elapsed window, well behind the edge: nothing is in flight under it.
+    let past = TimeRange::new(ts(T0), ts(T0 + 32 * S));
+    for l in 0..n_levels {
+        let h = query(
+            &p,
+            (0.0, N_BINS as f64 * BW),
+            (past.start.as_unix_nanos(), past.end.as_unix_nanos()),
+            Resolution::Level(l as u8),
+        );
+        assert!(h.cells.iter().any(|c| c.observed()), "level {l} read grey");
+    }
+    assert_eq!(
+        p.preview_rows_folded(),
+        0,
+        "a read of elapsed time previewed rows: only the live edge has any in flight"
+    );
+
+    // The live edge does preview, and pays a bounded number of rows for it: at most one per level
+    // of a producer chain per open tile it consults, never a tile fold.
+    let before = p.stats().producer_tiles_folded;
+    let mut folded = 0;
+    for l in 0..n_levels {
+        let _ = query(
+            &p,
+            (0.0, N_BINS as f64 * BW),
+            (T0, T0 + secs * S),
+            Resolution::Level(l as u8),
+        );
+        folded = p.preview_rows_folded();
+    }
+    println!("  {folded} rows previewed for a read of every node at the live edge");
+    assert!(folded > 0, "the live edge previewed nothing");
+    assert_eq!(
+        p.stats().producer_tiles_folded,
+        before,
+        "the preview folded a producer TILE: it folds rows into clones, nothing else"
+    );
+    assert_eq!(
+        p.stats().tiles_materialized,
+        0,
+        "generation ran on the read path"
     );
 }

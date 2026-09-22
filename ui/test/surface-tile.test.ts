@@ -12,10 +12,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import {
-  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, TileBusyError, TileDecodeError,
-  type TileResponse,
+  BYTES_PER_CELL, capFromRefusal, decodeTile, fetchTile, probeAddr, shareFromRefusal, TileBusyError,
+  TileDecodeError, type TileResponse,
 } from "../src/surface/tile";
-import type { TileAddr } from "../src/surface/lattice";
+import { newClientId, setTileClientId } from "../src/surface/clientid";
+import { tileUrl, type TileAddr } from "../src/surface/lattice";
 
 const ADDR: TileAddr = { device: "any", scheme: "view", levelF: 1, levelT: 2, fIndex: 3, tIndex: 4, cells: 2 };
 
@@ -472,4 +473,50 @@ test("an unreadable shadow is not 'no shadow': the tile stays pending rather tha
   // Two runs over one cell.
   assert.throws(() => decodeTile(ADDR, resp({ ...DEPARTED(), shadow: shadowOf([{ f: 1, row: 0, rows: 2, db: -1 }, { f: 1, row: 1, rows: 1, db: -2 }]) })),
     /overlap/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// T-630: who is asking, and what this client is allowed to hold of the route's four slots.
+// ---------------------------------------------------------------------------------------------
+
+test("T-630: a named page carries `client` on every tile request, and an unnamed one carries none", () => {
+  // Unnamed is the default and is byte-identical to the pre-T-630 request: an undeclared caller
+  // shares the route's anonymous bucket, which behaves as the route always did.
+  setTileClientId("");
+  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2");
+  // Named, and the name is on the request — including the bootstrap probe, which is the ONE request
+  // a booting client cannot start without and therefore the whole reason the identity exists.
+  setTileClientId("tab-two");
+  assert.equal(tileUrl(ADDR), "/api/tiles?level_f=1&level_t=2&f_index=3&t_index=4&cells=2&client=tab-two");
+  assert.equal(tileUrl(probeAddr()), "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&client=tab-two");
+  // Two ids are two clients: the id is per page load, never shared and never remembered.
+  const ids = new Set([newClientId(), newClientId(), newClientId()]);
+  assert.equal(ids.size, 3);
+  for (const id of ids) assert.match(id, /^[A-Za-z0-9-_.:]{1,64}$/, `the route accepts ${id}`);
+  setTileClientId("");
+});
+
+test("T-630: a refusal names this client's SHARE as well as the server-wide cap", async () => {
+  const message = "too many tile reads in flight (limit 4, share 2) — 2 client(s) are reading tiles";
+  assert.equal(capFromRefusal(message), 4);
+  assert.equal(shareFromRefusal(message), 2);
+  // A pre-T-630 server names no share, and silence is not a share of zero: null leaves the client
+  // on the only number it has.
+  assert.equal(shareFromRefusal("too many tile reads in flight (limit 4)"), null);
+  await assert.rejects(
+    () => fetchTile(ADDR, "tok", () => Promise.resolve({
+      ok: false, status: 503, statusText: "",
+      json: () => Promise.resolve({ error: message, code: "http_503" }),
+    })),
+    (e: unknown) => {
+      assert.ok(e instanceof TileBusyError);
+      assert.equal(e.limit, 4);
+      assert.equal(e.share, 2);
+      return true;
+    });
+});
+
+test("T-630: `cost.in_flight_share` is decoded, and a server that states none says nothing", () => {
+  assert.equal(decodeTile(ADDR, resp({ cost: { in_flight_limit: 4, in_flight_share: 2 } })).serverInFlightShare, 2);
+  assert.equal(decodeTile(ADDR, resp()).serverInFlightShare, null);
 });

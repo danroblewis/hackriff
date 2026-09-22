@@ -211,7 +211,7 @@ function tileOf(a: TileAddr, nf: number, nt: number, value: number[], unobserved
     value: new Float32Array(value.map((v, k) => (state[k] === CELL.OBSERVED ? v : Number.NaN))),
     state,
     tier: "live-iq", answeredLevel: a.levelF, fold: { frequency: "exact", time: "exact" },
-    measured: { nf, nt }, rangeDb: null, bytes: nf * nt * 3, serverInFlightLimit: null,
+    measured: { nf, nt }, rangeDb: null, bytes: nf * nt * 3, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

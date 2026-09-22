@@ -17,6 +17,7 @@ import {
   autoContrastButton, loadRangeMode, pressAutoContrast, pressViewportScale, saveRangeMode,
   viewportScaleButton, type ContrastButton,
 } from "./contrast";
+import { newClientId, setTileClientId } from "./clientid";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
@@ -85,6 +86,11 @@ async function main(): Promise<void> {
     return;
   }
   const client = new ControlClient(token);
+  // **Name this page before it asks for its first tile** (T-630). `GET /api/tiles` splits its four
+  // in-flight slots between the clients that are asking, and a page with no name shares the
+  // anonymous bucket with every other unnamed caller — which is the first-come-first-served route
+  // that could not boot a second tab. See `./clientid.ts`.
+  setTileClientId(newClientId());
 
   let probe;
   try {
@@ -122,7 +128,9 @@ async function main(): Promise<void> {
   const canvas = slot("canvas") as HTMLCanvasElement;
   let preview: SurfacePreview;
   try {
-    preview = new SurfacePreview({ canvas, probe, token, fetchFn: (u, i) => fetch(u, i), chrome: slot("chrome") });
+    preview = new SurfacePreview({ canvas, probe, token, fetchFn: (u, i) => fetch(u, i), chrome: slot("chrome"),
+      // T-580: the coverage map is asked FIRST, so never-sampled spectrum costs no tile request.
+      survey: (path) => client.get(path) });
   } catch (e) {
     fail("WebGL2 is unavailable in this browser.", e instanceof Error ? e.message : String(e));
     return;
@@ -199,7 +207,9 @@ async function main(): Promise<void> {
       `${preview.view.surface.cache.residentTiles} tiles resident (${(preview.view.surface.cache.residentBytes / 1048576).toFixed(1)} MB)`,
       // The abandoned count is shown next to the in-flight one because it is the same budget: an
       // aborted request keeps costing the route a slot until its read finishes (T-454).
-      `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight`,
+      // T-630: and the SHARE this client is allowed of the route's slots, which is the difference
+      // between "this tab is backing off" and "another client is reading tiles too".
+      `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight (share ${preview.view.surface.cache.inFlightCeiling})`,
       `queue ${preview.view.surface.cache.queueDepth}`,
       `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
       `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,

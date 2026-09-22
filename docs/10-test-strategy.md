@@ -586,3 +586,76 @@ turns shared blocks private. Anyone repeating this should use a **dedicated thro
 an otherwise idle box**, watch `df` between runs, and prefer the per-target `cargo rustc` trick
 above wherever the question allows it — it answered the linker question for a few seconds of build
 instead of a few gigabytes.
+
+#### The "60 % slower in two days" was two different measurements, plus one real 5-minute step (T-763, 2026-09-22)
+
+The duration guard T-543 built fired on 2026-09-22: the rolling median of the last seven `full`
+runs read 34.0 min against a 35 min budget set from the 21.4 min recorded above. T-762 moved the
+assertion off the merge path (a monitor on the merge path deadlocks the pipeline); T-763 is the
+regression it flagged. **Most of the step is an artefact, and the remainder is one located
+defect.** Both halves are measurable from records nobody had to be watching to collect.
+
+**The first finding is that the instrumentation was not recording the runs that mattered.**
+`$HACKRIFF_OPS/gate-timings.jsonl` held **33 runs, 31 of them written by the test suite itself** —
+`py/tests/test_gate.py`'s round-trip through `gate.main()` used the real `$HACKRIFF_OPS`, so every
+`just test-py` appended a 0.0-second `py` record to the production history (their `root` is a
+pytest tmpdir; fixed by pointing the test at its own). Exactly **two** real `full` gates were in
+there, against **48** the merge runner had run over the same window. The record that survived is
+the line `py/hkpy/gate.py` *prints* next to each `gatelog.append()` — `gate: just test took 1221s
+(exit 0)` — which `ops/merge-runner.log` has captured since before the structured log existed, and
+which is per suite. `just cycle-time --suites` (`parse_suite_runs`/`suite_stats`) reads it back.
+
+**Two rules make that history mean something, and both were being broken:**
+
+- **An aborted run is not a measurement of the suite.** The gate stops at the first failing suite,
+  so a failed run measures a *prefix*. Of the 48 full gates, **24 never reached the UI e2e suite at
+  all**. Averaged in, they make the gate look faster every time an unrelated test breaks.
+  `rolling_medians` now excludes them.
+- **Two classes are never pooled into one median.** `suite_stats` reports per class, where a run's
+  class is the set of suites it launched.
+
+**That second rule is where the 21.4 min came from.** It is this document's table above: gate start
+-> `MERGED`, so *passing gates only*, **across all classes** — and a 17-second `py` gate sits in
+the same median as a 40-minute `full` one. The 34.0 the guard reported is `full` only, failures
+and bulk runs included. They are not the same quantity, and the step between them is mostly that.
+
+**Like for like, over the 24 complete passing `full` gates recorded 09-20 23:37 -> 09-22 05:06:**
+
+| suite | earlier half | recent half | moved |
+|---|---|---|---|
+| lint | 60 s | 63 s | +3 s (the `ld64.lld` link gain is real and holds) |
+| the Rust workspace suite | 16.9 min | 19.1 min | **+2.2 min** |
+| the acceptance suite | 3.7 min | 5.3 min | +1.6 min |
+| the UI e2e suite | 7.5 min | 8.0 min | +0.5 min |
+| **total** | **30.0 min** | **34.7 min** | **+4.7 min, +16 %** |
+
+So: **test-bound, as the ticket said — and +16 %, not +60 %.**
+
+**The Rust-suite growth is one step on one day, not a suite outgrowing its budget.** From the
+nextest `Summary` lines in the same log, the workspace run went **462 s -> 756 s at the 09-21 04:55
+gate**, while the test count moved **2395 -> 2403 (+0.3 %)**. Test-count growth (2302 on 09-19 to
+2485 on 09-22, +8 %) does not explain a 64 % jump. What changed in that same run is visible in the
+`SLOW` lines: four `hk-classify` binaries — `accuracy_sweep`, `below_gate_absorption`,
+`open_set_stats`, `verifier_gain` — went from never-slow to past the 60/120/180 s thresholds and
+have stayed there every run since, and `hk-estimate::receiver_lines` went from `>60 s` to `>240 s`
+(later `>300 s`) alongside them. That gate carried T-246 and T-589, both of which change the
+classifier internals those statistical sweeps exercise. The test *files* are weeks old; they did
+not appear, they got about three times more expensive.
+
+**The mechanism is that these are now the critical path, and T-436's measurement of it is stale.**
+None of the five binaries is in `heavy-serial`. T-436 measured the serial group at 224 s = 96 % of
+a 234 s run; with `receiver_lines` alone past 300 s and four classify binaries at 60-180 s in the
+free pool of 8 threads, the critical path has moved outside the group that was tuned for it. Any
+further tuning of `test-threads` or of the group memberships should be re-measured against that,
+not against the 2026-09-14 numbers still recorded in `.config/nextest.toml`.
+
+**The budget stays at 35 min, deliberately.** The extra ~5 minutes is attributable to roughly 300 s
+in five named binaries, which makes it a defect to shrink rather than a new honest price for the
+loop. Raising the number to fit it is the move that turns a budget into a record of whatever
+happened.
+
+**What dominates the loop is still not the gate's duration.** 36 gate failures are recorded against
+44 merge-runner gates, and *half of all full gates never finish their suite set*. A failure costs a
+whole re-gate plus a requeue — more than the entire 4.7 min of drift this ticket was filed for —
+and the UI e2e suite alone aborted 9 of them. The 2026-09-20 conclusion holds unchanged: queue
+wait and re-gates are the cycle, and the gate's own minutes are ~8 % of it.

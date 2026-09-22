@@ -103,6 +103,25 @@ record_landed(){ # branch
   if [ -n "${first:-}" ]; then land=$(( (now - first) / 60 )); else first=null; land=null; fi
   printf '{"ticket":"%s","branch":"%s","first_commit_ts":%s,"merge_ts":%s,"land_minutes":%s,"gate_attempts":%s,"merge":"%s"}\n' \
     "$t" "$b" "$first" "$now" "$land" "$(( $(attempts_of "$b") + 1 ))" "$merge_sha" >> "$LANDED"
+  flip_done "$t" "$merge_sha"
+}
+
+# The board flip belongs HERE, at the instant of landing, because this runner is the one process
+# allowed to commit to main right now. A bystander waiting for a "safe" moment never finds one: on
+# 2026-09-22 the work runner's board sync committed ZERO times in four hours of back-to-back gates,
+# so the burndown showed six landed branches as still open. Uses the task CLI when main has it
+# (py/hkpy/tasks.py, T-taskcli); a ticket-less branch (task-guards) has nothing to flip.
+flip_done(){ # ticket merge_sha
+  local t=$1 sha=$2
+  case "$t" in T-*) ;; *) return 0 ;; esac
+  [ -f "$REPO/py/hkpy/tasks.py" ] || { log "flip_done $t: no task CLI on main yet - the board keeps todo until reconcile"; return 0; }
+  if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks set "$t" status=done commit="${sha:0:8}" >>"$LOG" 2>&1 \
+      && git add docs/tasks.yaml && git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
+    log "BOARD $t -> done (${sha:0:8})"
+  else
+    (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
+    log "flip_done $t FAILED - board left as is; needs reconcile"
+  fi
 }
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
@@ -160,7 +179,17 @@ process(){
       notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
       return 0
     fi
-    git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
+    # T-764: the commit can now be REFUSED — `.githooks/pre-commit` validates docs/tasks.yaml
+    # before any commit that touches it, and a merge commit is one of the two writers that can
+    # put a malformed board on main. An unchecked `git commit` here would log "MERGED ✓" for a
+    # merge that never happened, which is the same false-success shape as T-840's lost MERGE_HEAD.
+    if ! git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
+      log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
+      git merge --abort 2>/dev/null || true
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"
+      notify_coordinator "$ticket ($branch) gated GREEN but its merge COMMIT was refused (see the log; usually a malformed docs/tasks.yaml). main is untouched."
+      return 0
+    fi
     log "MERGED $branch ✓"
     record_landed "$branch"
     clear_attempts "$branch"

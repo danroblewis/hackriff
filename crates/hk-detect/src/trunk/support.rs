@@ -186,10 +186,16 @@ pub const TRUNK_SUPPORT: [TrunkSupport; 10] = [
     TrunkSupport {
         name: "P25 Phase 2",
         protocol: Some(TrunkProtocol::P25Phase2),
-        level: SupportLevel::Unimplemented,
-        reason: "the control channel of a Phase 2 system is a Phase 1 FDMA channel this build \
-                 already decodes; what is missing is the two-slot TDMA traffic side, so a grant's \
-                 slot is not attributed and no Phase 2 system is named",
+        level: SupportLevel::Decoded,
+        reason: "TSBK decode on the Phase 1 FDMA control channel a Phase 2 system trunks on, plus \
+                 IDEN_UP_TDMA: the channel type names how many slots share a carrier, so a grant \
+                 resolves as base + spacing * (channel / slots) and is attributed to slot \
+                 channel % slots - consecutive channel numbers are ONE frequency and two \
+                 talkgroups, not two frequencies (T-272). What is still missing is the TDMA \
+                 TRAFFIC side: nothing demodulates the two-slot bursts, so a followed call's \
+                 boundaries are the shared carrier's envelope, recorded `tdma-shared-envelope`, \
+                 and per-slot timing is not measured. A channel type this build cannot name \
+                 admits no entry at all rather than dividing by a guessed slot count",
     },
     TrunkSupport {
         name: "MPT1327",
@@ -357,6 +363,7 @@ mod tests {
     fn the_decoded_protocols_are_the_ones_the_decoders_can_name() {
         for p in [
             TrunkProtocol::P25Phase1,
+            TrunkProtocol::P25Phase2,
             TrunkProtocol::DmrTier3,
             TrunkProtocol::NxdnTypeC,
         ] {
@@ -369,11 +376,35 @@ mod tests {
             TrunkProtocol::SmartNet,
             TrunkProtocol::Edacs,
             TrunkProtocol::Mpt1327,
-            TrunkProtocol::P25Phase2,
         ] {
             let e = support_for(p).unwrap_or_else(|| panic!("{p:?} is not in the support table"));
             assert_ne!(e.level, SupportLevel::Decoded, "{p:?}");
         }
+    }
+
+    /// P25 Phase 2 decodes its band plan and attributes slots (T-272), but nothing demodulates
+    /// the two-slot traffic. The entry must say **both**, because "decoded" alone invites a reader
+    /// to expect per-slot call timing this build never measures.
+    #[test]
+    fn p25_phase2_says_what_it_decodes_and_what_it_still_does_not() {
+        let e = support_for(TrunkProtocol::P25Phase2).expect("P25 Phase 2 in the support table");
+        assert_eq!(e.level, SupportLevel::Decoded);
+        let r = e.reason.to_lowercase();
+        assert!(
+            r.contains("iden_up_tdma") && r.contains("slot"),
+            "the entry does not say how a Phase 2 grant is attributed: {}",
+            e.reason
+        );
+        assert!(
+            r.contains("channel / slots"),
+            "the entry does not state the mapping a reader would otherwise get wrong: {}",
+            e.reason
+        );
+        assert!(
+            r.contains("tdma-shared-envelope"),
+            "the entry does not say that per-slot timing is NOT measured: {}",
+            e.reason
+        );
     }
 
     /// The two protocols whose grants carry **no frequency** must say so in the table, because a

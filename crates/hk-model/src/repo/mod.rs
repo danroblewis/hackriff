@@ -161,6 +161,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
     include_str!("migrations/0014_harmonic_family.sql"), // T-374 C40 harmonic families
     include_str!("migrations/0015_retune_verdict.sql"), // T-598 persisted retune verdict
+    include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
 ];
 
 /// Schema version this build creates and understands.

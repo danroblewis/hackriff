@@ -120,6 +120,17 @@
 # lengthen it, by taking CPU away from the one-at-a-time tests that ARE the critical path:
 # the same 266 serial tests cost 224 s at 8 and 279 s at 28. That is also the whole flake
 # mechanism in one line, since those are the tests that bound wall-clock latencies.
+#
+#   T-763, 2026-09-22 — THE CRITICAL PATH HAS MOVED OUT OF THE GROUP; RE-MEASURE BEFORE
+#   TUNING EITHER NUMBER AGAIN. The run above was 234 s. By 2026-09-22 the workspace run
+#   is ~900 s, and the `SLOW` lines in `ops/merge-runner.log` say where it went: FIVE
+#   binaries that are NOT in this group dominate it — `hk-estimate::receiver_lines` past
+#   300 s, and `hk-classify`'s `accuracy_sweep`, `below_gate_absorption`, `open_set_stats`
+#   and `verifier_gain` at 60-180 s each. All five tripled in cost at one gate (09-21
+#   04:55, +8 tests, 462 s -> 756 s) and stayed there. So "the group IS the critical path"
+#   is no longer true, and the arithmetic above — which is why 8 beats 28 — rests on it.
+#   Shrinking those five is the lever; changing `test-threads` on the old numbers is not.
+#   docs/10, "The '60 % slower in two days' was two different measurements".
 #   - corroborating, from an investigation that was not looking for a thread count at all
 #     (T-257, docs/10 §3.4): nextest `LEAK` lines here are a macOS pipe(2)/FD_CLOEXEC race
 #     between concurrently SPAWNING test processes, and they scale with spawn concurrency
