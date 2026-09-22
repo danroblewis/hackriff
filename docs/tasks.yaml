@@ -20657,6 +20657,28 @@ tasks:
       mod_order claim, and the count of each is reported so the test cannot pass on zero.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      T-614 DONE (branch task-t614).
+
+      WHY THE ESTIMATOR COMMITTED: nothing in the chain could return "analogue, no symbols". The abstention was never there to be reached. `FskBurst::estimated_params` (crates/hk-demod/src/fsk/receiver.rs) hard-coded `mod_order: Some(2)` and copied the demodulator's rate and deviation from whatever trial `FskReceiver::run` chose. With the pipeline's priors (`standard_rates: true`, no sync, no cluster) and C14 not trusting the burst, that trial is the best-lock standard-rate guess that nothing confirmed. The seed already recorded `c14_trusted` / `sync_confirmed` / `source`, but the parameters never read those fields. `write_framed_bursts` then stored a `2fsk` Demodulation for every demodulated burst, and a `2fsk` emitter classification and fingerprint.
+
+      FIX (hk-demod only):
+      - `FskBurst::alphabet_evidence_framed(FrameEvidence)` returns `AlphabetEvidence::Measured(why)` or `Abstained(why)`. The alphabet counts as measured only for: a valid frame CRC, or a confirmed sync prior; otherwise it is vetoed if the bits are periodic (`periodic_bits`: |autocorr| >= 0.8 at some lag 1..=64); otherwise the framing sync was found in the burst, or the rate was C14's trusted clock or a cluster prior. An unconfirmed standard-rate trial abstains.
+      - `estimated_params[_framed]`: symbol_rate, deviation and mod_order are None unless the alphabet was measured. The CFO then falls back to C13's measurement.
+      - `write_framed_bursts`: a burst whose alphabet was not measured gets no `2fsk` Demodulation row (and so no Decode, which needs one). The 2-FSK fingerprint rate and deviation, and the Bitstream rate, are medians over measured bursts only. If no burst was measured, the emitter gets no `2fsk` family or classification.
+      - The periodicity veto closes the tone case structure.rs had deferred to T-614, on the burst path: a sliced sinusoid repeats at some lag <= 64 at any rate. It matters when C14 trusts a tone's clock line at 2x the tone frequency.
+
+      TEST (goes RED without the fix): crates/hk-demod/tests/t614_analogue_fm_abstains.rs. One scene: tone NBFM bursts (1 kHz, +/-2.5 kHz, as T-545), voice-like NBFM bursts, and a 4800 Bd 2-FSK channel. Each goes through FskReceiver with the pipeline's priors, then infer_framing, then write_framed_bursts, and is read back as docs/07 Demodulation/EstimatedParams. Counts:
+      - before the fix: ToneFm 7/7 and VoiceFm 7/7 bursts stored mod_order 2 with a rate (e.g. 9599 Bd at 2215 Hz dev), so RED.
+      - after the fix: ToneFm 0/7 (periodic veto), VoiceFm 0/7 (unconfirmed standard-rate), Fsk2 17/17 stored mod_order 2 at 4800.0 Bd. The test fails if there are fewer than 4 analogue bursts, or if fewer than half the digital bursts keep mod_order 2.
+      - Unit test `a_sliced_tone_is_periodic_at_any_rate_and_data_is_not`.
+
+      TARGETED RESULTS: `just test-crate hk-demod` 57/57 pass. hk-pipeline aware_036_pipeline, data_path and sweep_residency pass (15 run, 1 skipped). hk-e2e: smoke, acceptance_m0 aware_036, acceptance_ism t254, acceptance_mauto signal_087 (all six) and 3 of the 4 acceptance_m3 m3_scene tests pass. `just precheck hk-demod` is clean.
+
+      SURFACED, NOT CHASED (both fail WITHOUT this change too):
+      1. hk-pipeline runtime_attach `chains_attached_and_detached_mid_run_drop_no_always_on_samples`: a load-flake on the attach count. The count needs >= 18 of 20. At load avg 11-27 it got 17, 17, 18 at the branch base (HEAD~1 src) and 11-16 with this change. Neither variant writes a demodulation in that test, so the FSK path is not involved. It is timing-bound (a sleep loop over a real-time-paced replay). For the deflaker.
+      2. hk-e2e acceptance_m3 `m3_scene::m3_repeated_unknowns_form_one_visible_cluster` fails in isolation at the branch base: "[T-206] 1 emitters over three appearances". Three runs through the device at +0, +1.5 and +3 MHz leave ONE emitter in the repo, so there are never three members to cluster. With this change it also fails, on the earlier assertion: the same 1 emitter, but 0 visible clusters instead of 1. It is a real, pre-existing failure. It needs its own root cause (possibly the three runs sharing one data dir while only one run's emitter survives).
+      Also not chased: the C15 cascade (`classify_and_record`) in the fsk chain still writes its own posterior for these emitters. That is a separate estimator, outside this ticket.
   - id: T-615
     milestone: MAUTO
     title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
