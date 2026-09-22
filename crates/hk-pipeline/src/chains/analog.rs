@@ -432,8 +432,7 @@ fn log_declined(shared: &Arc<Shared>, session: &AnalogSession, cand: &Candidate)
     let demod = match write_declined(&mut repo, session, &ctx) {
         Ok(id) => id,
         Err(err) => {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: analog chain declined-measurement write: {err}");
+            crate::stats::storage_error(c, "analog chain declined-measurement write", &err);
             return;
         }
     };
@@ -446,8 +445,7 @@ fn log_declined(shared: &Arc<Shared>, session: &AnalogSession, cand: &Candidate)
     // Named, not just counted (T-293/T-319): losing this silently is losing the record the whole
     // path exists to leave.
     if let Err(err) = inv.chain_measurement(&mut repo, cand.track, demod, at) {
-        inc(&c.errors);
-        eprintln!("hk-pipeline: analog chain declined-measurement link: {err}");
+        crate::stats::storage_error(c, "analog chain declined-measurement link", &err);
     }
     if crate::debug_enabled() {
         eprintln!(
@@ -534,8 +532,7 @@ fn identify(
     {
         Ok(e) => e,
         Err(err) => {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: analog chain early identification write: {err}");
+            crate::stats::storage_error(c, "analog chain early identification write", &err);
             return Identified::Written(None, false);
         }
     };
@@ -561,8 +558,7 @@ fn identify(
             ) {
                 Ok(row) => stored = row.is_some(),
                 Err(err) => {
-                    inc(&c.errors);
-                    eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+                    crate::stats::storage_error(c, "analog chain refined tuning write", &err);
                 }
             }
         }
@@ -574,8 +570,7 @@ fn identify(
         // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
         // trains everyone to ignore it.
         if let Err(err) = inv.chain_emitter(&mut repo, cand.track, e) {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: analog chain emitter: {err}");
+            crate::stats::storage_error(c, "analog chain emitter", &err);
         }
         drop(inv);
         // T-321: the fourth measured field a purely analogue emitter can supply.
@@ -695,8 +690,7 @@ fn write_shape(
     let t = match repo.emitter(emitter) {
         Ok(e) => e.last_seen,
         Err(err) => {
-            inc(&counters.errors);
-            eprintln!("hk-pipeline: analog chain shape emitter: {err}");
+            crate::stats::storage_error(counters, "analog chain shape emitter", &err);
             return;
         }
     };
@@ -704,8 +698,7 @@ fn write_shape(
     // purely analogue emitter above the clustering floor, and "no groups" is the failure mode this
     // exists to stop being silent.
     if let Err(err) = crate::characterise::characterise_with(repo, emitter, obs, t) {
-        inc(&counters.errors);
-        eprintln!("hk-pipeline: analog chain shape characterisation: {err}");
+        crate::stats::storage_error(counters, "analog chain shape characterisation", &err);
     }
 }
 
@@ -936,8 +929,7 @@ fn collect_and_write(
             }
             let emitter = mode_emitter(&mut repo, &session, &written, enough && !overloaded)
                 .unwrap_or_else(|err| {
-                    inc(&c.errors);
-                    eprintln!("hk-pipeline: analog chain emitter write: {err}");
+                    crate::stats::storage_error(c, "analog chain emitter write", &err);
                     None
                 });
             if let Some(e) = emitter {
@@ -951,8 +943,7 @@ fn collect_and_write(
                         session.time_range().start,
                     )
                 {
-                    inc(&c.errors);
-                    eprintln!("hk-pipeline: analog chain refined tuning write: {err}");
+                    crate::stats::storage_error(c, "analog chain refined tuning write", &err);
                 }
                 let mut inv = shared
                     .inventory
@@ -962,8 +953,7 @@ fn collect_and_write(
                 // loses the fold, the T-078 confirmation review and the T-219 overlap resolution,
                 // and a bare count trains everyone to ignore it.
                 if let Err(err) = inv.chain_emitter(&mut repo, cand.track, e) {
-                    inc(&c.errors);
-                    eprintln!("hk-pipeline: analog chain emitter: {err}");
+                    crate::stats::storage_error(c, "analog chain emitter", &err);
                 }
                 drop(inv);
                 // T-321: the fourth measured field a purely analogue emitter can supply.
@@ -971,8 +961,7 @@ fn collect_and_write(
             }
         }
         Err(e) => {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: analog chain write: {e}");
+            crate::stats::storage_error(c, "analog chain write", &e);
         }
     }
 }

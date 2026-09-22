@@ -34,6 +34,9 @@ function data(a: TileAddr, bytes = BYTES, t1Ns: number | null = null): TileData 
 
 const flush = () => new Promise((r) => setImmediate(r));
 
+/** One clock per T-532 run: `now` is captured when the cache is built, so each run needs its own. */
+const clockA = { t: 0 }, clockB = { t: 0 }, clockC = { t: 0 };
+
 function harness(opts: TileCacheOptions = {}) {
   const calls: string[] = [];
   /** The URL each request would actually be sent to — assert on what is REQUESTED (T-442/T-454). */
@@ -573,6 +576,91 @@ test("a live-edge tile is NEVER served from cache indefinitely", async () => {
   assert.equal(h.cache.residentTiles, 1);
   // One texture in hand, not a leak per refresh.
   assert.equal(h.uploads() - h.destroys(), 1, "each refresh must destroy the texture it replaces");
+});
+
+// ——— T-532: the period must not scale with how many tiles the edge is cut into ———
+//
+// T-501's fidelity floor makes a level-0 tile 150 kHz x 10.3 s where the old floor made it
+// 1.6 MHz x 256 s, so a pane that drew its live edge in ONE tile now draws it in four. The duty
+// gate was charged per tile, so four members meant four turns to wait: measured in a browser on
+// that floor, a mean 1.5 s and a worst 4.4 s between re-asks of the same live address, against a
+// route whose own answer is never more than 90 ms behind the newest recorded row. A refresh period
+// that is a function of the TILE SIZE is the one thing this policy must not be.
+//
+// The fix charges the gate to a PASS over the edge instead. Within a pass the members go out back
+// to back — still one in flight, still last refusal on the slot — and the wait is paid once per
+// walk. Below: the ratio, and the bound that stops it becoming a poll.
+
+/** A viewport following the edge across `n` level-0 tiles, so all of them are eligible. */
+const wideEdgeView = (n: number, edgeNs = EDGE_NS): Viewport =>
+  ({ box: { f0Hz: 0, f1Hz: n * TILE_HZ, t0Ns: edgeNs - 100e9, t1Ns: edgeNs }, levelF: 0, levelT: 0 });
+
+/**
+ * `ms` of simulated live time over `n` live-edge tiles; returns re-asks per tile.
+ *
+ * **The route answers in `SERVICE_MS`, not instantly, and that is load-bearing.** [[live]] resolves
+ * every fetch in the same step, which puts the measured lane cost at the cache's 12 ms floor —
+ * far under the 100 ms step, so a per-tile gate and a per-pass gate both issue once a step and the
+ * difference between them vanishes. A real live tile is 1.2 MB and answers in ~90-250 ms, which is
+ * *longer* than the gate is short, and that is the regime the period is a function of the tile
+ * count in. Two steps of service reproduces it.
+ */
+const SERVICE_MS = 200;
+async function liveWide(h: ReturnType<typeof harness>, clock: { t: number }, ms: number, n: number) {
+  const tiles = Array.from({ length: n }, (_, i) => i);
+  const issuedAt = new Map<string, number>();
+  for (let step = 0; step < ms / 100; step++) {
+    clock.t += 100;
+    h.cache.beginFrame();
+    for (const f of tiles) h.cache.acquire(edgeTile(f));
+    h.cache.setViewports(LAT, [wideEdgeView(n)]);
+    h.cache.endFrame();
+    h.cache.refreshEdge(LAT, edgeAt(clock.t), [wideEdgeView(n, edgeAt(clock.t))]);
+    await flush();
+    for (const [key, w] of [...h.waiting]) {
+      const at = issuedAt.get(key) ?? clock.t;
+      issuedAt.set(key, at);
+      if (clock.t - at < SERVICE_MS) continue;
+      issuedAt.delete(key);
+      w.resolve(data(parseKey(key)!));
+      h.waiting.delete(key);
+      await flush();
+    }
+  }
+  const per = tiles.map((f) => h.calls.filter((k) => k === keyOf(edgeTile(f))).length);
+  return { per, worst: Math.min(...per), total: h.calls.length };
+}
+
+test("T-532: a live edge cut into four tiles is walked as OFTEN as one cut into one", async () => {
+  const ms = 10_000;
+  const one = await liveWide(harness({ inFlight: 4, now: () => clockA.t, serverMsGuess: 20 }), clockA, ms, 1);
+  const four = await liveWide(harness({ inFlight: 4, now: () => clockB.t, serverMsGuess: 20 }), clockB, ms, 4);
+  assert.ok(one.worst > 2 && four.worst > 2,
+    `both runs must actually refresh, or the ratio is meaningless (${one.per} vs ${four.per})`);
+  // The old rule gave four members a QUARTER of the turns. Half is a generous floor for the
+  // scheduling jitter of a 100 ms step against a 12 ms floor cost, and it is far under 1/4.
+  assert.ok(four.worst >= one.worst * 0.5,
+    `the least-refreshed of four live tiles was re-asked ${four.worst} times in ${ms / 1000} s against a lone tile's ${one.worst}: ` +
+    "the period still scales with how many tiles the edge is cut into, which is the T-501 regression this guards (per tile: " +
+    `${four.per})`);
+});
+
+test("…and it is still not a poll: one in flight, and a gate between passes", async () => {
+  // The bound REFRESH_DUTY states, now enforced on the LANE rather than on each of its members.
+  // A pass of `n` members costs `n` service times and then waits `(REFRESH_DUTY - 1)` more, so over
+  // a run the lane can never ask more than `n` times per `(n + REFRESH_DUTY - 1)` service times.
+  // The harness answers instantly, so the service time is the cache's own floor.
+  const ms = 10_000, n = 4;
+  const h = harness({ inFlight: 4, now: () => clockC.t, serverMsGuess: 20 });
+  const r = await liveWide(h, clockC, ms, n);
+  const steps = ms / 100;
+  // A pass is `n` service times plus `(REFRESH_DUTY - 1)` more of gate, so the lane can complete at
+  // most `ms / ((n + REFRESH_DUTY - 1) x SERVICE_MS)` of them — plus the initial fill.
+  const ceiling = n * (Math.ceil(ms / ((n + REFRESH_DUTY - 1) * SERVICE_MS)) + 1);
+  assert.ok(r.total <= ceiling,
+    `${r.total} requests over ${steps} frames is past the lane's own duty bound (${ceiling}): the refresh has become a poll`);
+  assert.equal(h.cache.stats.edgeRefreshes, r.total - n,
+    "every re-ask past the initial fill is accounted for as a refresh, and nothing else is issuing");
 });
 
 test("…and the CONTROL: without the policy, the very same loop asks exactly once (the defect)", async () => {

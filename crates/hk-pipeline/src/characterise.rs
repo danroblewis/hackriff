@@ -125,6 +125,16 @@ pub fn characterise(
 /// [`characterise`] for an observation a producer measured itself, rather than one read back off
 /// the emitter's fingerprint and classification.
 ///
+/// **The analogue chain's second call per session is a real re-characterisation, not a repeat**
+/// (T-605). T-321 wired this in as a second `characterise_with` per analogue session precisely
+/// because it carries a field the first cannot: the shape flatness, measured from the IQ, which
+/// no fingerprint can hold. It is T-335's rule in action — new evidence arrived, so the emitter
+/// is characterised again — and the right answer is an **append**, exactly as the append-only
+/// snapshot table already intends. Never an upsert and never a replace: collapsing the two would
+/// discard the flatness and, with it, the fourth field that keeps a purely analogue emitter above
+/// the clustering floor. What was wrong was not that it wrote twice, but that the second write's
+/// `features_id` could collide (see [`Repository::emitter_features`]).
+///
 /// The fold, the snapshot and the match/cluster step are identical — this is the *same* call site,
 /// entered with fields the caller measured. It exists because some measurements are not in the
 /// fingerprint and cannot be: a sweep rate is measured from the IQ by a chain
@@ -224,6 +234,76 @@ mod tests {
         let id = repo.record_sighting(&s, None).unwrap().emitter_id;
         inv.chain_emitter(repo, None, id).unwrap();
         repo.live_emitter_id(id).unwrap()
+    }
+
+    /// **T-605: a characterisation stamped behind the snapshot on file still appends, and every
+    /// snapshot id is its own.**
+    ///
+    /// The analogue chain characterises a session twice (T-321): once through the inventory seam,
+    /// once with the shape flatness the fingerprint cannot carry. The second is stamped from a
+    /// different emitter row and can land up to a second *behind* the first, and that is the only
+    /// unusual thing about it — it is a genuinely new measurement, not a repeat of the first.
+    ///
+    /// The fold used to restart from whichever snapshot carried the largest `t`, so an
+    /// earlier-stamped call read a *superseded* aggregate, folded onto it, and re-minted
+    /// `features:{emitter}:{observations}` with a count the chain had already spent. SQLite
+    /// refused the row (`UNIQUE constraint failed: emission_features.features_id`) and the chain
+    /// caught it, printed it and carried on — losing exactly the re-characterisation T-335 exists
+    /// to guarantee.
+    ///
+    /// The assertion is a **count**: N characterisations of one emitter leave N snapshots with N
+    /// distinct ids and strictly increasing `observations`, whatever order their timestamps
+    /// arrive in.
+    #[test]
+    fn t605_a_characterisation_stamped_behind_the_snapshot_on_file_still_appends() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        // One characterisation, through the inventory seam, stamped at t(30).
+        let id = observe(&mut repo, &mut inv, 100.1e6, sensor_fp(100.1e6, 4800.0), 30);
+        assert_eq!(
+            repo.emitter_features_history(id, 100).unwrap().len(),
+            1,
+            "the seam characterises once per sighting; without that this test judges nothing"
+        );
+
+        // Three more, each stamped a full 20 s *behind* the snapshot already on file — the
+        // production shape, exaggerated so a passing run cannot be an ordering accident.
+        let mut scored_against = Vec::new();
+        for _ in 0..3 {
+            let o = super::observation(&repo, id, false).unwrap().unwrap();
+            let out = super::characterise_with(&mut repo, id, o, t(10))
+                .expect("a storage error here is the bug, not a cost of characterising twice");
+            scored_against.push((
+                out.features.id.clone(),
+                out.signature_match
+                    .as_ref()
+                    .and_then(|m| m.features_ref.clone()),
+            ));
+        }
+
+        let snaps = repo.emitter_features_history(id, 100).unwrap();
+        assert_eq!(
+            snaps.len(),
+            4,
+            "one snapshot per characterisation that happened: 1 at the seam + 3 appended"
+        );
+        let ids: std::collections::BTreeSet<_> = snaps.iter().map(|f| f.id.clone()).collect();
+        assert_eq!(ids.len(), 4, "every snapshot id is its own: {ids:?}");
+        let counts: Vec<u32> = snaps.iter().rev().map(|f| f.observations).collect();
+        assert_eq!(
+            counts,
+            vec![1, 2, 3, 4],
+            "each fold continues the chain it appended to, so nothing measured is dropped"
+        );
+        // Same root cause, one step earlier than the refused row: the catalogue match must be
+        // scored from the snapshot its own call wrote, never from a superseded one.
+        for (written, scored) in &scored_against {
+            assert_eq!(
+                scored.as_deref(),
+                Some(written.as_str()),
+                "the match must read the features it was taken from"
+            );
+        }
     }
 
     /// A catalogue entry expecting exactly these numeric fields, each within 2 %.

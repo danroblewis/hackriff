@@ -81,6 +81,46 @@ fn pi_1694(repo: &Repository) -> Option<EmitterId> {
     .map(|e| e.emitter.id)
 }
 
+/// **T-605: a real analogue run swallows no storage error.**
+///
+/// This scene is the one that produced
+/// `hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed:
+/// emission_features.features_id` in six gates, including green ones. The error was caught,
+/// printed and stepped past, so a run that lost the T-321 shape characterisation — and with it
+/// the fourth field that keeps a purely analogue emitter above the clustering floor — looked
+/// exactly like a run that wrote it.
+///
+/// The assertion is a **count**, not a log grep: every chain site that catches a `RepoError` and
+/// carries on now goes through `hk_pipeline::stats::storage_error`, which counts it in
+/// `/chains/storage_errors` as well as naming it. Zero is the only acceptable value, because a
+/// storage error on this path is always a write that should have happened.
+///
+/// Anti-vacuity: the run must actually have demodulated an analogue session and characterised
+/// its shape, or "zero storage errors" is a statement about a scene with nothing in it.
+#[test]
+fn t605_an_analogue_run_swallows_no_storage_error() {
+    let Some(meta) = real_fixture(NAME) else {
+        return;
+    };
+    let dir = TempDir::new("t605-storage");
+    let s = run_mock(&dir.0, &meta);
+    assert!(
+        s.counter("/chains/demodulations") >= 1,
+        "[{SIGNAL_062}] no analogue session ran, so this test judges nothing"
+    );
+    assert!(
+        s.counter("/chains/identifications") >= 1,
+        "[{SIGNAL_062}] the identify path (one of T-321's two characterise sites) never ran, so \
+         this test judges nothing"
+    );
+    assert_eq!(
+        s.counter("/chains/storage_errors"),
+        0,
+        "[{SIGNAL_062}] a chain caught a storage error and carried on; a run that cannot write \
+         must not look like a run that wrote"
+    );
+}
+
 #[test]
 fn signal_062_one_session_counts_one_sighting_and_stores_its_refined_tuning_once() {
     let Some(meta) = real_fixture(NAME) else {

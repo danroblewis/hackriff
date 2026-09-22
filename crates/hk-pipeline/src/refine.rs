@@ -206,8 +206,7 @@ pub(crate) fn store_and_explain(
         Ok(Some(row)) => row,
         Ok(None) => return None,
         Err(e) => {
-            crate::stats::inc(&shared.counters.chains.errors);
-            eprintln!("hk-pipeline: refined tuning write: {e}");
+            crate::stats::storage_error(&shared.counters.chains, "refined tuning write", &e);
             return None;
         }
     };
@@ -219,8 +218,7 @@ pub(crate) fn store_and_explain(
     // fold, the T-078 confirmation review and the T-219 overlap resolution, and a bare count
     // trains everyone to ignore it.
     if let Err(err) = inv.chain_emitter(&mut repo, None, stored.emitter_id) {
-        crate::stats::inc(&shared.counters.chains.errors);
-        eprintln!("hk-pipeline: refine chain emitter: {err}");
+        crate::stats::storage_error(&shared.counters.chains, "refine chain emitter", &err);
     }
     Some(stored.emitter_id)
 }

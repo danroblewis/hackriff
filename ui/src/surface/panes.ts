@@ -37,7 +37,7 @@
 // reaches the front end, through T-343's one gate.
 
 import { fmtBandwidth } from "../app/explore/format";
-import type { Box, Lattice } from "./lattice";
+import type { Box, Lattice, ViewTier } from "./lattice";
 import type { PaneRect, PaneReport, PaneView } from "./surface";
 
 /** A pane's frequency window. Centre and span, exactly as §8.4 states it. */
@@ -683,15 +683,41 @@ export interface PaneStatus {
   readonly cellHz: number;
   readonly cellS: number;
   readonly levelLabel: string;
+  /** **Which tier this pane drew from** (T-505) — the lattice the measurement came off, not only
+   * the level within it. */
+  readonly tier: ViewTier;
+  /** That tier in one clause, for a user: what the pane is showing and why. */
+  readonly tierLabel: string;
   /** `LIVE`, or how far behind the live edge the frozen window's newest row sits. */
   readonly timeLabel: string;
   readonly freqLabel: string;
   readonly tiles: number;
   readonly fallbacks: number;
   readonly pending: number;
+  /** **Resident tiles whose answer does not reach the live edge** (T-532) — see
+   * [[PaneReport.behind]]. Not part of `pending`: the tile arrived, its newest rows had not. */
+  readonly behind: number;
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
+}
+
+/**
+ * **The pane's statement of which tier it drew from** (T-505), and why.
+ *
+ * CLAUDE.md: *"each pane states the level it was actually drawn at, so a wide or deep zoom shows
+ * overview rather than upscaled detail presented as measurement"*. Since the tiers became two real
+ * tile sources, the level alone no longer says that — the same index means a different cell on
+ * each lattice — so the pane names the source as well.
+ */
+function tierStatement(r: PaneReport): string {
+  if (r.tier === "detail") {
+    return r.clamped
+      ? "detail tier, zoomed past its ceiling: the cells drawn are finer than a pixel."
+      : "detail tier: the live chain's own lattice, at the resolution the front end measured.";
+  }
+  return "overview tier: folded from the spectrum-history pyramid, because this window is wider or "
+    + "longer than the detail lattice can be read over. Survey resolution, not live-IQ detail.";
 }
 
 const cellHzAt = (lat: Lattice, level: number) => lat.f0Hz * 2 ** level;
@@ -715,7 +741,6 @@ export function fmtSpan(s: number): string {
 export function paneStatuses(
   panes: readonly PaneState[],
   reports: readonly PaneReport[],
-  lat: Lattice,
   edgeNs: number,
   rects?: ReadonlyMap<string, PaneRect>,
   /** Whether a viewport is following, **asked of the model that owns the answer**. Mid-gesture that
@@ -725,14 +750,21 @@ export function paneStatuses(
    * states in hand. */
   isFollowing?: (id: string) => boolean,
 ): PaneStatus[] {
+  // **No lattice parameter** (T-505). Each report carries the lattice its pane was drawn on,
+  // because the two tiers are two lattices and a single one held here would label a pane's cells
+  // with a size they do not have.
   const byId = new Map(reports.map((r) => [r.id, r]));
   const out: PaneStatus[] = [];
   for (const p of panes) {
     const r = byId.get(p.id);
     if (!r) continue;
-    const mine = `${r.levelF}/${r.levelT}`;
-    const differsFrom = reports.filter((o) => o.id !== p.id && `${o.levelF}/${o.levelT}` !== mine).map((o) => o.id);
-    const cellHz = cellHzAt(lat, r.levelF), cellS = cellSAt(lat, r.levelT);
+    // **The tier is part of the identity of a level** (T-505): level 4 on the detail lattice and
+    // level 4 on the overview lattice are different cells, so two panes at the same indices on
+    // different tiers DO differ and the note must say so.
+    const mine = `${r.tier}:${r.levelF}/${r.levelT}`;
+    const differsFrom = reports.filter((o) => o.id !== p.id && `${o.tier}:${o.levelF}/${o.levelT}` !== mine).map((o) => o.id);
+    // Off the pane's OWN lattice, the one the renderer drew with — never a second one held here.
+    const cellHz = cellHzAt(r.lat, r.levelF), cellS = cellSAt(r.lat, r.levelT);
     const t = timeExtentOf(p.time, edgeNs);
     const live = isFollowing ? isFollowing(p.id) : p.time.live;
     out.push({
@@ -744,12 +776,15 @@ export function paneStatuses(
       levelT: r.levelT,
       cellHz,
       cellS,
-      levelLabel: `${fmtBandwidth(cellHz)} × ${fmtSpan(cellS)} cells (level ${r.levelF}/${r.levelT})`,
+      levelLabel: `${fmtBandwidth(cellHz)} × ${fmtSpan(cellS)} cells (${r.tier} tier, level ${r.levelF}/${r.levelT})`,
+      tier: r.tier,
+      tierLabel: tierStatement(r),
       timeLabel: live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
       freqLabel: `${(p.freq.centerHz / 1e6).toFixed(3)} MHz ± ${fmtBandwidth(p.freq.spanHz / 2)}`,
       tiles: r.tiles,
       fallbacks: r.fallbacks,
       pending: r.pending,
+      behind: r.behind,
       differsFrom,
     });
   }
@@ -762,7 +797,7 @@ export function paneStatuses(
  * `null` when every pane resolved to the same level, because then there is nothing to explain.
  */
 export function levelDivergenceNote(statuses: readonly PaneStatus[]): string | null {
-  const distinct = new Set(statuses.map((s) => `${s.levelF}/${s.levelT}`));
+  const distinct = new Set(statuses.map((s) => `${s.tier}:${s.levelF}/${s.levelT}`));
   if (distinct.size < 2) return null;
   const parts = statuses.map((s) => `${s.id} ${s.levelLabel}`).join("; ");
   return `Panes are at different pyramid levels (${parts}). A coarser cell is the maximum over more cells, so the same energy legitimately reads differently — same ramp, same scale, stated level.`;

@@ -383,6 +383,30 @@ pub(crate) struct Evidence {
     /// A source has **discarded** records that could reach back before `recording_began`, so that
     /// boundary is not a floor and every row before `oldest_record` is `"unknown"`. `Some(why)`.
     pub forgotten: Option<&'static str>,
+    /// **How far forward this answer's evidence reaches** (T-532): the newest instant any consulted
+    /// span over *this band* ends at, clamped into the asked-for window; `None` when no record
+    /// touches the band at all.
+    ///
+    /// # Why the young end needs its own horizon, and why its absence was a bug
+    ///
+    /// [`Evidence::oldest_record`] exists because *absence of a span is not evidence of absence*
+    /// past the point the records reach — before it, "we did not look" is a claim nothing supports,
+    /// so those rows are `"unknown"` rather than grey. **The same is true at the other end, and was
+    /// not said.** A tune record is written as capture proceeds, so it stops at the newest sample;
+    /// every row after that is served `unobserved` — a positive claim that nothing ever looked —
+    /// about an instant the record simply has not reached yet.
+    ///
+    /// Served, that claim is momentarily harmless: nothing has happened there *yet*. **Held, it
+    /// becomes false the instant capture continues**, and a tile is held — a client keeps a resident
+    /// copy for as long as it can, and T-460/T-495 are two tickets about exactly how long that is.
+    /// With a one-second coverage cell the error hid inside the cell the live edge was already in;
+    /// at the fidelity floor's 40 ms cell (T-501) it is a visible band of grey across the newest
+    /// second of every live pane, over rows the radio recorded and this server is serving.
+    ///
+    /// So the answer states where its own evidence stops, and a reader may not read `unobserved`
+    /// past it as *"nothing looked"* — only as *"this answer does not reach here"*. It is the same
+    /// sentence as `oldest_record_s`, pointing the other way.
+    pub newest_record: Option<Timestamp>,
 }
 
 impl Evidence {
@@ -399,6 +423,15 @@ impl Evidence {
             spans.extend(log_spans);
         }
         let log = spans.len() - ring;
+        // The newest instant the consulted records reach over this band, never past the window they
+        // were asked about: an answer cannot be evidence about time it did not look at. Taken from
+        // the SAME `spans` the planes are rasterised from, so the horizon and the plane cannot
+        // disagree — the failure mode of serving a summary beside a body.
+        let newest_record = spans
+            .iter()
+            .map(|s| s.time.end)
+            .max()
+            .map(|t| t.min(window.end));
         Evidence {
             spans,
             ring,
@@ -410,6 +443,7 @@ impl Evidence {
             oldest_record: memory.oldest_record,
             recording_began: memory.recording_began,
             forgotten: memory.forgotten,
+            newest_record,
         }
     }
 
@@ -478,6 +512,10 @@ impl Evidence {
             "recording_began_s": secs(self.recording_began),
             // Why this server cannot bound what it forgot, or null when it can.
             "forgotten": self.forgotten,
+            // Unix s: how far FORWARD this answer's evidence reaches over this band (T-532), or
+            // null when no record touches the band at all. `oldest_record_s` pointing the other
+            // way — see [`Evidence::newest_record`] for why a held answer needs it.
+            "as_of_s": secs(self.newest_record),
             // The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row +
             // unknown_rows)` — a contiguous band, so a client can check the states it was sent.
             "unknown_rows": unknown.len(),
@@ -492,6 +530,14 @@ impl Evidence {
             "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", \
                 and must be drawn as neither grey nor a level - forgetting is not a measurement of \
                 nothing.",
+            "as_of_rule": "this answer's records reach forward only as far as `as_of_s`. An \
+                `\"unobserved\"` cell AFTER it means \"this answer does not reach here\", NOT \
+                \"nothing looked\" - a tune record is written as capture proceeds, so it always \
+                stops at the newest sample. A reader that KEEPS this answer (every tile cache does) \
+                must not draw grey past `as_of_s`: the rows there are being recorded while the copy \
+                ages, and grey is the one mark that may only mean the radio never looked. `null` \
+                means no record touches this band at all, and then nothing here was ever observed \
+                and the whole answer stands.",
         })
     }
 }

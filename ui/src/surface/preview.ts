@@ -36,7 +36,7 @@ import {
   coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
-import { tileUrl, type Box, type Lattice, type TileAddr } from "./lattice";
+import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
 import type { RowActionFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
@@ -88,7 +88,15 @@ export function isBackpressure(e: unknown): boolean {
 
 /** Everything the preview needs before its first frame, and where each part came from. */
 export interface SurfaceProbe {
+  /** The **detail** lattice: the live chain's own, and the one an edge invalidation is about. */
   readonly lattice: Lattice;
+  /**
+   * **Both tiers** (T-505). `overview` is `scheme=overview`, anchored on the spectrum-history
+   * pyramid, and it is what answers a viewport the detail lattice cannot be read over. When that
+   * probe fails the set is [[oneTier]] of the detail lattice — the surface then behaves exactly as
+   * it did before, with the failure stated in `degraded` rather than silently halving the reach.
+   */
+  readonly lattices: LatticeSet;
   readonly origin: SurfaceOrigin;
   readonly census: CoverageCensus;
   readonly opening: OpeningWindow;
@@ -140,6 +148,17 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   };
   const lattice = latticeOf(probe, RENDER_CELLS);
 
+  // **The second tier, probed the same way and never guessed** (T-505). One extra `cells = 8`
+  // request. It is not fatal: a server with no overview lattice (or one that refuses the address)
+  // leaves every viewport on the detail tier, which is what the surface did before this existed.
+  let lattices: LatticeSet = oneTier(lattice);
+  try {
+    const over = (await ask(tileUrl(probeAddr("any", "overview")))) as TileResponse;
+    lattices = { detail: lattice, overview: latticeOf(over, RENDER_CELLS) };
+  } catch (e) {
+    degraded.push(`GET /api/tiles?scheme=overview failed (${describe(e)}): wide or long viewports stay on the detail lattice, which cannot be read over them — they will show coarse stand-ins and pending rather than survey overview.`);
+  }
+
   let nav: NavigationSlice | null = null;
   try {
     nav = (await ask("/api/navigation")) as NavigationSlice;
@@ -187,7 +206,7 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   const range = shadeRange(fine, "the observed region")
     ?? shadeRange(cov, "the whole surface")
     ?? { ...FALLBACK_RANGE, source: FALLBACK_RANGE_SOURCE };
-  return { lattice, origin, census, opening, range, note: orientationNote(census, opening), requests, degraded };
+  return { lattice, lattices, origin, census, opening, range, note: orientationNote(census, opening), requests, degraded };
 }
 
 /**
@@ -517,6 +536,7 @@ export class SurfacePreview {
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
+      lattices: probe.lattices,
       bounds: probe.origin.bounds,
       cache: (tex) => new TileCache<TilePlanes>(tex, (a: TileAddr, signal?: AbortSignal) =>
         fetchTile(a, opts.token, opts.fetchFn, signal)),

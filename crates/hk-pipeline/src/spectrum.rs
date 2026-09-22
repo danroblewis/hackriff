@@ -72,11 +72,13 @@ use std::time::Duration;
 use hk_core::{Discontinuity, ReadOutcome};
 use hk_dsp::{InputInfo, PowerUnit, SpectrumFrame, StftProcessor};
 use hk_model::ContentClass;
+use hk_store::history::{FrameOrigin, source_key};
 use hk_stream::{
     BinaryRecord, Publisher, PublisherConfig, PublisherHandle, RecordFlags, StreamError,
 };
 use num_complex::Complex;
 
+use crate::attention::AttentionService;
 use crate::class::{RowPlan, row_plan, spectrum_header};
 use crate::compute::Reader;
 use crate::config::{DisplayPatch, DisplaySettings};
@@ -144,10 +146,19 @@ struct Output<'a> {
     /// with the one before it and says so (T-489).
     gap: bool,
     error: Option<anyhow::Error>,
+    /// T-484: the view lattice's writer queue, whose finest node these frames *are*.
+    view: Option<Arc<crate::history::ViewQueue>>,
+    /// T-133: the site each frame is folded under, peeked at the frame's sample time.
+    attention: Option<Arc<AttentionService>>,
 }
 
 impl<'a> Output<'a> {
-    fn new(shared: &'a Shared, plan: RowPlan, settings: DisplaySettings) -> Self {
+    fn new(
+        shared: &'a Shared,
+        plan: RowPlan,
+        settings: DisplaySettings,
+        attention: Option<Arc<AttentionService>>,
+    ) -> Self {
         Self {
             shared,
             class: shared.cfg.source_class,
@@ -162,6 +173,8 @@ impl<'a> Output<'a> {
             avg_rows: 0,
             gap: false,
             error: None,
+            view: shared.view_queue.clone(),
+            attention,
         }
     }
 
@@ -182,7 +195,22 @@ impl<'a> Output<'a> {
     /// re-offer (a retune, a display-geometry change) builds a new one and its consumers have to
     /// resubscribe, which is exactly the interval in which nobody is reading.
     fn watched(&self) -> bool {
-        self.handle.as_ref().is_some_and(|h| h.open_consumers() > 0)
+        // **The view lattice is a consumer, and unlike every other one it is STORED (T-501).**
+        //
+        // The paragraph above was true when T-489 was written and T-501 falsifies it: since the
+        // canvas's finest tier is sized to *this* plan's own bin and row
+        // ([`crate::history::view_geometry`]), the rows this reader produces are folded into the
+        // view pyramid by [`Output::row`] and become history. Skipping the FFT because no browser
+        // is attached would therefore leave a permanent hole in the recorded finest tier for every
+        // interval nobody watched — and the canvas cannot tell that hole from "the radio never
+        // looked", which is the one thing grey is allowed to mean. A saving that changes what is
+        // recorded is not a saving; T-489's own first rule says so.
+        //
+        // So T-489's skip survives exactly where its premise still holds: a run with no view
+        // lattice attached (`view_queue: None`). With one attached the FFT runs, and what remains
+        // gated on a subscriber is everything downstream of it — the publish is still offered to
+        // nobody and costs nothing.
+        self.view.is_some() || self.handle.as_ref().is_some_and(|h| h.open_consumers() > 0)
     }
 
     /// Samples went by with nothing subscribed: the next row is not contiguous with the last one
@@ -278,6 +306,38 @@ impl<'a> Output<'a> {
         if reset {
             flags = flags.with(RecordFlags::DISCONTINUITY);
         }
+        // **T-484: the canvas's finest tier is THIS row.**
+        //
+        // The view lattice's node (0, 0) is sized to this plan's own bin and row
+        // ([`crate::history::view_geometry`]), so the fold here is 1:1 — one FFT bin of one
+        // published row per cell — and `/api/tiles`'s `max_db` at that node is the number this
+        // reader just wrote into `self.db`, not a max-hold over ~10³ of them. T-483 measured what
+        // the second STFT cost: +10.5 dB of floor lift, 5.0 dB of contrast on the 100.465 MHz
+        // emission, and 3 % of the station's level variation retained.
+        //
+        // It is pushed **before** the publish and regardless of the class gate: the gate withholds
+        // payloads from external consumers (`StreamError::SpectrumGated`), and this is the local
+        // store, which scheme 1 already fills at full resolution from the history reader.
+        //
+        // It is `spec.psd`, not `trace`: `averaging` is an exponential moving average the *viewer*
+        // asked for, and a display filter does not belong in the store. At the default
+        // (`averaging = 1`) they are the same slice, which is the case T-483 compares.
+        //
+        // A clone and a push — no pyramid lock, no tile write, no zstd. This thread holds a gate
+        // cursor; nothing here can be made slow by a reader or by the disk.
+        if let Some(q) = self.view.as_ref() {
+            q.push(
+                &self.shared.counters.history,
+                frame,
+                FrameOrigin {
+                    source: source_key(&frame.provenance.get().device_id),
+                    site: Some(crate::history::frame_site(
+                        self.attention.as_deref(),
+                        frame.t.host_time,
+                    )),
+                },
+            );
+        }
         let sc = &self.shared.counters.spectrum;
         inc(&sc.rows);
         let p = self.publisher.as_mut().expect("publisher offered above");
@@ -349,7 +409,10 @@ fn rebuild(
 }
 
 /// Runs reader 3 until the ring closes.
-pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
+pub(crate) fn run(
+    shared: Arc<Shared>,
+    attention: Option<Arc<AttentionService>>,
+) -> anyhow::Result<()> {
     let class = shared.cfg.source_class;
     let display = Arc::clone(&shared.display);
     let mut seen = display.generation();
@@ -363,7 +426,7 @@ pub(crate) fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
         settings.window,
     );
     let mut stft = stft_for(&shared, &plan)?;
-    let mut out = Output::new(&shared, plan, settings);
+    let mut out = Output::new(&shared, plan, settings, attention);
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
     let mut buf = vec![Complex::<i8>::default(); 1 << 16];
