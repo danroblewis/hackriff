@@ -2426,6 +2426,225 @@ fn tile_body(
     }))
 }
 
+// ---------------------------------------------------------------------------------------------
+// T-573: one request per viewport, not one per tile.
+// ---------------------------------------------------------------------------------------------
+
+/// The most addresses one `GET /api/tiles/batch` may name.
+///
+/// A viewport is tens of tiles, not hundreds — a 6 GHz-wide pane at the overview lattice was
+/// measured at 1780 addresses across the WHOLE canvas (T-484), and no single pane asks for its
+/// whole canvas at once. Sixty-four is comfortably above a pane row and far below anything that
+/// could turn one request into a long occupation of a connection thread. Over it the route
+/// **refuses**, naming the cap, rather than silently answering a prefix: a caller that asked for
+/// more than it may have needs to know which addresses it must re-ask for, and the cheapest
+/// honest answer is "split it".
+pub const TILES_BATCH_MAX_ADDRESSES: usize = 64;
+
+/// The most bytes one batch answer may carry.
+///
+/// Unlike the address cap this one **truncates** rather than refuses, because its trigger is not
+/// the caller's fault: a tile's size is a property of the grid, not of the request, so a legal
+/// 64-address batch can be cheap over unobserved spectrum and enormous over a full one. The
+/// answer says `truncated: true` and lists every address it did not reach in `remaining`, so the
+/// remainder is addressable — the caller asks again for exactly those and makes progress.
+///
+/// At least one tile is always returned even when it alone exceeds the cap; otherwise a single
+/// oversized address would be unfetchable through this route forever.
+pub const TILES_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// `GET /api/tiles/batch` — a viewport's worth of tile addresses in one request (T-573).
+///
+/// **This is a transport change, never an analysis one.** Each entry's `tile` is byte-identical to
+/// what `GET /api/tiles` would have answered for that address on its own: the same `key`, the same
+/// independent `(level_f, level_t)` pair, the same `coverage` plane, the same `resolution` block
+/// and the same per-tile `cost`. Batching is a way to ask, not a way to summarise, and every
+/// per-address fact the canvas depends on survives it.
+///
+/// **A partial answer is expressible, and that is the point.** A viewport where three tiles have
+/// data, one is genuinely unobserved and one was refused is ONE response carrying three 200s, a
+/// 200 whose own `coverage` says unobserved, and a 503 — never one status for the set. Collapsing
+/// a missing tile into an empty one is precisely the defect the coverage map exists to prevent, so
+/// there is no "status" for the batch as a whole beyond the transport's own 200.
+///
+/// **The coverage short-circuit is untouched.** Each address goes through [`tiles_json`], which
+/// answers a uniformly-unobserved tile from the coverage map without ever reaching the generation
+/// path (T-461). A batch endpoint that made empty tiles expensive again would be a regression and
+/// not a win, so the cheap path is reached by construction: this route adds a loop, not a
+/// different tile builder.
+///
+/// **The in-flight cap is per address, still.** `tiles_json` takes and releases one
+/// [`TileSlot`] per address, so a batch of sixty-four holds ONE producer slot at a time, never
+/// sixty-four; under contention its later addresses come back as per-address 503s and the caller
+/// re-asks for exactly those. It does not widen the cap and it does not queue behind it.
+pub fn tiles_batch_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
+    tiles_batch_json_capped(state, q, TILES_BATCH_MAX_BYTES)
+}
+
+/// [`tiles_batch_json`] with the response-size cap as an argument.
+///
+/// The seam exists so the truncation path is tested **through the route**, at a cap small enough
+/// for a fixture to cross, rather than by a separate pure function that could drift from what the
+/// route does. The public entry point is the only caller outside tests, and it passes the
+/// documented constant.
+fn tiles_batch_json_capped(
+    state: &ApiState,
+    q: &Params,
+    max_bytes: usize,
+) -> Result<Value, ApiError> {
+    const ALLOWED: [&str; 7] = [
+        "device", "scheme", "cells", "planes", "client", "addresses", "token",
+    ];
+    if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
+        return Err(bad(&format!(
+            "unknown parameter {k:?} (allowed: device, scheme, cells, planes, client, \
+             addresses). \
+             `level_f`, `level_t`, `f_index` and `t_index` are per-address and belong in \
+             `addresses`, not beside it"
+        )));
+    }
+    // Shared across the batch, because a viewport is drawn from ONE lattice at ONE cell count for
+    // ONE device: these are properties of the viewport, and the addresses are what vary within it.
+    // A client mixing schemes or devices (a pane and the minimap) issues one batch per group,
+    // which is still a small constant per render and keeps every request self-describing.
+    // `client` (T-630) is shared for the same reason: one request is one asker, and each address
+    // takes its admission slot under that asker's share exactly as a single-tile read would.
+    let shared: Vec<(String, String)> = q
+        .iter()
+        .filter(|(k, _)| {
+            matches!(
+                k.as_str(),
+                "device" | "scheme" | "cells" | "planes" | "client"
+            )
+        })
+        .cloned()
+        .collect();
+    let raw = q
+        .iter()
+        .find(|(k, _)| k == "addresses")
+        .map(|(_, v)| v.as_str())
+        .ok_or_else(|| {
+            bad(
+                "addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…] names the tiles to answer; \
+                 a batch with no addresses is not a cheaper spelling of anything",
+            )
+        })?;
+    let addrs = parse_batch_addresses(raw)?;
+    if addrs.len() > TILES_BATCH_MAX_ADDRESSES {
+        return Err(bad(&format!(
+            "{} addresses is over this route's cap of {TILES_BATCH_MAX_ADDRESSES} per request \
+             (refused rather than truncated, so you know exactly which addresses still need \
+             asking for): split the viewport and ask again",
+            addrs.len()
+        )));
+    }
+
+    let mut tiles = Vec::with_capacity(addrs.len());
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    let mut remaining: Vec<String> = Vec::new();
+    for (i, a) in addrs.iter().enumerate() {
+        if truncated {
+            remaining.push(a.spelling.clone());
+            continue;
+        }
+        let mut params = shared.clone();
+        params.push(("level_f".into(), a.level_f.to_string()));
+        params.push(("level_t".into(), a.level_t.to_string()));
+        params.push(("f_index".into(), a.f_index.to_string()));
+        params.push(("t_index".into(), a.t_index.to_string()));
+        let address = json!({
+            "level_f": a.level_f,
+            "level_t": a.level_t,
+            "f_index": a.f_index,
+            "t_index": a.t_index,
+            "spelling": a.spelling,
+        });
+        let entry = match tiles_json(state, &params) {
+            // Verbatim. The single-tile body IS the per-address answer; nothing is dropped,
+            // merged or re-keyed on the way into the array.
+            Ok(v) => json!({ "address": address, "status": 200, "tile": v }),
+            // A per-address refusal with its own status — the whole reason this is an array of
+            // entries and not an array of tiles.
+            Err(e) => json!({ "address": address, "status": e.status, "error": e.message }),
+        };
+        // The size cap is charged on what this answer will actually put on the wire.
+        bytes += serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
+        tiles.push(entry);
+        // `i > 0`: one oversized address must still be answerable, or it is unfetchable forever.
+        if bytes >= max_bytes && i + 1 < addrs.len() {
+            truncated = true;
+        }
+    }
+
+    Ok(json!({
+        "requested": addrs.len(),
+        "returned": tiles.len(),
+        "truncated": truncated,
+        // Exactly the addresses that were not answered, in the spelling they were asked in, so the
+        // follow-up request is a copy rather than a re-derivation.
+        "remaining": remaining,
+        "limits": {
+            "max_addresses": TILES_BATCH_MAX_ADDRESSES,
+            "max_response_bytes": max_bytes,
+            "over_addresses": "refused (400), naming the cap",
+            "over_bytes": "truncated, with every unanswered address listed in `remaining`",
+        },
+        "tiles": tiles,
+        "statement": "each entry's `tile` is exactly what GET /api/tiles answers for that address \
+            alone — same key, same level pair, same coverage plane, same cost. Batching changes \
+            how many requests a viewport costs, never what a tile says. A tile with no data is \
+            still answered from the coverage map without reaching the generation path.",
+    }))
+}
+
+/// One address in a batch, plus the exact text it was asked in.
+struct BatchAddr {
+    level_f: u32,
+    level_t: u32,
+    f_index: i64,
+    t_index: i64,
+    spelling: String,
+}
+
+/// `<level_f>.<level_t>.<f_index>.<t_index>`, comma-separated.
+///
+/// Dotted and comma-separated rather than repeated query parameters: it keeps a sixty-four-address
+/// viewport around a kilobyte, well inside the 16 KiB request-head limit, and it keeps ONE
+/// parameter to validate. A malformed address refuses the whole request rather than being skipped
+/// — a silently-dropped address is a tile the canvas would leave pending forever with nothing
+/// saying why.
+fn parse_batch_addresses(raw: &str) -> Result<Vec<BatchAddr>, ApiError> {
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let f: Vec<&str> = part.split('.').collect();
+        let malformed = || {
+            bad(&format!(
+                "address {part:?} is not <level_f>.<level_t>.<f_index>.<t_index>: a batch refuses \
+                 a malformed address rather than dropping it, because a dropped address is a tile \
+                 left pending with nothing saying why"
+            ))
+        };
+        if f.len() != 4 {
+            return Err(malformed());
+        }
+        out.push(BatchAddr {
+            level_f: f[0].parse().map_err(|_| malformed())?,
+            level_t: f[1].parse().map_err(|_| malformed())?,
+            f_index: f[2].parse().map_err(|_| malformed())?,
+            t_index: f[3].parse().map_err(|_| malformed())?,
+            spelling: part.to_owned(),
+        });
+    }
+    if out.is_empty() {
+        return Err(bad(
+            "addresses= named no address: a batch with no addresses is not a cheaper spelling of \
+             anything",
+        ));
+    }
+    Ok(out)
+}
+
 /// `GET /api/tiles/events` — the coarse-zoom aggregate form (`docs/16` §5.3).
 ///
 /// A tile carries **no emitters**: identity gating is per-caller and a tile is not, and a sealed
@@ -4029,6 +4248,213 @@ mod tests {
             ("t_index", &t_index.to_string()),
             ("cells", &N.to_string()),
         ])
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-573: the batch route.
+    // -----------------------------------------------------------------------------------------
+
+    fn batch_params(addresses: &str) -> Vec<(String, String)> {
+        params(&[("cells", &N.to_string()), ("addresses", addresses)])
+    }
+
+    /// **Batching is a way to ask, not a way to summarise.** (T-573.)
+    ///
+    /// Every per-address fact the canvas depends on has to survive the round trip: the address
+    /// itself, its independent level pair, its own coverage plane and its own `cost`. Asserted by
+    /// comparing each entry against what `GET /api/tiles` answers for that address ALONE — the
+    /// only difference permitted is this read's own diagnostics (`build_ms`, `in_flight`), which
+    /// T-574 already had to strip before hashing a tile into an ETag for exactly this reason.
+    #[test]
+    fn a_batch_entry_is_what_the_single_tile_route_answers_for_that_address_alone() {
+        let dir = temp_dir("batch-identity");
+        let (state, _, _) = state_with_history(&dir, 8);
+        // One observed address, one that nothing ever sampled, one two tiles away.
+        let addrs = [F_INDEX, F_INDEX + 1, F_INDEX + 3];
+        let spelling = addrs
+            .iter()
+            .map(|f| format!("0.0.{f}.{T_INDEX}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let batch = tiles_batch_json(&state, &batch_params(&spelling)).unwrap();
+        assert_eq!(batch["requested"], json!(3));
+        assert_eq!(batch["returned"], json!(3));
+        assert_eq!(batch["truncated"], json!(false));
+        assert_eq!(batch["remaining"], json!([]));
+
+        for (i, f) in addrs.iter().enumerate() {
+            let e = &batch["tiles"][i];
+            assert_eq!(e["status"], json!(200), "{e}");
+            assert_eq!(e["address"]["f_index"], json!(*f), "{}", e["address"]);
+            assert_eq!(e["address"]["t_index"], json!(T_INDEX), "{}", e["address"]);
+            assert_eq!(e["address"]["level_f"], json!(0));
+            assert_eq!(e["address"]["level_t"], json!(0));
+            assert_eq!(
+                e["address"]["spelling"],
+                json!(format!("0.0.{f}.{T_INDEX}")),
+                "the spelling is echoed so a follow-up request is a copy, not a re-derivation"
+            );
+            let alone = tiles_json(&state, &tile_params(*f, T_INDEX)).unwrap();
+            let got = &e["tile"];
+            for field in ["key", "extent", "axes", "grid", "coverage", "sealed"] {
+                assert_eq!(
+                    got[field], alone[field],
+                    "{field} differs between the batch and the single-tile route at f_index {f}"
+                );
+            }
+            // The level pair that ANSWERED, not the one addressed — the honesty tier survives.
+            assert_eq!(
+                got["resolution"]["answered"],
+                alone["resolution"]["answered"]
+            );
+            assert_eq!(got["resolution"]["source"], alone["resolution"]["source"]);
+            // Its own cost, per address, not one number for the set.
+            assert!(got["cost"]["source_cells"].is_number(), "{}", got["cost"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A partial viewport is expressible, and the coverage short-circuit still short-circuits.**
+    ///
+    /// Three marks in one response: a tile with data, a tile nothing ever sampled, and a refusal.
+    /// The unobserved one must still be answered from the coverage map — `source_cells: 0`,
+    /// `chunks: 0`, `short_circuit.applied` — because a batch that made empty tiles expensive
+    /// again would be a regression and not a win. There is no status for the SET: collapsing a
+    /// missing tile into an empty one is the defect the coverage map exists to prevent.
+    #[test]
+    fn one_batch_carries_data_genuinely_unobserved_and_a_refusal_without_flattening_them() {
+        let dir = temp_dir("batch-partial");
+        // With an observation log: only then does the coverage map distinguish "nothing ever
+        // sampled here" from "we no longer know whether we looked", and the short-circuit needs
+        // the former. Without one every cell is `unknown`, which fails closed into the full read.
+        let (state, _, _) = state_with_records(&dir, 8, 0);
+        // The third address is above the readable ceiling, so the route refuses THAT ADDRESS with
+        // its own status while the two beside it answer.
+        let spelling = format!(
+            "0.0.{F_INDEX}.{T_INDEX},0.0.{}.{T_INDEX},99.0.0.0",
+            F_INDEX + 1
+        );
+        let batch = tiles_batch_json(&state, &batch_params(&spelling)).unwrap();
+        assert_eq!(batch["returned"], json!(3), "{batch}");
+
+        let (data, unobserved, refused) =
+            (&batch["tiles"][0], &batch["tiles"][1], &batch["tiles"][2]);
+        assert_eq!(data["status"], json!(200));
+        assert!(
+            data["tile"]["grid"]["observed_cells"].as_u64().unwrap() > 0,
+            "the fixture's own band must carry data: {}",
+            data["tile"]["grid"]
+        );
+
+        assert_eq!(unobserved["status"], json!(200), "{unobserved}");
+        let u = &unobserved["tile"];
+        assert_eq!(
+            u["resolution"]["short_circuit"]["applied"],
+            json!(true),
+            "a batch must not cost an unobserved tile the generation path: {}",
+            u["resolution"]["short_circuit"]
+        );
+        assert_eq!(u["cost"]["source_cells"], json!(0), "{}", u["cost"]);
+        assert_eq!(u["cost"]["chunks"], json!(0), "{}", u["cost"]);
+
+        assert_ne!(
+            refused["status"],
+            json!(200),
+            "an unreadable address keeps its OWN status: {refused}"
+        );
+        assert!(refused["tile"].is_null(), "{refused}");
+        assert!(
+            refused["error"].as_str().is_some_and(|m| !m.is_empty()),
+            "a refusal says why, per address: {refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two caps, two answers, because they have two different causes** (T-573).
+    ///
+    /// Over `max_addresses` is the CALLER's doing, so it is refused with a 400 naming the cap —
+    /// nothing is produced and the caller knows exactly what still needs asking for. A malformed
+    /// address refuses the whole request too, rather than being skipped: a silently-dropped
+    /// address is a tile left pending forever with nothing saying why.
+    #[test]
+    fn the_address_cap_and_a_malformed_address_are_refused_rather_than_partly_answered() {
+        let dir = temp_dir("batch-caps");
+        let (state, _, _) = state_with_history(&dir, 2);
+
+        let many = (0..=TILES_BATCH_MAX_ADDRESSES)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i as i64))
+            .collect::<Vec<_>>()
+            .join(",");
+        let e = tiles_batch_json(&state, &batch_params(&many)).unwrap_err();
+        assert_eq!(e.status, 400);
+        assert!(
+            e.message.contains(&TILES_BATCH_MAX_ADDRESSES.to_string()) && e.message.contains("65"),
+            "the refusal names the cap and what was asked: {}",
+            e.message
+        );
+
+        for bad_addr in ["0.0.1", "0.0.1.2.3", "a.0.1.2", ""] {
+            let e = tiles_batch_json(&state, &batch_params(bad_addr)).unwrap_err();
+            assert_eq!(e.status, 400, "{bad_addr:?} was not refused");
+        }
+        // The per-address parameters do not belong beside the batch; saying so beats ignoring them.
+        let mut mixed = batch_params(&format!("0.0.{F_INDEX}.{T_INDEX}"));
+        mixed.push(("f_index".into(), "3".into()));
+        assert_eq!(tiles_batch_json(&state, &mixed).unwrap_err().status, 400);
+        // T-630: `client` is a per-request fact (one request is one asker), so it rides beside the
+        // addresses and every address is admitted under it, as a single-tile read would be.
+        let mut named = batch_params(&format!("0.0.{F_INDEX}.{T_INDEX}"));
+        named.push(("client".into(), "tab-one".into()));
+        let v = tiles_batch_json(&state, &named).expect("a named batch is answered");
+        assert_eq!(v["tiles"][0]["status"], json!(200), "{v}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Over the byte cap it truncates, and the remainder stays addressable.**
+    ///
+    /// The size cap's trigger is a property of the GRID, not of the request — a legal batch is
+    /// cheap over unobserved spectrum and large over a full one — so refusing it would punish a
+    /// caller for something it cannot predict. Instead the answer stops, says `truncated: true`,
+    /// and lists every address it did not reach in the spelling it was asked in. And a single
+    /// address over the cap on its own is still answered, or it would be unfetchable forever.
+    #[test]
+    fn over_the_byte_cap_the_batch_truncates_and_names_every_address_it_did_not_reach() {
+        let dir = temp_dir("batch-truncate");
+        let (state, _, _) = state_with_history(&dir, 8);
+        let spellings: Vec<String> = (0..5)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i))
+            .collect();
+        let joined = spellings.join(",");
+
+        // A cap of one byte: the first entry alone crosses it, so exactly one tile comes back and
+        // the other four are named.
+        let v = tiles_batch_json_capped(&state, &batch_params(&joined), 1).unwrap();
+        assert_eq!(v["requested"], json!(5));
+        assert_eq!(v["returned"], json!(1), "{}", v["tiles"]);
+        assert_eq!(v["truncated"], json!(true));
+        assert_eq!(v["remaining"], json!(spellings[1..]), "{v}");
+        assert_eq!(v["limits"]["max_response_bytes"], json!(1));
+        assert_eq!(
+            v["tiles"][0]["status"],
+            json!(200),
+            "a lone oversized address is still answered"
+        );
+
+        // Asking again for exactly what `remaining` named makes progress rather than looping.
+        let again =
+            tiles_batch_json_capped(&state, &batch_params(&spellings[1..].join(",")), 1).unwrap();
+        assert_eq!(
+            again["tiles"][0]["address"]["spelling"],
+            json!(spellings[1])
+        );
+
+        // And under the real cap this same viewport is one whole answer.
+        let whole = tiles_batch_json(&state, &batch_params(&joined)).unwrap();
+        assert_eq!(whole["returned"], json!(5));
+        assert_eq!(whole["truncated"], json!(false));
+        assert_eq!(whole["remaining"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **The ticket.** A tile whose selected coverage plane is `unobserved` end to end is answered

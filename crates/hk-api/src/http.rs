@@ -1249,6 +1249,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 Err(e) => respond_error(&mut stream, e.status, &e.message),
             };
         }
+        // T-573: one request per viewport, not one per tile. Each entry's `tile` is exactly what
+        // the route above answers for that address alone, so a partial viewport — some data, one
+        // genuinely unobserved, one refused — is expressible in one response. Answered through
+        // the generic tail: a batch is never a single sealed representation, so it gets no ETag
+        // and no immutable cache, but it does get `Accept-Encoding` (T-700) where it matters most.
+        "/api/tiles/batch" => crate::tiles::tiles_batch_json(state, &req.query),
         // docs/16 §5.3: a tile never carries emitters (identity gating is per-caller and a sealed
         // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
         // demand on the same address.

@@ -36,12 +36,13 @@ import {
   coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
+import { batchedTileSource } from "./tilebatch";
 import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
 import type { RowActionFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
-import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
+import { probeAddr, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type Viewport } from "./tilecache";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
@@ -590,8 +591,11 @@ export class SurfacePreview {
       lattice: probe.lattice,
       lattices: probe.lattices,
       bounds: probe.origin.bounds,
-      cache: (tex) => new TileCache<TilePlanes>(tex, (a: TileAddr, signal?: AbortSignal) =>
-        fetchTile(a, opts.token, opts.fetchFn, signal)),
+      // T-573: the cache still asks for one address at a time — its slots, aborts and refresh
+      // lane are per-tile facts — and `batchedTileSource` coalesces the calls one pump makes into
+      // ONE `GET /api/tiles/batch`. A viewport render costs a small constant of requests instead
+      // of one per tile, and nothing about how a tile is scheduled, aborted or decoded changes.
+      cache: (tex) => new TileCache<TilePlanes>(tex, batchedTileSource(opts.token, opts.fetchFn)),
       minimapPx: opts.minimapPx ?? 120,
       chrome: opts.chrome ?? null,
       chromeAction: opts.chromeAction ?? null,

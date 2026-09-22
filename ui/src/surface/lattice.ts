@@ -297,6 +297,42 @@ export const keyOf = (a: TileAddr): string =>
 export const TILE_PLANES = "f16";
 
 /**
+ * The most addresses this client puts in one batch request (T-573).
+ *
+ * The route's own cap, mirrored here so the client splits rather than being refused: a refusal
+ * costs a round trip and teaches the client nothing it could not have known.
+ */
+export const TILES_BATCH_MAX_ADDRESSES = 64;
+
+/** One address in the batch route's `addresses` spelling: `level_f.level_t.f_index.t_index`. */
+export const addrSpelling = (a: TileAddr): string =>
+  `${a.levelF}.${a.levelT}.${a.fIndex}.${a.tIndex}`;
+
+/**
+ * The batch request this client builds for `addrs` (T-573; ui/test asserts the REQUEST).
+ *
+ * `device`, `scheme`, `cells`, `planes` and `client` are shared by the batch because they are properties of
+ * the viewport; only the address varies within it. A caller with a mixed set groups by
+ * [[batchGroupKey]] first — one request per group is still a small constant per render.
+ */
+export function tilesBatchUrl(addrs: readonly TileAddr[], path = "/api/tiles/batch"): string {
+  if (addrs.length === 0) throw new Error("tilesBatchUrl: no addresses");
+  const a = addrs[0];
+  const q = new URLSearchParams({ addresses: addrs.map(addrSpelling).join(",") });
+  if (a.scheme !== "view") q.set("scheme", a.scheme);
+  if (a.device !== "any") q.set("device", a.device);
+  if (a.cells !== 256) q.set("cells", String(a.cells));
+  // T-630: one batch is one asker, so it carries the same `client` a single-tile request would.
+  const client = tileClientId();
+  if (client) q.set("client", client);
+  q.set("planes", TILE_PLANES);
+  return `${path}?${q.toString()}`;
+}
+
+/** What may share one batch: everything the route takes once, per request. */
+export const batchGroupKey = (a: TileAddr): string => `${a.device}|${a.scheme}|${a.cells}`;
+
+/**
  * The request this client builds for `a` (ui/test asserts the request, not only the response).
  *
  * T-630: it also carries **who is asking** (`client`), when a host has named this page

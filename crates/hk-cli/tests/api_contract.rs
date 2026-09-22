@@ -10230,6 +10230,164 @@ fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
 /// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
 const FINE_STEPS: u64 = 3334;
 const COARSE_STEPS: u64 = 418;
+
+/// T-573 — **a viewport's worth of tile addresses in ONE request.**
+///
+/// The assertions are COUNTS and the per-address marks, never a wall clock: eight addresses cost
+/// one HTTP request instead of eight; each entry carries its own address, level pair, coverage
+/// plane and `cost`, and equals what `GET /api/tiles` answers for that address alone; a tile
+/// nothing ever sampled is still answered from the coverage map without reaching the generation
+/// path; and both caps are enforced with the answer documented in `docs/api.md`.
+#[test]
+fn tiles_batch_answers_a_viewport_in_one_request_without_flattening_its_marks() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let one = |fi: u64, ti: u64| {
+        format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let batch = |spelling: &str| format!("/api/tiles/batch?cells={N}&addresses={spelling}");
+
+    let (st, probe) = get(addr, &one(0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    let t_now = || (unix_now() / (t_cell * N as f64)) as u64;
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &one(f_index, t_now())).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|c| c > 0)
+        },
+    );
+
+    // Eight addresses across the station's band — a pane row — at an address **two tile-heights
+    // behind the live edge**, whose extent is entirely in the past. A tile at the edge grows
+    // between two HTTP requests, and the comparison below is between a batch read and eight
+    // single reads: across a growing tile that compares two different grids. Waited for rather
+    // than assumed, because "it has data by now" is the premise of everything after it.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let ti = loop {
+        let ti = t_now().saturating_sub(2);
+        if get(addr, &one(f_index, ti)).1["grid"]["observed_cells"]
+            .as_u64()
+            .is_some_and(|c| c > 0)
+        {
+            break ti;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no settled observed tile behind the live edge"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let bases: Vec<u64> = (0..8).map(|i| f_index + i).collect();
+    let spelling = bases
+        .iter()
+        .map(|f| format!("0.0.{f}.{ti}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // ONE request. Eight tiles.
+    let (st, v) = get(addr, &batch(&spelling));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["requested"], json!(8), "{v}");
+    assert_eq!(v["returned"], json!(8), "{v}");
+    assert_eq!(v["truncated"], json!(false));
+    assert_eq!(v["remaining"], json!([]));
+    assert_eq!(v["tiles"].as_array().map(Vec::len), Some(8), "{v}");
+
+    let mut observed = 0;
+    let mut unobserved = 0;
+    for (i, f) in bases.iter().enumerate() {
+        let e = &v["tiles"][i];
+        assert_eq!(e["status"], json!(200), "{e}");
+        assert_eq!(e["address"]["f_index"], json!(*f), "{}", e["address"]);
+        assert_eq!(e["address"]["t_index"], json!(ti), "{}", e["address"]);
+        assert_eq!(e["address"]["spelling"], json!(format!("0.0.{f}.{ti}")));
+        // Byte-identical to the single-tile answer, bar this read's own diagnostics.
+        let (st, alone) = get(addr, &one(*f, ti));
+        assert_eq!(st, 200, "{alone}");
+        for field in ["key", "extent", "axes", "grid", "coverage", "sealed"] {
+            assert_eq!(
+                e["tile"][field], alone[field],
+                "{field} differs between the batch and the single-tile route at {f}"
+            );
+        }
+        // The three marks, per address, where they already were.
+        if e["tile"]["grid"]["observed_cells"].as_u64().unwrap_or(0) > 0 {
+            observed += 1;
+        }
+        if e["tile"]["resolution"]["short_circuit"]["applied"] == json!(true) {
+            unobserved += 1;
+            // The standing invariant: a tile with no data is answered from the coverage map and
+            // never runs the generation path — batching must not make empty tiles expensive again.
+            assert_eq!(e["tile"]["cost"]["source_cells"], json!(0), "{e}");
+            assert_eq!(e["tile"]["cost"]["chunks"], json!(0), "{e}");
+        }
+    }
+    assert!(observed > 0, "the station's own band must carry data: {v}");
+
+    // A tile nothing ever sampled, asked for in the same request as one that did. If the fixture's
+    // own row did not already contain one, reach for a band 2000 tiles away.
+    if unobserved == 0 {
+        let far = f_index + 2_000;
+        let mixed = format!("0.0.{f_index}.{ti},0.0.{far}.{ti}");
+        let (st, m) = get(addr, &batch(&mixed));
+        assert_eq!(st, 200, "{m}");
+        assert_eq!(m["returned"], json!(2), "{m}");
+        let e = &m["tiles"][1];
+        assert_eq!(e["status"], json!(200), "{e}");
+        assert_eq!(e["tile"]["cost"]["source_cells"], json!(0), "{e}");
+        assert_ne!(
+            m["tiles"][0]["tile"]["coverage"], e["tile"]["coverage"],
+            "two different marks must stay two different marks inside one response"
+        );
+    }
+
+    // **Caps.** Over `max_addresses` is refused, naming the cap — nothing produced, and the
+    // caller knows exactly what still needs asking for.
+    let cap = v["limits"]["max_addresses"].as_u64().unwrap();
+    assert_eq!(cap, 64, "docs/api.md documents 64");
+    assert_eq!(v["limits"]["max_response_bytes"], json!(8 * 1024 * 1024));
+    let too_many = (0..=cap)
+        .map(|i| format!("0.0.{}.{ti}", f_index + i))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (st, e) = get(addr, &batch(&too_many));
+    assert_eq!(st, 400, "{e}");
+    assert!(
+        e["error"].as_str().unwrap_or_default().contains("64"),
+        "{e}"
+    );
+
+    // A malformed address refuses the WHOLE request rather than being dropped silently.
+    for bad in ["0.0.1", "0.0.1.2.3", "x.0.1.2"] {
+        let (st, e) = get(addr, &batch(bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // …and no addresses at all is not a cheaper spelling of anything.
+    let (st, e) = get(addr, &format!("/api/tiles/batch?cells={N}"));
+    assert_eq!(st, 400, "{e}");
+
+    // The per-address parameters do not belong beside the batch.
+    let (st, e) = get(
+        addr,
+        &format!("{}&f_index=3", batch(&format!("0.0.{f_index}.{ti}"))),
+    );
+    assert_eq!(st, 400, "{e}");
+
+    eprintln!(
+        "T-573: 8 tiles in 1 request ({} B) against 8 requests; batch cap {} addresses / {} B",
+        serde_json::to_vec(&v).unwrap().len(),
+        cap,
+        v["limits"]["max_response_bytes"],
+    );
+    stop_server(serving);
+}
+
 /// T-533 — **the measurement plane on the wire, and the transfer coding under it.**
 ///
 /// A live tile's body was 1 878 289 B, of which `grid.max_db` was 1 197 118 B: JSON decimal text,

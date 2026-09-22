@@ -1102,6 +1102,32 @@ So when the **selected** coverage plane — the one `coverage.selected.plane` na
 
 Measured on the same fixture, before and after (`crates/hk-api/tests/tile_cost.rs`, a test-profile binary; `body_bytes` is the uncompressed bytes the HTTP layer would write): **2 561 726 B → 7 568 B** (338×), `cost.build_ms` **92.1 ms → 3.1 ms** (29×), `source_cells` **65 536 → 0**. The body is a *constant*: 7 549 B at 64 × 64 and 7 563 B at 256 × 256 — sixteen times the cells for fourteen more bytes. The remaining ~3 ms is the coverage rasterisation itself, which is the answer rather than overhead: reading the same plane the renderer greys from is the point.
 
+### `GET /api/tiles/batch` — a viewport's worth of tile addresses in one request (T-573)
+
+A viewport needs tens of tiles and used to ask for them one HTTP request at a time. This route takes the addresses together and answers them together. **It is a transport change, never an analysis one:** each entry's `tile` is byte-identical to what `GET /api/tiles` answers for that address alone — the same `key`, the same independent `(level_f, level_t)` pair, the same `coverage` plane, the same `resolution` block, the same per-tile `cost`.
+
+Query: `device`, `scheme`, `cells`, `planes` and `client` are shared by the batch (they are properties of the viewport, and one request is one asker); `addresses` carries the per-tile part.
+
+```
+GET /api/tiles/batch?addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…]&cells=256&planes=f16
+{ "requested": 5, "returned": 5, "truncated": false, "remaining": [],
+  "limits": { "max_addresses": 64, "max_response_bytes": 8388608,
+              "over_addresses": "refused (400), naming the cap",
+              "over_bytes": "truncated, with every unanswered address listed in `remaining`" },
+  "tiles": [ { "address": { "level_f": 0, "level_t": 0, "f_index": 12, "t_index": 3,
+                            "spelling": "0.0.12.3" },
+               "status": 200, "tile": { "key": "…", "grid": "…", "coverage": "…", "cost": "…" } },
+             { "address": { "…": "…" }, "status": 503, "error": "too many tile reads in flight …" } ],
+  "statement": "…" }
+```
+
+- **A partial answer is expressible, and that is the point.** A viewport where three tiles have data, one is genuinely unobserved and one was refused is ONE response carrying three 200s, a 200 whose own `coverage` plane says `unobserved`, and a 503. There is no status for the set beyond the transport's own 200, because collapsing a missing tile into an empty one is exactly the defect the coverage map exists to prevent. The three marks the canvas depends on — data, genuinely-unobserved, observed-but-not-yet-measured — are per address, where they already were.
+- **The coverage short-circuit is untouched.** Each address goes through the same code path as `GET /api/tiles`, so a uniformly-unobserved tile is still answered from the coverage map with `cost.source_cells: 0` and `chunks: 0`, never reaching the generation path. A batch endpoint that made empty tiles expensive again would be a regression, not a win.
+- **The in-flight cap is per address, still.** One producer slot is taken and released per address — under the named `client`'s share (T-630), exactly as a single-tile read takes it — so a batch of sixty-four holds ONE at a time, never sixty-four, and a batch does not widen any client's share. Under contention its later addresses come back as per-address 503s and the caller re-asks for exactly those.
+- **Two caps, two different answers, because they have two different causes.** `max_addresses` (64) is the caller's own doing, so it is **refused** with a 400 naming the cap — the caller knows precisely what still needs asking for. `max_response_bytes` (8 MiB) is a property of the grid rather than of the request, so it **truncates**: `truncated: true` and every unanswered address listed in `remaining`, in the spelling it was asked in, so the follow-up is a copy and not a re-derivation. At least one tile is always returned, so a single oversized address is never unfetchable.
+- **A malformed address refuses the whole request**, rather than being skipped. A silently-dropped address is a tile the canvas leaves pending forever with nothing saying why.
+- **No ETag, no immutable cache.** A batch is not a single representation and a mix of sealed and live tiles has no single validator; `GET /api/tiles` is where a sealed tile earns its ETag (T-574). The batch answer does honour `Accept-Encoding: gzip` like every other routed JSON answer (T-700).
+
 ### `GET /api/tiles/events` — the coarse-zoom event aggregate (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §5.3)
 
 The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), answering counts instead of spectra:
