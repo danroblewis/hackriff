@@ -665,7 +665,6 @@ tasks:
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
     status: done
     commit: "51c23f1 (merged 86b39a5)"
-    note: "Structured vs NoiseLike via inter-bin power-change anticorrelation (bins 3-8 apart), SK upper tol 1.35, median excess; confusion matrix noise jammers 12/12 NoiseLike, OFDM 18/18 Structured (6/10/15 dB). Per-bin extent refinement: worst 0.3 % of bandwidth (800 kHz jammer was 375 kHz). Withheld emitters accept/show only TAG_VOCABULARY tags (class-dependent refusal, no oracle). Post-merge legal review: MERGE-OK (no leak); hardening nits -> T-040."
     followups:
       - "wideband single-carrier PSK/QAM and dense-QAM OFDM can still read NoiseLike; slow noise-FM (20 kHz mod) reads Structured at >=10 dB; needs IQ-level (cyclostationary/CP) evidence on the dwell path"
       - "anticorrelation feature tuned on Hann window at default FFT size; weakens when FFT >> symbol length (16k bins)"
@@ -10275,39 +10274,6 @@ tasks:
       precisely the shape of self-weakening T-396 wrote the fail-closed rule to prevent.
     commit: 6df409c
     result: |
-      DONE, and the reframe is the answer: IT IS NOT "IGNORE SOME FILES", IT IS "CLASSIFY THE RIGHT
-      DIFF". Two subjects, two sources - `just gate` (unchanged) for an AGENT checking its own work,
-      where untracked counts because a file nobody has git-added yet is still about to be committed;
-      and the new `just gate-merge` for the COORDINATOR inside git merge --no-ff --no-commit, where GIT
-      ITSELF built the index as the merge result versus HEAD and `git commit` commits the index. THE
-      INDEX IS THE CHANGE BEING CERTIFIED.
-      THE WEAKENING ARGUMENT, since this IS a narrowing: it classifies a strict subset and classify()
-      is monotone (any full path forces full), so a smaller input can only be cheaper or equal. Three
-      things make it sound:
-        (1) for the merge subject the DEFAULT is the wrong question - untracked files are not in the
-            index and cannot reach main through that merge;
-        (2) THE COUNTEREXAMPLE DOES NOT SURVIVE CONTACT - an untracked fixture can change what a suite
-            sees, but classifying untracked paths as full never protected against that, because the
-            suites read the WORKING TREE. Fail-closed on untracked buys COST, NOT SAFETY, for this
-            subject; contamination is a property of where suites run, not of how the diff is classified;
-        (3) it is GUARDED - it REQUIRES MERGE_HEAD (or SQUASH_MSG) or forces the full gate, which a
-            blanket --staged would not do and is exactly why the recipe is --merge; and every
-            uncommitted path it did not classify is PRINTED with the class it would have had. No ignore
-            list, no exempt path: fixtures/ or tools/ STAGED INTO a merge is still full.
-      MISUSE STATED: gate-merge inside a real merge while the tree holds an unstaged edit to something
-      the suites read means that path is classified out - printed in the `outside` list every time. The
-      residual risk is delayed discovery of a problem existing only in the coordinator's tree, never a
-      change reaching main unverified.
-      DELIBERATELY NOT DONE: generalising T-437's "prove this path inert". A proof argued in a merge
-      commit is categorically different from a list the classifier consults silently, and generalising
-      it would require the classifier to model what each suite reads - itself a weakening surface.
-      Noted in docs/10 as earning its own ticket if it recurs.
-      FIRST PAYOFF, same hour: T-440's merge classified `ui` -> just test-ui instead of the full
-      ~25-minute gate it would have drawn purely because of untracked tools/.
-      Verified live from inside its own merge; it classified ITS OWN diff as full, because it touches
-      justfile and the classifier's source.
-    commit: 6df409c
-    result: |
       DONE. THE REFRAME IS THE ANSWER: it is not "ignore some files", it is "CLASSIFY THE RIGHT DIFF".
       `just gate` (unchanged) asks "what is in my tree that isn't on main?" for an AGENT, where
       untracked counts because a file nobody has git-added is still about to be committed. New
@@ -11524,43 +11490,6 @@ tasks:
       T-437's spike is exploring exactly this. Read its findings before starting - the spike's job
       is to tell you what does NOT work, and a spike that reports only success has de-risked
       nothing.
-    commit: 55fb808
-    result: |
-      DONE - the renderer core, ui/ only, ~2000 lines, no crates/.
-      NOT-RESIDENT IS DISTINGUISHED FROM UNOBSERVED STRUCTURALLY, in three places:
-        1. GREY HAS EXACTLY ONE EXPRESSION IN THE SHADER - cellrule.ts holds CELL_MARKS and GENERATES
-           CELL_RULE_GLSL from it (T-397's pattern applied to the claim that matters most). Grey appears
-           only on the s == CELL.UNOBSERVED branch, from the route's coverage plane. A test counts the
-           literal's occurrences in the fragment source actually handed to shaderSource: exactly one.
-        2. NOT-RESIDENT IS A DIFFERENT TYPE - acquire returns Residency (resident | pending), never a
-           CellState. A miss draws as a resident coarser ancestor upscaled AND MARKED, or a PENDING
-           flat. THE PANE'S GROUND CLEARS TO PENDING, NOT GREY: the spike cleared to grey, and THAT ONE
-           LINE IS F3.
-        3. An unreadable response is not a coverage answer - decodeTile throws rather than decoding to
-           unobserved, so the place stays pending, which is true.
-      PROVED, not asserted: the same nine-tile working set over nine frames at 96 MB and at ONE tile.
-      Evictions 0 -> many, pending+fallbacks rises, grey draw-uniforms and clear-colours stay ZERO in
-      both. The revisit pattern matters - panning somewhere new every frame makes both runs miss
-      equally and proves nothing.
-      FOUR states kept distinct: observed, unobserved (grey), no_level (observed but max_db null), and
-      T-423's unknown.
-      BUDGET IS BYTES, NOT TILES, for a new reason: `cells` is addressable 8..256, so a tile count
-      would be off by up to 1024x between tiles. §5.5's count was only honest while §6 fixed the tile
-      size, and T-438's route reopened that. 192 KB/tile, 96 MB = 512 tiles, chosen so 80 MB of pins
-      never has to fight the budget. Worst case at 48 panes: 290 tiles / 54.4 MB, 427 / 80.1 MB with
-      the parent pin - agreeing with the spike's 208 keys / 220 resident.
-      PREFETCH AGAINST 11.4 ms/TILE: LIFO (the spike's was FIFO despite §5.5 requiring LIFO),
-      least-wanted-first emission, viewport-change cancellation, one request per key however many panes
-      want it, and the 503 as a FIRST-CLASS ANSWER (lower the cap, back off, re-queue; busyRefusals not
-      failures). Coarse-first fill: the parent pin is pushed after the pane's tiles so LIFO fetches it
-      first, and one parent covers four children's worth of screen.
-      WHAT DID NOT SURVIVE THE SPIKE - the value of having run one: the grey clear (F3 in one line);
-      FIFO where §5.5 says LIFO; no 503 path at all; a four-part key that is really seven; a single
-      RGB8 texture packing value+duty+tier per cell, quantising the measurement against an unnamed
-      scale and making tier a per-cell byte when it is per-TILE on the wire; and a ramp that was "an
-      approximation of CMAP_STOPS - the exact stops do not matter to the spike". They matter here.
-      FOR T-442/T-443: §8.5a's "state the level per pane" is served by PaneReport {levelF, levelT,
-      tiles, fallbacks, pending} returned from every render() - the seam exists, nothing draws it yet.
     commit: 55fb808
     result: |
       DONE - renderer core, ui/ only, ~2000 lines, no crates/.
@@ -18983,31 +18912,10 @@ tasks:
       cell against the on-demand control across all 16 nodes and it agrees exactly. Assert
       residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
       already does, never with a wall-clock budget.
-    depends_on: [T-571, T-572]
-    use_cases: [AWARE-011]
-    acceptance: |
-      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
-      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
-      first "just moves contention". This ticket exists so the dependency is recorded, not so it
-      is started now.
-      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
-      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
-      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
-      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
-      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
-      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
-      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
-      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
-      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
-      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
-      requests is vacuous - report what each run actually exercised.
-      Prove the tests go RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: done
     status: in-progress
     priority: normal
     parallel_group: OPS
@@ -19517,43 +19425,7 @@ tasks:
       read unobserved is zero, counted over a stated number of rows.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    use_cases: []
-    acceptance: |
-      FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
-      probe binary - nothing in `hk-pipeline` ever populates `Fingerprint.structure` (T-233's
-      `envelope_shape`). So entity resolution compares a field that is always absent in production:
-      the comparison runs, contributes nothing, and nobody is told.
-      This is the same class as T-589 (a verifier that cannot run on the class it claims to handle)
-      and as T-321's own defect (an emitter silently not clustering): a stage that is structurally
-      unable to fire looks exactly like a stage that fired and agreed. It is worth measuring how
-      much of entity resolution is in this state rather than fixing only this one field.
-      Decide, with evidence: wire a producer in the pipeline, or remove the field and its comparison
-      and say so. A dead comparison kept "in case" is worse than an absent one, because its presence
-      implies a discrimination that is not happening.
-      If it is wired, note it also gives T-321's analogue-emitter field supply a fifth field, which
-      is margin rather than a reason to touch the floor.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
-      after, and how many comparisons actually used it. A test that passes because the field was
-      absent on both sides is vacuous.
-      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
-      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
-      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
-      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
-      fact, deriving it two different ways.
-      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
-      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
-      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
-      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
-      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
-      constants match - two independent derivations that happen to agree today will diverge again.
-      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
-      measurement exists.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
-      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
-      emitters in the window rather than a sampled one. A test that compares zero emitters is
-      vacuous - report how many it compared.
-      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-592
     milestone: M2-hardening
     title: /api/events refuses its own documented limit - 501..2000 is a 400
@@ -19600,95 +19472,7 @@ tasks:
       describes. Restored the fix; the test passes.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
       Ran `just precheck hk-api hk-cli` clean.
-    effort: high
-    depends_on: [T-586]
-    use_cases: [AWARE-011]
-    acceptance: |
-      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
-      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
-      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
-      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
-      three different absolute frequencies - which is exactly what the user saw.
-      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
-      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
-      absolute frequencies, each individually indistinguishable from a real emission. Only the
-      cross-centre relationship separates them, which is the whole point of retune diversity.
-      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
-      resolved as LO-relative carries that on the stored row, and the inventory merges the three
-      sightings into one artefact rather than minting three emitters.
-      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
-      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
-      same way a detected end is provisional and revocable. Do not delete the sightings; relate
-      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
-      harmonic is absolute-fixed and still an artefact.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
-      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
-      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
-      `retune_diversity`) reproduces it directly and its assertions already count what matters.
-      Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    notes: |
-      DONE 2026-09-21 (branch task-t598). The verdict is now written down and load-bearing.
-      WHERE IT IS PERSISTED. Two records, both APPEND-ONLY and both revocable.
-      (a) `detection_retune` (migration 0015, hk-model): one row per claim ABOUT a detection -
-      slope (absolute / lo-locked / image), the invariant coordinate `f - slope*f_LO`, the number
-      of distinct LOs that decided it, the spread, and the flag bits the slope implies. It is a
-      separate table because a detection row is IMMUTABLE by trigger (`detection_immutable`): a
-      measurement is what was measured and an interpretation must never rewrite it. The implied
-      suspect flags are applied on the READ path (`Repository::detection` /
-      `detections_in_region` -> `repo::retune::apply_verdicts`), so a reader sees
-      spur_candidate + lo-relative without the measurement being edited, and a revocation takes
-      them away by construction rather than by guessing which bits to unset.
-      (b) `RelationKind::RetuneSiblingOf` on `emitter_relation`: the N sightings of one LO-relative
-      family are RELATED to the one that represents them, so `/api/inventory` (which already hides
-      deferring rows by default) shows ONE artefact. Nothing is deleted: every sighting keeps its
-      id, detections, time extent and history, and is listed with `relations=all`. It is its own
-      kind, not `duplicate-of` / `artifact-of`, because the T-219 overlap resolver CLAIMS AND
-      REVOKES those two over overlapping bands and these sightings do not overlap at all (that is
-      the whole point) - a shared kind would have the two rules revoking each other every pass.
-      Migration 0015 rebuilds `emitter_relation` to widen its kind CHECK (SQLite cannot relax one
-      in place), copying every row, and adds an expression index on the provenance tune centre.
-      REVOCATION. `Repository::resolve_retune` re-derives the verdict from the stored rows and:
-      appends `active = 0` over any standing verdict whose slope changed (then the new claim);
-      revokes the sibling relation of any row the measurement no longer places in a family. The
-      sweep includes rows that merely DEFER TO an examined row even when they are no longer live,
-      so a claim cannot outlive the evidence. A verdict identical to the one standing writes
-      nothing. An `absolute` verdict is recorded and implies zero flag bits: it is the WEAK claim,
-      "not LO-relative", never "real" (a reference harmonic is absolute-fixed and still an
-      artefact).
-      WIRING AND ITS BOUND. `hk_pipeline::inventory::TrackInventory::touch` calls it after
-      `resolve_overlaps`, i.e. on every seam that reaches an entry. A cross-centre verdict can only
-      change when a NEW CENTRE appears, so the pass runs at most once per row per distinct-centre
-      count (`Repository::tune_centre_count`, answered from the new index) and not at all below
-      two centres - never once per sighting. The neighbourhood is bounded at 64 rows, 32 detections
-      per row and a band derived from the LOs within 100 MHz of the seed's own.
-      MEASURED, on T-586's `retune_diversity` fixture through the mock SDR (15 detections, 3
-      centres, 5 lines): BEFORE 3 emitters + 6 artefact rows = 9 shown; AFTER 3 emitters + 2
-      artefact rows = 5 shown, with all 6 artefact sightings still present under `relations=all`.
-      Stored verdicts 6 lo-locked + 9 absolute over 15 detections. Real emitters unchanged in
-      number and in absolute frequency (99.78 / 100.68 / 101.18 MHz).
-      RED WHEN BROKEN, both halves proven by removing the `touch` call: the verdict check failed
-      with "0 detections were recorded LO-relative" and, with that check skipped, the inventory
-      check failed with "the artefact at LO offset 0.0 kHz is shown as 3 emitters, not one".
-      Neither is vacuous: the scene asserts 3 sightings were kept per family (so there was
-      something to collapse) and 3 distinct centres were compared.
-      TESTS: 5 unit tests in `crates/hk-model/src/repo/retune_tests.rs` (the bug reproduced; the
-      fix; absolute flags nothing; revocation restores the prior single-capture flags exactly;
-      one centre claims nothing) and 2 new checks in the T-586 acceptance scene
-      `tests/e2e/tests/acceptance/t586_retune_diversity.rs`. Targeted runs: hk-model 317/317,
-      hk-model + hk-context 548/548, hk-pipeline 307/307, acceptance_m0 t586 2/2 (and an earlier
-      full acceptance_m0 50/50). `just precheck hk-model hk-pipeline hk-context hk-e2e` clean.
-      API: `docs/api.md` documents the new `relation.kind` value and its `detail`. The ROW SHAPE
-      and every route are unchanged - only a new enum value in an existing field - so
-      `api_contract.rs` (which asserts the `relation` key, not its vocabulary) needed no change.
-      FOLLOW-UPS SURFACED, NOT CHASED: (a) `hk_context::watch::StandingRelation::label` now has a
-      sentence for the new kind, but the SQL rank/trust proxy in `repo/relate.rs` still counts only
-      the MEASURED flag bits, so a resolved artefact does not yet rank below a clean row - joining
-      `detection_retune.flag_bits` into `EMITTER_DETECTION_EVIDENCE_SQL` is a small follow-up;
-      (b) the primary of a family is the row with most sightings, then the earliest - a Confirmed
-      row is never hidden by this rule, which is deliberate but means a wrongly-confirmed artefact
-      stays visible until a person acts; (c) the image slope (2) is still exercised by unit tests
-      only, since T-586's fixture omits images on purpose.
+
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
@@ -19866,34 +19650,6 @@ tasks:
     parallel_group: PIPE
     model: opus
     effort: medium
-    depends_on: [T-321]
-    use_cases: []
-    acceptance: |
-      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
-      has chased it:
-        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
-        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
-        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
-      A storage-engine error is being caught, printed and continued past. The suite stays green, so
-      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
-      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
-      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
-      per analogue session, at both `identify` and the full-window path, and its own agent flagged
-      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
-      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
-      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
-      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
-      duplicate that should be an upsert, or a genuinely new characterisation that should replace
-      the first? T-335 established that a re-characterisation must happen when the evidence changed;
-      if the second write is that, dropping it on a UNIQUE violation silently loses the very
-      re-characterisation T-335 added.
-      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
-      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
-      the wrong reason.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
-      one emission_features row per characterisation that should exist, and zero swallowed storage
-      errors over an acceptance run. Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     depends_on: []
     use_cases: []
     acceptance: |
