@@ -2283,6 +2283,27 @@ fn tile_body(
     })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
+    // T-572: SEALED ONLY. A sealed tile's whole extent has passed the watermark and can never
+    // change again; a live tile at the growing edge changes on every arriving row, so it is never
+    // looked up here and never inserted below — it is always re-read, which is what keeps the
+    // live view appending rows in real time. The slot is already held (T-630 admission ran in
+    // `tiles_json`), so a hit costs a lock and a clone and no history hold at all.
+    let cache_key = state
+        .tile_cache
+        .as_ref()
+        .filter(|_| sealed)
+        .map(|_| hot_tile_key(&key, store, planes, max_live));
+    let epoch = coverage_epoch(state);
+    if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), cache_key.as_ref())
+        && let Some(mut v) = c.get(k, epoch)
+    {
+        // The answer is the cached one, but the measurement of what THIS read cost, and whose
+        // share it was admitted under (T-630), is this read's — `http.rs` strips exactly these
+        // before hashing a response into an ETag, so a hit and a miss still validate identically.
+        stamp_read_cost(&mut v["cost"], started.elapsed().as_secs_f64() * 1e3, slot);
+        v["cost"]["served_from"] = json!("hot-tile-cache");
+        return Ok(v);
+    }
     let window = key.window();
     // T-467: the compact plane-table form. The per-cell form this route used to serve was 99 % of a
     // live tile's 19.34 MB body, duplicated between `any` and `devices[0]`, for a `state` field the
@@ -2321,14 +2342,14 @@ fn tile_body(
             planes,
         );
         v["shadow"] = shadow_json(&sh, None);
-        return Ok(v);
+        return Ok(cache_put(state, &cache_key, epoch, v));
     }
     let r = tile_read(state, store, &key)?;
     let sh = shadow(state, store, &key, Some(&r.grid))?;
     let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
-    Ok(json!({
+    let v = json!({
         // T-574: whether this tile's own time extent has fully passed the watermark, so it can
         // never change again — `http.rs` reads this to decide the ETag / Cache-Control, never a
         // timestamp or an age. false at the live edge (or anywhere still inside the retained
@@ -2423,7 +2444,231 @@ fn tile_body(
                 rendering: T-437 measured 48 panes at p95 2.2 ms against ~500 ms per tile. \
                 `chunks` is the number of history lock holds this tile took.",
         },
-    }))
+    });
+    Ok(cache_put(state, &cache_key, epoch, v))
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-572: the hot-tile LRU.
+// ---------------------------------------------------------------------------------------------
+
+/// The cache's byte bound.
+///
+/// **Bounded is the point, and the bound is in bytes** (T-453): residency must not grow with node
+/// count, and a cache sized in *tiles* would, because a tile's size is a property of the grid.
+/// Thirty-two mebibytes is a few viewports' worth of `planes=f16` tiles and a small fraction of
+/// what one `/api/history` query already allocates; it does not move when the pyramid deepens,
+/// when a pane zooms, or when a second client connects.
+pub const TILE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// The cache's entry bound.
+///
+/// The byte bound alone would admit an unbounded number of tiny answers — a 7.5 kB
+/// coverage-short-circuit tile is 4300 of them inside 32 MiB — and each entry costs a key and a
+/// `Value` tree beyond its serialized size. Whichever bound binds first evicts.
+pub const TILE_CACHE_MAX_ENTRIES: usize = 256;
+
+/// One cached answer.
+struct HotTile {
+    body: Value,
+    bytes: usize,
+    /// Monotonic use stamp; the smallest is the least recently used.
+    used: u64,
+}
+
+/// An in-memory LRU of **sealed** tile answers, in front of the filesystem (T-572).
+///
+/// **Only sealed tiles, and that is the whole correctness argument.** A sealed tile's own time
+/// extent has fully passed the pyramid's watermark, so a frame landing inside it is by definition
+/// late and dropped (the same rule T-574 gives its ETag and its `immutable` cache-control): it can
+/// never change again. A LIVE tile at the growing edge changes on every arriving row, and serving
+/// a stale one would violate *"the live view renders like a classic SDR waterfall, rows append in
+/// real time"* exactly as badly as not serving it at all — so a live tile is never inserted, never
+/// looked up, and always re-read. The distinction is in the insert path, not in a timer.
+///
+/// **What can still change about a sealed tile, and how that is caught.** The grid cannot, but the
+/// `coverage` plane beside it is derived from the observation log, which is appended to as capture
+/// proceeds and pruned by retention — so the cache carries an **epoch** taken from that log's own
+/// counters (`written`, `segments_deleted`), and any movement in either drops every entry. The
+/// epoch is read, never written, by this path: those two atomics are already incremented on the
+/// capture thread, so reading them costs the reader and nothing costs the writer.
+///
+/// **The capture thread is not on this path at all.** The cache lives entirely in the HTTP read
+/// path: no lock it holds is taken by ingest, and nothing it does runs per arriving row. That is
+/// why there is no per-row measurement here — there is no per-row work to measure (T-453).
+#[derive(Default)]
+pub struct HotTileCache {
+    inner: Mutex<HotTileCacheInner>,
+}
+
+#[derive(Default)]
+struct HotTileCacheInner {
+    map: std::collections::HashMap<String, HotTile>,
+    bytes: usize,
+    clock: u64,
+    epoch: (u64, u64),
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    invalidations: u64,
+}
+
+impl HotTileCache {
+    /// A cached answer for `key`, if one is held at `epoch`.
+    fn get(&self, key: &str, epoch: (u64, u64)) -> Option<Value> {
+        let mut g = self.inner.lock().ok()?;
+        g.reset_if_stale(epoch);
+        g.clock += 1;
+        let clock = g.clock;
+        let Some(e) = g.map.get_mut(key) else {
+            g.misses += 1;
+            return None;
+        };
+        e.used = clock;
+        let body = e.body.clone();
+        g.hits += 1;
+        Some(body)
+    }
+
+    /// Hold `body` for `key`, evicting the least recently used until both bounds hold.
+    fn put(&self, key: String, body: &Value, epoch: (u64, u64)) {
+        let Ok(mut g) = self.inner.lock() else { return };
+        g.reset_if_stale(epoch);
+        let bytes = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
+        // A single answer larger than the whole cache is not cached: holding it would evict
+        // everything else to no purpose, and the bound must hold unconditionally.
+        if bytes > TILE_CACHE_MAX_BYTES {
+            return;
+        }
+        g.clock += 1;
+        let clock = g.clock;
+        if let Some(old) = g.map.remove(&key) {
+            g.bytes -= old.bytes;
+        }
+        g.map.insert(
+            key,
+            HotTile {
+                body: body.clone(),
+                bytes,
+                used: clock,
+            },
+        );
+        g.bytes += bytes;
+        while g.bytes > TILE_CACHE_MAX_BYTES || g.map.len() > TILE_CACHE_MAX_ENTRIES {
+            let Some(victim) = g
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(e) = g.map.remove(&victim) {
+                g.bytes -= e.bytes;
+            }
+            g.evictions += 1;
+        }
+    }
+
+    /// The counters, for `/api/status` and for the tests that assert the bound holds.
+    pub fn stats_json(&self) -> Value {
+        let Ok(g) = self.inner.lock() else {
+            return Value::Null;
+        };
+        json!({
+            "entries": g.map.len(),
+            "bytes": g.bytes,
+            "max_entries": TILE_CACHE_MAX_ENTRIES,
+            "max_bytes": TILE_CACHE_MAX_BYTES,
+            "hits": g.hits,
+            "misses": g.misses,
+            "evictions": g.evictions,
+            "invalidations": g.invalidations,
+            "rule": "SEALED TILES ONLY. A sealed tile's time extent has fully passed the \
+                pyramid's watermark, so it can never change again; a live tile at the growing \
+                edge changes on every arriving row and is never cached, never looked up and \
+                always re-read. `invalidations` counts the times the observation log moved \
+                (records written or segments deleted) and every entry was dropped, because the \
+                coverage plane beside a sealed grid is derived from that log.",
+        })
+    }
+}
+
+impl HotTileCacheInner {
+    fn reset_if_stale(&mut self, epoch: (u64, u64)) {
+        if self.epoch != epoch {
+            if !self.map.is_empty() {
+                self.invalidations += 1;
+            }
+            self.map.clear();
+            self.bytes = 0;
+            self.epoch = epoch;
+        }
+    }
+}
+
+/// The observation log's own counters, as the cache's invalidation epoch.
+///
+/// `written` moves when a record is appended and `segments_deleted` when retention removes one:
+/// between them, every way the coverage plane over a past extent can change. With no observation
+/// log at all the epoch is constant, which is correct — there is nothing to change.
+fn coverage_epoch(state: &ApiState) -> (u64, u64) {
+    let Some(obs) = state.observations.as_ref() else {
+        return (0, 0);
+    };
+    let s = obs.stats();
+    (
+        s.written.load(Ordering::Relaxed),
+        s.segments_deleted.load(Ordering::Relaxed),
+    )
+}
+
+/// Everything that decides a tile's body, as one string.
+///
+/// The address, the device, the store, the plane spelling, and `max_live` (which chooses the
+/// honesty tier this answer states). Anything not in here would be a way for two different answers
+/// to share one entry.
+fn hot_tile_key(key: &TileKey, store: TileStore, planes: Planes, max_live: Option<f64>) -> String {
+    format!(
+        "{}|{}|{}|{}|{:?}",
+        key_json(key),
+        key.device,
+        match store {
+            TileStore::View => "view",
+            TileStore::Main => "main",
+        },
+        planes.as_str(),
+        max_live.map(f64::to_bits),
+    )
+}
+
+/// Overwrite `cost`'s per-read fields with THIS read's (T-572 over T-630).
+///
+/// A cached body was built by an earlier read: its wall clock, its in-flight count and — since
+/// T-630 — the share, holdings and client name it was admitted under all belong to that read.
+/// Serving them on a hit would tell this client someone else's share. Every field set here is one
+/// `http.rs` strips before hashing a sealed tile into its ETag.
+fn stamp_read_cost(cost: &mut Value, elapsed_ms: f64, slot: &TileSlot) {
+    let share = slot.share();
+    cost["build_ms"] = json!((elapsed_ms * 1000.0).round() / 1000.0);
+    cost["in_flight"] = json!(slot.in_flight());
+    cost["in_flight_share"] = json!(share.share);
+    cost["in_flight_held"] = json!(slot.held());
+    cost["clients"] = json!(share.clients);
+    cost["client"] = json!(slot.client());
+    cost["reserved"] = json!(share.reserved);
+    cost["fair_share"] = json!(share.fair);
+}
+
+/// Hold `v` in the hot-tile cache when this address earned one (T-572), and hand it back.
+///
+/// `key` is `None` for a LIVE tile — the insert path is where the sealed/live distinction lives,
+/// so there is no way to reach this with a growing tile's body.
+fn cache_put(state: &ApiState, key: &Option<String>, epoch: (u64, u64), v: Value) -> Value {
+    if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), key.as_ref()) {
+        c.put(k.clone(), &v, epoch);
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4248,6 +4493,232 @@ mod tests {
             ("t_index", &t_index.to_string()),
             ("cells", &N.to_string()),
         ])
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-572: the hot-tile LRU.
+    // -----------------------------------------------------------------------------------------
+
+    /// Filesystem reads the pyramid has done, and a way to zero it — the COUNT this ticket is
+    /// asserted with, rather than a wall clock.
+    fn source_reads(state: &ApiState) -> u64 {
+        state
+            .history
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .source_tiles_read()
+    }
+    fn reset_source_reads(state: &ApiState) {
+        state
+            .history
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .reset_source_tiles_read();
+    }
+
+    /// **A repeated viewport poll of a SEALED tile reads the filesystem zero times** (T-572).
+    ///
+    /// And the answer is the same answer: a cache that served a different tile cheaply would be
+    /// worse than no cache. Counts, not wall clock — `source_tiles_read` is the pyramid's own
+    /// count of source tiles pulled off disk.
+    #[test]
+    fn a_repeated_read_of_a_sealed_tile_touches_the_filesystem_zero_times() {
+        let dir = temp_dir("cache-sealed");
+        // Past the tile's own 64 s extent, so the watermark has sealed it.
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let first = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        assert_eq!(
+            first["sealed"],
+            json!(true),
+            "the fixture must seal this tile"
+        );
+        assert!(
+            first["cost"]["served_from"].is_null(),
+            "the first read is a real read"
+        );
+        reset_source_reads(&state);
+
+        for poll in 0..5 {
+            let again = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+            assert_eq!(
+                source_reads(&state),
+                0,
+                "poll {poll} went to the filesystem for a sealed tile"
+            );
+            assert_eq!(again["cost"]["served_from"], json!("hot-tile-cache"));
+            // The SAME answer, not a cheaper one.
+            for f in [
+                "key", "extent", "axes", "grid", "coverage", "sealed", "shadow",
+            ] {
+                assert_eq!(again[f], first[f], "{f} changed across a cache hit");
+            }
+            // …except this read's own diagnostics, which are this read's.
+            assert!(again["cost"]["in_flight"].is_number());
+        }
+
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(stats["hits"], json!(5), "{stats}");
+        assert_eq!(stats["entries"], json!(1), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LIVE tile is re-read every time, and that is the correctness half of the ticket.**
+    ///
+    /// The growing edge changes on every arriving row: serving a stale copy would break *"the live
+    /// view renders like a classic SDR waterfall, rows append in real time"* exactly as badly as
+    /// serving nothing. The distinction is structural — a live tile is never looked up and never
+    /// inserted — so this asserts the filesystem is reached on EVERY poll, and that the cache
+    /// never grew an entry for it.
+    #[test]
+    fn a_live_tile_is_never_cached_and_is_re_read_on_every_poll() {
+        let dir = temp_dir("cache-live");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        // The tile the watermark is INSIDE: its extent reaches past the newest frame.
+        let live = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(
+            live["sealed"],
+            json!(false),
+            "the fixture must leave this tile growing"
+        );
+
+        for poll in 0..3 {
+            reset_source_reads(&state);
+            let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+            assert!(
+                v["cost"]["served_from"].is_null(),
+                "poll {poll} was served from cache at the live edge"
+            );
+            assert!(
+                source_reads(&state) > 0,
+                "poll {poll} did not re-read the growing tile"
+            );
+        }
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(
+            stats["entries"],
+            json!(0),
+            "a live tile was cached: {stats}"
+        );
+        assert_eq!(stats["hits"], json!(0), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The bound is in BYTES and in ENTRIES, and it holds under sustained scrolling** (T-453).
+    ///
+    /// Residency must not grow with node count, so neither bound is a function of the pyramid: the
+    /// cache is asserted against a cap it is driven far past, with eviction counted rather than
+    /// inferred. Driven directly, because driving it through the route would need hundreds of real
+    /// tiles to say the same thing.
+    #[test]
+    fn the_cache_stays_inside_its_stated_bound_however_long_the_scroll_is() {
+        let c = HotTileCache::default();
+        let epoch = (7, 3);
+        // ~4 kB an entry, four times the entry cap: the entry bound binds first and evicts.
+        let body = json!({ "grid": vec![-80.0f64; 400] });
+        for i in 0..TILE_CACHE_MAX_ENTRIES * 4 {
+            c.put(format!("tile-{i}"), &body, epoch);
+        }
+        let s = c.stats_json();
+        assert_eq!(s["entries"], json!(TILE_CACHE_MAX_ENTRIES), "{s}");
+        assert!(
+            s["bytes"].as_u64().unwrap() <= TILE_CACHE_MAX_BYTES as u64,
+            "{s}"
+        );
+        assert_eq!(
+            s["evictions"],
+            json!(TILE_CACHE_MAX_ENTRIES as u64 * 3),
+            "eviction is counted, not inferred: {s}"
+        );
+        // Least-recently-USED, not least-recently-inserted: touching an old key keeps it.
+        let c = HotTileCache::default();
+        for i in 0..TILE_CACHE_MAX_ENTRIES {
+            c.put(format!("k{i}"), &body, epoch);
+        }
+        assert!(c.get("k0", epoch).is_some());
+        c.put("fresh".into(), &body, epoch);
+        assert!(
+            c.get("k0", epoch).is_some(),
+            "the touched entry was evicted"
+        );
+        assert!(c.get("k1", epoch).is_none(), "the coldest entry survived");
+
+        // And a body larger than the whole cache is never held: the bound is unconditional.
+        let c = HotTileCache::default();
+        let huge = json!({ "grid": vec![-80.0f64; TILE_CACHE_MAX_BYTES / 4] });
+        c.put("huge".into(), &huge, epoch);
+        let s = c.stats_json();
+        assert_eq!(s["entries"], json!(0), "{s}");
+        assert_eq!(s["bytes"], json!(0), "{s}");
+    }
+
+    /// **The coverage plane beside a sealed grid can still move, and the epoch catches it.**
+    ///
+    /// A sealed tile's grid can never change again, but its `coverage` is derived from the
+    /// observation log — appended to as capture proceeds, pruned by retention. Any movement in
+    /// either counter drops every entry, so a cached answer can never outlive the coverage it
+    /// states. Invalidation is counted, so it is observable rather than argued.
+    #[test]
+    fn the_cache_is_dropped_whenever_the_observation_log_moves() {
+        let c = HotTileCache::default();
+        let body = json!({ "coverage": "observed" });
+        c.put("t".into(), &body, (1, 0));
+        assert!(c.get("t", (1, 0)).is_some());
+        // A record appended.
+        assert!(
+            c.get("t", (2, 0)).is_none(),
+            "a new record left a stale coverage answer"
+        );
+        c.put("t".into(), &body, (2, 0));
+        // A segment pruned.
+        assert!(
+            c.get("t", (2, 1)).is_none(),
+            "retention left a stale coverage answer"
+        );
+        let s = c.stats_json();
+        assert_eq!(s["invalidations"], json!(2), "{s}");
+        assert_eq!(s["entries"], json!(0), "{s}");
+    }
+
+    /// Two answers that differ may never share one entry: the key carries everything that decides
+    /// a body. The plane spelling is the one that would be easiest to leave out and the one that
+    /// would corrupt a render — a client that asked for `f16` and got JSON decodes neither.
+    #[test]
+    fn the_cache_key_separates_every_answer_that_differs() {
+        let dir = temp_dir("cache-key");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let mut packed = tile_params(F_INDEX, T_INDEX);
+        packed.push(("planes".into(), "f16".into()));
+        let a = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let b = tiles_json(&state, &packed).unwrap();
+        assert_eq!(a["grid"]["encoding"]["planes"], json!("json"));
+        assert_eq!(
+            b["grid"]["encoding"]["planes"],
+            json!("f16"),
+            "{}",
+            b["grid"]
+        );
+        // Both again, from cache this time, and still their own spelling.
+        assert_eq!(
+            tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap()["grid"]["encoding"]["planes"],
+            json!("json")
+        );
+        assert_eq!(
+            tiles_json(&state, &packed).unwrap()["grid"]["encoding"]["planes"],
+            json!("f16")
+        );
+        let s = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(s["entries"], json!(2), "two spellings, two entries: {s}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------------------------

@@ -808,6 +808,29 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     // frozen clock).
     let t = v["t"].as_f64().expect("t (server clock, s): {v}");
     assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {v}");
+    // T-572: the hot-tile cache's bound and its eviction, reported HERE — not in a tile body,
+    // where a per-read counter would change a sealed tile's ETag and turn T-574's 304 back into a
+    // 200. The BOUND is the assertion, not a rate: entries and bytes both inside the cap the same
+    // object states.
+    let tc = &v["tile_cache"];
+    assert!(is_object(tc), "tile_cache: {v}");
+    for field in [
+        "entries",
+        "bytes",
+        "max_entries",
+        "max_bytes",
+        "hits",
+        "misses",
+        "evictions",
+        "invalidations",
+    ] {
+        assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
+    }
+    assert_eq!(tc["max_entries"], json!(256), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
         "memory_bytes",

@@ -381,6 +381,14 @@ pub struct ApiState {
     /// that leaks across tests is a cap nobody can assert. Cloning the state shares the table,
     /// which is what makes it a server-wide cap rather than a per-request one.
     pub tile_admission: Arc<crate::tiles::TileAdmission>,
+    /// T-572: the hot-tile LRU in front of `GET /api/tiles`.
+    ///
+    /// Per **state** and shared by cloning, exactly like [`Self::tile_admission`] and for the
+    /// same reason: two servers in one process must not share a cache, and a cache that leaks
+    /// across tests is a cache nobody can assert. `None` disables it entirely (the default for a
+    /// state built by hand in a test that is not about caching), so every existing assertion
+    /// about what a tile read costs still measures a real read.
+    pub tile_cache: Option<Arc<crate::tiles::HotTileCache>>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -900,14 +908,48 @@ fn maybe_gzip<'a>(gzip_ok: bool, extra: &str, bytes: &'a [u8]) -> (String, Cow<'
     (extra.to_string(), Cow::Borrowed(bytes))
 }
 
-/// Recursively nulls `build_ms` and `in_flight` wherever they appear (`cost` and
-/// `shadow.search`, T-574) — this read's own timing and concurrency, never the tile's content.
+/// `cost` fields T-630 added that describe the admission of THIS read, not the tile.
+const T630_READ_FIELDS: [&str; 6] = [
+    "in_flight_share",
+    "in_flight_held",
+    "clients",
+    "client",
+    "reserved",
+    "fair_share",
+];
+
+/// Recursively nulls `build_ms`, `in_flight` and `served_from` wherever they appear (`cost` and
+/// `shadow.search`, T-574/T-572) — this read's own timing, concurrency and provenance, never the
+/// tile's content.
+///
+/// `served_from` matters as much as the other two: T-572's hot-tile cache adds it on a HIT and not
+/// on a miss, so leaving it in what the ETag is hashed over would make a sealed tile's first
+/// re-read a 200 instead of the 304 T-574 exists for — the cache would have broken the cache.
+///
+/// And, inside `cost`, T-630's admission fields ([`T630_READ_FIELDS`]): a second client reading
+/// the same sealed tile under a different share must still get its 304.
 fn strip_read_diagnostics(v: &mut Value) {
     match v {
         Value::Object(obj) => {
+            // REMOVED, not nulled: `served_from` is present only on a cache hit, and a key that
+            // is absent on one read and null on the next is still a different byte string — which
+            // is a different ETag, which is a 200 where T-574 promises a 304.
+            obj.remove("served_from");
             for (k, val) in obj.iter_mut() {
                 if k == "build_ms" || k == "in_flight" {
                     *val = Value::Null;
+                } else if k == "cost" {
+                    // T-630's admission facts are this read's too — whose share it was admitted
+                    // under and how busy the route was — and differ between two clients reading
+                    // the same sealed tile. Nulled only inside `cost`, where they are defined.
+                    if let Value::Object(cost) = val {
+                        for f in T630_READ_FIELDS {
+                            if let Some(x) = cost.get_mut(f) {
+                                *x = Value::Null;
+                            }
+                        }
+                    }
+                    strip_read_diagnostics(val);
                 } else {
                     strip_read_diagnostics(val);
                 }
@@ -1275,6 +1317,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                         "t".into(),
                         json!(Timestamp::now().as_unix_nanos() as f64 / 1e9),
                     );
+                    // T-572: the hot-tile cache's bound and its eviction, reported HERE and not in
+                    // a tile body — `cost.cache` would change on every read and so would a sealed
+                    // tile's ETag, which is the one thing T-574's 304 depends on not doing.
+                    if let Some(c) = state.tile_cache.as_ref() {
+                        o.insert("tile_cache".into(), c.stats_json());
+                    }
                 }
                 v
             })

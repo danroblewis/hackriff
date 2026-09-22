@@ -1102,6 +1102,16 @@ So when the **selected** coverage plane — the one `coverage.selected.plane` na
 
 Measured on the same fixture, before and after (`crates/hk-api/tests/tile_cost.rs`, a test-profile binary; `body_bytes` is the uncompressed bytes the HTTP layer would write): **2 561 726 B → 7 568 B** (338×), `cost.build_ms` **92.1 ms → 3.1 ms** (29×), `source_cells` **65 536 → 0**. The body is a *constant*: 7 549 B at 64 × 64 and 7 563 B at 256 × 256 — sixteen times the cells for fourteen more bytes. The remaining ~3 ms is the coverage rasterisation itself, which is the answer rather than overhead: reading the same plane the renderer greys from is the point.
 
+#### The hot-tile cache (T-572)
+
+A viewport that has not moved re-reads the same tiles every poll, so a bounded in-memory LRU sits in front of this route.
+
+- **Sealed tiles only, and that is the whole correctness argument.** A sealed tile's own time extent has fully passed the pyramid's watermark, so a frame landing inside it is by definition late and dropped: it can never change again (the same fact that earns it an ETag and `immutable`, T-574). A **live** tile at the growing edge changes on every arriving row and is never looked up, never inserted and always re-read — a stale live tile breaks *"rows append in real time"* exactly as badly as a missing one. The distinction is structural, in the insert path, never a timer.
+- **`cost.served_from: "hot-tile-cache"`** appears on a cached answer and is absent otherwise. It is a diagnostic of the READ, not of the tile: it is removed before the body is hashed into an ETag, so a hit and a miss validate identically and a re-read is still the 304 T-574 promises.
+- **Bounded in bytes AND in entries** — 32 MiB / 256 entries, whichever binds first — so residency does not grow with node count (T-453). Least-recently-*used*, not least-recently-inserted. A body larger than the whole cache is never held.
+- **The coverage plane beside a sealed grid can still move**, being derived from the observation log, so every entry is dropped whenever that log's `written` or `segments_deleted` counters move. The cache reads those two atomics and writes nothing: the capture thread is not on this path at all.
+- **Counters are on `GET /api/status` as `tile_cache`** (`entries`, `bytes`, `max_entries`, `max_bytes`, `hits`, `misses`, `evictions`, `invalidations`) — never in a tile body, where they would change on every read and with them the ETag.
+
 ### `GET /api/tiles/batch` — a viewport's worth of tile addresses in one request (T-573)
 
 A viewport needs tens of tiles and used to ask for them one HTTP request at a time. This route takes the addresses together and answers them together. **It is a transport change, never an analysis one:** each entry's `tile` is byte-identical to what `GET /api/tiles` answers for that address alone — the same `key`, the same independent `(level_f, level_t)` pair, the same `coverage` plane, the same `resolution` block, the same per-tile `cost`.

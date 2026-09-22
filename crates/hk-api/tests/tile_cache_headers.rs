@@ -207,6 +207,12 @@ impl Fixture {
         let state = ApiState {
             history: Some(Arc::new(Mutex::new(p))),
             observations: Some(obs),
+            // T-572: the hot-tile cache ON, as a served run has it — so this file's 304 assertions
+            // are made against a server that may answer a sealed tile from RAM. A cache that
+            // changed the body between a miss and a hit would turn the re-read back into a 200,
+            // which is the one thing T-574 exists to prevent, and it is asserted here rather than
+            // argued for.
+            tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
             ..ApiState::default()
         };
         Fixture {
