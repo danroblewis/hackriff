@@ -278,7 +278,7 @@ def runtime_states(smap, tl=None, limit=10):
 
 
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
-               keep_merging=True, keep_next=True, keep_failed=True):
+               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True):
     try:
         import yaml
         d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
@@ -326,17 +326,22 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         cand = [x for x in tl if x.get("status") != "cancelled"]
     else:
         cand = [x for x in active if x.get("status") != "deferred"]
+    rt, rt_why = runtime_states(smap, tl)
+    # Runtime-state filters, one per state, same semantics as the status filters: off hides those
+    # nodes, on shows them whatever their status filter says.
+    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed}
     def passes(x):
         s = x.get("status")
+        r = rt.get(x.get("id"))
+        if r:
+            return show_rt.get(r, True)
         if s == "cancelled": return False
         if s == "done": return show_done
         if s == "todo": return show_todo
         if s in ("blocked", "paused"): return show_blocked
         if s == "deferred": return scope == "all"
         return True  # in-progress, review, etc. always anchor
-    rt, rt_why = runtime_states(smap, tl)
-    keep = {tid for tid, s in rt.items() if tid in tasks and (
-        (keep_merging and s in ("testing", "queued", "review")) or (keep_next and s == "next") or (keep_failed and s == "failed"))}
+    keep = {tid for tid, r in rt.items() if tid in tasks and show_rt.get(r, True)}
     anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
     # ALWAYS keep the dependency chain leading to any anchor, whatever its status/filter
     nodes = {}
@@ -449,6 +454,10 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .filters{display:flex;gap:2px;align-items:center;color:var(--dim);font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:2px 6px 2px 8px}
 .filters button{border:1px solid var(--line);background:transparent;color:var(--dim);padding:2px 8px;border-radius:5px;cursor:pointer;font-size:12px;margin-left:2px}
 .filters button.on{color:var(--txt);border-color:var(--dim);background:#1E2A33}
+.filters button.rt{font-weight:600;letter-spacing:.04em;font-size:11px}
+.filters button.rt-next.on{color:#C7B8FF;border-color:#C7B8FF;background:#2b2352}.filters button.rt-merging.on{color:#FFC14D;border-color:#FFC14D;background:#4a3608}
+.filters button.rt-queue.on{color:#F0A542;border-color:#F0A542;background:#33280c}.filters button.rt-review.on{color:#5EE0C4;border-color:#5EE0C4;background:#0f3a33}
+.filters button.rt-failed.on{color:#FF6B57;border-color:#FF6B57;background:#5a1a12}
 .filters select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;font-size:12px;padding:2px 4px;margin-left:4px;cursor:pointer}
 .legend{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
@@ -484,8 +493,8 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button></span>
-<span class=filters title="always shown, whatever the other filters say">always: <button id=f-merging class=on>merging</button><button id=f-next class=on>up next</button><button id=f-failed class=on>failed</button></span>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button>
+<button id=f-next class="on rt rt-next">UP NEXT</button><button id=f-merging class="on rt rt-merging">MERGING</button><button id=f-queue class="on rt rt-queue">IN QUEUE</button><button id=f-review class="on rt rt-review">IN REVIEW</button><button id=f-failed class="on rt rt-failed">FAILED</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <a href="/">← dashboard</a>
 <span class=legend><span><i class=hex style="background:#FF6B57"></i>FAILED / redo (pulsing)</span><span><i class=stad style="background:#FFC14D"></i>IN THE GATE (moving dashes)</span><span><i class=sub style="background:#F0A542"></i>QUEUED</span><span><i class=asym style="background:#5EE0C4"></i>IN REVIEW</span><span><i class=trap style="background:#C7B8FF"></i>UP NEXT</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
@@ -498,12 +507,12 @@ let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter=
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked','merging','next','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
 async function draw(){
  try{
-  let q='/graph.json?scope='+scope; ['done','todo','blocked','merging','next','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
   const d=await (await fetch(q,{cache:'no-store'})).json();
-  const hid=['done','todo','blocked'].filter(k=>!flt[k]);
+  const hid=['done','todo','blocked','next','merging','queue','review','failed'].filter(k=>!flt[k]);
   const rt=d.runtime||{}; const rts=['failed','testing','queued','review','next'].filter(k=>rt[k]).map(k=>`${rt[k]} ${k}`).join(' · ');
   document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}${rts?' · '+rts:''}`;
   if(d.mermaid===last) return; last=d.mermaid;
@@ -2029,8 +2038,10 @@ class H(BaseHTTPRequestHandler):
             keep_merging = "merging=0" not in self.path
             keep_next = "next=0" not in self.path
             keep_failed = "failed=0" not in self.path
+            keep_queue = "queue=0" not in self.path
+            keep_review = "review=0" not in self.path
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
