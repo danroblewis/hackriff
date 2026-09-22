@@ -311,6 +311,23 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
   tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
   TRIAGE_KIND="test"
+  # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
+  # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
+  # Those are TEST failures too (2026-09-22 14:49 they were read as "suite broken"), and a spec
+  # can be re-run alone with `npm run e2e -- <name>...` from ui/.
+  local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
+  if [ -z "$tests" ] && [ -n "$specs" ]; then
+    log "TRIAGE: browser specs red: $specs - re-running them alone"
+    if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
+      log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+      printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
+      ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+      [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
+      return $rc
+    fi
+    log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
+    return 1
+  fi
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
