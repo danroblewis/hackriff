@@ -20843,7 +20843,8 @@ tasks:
   - id: T-625
     milestone: MAUTO
     title: 'ADC fill (sigma in LSB) is the corpus stratification key and nothing stores it - record it as provenance and build the fill ladder'
-    status: todo
+    status: done
+    commit: "6de2da5f"
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20911,10 +20912,16 @@ tasks:
       the `hackriff.calibration/1` loader and cannot start before `hk-synth` exists. The live
       capture path still writes `noise_sigma_lsb: None` (fail-closed) because measuring it there is
       a capture-thread cost that T-453's rule says must be measured, not assumed - filed as T-750.
+    result: |
+      Landed on task-adcfill (tip a5de42f4), merged 2026-09-22 as ea91c27c (partial: a stash in another
+      session had dropped MERGE_HEAD, so the runner committed only the 4 new files) + 6de2da5f (the
+      remaining 40 files, a true merge commit naming the tip). Board flipped by hand.
+
   - id: T-626
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: the N5 mismatched-hypothesis negative population - the null the search actually faces'
-    status: todo
+    status: done
+    commit: "6de2da5f"
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20983,6 +20990,11 @@ tasks:
       NOT DONE: the population is not yet RUN against an engine - there is none (MAUTO M-1/M-3).
       `acceptance_mauto::negative_control` consuming it is T-576/T-627's work, and the n = 200 per
       shape that docs/22 specifies is a harness-side count, not a generator one.
+    result: |
+      Landed on task-adcfill (tip a5de42f4), merged 2026-09-22 as ea91c27c (partial: a stash in another
+      session had dropped MERGE_HEAD, so the runner committed only the 4 new files) + 6de2da5f (the
+      remaining 40 files, a true merge commit naming the tip). Board flipped by hand.
+
   - id: T-627
     milestone: MAUTO
     title: 'MAUTO-TEST: the coverage manifest and the sealed hold-out - make the corpus sufficiency argument checkable instead of asserted'
@@ -21327,7 +21339,7 @@ tasks:
       The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
   - id: T-640
     milestone: M2-hardening
-    title: A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got
+    title: 'A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got'
     status: done
     commit: "43873178"
     priority: normal
@@ -21926,7 +21938,7 @@ tasks:
       Filed 2026-09-22 by T-625 (task-adcfill). The dedup interaction is the real design question
       here, not the DSP: a sigma that moves every block would turn a deduplicated provenance table
       into one row per block.
-  - id: T-761
+  - id: T-800
     milestone: MMAP
     title: 'Design + ADR-0023: map-UI chrome, the layer model, and the research-state stores'
     status: todo
@@ -21955,14 +21967,14 @@ tasks:
       BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Blocks everything; land first. Mockup choices the docs left open, to
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Blocks everything; land first. Mockup choices the docs left open, to
       confirm in MAP-00: bottom sheet at every width (no desktop side slide-in); Research is a right
       slide-in, not the sheet's full state.
-  - id: T-762
+  - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
     status: todo
@@ -21970,7 +21982,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-761]
+    depends_on: [T-800]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -21986,13 +21998,13 @@ tasks:
       targeted tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-763
+  - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
     status: todo
@@ -22000,7 +22012,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-762]
+    depends_on: [T-801]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22016,13 +22028,13 @@ tasks:
       just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-764
+  - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
     status: todo
@@ -22030,7 +22042,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-762]
+    depends_on: [T-801]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22046,13 +22058,13 @@ tasks:
       Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-765
+  - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
     status: todo
@@ -22060,7 +22072,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-764]
+    depends_on: [T-803]
     use_cases: [AWARE-053]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22076,13 +22088,13 @@ tasks:
       HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-766
+  - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
     status: todo
@@ -22090,7 +22102,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-762, T-459]
+    depends_on: [T-801, T-459]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22105,13 +22117,13 @@ tasks:
       targeted tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-767
+  - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
     status: todo
@@ -22119,7 +22131,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: opus
     effort: medium
-    depends_on: [T-761, T-763]
+    depends_on: [T-800, T-802]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22136,13 +22148,13 @@ tasks:
       HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-768
+  - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
     status: todo
@@ -22150,7 +22162,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-767]
+    depends_on: [T-806]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22165,13 +22177,13 @@ tasks:
       crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-769
+  - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
     status: todo
@@ -22179,7 +22191,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-767]
+    depends_on: [T-806]
     use_cases: [AWARE-053]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22194,13 +22206,13 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-770
+  - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
     status: todo
@@ -22208,7 +22220,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: opus
     effort: medium
-    depends_on: [T-767, T-765]
+    depends_on: [T-806, T-804]
     use_cases: [AWARE-053]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22224,13 +22236,13 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-771
+  - id: T-810
     milestone: MMAP
     title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
     status: todo
@@ -22238,7 +22250,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-770]
+    depends_on: [T-809]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22253,13 +22265,13 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-772
+  - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
     status: todo
@@ -22267,7 +22279,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-767]
+    depends_on: [T-806]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22282,13 +22294,13 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-773
+  - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
     status: todo
@@ -22297,7 +22309,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    depends_on: [T-767]
+    depends_on: [T-806]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22315,13 +22327,13 @@ tasks:
       (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-774
+  - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
     status: todo
@@ -22329,7 +22341,7 @@ tasks:
     parallel_group: MAP-LAYERS
     model: sonnet
     effort: medium
-    depends_on: [T-768, T-769, T-770]
+    depends_on: [T-807, T-808, T-809]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22344,13 +22356,13 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
-  - id: T-775
+  - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
     status: todo
@@ -22358,7 +22370,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-764]
+    depends_on: [T-803]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22374,13 +22386,13 @@ tasks:
       crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-776
+  - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
     status: todo
@@ -22388,7 +22400,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-775, T-780]
+    depends_on: [T-814, T-819]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22403,13 +22415,13 @@ tasks:
       gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-777
+  - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
     status: todo
@@ -22418,7 +22430,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    depends_on: [T-761]
+    depends_on: [T-800]
     use_cases: [RESEARCH-003, RESEARCH-001]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22435,13 +22447,13 @@ tasks:
       tests only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Backend stores, parallel behind MAP-00; each owns its own crate
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
-  - id: T-778
+  - id: T-817
     milestone: MMAP
     title: 'Marker collections: generalize /api/bookmarks to time-frequency markers grouped into named collections'
     status: todo
@@ -22450,7 +22462,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    depends_on: [T-761]
+    depends_on: [T-800]
     use_cases: [RESEARCH-003]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22466,13 +22478,13 @@ tasks:
       then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Backend stores, parallel behind MAP-00; each owns its own crate
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
-  - id: T-779
+  - id: T-818
     milestone: MMAP
     title: 'Saved measurements store + /api/measurements (value+unit+place+time+provenance)'
     status: todo
@@ -22481,7 +22493,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    depends_on: [T-761]
+    depends_on: [T-800]
     use_cases: [RESEARCH-003]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22498,13 +22510,13 @@ tasks:
       (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Backend stores, parallel behind MAP-00; each owns its own crate
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
-  - id: T-780
+  - id: T-819
     milestone: MMAP
     title: 'Saved views: named, restorable (time x frequency) window extents'
     status: todo
@@ -22513,7 +22525,7 @@ tasks:
     model: opus
     effort: medium
     core_interface: true
-    depends_on: [T-761]
+    depends_on: [T-800]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22529,13 +22541,13 @@ tasks:
       BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Backend stores, parallel behind MAP-00; each owns its own crate
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Backend stores, parallel behind MAP-00; each owns its own crate
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
-  - id: T-781
+  - id: T-820
     milestone: MMAP
     title: 'Annotation authoring on the canvas (draw box/marker/label -> create annotation)'
     status: todo
@@ -22543,7 +22555,7 @@ tasks:
     parallel_group: MAP-RESEARCH
     model: opus
     effort: medium
-    depends_on: [T-777, T-765, T-458]
+    depends_on: [T-816, T-804, T-458]
     use_cases: [RESEARCH-003, RESEARCH-001]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22559,12 +22571,12 @@ tasks:
       HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Depends on the stores and the gesture design (T-458).
-  - id: T-782
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
     status: todo
@@ -22572,7 +22584,7 @@ tasks:
     parallel_group: MAP-RESEARCH
     model: opus
     effort: medium
-    depends_on: [T-778, T-767]
+    depends_on: [T-817, T-806]
     use_cases: [RESEARCH-003]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22587,12 +22599,12 @@ tasks:
       only (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Depends on the stores and the gesture design (T-458).
-  - id: T-783
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
     status: todo
@@ -22600,7 +22612,7 @@ tasks:
     parallel_group: MAP-RESEARCH
     model: sonnet
     effort: medium
-    depends_on: [T-779, T-458]
+    depends_on: [T-818, T-458]
     use_cases: [RESEARCH-003]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22616,12 +22628,12 @@ tasks:
       HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Depends on the stores and the gesture design (T-458).
-  - id: T-784
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-823
     milestone: MMAP
     title: 'Export: collections, measurements, annotations out as file/link (SigMF-adjacent)'
     status: todo
@@ -22629,7 +22641,7 @@ tasks:
     parallel_group: MAP-RESEARCH
     model: sonnet
     effort: medium
-    depends_on: [T-782, T-783]
+    depends_on: [T-821, T-822]
     use_cases: [RESEARCH-003]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22644,12 +22656,12 @@ tasks:
       (just test-ui / just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Depends on the stores and the gesture design (T-458).
-  - id: T-785
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+  - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
     status: todo
@@ -22657,7 +22669,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: sonnet
     effort: medium
-    depends_on: [T-766, T-775, T-782]
+    depends_on: [T-805, T-814, T-821]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22672,13 +22684,13 @@ tasks:
       Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
-  - id: T-786
+  - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
     status: todo
@@ -22686,7 +22698,7 @@ tasks:
     parallel_group: MAP-TEST
     model: sonnet
     effort: medium
-    depends_on: [T-770, T-771, T-773, T-781, T-782, T-783]
+    depends_on: [T-809, T-810, T-812, T-820, T-821, T-822]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -22702,11 +22714,11 @@ tasks:
       just test-crate), then HAND BACK. Never `just gate`.
     notes: |
       Filed 2026-09-22 from docs/26 after the user approved the ticket set and the mockup. Ticket ids:
-      MAP-00=T-761, MAP-01=T-762, MAP-02=T-763, MAP-03=T-764, MAP-04=T-765, MAP-05=T-766,
-      MAP-06=T-767, MAP-07=T-768, MAP-08=T-769, MAP-09=T-770, MAP-10=T-771, MAP-11=T-772,
-      MAP-12=T-773, MAP-13=T-774, MAP-14=T-775, MAP-15=T-776, MAP-16=T-777, MAP-17=T-778,
-      MAP-18=T-779, MAP-19=T-780, MAP-20=T-781, MAP-21=T-782, MAP-22=T-783, MAP-23=T-784,
-      MAP-24=T-785, MAP-25=T-786. Last; extends ui/test + ui/e2e.
+      MAP-00=T-800, MAP-01=T-801, MAP-02=T-802, MAP-03=T-803, MAP-04=T-804, MAP-05=T-805,
+      MAP-06=T-806, MAP-07=T-807, MAP-08=T-808, MAP-09=T-809, MAP-10=T-810, MAP-11=T-811,
+      MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
+      MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
+      MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
