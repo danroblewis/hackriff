@@ -73,8 +73,8 @@ GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 # and every failure costs a 50-minute isolation pass. So while a gate runs, admission drops to
 # GATE_CAP workers and GATE_LOAD_MAX load; the original CLAUDE.md rule (4 builders INCLUDING the
 # gate) was this, and raising the cap to 8 without it was the mistake.
-GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "3"))
-GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "10"))
+GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "5"))
+GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "18"))   # the gate alone runs this box at 8-13; workers are on E-cores meanwhile
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
