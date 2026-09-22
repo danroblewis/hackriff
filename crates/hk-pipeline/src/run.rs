@@ -685,6 +685,8 @@ pub(crate) struct Shared {
     /// that drains it and the T-446 decision about sealing. `None` when the view lattice is off or
     /// could not open.
     pub view_queue: Option<Arc<crate::history::ViewQueue>>,
+    /// T-844: the run's C38 shadow stage, observed at the classifier's call site.
+    pub ml: Option<Arc<crate::ml::MlStage>>,
 }
 
 impl Shared {
@@ -907,6 +909,10 @@ struct Common {
     alarms: Option<Arc<crate::alarms::AlarmService>>,
     /// T-115: the observation log (`None` when it could not be opened).
     observations: Option<crate::observe::ObservationLog>,
+    /// T-844: the C38 shadow stage (`crate::ml`) — the model registry under the data directory,
+    /// the modes an operator set, and the durable shadow log. `None` only when its store could not
+    /// open, which is reported and never fails the run.
+    ml: Option<Arc<crate::ml::MlStage>>,
     /// T-127: the scheduler as the API sees it (snapshot + lease commands), shared by segments.
     scheduler: Arc<crate::control::SchedulerHub>,
     /// T-157: the rolling IQ capture buffer, fed by every segment's `hk-iqbuffer` reader.
@@ -1345,6 +1351,10 @@ impl Pipeline {
             )
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
+            ml: crate::ml::MlStage::open(&cfg.data_dir)
+                .map(Arc::new)
+                .map_err(|e| eprintln!("ML shadow stage disabled: {e:#}"))
+                .ok(),
             fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
             reopen: reopen.map(|f| Arc::new(Mutex::new(f))),
             worker_panic: Arc::default(),
@@ -1622,6 +1632,7 @@ fn start_segment(
     let shared = Arc::new(Shared {
         dc_twin: dc_twin_rule(common),
         receiver: Arc::clone(&common.receiver),
+        ml: common.ml.clone(),
         counters: Arc::clone(&common.counters),
         ring,
         gate,
@@ -3061,6 +3072,11 @@ impl PipelineHandle {
     /// The scheduler hub (T-127) for `/api/scheduler*`: empty when the run has no scheduler.
     pub fn scheduler_hub(&self) -> Arc<crate::control::SchedulerHub> {
         Arc::clone(&self.sup.common.scheduler)
+    }
+
+    /// T-844: the run's C38 shadow stage (`/api/ml/*`); `None` when its store could not open.
+    pub fn ml(&self) -> Option<Arc<crate::ml::MlStage>> {
+        self.sup.common.ml.clone()
     }
 
     /// The data directory (`hackriff.db`, `history/`, `recordings/`).

@@ -129,11 +129,13 @@ pub(crate) fn run(
     // which is the most evidence it saw of this emission (ties keep the earlier one, so the choice
     // is deterministic and blind). Kept as an owned copy of that burst's samples alone, bounded by
     // one burst, because `buf` is drained as the chain advances.
+    // T-844: with the CFAR detection that burst came from, which the C38 gate needs.
     let mut best: Option<(
         Vec<Complex<i8>>,
         SampleTime,
         ProvenanceHandle,
         SnippetRequest,
+        DetectionId,
     )> = None;
     // Bursts already offered to burst taps (T-060) and when framing was last inferred for them.
     let mut streamed = 0usize;
@@ -229,7 +231,7 @@ pub(crate) fn run(
                     f_hi = f_hi.max(g.f_hi);
                     first_det.get_or_insert(g.detection);
                     if best.as_ref().is_none_or(|(s, ..)| s.len() < slice.len()) {
-                        best = Some((slice.to_vec(), info.time, p.clone(), request));
+                        best = Some((slice.to_vec(), info.time, p.clone(), request, g.detection));
                     }
                     bursts.push(b);
                 }
@@ -281,6 +283,14 @@ pub(crate) fn run(
         classification,
         ..Default::default()
     };
+    // T-844: the C38 shadow stage, when an operator put a model in a non-`off` mode. The best
+    // burst's detection is waited for like the chain's own (`stored_detection`), but only then —
+    // an idle stage adds no wait to the chain.
+    let ml = shared.ml.as_deref().filter(|m| !m.is_idle());
+    let ml_detection = ml
+        .and_then(|_| best.as_ref())
+        .and_then(|b| super::stored_detection(&shared, Some(b.4)));
+    let mut shadow: Option<(hk_model::classify::Classification, Option<Vec<f32>>)> = None;
     let written = {
         let mut repo = shared.repo();
         match write_framed_bursts(&mut repo, &bursts, &result, &ctx) {
@@ -308,7 +318,7 @@ pub(crate) fn run(
                 // bound). Without this call site a run wrote no posterior, no open-set score and
                 // no `unknown`, and ADR-0016 §7's classification floors could not be measured
                 // through the device at all.
-                if let Some((iq, time, prov, request)) = &best {
+                if let Some((iq, time, prov, request, _)) = &best {
                     let info = InputInfo {
                         time: *time,
                         discontinuity: Discontinuity::NONE,
@@ -316,7 +326,7 @@ pub(crate) fn run(
                         provenance: prov,
                     };
                     let mut c14 = SymbolEstimator::new();
-                    match crate::classify::classify_and_record(
+                    match crate::classify::classify_and_record_observed(
                         &mut repo,
                         w.emitter_id,
                         &Classifier::new(),
@@ -328,9 +338,15 @@ pub(crate) fn run(
                         iq,
                         request,
                         time.host_time,
+                        ml,
                     ) {
-                        Ok(Some((_, true))) => inc(&c.classifications),
-                        Ok(_) => {}
+                        Ok(Some((classification, written, input))) => {
+                            if written {
+                                inc(&c.classifications);
+                            }
+                            shadow = Some((classification, input));
+                        }
+                        Ok(None) => {}
                         Err(_) => inc(&c.errors),
                     }
                 }
@@ -355,6 +371,13 @@ pub(crate) fn run(
             }
         }
     };
+    // T-844: observed after the repository lock is released — the host batches, and a batch must
+    // never stall the other writers. The published row above is final; this only records what a
+    // model in shadow said about it (`crate::ml`).
+    if let (Some(ml), Some((classification, input))) = (ml, &shadow) {
+        let detection = ml_detection.and_then(|d| shared.repo().detection(d).ok());
+        ml.observe(detection.as_ref(), classification, input.as_deref());
+    }
     if let Some(w) = written {
         publish_bits(&shared, &bursts, &w, f_lo, f_hi);
         // Burst taps get the bursts not offered live, under the stored class and emitter.

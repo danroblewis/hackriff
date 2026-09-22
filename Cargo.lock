@@ -1009,6 +1009,7 @@ dependencies = [
  "hk-e2e",
  "hk-estimate",
  "hk-gnss",
+ "hk-ml",
  "hk-model",
  "hk-plugins",
  "hk-recipe",

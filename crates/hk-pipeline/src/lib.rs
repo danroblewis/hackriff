@@ -49,6 +49,7 @@ pub mod family;
 pub mod gate;
 pub mod gnss; // T-322 (ADR-0018): the C36 L1-dwell caller
 pub mod inventory;
+pub mod ml; // T-844: the C38 shadow stage and its durable sink (ADR-0016 §6)
 pub mod recipes;
 pub mod refine;
 /// T-265 (ADR-0017 TM-10, ADR-0015 §14): the **incremental region-decode contract** — Rule I's

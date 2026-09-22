@@ -113,6 +113,25 @@ pub fn classify_box<T: IqSample>(
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Option<Classification> {
+    classify_box_observed(classifier, c14, survey, info, iq, request, t, None)
+        .map(|(c, _)| c)
+}
+
+/// [`classify_box`], plus the learned stage's input (`hk_classify::dl_input`) of the **same**
+/// normalised snippet when `ml` has a model in a non-`off` mode for the family that came out
+/// (T-844). The vector is computed only then, so an idle shadow stage costs nothing here; `None`
+/// in the second slot means no model wanted it, or the snippet was unmeasurable.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_box_observed<T: IqSample>(
+    classifier: &Classifier,
+    c14: &mut SymbolEstimator,
+    survey: &crate::survey::ReceiverSurvey,
+    info: InputInfo<'_>,
+    iq: &[T],
+    request: &SnippetRequest,
+    t: Timestamp,
+    ml: Option<&crate::ml::MlStage>,
+) -> Option<(Classification, Option<Vec<f32>>)> {
     survey.apply(c14, info.provenance.get());
     let mut extractor = SnippetExtractor::new(Default::default());
     let snippet = extractor.extract(info, iq, request).ok()?;
@@ -133,7 +152,11 @@ pub fn classify_box<T: IqSample>(
     req.symbol_sample_rate_hz = window.as_ref().map(|w| w.sample_rate_hz);
     req.suspect.clipped = params.flags.clipped;
     req.suspect.spur = params.flags.overload;
-    Some(classifier.classify(&req))
+    let classification = classifier.classify(&req);
+    let input = ml
+        .filter(|m| m.wants(&classification.family))
+        .and_then(|_| hk_classify::dl_input(req.samples, req.sample_rate_hz, req.obw_hz));
+    Some((classification, input))
 }
 
 /// Appends `classification` to `emitter` at [`ArbRank::Classifier`], unless a better-informed
@@ -190,11 +213,35 @@ pub fn classify_and_record<T: IqSample>(
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Result<Option<(Classification, bool)>, RepoError> {
-    let Some(classification) = classify_box(classifier, c14, survey, info, iq, request, t) else {
+    Ok(classify_and_record_observed(
+        repo, emitter, classifier, c14, survey, info, iq, request, t, None,
+    )?
+    .map(|(c, written, _)| (c, written)))
+}
+
+/// [`classify_and_record`], also returning the learned stage's input for `ml`
+/// ([`classify_box_observed`]). The caller hands both to [`crate::ml::MlStage::observe`] **after**
+/// releasing the repository lock: the host batches, and a batch must never stall other writers.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_and_record_observed<T: IqSample>(
+    repo: &mut Repository,
+    emitter: EmitterId,
+    classifier: &Classifier,
+    c14: &mut SymbolEstimator,
+    survey: &crate::survey::ReceiverSurvey,
+    info: InputInfo<'_>,
+    iq: &[T],
+    request: &SnippetRequest,
+    t: Timestamp,
+    ml: Option<&crate::ml::MlStage>,
+) -> Result<Option<(Classification, bool, Option<Vec<f32>>)>, RepoError> {
+    let Some((classification, input)) =
+        classify_box_observed(classifier, c14, survey, info, iq, request, t, ml)
+    else {
         return Ok(None);
     };
     let written = record(repo, emitter, &classification)?;
-    Ok(Some((classification, written)))
+    Ok(Some((classification, written, input)))
 }
 
 /// Re-appends a demodulator chain's own label at [`ArbRank::LockVerified`] (rank 2), the rank

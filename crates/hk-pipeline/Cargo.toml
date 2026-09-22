@@ -22,6 +22,9 @@ hk-estimate.workspace = true
 # and it is not on the blind detection path — hk-detect/hk-core/hk-dsp/hk-estimate still do not
 # depend on hk-gnss, which is what crates/hk-gnss/tests/blind_path_boundary.rs enforces (ADR-0018).
 hk-gnss.workspace = true
+# T-844: the C38 shadow stage. `ml-mlp` because the models the training pipeline exports are
+# `hk-mlp@1` files; ONNX runs on the default tract provider.
+hk-ml = { workspace = true, features = ["ml-mlp"] }
 hk-model.workspace = true
 hk-plugins.workspace = true
 # T-085: recipe runtime (T-088/T-092/T-093, `src/recipes/`).
