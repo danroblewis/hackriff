@@ -18096,7 +18096,7 @@ tasks:
   - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
-    status: in-progress
+    status: done
     branch: task-t556
     priority: normal
     parallel_group: MAUTOD
@@ -18143,10 +18143,13 @@ tasks:
       - the whole roadmap rests on a per-decoder wrapping cost that nobody has measured.
       A negative result is a good outcome and should be written up as one.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
+    commit: 243f8f02
   - id: T-557
     milestone: MAUTO
     title: 'DECODER COVERAGE: how a protocol crosses the licence boundary as PARAMETERS - the GNU-Radio-informed template, so the reference set grows the MAUTO library without copying code'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -18199,6 +18202,9 @@ tasks:
       cost into a data-entry cost, for every protocol whose structure the existing block
       catalogue can already express.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
+    commit: f4e1e3d6
   - id: T-575
     milestone: MAUTO
     title: "MAUTO: the derived ConfirmPolicy - analytic hold-out bits, per-stage look-elsewhere, differences not distinct_valid, and the decision-rate counter the budget rests on"
@@ -19255,7 +19261,7 @@ tasks:
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
-    status: todo
+    status: done
     priority: medium
     parallel_group: PIPE
     core_interface: true
@@ -19281,6 +19287,9 @@ tasks:
       on a crash. MEASURE THE SIZE FIRST with a count assertion - frames folded per node against
       the on-demand control, with deliberate disorder in the fixture - because the answer decides
       whether this is worth a mechanism at all.
+    commit: af143981
+    notes: |
+      2026-09-22 (coordinator): landed UNGATED with the supervisor's six-branch landing onto f1fd4adf (recorded in merge-done.txt); the audit gate over main afterwards was Rust 2562/2562 green. commit = its merge on main.
   - id: T-585
     milestone: MLIVE
     title: Coarse-tile residency is one open accumulator per node - hold committed rows encoded instead
