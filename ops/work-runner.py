@@ -280,8 +280,12 @@ def launch(t, dry):
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(["bash", "-c", script], cwd=wt, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude)")
+    # QoS: a worker runs at `utility` + nice 10 from birth, below the gate's default tier for CPU and
+    # I/O. While a gate runs, apply_gate_qos() drops every worker to `background`, which on Apple
+    # Silicon means the efficiency cores only - the 20 P-cores of this M3 Ultra belong to the gate.
+    p = subprocess.Popen(["taskpolicy", "-c", "utility", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+                         stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; utility QoS)")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
@@ -663,9 +667,36 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+def apply_gate_qos(claims):
+    """The macOS stand-in for a cgroup: while a gate runs, every worker process group goes to
+    background QoS (E-cores only, throttled I/O); when it ends they come back to utility. Applied to
+    every pid in the group each tick, so children spawned since are caught too."""
+    gate = gate_running()
+    for tid, c in claims.items():
+        if c.get("state") != "running":
+            continue
+        pgid = c.get("pid")
+        pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+        if not pids:
+            continue
+        want = "bg" if gate else "fg"
+        if c.get("qos") == want and len(pids) == c.get("qos_n"):
+            continue
+        flag = "-b" if gate else "-B"
+        for pid in pids:
+            subprocess.run(["taskpolicy", flag, "-p", pid], capture_output=True)
+        if c.get("qos") != want:
+            log(f"QOS {tid}: {'background (E-cores) while the gate runs' if gate else 'restored to utility'} ({len(pids)} processes)")
+        c["qos"] = want; c["qos_n"] = len(pids)
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
+    try:
+        apply_gate_qos(claims)
+    except Exception as e:
+        log(f"apply_gate_qos error: {e}")
     try:
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
@@ -679,7 +710,7 @@ def tick(dry):
     except Exception as e:
         log(f"reap_worktrees error: {e}")
     changed |= dispatch(claims, dry)
-    if changed and not dry:
+    if not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
     frontier = {}
