@@ -201,7 +201,27 @@ def runtime_states(smap, tl=None, limit=10):
     def put(tid, state, reason=""):
         if tid and smap.get(tid) not in ("done", "cancelled") and tid not in st:
             st[tid] = state; why[tid] = reason
-    # Current work-runner claim first: what a ticket IS now outranks what happened to it earlier
+    # The merge runner's view first: a branch in the current gate or the queue file is exactly that,
+    # whatever failed earlier (T-800/T-763/T-299 re-queued after load flakes must read QUEUED).
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            put(_tk_of_branch(b), "testing", "bulk gate")
+    except Exception:
+        pass
+    try:
+        first = open(os.path.join(REPO, ".git", "MERGE_MSG")).read().splitlines()[0]
+        m = re.search(r"task-t\d+", first)
+        if m:
+            put(_tk_of_branch(m.group(0)), "testing", "staged merge")
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "merge-queue.txt")):
+            put(_tk_of_branch(l.strip()), "queued", "merge queue")
+    except Exception:
+        pass
+    # Then the work-runner claim: what a ticket IS now outranks what happened to it earlier
     # (a branch that failed a gate at 09:22 and is queued again at 12:00 is QUEUED, not FAILED - the
     # old precedence made 34 "failed" out of 3 real ones on 2026-09-22). NO_WORK is a stopped or lost
     # agent, drawn as "stopped", never as a failure.
@@ -233,8 +253,10 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
             f = l.split()   # date time branch ticket KIND detail...
-            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
+            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "GATE_FAIL_ESCALATE", "GATE_FAIL_NO_SESSION", "CANCEL_PROPOSED"):
                 put(f[3], "failed", f[4])
+            elif len(f) >= 5 and f[4] == "NO_WORK":
+                put(f[3], "stopped", "stopped or lost agent (NO_WORK)")
     except Exception:
         pass
     try:
