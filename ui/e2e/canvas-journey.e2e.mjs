@@ -877,7 +877,28 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     t.diagnostic(`recording began ${insideAge.ageS.toFixed(1)} s ago; the pane spans at most ` +
       `${insideAge.paneS.toFixed(1)} s (ruler: ${insideAge.ruler}); waited ${insideAge.waitedMs} ms`);
     const insideRes = await waitForResident(page);
-    t.diagnostic(`INSIDE residency after ${insideRes.ms} ms: ${insideRes.counts}`);
+    // **The two facts a flat pane is decided by, read at the same moment as the residency.** A pane
+    // can be fully resident, fully observed and still come out a flat fill for two reasons that
+    // look identical in a pixel census: the tiles were drawn through the wrong TIER byte, or the
+    // dB→colour range collapsed. Neither is visible in `counts`, and without them the census
+    // assertion below can only say "not a render" and leave the next person to guess which.
+    const insideTier = (await pane0(page)).level;
+    const insideRange = await page.eval(`(document.querySelector('.sf-range')?.textContent ?? '')`);
+    t.diagnostic(`INSIDE residency after ${insideRes.ms} ms: ${insideRes.counts} · ` +
+      `${insideTier} · range "${insideRange}"`);
+    // **Re-read the pane's box HERE, not before the waits above.** `g` was taken right after the
+    // navigation, and `waitForRecordToCover` + `waitForResident` can sit for fifteen seconds; the
+    // chrome's own height is not constant across that (T-505 put the tier inside every viewport
+    // row's level cell, so a row can wrap and un-wrap as the level changes), and the canvas moves
+    // with it. Sampling the stale rectangle reads the page AROUND the pane, which is a flat fill —
+    // and produces exactly the signature that sent two branches back: 0 % grey, 0 % magenta, tiles
+    // resident, tier and range correct, and "2 distinct, dominant 99 %". It is the T-487 mistake
+    // spelled with pixels instead of with time. The wide leg below already re-reads; this one did
+    // not, and the asymmetry was the whole defect.
+    const movedBy = Math.abs((await paneGeometry(page)).rect.y - g.rect.y);
+    g = await paneGeometry(page);
+    if (movedBy > 0) t.diagnostic(`the canvas moved ${movedBy} px while the waits above ran — ` +
+      "the rectangle sampled below is re-read for exactly this reason");
     const insideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE));
     const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0.06, LIVE_EDGE_ZONE), { n: 3, gapMs: 700 });
     const insidePix = insideG.last;
@@ -887,7 +908,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       `${insideG.text}); ` +
       `server (last ${RECENT_S} s) ${(insideCov.unobservedShare * 100).toFixed(1)} % unobserved OF KNOWN ` +
       `(${insideCov.observed} obs / ${insideCov.unobserved} unobs / ${insideCov.unknown} unk of ${insideCov.total}); ` +
-      `census ${insidePix.census.distinct} distinct, dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} %`);
+      `census ${insidePix.census.distinct} distinct, dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} % ` +
+      `(top: ${insidePix.census.top.map(([c, n]) => `${c}x${n}`).join(" ")})`);
     t.diagnostic(`INSIDE grey by vertical tenth over the WHOLE pane (newest first): ` +
       `${insideG.all[insideG.all.length - 1].bandsText}`);
     t.diagnostic(`INSIDE the live-edge zone (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of the pane): ` +
@@ -955,7 +977,12 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       "(T-532; CLAUDE.md: the live view renders like a classic SDR waterfall).");
     assert.ok(isRender(insidePix.census),
       `the pane over observed spectrum is not a render: ${insidePix.census.distinct} distinct, ` +
-      `dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} %`);
+      `dominant ${(insidePix.census.dominantShare * 100).toFixed(0)} % ` +
+      `(top: ${insidePix.census.top.map(([c, n]) => `${c}x${n}`).join(" ")}) — with ${insideRes.counts}, ` +
+      `drawn as ${insideTier}, over range "${insideRange}". Resident and observed and still flat is ` +
+      "not a delivery problem, and with those two right it is not a render problem either: check " +
+      "that the rectangle sampled is still ON the pane (the canvas moves when the chrome's height " +
+      "changes) before looking at the tile route.");
     assert.deepEqual(page.exceptions, [], "uncaught exception during the pan/zoom leg");
   });
 
