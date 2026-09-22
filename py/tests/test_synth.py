@@ -1421,14 +1421,25 @@ def test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo(tmp_p
             # Fixed LO offset: the absolute frequency changes with the centre.
             power = tone_power_dbfs(seg, fs, offset)
             assert power > floor + 6, f"artefact at offset {offset} missing at centre {centre}"
+        # T-599: an IQ image, fixed in the invariant f - 2*f_LO, so its baseband offset (and
+        # absolute frequency) changes with the centre at TWICE the LO's own step.
+        image_offset = 2.0 * centre - st["image_source_hz"] - centre
+        power = tone_power_dbfs(seg, fs, image_offset)
+        assert power > floor + 6, f"IQ image missing at centre {centre}"
 
     # The annotations say the same thing.
     for _, t in truths(meta, role="emission"):
         assert t["center_hz"] in st["emitters_hz"]
     for _, t in truths(meta, role="artefact"):
-        assert t["kind"] in ("dc-offset", "lo-spur")
-        assert t["offset_hz"] in st["lo_relative_offsets_hz"]
-        assert t["center_hz"] - t["offset_hz"] in centres
+        assert t["kind"] in ("dc-offset", "lo-spur", "iq-image")
+        if t["kind"] == "iq-image":
+            # Fixed in the invariant f - 2*f_LO, not in a fixed LO offset.
+            centre = t["center_hz"] - t["offset_hz"]
+            assert centre in centres
+            assert t["center_hz"] - 2.0 * centre == pytest.approx(-st["image_source_hz"])
+        else:
+            assert t["offset_hz"] in st["lo_relative_offsets_hz"]
+            assert t["center_hz"] - t["offset_hz"] in centres
 
 
 def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):
