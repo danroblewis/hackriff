@@ -125,6 +125,12 @@ builders *args:
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
+# Is the merge suite within its duration budget? Exits 1 if not (T-762). Deliberately NOT part
+# of any suite: it reads this machine's recorded history, so no diff can clear it and a merge
+# must never hang on it.
+budget-check:
+    uv run --locked --project py python -m hkpy.cycletime --check-budget
+
 # p50/p90 of the gate, per class and per phase, from $HACKRIFF_OPS/gate-timings.jsonl, plus
 # whether any class's ROLLING MEDIAN is over budget. `py/tests/test_gate.py` asserts the same
 # budgets, so a slow-down trips a test instead of waiting for someone to notice it.

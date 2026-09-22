@@ -21847,8 +21847,9 @@ tasks:
       blanket sweep is not the fix here either.
   - id: T-760
     milestone: MLIVE
-    title: The growing edge still loses frames to a reader - raising the view queue 600 to 1500 did not fix it, because the writer is starved of the pyramid lock
-    status: todo
+    title: 'The growing edge loses frames because the view WRITER holds the pyramid for seconds writing tiles - not, as this ticket first claimed, because a reader starves it'
+    status: done
+    commit: see branch task-viewstarve
     priority: high
     parallel_group: PIPE
     model: opus
@@ -21901,6 +21902,45 @@ tasks:
       tile generation". Losing rows to a tile reader is that invariant failing in the "lost them
       instead" direction, which the test's own comment names: "losing the growing edge would be the
       same failure as blocking for it, spelled differently."
+    result: |
+      RESOLVED 2026-09-22 on `task-viewstarve`. **THIS TICKET'S OWN DIAGNOSIS WAS WRONG, and the
+      measurement says so** - recorded here because the wrong cause was mine, and it was stated
+      confidently enough to have sent the work in the wrong direction.
+      THE TICKET SAID: the writer is starved of the pyramid lock by a `/api/tiles` reader holding
+      it 15 ms in every 16.
+      THE MEASUREMENT SAYS: the lock wait is FLAT in passing and failing runs alike - ~59-113 ms
+      per 17 s run in both - so the reader was never the cause. Four new counters
+      (`view_batches`, `view_lock_wait_ms`, `view_fold_ms`, `view_queue_peak`) over 20 isolated
+      runs separate them cleanly:
+        17 passing runs: fold 54-969 ms,   queue peak 51-1349
+         3 failing runs: fold 1904-2517 ms, queue peak 1501, 1501, 1501 (saturated)
+      What differs is the WRITER'S OWN HOLD, and it is DISK. `Pyramid::ingest` seals,
+      zstd-encodes and writes tiles INLINE, and T-571's live cascade seals across the lattice when
+      one frame crosses a block boundary: single holds of 2.006 s / 2.921 s / 5.867 s writing
+      24-300 tiles, and single `ingest` calls of 109 ms / 397 ms / 495 ms / 1.004 s. The writer
+      drained the queue ONCE PER BATCH, so the queue had to absorb every arrival for the whole
+      multi-second hold; at the unpaced replay's ~250-750 frames/s no capacity survives that.
+      That is MLIVE failing in its own words - the live edge WAS gated on batch tile generation.
+      A SECOND, INDEPENDENT REFUTATION: driving the reader deliberately hostile (holding 40 ms in
+      every 41, via the new `HK_VIEW_HOG_MS` knob) does NOT reproduce the failure on the broken
+      build, 0 of 5. The lever that reproduces it is the writer's hold.
+      THE FIX: `VIEW_FOLD_BUDGET = 20 ms` - one lock hold is one BUDGET, not one batch, and the
+      writer re-drains the queue between holds. The queue absorbs one budget's arrivals instead of
+      one batch's, and the stall this thread imposes on `/api/tiles` is bounded too, which is the
+      same defect seen from the reader's side. `VIEW_QUEUE_FRAMES` is UNCHANGED at 1500 and its
+      comment now records that the 600->1500 bump was never the answer - the one thing this ticket
+      did get right.
+      BEFORE/AFTER, 20 isolated runs each, builds differing only in the budget:
+        BEFORE: 3 failures in 20 (`view_dropped` 380, 1568, 14)
+        AFTER:  0 in 20; queue peak never above 651 (was saturating 1501); worst fold 821 ms
+                (was 2517); longest single hold 347 ms (was 5.867 s)
+      AND IT DID NOT BUY ZERO DROPS BY STALLING CAPTURE - the test's other assertions (capture
+      advanced by the full phase, detect reader advanced, `view_late`/`view_rejected` zero,
+      observed-but-unmeasured still exists) pass in all 20, and the run got FASTER, 17 s -> 5-13 s,
+      because the writer keeps up.
+      HONEST RESIDUAL: the budget is checked BETWEEN frames, so one cascade (1.0 s observed) is
+      still atomic. On a disk that cannot retire tiles as fast as rows arrive, frames are still
+      dropped - which is then an honest statement that the disk is the bottleneck. Filed as T-771.
   - id: T-750
     milestone: MAUTO
     title: 'Measure ADC fill on the live capture path - or prove the per-row cost first (T-625 residual)'
@@ -22719,6 +22759,157 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
+  - id: T-762
+    milestone: M2-hardening
+    title: A duration-budget assertion inside the merge suite is a deadlock - it measures this machine's history, so no diff can clear it and every failure makes it worse
+    status: done
+    branch: task-gatebudget
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    found_by: 'the coordinator, 2026-09-22, triaging why every branch was failing'
+    acceptance: |
+      IT BLOCKED EVERY MERGE, FOR A REASON NO BRANCH COULD FIX.
+      `py/tests/test_gate.py::test_the_recorded_gate_history_is_within_budget` asserted that the
+      rolling median of the last 7 recorded runs of a class is within budget. On 2026-09-22 the
+      `full` median reached 35.8 min against a 35.0 min budget, so `test-py` failed, `just test`
+      failed, and the merge suite failed for every branch - with ALL 2481 Rust tests passing in the
+      same run. The bulk carrying T-633 and T-625/T-626 was rewound for it.
+      THREE THINGS MAKE IT A DEADLOCK RATHER THAN A STRICT GUARD:
+      1. IT IS SELF-REINFORCING. Every failed run is itself another slow record appended to
+         `gate-timings.jsonl`, so each attempt pushes the median further over. The failure feeds
+         itself.
+      2. NO DIFF CLEARS IT. Every other guard in that file is a pure function of the diff - the
+         same diff gets the same verdict from anyone, anywhere. This one is a function of THIS
+         MACHINE'S ACCUMULATED HISTORY, so a fresh checkout and a week-old one disagree about
+         identical code, and a branch that would make the suite FASTER cannot land through it.
+      3. IT FLAPS. Measured at the time of writing: median 34.0 min against a 35.0 budget, having
+         been 35.8 an hour earlier. It sits on the threshold, so it blocks merges essentially at
+         random depending on which 7 runs are most recent.
+      A HYPOTHESIS CHECKED AND REJECTED, recorded because it was the obvious fix: "the box is
+      loaded with agents, so condition the budget on load". THE DATA SAYS OTHERWISE - 42.5 min at
+      load 5.53 and 33.4 at 6.25, against 16.0 min at load 22.81 and 15.5 at 19.15. The FASTEST
+      runs happened at the HIGHEST load. Duration does not track load here, and conditioning on it
+      would have been a plausible-sounding fix for a cause that is not present.
+      RESOLUTION - the signal is kept, its placement is corrected. The test now REPORTS a breach to
+      stderr and asserts only that its own reporting path still works, so it cannot quietly rot
+      into a no-op however far the suite regresses. The assertion moves to `just budget-check`
+      (`hkpy.cycletime --check-budget`, exit 1 on a breach), where a human is deliberately asking.
+      Proven both ways: with the real history it reports "every class within budget" and exits 0;
+      with the budget forced to 20 min it prints "OVER BUDGET: full: rolling median of the last 7
+      runs is 34.0 min" and exits 1.
+      THE DISTINCTION WORTH KEEPING: a MONITOR is not a GATE. A monitor on the merge path stops
+      the work it is monitoring. This is NOT a licence to delete guards - "a gate that skips is a
+      gate that passes for the wrong reason" still holds for anything that is a function of the
+      diff.
+    notes: |
+      The regression the guard correctly detected is real and is filed separately as T-763 - this
+      ticket only removes the deadlock, it does not make the suite faster.
+      KNOWN COUPLING: `hkpy.gatelog.read()` resolves its directory from `HACKRIFF_OPS` alone, so
+      `just budget-check` is blind in a session that does not set it - the same hole T-761 closes
+      for the staged-bulk marker. Once T-761 lands, point `gatelog` at `reconcile.ops_dir()` too.
+  - id: T-763
+    milestone: M2-hardening
+    title: The merge suite has gone from a 21.4 min median to ~34 min in two days, and it is test-bound rather than build-bound
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    found_by: 'the duration-budget guard, 2026-09-22, before T-762 moved it off the merge path'
+    acceptance: |
+      MEASURED, AND AGAINST A PRIORITY THE USER NAMED EXPLICITLY ("iteration speed is a priority;
+      ~4h per ticket is unbearable"). `CLAUDE.md` records the first measurement, 2026-09-20: gate
+      median 21.4 min. On 2026-09-22 the rolling median of the last 7 `full` runs is 34.0 min,
+      having touched 35.8. That is roughly 60 % slower in two days.
+      WHERE NOT TO LOOK, so the hunt does not start in the wrong place: this is TEST-BOUND, not
+      BUILD-BOUND. The `ld64.lld` change genuinely sped the link half and that gain is real; the
+      wall clock is dominated by test EXECUTION, and that half grew.
+      CANDIDATES, in the order the evidence suggests:
+        - TEST COUNT GROWTH: the workspace run went 2461 -> 2485 tests across the day, and
+          `just test-ui-e2e` alone now takes ~611 s.
+        - THE TILE-PERF DEFECTS SLOW THE SUITES THEMSELVES. T-760 (the view writer starved of the
+          pyramid lock) and T-690's measured service-rate collapse (167 ms/tile at cap 4/4 against
+          3612 ms/tile at cap 1/4) are not only product bugs - they make the browser tier wait.
+          Fixing them may recover a large part of this without touching the suite's shape.
+        - T-631 changed hk-e2e to run under nextest in an `e2e-bounded` group at max-threads 6,
+          measured at 230 s against 390 s for the `cargo test` path it replaced. That is a GAIN and
+          should show up as one; if the median did not move after it landed, that is itself a
+          finding worth chasing.
+      DO NOT "FIX" THIS BY RAISING THE BUDGET. The budget is a statement of what the loop should
+      cost. If the honest answer is that the suite now legitimately costs more, change it
+      DELIBERATELY and say why, in the same commit that records the measurement.
+      ASSERT WITH MEASURED DURATIONS, NOT IMPRESSIONS: `just cycle-time` reads the recorded history
+      per class and per phase, so state the before/after per PHASE and name which suite moved.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never run the full suite
+      to measure it - the recorded history already holds the measurements.
+    notes: |
+      Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
+      this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
+      place.
+  - id: T-764
+    milestone: M2-hardening
+    title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-762]
+    use_cases: []
+    found_by: 'the supervisor, 2026-09-22, after a malformed board reached main and broke the dashboard'
+    acceptance: |
+      WHAT HAPPENED. T-640's title contained `sources[iq-ring].available: true`, unquoted. To a
+      YAML loader that colon-space is a nested mapping, so `yaml.safe_load` rejected the WHOLE
+      file ("mapping values are not allowed here"). Every textual guard in
+      `py/tests/test_task_board.py` passed, `hkpy.reconcile` parsed it leniently and was fine, and
+      the gate stayed green - so the break reached `main` invisibly and surfaced only as a broken
+      dashboard graph, which is the worst way to learn about it.
+      THE INSIGHT THAT MAKES THIS MORE THAN A LINT TICKET, and it is uncomfortable: **it arrived
+      through a DIRECT BOARD COMMIT, and those are UNGATED.** The coordinator commits the board
+      several times an hour - "Board: flip nine tickets", "File T-700", "File T-760" - and none of
+      those commits runs a gate. So a gate-layer check would NOT have caught this break, and will
+      not catch the next one. The board's integrity currently rests on whoever is committing
+      remembering to check, which is exactly what failed.
+      TWO LAYERS, AND THE SECOND IS THE POINT.
+      1. GATE LAYER: `py/tests/test_task_board.py` asserts the board strict-parses, so a malformed
+         board fails any gated merge that touches it. NOTE the live constraint before choosing how:
+         **`pyyaml` is deliberately NOT a dependency of `py/`** (`hkpy.boardmerge` says so, and the
+         whole board toolchain is stdlib). T-762 already added a stdlib guard for the exact
+         construct that has ever broken it - a plain scalar containing `": "` - RED-proved. If you
+         want true strict-parse coverage instead, TAKING THE DEPENDENCY IS A DELIBERATE DECISION:
+         argue it in this ticket, do not smuggle it in with the fix.
+      2. COMMIT-PATH LAYER, which is the one that would have caught this: validate before ANY
+         commit that touches `docs/tasks.yaml` - the coordinator's direct board commits AND the
+         runner's merge commits.
+      IT MUST FAIL CLOSED. If the checker cannot run at all - missing interpreter, missing file,
+      unreadable board - the commit is REFUSED, not allowed. A validator that silently no-ops is
+      how this class recurs, and it is the same shape as three other defects found the same day:
+      a nextest override naming a package no run could see (T-631), a staged-bulk marker written
+      where its only reader never looked (T-761), and this file's own guards passing on a file a
+      loader rejects.
+      IT MUST COVER BOTH WRITERS. `hkpy.boardmerge` resolves `docs/tasks.yaml` automatically for
+      the merge driver, so a bad resolution can produce a malformed board with NO HUMAN IN THE
+      LOOP. `_validate` is the natural home for that half - it already refuses a resolution it
+      cannot vouch for, so extend what it vouches for.
+      DoD: a malformed board cannot reach `main` by any route. Demonstrate it by attempting the
+      exact 2026-09-22 break - an unquoted title containing `": "` - down EACH path in turn (a
+      direct board commit; a driver-resolved merge; a gated merge) and showing each one refuses
+      it. A DoD that only proves the gated path is not this ticket.
+      ASSERT WITH THE REFUSAL, NOT THE ABSENCE: show the check rejecting a known-bad board, not
+      merely passing on a good one, or the guard can rot into a no-op undetected.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 at the user's request, via the supervisor, who identified the ungated
+      direct-commit path as the hole. The dashboard's own half - `ops/monitor.py` reporting "the
+      board did not parse, here is why" instead of rendering a broken graph - is the supervisor's
+      and is not in this ticket; it is worth keeping even after the validators land, because a
+      reader that degrades honestly is useful whatever the writers do.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
