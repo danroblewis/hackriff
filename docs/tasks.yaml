@@ -15474,7 +15474,8 @@ tasks:
     milestone: MSDR
     title: The serving layer holds N live controls, and device-control routes take a device selector
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     core_interface: true
     model: opus
@@ -15494,7 +15495,8 @@ tasks:
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: sonnet
     depends_on: [T-510, T-511]
@@ -15511,7 +15513,8 @@ tasks:
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: sonnet
     depends_on: [T-510, T-511]
@@ -15529,7 +15532,8 @@ tasks:
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: opus
     depends_on: []
