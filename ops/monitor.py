@@ -192,7 +192,7 @@ def _tk_of_branch(b):
     return f"T-{m.group(1)}" if m else b
 
 
-def runtime_states(smap):
+def runtime_states(smap, tl=None, limit=10):
     """What the runners know that the board does not: per ticket, one of
     failed (a gate/review/worker failure needing a person), testing (in the current gate),
     queued (waiting for the merge runner), review (in the reviewer stage), next (the runner's
@@ -233,7 +233,7 @@ def runtime_states(smap):
             put(_tk_of_branch(l.strip()), "queued", "merge queue")
     except Exception:
         pass
-    working = set()
+    working = set(); claims = {}
     try:
         claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
         working = {tid for tid, c in claims.items() if c.get("state") == "running" and c.get("kind") == "work"}
@@ -246,13 +246,32 @@ def runtime_states(smap):
                 put(tid, "queued", "merge queue")
     except Exception:
         pass
+    # UP NEXT = the work runner's own dispatch order (ops/work-runner.py candidates()): todo, deps done,
+    # not blocked_on / needs user|hardware / dispatch: manual, not claimed; user-requested first,
+    # then priority, then number. Mirrored here rather than imported so the page has no runner dependency.
+    claimed = set(claims)
     try:
-        shown = 0
-        for r in work_queue(smap, [], [])["upcoming"]:
-            if r.get("ready") and r["id"] not in working and r["id"] not in st:
-                put(r["id"], "next", "up next"); shown += 1
-            if shown >= 8:
-                break
+        tl = tl or load_tasks_yaml()
+        by = {t.get("id"): t for t in tl}
+        pri = {"high": 0, "medium": 1, "normal": 2, "low": 3}
+        def is_user(t):
+            return bool(t.get("requested_by") or t.get("user_report") or str(t.get("found_by", ""))[:40].lower().startswith("user"))
+        def num(tid):
+            m = re.search(r"(\d+)", tid or ""); return int(m.group(1)) if m else 10**9
+        cands = []
+        for t in tl:
+            tid = t.get("id")
+            if t.get("status") != "todo" or tid in claimed or tid in st or tid in working:
+                continue
+            if t.get("needs") in ("user", "hardware") or t.get("blocked_on") or t.get("dispatch") == "manual":
+                continue
+            dps = t.get("depends_on") or t.get("deps") or []
+            if any(by.get(d, {}).get("status") not in ("done", "cancelled") for d in dps if d in by):
+                continue
+            cands.append(t)
+        cands.sort(key=lambda t: (not is_user(t), pri.get(t.get("priority", "normal"), 2), num(t.get("id"))))
+        for i, t in enumerate(cands[:limit]):
+            put(t["id"], "next", f"up next #{i + 1}")
     except Exception:
         pass
     return st, why
@@ -315,7 +334,7 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         if s in ("blocked", "paused"): return show_blocked
         if s == "deferred": return scope == "all"
         return True  # in-progress, review, etc. always anchor
-    rt, rt_why = runtime_states(smap)
+    rt, rt_why = runtime_states(smap, tl)
     keep = {tid for tid, s in rt.items() if tid in tasks and (
         (keep_merging and s in ("testing", "queued", "review")) or (keep_next and s == "next") or (keep_failed and s == "failed"))}
     anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
@@ -343,7 +362,7 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
             word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT"}[state]
             col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF"}[state]
             why = rt_why.get(x["id"], "")
-            why = "" if why in ("bulk gate", "merge queue", "reviewer stage", "up next") else " · " + why
+            why = "" if why in ("bulk gate", "merge queue", "reviewer stage") else " · " + why
             t = f"<b style='color:{col};font-size:10px;letter-spacing:.08em'>{word}{why}</b><br/>" + t
         sub = " · ".join(p for p in (ms, t) if p)
         return f"{tick}{x['id']}<br/><span style='font-size:9px;opacity:.75'>{sub}</span>" if sub else f"{tick}{x['id']}"
