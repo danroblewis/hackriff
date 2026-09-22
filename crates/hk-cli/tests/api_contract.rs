@@ -10287,3 +10287,105 @@ fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
 /// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
 const FINE_STEPS: u64 = 3334;
 const COARSE_STEPS: u64 = 418;
+
+/// **T-511 — the device selector on the wire, against a real server.**
+///
+/// The serving layer holds N live controls keyed by `device_id`, and the routes that reach a radio
+/// take a `device_id` selector. This run holds exactly one front end (the mock SDR), which is the
+/// case the invariant protects: **with one device the selector may be omitted and behaviour is
+/// unchanged.** Asserted here rather than in a unit test because "the client's existing bodies
+/// still work" is a statement about the wire.
+///
+/// Four things, all by value:
+///
+/// 1. `GET /api/control/state` enumerates the front ends in `devices`, and with one it agrees with
+///    the singular `device`/`tuning` — so a client can discover the selector it would pass;
+/// 2. the ids in `devices` are the same ids `GET /api/navigation`'s `windows` lights segments
+///    from: one enumeration of the run's radios, not two;
+/// 3. a device route with **no** selector still retunes, and answers `device.id` naming the radio
+///    it moved;
+/// 4. a selector naming another radio is refused `404 unknown_device` and **the front end does not
+///    move** — a wrong name is not "the only device, so they must have meant it".
+#[test]
+fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // (1) the enumeration, and its agreement with the singular default.
+    let (st, v) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{v}");
+    let devices = v["devices"]
+        .as_array()
+        .unwrap_or_else(|| panic!("control/state must enumerate its front ends: {v}"));
+    assert_eq!(devices.len(), 1, "this run holds one front end: {v}");
+    let device_id = devices[0]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"))
+        .to_owned();
+    assert!(device_id.starts_with("mock:"), "{v}");
+    assert_eq!(devices[0]["device_id"], v["device"]["device_id"], "{v}");
+    assert_eq!(devices[0]["tuning"], v["tuning"], "{v}");
+
+    // (2) the same radio, seen as a capture window.
+    let (st, nav) = get(addr, "/api/navigation");
+    assert_eq!(st, 200, "{nav}");
+    let windows = nav["windows"].as_array().expect("windows");
+    assert_eq!(windows.len(), 1, "{nav}");
+    assert_eq!(windows[0]["device_id"], json!(device_id), "{nav}");
+
+    // (3) no selector: unchanged, and the answer names the radio that moved.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 2e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(
+        st, 200,
+        "an omitted selector is correct with one device: {r}"
+    );
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_default = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+
+    // The selector given explicitly names the same radio and is accepted.
+    let moved2 = step * (((FIXTURE_CENTER_HZ + 3e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{moved2:?},\"device_id\":{}}}",
+            json!(device_id)
+        ),
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_named = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+    assert!(
+        (after_named - after_default).abs() > 1.0,
+        "the named selector moved the radio: {r}"
+    );
+
+    // (4) a selector naming a radio this run does not hold: refused, and nothing moved.
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{:?},\"device_id\":\"mock:not-this-radio\"}}",
+            FIXTURE_CENTER_HZ
+        ),
+    );
+    assert_eq!(st, 404, "{r}");
+    assert_eq!(r["code"], json!("unknown_device"), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains(&device_id),
+        "the refusal names what this run does hold: {r}"
+    );
+    let (_, v) = get(addr, "/api/control/state");
+    assert_eq!(
+        v["tuning"]["center_hz"].as_f64(),
+        Some(after_named),
+        "a refused selector must not move the front end: {v}"
+    );
+
+    stop_server(serving);
+}
