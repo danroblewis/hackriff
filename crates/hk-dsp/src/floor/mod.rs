@@ -285,7 +285,10 @@ pub use blocks::{BlockConfig, BlockLayout, fill_invalid, sliding_min};
 pub use fcme::{BlockFcme, FcmeBlock, FcmeConfig, fcme_floor};
 pub use minstat::{MinStatConfig, MinStatistics, monte_carlo_bias};
 pub use percentile::{BlockPercentile, PercentileBlock, PercentileConfig};
-pub use quantisation::{QuantisationFloor, QuantisationNoise, ci8_quantisation_noise};
+pub use quantisation::{
+    AdcFill, QuantisationFloor, QuantisationNoise, adc_fill_ci8, adc_fill_unit_scale,
+    ci8_quantisation_noise,
+};
 pub use threshold::{DEFAULT_GUARD_DB, FloorThreshold, snr_wall_db};
 pub use tracker::{
     ChannelFloor, EndReason, FLOOR_RESET_ON, FloorChangeClass, FloorChangeConfig, FloorConfig,

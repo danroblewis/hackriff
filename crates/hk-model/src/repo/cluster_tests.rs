@@ -841,6 +841,7 @@ fn emitter_latest_measurement_reads_the_newest_linked_detection() {
             },
             overload: false,
             quantisation_limited: false,
+            noise_sigma_lsb: None,
             temperature_c: None,
             antenna_port: None,
             bias_tee: crate::BiasTee::Unknown,

@@ -685,7 +685,7 @@ def work_queue(smap, wts, ags, merge_ticket=""):
     # --- upcoming: todo, dependency-ready then priority then number ---
     def dep_state(t):
         # a dep blocks only while it is still open; done/cancelled/unknown don't block
-        deps = t.get("deps") or []
+        deps = t.get("deps") or t.get("depends_on") or []
         return [d for d in deps if smap.get(d) in ("todo", "in-progress", "blocked", "paused", "deferred")]
     upcoming = []
     for t in all_tasks:

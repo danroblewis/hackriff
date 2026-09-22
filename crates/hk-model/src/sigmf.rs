@@ -411,6 +411,7 @@ mod tests {
             },
             overload: false,
             quantisation_limited: false,
+            noise_sigma_lsb: None,
             temperature_c: Some(41.5),
             antenna_port: None,
             bias_tee: crate::BiasTee::Unknown,

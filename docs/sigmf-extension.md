@@ -22,6 +22,7 @@ that don't know it can ignore it.
            "vga_db": 20.0, "amp_on": false, "bandwidth_hz": 1750000.0},
   "overload": false,
   "quantisation_limited": false,
+  "noise_sigma_lsb": 2.25,
   "temperature_c": 41.5,
   "antenna_port": "A1",
   "bias_tee": "off",
@@ -36,7 +37,7 @@ that don't know it can ignore it.
 
 - **Required:** `device_id`, `tune` (all six fields), `overload`, `quantisation_limited`,
   `clock_source`, `clock_locked`, `timestamp_method`.
-- **Optional:** `temperature_c`, `antenna_port`, `bias_tee`, `calibration_state_ref`,
+- **Optional:** `noise_sigma_lsb`, `temperature_c`, `antenna_port`, `bias_tee`, `calibration_state_ref`,
   `spur_mask_ref`, and `timestamp_error_budget_ns`. Omit a field when it is unknown; do not write
   `null`.
 - `bias_tee` (T-325) is `off` or `on`: the antenna-port bias tee's state under this provenance.
@@ -51,6 +52,15 @@ that don't know it can ignore it.
   flagged `clipped`.
 - `quantisation_limited` is true when the noise floor under this gain state is within 3 dB of the
   ADC quantisation floor (added from spike S4, 2026-09-13). It is stable per gain state.
+- `noise_sigma_lsb` (T-625) is **ADC fill**: the per-component noise σ in ADC LSB under this
+  state. It is the variable the evidence-metric calibration tables are conditioned on
+  (ADR-0015 §13.3) and it is **not** the gain setting — T-547 applied 51 dB of gain with the ADC
+  skipped and reproduced the float table to 0.02 bits on every metric (docs/21 §4), so a table or
+  a breakdown keyed on gain is keyed on a no-op. **An absent key means not measured, and not
+  measured is `under_filled`, not `nominal`**: a reader credits calibrated metrics 0 bits for the
+  window rather than assuming the fill was fine. A recording with no ADC (a `cf32_le` file) has no
+  fill and must omit the key rather than invent one. Provenance written before T-625 has no key,
+  and its canonical JSON — and therefore its dedup hash — is unchanged.
 - `clock_source` is one of `internal`, `external` (10 MHz into CLKIN) or `gpsdo`.
 - `timestamp_method` is one of `host-arrival`, `gnss-tagged`, `external-reference`, `synthetic` or
   `unknown`. HackRF One has no hardware 1PPS, so live captures are `host-arrival` unless
