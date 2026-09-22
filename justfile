@@ -101,6 +101,20 @@ gate-merge *args: (_coordinator-only "gate-merge")
 reconcile *args:
     uv run --locked --project py python -m hkpy.reconcile {{args}}
 
+# THE TASK BOARD CLI (user, 2026-09-22): docs/tasks.yaml is edited through THIS, never by hand -
+# a PreToolUse hook bans direct Edit/Write/sed-i/redirect edits to it in worktrees. Text-level
+# operations on one ticket's block (py/hkpy/tasks.py), never a whole-file YAML re-dump; every
+# write is re-read and re-validated, restoring the original bytes on any failure.
+#   just task show T-nnn                 print a ticket's raw block
+#   just task list [--status S] [--milestone M] [--ready] [--group G] [--json]
+#   just task set T-nnn key=value ...     replace/add scalar fields (refuses bad status/blocked)
+#   just task result T-nnn (--from|--text)   set the `result:` block
+#   just task note T-nnn (--from|--text)     append to the `notes:` block
+#   just task new --title T --milestone M [...]   file a ticket, allocating its id
+#   just task validate                    strict-parse + the board's own invariants
+task *args:
+    uv run --locked --project py python -m hkpy.tasks {{args}}
+
 # IS IT SAFE TO LAUNCH ANOTHER BUILDING AGENT (T-559)? CLAUDE.md's worktree-launch cap is "at
 # most 4 Rust-building agents" - but a count-the-cargo-processes check misses the `hk serve`
 # processes agents leave running (e2e harnesses, demo servers, replay servers), which is exactly
