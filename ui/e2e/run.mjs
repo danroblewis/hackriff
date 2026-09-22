@@ -47,14 +47,28 @@
 // such kill, contending for the machine the whole time. SIGINT and SIGTERM are trappable, so those
 // two sweep synchronously, same as the timeout. **SIGKILL of run.mjs itself cannot be trapped by
 // anything in this file** — Node offers no hook for it — so that one case is handled differently and
-// explicitly, not left as a silent gap: every run records its own pid and every child it has spawned
-// so far (across every lane) in a lock file (`LOCK_DIR`, `persistLock` below), and the FIRST thing the
-// NEXT run does, before starting a browser or a backend of its own, is `sweepStaleRuns()` — read every
-// lock file, and for any whose recorded pid is no longer alive, kill every child it had recorded (and
-// their own descendants, same `killSpecTree` walk). A killed run's orphans therefore survive until the
-// next invocation of this file, and are swept then; see `ui/e2e/selftest-orphan-sweep.mjs`, which
-// proves the SIGINT/SIGTERM legs clean synchronously and the SIGKILL leg cleans at the next run's
-// start.
+// explicitly, not left as a silent gap: every run records its own pid, a MARKER and a process START
+// TIME for every child it has spawned so far (across every lane), in a lock file (`LOCK_DIR`,
+// `persistLock` below), and the FIRST thing the NEXT run does, before starting a browser or a backend
+// of its own, is `sweepStaleRuns()` — read every lock file, and for any whose recorded pid is no
+// longer alive, kill every RECORDED CHILD ONLY AFTER RE-VERIFYING IT AGAINST THE OS (`verifyStillOurs`
+// below) that its pid still runs the same process, not a stranger that has since reused the number. A
+// killed run's orphans therefore survive until the next invocation of this file, and are swept then;
+// see `ui/e2e/selftest-orphan-sweep.mjs`, which proves the SIGINT/SIGTERM legs clean synchronously and
+// the SIGKILL leg cleans at the next run's start.
+//
+// **Why the verify step exists (review finding, T-740 fix round 1).** A bare recorded pid is not
+// enough: pids wrap (macOS: ~99,998) and this box runs cargo/rustc for up to four agents at once, so
+// reuse of a low pid is plausible, especially across a long gap (a lock left by a run that died and
+// was never cleaned, found much later). Killing on the pid number ALONE would then SIGKILL whatever
+// unrelated process — another agent's Chrome, the merge runner, a tmux shell — now holds that number,
+// plus its whole tree and group. `verifyStillOurs` re-reads the CURRENT process's start time
+// (`ps -o lstart=`, recorded at `trackChild` time and compared exactly) and command line (must still
+// contain the marker recorded at `trackChild` time — the child's own `hk-e2e-chrome-*` /
+// `hk-e2e-data-*` profile/data dir, or its spec's file path) before every kill in `sweepStaleRuns`;
+// anything that does not match BOTH is left alone, exactly as the ticket's own notes require ("a
+// blanket sweep is not the fix here" — the agent that found the leak also checked, rather than
+// assumed, that 14 other Chrome processes belonged to a different agent's live worktree).
 import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import os from "node:os";
@@ -66,25 +80,85 @@ import { waitForSurfaceHistory } from "./harness.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-// One JSON file per run, `{pid, startedAt, children}` — the record `sweepStaleRuns()` reads at the
-// START of the NEXT run to find what a SIGKILLed run left behind. Lives in the OS tmp dir, not
-// `ui/e2e/`, so it survives independent of this checkout and is naturally per-machine.
+// One JSON file per run, `{pid, startedAt, children: [{pid, marker, lstart}]}` — the record
+// `sweepStaleRuns()` reads at the START of the NEXT run to find what a SIGKILLed run left behind.
+// Lives in the OS tmp dir, not `ui/e2e/`, so it survives independent of this checkout and is
+// naturally per-machine. A lock older than this is deleted outright rather than acted on — by then
+// any recorded child is either long gone or, if its pid number has been reused, definitely not ours;
+// `verifyStillOurs` below would reach the same answer, this just skips the `ps` calls to get there.
 const LOCK_DIR = path.join(os.tmpdir(), "hk-e2e-runs");
+const STALE_LOCK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 try { mkdirSync(LOCK_DIR, { recursive: true }); } catch { /* already exists */ }
 const LOCK_FILE = path.join(LOCK_DIR, `${process.pid}.json`);
-const trackedChildren = new Set();
+// pid -> { marker, lstart }. `marker` is a substring that MUST appear in that pid's own command line
+// (its `hk-e2e-chrome-*` / `hk-e2e-data-*` dir, or its spec's file path) and `lstart` is that
+// process's OS-reported start time at the moment it was tracked — together, what `verifyStillOurs`
+// checks before a later run is allowed to kill it.
+const trackedChildren = new Map();
 
 /** Rewrite this run's own lock file with its current child set. Best-effort: a failed write only
  * means THIS run's SIGKILL case would go unswept next time, never a correctness problem for the run
  * in progress. */
 function persistLock() {
   try {
-    writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, startedAt: Date.now(), children: [...trackedChildren] }));
+    const children = [...trackedChildren].map(([pid, info]) => ({ pid, marker: info.marker, lstart: info.lstart }));
+    writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, startedAt: Date.now(), children }));
   } catch { /* best effort */ }
 }
-function trackChild(pid) { trackedChildren.add(pid); persistLock(); }
+
+/** The OS's own record of when `pid` started (`ps -o lstart=`), or `null` if `pid` does not exist (or
+ * `ps` itself is unavailable) right now. Exact-string-compared later, never parsed into a Date: the
+ * only question that matters is "is this still the SAME process", and the OS's own formatting of its
+ * own field answers that without this file taking on a timezone/locale parsing bug of its own. */
+function processStartTime(pid) {
+  try {
+    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    return out || null;
+  } catch {
+    return null; // no such pid, or ps missing
+  }
+}
+
+/** `pid`'s own full command line right now (`-ww`: never truncated to a terminal width, which
+ * matters here — Chrome's real command line is hundreds of characters and the marker this checks for
+ * can sit well past 80 columns), or `""` if `pid` does not exist. */
+function processCommand(pid) {
+  try {
+    return execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Record `pid` as this run's own child, with a MARKER that must appear in its command line and its
+ * OS-reported start time — both read from the live process right now, at the moment it is known to be
+ * ours, so a LATER run has something to check a same-numbered stranger against.
+ */
+function trackChild(pid, marker) {
+  trackedChildren.set(pid, { marker, lstart: processStartTime(pid) });
+  persistLock();
+}
 function untrackChild(pid) { trackedChildren.delete(pid); persistLock(); }
 function clearLock() { try { unlinkSync(LOCK_FILE); } catch { /* already gone, or never written */ } }
+
+/**
+ * Is the CURRENTLY-RUNNING process at `pid` still the one `trackChild` recorded? `"match"` only if
+ * BOTH the OS start time is byte-identical to what was recorded (pid reuse virtually always changes
+ * it — two processes starting in the same clock tick and getting the same recycled pid is the
+ * coincidence this alone would have to fail on) AND the current command line still contains the
+ * marker recorded at track time. `"gone"` (pid no longer exists) and `"reused"`/`"mismatch"` (it
+ * exists but fails one of the two checks) are both refusals to kill — this function has exactly one
+ * job, and getting it wrong in the kill direction is the bug the review that required it was filed
+ * over.
+ */
+function verifyStillOurs(pid, marker, lstart) {
+  const curLstart = processStartTime(pid);
+  if (curLstart === null) return "gone";
+  if (curLstart !== lstart) return "reused";
+  if (!processCommand(pid).includes(marker)) return "mismatch";
+  return "match";
+}
 
 /**
  * Sweep every lock file left by a run whose pid is no longer alive — the SIGKILL case, handled here
@@ -92,6 +166,9 @@ function clearLock() { try { unlinkSync(LOCK_FILE); } catch { /* already gone, o
  * belongs to a run genuinely still in flight (this repo runs up to four agents at once) and is never
  * touched. Runs before anything else in this file starts a browser or a backend, so a killed run's
  * orphans never contend with the run doing the sweeping.
+ *
+ * Every recorded child is re-verified against the live OS (`verifyStillOurs`) immediately before it
+ * is killed — see the file-header note on why a bare recorded pid is never enough to act on alone.
  */
 function sweepStaleRuns() {
   let names = [];
@@ -102,13 +179,29 @@ function sweepStaleRuns() {
     let entry;
     try { entry = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
     if (typeof entry?.pid !== "number") { try { unlinkSync(file); } catch { /* ignore */ } continue; }
+    if (typeof entry.startedAt === "number" && Date.now() - entry.startedAt > STALE_LOCK_MAX_AGE_MS) {
+      try { unlinkSync(file); } catch { /* already gone */ }
+      continue; // too old to touch — see the constant's own comment above
+    }
     let alive = true;
     try { process.kill(entry.pid, 0); } catch { alive = false; }
     if (alive) continue; // a concurrent run genuinely still in flight — leave it alone
-    const victims = (entry.children ?? []).flatMap((pid) => killSpecTree(pid));
-    if (victims.length) {
-      console.log(`e2e: swept ${victims.length} orphaned process(es) left by a killed run (pid ${entry.pid}, ` +
-        `dead since it could not clean up after itself): [${victims.join(", ")}]`);
+    for (const child of entry.children ?? []) {
+      if (!child || typeof child.pid !== "number" || typeof child.marker !== "string" || typeof child.lstart !== "string") {
+        continue; // an entry this run cannot verify identity for — fail closed, never kill on a guess
+      }
+      const verdict = verifyStillOurs(child.pid, child.marker, child.lstart);
+      if (verdict !== "match") {
+        if (verdict !== "gone") {
+          console.log(`e2e: NOT sweeping pid ${child.pid} (marker "${child.marker}") recorded by a killed ` +
+            `run (pid ${entry.pid}) — verify said "${verdict}", so it is no longer (or never was) this ` +
+            "harness's process; leaving it alone.");
+        }
+        continue;
+      }
+      const victims = killSpecTree(child.pid);
+      console.log(`e2e: swept ${victims.length} orphaned process(es) for verified pid ${child.pid} ` +
+        `(marker "${child.marker}") left by a killed run (pid ${entry.pid}): [${victims.join(", ")}]`);
     }
     try { unlinkSync(file); } catch { /* already gone */ }
   }
@@ -212,6 +305,11 @@ const t0 = Date.now();
 const backends = [];
 const stopAll = () => { for (const b of backends) { try { b.stop(); } catch { /* already gone */ } } };
 process.on("exit", stopAll);
+// Backends are tracked individually per lane in `startLane` below, each with its own `--data-dir` as
+// the marker `verifyStillOurs` checks a later run's sweep against — so a SIGKILL of THIS process
+// still lets the next run's sweep find and kill any lane's backend that survives, without risking a
+// same-numbered stranger.
+//
 // Every spec currently running, across every lane — kept only so a lane's timeout can name and race
 // one particular child. Signal cleanup (next) does not use it: a SIGINT/SIGTERM to THIS process (a
 // developer's Ctrl-C, or the gate's own deadline) sweeps every child `trackChild` currently knows
@@ -221,7 +319,7 @@ process.on("exit", stopAll);
 const activeSpecs = new Set();
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
-    for (const pid of [...trackedChildren]) killSpecTree(pid);
+    for (const pid of [...trackedChildren.keys()]) killSpecTree(pid);
     stopAll();
     process.exit(130);
   });
@@ -306,8 +404,11 @@ function runSpec(file, env) {
       detached: true,
     });
     activeSpecs.add(child);
-    trackChild(child.pid); // in the lock file too: if THIS process is SIGKILLed mid-spec, the next
-                            // run's sweep still finds this spec (and, via descendantPids, its Chrome).
+    // Recorded with the spec's own file path as marker (it is a substring of this exact child's
+    // command line, `node <HERE>/<file>`) — if THIS process is SIGKILLed mid-spec, the next run's
+    // sweep still finds this spec (and, via descendantPids, its Chrome) and can verify it is still
+    // this same spec process before killing it.
+    trackChild(child.pid, file);
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => { out += d; });
@@ -344,9 +445,11 @@ function runSpec(file, env) {
 async function startLane(i) {
   const backend = await startBackend({ port: lanePortBase(i) });
   backends.push(backend);
-  trackChild(backend.proc.pid); // recorded in the lock file, so a SIGKILL of THIS process still lets
-                                  // the next run's sweep find and kill this lane's backend if it
-                                  // survives.
+  // Recorded in the lock file with its own `--data-dir` (a fresh `mkdtempSync` per run, so this is
+  // unique to THIS backend, not just "some hk serve") as the marker `verifyStillOurs` checks a later
+  // run's sweep against — so a SIGKILL of THIS process still lets the next run's sweep find and kill
+  // this lane's backend if it survives, without risking a same-numbered stranger.
+  trackChild(backend.proc.pid, path.basename(backend.dataDir));
   const csp = await assertRealCsp(backend.origin);
   // The server's own backpressure cap, read HERE rather than from a test: over the cap
   // `/api/tiles` answers 503, so a test process asking for it while its own browser holds four
@@ -357,7 +460,7 @@ async function startLane(i) {
   // the polling below (or Chrome's own helper-process forking) that could be interrupted by a signal.
   let readinessBrowserPid = null;
   const cov = await waitForSurfaceHistory(backend.origin, backend.token, {
-    onSpawn: (pid) => { readinessBrowserPid = pid; trackChild(pid); },
+    onSpawn: (pid, profile) => { readinessBrowserPid = pid; trackChild(pid, path.basename(profile)); },
   });
   if (readinessBrowserPid) untrackChild(readinessBrowserPid); // waitForSurfaceHistory's own
                                                                 // `finally` already closed it normally

@@ -9,7 +9,15 @@
 // SIGKILL (nothing else could happen — that is the whole reason it needed a different fix), and the
 // VERY NEXT `run.mjs` invocation sweeps them to zero before starting any browser or backend of its
 // own.
-import { execFileSync, spawn } from "node:child_process";
+//
+// A third leg (review round 1) proves the fix for that second step does not itself become a NEW
+// hazard: `sweepStaleRuns()` must verify a recorded child against the live OS (its marker and start
+// time) before killing it, never act on the bare pid number, because pids get reused. This is
+// simulated directly — a fabricated stale lock file naming a genuinely alive but unrelated process —
+// rather than by waiting out an actual pid wraparound, which nothing on a normal dev box can force.
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,8 +116,43 @@ const reportedSweep = /swept \d+ orphaned process/.test(sweepOut);
 console.log(`  swept back to baseline: ${sweptToBaseline}, logged the sweep: ${reportedSweep}`);
 if (!sweptToBaseline || !reportedSweep) ok = false;
 
+// **A THIRD leg, from review round 1: a stale lock must never be trusted on the pid number alone.**
+// Fabricate a lock file claiming pid `owner` (guaranteed dead) recorded a child at `sleep.pid` — a
+// process that is genuinely alive but has nothing to do with this harness, and whose marker/lstart
+// are fabricated so they cannot match. If the sweep ever falls back to "the pid number is enough",
+// this innocent process dies. It must not.
+const LOCK_DIR = path.join(os.tmpdir(), "hk-e2e-runs");
+mkdirSync(LOCK_DIR, { recursive: true });
+
+const sleep = spawn("sleep", ["60"], { stdio: "ignore" });
+await new Promise((r) => setTimeout(r, 200)); // let it actually start before anyone probes it
+// A pid GUARANTEED dead right now: `true` exits immediately, and nothing else in this narrow window
+// can grab its exact number back (the test would need to lose a race against the whole OS to flake).
+const deadOwner = spawnSync("true", [], {}).pid;
+const fakeLockFile = path.join(LOCK_DIR, `${deadOwner}.json`);
+writeFileSync(fakeLockFile, JSON.stringify({
+  pid: deadOwner, startedAt: Date.now(),
+  children: [{ pid: sleep.pid, marker: "hk-e2e-chrome-this-marker-cannot-match-anything", lstart: "not a real lstart" }],
+}));
+
+const verifyRun = spawnSync(process.execPath, [path.join(HERE, "run.mjs"), "__never_matches_any_real_spec__"], {
+  cwd: HERE, encoding: "utf8",
+});
+const verifyOut = `${verifyRun.stdout ?? ""}${verifyRun.stderr ?? ""}`;
+console.log(verifyOut.trim());
+
+let sleepAlive = true;
+try { process.kill(sleep.pid, 0); } catch { sleepAlive = false; }
+const reportedRefusal = /NOT sweeping pid \d+.*"reused"|NOT sweeping pid \d+.*"mismatch"/.test(verifyOut);
+console.log(`e2e selftest-orphans: pid-reuse guard — innocent process (pid ${sleep.pid}) still alive: ` +
+  `${sleepAlive}, sweep logged a refusal: ${reportedRefusal}`);
+if (!sleepAlive || !reportedRefusal) ok = false;
+try { unlinkSync(fakeLockFile); } catch { /* the sweep should have removed it already */ }
+try { process.kill(sleep.pid, "SIGKILL"); } catch { /* already gone */ }
+
 console.log(ok
   ? "\nPASS: SIGINT/SIGTERM sweep run.mjs's own children synchronously; a SIGKILLed run's orphans " +
-    "are swept at the very start of the next run.mjs invocation."
-  : "\nFAIL: cleanup still depends on the exit path. See the flags above.");
+    "are swept at the very start of the next run.mjs invocation; a stale lock naming an unrelated " +
+    "live pid is never killed on the pid number alone."
+  : "\nFAIL: cleanup still depends on the exit path, or the pid-reuse guard did not hold. See the flags above.");
 process.exit(ok ? 0 : 1);

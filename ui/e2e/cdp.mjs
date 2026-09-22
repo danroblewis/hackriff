@@ -111,8 +111,11 @@ export async function launch({ port = 0, width = 1440, height = 900, headless = 
   // can itself take up to several seconds. A caller that tracks its own children for signal/SIGKILL
   // cleanup (`ui/e2e/run.mjs`) needs the pid now, not after `launch()` resolves: Chrome forks its
   // GPU/network/renderer helpers throughout that wait, so tracking only the RESOLVED browser misses
-  // exactly the window a kill landing during startup would hit.
-  onSpawn?.(proc.pid);
+  // exactly the window a kill landing during startup would hit. `profile` is passed too so a caller
+  // that verifies a recorded child before killing it (pid reuse across runs) has this browser's own
+  // unique `--user-data-dir` to check for, not just the generic `hk-e2e-chrome-` prefix every Chrome
+  // this tier launches shares.
+  onSpawn?.(proc.pid, profile);
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
 
