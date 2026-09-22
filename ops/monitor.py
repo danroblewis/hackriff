@@ -1262,9 +1262,8 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .bd{overflow:auto;min-height:0;flex:1}
 .counts{display:flex;gap:6px;flex-wrap:wrap}
 .chip{font:11px var(--mono);padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--mut)}
-.chip.ms{color:var(--amber);border-color:rgba(240,165,66,.4);padding:1px 6px}
 .chip.done{color:var(--teal)}.chip.in-progress{color:var(--amber)}.chip.blocked,.chip.paused{color:var(--coral)}.chip.todo{color:var(--lav)}
-.chip.ms{color:var(--dim);border-color:var(--line);letter-spacing:.04em}
+.chip.ms{color:var(--amber);border-color:rgba(240,165,66,.4);padding:1px 6px;letter-spacing:.04em}
 .qsec{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:10px 0 5px;display:flex;justify-content:space-between}
 .qsec:first-child{margin-top:0}
 .qsec .hint{text-transform:none;letter-spacing:0;color:var(--dim);font-weight:400}
