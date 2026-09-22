@@ -24,6 +24,12 @@ pub struct PyramidStats {
     pub frames_late: u64,
     /// Frames rejected as malformed or in the wrong unit.
     pub frames_rejected: u64,
+    /// T-584: frames folded into a level-0 time cell whose column had **already closed** — frame
+    /// disorder, or a frame arriving in the cell a checkpoint just closed. Their values reach the
+    /// cell in place (percentiles excepted, which are not revisited), and they reach the coarse
+    /// nodes too, because a row is folded upwards only once the ingest clock has left it by
+    /// `seal_lag`. Nonzero is normal; it is the size of the window that rule is holding open.
+    pub frames_out_of_order: u64,
     /// Sealed tiles written.
     pub tiles_written: u64,
     /// T-453: coarse tiles built **on demand** by [`Pyramid::materialize`] rather than at a seal.
@@ -182,8 +188,9 @@ pub struct Pyramid {
     row_queue: std::collections::VecDeque<(usize, i64, i64, usize, usize, usize)>,
     /// T-571: rows one [`Tile::fold_row`] call completed.
     row_out: Vec<(usize, usize, usize)>,
-    /// T-571: level-0 columns one [`Pyramid::ingest`] call closed, `(f_block, t_block, row)`.
-    closed_rows: Vec<(i64, i64, usize)>,
+    /// T-571/T-584: level-0 tiles one [`Pyramid::ingest`] call touched, `(f_block, t_block)`.
+    /// Each is checked for rows the ingest clock has now left, which are the rows to fold.
+    touched: Vec<(i64, i64)>,
     /// T-571: tiles consulted to answer a query. Counted behind a shared reference because the
     /// read path takes `&self`; see [`Pyramid::source_tiles_read`].
     source_tiles: std::sync::atomic::AtomicU64,
@@ -327,7 +334,7 @@ impl Pyramid {
             consumers: Vec::new(),
             row_queue: std::collections::VecDeque::new(),
             row_out: Vec::new(),
-            closed_rows: Vec::new(),
+            touched: Vec::new(),
             source_tiles: std::sync::atomic::AtomicU64::new(0),
             buf: Vec::new(),
             payload: Vec::new(),
@@ -625,6 +632,12 @@ impl Pyramid {
         let scheme = self.cfg.scheme;
         let bins = usize::from(hist_cfg.bins);
         let live = self.cfg.coarse_live;
+        // T-584: the ingest clock, this frame included, and the store's declared tolerance for
+        // frames arriving out of order — the same `seal_lag` a tile's own seal waits out.
+        let lag_ns = self.lag_ns();
+        let now = self
+            .latest_ns
+            .max(frame.t.as_unix_nanos().saturating_add(frame.duration_ns));
         let Self {
             plan,
             open,
@@ -633,12 +646,14 @@ impl Pyramid {
             scratch,
             geom,
             next_seal_ns,
-            closed_rows,
+            touched,
             ..
         } = self;
-        closed_rows.clear();
+        touched.clear();
         let cells = &plan.cells;
         let peak = frame.peak.unwrap_or(frame.psd);
+        // T-584: whether this frame landed in an already-closed time cell anywhere.
+        let mut out_of_order = false;
         let mut i = 0;
         while i < cells.len() {
             let fb = cells[i].cell.div_euclid(nf);
@@ -659,15 +674,18 @@ impl Pyramid {
             );
             // T-377: this frame's own chain's floor, never the pyramid's pooled one.
             let floor = floors.get(&(frame.source, fb)).map(|f| &f.floor[..]);
-            if tile.col_t.is_some_and(|c| t_in > c)
-                && let Some(closed) = tile.close_column(margin, pct, scratch)
-                && live
-            {
-                // T-571: that row is final, so it is folded upwards NOW, one row at a time.
-                closed_rows.push((fb, tb, closed));
+            if tile.col_t.is_some_and(|c| t_in > c) {
+                tile.close_column(margin, pct, scratch);
+            }
+            if live {
+                // T-571: rows are folded upwards one at a time, as they finish. T-584: a row
+                // finishes when the ingest clock leaves it, NOT when its column closes — see
+                // `fold_finished_rows`. The fold runs below, once this frame is in the cells.
+                touched.push((fb, tb));
             }
             let late =
                 tile.col_done.is_some_and(|d| t_in <= d) || tile.col_t.is_some_and(|c| t_in < c);
+            out_of_order |= late;
             if !late && tile.col_t.is_none() {
                 tile.col_t = Some(t_in);
             }
@@ -705,24 +723,26 @@ impl Pyramid {
                 .add_frame(frame, &state, step.as_ref(), cell_shape, values);
             i = j;
         }
-        if live && !self.closed_rows.is_empty() {
-            let rows = std::mem::take(&mut self.closed_rows);
-            let nf = self.geom.nf;
-            for &(fb, tb, t) in &rows {
-                self.fold_row_live(0, fb, tb, t, 0, nf);
+        if live && !self.touched.is_empty() {
+            // T-584: this frame's own values — including the in-place update of a cell whose
+            // column has already closed — are in the tile by now, so a row folded here carries
+            // them. Taken out and put back so `fold_finished_rows` may borrow `self` mutably;
+            // it reuses the buffer's capacity, so ingest stays allocation-free.
+            let touched = std::mem::take(&mut self.touched);
+            let through = now.saturating_sub(lag_ns);
+            for &(fb, tb) in &touched {
+                self.fold_finished_rows(fb, tb, through);
             }
-            self.closed_rows = rows;
+            self.touched = touched;
         }
         self.stats.frames_folded += 1;
+        self.stats.frames_out_of_order += u64::from(out_of_order);
         self.first_folded_ns = self.first_folded_ns.min(frame.t.as_unix_nanos());
         // T-453: this frame has just changed level 0, so any live-edge summary folded from it is
         // stale. Cheap when nothing is cached, which is every ingest of a run nobody is watching.
         self.invalidate_derived();
-        let end = frame.t.as_unix_nanos().saturating_add(frame.duration_ns);
-        self.latest_ns = self.latest_ns.max(end);
-        let due = self
-            .latest_ns
-            .saturating_sub(i64::try_from(self.cfg.seal_lag.as_nanos()).unwrap_or(i64::MAX));
+        self.latest_ns = now;
+        let due = self.latest_ns.saturating_sub(lag_ns);
         if due >= self.next_seal_ns {
             self.seal_through_ns(due)?;
         }
@@ -792,18 +812,23 @@ impl Pyramid {
             // level order guarantees.
             if self.cfg.coarse_live {
                 for &(fb, tb) in &keys {
-                    let flushed = if level == 0 {
-                        let Self { open, scratch, .. } = self;
-                        open[0]
-                            .get_mut(&(fb, tb))
-                            .and_then(|t| t.close_column(margin, pct, scratch))
-                            .map(|t| (t, 0, self.geom.nf))
-                    } else {
-                        self.open[level]
-                            .get_mut(&(fb, tb))
-                            .and_then(|t| t.take_pending_row())
-                    };
-                    if let Some((t, lo, hi)) = flushed {
+                    if level == 0 {
+                        // T-584: the tile is about to seal, so every remaining row is finished
+                        // whatever the clock says — a frame for it is refused as late from here
+                        // on — and rows held back by `seal_lag` must all go up now.
+                        {
+                            let Self { open, scratch, .. } = self;
+                            if let Some(t) = open[0].get_mut(&(fb, tb)) {
+                                t.close_column(margin, pct, scratch);
+                            }
+                        }
+                        self.fold_finished_rows(fb, tb, i64::MAX);
+                        continue;
+                    }
+                    if let Some((t, lo, hi)) = self.open[level]
+                        .get_mut(&(fb, tb))
+                        .and_then(|t| t.take_pending_row())
+                    {
                         self.fold_row_live(level, fb, tb, t, lo, hi);
                     }
                 }
@@ -951,6 +976,70 @@ impl Pyramid {
         self.consumers = ups;
     }
 
+    /// The store's tolerance for frames arriving out of order, ns: [`PyramidConfig::seal_lag`].
+    fn lag_ns(&self) -> i64 {
+        i64::try_from(self.cfg.seal_lag.as_nanos()).unwrap_or(i64::MAX)
+    }
+
+    /// **When a level-0 row is finished, and so may be folded upwards (T-584).**
+    ///
+    /// Folds every not-yet-folded row of level-0 tile `(fb, tb)` whose column has closed *and*
+    /// whose time cell ended at or before `through_ns`, oldest first, exactly once each.
+    /// `i64::MAX` forces every closed row, which is what the pre-seal flush wants.
+    ///
+    /// # Why closing the column is not the same as finishing the row
+    ///
+    /// T-571 folded a row the moment its column closed. But a closed column is not a closed
+    /// **cell**: a frame whose time cell has already closed is still folded into level 0 — in
+    /// place, by [`Tile::add_value`] and [`Tile::add_late_occupancy`] — and it arrives after the
+    /// fold has been and gone. The value was then on disk at level 0 and absent from every zoom
+    /// above it: the same "present at the finest zoom, gone when you zoom out" shape T-571 fixed
+    /// for checkpoints. Two windows produced it, and **both are ordinary, not pathological**:
+    ///
+    /// - mild frame disorder inside a cell, which the store already tolerates everywhere else —
+    ///   `seal_lag` exists to hold a *tile* open for exactly this;
+    /// - every frame arriving in the cell a [`Pyramid::checkpoint`] has just closed, which at the
+    ///   shipped 60 s interval over a 1 s cell is one cell in sixty, for the rest of its second.
+    ///
+    /// Measured over a 600 s run at four frames a cell, against the on-demand control that
+    /// re-folds the open producer on every read: **1.1 % of frames missing from every coarse node
+    /// for the checkpoint window alone, 2.2 % for disorder at one boundary in ten, 3.3 % for
+    /// both** — while node (0, 0) held all of them. `tests/live_coarse.rs` holds the measurement
+    /// and the control.
+    ///
+    /// # The rule, and why it needs no new configuration
+    ///
+    /// A row is finished when the ingest clock has left its cell by `seal_lag` — the store's own
+    /// declared disorder tolerance, the same number that decides when a *tile* may seal, applied
+    /// one level down. Past that point a frame for the cell is refused as late anyway, so nothing
+    /// can change the row afterwards and the fold is both exactly-once and complete. The
+    /// alternatives the ticket listed are what this avoids: no subtract-then-re-add (the cascade
+    /// accumulates, and `max`/`occ_max` do not invert), no pending late delta, and a checkpoint
+    /// still closes its column, so a crash still loses nothing it did not lose before.
+    ///
+    /// With `seal_lag` at zero — no tolerance declared, which is what most tests configure — a
+    /// row is finished as soon as the clock passes its cell end, so behaviour is exactly T-571's.
+    /// With the shipped 2 s, a coarse node trails the live edge by a further 2 s on top of the
+    /// in-progress-row lag T-583 measured; node (0, 0), the live edge itself, is untouched.
+    fn fold_finished_rows(&mut self, fb: i64, tb: i64, through_ns: i64) {
+        let (nf, t_cell_ns) = (self.geom.nf, self.geom.levels[0].t_cell_ns);
+        loop {
+            let Some(tile) = self.open[0].get_mut(&(fb, tb)) else {
+                return;
+            };
+            let t = tile.folded_through.map_or(0, |t| t + 1);
+            if tile.col_done.is_none_or(|d| t > d)
+                || (tile.t_cell0 + t as i64 + 1).saturating_mul(t_cell_ns) > through_ns
+            {
+                return;
+            }
+            tile.folded_through = Some(t);
+            if tile.row_has_data(t) {
+                self.fold_row_live(0, fb, tb, t, 0, nf);
+            }
+        }
+    }
+
     /// **Live coarse maintenance (T-571).** Folds one finished producer row — cells
     /// `[f_lo, f_hi)` of row `t` in tile `(fb, tb)` of `level` — into every consumer, and
     /// cascades wherever that completes a consumer's own row.
@@ -976,7 +1065,9 @@ impl Pyramid {
     /// The cascade propagates **on commit**, so a node that downsamples time by `2^j` from the
     /// finest one only hears about a row once `2^j` of them have closed, and a chain of
     /// in-progress rows compounds: node `(i, j)` trails the finest row by up to `2^j − 1` of
-    /// them, plus the finest level's own still-open column. At the shipped four time levels and a
+    /// them, plus the finest level's own still-open column, plus (T-584) the `seal_lag` a
+    /// finished row waits out — 2 s in the shipped config, zero in most tests. At the shipped
+    /// four time levels and a
     /// 1 s cell that is up to **7 s** at `level_t = 3`, measured at 1, 2 and 4 rows for
     /// `level_t` 1, 2 and 3. The cells are *correct* throughout — a partial row reads as fewer
     /// observed seconds, never as wrong values — and node (0, 0), which is the live edge, is not
@@ -1835,20 +1926,23 @@ impl Pyramid {
     /// column first). Coarser open tiles are not written: they are rebuilt from their sealed
     /// children on open.
     ///
-    /// **T-571: the column this closes is a finished row and is folded upwards like any other.**
-    /// It was not, and the loss was silent and permanent: under `coarse_live` the only paths into
-    /// [`Pyramid::fold_row_live`] are the column advance in [`Pyramid::ingest`] and the pre-seal
-    /// flush, and a column closed here reaches neither — the next frame finds `col_t` at `None`
-    /// and the seal's own `close_column` returns `None`. With the shipped 60 s checkpoint interval
+    /// **T-571: the column this closes is a row like any other, and must still reach the coarse
+    /// nodes.** It did not, and the loss was silent and permanent: the only paths into
+    /// [`Pyramid::fold_row_live`] were the column advance in [`Pyramid::ingest`] and the pre-seal
+    /// flush, and a column closed here reached neither — the next frame found `col_t` at `None`
+    /// and the seal's own `close_column` returned `None`. With the shipped 60 s checkpoint interval
     /// over a 1 s time cell that is **one row in sixty missing from every coarse node, on disk**,
     /// so a burst inside a dropped second is present at the finest zoom and vanishes when you zoom
     /// out — the max-hold that would have carried it was never folded.
     ///
-    /// One residual is left, and it is the checkpoint's own shape rather than the cascade's:
-    /// frames that arrive in the **same** time cell after a checkpoint has closed it take
-    /// [`Tile::add_late_occupancy`]'s late path, which updates level 0 in place and is invisible
-    /// to every coarser node (T-584). A checkpoint that did not close the column would trade that
-    /// for an unrecoverable in-progress column on a crash, which is what the column close is for.
+    /// **T-584: the column this closes is on disk, but it is not a finished row.** Frames that
+    /// arrive in the **same** time cell afterwards take [`Tile::add_late_occupancy`]'s late path,
+    /// which updates level 0 in place — and at the shipped 60 s interval over a 1 s cell that is
+    /// one cell in sixty, exposed for the rest of its second, measured at 1.1 % of frames absent
+    /// from every coarse node. So the checkpoint still closes the column (a crash must not find
+    /// an unrecoverable in-progress column, which is what the close is for) but no longer folds
+    /// it upwards: the row goes up when the ingest clock has left it, like every other row. See
+    /// [`Pyramid::fold_finished_rows`].
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
         let margin = self.cfg.occupancy_margin_db;
         let pct = self.pct();
@@ -1860,13 +1954,15 @@ impl Pyramid {
             let Some(mut tile) = self.open[0].remove(&k) else {
                 continue;
             };
-            let closed = tile.close_column(margin, pct, &mut self.scratch);
+            tile.close_column(margin, pct, &mut self.scratch);
             let written = self.write_tile(0, &tile, false);
             self.open[0].insert(k, tile);
-            if self.cfg.coarse_live
-                && let Some(t) = closed
-            {
-                self.fold_row_live(0, k.0, k.1, t, 0, self.geom.nf);
+            if self.cfg.coarse_live {
+                // T-584: the column this closed is on disk, but it is NOT finished — frames may
+                // still arrive in that cell, and they did. It folds upwards when the ingest
+                // clock has left it, like every other row.
+                let through = self.latest_ns.saturating_sub(self.lag_ns());
+                self.fold_finished_rows(k.0, k.1, through);
             }
             if let Err(e) = written {
                 result = Err(e);
