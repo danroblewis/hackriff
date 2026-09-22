@@ -15796,7 +15796,8 @@ tasks:
   - id: T-514
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
-    status: todo
+    status: done
+    commit: "5ceb7e09"
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
@@ -16703,7 +16704,8 @@ tasks:
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
-    status: todo
+    status: in-progress
+    branch: task-t560
     priority: normal
     parallel_group: PIPE
     model: sonnet
@@ -18064,7 +18066,8 @@ tasks:
   - id: T-556
     milestone: MAUTO
     title: 'DECODER COVERAGE (spike): wrap ONE real GNU Radio OOT decoder end to end and measure what a wrapped decoder actually costs - build, footprint, latency, manifest work'
-    status: todo
+    status: in-progress
+    branch: task-t556
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -18895,7 +18898,8 @@ tasks:
   - id: T-578
     milestone: M2-hardening
     title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
-    status: todo
+    status: in-progress
+    branch: task-t578
     priority: normal
     parallel_group: PIPE
     model: sonnet
