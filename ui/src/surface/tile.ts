@@ -103,6 +103,13 @@ export interface TileData {
   readonly bytes: number;
   /** `cost.in_flight_limit`: the server's cap, so the client can adopt it rather than guess. */
   readonly serverInFlightLimit: number | null;
+  /**
+   * `cost.in_flight_share`: **this client's** cap (T-630). The server-wide limit is what protects
+   * ingest; the share is what this client may hold of it while other clients are asking, and it is
+   * the number to operate at. Null from a server that states none (pre-T-630), where the limit is
+   * the only number there is.
+   */
+  readonly serverInFlightShare: number | null;
 }
 
 /** The shape this client reads. Structural, and only the fields it actually uses. */
@@ -145,7 +152,7 @@ export interface TileResponse {
       time?: { direction: string; source_cells?: number; served?: number };
     };
   };
-  cost?: { in_flight_limit?: number };
+  cost?: { in_flight_limit?: number; in_flight_share?: number; clients?: number };
   /**
    * **The last-known tier** (T-519/T-520, ADR-0020): column runs, each carrying a band's newest
    * known max-hold down rows the radio was not looking at. Parallel arrays of `runs` entries; run
@@ -175,15 +182,30 @@ export class TileDecodeError extends Error {
  * at a time*, and the cap it names is the number to obey.
  */
 export class TileBusyError extends Error {
-  constructor(readonly limit: number | null, message: string) {
+  /**
+   * @param limit the server-wide cap the refusal named, or null.
+   * @param share **this client's** cap (T-630), or null from a server that named none. A refusal
+   * is how a client learns its share shrank because another client arrived, so the number is
+   * carried here and not only on the answers it is no longer getting.
+   */
+  constructor(readonly limit: number | null, message: string, readonly share: number | null = null) {
     super(message);
     this.name = "TileBusyError";
   }
 }
 
-/** The cap a `503` names ("too many tile reads in flight (limit 4)"), or null if it named none. */
+/** The cap a `503` names ("too many tile reads in flight (limit 4, share 2)"), or null if it named none. */
 export function capFromRefusal(message: string): number | null {
-  const m = /limit\s+(\d+)/.exec(message);
+  return numberNamed(message, "limit");
+}
+
+/** This client's share, as a `503` names it (T-630), or null from a server that named none. */
+export function shareFromRefusal(message: string): number | null {
+  return numberNamed(message, "share");
+}
+
+function numberNamed(message: string, word: string): number | null {
+  const m = new RegExp(`${word}\\s+(\\d+)`).exec(message);
   const n = m ? Number(m[1]) : NaN;
   return Number.isFinite(n) && n > 0 ? n : null;
 }
@@ -304,6 +326,7 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     rangeDb: resp.grid?.range_db ?? null,
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
+    serverInFlightShare: typeof resp.cost?.in_flight_share === "number" ? resp.cost.in_flight_share : null,
   };
 }
 
@@ -449,7 +472,7 @@ export async function fetchTile(addr: TileAddr, token: string, fetchFn: TileFetc
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = errorFrom(r.status, body, r.statusText);
-    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message);
+    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message, shareFromRefusal(e.message));
     throw e;
   }
   return decodeTile(addr, body as TileResponse);

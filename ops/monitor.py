@@ -201,7 +201,51 @@ def runtime_states(smap, tl=None, limit=10):
     def put(tid, state, reason=""):
         if tid and smap.get(tid) not in ("done", "cancelled") and tid not in st:
             st[tid] = state; why[tid] = reason
-    try:  # failures first: they win over every other state
+    # The merge runner's view first: a branch in the current gate or the queue file is exactly that,
+    # whatever failed earlier (T-800/T-763/T-299 re-queued after load flakes must read QUEUED).
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            put(_tk_of_branch(b), "testing", "bulk gate")
+    except Exception:
+        pass
+    try:
+        first = open(os.path.join(REPO, ".git", "MERGE_MSG")).read().splitlines()[0]
+        m = re.search(r"task-t\d+", first)
+        if m:
+            put(_tk_of_branch(m.group(0)), "testing", "staged merge")
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "merge-queue.txt")):
+            put(_tk_of_branch(l.strip()), "queued", "merge queue")
+    except Exception:
+        pass
+    # Then the work-runner claim: what a ticket IS now outranks what happened to it earlier
+    # (a branch that failed a gate at 09:22 and is queued again at 12:00 is QUEUED, not FAILED - the
+    # old precedence made 34 "failed" out of 3 real ones on 2026-09-22). NO_WORK is a stopped or lost
+    # agent, drawn as "stopped", never as a failure.
+    try:
+        _claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        for tid, c in _claims.items():
+            cs, ck = c.get("state"), c.get("kind")
+            if cs == "running" and ck == "review":
+                put(tid, "review", "reviewer stage")
+            elif cs == "running" and ck == "fix":
+                put(tid, "failed", "fixing a gate/review failure")
+            elif cs == "running":
+                pass   # working: drawn by the agents() path, not here
+            elif cs == "queued":
+                put(tid, "queued", "merge queue")
+            elif cs == "blocked":
+                put(tid, "blocked", "worker handed back BLOCKED - needs a person")
+            elif cs in ("gate-failed", "review-failed", "uncommitted", "cancel-proposed", "error", "timeout"):
+                put(tid, "failed", cs.upper().replace("-", "_"))
+            elif cs == "no-work":
+                put(tid, "stopped", "stopped or lost agent (NO_WORK)")
+    except Exception:
+        pass
+    try:  # failure lines from the attention files: only for tickets with no current claim
         for l in open(os.path.join(SCRATCH, "merge-needs-attention.txt")):
             f = l.split()   # date time branch ticket KIND detail...
             if len(f) >= 5 and f[4].startswith(("GATE_FAIL", "CONFLICT", "GAVE_UP", "UNCHANGED")):
@@ -211,8 +255,12 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
             f = l.split()   # date time branch ticket KIND detail...
-            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
+            if len(f) >= 5 and f[4] == "BLOCKED":
+                put(f[3], "blocked", "worker handed back BLOCKED - needs a person")
+            elif len(f) >= 5 and f[4] in ("REVIEW_FAIL", "ERROR", "TIMEOUT", "UNCOMMITTED", "GATE_FAIL_ESCALATE", "GATE_FAIL_NO_SESSION", "CANCEL_PROPOSED"):
                 put(f[3], "failed", f[4])
+            elif len(f) >= 5 and f[4] == "NO_WORK":
+                put(f[3], "stopped", "stopped or lost agent (NO_WORK)")
     except Exception:
         pass
     try:
@@ -237,13 +285,6 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
         working = {tid for tid, c in claims.items() if c.get("state") == "running" and c.get("kind") == "work"}
-        for tid, c in claims.items():
-            if c.get("state") == "running" and c.get("kind") == "review":
-                put(tid, "review", "reviewer stage")
-            elif c.get("state") == "running" and c.get("kind") == "fix":
-                put(tid, "failed", "fixing a gate failure")
-            elif c.get("state") == "queued":
-                put(tid, "queued", "merge queue")
     except Exception:
         pass
     # UP NEXT = the work runner's own dispatch order (ops/work-runner.py candidates()): todo, deps done,
@@ -280,9 +321,9 @@ def runtime_states(smap, tl=None, limit=10):
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
                keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
     try:
-        import yaml
-        d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
-        tl = d["tasks"] if isinstance(d, dict) else d
+        tl = load_tasks_yaml()      # mtime-cached; a fresh PyYAML parse per poll had the monitor at 65 % CPU (2026-09-22)
+        if not tl:
+            raise RuntimeError("docs/tasks.yaml did not load (see the dashboard's error line)")
     except Exception as e:
         return {"mermaid": f"graph LR\n  err[\"{e}\"]", "active": 0}
     # Milestone filter (for isolating a side-project milestone in the graph). The
@@ -329,7 +370,7 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     rt, rt_why = runtime_states(smap, tl)
     # Runtime-state filters, one per state, same semantics as the status filters: off hides those
     # nodes, on shows them whatever their status filter says.
-    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed}
+    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed, "stopped": keep_failed, "blocked": show_blocked}
     def passes(x):
         s = x.get("status")
         r = rt.get(x.get("id"))
@@ -373,8 +414,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         ms = x.get("milestone") or ""
         state = rt.get(x["id"])
         if state:
-            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT"}[state]
-            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF"}[state]
+            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT", "stopped": "STOPPED", "blocked": "BLOCKED"}[state]
+            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF", "stopped": "#8595A0", "blocked": "#E47B68"}[state]
             why = rt_why.get(x["id"], "")
             why = "" if why in ("bulk gate", "merge queue", "reviewer stage") else " · " + why
             t = f"<b style='color:{col};font-size:10px;letter-spacing:.08em'>{word}{why}</b><br/>" + t
@@ -395,7 +436,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
              "classDef testing fill:#4a3608,stroke:#FFC14D,color:#FFF0C2,stroke-width:4px,stroke-dasharray:9 5;",
              "classDef queued fill:#33280c,stroke:#F0A542,color:#FFE3B0,stroke-width:3px,stroke-dasharray:4 4;",
              "classDef reviewing fill:#0f3a33,stroke:#5EE0C4,color:#D6FFF5,stroke-width:4px;",
-             "classDef next fill:#2b2352,stroke:#C7B8FF,color:#EFEAFF,stroke-width:4px;"]
+             "classDef next fill:#2b2352,stroke:#C7B8FF,color:#EFEAFF,stroke-width:4px;",
+             "classDef stopped fill:#15191c,stroke:#5A6973,color:#8595A0,stroke-dasharray:2 4;"]
     # milestone backbone: the roadmap chain, coloured by how far along each milestone is
     norm_ms = lambda m: re.sub(r"-(fix|hardening)$", "", m or "")   # fold M2-hardening/M1-fix into their base
     by_ms = {}
@@ -430,9 +472,9 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         lines.append(f"MS_{a} --> MS_{b}")
     lines.append("MS_M1 --> MS_MUI")
     for nid, x in nodes.items():
-        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next"}.get(rt.get(nid)) \
+        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped", "blocked": "blocked"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
-        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'),
+        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'), "blocked": ('(["', '"])'),
                  "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
         lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
     # dependency edges (solid) — draw among all nodes in scope, not just from active tasks

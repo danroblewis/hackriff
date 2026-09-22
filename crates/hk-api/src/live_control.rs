@@ -1,5 +1,5 @@
 //! Live front-end control (T-042, T-050): a typed, device-generic handle from the running
-//! pipeline's source into [`crate::ApiState::live_control`], for the authenticated control API
+//! pipeline's source into [`crate::ApiState::live_controls`], for the authenticated control API
 //! ([`crate::control`]) to change the tuned centre, sample rate, named gains and (optionally) the
 //! bias tee. **Receive-only controls**: there is no transmit operation, and none can be added
 //! through this trait (C37 stays gated).
@@ -56,6 +56,12 @@
 //!
 //! Reads ([`LiveControl::tuning`]) never enter the gate, so a slow re-plumb cannot block the
 //! state poll.
+//!
+//! # N front ends (T-511)
+//!
+//! A server holds [`LiveControls`], not one handle: a collection keyed by `device_id`, with **one
+//! gate per device** (each handle carries its own), and a device selector on the control routes
+//! that may be omitted only when the run holds exactly one front end. See [`LiveControls`].
 //!
 //! **Cross-process** exclusion is the device open itself: only one process can open a HackRF, so
 //! a second server fails at open, not here. This gate is the in-process half.
@@ -430,6 +436,265 @@ pub trait LiveControl: Send + Sync {
     /// Selects the baseband (anti-alias) filter bandwidth, Hz ([`DeviceAction::BasebandFilter`];
     /// optional capability; T-067).
     fn set_baseband_filter(&self, bandwidth_hz: f64) -> Result<LiveTuning, LiveControlError>;
+}
+
+/// **The live front ends this server holds** (T-511), keyed by `device_id`.
+///
+/// # Why a collection, and why keyed
+///
+/// `ApiState::live_controls` was one `Option<Arc<dyn LiveControl>>`, and every place that needed
+/// "the device" took it. That was true of a run with one front end and of nothing else: the
+/// product direction is several SDRs collecting at once (CLAUDE.md, "Allow several SDRs at once"),
+/// `/api/navigation`'s `windows` has spoken in lists since T-340, and T-510 made one `Pipeline`
+/// spawn N `{source, ring, capture thread}` sets. This is the serving half of that seam.
+///
+/// Three properties it must have, and the reasons they are properties rather than conventions:
+///
+/// - **One [`DeviceGate`] per device, not one per server.** The gate exists because a front end is
+///   one shared resource that must not be raced (T-343). Two radios are two resources: a retune of
+///   A has no business waiting on, or being refused by, a gain write to B. Each [`LiveControl`]
+///   carries its own gate ([`SourceLiveControl::gate`]), so holding this as a collection of
+///   handles gives per-device serialisation by construction — there is no server-wide gate left to
+///   accidentally share.
+/// - **`device_id` is the key, and `None` is not one.** The id here is the source's own
+///   `SourceControl::device_info().device_id`, the same string on every frame and detection it
+///   produces. A source that reports no identity said *nothing* (the T-325 rule); nothing cannot
+///   be addressed, so at most one such handle may be held — with one front end the selector is
+///   omitted anyway, and with two an unnamed one could not be named.
+/// - **Order is stable and the first is the default.** [`Self::primary`] is what a single-device
+///   run means by "the device", so with exactly one handle every caller behaves exactly as it did
+///   before this type existed.
+#[derive(Clone, Default)]
+pub struct LiveControls {
+    controls: Vec<Arc<dyn LiveControl>>,
+}
+
+/// Why a set of live controls could not be formed ([`LiveControls::new`]).
+///
+/// Both variants are the *same* defect seen twice: a handle that cannot be addressed unambiguously
+/// by `device_id`. Composing a server with one is refused at composition time rather than
+/// answering an ambiguous selector at request time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveControlsError {
+    /// Two handles report the same `device_id`.
+    DuplicateDeviceId(String),
+    /// More than one handle reports no `device_id` at all, so neither can be selected.
+    UnnamedDevices(usize),
+}
+
+impl fmt::Display for LiveControlsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateDeviceId(id) => write!(
+                f,
+                "two live front ends report device_id {id:?}: a device selector could not \
+                 distinguish them"
+            ),
+            Self::UnnamedDevices(n) => write!(
+                f,
+                "{n} live front ends report no device_id: at most one unnamed front end can be \
+                 held, because an unnamed one cannot be selected"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LiveControlsError {}
+
+/// Why a device selector did not resolve to a front end ([`LiveControls::select`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectError {
+    /// This server runs no live front end (a replay).
+    NotLive,
+    /// No selector was given and this run holds more than one front end, so there is no default.
+    /// Carries the ids that would resolve.
+    Ambiguous(Vec<String>),
+    /// The selector names no front end this run holds. Carries the request and the ids that would
+    /// resolve.
+    Unknown {
+        /// The `device_id` the caller asked for.
+        requested: String,
+        /// The ids this run does hold.
+        available: Vec<String>,
+    },
+}
+
+impl fmt::Display for SelectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |ids: &[String]| {
+            if ids.is_empty() {
+                "none (no front end reports an identity)".to_owned()
+            } else {
+                ids.join(", ")
+            }
+        };
+        match self {
+            Self::NotLive => f.write_str(
+                "device settings apply to a live source; this server is not running one (a \
+                 replayed recording accepts display, recording and bookmark requests only)",
+            ),
+            Self::Ambiguous(ids) => write!(
+                f,
+                "this run holds {} live front ends, so \"the device\" is not defined: name one \
+                 with \"device_id\" (available: {})",
+                ids.len(),
+                list(ids)
+            ),
+            Self::Unknown {
+                requested,
+                available,
+            } => write!(
+                f,
+                "no live front end with device_id {requested:?} on this server (available: {})",
+                list(available)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SelectError {}
+
+impl SelectError {
+    /// The HTTP status a control route answers with.
+    pub fn http_status(&self) -> u16 {
+        match self {
+            // Not a client mistake: this server has no front end at all.
+            Self::NotLive => 409,
+            // The request is under-specified for *this* run.
+            Self::Ambiguous(_) => 400,
+            // The named device is not here.
+            Self::Unknown { .. } => 404,
+        }
+    }
+
+    /// The stable error `code` on the wire.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotLive => "not_live",
+            Self::Ambiguous(_) => "device_required",
+            Self::Unknown { .. } => "unknown_device",
+        }
+    }
+}
+
+impl LiveControls {
+    /// The front ends `controls` addresses, in order.
+    ///
+    /// Refused when two report the same `device_id`, or when more than one reports none: either
+    /// way a selector could not address them (see the [type docs](Self)).
+    pub fn new(controls: Vec<Arc<dyn LiveControl>>) -> Result<Self, LiveControlsError> {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut unnamed = 0usize;
+        for c in &controls {
+            match c.device_id() {
+                Some(id) => {
+                    if seen.contains(&id) {
+                        return Err(LiveControlsError::DuplicateDeviceId(id.to_owned()));
+                    }
+                    seen.push(id);
+                }
+                None => unnamed += 1,
+            }
+        }
+        if unnamed > 1 {
+            return Err(LiveControlsError::UnnamedDevices(unnamed));
+        }
+        Ok(Self { controls })
+    }
+
+    /// No live front end (a replay, or a scheduler-driven run).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Exactly one front end — today's single-SDR run, where the selector may be omitted.
+    pub fn one(control: Arc<dyn LiveControl>) -> Self {
+        Self {
+            controls: vec![control],
+        }
+    }
+
+    /// True when this server runs no live front end.
+    pub fn is_empty(&self) -> bool {
+        self.controls.is_empty()
+    }
+
+    /// How many live front ends this run holds — **measured, never assumed**.
+    pub fn len(&self) -> usize {
+        self.controls.len()
+    }
+
+    /// The **default** front end: the first, and meaningful only when there is exactly one.
+    ///
+    /// Routes that act on a device must use [`Self::select`], which refuses to guess when the run
+    /// holds more than one. This is for the reads whose contract is explicitly "one device's
+    /// state" (`/api/navigation`'s `frequency.current`, which `docs/api.md` already documents as
+    /// one device's tuned state and not an enumeration).
+    pub fn primary(&self) -> Option<&Arc<dyn LiveControl>> {
+        self.controls.first()
+    }
+
+    /// Every front end, in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn LiveControl>> {
+        self.controls.iter()
+    }
+
+    /// Every `device_id` that resolves, in order (a front end reporting none contributes nothing —
+    /// "nothing said" is never a key).
+    pub fn device_ids(&self) -> Vec<String> {
+        self.controls
+            .iter()
+            .filter_map(|c| c.device_id().map(str::to_owned))
+            .collect()
+    }
+
+    /// **Resolves a device selector** (T-511).
+    ///
+    /// `None` means "the device": allowed only when this run holds exactly one front end, so a
+    /// single-SDR client keeps working unchanged and a multi-SDR one is told to name a device
+    /// rather than silently moving whichever radio happened to be composed first.
+    pub fn select(&self, device_id: Option<&str>) -> Result<&Arc<dyn LiveControl>, SelectError> {
+        match device_id {
+            None => match self.controls.as_slice() {
+                [] => Err(SelectError::NotLive),
+                [one] => Ok(one),
+                _ => Err(SelectError::Ambiguous(self.device_ids())),
+            },
+            Some(want) => {
+                if self.controls.is_empty() {
+                    return Err(SelectError::NotLive);
+                }
+                self.controls
+                    .iter()
+                    .find(|c| c.device_id() == Some(want))
+                    .ok_or_else(|| SelectError::Unknown {
+                        requested: want.to_owned(),
+                        available: self.device_ids(),
+                    })
+            }
+        }
+    }
+}
+
+impl fmt::Debug for LiveControls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LiveControls")
+            .field("devices", &self.device_ids())
+            .field("len", &self.controls.len())
+            .finish()
+    }
+}
+
+impl From<Option<Arc<dyn LiveControl>>> for LiveControls {
+    fn from(control: Option<Arc<dyn LiveControl>>) -> Self {
+        control.map_or_else(Self::none, Self::one)
+    }
+}
+
+impl From<Arc<dyn LiveControl>> for LiveControls {
+    fn from(control: Arc<dyn LiveControl>) -> Self {
+        Self::one(control)
+    }
 }
 
 /// Decides whether the run may tune to `(center_hz, sample_rate_hz)`; `Err` explains why not.
@@ -1227,5 +1492,144 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("930500000"))
         );
+    }
+
+    /// A front end that only has to answer "who are you" — enough to key a [`LiveControls`].
+    struct Named(Option<String>, SourceCapabilities);
+
+    impl Named {
+        fn handle(id: Option<&str>) -> Arc<dyn LiveControl> {
+            Arc::new(Self(
+                id.map(str::to_owned),
+                SourceCapabilities::hackrf_one(),
+            ))
+        }
+    }
+
+    impl LiveControl for Named {
+        fn capabilities(&self) -> &SourceCapabilities {
+            &self.1
+        }
+        fn tuning(&self) -> LiveTuning {
+            LiveTuning {
+                center_hz: 100.8e6,
+                sample_rate_hz: 2.4e6,
+                gains: Vec::new(),
+                bias_tee: hk_model::BiasTee::Unknown,
+                baseband_filter_hz: None,
+            }
+        }
+        fn device_id(&self) -> Option<&str> {
+            self.0.as_deref()
+        }
+        fn set_center(&self, _: f64) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+        fn set_rate(&self, _: f64) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+        fn set_window(&self, _: f64, _: f64) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+        fn set_gains(&self, _: &[NamedGain]) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+        fn set_bias_tee(&self, _: bool) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+        fn set_baseband_filter(&self, _: f64) -> Result<LiveTuning, LiveControlError> {
+            unreachable!()
+        }
+    }
+
+    /// T-511: a selector may be omitted only when "the device" is defined — with one front end.
+    /// With none it is a replay; with several the caller must name one, because choosing for them
+    /// would move a radio nobody asked about.
+    #[test]
+    fn a_device_selector_is_optional_only_when_there_is_one_device() {
+        // A `&Arc<dyn LiveControl>` is not `Debug`, so compare on the identity a selector resolves
+        // to — which is the property under test anyway.
+        let id = |r: Result<&Arc<dyn LiveControl>, SelectError>| {
+            r.map(|c| c.device_id().map(str::to_owned))
+        };
+        let none = LiveControls::none();
+        assert!(none.is_empty() && none.primary().is_none());
+        assert_eq!(id(none.select(None)).unwrap_err(), SelectError::NotLive);
+        assert_eq!(
+            id(none.select(Some("a"))).unwrap_err(),
+            SelectError::NotLive
+        );
+        assert_eq!(id(none.select(None)).unwrap_err().http_status(), 409);
+
+        let one = LiveControls::one(Named::handle(Some("a")));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one.select(None).unwrap().device_id(), Some("a"));
+        assert_eq!(one.select(Some("a")).unwrap().device_id(), Some("a"));
+        let e = id(one.select(Some("b"))).unwrap_err();
+        assert_eq!(e.http_status(), 404);
+        assert_eq!(e.code(), "unknown_device");
+        assert!(e.to_string().contains('a'), "{e}");
+
+        let two =
+            LiveControls::new(vec![Named::handle(Some("a")), Named::handle(Some("b"))]).unwrap();
+        assert_eq!(two.device_ids(), vec!["a".to_owned(), "b".to_owned()]);
+        let e = id(two.select(None)).unwrap_err();
+        assert_eq!((e.http_status(), e.code()), (400, "device_required"));
+        assert!(
+            e.to_string().contains('a') && e.to_string().contains('b'),
+            "{e}"
+        );
+        assert_eq!(two.select(Some("b")).unwrap().device_id(), Some("b"));
+        // The default exists for the reads whose contract is one device's state; it is never what
+        // an omitted selector resolves to.
+        assert_eq!(two.primary().unwrap().device_id(), Some("a"));
+
+        // An unnamed front end is today's single-device run: the selector is omitted, and nothing
+        // is fabricated to key it by.
+        let unnamed = LiveControls::one(Named::handle(None));
+        assert_eq!(unnamed.select(None).unwrap().device_id(), None);
+        assert!(unnamed.device_ids().is_empty());
+        assert_eq!(
+            id(unnamed.select(Some("a"))).unwrap_err(),
+            SelectError::Unknown {
+                requested: "a".to_owned(),
+                available: Vec::new()
+            }
+        );
+    }
+
+    /// T-511: a set that could not be addressed unambiguously is refused where it is **composed**,
+    /// not discovered at request time as an ambiguous selector.
+    #[test]
+    fn live_controls_refuse_a_set_a_selector_could_not_address() {
+        assert_eq!(
+            LiveControls::new(vec![Named::handle(Some("a")), Named::handle(Some("a"))])
+                .unwrap_err(),
+            LiveControlsError::DuplicateDeviceId("a".to_owned())
+        );
+        assert_eq!(
+            LiveControls::new(vec![Named::handle(None), Named::handle(None)]).unwrap_err(),
+            LiveControlsError::UnnamedDevices(2)
+        );
+        // One unnamed beside a named one is still addressable: the named one by id, and the
+        // unnamed one by nothing — which is what "nothing said" means.
+        assert!(LiveControls::new(vec![Named::handle(Some("a")), Named::handle(None)]).is_ok());
+    }
+
+    /// T-511: each front end carries **its own** gate, so one busy radio never refuses another.
+    #[test]
+    fn each_device_has_its_own_gate() {
+        let (a, _) = live(SourceCapabilities::hackrf_one());
+        let (b, _) = live(SourceCapabilities::hackrf_one());
+        let held = a.gate().enter(DeviceAction::Retune).expect("free");
+        assert_eq!(
+            a.gate().enter(DeviceAction::Gains).unwrap_err().code(),
+            "device_busy"
+        );
+        assert!(
+            b.gate().enter(DeviceAction::Gains).is_ok(),
+            "a second radio is a second resource"
+        );
+        drop(held);
     }
 }

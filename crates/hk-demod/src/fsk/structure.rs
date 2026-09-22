@@ -56,8 +56,9 @@
 //! separate that case, because the values really do sit on two levels. The **four**-level answer
 //! never fires on it (the test `a_pure_tone_is_never_called_four_level_though_it_can_still_look_\
 //! two_level` pins that), and voice-carrying analogue FM — the case that actually occurs on the
-//! air, and the one T-545 found mislabelled — abstains correctly. Closing the tone case belongs
-//! with T-614.
+//! air, and the one T-545 found mislabelled — abstains correctly. The *burst* estimator that
+//! T-545 caught labelling analogue FM `2fsk` closes the tone case on its own path (T-614): a
+//! sliced tone's bits repeat, and [`super::receiver::periodic_bits`] vetoes the alphabet claim.
 
 use hk_dsp::{CpuFft, FftBackend};
 use num_complex::Complex32;

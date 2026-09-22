@@ -81,7 +81,8 @@ pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
     DEVICE_GATE_WAIT, DeviceAction, DeviceGate, DeviceGuard, LiveControl, LiveControlError,
-    LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
+    LiveControls, LiveControlsError, LiveTuning, SelectError, SourceLiveControl, WindowPolicy,
+    WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 pub use recordings::{RecordingCatalog, RecordingsFailure};

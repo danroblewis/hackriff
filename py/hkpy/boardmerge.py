@@ -108,12 +108,22 @@ def merge(base: str, ours: str, theirs: str) -> str | None:
 
 
 def _validate(text: str, need: set[str]) -> str | None:
-    """Stdlib only, like `py/tests/test_task_board.py` — `pyyaml` is not a dependency here.
+    """What the driver vouches for before it writes a resolution with NO HUMAN IN THE LOOP.
 
-    Blocks are moved verbatim, so the risks worth checking are structural: a lost ticket, a
-    duplicated id, a block that bled into its neighbour, or a mangled tail. A YAML parser would
-    add little over this and a dependency the project has deliberately refused.
+    Blocks are moved verbatim, so the structural risks are first: a lost ticket, a duplicated id,
+    a block that bled into its neighbour, a mangled tail.
+
+    It then vouches for the property those checks cannot see, via `hkpy.boardcheck`: that the
+    result LOADS under the strict parser its consumers use. This file used to argue that a YAML
+    parser "would add little over this and a dependency the project has deliberately refused" —
+    that was wrong, and 2026-09-22 is why: a board no loader accepts passed every textual guard
+    in the tree and blanked the dashboard. T-762 took the dependency deliberately (`pyyaml`, MIT,
+    a dev dependency of `py/`, locked), and this driver has run under `uv run --locked --project
+    py` since T-582, so it is present here. `boardcheck` refuses when it is not, which is the
+    answer that fails closed.
     """
+    from hkpy import boardcheck  # noqa: PLC0415 - keeps the merge path's imports where they are used
+
     _, blocks, order, trailer = split(text)
     if not order:
         return "result has no task list"
@@ -139,6 +149,9 @@ def _validate(text: str, need: set[str]) -> str | None:
             seen.add(key)
     if trailer and not TRAILER_RE.match(trailer.split("\n")[0]):
         return "the tail after the task list is not a top-level key"
+    bad = boardcheck.problems(text, min_tasks=len(order))
+    if bad:
+        return "; ".join(bad)
     return None
 
 

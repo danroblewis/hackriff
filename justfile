@@ -136,6 +136,12 @@ builders *args:
 # Run it when the loop feels slow; the point is that a slow-down shows up as data before anyone
 # has to notice it. First measurement, 2026-09-20: gate median 21.4 min, but QUEUE WAIT median
 # 119.7 min and commit->merge median 272.6 min - the gate is ~8 % of a ticket's cycle.
+#
+# T-763: that 21.4 pools every class (a 17 s `py` gate and a 40 min `full` one in one median) and
+# counts only gates that MERGED, so it is not comparable to the full-class number the budget guard
+# reports - which is where "60 % slower in two days" came from. `--suites` answers the question
+# that matters, per CLASS and per SUITE, from the per-suite lines in merge-runner.log: which half
+# of the gate moved. Complete passing runs only; an aborted gate measures a prefix, not the suite.
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
@@ -636,10 +642,16 @@ lint-py:
 # .git/config and is NOT, so a fresh clone has the attribute pointing at nothing and git fails
 # the merge with "custom merge driver hkboard lacks command line". Run this once per clone.
 # `ops/merge-runner.sh` also calls it at startup, so the automated path cannot miss it.
+#
+# It also points git at `.githooks/`, whose `pre-commit` validates docs/tasks.yaml before any
+# commit that touches it (T-764). The gate only runs on merges, and the board is committed
+# DIRECTLY several times an hour, so the gate cannot be where the board's integrity lives. The
+# path is relative, so each worktree uses its own copy of the hook.
 setup-git:
     @git config merge.hkboard.name "append-only merge for docs/tasks.yaml (T-582)"
     @git config merge.hkboard.driver "uv run --locked --project py python -m hkpy.boardmerge %O %A %B"
-    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml"
+    @git config core.hooksPath .githooks
+    @echo "git: merge driver 'hkboard' registered for docs/tasks.yaml; hooks -> .githooks"
 
 # THE CHEAP CHECK TO RUN BEFORE QUEUING A BRANCH — seconds, not a gate.
 #
