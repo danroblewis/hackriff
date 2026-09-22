@@ -15570,6 +15570,79 @@ tasks:
       Filed 2026-09-18, MSDR track (B0.690). Only ticket in the slice that needs hardware; it is
       present and verified (100.3 MHz FM capture, std 10.66 - live signal, not a dead input).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      Landed a native librtlsdr RX driver as `hk-core`'s third device, behind cargo feature
+      `rtlsdr` (off by default, `hk-cli/rtlsdr` re-exports it), mirroring the `hackrf` feature
+      exactly: `build.rs` links the system librtlsdr through pkg-config or `RTLSDR_LIB_DIR`, so
+      CI builds and tests need no library and the default build carries no FFI.
+
+      - `crates/hk-core/src/source/rtlsdr.rs`: `RtlSdrDriver` / `RtlSdrSource` / `RtlSdrControl` /
+        `RtlSdrConfig` / `RtlSdrDeviceInfo` / `RtlSdrStats` behind the generic
+        `SourceDriver`/`Source`/`SourceControl` contract. Reuses the HackRF driver's
+        `TransferPool` for the callback -> capture-thread hand-over (no per-block allocation);
+        controls are validated when posted and applied at a block boundary through
+        `ControlMailbox`, with the settling transfers discarded and reported as a `GAP`.
+      - `crates/hk-core/src/source/rtlsdr/ffi.rs`: hand-written bindings. `rtlsdr_read_async`
+        blocks, so it runs on a worker thread; `stop_rx` retries `rtlsdr_cancel_async` until the
+        worker actually leaves it (a real librtlsdr race on an early stop). A unit test asserts
+        the bindings declare no `rtlsdr_write_eeprom`, `set_testmode`, `set_direct_sampling` or
+        `set_bias_tee`.
+      - Addressed BY SERIAL: `rtlsdr_get_index_by_serial`, never a bare index when a serial is
+        given; CLI specs `rtlsdr` / `rtlsdr:<serial>` (`rtlsdr_serial`, `driver_for`,
+        `is_device_spec`). `device_id` is `rtlsdr:<serial>`.
+      - Capabilities (`SourceCapabilities::rtl_sdr_r820t`) state the real, lesser front end:
+        25 MHz-1.75 GHz; a discrete rate list capped at 2.4 Msps (`R820T_RATES_HZ`, every entry
+        exactly realisable on the 28.8 MHz clock -- 1.4 Msps is excluded because it misses by
+        0.019 Hz, an error `rtlsdr_get_sample_rate`'s integer return could never report); `cu8`,
+        8-bit, receive-only, not TX-capable; tuning step 439.453125 Hz (the coarsest R820T PLL
+        grid, derived from librtlsdr's `r82xx_set_pll`, so every declared centre is reachable at
+        every frequency -- the same "err coarser" rule as `HACKRF_ONE_TUNING_STEP_HZ`, and
+        likewise unverified by bench measurement); one combined gain stage `lna`, 0-49.6 dB;
+        no RF amp, no baseband filter, no bias tee, no external clock, no hardware timestamps.
+        `set_bias_tee` / `set_baseband_filter` are `Unsupported`, and provenance reports
+        `BiasTee::Unknown` -- never a fabricated `Off`, since this driver never drives GPIO0 and
+        librtlsdr offers no read-back (T-325).
+      - Gain honesty: the R820T's 29 steps are uneven, which `GainStage` cannot express, so the
+        stage is declared continuous and the driver snaps every request to the **device's own**
+        table (read at open via `rtlsdr_get_tuner_gains`, so a non-R820T dongle snaps to its own)
+        and records what the device reports back. A request for 30 dB reaches provenance as
+        29.7 dB. Tuner AGC and the RTL2832U digital AGC are switched off at open so the gain
+        state in provenance stays true. `set_gains` refuses non-zero `vga_db` / `amp_on` rather
+        than silently dropping them.
+      - The ~10 s R820T lock is handled, not worked around: `RtlSdrConfig::first_block_timeout`
+        (20 s) applies until the first block, then the ordinary 3 s stall timeout. Measured in
+        the HIL run the PLL actually locked in 19 ms, but the budget covers the cold case.
+
+      TESTS (targeted only).
+      - `cargo test -p hk-core --lib source::rtlsdr`: 17 unit tests pass, including the **whole
+        device conformance suite run against a fake dongle**, so all 21 checks are covered in CI
+        with no hardware.
+      - `just test-crate hk-core`: 174/174 pass (130 s).
+      - `cargo nextest run -p hk-cli --lib`: 22/22 pass, including the new
+        `rtlsdr_specs_select_the_rtl_driver_by_serial`.
+      - HIL against the real NooElec Nano 3 (serial 7673444264), receive only, HackRF never
+        opened: `cargo test -p hk-core --features rtlsdr --test rtlsdr_hil -- --ignored`, 2/2
+        pass. `fm_band_samples_flow...`: 187 blocks / 6 127 616 samples in 3.01 s (2.04 Msps),
+        rms 12.7 codes (a live FM signal, not a dead input), 0 dropped transfers, retune reached
+        a block at 1.55 s, gaps exactly equal settle discards + counted drops, clean close and
+        immediate reopen. `the_nano_3_passes_the_device_conformance_suite`: all 21 checks `ok`,
+        with the suite's default 1 us timestamp tolerance.
+      - `just precheck hk-core hk-cli`: clean.
+
+      SURFACED, NOT CHASED (for the coordinator to decide).
+      1. `GainStage` can only express a uniform step, so a tuner with a non-uniform gain table
+         (every RTL-SDR) has to be declared continuous. The honest model would be a discrete
+         step list on `GainStage`, but that is a `core_interface` change: the capabilities JSON
+         in `hk-api/src/control.rs`, `docs/api.md`, `ui/src/controls/model.ts` and the contract
+         tests all move together. Deliberately out of scope here; provenance is honest either
+         way because it records the value the device reported back.
+      2. No SigMF `cu8` write path was exercised. `native_format` is `Cu8` while both read paths
+         deliver re-centred signed samples (a lossless constant offset, so the IQ ring is
+         unaffected); nothing consumes `native_format` today except the replay source, but a
+         recording written from an RTL capture should be checked to declare `ci8`, not `cu8`.
+      3. The RTL is not offered in `hk serve --device` discovery or anywhere in the UI device
+         picker; only the `--source rtlsdr[:SERIAL]` spec path reaches it. Multi-device serving
+         is T-510/T-512/T-513 territory.
   - id: T-515
     milestone: MLIVE
     title: The coverage-only tile shortcut answers 200 above the declared readable ceiling, where docs/api.md says 400
