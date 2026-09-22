@@ -820,8 +820,42 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     assert.notEqual(windowOf(after.where).spanHz, windowOf(before.where).spanHz,
       `the gestures did not change the viewport's span at all (${before.where}), so nothing below is a measurement`);
 
-    const tiles = page.requests.slice(firstIdx).filter((r) => r.url.includes("/api/tiles"));
-    assert.ok(tiles.length >= 4, `the gesture made ${tiles.length} tile requests; too few to conclude anything`);
+    // ——— LET THE GESTURE'S OWN ENUMERATION REACH THE WIRE BEFORE JUDGING IT (T-690) ———
+    //
+    // This premise used to be read off `page.requests` the instant the last gesture ended, and
+    // **that counts the tile route's service rate, not the gesture**. The client asks through a
+    // LIFO queue behind an AIMD operating cap, so the addresses a pan/zoom enumerates go out over
+    // however long the route takes to answer the ones before them. Measured on this same file,
+    // same gestures, same product, in two runs of the same suite:
+    //
+    //     ~167 ms/tile, cap 4/4  -> 234 tile requests by the end of the gestures
+    //     ~3612 ms/tile, cap 1/4 ->   3 tile requests by the end of the gestures
+    //
+    // and the second run failed here with "too few to conclude anything" — then left the shared
+    // page zoomed out where the aggressive gesture had put it, which failed tests 2 and 3 as well.
+    // One volume assumption, three red tests.
+    //
+    // So the wait is on the COUNT ITSELF, bounded, and the bound is the same 4 the assertion
+    // wants: a client that enumerates fewer than four addresses for this gesture still fails,
+    // exactly as before, and one that enumerated them but has not been served yet is no longer
+    // read as one that never asked. (Surface-nav's T-564 partition, one step earlier: there the
+    // question was WHICH late requests to count, here it is whether they have been sent yet.)
+    const askedSince = () => page.requests.slice(firstIdx).filter((r) => r.url.includes("/api/tiles"));
+    const NEEDED = 4, DRAIN_POLLS = 80, DRAIN_EVERY_MS = 500;
+    const tDrain = Date.now();
+    let polls = 0;
+    for (; polls < DRAIN_POLLS && askedSince().length < NEEDED; polls++) {
+      await new Promise((r) => setTimeout(r, DRAIN_EVERY_MS));
+      await page.frames(2);
+    }
+    const tiles = askedSince();
+    t.diagnostic(`the gesture's enumeration reached the wire as ${tiles.length} tile request(s)` +
+      (polls ? ` after ${polls} drain poll(s) (${((Date.now() - tDrain) / 1000).toFixed(1)} s) — the ` +
+        "route was answering slowly enough that the queue had not emptied when the gestures ended" : ""));
+    assert.ok(tiles.length >= NEEDED,
+      `the gesture put only ${tiles.length} tile requests on the wire, even after ${polls} drain ` +
+      `poll(s); too few to conclude anything. This is the client enumerating too little, not the ` +
+      "route answering too slowly — the wait above is exactly for the latter.");
     const refused = tiles.filter((r) => r.status !== null && r.status >= 400 && r.status !== 503);
     const busy = tiles.filter((r) => r.status === 503).length;
     const addr = (u) => {
@@ -925,9 +959,22 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
       await page.frames(2);
       wide = windowOf((await pane0(page)).where);
     }
-    g = await paneGeometry(page);
+    // **Re-read the pane's box AFTER the wait, not before it** — the same asymmetry T-564 fixed in
+    // the INSIDE leg above, still present here (T-690). `waitForResident` can sit for twenty-five
+    // seconds, and this leg has just changed the pane's LEVEL twenty times: T-505 puts the tier
+    // inside every viewport row's level cell, so that row wraps and un-wraps as the level changes
+    // and the canvas moves with it. Sampling a rectangle read before the wait reads the page
+    // AROUND the pane, which is a flat fill — 0 % grey, tiles resident, and "2 distinct, dominant
+    // 99 %". The inside leg carried exactly this bug and it sent two branches back; leaving the
+    // other half of the same test to be caught by luck about how long residency took is the same
+    // defect waiting for a slower machine.
+    const wideBefore = await paneGeometry(page);
     const wideRes = await waitForResident(page);
-    t.diagnostic(`OUTSIDE residency after ${wideRes.ms} ms: ${wideRes.counts}`);
+    g = await paneGeometry(page);
+    const wideMovedBy = Math.abs(g.rect.y - wideBefore.rect.y);
+    t.diagnostic(`OUTSIDE residency after ${wideRes.ms} ms: ${wideRes.counts}` +
+      (wideMovedBy > 0 ? ` — the canvas moved ${wideMovedBy} px while that wait ran, which is why ` +
+        "the rectangle sampled below is re-read here" : ""));
     const wideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE), { n: 3 });
     const widePix = wideG.last;
     const { cov: wideCov, cellHz: wideCellHz, n: wideN } = await atPaneLevel(wide);
@@ -993,6 +1040,15 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
  * and the point the gestures were made at.
  */
 async function planRetune(page, backend, t) {
+  // **Start from a known view, whatever the test before this one left behind** (T-690). The file
+  // shares one page across six tests, and test 1's last act is an aggressive zoom-out; when test 1
+  // FAILS it never reaches its own `reopen`, so the page is handed on parked on the whole surface
+  // — from which `navigate` below cannot get back inside the tuned window, and tests 2 and 3 fail
+  // for a reason that is nothing to do with what they test. One red test became three. `reopen` is
+  // this file's own documented way back to a known live view (it re-derives the opening window
+  // from the observed coverage, rather than re-implementing that arithmetic here), and the
+  // init-script observers survive it because they are installed per document.
+  await reopen(page, backend);
   const w0 = await tunedWindow(backend);
 
   // The control plans for the viewport, so put the viewport somewhere else inside the recorded band
@@ -1165,17 +1221,49 @@ test("2. a retune keeps the stream alive, and live rows keep arriving at the NEW
 test("3. a live tile panned off-screen and back shows no grey gap: its coverage is complete on return",
   async (t) => {
     const { page, backend } = await journey();
-    const g = await paneGeometry(page);
+    // Same reason as `planRetune`'s (T-690): begin from a known view rather than from whatever the
+    // previous test left, so a failure there cannot make this one fail about something else.
+    await reopen(page, backend);
     // Below the live-edge zone ([[LIVE_EDGE_ZONE]]), which is why the return below is given time to
     // scroll: the rows that arrived while the tile was off screen ARE the newest rows on return, so
     // measuring immediately would put the subject inside the one band whose grey cannot be read.
-    const body = bodyRect(g.pane, LIVE_EDGE_ZONE);
+    //
+    // **Re-read at each measurement, never once at the top** (T-690). Between the two censuses
+    // below this test spends half a minute in residency waits and settle sleeps, and T-505 puts
+    // the tier inside every viewport row's level cell — so the row wraps and un-wraps as the level
+    // changes and the canvas moves with it. A rectangle read once names a box on the PAGE, not a
+    // box on the PANE, and the two stop being the same thing the moment the chrome reflows: the
+    // before/after comparison would then be between two different subjects, or between two
+    // measurements of the shell around the pane (which holds no grey at all, so the claim would
+    // pass for free).
+    const bodyNow = async () => bodyRect((await paneGeometry(page)).pane, LIVE_EDGE_ZONE);
     const at = await centreOf(page);
 
     // The pane must be FOLLOWING, or there is no live tile here to go stale.
     await goLive(page);
     const row = await pane0(page);
     assert.equal(row.following, true, "the pane is not following the live edge, so this test has no subject");
+
+    // **And it must be OVER DATA, which this test now establishes rather than inherits** (T-690).
+    // A reopen puts the pane on the observed extent from the coverage map plus a margin, which
+    // after test 2's retune is several times the tuned window — so most of the pane is spectrum
+    // this radio never looked at and is correctly grey (measured: 95.4 %), and the baseline this
+    // test compares a return against would be gone. It used to inherit test 2's viewport, which is
+    // the coupling the reopen above exists to remove; inheriting the premise instead of stating it
+    // is the same defect one step along.
+    const wTuned = await tunedWindow(backend);
+    const inner = { loHz: wTuned.centerHz - wTuned.spanHz * 0.15, hiHz: wTuned.centerHz + wTuned.spanHz * 0.15 };
+    // Twice `navigate`'s default step budget, and for a stated reason rather than a nudge: this
+    // target is 30 % of the tuned window (test 1's is 60 %), and the reopened view starts on the
+    // whole observed extent plus a margin, so it is about twice as many wheel steps of zoom. The
+    // budget is a count of gestures, not a duration.
+    const into = await navigate(page, at, inner, { steps: 80 });
+    t.diagnostic(`into the tuned window in ${into.steps} gesture(s): ${spanOf(into.view)} ⊂ ${spanOf(wTuned)}`);
+    assert.ok(into.view.loHz >= wTuned.loHz && into.view.hiHz <= wTuned.hiHz,
+      `the viewport never got inside the tuned window: ${spanOf(into.view)} vs ${spanOf(wTuned)} after ` +
+      `${into.steps} steps — there is no live tile over data here to lose.\ntrail: ${into.trail.join(" -> ")}`);
+    // A pan in frequency can drop a following pane; put it back before the subject is chosen.
+    await goLive(page);
 
     // **The user's step 3: pan so the NEW tile is in view.** The subject of T-495 is a tile that
     // became live *because of the retune* — not one that has been on screen since before it. Test 2
@@ -1192,7 +1280,7 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     // ——— on screen: the control measurement ———
     const beforeRes = await waitForResident(page);
     t.diagnostic(`residency before the round trip after ${beforeRes.ms} ms: ${beforeRes.counts}`);
-    const beforeG = await sampleGrey(page, body, { n: 4, gapMs: 1500 });
+    const beforeG = await sampleGrey(page, await bodyNow(), { n: 4, gapMs: 1500 });
     const beforePix = beforeG.last;
     const beforeWin = windowOf((await pane0(page)).where);
     const tAway = Date.now() / 1000;
@@ -1255,7 +1343,7 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     // stand-in, not grey, but a pane mid-fill is not the state the claim is about).
     const afterRes = await waitForResident(page);
     t.diagnostic(`residency after the round trip after ${afterRes.ms} ms: ${afterRes.counts}`);
-    const afterG = await sampleGrey(page, body, { n: 4, gapMs: 1500 });
+    const afterG = await sampleGrey(page, await bodyNow(), { n: 4, gapMs: 1500 });
     const afterPix = afterG.last;
     // **The reach of this tier, printed rather than asserted** (see the header). A level-0 tile is
     // `RENDER_CELLS` x the lattice's base time cell; the round trip has to be longer than that for
@@ -1430,6 +1518,18 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
     "the close) — frames already on the wire when the server died, which is why the boundary below " +
     "is the close and not the clock");
 
+  // **The pane's box, re-read now that the page has reacted to the death** (T-690). `body` above
+  // was measured while the server was alive; the kill changes what the chrome says, T-505 puts the
+  // tier inside the level cell, and a row that wraps moves the canvas under it. Both windows below
+  // are shot after this point, so one read here covers both — and a stale box here does not go
+  // red, it goes quietly GREEN: the shell around the pane holds no magenta and does not repaint,
+  // so both claims would pass without ever looking at the pane.
+  const deadBody = bodyRect((await paneGeometry(page)).pane, 0.06, 0.60);
+  if (deadBody.y !== body.y || deadBody.h !== body.h) {
+    t.diagnostic(`the canvas moved when the stream died (pane body y ${body.y}->${deadBody.y}, ` +
+      `h ${body.h}->${deadBody.h}); the two windows below are measured over the box as it is NOW`);
+  }
+
   // Two successive windows, both wholly AFTER the stream's observed end. The first is the
   // legitimate reaction — in-flight requests fail, the client notices, the page says so. The
   // second is whether it SETTLED.
@@ -1474,8 +1574,8 @@ test("4. a killed backend degrades to grey with no purple and no re-render thras
     "the tap recorded no rows in the seconds before the kill either, so it was not observing a live " +
     "stream and the zero above says nothing");
 
-  const pixW2 = inspect(imgW2, body);
-  const churn = diff(imgW1, imgW2, body);
+  const pixW2 = inspect(imgW2, deadBody);
+  const churn = diff(imgW1, imgW2, deadBody);
   const draws = await page.eval("window.__hkGl.draws");
   t.diagnostic(`after the kill: uploads ${uploadsW1} in the first ${WINDOW_MS / 1000} s, ${uploadsW2} in the second; ` +
     `failed requests ${failedW1} then ${failedW2}; ${draws} draw calls total (the rAF loop, not the subject); ` +

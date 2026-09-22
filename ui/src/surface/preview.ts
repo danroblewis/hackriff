@@ -72,14 +72,62 @@ export type Getter = (path: string) => Promise<unknown>;
  * ask again — and only an exhausted retry is something the user should ever be told about.
  */
 export interface BackpressureOptions {
-  /** Attempts after the first, per request. */
+  /** Attempts after the first, per request. Default: [[retriesForBudget]] of [[RETRY_BUDGET_MS]]. */
   retries?: number;
-  /** First wait, ms; doubles per attempt. */
+  /** First wait, ms; doubles per attempt, capped at [[maxBackoffMs]]. */
   backoffMs?: number;
+  /** The most any one wait may grow to, ms. */
+  maxBackoffMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
 
 const REFUSAL_STATUS = 503;
+
+/**
+ * **The bootstrap's retry budget, in TIME rather than in attempts** (T-690).
+ *
+ * It was five attempts with an uncapped doubling backoff: 150, 300, 600, 1200, 2400 — four and a
+ * half seconds, most of it asleep, and then the page gives up and tells the user to reload. That
+ * is a bet on how fast the tile route answers, and the route's speed is not a constant: measured
+ * across runs of this repo's own browser tier it moves from ~167 ms a tile on a quiet box to
+ * ~3612 ms under a full suite, with all four slots held by another tab's storm. At the slow end
+ * the budget expires before one round of production finishes, and a second tab cannot open at all
+ * — observed as "GET /api/tiles refused every attempt".
+ *
+ * A `503` here is **documented, transient backpressure**: the route is producing for somebody and
+ * releases the slot when it finishes. The page's own advice for it is *reload in a moment*, which
+ * is asking the user to do by hand exactly what this loop does. So the bound is stated as the
+ * thing it is — how long the surface is willing to wait for a busy route — and the wait is CAPPED
+ * so the client keeps asking on a steady cadence instead of sleeping longer and longer through the
+ * window it has.
+ *
+ * Twenty seconds is "something is wrong", not a race margin: four slots at the slowest service
+ * time ever measured here is ~14 s, so a budget that cannot cover one full turn of the route would
+ * be a bound on the wrong thing again. It is NOT unbounded — an exhausted budget still reports as
+ * backpressure, and `preview-main.ts` still says so rather than quoting the route at the user.
+ *
+ * The real answer to one greedy tab holding every slot is a fair-share decision on the route
+ * itself (T-630); this only stops the client from giving up while the route is still working.
+ */
+export const RETRY_BUDGET_MS = 20_000;
+/** The most any one backoff wait may grow to, ms. See [[RETRY_BUDGET_MS]]. */
+export const MAX_BACKOFF_MS = 1000;
+
+/**
+ * How many retries fit in `budgetMs`, given a first wait of `first` ms doubling up to `cap`.
+ *
+ * Exported so the budget is checkable as a PROPERTY (the waits sum to about the budget, and no one
+ * wait exceeds the cap) rather than as a magic attempt count somebody would have to re-derive.
+ */
+export function retriesForBudget(first: number, cap: number, budgetMs: number): number {
+  let spent = 0, n = 0;
+  for (;;) {
+    const wait = Math.min(cap, first * 2 ** n);
+    if (spent + wait > budgetMs) return n;
+    spent += wait;
+    n++;
+  }
+}
 
 /** Is this the route saying "too many at once" rather than something being wrong? */
 export function isBackpressure(e: unknown): boolean {
@@ -124,8 +172,12 @@ export interface SurfaceProbe {
 export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureOptions = {}): Promise<SurfaceProbe> {
   const requests: string[] = [];
   const degraded: string[] = [];
-  const retries = bp.retries ?? 5;
   const backoffMs = bp.backoffMs ?? 150;
+  const maxBackoffMs = bp.maxBackoffMs ?? MAX_BACKOFF_MS;
+  // Attempts are derived from the TIME budget rather than being a constant of their own, so the
+  // two can never drift apart (T-690). An explicit `retries` still wins — that is how the unit
+  // tests pin the bounded-refusal case without waiting out a real budget.
+  const retries = bp.retries ?? retriesForBudget(backoffMs, maxBackoffMs, RETRY_BUDGET_MS);
   const sleep = bp.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   // Every request here retries a `503`, not only the tile probe: the refusal means the history lock
   // is busy, and asking again is the whole of the right response. Each attempt is pushed to
@@ -137,7 +189,7 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
         return await get(path);
       } catch (e) {
         if (attempt >= retries || !isBackpressure(e)) throw e;
-        await sleep(backoffMs * 2 ** attempt);
+        await sleep(Math.min(maxBackoffMs, backoffMs * 2 ** attempt));
       }
     }
   };

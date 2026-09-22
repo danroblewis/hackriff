@@ -33,7 +33,7 @@ import { GREY } from "../src/surface/cellrule";
 import { legendEntries, swatchPixels } from "../src/surface/legend";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { ControlError } from "../src/controls/client";
-import { ORIENT_CELLS, ORIENT_ROWS, SurfacePreview, isBackpressure, probeSurface, wheelAxes, wheelDelta, wheelZoom, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
+import { MAX_BACKOFF_MS, ORIENT_CELLS, ORIENT_ROWS, RETRY_BUDGET_MS, SurfacePreview, isBackpressure, probeSurface, retriesForBudget, wheelAxes, wheelDelta, wheelZoom, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
 import { parseKey } from "../src/surface/tilecache";
 import { stubGl } from "./surface-glstub";
 
@@ -244,6 +244,28 @@ test("the route's backpressure is answered by ASKING AGAIN, never by a banner qu
   assert.equal(p.lattice.cells, 256, "and the surface opens exactly as if it had never been refused");
   assert.deepEqual(p.requests.slice(0, 3), [probePath, probePath, probePath],
     "every attempt is on the record: the page shows what it actually asked for");
+});
+
+test("the bootstrap's retry budget is stated in TIME, and no one wait swallows it (T-690)", () => {
+  // The bound used to be five attempts with an uncapped doubling backoff — 4.65 s, most of it
+  // asleep — which is a bet on how fast the tile route answers. Measured in the browser tier the
+  // route moves from ~167 ms a tile to ~3612 ms with all four slots held by another tab, and at
+  // the slow end a second tab could not open at all. So the budget is a DURATION and the attempts
+  // are derived from it, and the property is asserted rather than the number.
+  const waits = [];
+  const n = retriesForBudget(150, MAX_BACKOFF_MS, RETRY_BUDGET_MS);
+  for (let i = 0; i < n; i++) waits.push(Math.min(MAX_BACKOFF_MS, 150 * 2 ** i));
+  const total = waits.reduce((a, b) => a + b, 0);
+  assert.ok(total <= RETRY_BUDGET_MS, `the derived waits total ${total} ms, over the ${RETRY_BUDGET_MS} ms budget`);
+  assert.ok(total > RETRY_BUDGET_MS - MAX_BACKOFF_MS,
+    `the derived waits total only ${total} ms of a ${RETRY_BUDGET_MS} ms budget — more than one ` +
+    "capped wait is being left unspent, so the attempts and the budget have drifted apart");
+  assert.ok(waits.every((w) => w <= MAX_BACKOFF_MS),
+    `a single backoff wait grew past the ${MAX_BACKOFF_MS} ms cap: ${waits.join(" ")}`);
+  // And the cap is what makes it a cadence rather than a nap: without it, five doublings from
+  // 150 ms already spend 4.65 s in four waits, which is the shape that gave up too early.
+  assert.ok(n >= 10, `only ${n} retries fit the budget, so the client still gives up in a handful of attempts`);
+  assert.equal(retriesForBudget(150, MAX_BACKOFF_MS, 0), 0, "a zero budget buys no retries at all");
 });
 
 test("only backpressure is retried — a real error is still an error, and at once", async () => {
