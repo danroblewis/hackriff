@@ -1271,7 +1271,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -1880,6 +1880,18 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/burndown.json"):
+            try:
+                import burndown
+                body = json.dumps(burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": str(e), "rows": []}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/burndown"):
+            import burndown
+            body = burndown.PAGE.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/timeline.json"):
             # timeline() function was lost in crash-recovery reconstruction; stub to keep the client working.
             body = json.dumps({"rows": [], "note": "timeline data unavailable after crash recovery"}).encode()
@@ -1947,4 +1959,11 @@ if __name__ == "__main__":
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
     threading.Thread(target=_usage_poller, daemon=True).start()
+    def _warm_burndown():
+        try:
+            import burndown
+            burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))
+        except Exception:
+            pass
+    threading.Thread(target=_warm_burndown, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 8901), H).serve_forever()
