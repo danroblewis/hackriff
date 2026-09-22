@@ -256,6 +256,27 @@ ready_filter(){
 # merger to main, nothing has been pushed, and the batch is reconstructible from the
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
+FLAKY=$S/flaky.jsonl
+flake_retry(){ # base gate_log_start_line tickets -> exit 0 if the retried gate passed
+  local base=$1 from=$2 tickets=$3 tests filter t rc
+  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+FAIL \[' | awk '{print $NF}' | sort -u)
+  [ -z "$tests" ] && { log "TRIAGE: no FAIL lines found (lint/build failure?) - not a flake candidate"; return 1; }
+  filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
+  log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
+  # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
+  # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
+  # the reserve the gate always has.
+  if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+    log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> isolating"
+    return $rc
+  fi
+  log "TRIAGE: a test FAILS alone -> a real defect in this batch; isolating"
+  return 1
+}
+
 try_bulk(){
   local branches=("$@") tickets="" b wt base after rc
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
@@ -308,7 +329,15 @@ try_bulk(){
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
+  local gate_line; gate_line=$(wc -l < "$LOG")
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
+  # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
+  # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
+  # recorded in flaky.jsonl, and the whole gate is retried ONCE with the machine to itself
+  # (gate-exclusive: the work runner suspends its workers). Only a test that fails alone, or a
+  # second red gate, still isolates.
+  if [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
