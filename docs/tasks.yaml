@@ -16321,6 +16321,19 @@ tasks:
     notes: |
       Filed 2026-09-20 from T-474's report.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (T-534). The `--loop` reopen policy now belongs to the run, not to its first segment.
+
+      Changed (crates/hk-pipeline/src/run.rs):
+      - `Common` now holds `reopen: Option<Arc<Mutex<SourceFactory>>>`, set once in `start_multi`. `start_segment` no longer takes a `reopen` parameter. Every segment's capture thread now reopens through the run's one factory: the first segment, one a `replumb()` starts, and one a `recover()` starts. Before this, `replumb()` and `recover()` passed `None`, so a looping replay ended at the recording's end after any re-plumb or capture recovery.
+      - Second half, found while writing the test: a source reopened on a live run (`live_window_class` && controllable) is now sent the **commanded** window (`set_sample_rate`, then `tune`) before its first read. Otherwise the reopened source starts at its own default window, not where a re-plumb or an in-place retune had moved the run, and the segment's WindowGuard drops every block of the new pass until WINDOW_SETTLE_TIMEOUT. Fixed-window runs (plain replay, scheduler-driven) re-send nothing, so their behaviour is unchanged.
+
+      Regression test: crates/hk-pipeline/tests/loop_survives_replumb.rs. A scripted receiver behind the device contract plays a finite "pass" (the recording), and a factory reopens it. The test first checks the run wraps at all. It then re-plumbs with a rate change and asserts the replay still wraps (+2 loops) and that the reopened pass was sent and moved to the commanded rate. Finally it forces a capture recovery (`fail_reads_for(2)`) and asserts the replay still wraps.
+      - Against the unfixed run.rs it fails as the ticket describes: after the re-plumb, `finished: true, capture: Ended`, and loops stop.
+
+      Targeted tests: `cargo nextest run -p hk-pipeline` over the binaries loop_survives_replumb, loop_capture_time, retune_replumb_fails, degrade_dont_crash, history_survives_retune and occupancy_retune, plus the lib reopen tests: 21/21 pass. `just precheck hk-pipeline`: fmt clean, clippy clean.
+
+      Surfaced, not chased: nextest flags `hk-pipeline presence::tests::a_returning_signal_reopens_the_same_emitter_and_never_spans_the_silence` as LEAK (it passed; a leaked handle or subprocess). It is unrelated to this diff. A reopened source also gets no gains or baseband filter re-sent, only the window. The scheduler already re-sends its step. User-set gains on a looping live-class run would reset to the pass's defaults on each wrap. I did not observe this failing, so I am noting it only.
   - id: T-535
     milestone: MLIVE
     title: A capture-recovery gap still answers 410 - the reader cannot tell recovery from the end
