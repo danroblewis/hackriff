@@ -223,6 +223,17 @@ def landed_tickets():
 
 
 # ---------- launch ----------
+def bounded(cmd, cores=None):
+    """Wrap a command in the worker bound - cpulimit (HiGarfield fork, descendants included), the
+    background QoS clamp, nice - so EVERY agent this runner starts is bounded the same way: workers,
+    reviewers and fix/resume runs alike. `cores` defaults to WORKER_CORES."""
+    cores = cores or WORKER_CORES
+    prefix = [CPULIMIT, "-l", str(cores * 100), "-i", "--"] if os.path.exists(CPULIMIT) else []
+    if not prefix and not getattr(bounded, "_warned", False):
+        log(f"NOTE: no cpulimit at {CPULIMIT} (see ops/README.md to build the fork) - QoS + env limits only"); bounded._warned = True
+    return prefix + ["taskpolicy", "-c", "background", "nice", "-n", "10"] + cmd
+
+
 def brief_for(t, wt, branch):
     d = f"{WORKDIR}/{t['id']}"          # where handback.json goes
     fields = {k: t.get(k) for k in ("id", "milestone", "title", "priority", "model", "effort", "core_interface",
@@ -310,10 +321,8 @@ def launch(t, dry):
     # of CPU in aggregate - a real ceiling by SIGSTOP/SIGCONT, descendants included); (2) a permanent
     # `background` QoS clamp (efficiency cores only, low priority); (3) CARGO/NEXTEST limits in env
     # so the build and test runners never ask for more. Without the fork binary, layers 2-3 still hold.
-    cmd_prefix = [CPULIMIT, "-l", str(WORKER_CORES * 100), "-i", "--"] if os.path.exists(CPULIMIT) else []
-    if not cmd_prefix and not getattr(launch, "_warned", False):
-        log(f"NOTE: no cpulimit at {CPULIMIT} (build: git clone https://github.com/HiGarfield/cpulimit && make; copy src/cpulimit there) - QoS + env limits only"); launch._warned = True
-    p = subprocess.Popen(cmd_prefix + ["taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+    cmd_prefix = ["cpulimit"] if os.path.exists(CPULIMIT) else []
+    p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt,
                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
     log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; {'cpulimit ' + str(WORKER_CORES * 100) + '% + ' if cmd_prefix else ''}background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
@@ -340,11 +349,11 @@ VERDICT: FAIL <one line naming the defect and the file:line>
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out = open(f"{d}/review.json", "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err, env=dict(os.environ, HACKRIFF_OPS=S),
-                         start_new_session=True, text=True)
+    p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                         env=dict(os.environ, **CARGO_ENV, HACKRIFF_OPS=S), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"REVIEW {tid} pid={p.pid}")
+    log(f"REVIEW {tid} pid={p.pid} (bounded)")
     return dict(claim, pid=p.pid, started=time.time(), kind="review")
 
 
@@ -571,11 +580,11 @@ your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
     out_path = f"{d}/fix{n}.json"
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+    p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid}")
+    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 

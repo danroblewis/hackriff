@@ -100,7 +100,11 @@ throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` fr
 (`$HACKRIFF_OPS/bin/cpulimit`; source kept at `$HACKRIFF_OPS/src/cpulimit`; rebuild with
 `cd $HACKRIFF_OPS/src/cpulimit && make install DESTDIR=$HOME/.local/bin && cp src/cpulimit $HACKRIFF_OPS/bin/` —
 no sudo needed; do NOT `brew install cpulimit`, that is the inert opsengine build) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
-the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. Disk floor 20 GB.
+the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. The same bound wraps the
+reviewer and fix/resume runs, and `ops/launch.sh` wraps the coordinator/supervisor session itself at
+`ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. Budget of
+28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
+sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)
