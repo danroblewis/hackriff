@@ -1,7 +1,7 @@
 # ADR-0015 — Decoder synthesis contracts: candidate pipelines, stage evidence, search, templates, region analyze
 
 **Status:** PROVISIONAL (T-208, core interface, planning only). MAUTO is unscheduled until after M3. No code comes from this ADR until then.
-**Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning).
+**Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning); **§14 below** (T-557, 2026-09-22 — template fact provenance, the fact/implementation line, bulk import).
 **Touches:** C13/C14 estimation, C15 classifier, C18 signatures, C20 digital demod, C21 bit framing, C22 decoders, C27 inventory; Emitter, Decode ([docs/07 §2.11, §2.15](../07-data-model.md)).
 **Builds on:** [docs/15](../15-decoder-synthesis.md) (the design brief), [ADR-0011](0011-decoder-workbench-contracts.md) (blocks, recipes, stream), [ADR-0012](0012-attention-memory-contracts.md) (chain tiers), ADR-0014 (IQ capture ring; T-178, `docs/adr/0014-iq-capture-ring.md` lands with it), ADR-0016 (M3 classification; T-198, written in parallel).
 **Planned code:** new crate `hk-synth` (search, evidence scoring, templates; no HTTP), `hk-pipeline::synth` (jobs, acquisition, attach), `crates/hk-api/src/analyze.rs` (replaces the T-190 stub), `templates/*.template.json`.
@@ -1104,3 +1104,311 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
 measures the 0.3–0.9 band); that 0.25 bits is the right expressibility tolerance; that
 `floor_j = 6` remains achievable at S2/S3 under the maximum rule on a real corpus (T-660); and
 every number inherited from docs/21, which measured one block family at one support.*
+
+---
+
+## 14. Amendment — protocol facts cross as template data: fact provenance, the fact/implementation line, bulk import (T-557, 2026-09-22)
+
+**Status:** PROVISIONAL, design only, no code and no template files. Use cases: **SIGNAL-049**
+(ERT meters), **SIGNAL-053** (LoRa), **RESEARCH-002** (flex decoder for a never-seen sensor).
+Source: [docs/18 §0, §3 Tier 1, §6](../18-decoder-coverage.md), which rank the short-range ISM long
+tail as the highest-return coverage and call it "templates, not code". §§1–13 stand, except for the
+deltas in §14.8.
+
+**What binds, and what doesn't.** The only licence rule is the existing one in
+[ADR-0010](0010-language-and-licence-ledger.md) and [ADR-0003](0003-process-plugin-model.md): GPLv3
+decoder *code* stays behind the process boundary and nothing is derived from it in-core. The user
+said on 2026-09-20 (T-555) that there is **no separate licence rule**. docs/18 §4's three-tier
+proposal was cancelled, and this section neither cites nor revives it. What follows is a data
+schema and a bookkeeping discipline. It adds no new gate.
+
+### 14.1 Why templates are the bridge
+
+A **template is data about a protocol** and a **block is code**. The licence question is only ever
+about code. A template holds the same things every GNU Radio or rtl_433 decoder holds, and every
+specification those decoders were written from: modulation family, symbol rate, sync word, check
+polynomial, field layout and expected band. These are **protocol facts**. The schema has no place
+for the rest of a decoder, which is its loops, taps, thresholds and state machines (§14.3).
+
+The costs differ by orders of magnitude. A template takes hours. A block takes days. A wrapped
+plugin is a dependency forever. For every protocol whose structure the ADR-0011 catalogue can
+already express (docs/18 §3 Tier 1: OOK/ASK/FSK with PWM, PPM or Manchester coding and a CRC),
+coverage therefore becomes data entry. And every template is also a MAUTO search seed (§4.2).
+
+### 14.2 The fact-source field
+
+§4.1's `provenance.kind` (`builtin | user | discovered`) says **who authored the template**. It
+does not change, and ADR-0022 §5.1's template-fixed rule still reads it. This amendment adds a
+second, independent record: **where each fact came from**.
+
+```jsonc
+"provenance": {
+  "kind": "builtin",
+  "facts": [
+    { "fields": ["priors.families", "priors.symbol_rate_bd", "evidence_targets.S4"],
+      "basis": "spec",                       // spec | tolerance | measured   (§14.3)
+      "source": { "kind": "standard",       // see the table below
+                  "ref": "ITU-R M.584-2", "locator": "Annex 1 §4", "accessed": "2026-09-22" } },
+    { "fields": ["free[clock].domain"],
+      "basis": "tolerance",
+      "source": { "kind": "decoder-source", "project": "rtl_433", "artefact": "code",
+                  "path": "src/devices/<file>.c", "commit": "<sha>",
+                  "licence": "GPL-2.0-or-later", "licence_read_from": "COPYING" } } ] }
+```
+
+| `source.kind` | Meaning | Required keys |
+|---|---|---|
+| `standard` | A standards body's document (ITU, ETSI, IEEE, CCSDS, EN, ANSI, …) | `ref`, `locator` |
+| `specification` | A published vendor or alliance spec, application note or datasheet (LoRa Alliance, Semtech, TI, …) | `ref`, `locator` |
+| `paper` | A peer-reviewed or preprint paper | `ref` (DOI or arXiv id) |
+| `reverse-engineering` | A published write-up of a protocol someone decoded (blog, talk, notes) | `ref` (URL) |
+| `wiki` | A community wiki entry (sigidwiki, …) | `ref` (URL), `licence` |
+| `decoder-source` | **Read from a decoder's own repository**: its code, tests, docs or config | `project`, `artefact` (`code \| tests \| docs \| conf`), `path`, `commit`, `licence`, `licence_read_from` |
+| `measured` | Derived by this system from a capture: a discovered template, or a fixture fit | `job_id` or `fixture` (path + content hash) |
+| `user` | The user stated it, with no further source | — |
+
+Rules:
+- **Granularity is the field path, not the template.** One template routinely mixes sources: a sync
+  word from a standard, a rate tolerance from a decoder. Every fact-bearing field of a **builtin**
+  template has to be covered by some `facts` entry. The loader refuses an uncovered field
+  (`fact_unsourced`) the same way `Recipe::validate` refuses a dangling port.
+- **Defaults fill themselves in, so the rule costs the user nothing.** A user-authored template's
+  uncovered fields default to `{kind: user}`. A discovered template (§4.3) is stamped
+  `{kind: measured, job_id}` on every field it fixed or narrowed.
+- **`decoder-source` is recorded, not refused.** A template whose parameters came from reading a
+  decoder's source must say so. That is the whole obligation. `licence` is read from the file
+  itself, never from a forge API, because docs/18 §1.5 found GitHub's licence field wrong for
+  several GNU Radio modules. A repository with no licence file records `licence: "none-stated"`.
+  This is bookkeeping in ADR-0010's ledger sense, not a gate (CLAUDE.md).
+- **Prefer the upstream description when one exists.** When a fact is available from both a
+  `standard`/`specification`/`paper` and a `decoder-source`, the template cites the former. A
+  template library lint lists fields sourced *only* from `decoder-source` (`resource_wanted`) so a
+  later pass can re-source them. That list is information, not a failure.
+- **No prose crosses.** `name` and `description` are written fresh. A wiki's or decoder's text is
+  never pasted in, because text is expression even when the numbers beside it are facts.
+
+### 14.3 The line: fact versus implementation, per §4.1 field
+
+A **fact** is a statement about the air interface or the message format that two independent,
+interoperable implementations must agree on. If a transmitter could change it and still be heard by
+every existing receiver, it is not a fact about the protocol. **Implementation** is everything a
+receiver's author chose in order to receive well.
+
+| §4.1 field | Fact side | Implementation side | The awkward middle and its rule |
+|---|---|---|---|
+| `recipe` / `skeleton` | The protocol's **layering**: line code (NRZ, NRZI, Manchester, PWM, PPM), whether whitening is applied, where the check sits | Any other decoder's flowgraph or file decomposition. A skeleton is **always** expressed in ADR-0011's own blocks, never transcribed from someone's graph | A layer the catalogue lacks (`css_demod` for LoRa, docs/18 §7 rank 9) makes the template **inert** (§14.6), not a reason to copy a block |
+| Node params the template fixes | Protocol parameters: `sync_word`, CRC RevEng model (`width, poly, init, refin, refout, xorout`), BCH code, whitening polynomial and seed, deviation, bit order, frame length | Loop bandwidths, filter taps and lengths, AGC constants, slicer thresholds and hysteresis, lock/unlock run lengths, timeouts, retry logic, any decoder state machine | **The schema enforces this line.** ADR-0011's `ParamSchema` gains `class: protocol \| tuning` (§14.8). A template may fix, range or seed only `protocol` params. `tuning` params keep the block's own defaults and are refined from the processed output (§2.3, T-070). No field exists to carry them, so a template *cannot* import them |
+| `free[].domain` | An `enum` of values the spec lists (POCSAG 512/1200/2400) | — | **Ranges are the middle.** See the tolerance rule below |
+| `priors.families`, `bursty` | Modulation family and duty cycle as the protocol defines them | — | — |
+| `priors.symbol_rate_bd` | The nominal rate | — | The width of the range is a tolerance: tolerance rule |
+| `priors.bandwidth_hz` | An emission mask or channel spacing the spec states | A decoder's channel-filter width | With no mask in the spec, the range is `basis: measured` from a fixture, or derived from the rate and family by `hk-synth` |
+| `priors.bands_hz` | Allocations and spec channel plans | — | Rank only, for an emitter already detected there (§4.1). A wrong band costs nothing but order |
+| `evidence_targets` | Sync length in bits; check kind and width | A decoder's "accept after N matches" | — |
+| `plausibility` | Field widths and enumerations from the message format (a 21-bit RIC ranges over 0…2²¹−1) | A decoder's sanity filters ("drop temperatures above 70 °C") | A tighter "values actually seen" range counts as `basis: measured` and needs a fixture or job reference. A decoder's filter never passes as a spec fact |
+| `output_policy` | — | — | Project policy, never sourced externally, so it carries no `facts` entry |
+
+**The tolerance rule (the awkward middle).** Someone chose a symbol-rate window of ±3 %. That
+number is not a spec constant, but it is not an implementation secret either, because it encodes
+what that author saw real devices do. The rule treats it as **`basis: tolerance`**, which may come
+from any recorded source, with three properties that make its origin low-stakes:
+1. **A range only changes search order and budget, never a claim.** A range that is too wide costs
+   evaluations. A range that is too narrow costs a miss, and then the open-search floor (§4.2, ≥ 20 %
+   of budget) still runs. Continuous-parameter ranges do not enter the confirm gate at all: ADR-0022
+   §2.1 pays only analytic check bits, net of `L_check`.
+2. **The engine never narrows below measurement.** The effective domain is
+   `range ∪ (estimate ± k·σ_estimate)`, so a blind estimate outside a template's tolerance is still
+   searched. The template ranks it lower (a prior), and nothing vetoes it (ADR-0016's rule).
+3. **With a spec tolerance, use it. With none, derive the tolerance, don't copy it.** Prefer the
+   spec's own figure (`basis: spec`). Otherwise use `hk-synth`'s default widening by timing class,
+   `timing: crystal | rc | unknown`, which the template declares as a fact about the transmitter
+   (for example ±2 % / ±25 % / ±50 % — **initial guesses, unverified**). A copied decoder window is
+   permitted, recorded as `basis: tolerance, source: decoder-source`, and listed by the
+   `resource_wanted` lint.
+
+### 14.4 What a template can and cannot do, and the one exposure bulk import creates
+
+These safeguards make it safe to import a template from a reference decoder, which would not be
+true of importing the decoder itself. Each restates an existing rule:
+- **Priors order the search. They NEVER rank a result and NEVER confirm one** (§1.3, §4.1).
+  `prior_bits` is kept separate from `evidence_bits` and is reported but never used as a key.
+- **A template can never confirm a signal on its own** (§4.1). Confirmation needs measured hold-out
+  frames that pass a check, under ADR-0022's inequality.
+- **`bands_hz` only raises rank for an emitter already detected there** (§4.1). A template never
+  tunes, never creates a candidate and never pre-populates the inventory (CLAUDE.md, workflow #4).
+- **A template cannot starve unknowns**: open-search floor and defer-don't-delete (§4.2).
+- **A validated template earns nothing extra** (§14.6). Validation is quality control on the
+  library. It is never a bit source.
+
+A template imported from a reference decoder therefore cannot make the system claim something it
+did not measure. The worst case for a wrong template is wasted budget, or a decode label that has
+to pass a real check on real frames.
+
+**The exposure, stated rather than hidden.** ADR-0022 §5.1 sets `L_check = 0` for a template-fixed
+check "because zero hypotheses were tried". That holds when **one** template is tried against a
+window. It stops holding when a library of hundreds is tried. If a job tries *N* template-fixed
+checks against the same window, that is *N* chances for noise to pass one of them, and ADR-0022
+§2.3's own attribution test ("the trials that could have produced *this* fit") counts every one of
+them. ADR-0022 §4.2 already applies this to one template tried at several framings. The same logic
+applies across templates:
+
+> **`L_check` for a template-fixed check is `log2(number of distinct template-fixed check
+> hypotheses evaluated against that window's frames at the check stage in this job)`.** It is zero
+> only when a single template's check was tried.
+
+Worked case: 380 ISM templates, each with a CRC-8, all tried on one burst, give
+`L_check = log2 380 ≈ 8.6 bits`, which is more than the check's own 8. ADR-0022's
+`min_differences = ceil((24 + 8.6) / 8) = 5` differing frames are then needed instead of 3. With a
+confident classification, priors put a handful of templates first, the job stops early, and the
+charge is small. The charge counts **what was tried, not the library's size**. So a large library
+costs confirmations only when the search actually had to spread across it, which is correct.
+Without this rule, bulk import would be the one way a template *could* help cause a false confirm.
+This delta belongs to ADR-0022 and is handed to **T-575**, which applies that ADR (§14.8).
+
+### 14.5 The bulk path: hand-authored, spec-first, one skeleton at a time
+
+There are three candidate paths. The position is: **(a) and (c) yes; (b) no mechanical generator
+from any decoder corpus; one narrow format importer.**
+
+**(a) Hand-authored, batched by skeleton.** One skeleton (`generic-ook-pwm`,
+`generic-ook-manchester`, `generic-fsk-framed`) carries many parameter sets. Authoring a template is
+then filling in about a dozen facts with sources, in the order docs/18 §3 ranks use cases. This is
+the primary path. rtl_433's device list is used as an **index** of which protocols exist, in which
+bands and under which modulation class, so authoring can be prioritised. The list itself is not
+copied into the repo as a table.
+
+**(b) Generated from a structured corpus: no.** The reason is not that templates are a licence
+problem, because they are data. The reasons are these:
+- **rtl_433's facts live in code, not data.** Its ~380 decoders are C (`src/devices/*.c`). The
+  `r_device` initialisers hold pulse timings, but the sync match, CRC call and field extraction are
+  inside decode functions. A generator would be a C parser for arbitrary decode functions: brittle,
+  and most of its output would fall on the implementation side of §14.3 (`gap_limit`,
+  `reset_limit`, and the decoder's own acceptance logic).
+- **A generator ships hundreds of unvalidated claims in one commit.** Each one costs budget and
+  §14.4 multiplicity. The library's value grows with *validated* templates, not with its size
+  (§14.6).
+
+**The one structured translator worth building is for RESEARCH-002.** It is an importer for the
+**rtl_433 flex (`-X`) spec language**, a small declarative format (`modulation`, `short`, `long`,
+`gap`, `reset`, `preamble`/`match`, `bits`, `repeats`). It maps directly onto the generic OOK
+skeletons and applies §14.3 as it translates:
+- `modulation` becomes the skeleton;
+- `short` and `long` become `priors` with `basis: measured` (someone measured those pulses) and a
+  derived tolerance;
+- `preamble`/`match` becomes `evidence_targets.S4`;
+- `gap` and `reset` are **dropped**, because they are receiver limits and the burst detector
+  (T-075) derives them.
+
+A spec string the user wrote is `kind: user`. That is RESEARCH-002 as the product sees it: describe
+a never-seen sensor's timing and get a searchable template, not a hard-wired decoder. One of
+rtl_433's shipped `conf/*.conf` files can go through the same importer **one file at a time, on
+request**, and is stamped `decoder-source` (artefact `conf`, commit, `GPL-2.0-or-later`)
+automatically.
+
+**(c) Grown by the user through save-as-template (§4.3).** This path is already safe:
+`kind: discovered` inherits the discovering search's look-elsewhere (ADR-0022 §5.1), and every field
+it fixes is stamped `measured`.
+
+**Corpus licences (ADR-0010's ledger rule).** A ledger row is added by the ticket that first *uses*
+a corpus as a fact source, like the gpsjam data-source row. None is adopted by this amendment.
+
+| Corpus | Licence | Status | Proposed use |
+|---|---|---|---|
+| rtl_433 (code, `conf/`, docs) | GPL-2.0-or-later | In the ADR-0010 ledger (subprocess plugin row) | Index for prioritising; per-field `decoder-source`; per-file flex import. **No bulk generator.** The plugin stays the long-tail escape |
+| rtl_433_tests (sample `.cu8` captures) | **Unverified**: read the repo's licence file before use | Not adopted | Candidate **validation fixtures** (§14.6). Nothing enters `fixtures/` until the licence is read from the file |
+| sigidwiki.com | **Unverified**: read the site's content licence and terms before use | Not adopted | Facts only (frequency, mode, bandwidth, baud), at S0–S2 depth. Better suited to the explanation/recommendation database than to decode templates, because it rarely carries field maps or checks. No scraping; no prose |
+| CRC RevEng catalogue | Parameter facts; already used (T-013 ledger row: "parameters only, no code copied") | Precedent | The `crc` model and its `check` value (§14.6) |
+| rtlamr (SIGNAL-049) | AGPL-3.0 (**verify** from the file) | Not adopted | `decoder-source` (artefact `docs`) for the SCM/IDM formats, pending a better public description |
+| gr-lora_sdr (SIGNAL-053) | GPL-3.0 | Not used | Not needed: the LoRa PHY is described in a paper and vendor application notes (§14.7) |
+| Standards bodies (ITU-R, ETSI, CCSDS; IEEE where accessible) | Each document's own terms; facts only | — | The preferred `standard` source |
+
+### 14.6 The test: templates are claims about the world and can be wrong
+
+The design already refuses to trust a template: nothing a template says ranks or confirms anything
+(§14.4). Validation is therefore **quality control on the library, never trust**. A template's
+parameters are a claim, and there are four levels of checking them, which report honestly what
+each one proves:
+
+```jsonc
+"validation": [
+  { "level": "consistency" },                                              // loader, always
+  { "level": "synthetic", "generator": "hkpy.synth:<name>", "commit": "…" },
+  { "level": "fixture", "fixture": "fixtures/…sigmf-meta", "sha256": "…", "use_case": "SIGNAL-049",
+    "result": { "rank": 1, "stage": "S5", "differences": 7 } },
+  { "level": "field", "job_id": "…", "emitter_id": "…" } ]
+```
+
+1. **`consistency`: every load, free.** The template has to be internally coherent. The CRC model
+   includes the RevEng `check` value (the CRC of `"123456789"`), and the loader verifies that
+   `hk_estimate::framing::crc` reproduces it, which catches a mistyped polynomial, init or reflect
+   flag at load. Sync length matches `evidence_targets.S4.sync_bits`. Field-map widths sum to the
+   frame length. Every `free` path names a `protocol`-class param (§14.3). Every fact field is
+   sourced (§14.2). Failure is a load error for builtins and a validation error for user templates.
+2. **`synthetic`: proves expressibility, not truth.** A synthetic generator built from the template's
+   own facts shows that ADR-0011's blocks can express and decode the signal. **It is circular about
+   the facts**, because a wrong sync word produces a synthetic with the same wrong sync word, so it
+   never counts as evidence that the facts are true.
+3. **`fixture`: the real test.** A real capture (own SigMF, or a licence-checked external one) is
+   run **blind through the mock SDR** as a §7 evaluation, with templates on and templates off
+   against a hidden truth list. It asserts the template's hypothesis is the rank-1 solved result and
+   the decode passes its check. Only this level, or `field`, validates facts. Builtins with a
+   fixture run in the T3 tier. Use-case IDs key the fixtures, per CLAUDE.md.
+4. **`field`: accrued, never asserted.** A confirmed emitter whose winning pipeline came from this
+   template is recorded by `job_id`/`emitter_id`.
+
+Beyond the four levels:
+- **Unvalidated templates may ship, and are listed as such.** A `consistency`-only builtin is legal.
+  It costs budget and §14.4 multiplicity, which is the real price of an untested claim. A builtin
+  whose skeleton names a block the catalogue lacks is **`inert`**: it loads, validates and is
+  listed, but is never seeded. The analyze trace reports it as ADR-0021's
+  `missing_block` with `suspected_by: template`.
+- **A wrong template surfaces from its record.** ADR-0021's `ruled_out` trace already records
+  "template X tried, deepest stage S2". A lint reports templates that were tried on k or more
+  emitters inside their own priors and never reached S5, as a prompt for review. It never
+  auto-deletes, never demotes, and never changes a prior. Removing or fixing a template is a human
+  act and a new version (§4.1 immutability).
+
+### 14.7 Worked sketches (illustrative; every number below is unverified)
+
+- **RESEARCH-002, a never-seen 433 MHz sensor.** The user pastes
+  `-X "n=probe,m=OOK_PWM,s=500,l=1000,r=4000,bits>=36"`. The importer yields `generic-ook-pwm` with
+  pulse-width priors {500, 1000} µs (`basis: measured`, source `user`), `bits ≥ 36` as a
+  plausibility on frame length, and `r` dropped. There is no check, so the template can order the
+  search but can never contribute analytic check bits. Confirmation, if it ever comes, needs a check
+  the search *finds*, charged by ADR-0022 §5.1. That is the honest outcome for a sensor nobody has
+  specified.
+- **SIGNAL-049, ERT SCM.** Manchester OOK, a fixed preamble and a 16-bit BCH-style check. The best
+  available public description is rtlamr's own protocol notes, so the facts are
+  `decoder-source {project: rtlamr, artefact: docs, licence: AGPL-3.0 (verify)}`, and the
+  `resource_wanted` lint lists them. The template is fully expressible in today's catalogue
+  (Manchester, `sync_search`, `crc`) and needs a `fixture` validation from the user's own meter
+  capture before anyone relies on it.
+- **SIGNAL-053, LoRa.** SF 7–12, BW 125/250/500 kHz, sync word and CRC-16 are facts sourced from
+  `paper` (Tapparel et al., the open LoRa PHY paper) and `specification` (Semtech application notes,
+  the LoRa Alliance LoRaWAN spec for the MAC headers SIGNAL-053 reads: DevAddr, FCnt). The GPLv3
+  `gr-lora_sdr` is not needed as a source. The skeleton needs `css_demod` and `descramble`
+  (docs/18 §7 ranks 9 and 2), so the template ships `inert` until those blocks land. Once they do,
+  it becomes live with no template change.
+
+### 14.8 Deltas
+
+- **§4.1 schema:** `provenance.facts[]` (§14.2), `validation[]` (§14.6), and a `timing` class for
+  the tolerance rule (§14.3). The `inert` state is derived from the catalogue, not stored.
+  `hackriff.template` stays `schema_version: 1` because nothing has been implemented yet. If
+  implementation lands first, these fields are `2`.
+- **§4.3 save-as-template:** stamps `facts: [{fields: <all fixed/narrowed>, basis: measured,
+  source: {kind: measured, job_id}}]`. The ADR-0022 §5.1 inherited-L field is unchanged.
+- **ADR-0011 `ParamSchema`:** gains `class: protocol | tuning`. `tuning` params are neither
+  template-fixable nor template-seedable. This is a descriptor contract change, listed here for
+  whichever ticket next amends ADR-0011 (docs/18 §8's T-606 carries catalogue deltas already), and
+  **not applied by this amendment**.
+- **ADR-0022 §5.1:** `L_check` for template-fixed checks counts the template-fixed check hypotheses
+  tried against the window (§14.4). **For T-575**, which applies ADR-0022. It is not applied here.
+- **ADR-0010 ledger:** a corpus row when a corpus is first used as a fact source (§14.5).
+- **Unchanged:** §§1–3, §§5–13, and ADR-0022's confirm inequality apart from the `L_check`
+  counting above.
+
+*Unverified in this amendment: the tolerance-class widenings (±2/25/50 %); the licences of
+rtl_433_tests, sigidwiki and rtlamr (to be read from their files); the §14.7 protocol constants;
+the rtl_433 decoder and flex-conf counts; and whether a handful of templates really suffices on a
+well-classified burst for §14.4's charge to stay small. That last point is measured by the templates-on
+runs in §7.*
