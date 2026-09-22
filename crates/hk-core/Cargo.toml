@@ -18,9 +18,12 @@ thiserror.workspace = true
 # T-037a: the live HackRF One source links the system libhackrf (BSD-3-Clause; ADR-0010). Off by
 # default so CI builds and tests need no libhackrf.
 hackrf = ["dep:pkg-config"]
+# T-514: the live RTL-SDR source links the system librtlsdr (GPL-2.0-or-later; ADR-0010 ledger).
+# Off by default so CI builds and tests need no librtlsdr.
+rtlsdr = ["dep:pkg-config"]
 
 [build-dependencies]
-# T-037a: finds libhackrf for the `hackrf` feature (ADR-0010 ledger).
+# T-037a/T-514: finds libhackrf / librtlsdr for the `hackrf` and `rtlsdr` features (ADR-0010).
 pkg-config = { version = "0.3", optional = true }
 
 [dev-dependencies]
