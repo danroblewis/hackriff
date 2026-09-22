@@ -665,7 +665,6 @@ tasks:
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
     status: done
     commit: "51c23f1 (merged 86b39a5)"
-    note: "Structured vs NoiseLike via inter-bin power-change anticorrelation (bins 3-8 apart), SK upper tol 1.35, median excess; confusion matrix noise jammers 12/12 NoiseLike, OFDM 18/18 Structured (6/10/15 dB). Per-bin extent refinement: worst 0.3 % of bandwidth (800 kHz jammer was 375 kHz). Withheld emitters accept/show only TAG_VOCABULARY tags (class-dependent refusal, no oracle). Post-merge legal review: MERGE-OK (no leak); hardening nits -> T-040."
     followups:
       - "wideband single-carrier PSK/QAM and dense-QAM OFDM can still read NoiseLike; slow noise-FM (20 kHz mod) reads Structured at >=10 dB; needs IQ-level (cyclostationary/CP) evidence on the dwell path"
       - "anticorrelation feature tuned on Hann window at default FFT size; weakens when FFT >> symbol length (16k bins)"
@@ -10275,39 +10274,6 @@ tasks:
       precisely the shape of self-weakening T-396 wrote the fail-closed rule to prevent.
     commit: 6df409c
     result: |
-      DONE, and the reframe is the answer: IT IS NOT "IGNORE SOME FILES", IT IS "CLASSIFY THE RIGHT
-      DIFF". Two subjects, two sources - `just gate` (unchanged) for an AGENT checking its own work,
-      where untracked counts because a file nobody has git-added yet is still about to be committed;
-      and the new `just gate-merge` for the COORDINATOR inside git merge --no-ff --no-commit, where GIT
-      ITSELF built the index as the merge result versus HEAD and `git commit` commits the index. THE
-      INDEX IS THE CHANGE BEING CERTIFIED.
-      THE WEAKENING ARGUMENT, since this IS a narrowing: it classifies a strict subset and classify()
-      is monotone (any full path forces full), so a smaller input can only be cheaper or equal. Three
-      things make it sound:
-        (1) for the merge subject the DEFAULT is the wrong question - untracked files are not in the
-            index and cannot reach main through that merge;
-        (2) THE COUNTEREXAMPLE DOES NOT SURVIVE CONTACT - an untracked fixture can change what a suite
-            sees, but classifying untracked paths as full never protected against that, because the
-            suites read the WORKING TREE. Fail-closed on untracked buys COST, NOT SAFETY, for this
-            subject; contamination is a property of where suites run, not of how the diff is classified;
-        (3) it is GUARDED - it REQUIRES MERGE_HEAD (or SQUASH_MSG) or forces the full gate, which a
-            blanket --staged would not do and is exactly why the recipe is --merge; and every
-            uncommitted path it did not classify is PRINTED with the class it would have had. No ignore
-            list, no exempt path: fixtures/ or tools/ STAGED INTO a merge is still full.
-      MISUSE STATED: gate-merge inside a real merge while the tree holds an unstaged edit to something
-      the suites read means that path is classified out - printed in the `outside` list every time. The
-      residual risk is delayed discovery of a problem existing only in the coordinator's tree, never a
-      change reaching main unverified.
-      DELIBERATELY NOT DONE: generalising T-437's "prove this path inert". A proof argued in a merge
-      commit is categorically different from a list the classifier consults silently, and generalising
-      it would require the classifier to model what each suite reads - itself a weakening surface.
-      Noted in docs/10 as earning its own ticket if it recurs.
-      FIRST PAYOFF, same hour: T-440's merge classified `ui` -> just test-ui instead of the full
-      ~25-minute gate it would have drawn purely because of untracked tools/.
-      Verified live from inside its own merge; it classified ITS OWN diff as full, because it touches
-      justfile and the classifier's source.
-    commit: 6df409c
-    result: |
       DONE. THE REFRAME IS THE ANSWER: it is not "ignore some files", it is "CLASSIFY THE RIGHT DIFF".
       `just gate` (unchanged) asks "what is in my tree that isn't on main?" for an AGENT, where
       untracked counts because a file nobody has git-added is still about to be committed. New
@@ -11524,43 +11490,6 @@ tasks:
       T-437's spike is exploring exactly this. Read its findings before starting - the spike's job
       is to tell you what does NOT work, and a spike that reports only success has de-risked
       nothing.
-    commit: 55fb808
-    result: |
-      DONE - the renderer core, ui/ only, ~2000 lines, no crates/.
-      NOT-RESIDENT IS DISTINGUISHED FROM UNOBSERVED STRUCTURALLY, in three places:
-        1. GREY HAS EXACTLY ONE EXPRESSION IN THE SHADER - cellrule.ts holds CELL_MARKS and GENERATES
-           CELL_RULE_GLSL from it (T-397's pattern applied to the claim that matters most). Grey appears
-           only on the s == CELL.UNOBSERVED branch, from the route's coverage plane. A test counts the
-           literal's occurrences in the fragment source actually handed to shaderSource: exactly one.
-        2. NOT-RESIDENT IS A DIFFERENT TYPE - acquire returns Residency (resident | pending), never a
-           CellState. A miss draws as a resident coarser ancestor upscaled AND MARKED, or a PENDING
-           flat. THE PANE'S GROUND CLEARS TO PENDING, NOT GREY: the spike cleared to grey, and THAT ONE
-           LINE IS F3.
-        3. An unreadable response is not a coverage answer - decodeTile throws rather than decoding to
-           unobserved, so the place stays pending, which is true.
-      PROVED, not asserted: the same nine-tile working set over nine frames at 96 MB and at ONE tile.
-      Evictions 0 -> many, pending+fallbacks rises, grey draw-uniforms and clear-colours stay ZERO in
-      both. The revisit pattern matters - panning somewhere new every frame makes both runs miss
-      equally and proves nothing.
-      FOUR states kept distinct: observed, unobserved (grey), no_level (observed but max_db null), and
-      T-423's unknown.
-      BUDGET IS BYTES, NOT TILES, for a new reason: `cells` is addressable 8..256, so a tile count
-      would be off by up to 1024x between tiles. §5.5's count was only honest while §6 fixed the tile
-      size, and T-438's route reopened that. 192 KB/tile, 96 MB = 512 tiles, chosen so 80 MB of pins
-      never has to fight the budget. Worst case at 48 panes: 290 tiles / 54.4 MB, 427 / 80.1 MB with
-      the parent pin - agreeing with the spike's 208 keys / 220 resident.
-      PREFETCH AGAINST 11.4 ms/TILE: LIFO (the spike's was FIFO despite §5.5 requiring LIFO),
-      least-wanted-first emission, viewport-change cancellation, one request per key however many panes
-      want it, and the 503 as a FIRST-CLASS ANSWER (lower the cap, back off, re-queue; busyRefusals not
-      failures). Coarse-first fill: the parent pin is pushed after the pane's tiles so LIFO fetches it
-      first, and one parent covers four children's worth of screen.
-      WHAT DID NOT SURVIVE THE SPIKE - the value of having run one: the grey clear (F3 in one line);
-      FIFO where §5.5 says LIFO; no 503 path at all; a four-part key that is really seven; a single
-      RGB8 texture packing value+duty+tier per cell, quantising the measurement against an unnamed
-      scale and making tier a per-cell byte when it is per-TILE on the wire; and a ramp that was "an
-      approximation of CMAP_STOPS - the exact stops do not matter to the spike". They matter here.
-      FOR T-442/T-443: §8.5a's "state the level per pane" is served by PaneReport {levelF, levelT,
-      tiles, fallbacks, pending} returned from every render() - the seam exists, nothing draws it yet.
     commit: 55fb808
     result: |
       DONE - renderer core, ui/ only, ~2000 lines, no crates/.
@@ -15152,7 +15081,8 @@ tasks:
   - id: T-501
     milestone: MLIVE
     title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
-    status: todo
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15240,10 +15170,20 @@ tasks:
       has NO RECORDED SECOND OBSERVATION behind it. The tile explosion is real and independently
       fatal regardless, but the attribution chain is worth knowing.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 on `task-t505-v2`, on top of T-505. canvas_fidelity 5/5 with
+      T-483's four #[ignore]s deleted; the floor is asserted field for field against real pyramids
+      rather than written down. THE REBASE FOUND A COLLISION THE ORIGINAL COULD NOT HAVE: T-489
+      (landed after this branch was cut) skips the display FFT while nothing is subscribed, on the
+      ground that no STORED product consumes those rows - which this ticket falsifies, because the
+      canvas's finest tier IS that row. Unfixed it leaves a permanent hole in recorded history for
+      every interval nobody watched, indistinguishable from grey. `Output::watched` now counts the
+      view lattice as a watcher, so T-489's saving survives only for a run with no view lattice.
+      That is a REAL CPU COST (T-489 measured ~9 %) and it is accepted here deliberately.
   - id: T-505
     milestone: MLIVE
     title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
-    status: in-progress
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15296,6 +15236,11 @@ tasks:
       is a gap in the harness, not only in this pipeline, and it generalises: several e2e
       assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, together with T-501 and T-532 (they share
+      their conflict files, so one resolution). `scheme=overview` and `tierFor` land as written;
+      the client picks by VIEWPORT_TILE_BUDGET, each pane reports its tier, and on the shipped
+      floor nothing moves. The e2e failure both branches died on is GONE on current main and did
+      not need resolving.
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
@@ -16612,7 +16557,108 @@ tasks:
   - id: T-546
     milestone: MAUTO
     title: "BART 851 MHz, phase 3: make the blind auto-decode tests pass - the first real MAUTO end-to-end"
-    status: todo
+    result: |
+      DONE 2026-09-21 on branch task-t546. ALL SEVEN of T-545's acceptance tests pass and the five
+      `#[ignore]` lines are gone, which was the stated definition of done. Baseline re-measured
+      first: 2 passed, 5 failed, exactly as briefed.
+
+      WHAT WAS BUILT, one piece per red message.
+
+      (F) THE CLOCK ERROR, and it is the one to believe. `hk_detect::trunk::raster::fit_grid_offset`
+      fits the receiver's own offset from a channel grid as the POWER-WEIGHTED CIRCULAR MEAN of the
+      occupied bins modulo the raster - one extra FFT pass per hunt, not one per channel, because
+      every emission in a capture shares the same receiver offset and so reinforces one estimate.
+      The trunking hunt re-origins its grid on the fit (occupancy bins, channel centres and the DDC
+      offset all move together) and records it as `ReceiverFit {grid_hz, offset_hz, concentration,
+      ppm}` on the emitter's analysis: PROVENANCE ABOUT THE RADIO, NOT ABOUT THE SIGNAL. Below
+      `MIN_GRID_CONCENTRATION` (0.25, derived from the geometry of a 12.5 kHz channel's occupancy,
+      not read off a run) the answer is `None` and the grid is left uncorrected - a hint that does
+      not hold up buys nothing. At the measured -9.6 ppm the control channel is now found; test F
+      went green first, before anything else was built.
+
+      (B) PARAMETERS. `crates/hk-demod/src/fsk/structure.rs` is a NEW blind measurement, separate
+      from the demodulator on purpose: `C4fmSymbols::rate_bd` is the rate the demodulator was TOLD,
+      so it is not an input to `EstimatedParams`. It measures (1) the symbol rate as a
+      cyclostationary clock line - the squared first difference of the discriminator is a pulse
+      train at the baud rate - parabolically interpolated and gated on `MIN_CLOCK_BITS` over the
+      band median; (2) the level count; (3) the outer deviation. On the fixture, with no expected
+      value supplied anywhere: 4799.8 Bd (a priori tolerance 4800 +/- 48) and 1709 Hz (1800 +/- 360),
+      `mod_order: 4`, `modulation: "c4fm"`.
+
+      THE LEVEL TEST IS THE PART THAT TOOK THE WORK, and the first two attempts were wrong in a way
+      worth recording. `inner_fraction` alone cannot separate four levels from a CONTINUOUS-valued
+      modulation: both put ~50 % of samples on the inner pair (measured 0.49 vs 0.52). A threshold
+      on the mean distance-to-nearest-level cannot either, because a real pulse-shaped C4FM channel
+      has a half-open eye scoring 0.126 against a continuous spread's 1/6 = 0.167 - and setting a
+      constant between those two would have been reading a threshold off the fixture, which the
+      suite explicitly forbids. The statistic that works asks about the distribution's SHAPE rather
+      than its width: three equal, adjacent windows of width 2/9 over normalised |v|, centred on the
+      inner level, the midpoint and the outer level (they tile [2/9, 10/9] exactly, so no constant
+      chooses them), and the midpoint window's share against the modes'. `MAX_VALLEY_RATIO = 0.5` is
+      the honest halfway point. Measured on the two populations in a unit test that PRINTS them: a
+      clean four-level alphabet 0.00, a clocked continuous-valued modulation at the same rate and
+      deviation 0.96.
+
+      `Levels::Indeterminate` is a variant, not a fallback to 2, and it survives into the data model:
+      an emission whose alphabet cannot be measured gets NO `estimated_params` rather than plausible
+      ones, and the analysis caps at `framed` and says why.
+
+      ALSO A CLOSED LOOP, because it was needed: the caller's channel is deliberately wider than the
+      modulation (the trunking DDC passes 2x the raster so the demodulator can apply its own
+      selectivity), so the measurement re-filters at the Carson bandwidth it just measured - outer
+      deviation + half a symbol rate - and re-reads the levels. Without the first filter the
+      neighbours 12.5 kHz away contributed their own clock line and the measurement refused outright.
+
+      (C) AUTO-SELECTION. `crates/hk-pipeline/src/synth.rs` + `hk_model::repo::synthesis`: the
+      chosen pipeline, its per-stage evidence and an ADR-0021 trace are persisted as an
+      `emitter_synthesis` row (ADR-0015 section 5.4, append-only like `emitter_refined_tuning`), and
+      `POST /api/analyze {emitter_id}` serves it - 200 instead of 501. THE TRACE IS THE POINT and it
+      keeps ADR-0021's load-bearing distinction STRUCTURAL: `tried` is served, never inferred, and
+      `EmitterSynthesis::validate` REFUSES a row where `measured` and `outcome` disagree. So "why not
+      DMR" (tried: 0 frame syncs of the 0 blocks it checked) and "why not PSK" (`unsupported`: no
+      `psk_demod` block exists in this build, ADR-0015 section 1.1's own catalogue gap) read as the
+      different answers they are. Every framing in `CC_FRAMINGS` is re-scanned and recorded, winner
+      and losers alike.
+
+      `not-searched` is NOT `unknown`: an emitter no analysis has run on answers 200 with
+      `resolution.kind: "not-searched"` and a null pipeline. That is the decode-side statement of the
+      canvas's grey rule and it is asserted in `api_contract.rs` against a real, un-analysed
+      (analogue) emitter, not a fabricated one. `docs/api.md`'s Analyze section is rewritten with the
+      full vocabulary.
+
+      (D) CONFIRM BY DECODING - the heart of the ticket. The trunking chain now files its decode
+      against the INVENTORY EMITTER at the same frequency: a Demodulation carrying the measured
+      parameters, the synthesis row, and `family::record_decoder_evidence`, then
+      `Inventory::chain_emitter` to re-rank. ONE FINDING WORTH FLAGGING: the control channel confirms
+      inside the FIRST window, while the detector is still accumulating a track, so
+      `emitter_for_channel` routinely finds nothing - the first implementation dropped the strongest
+      evidence in the run on the floor and D stayed red. `synth::attach` therefore RECORDS THE
+      SIGHTING when detection has not offered a row yet, exactly as the analogue and FSK chain
+      writers do, and the repository's clustering resolves it to the detector's row.
+
+      (E2) EXPLANATION QUALITY. `p25-tsbk` / `dmr-csbk` / `nxdn-cac` map to `public-safety` at 0.97
+      in `hk_pipeline::family`, so the ranking rests on a CRC-valid decode of a trunked control
+      channel - which nothing else transmits - instead of on the allocation row that the analogue
+      neighbours and an empty channel would get equally.
+
+      THE NON-CIRCULAR CLAIM STILL HOLDS AND WAS NOT MADE VACUOUS. Test D's precondition 3 - grant ->
+      IDEN_UP -> frequency -> RF energy actually radiating there - passes unchanged, and nothing in
+      this diff touches the framing, the CRC variant or the five compliance gaps at
+      `confirm.rs:980-1035`. What went green is the PLUMBING; T-299 stays open and `docs/19` section
+      7.7 now says so in as many words.
+
+      TARGETED TESTS: `acceptance_mauto` 7/7 (was 2/7). hk-demod + hk-detect + hk-model 579/579.
+      hk-pipeline + hk-api and `hk-cli::api_contract` green. `just precheck` clean. ONE LOAD-FLAKE,
+      triaged not papered over: `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_
+      reports_ready_after_its_bounded_wait` failed once under load (33 s) and PASSES ALONE (19 s) -
+      a bounded-wait timing test, unrelated to this diff, for the deflaker.
+
+      FOLLOW-UP FILED, surfaced and deliberately not chased: T-628 - the fitted offset is known only
+      MODULO the raster (+4300 Hz and -8200 Hz name the same grid), which re-origins the grid but
+      cannot reach an ABSOLUTE frequency, so grant FOLLOWING is skipped while the receiver is
+      measurably off-grid rather than down-converting the channel next door and reporting "not
+      radiating". Recorded in `docs/19` section 7.6b.
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16826,7 +16872,7 @@ tasks:
   - id: T-563
     milestone: M2-hardening
     title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16909,7 +16955,7 @@ tasks:
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
-    status: review
+    status: done
     branch: task-t564
     priority: high
     parallel_group: M3A
@@ -17113,7 +17159,7 @@ tasks:
   - id: T-547
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: does the evidence-bits ladder survive 8-bit quantisation and gain state? Measure the calibrated nulls before any block implements evidence()'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -17164,6 +17210,20 @@ tasks:
       Nothing here needs hk-synth to exist. The metrics are already computed by M1 blocks; this
       is a measurement harness over them plus a write-up.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      LANDED 2026-09-21 on task-t547: docs/21-evidence-bits-under-quantisation.md, plus the
+      harness crates/hk-pipeline/examples/t547_ladder.rs and pointers from ADR-0015 section 2.2
+      and ADR-0022 section 9. Verdict CONDITIONAL. Conditioning key is ADC FILL LEVEL (sigma in
+      LSB / Provenance.quantisation_limited), not gain and not clip fraction: a control that
+      applies 51 dB of gain but skips the ADC reproduces the float table to 0.02 bits on every
+      metric, and 28% clipping costs <= 0.34 bits while sigma = 0.21 LSB costs 1.0-1.6 bits and
+      breaks eye_open outright. delta = 1.8 bits at a claimed 6 bits, 3.3 at 8; whether the law
+      is additive or saturating is NOT resolvable at n = 820 and is said so. Real captures add a
+      further ~2 bits of spread that cannot be attributed without T-375's terminator capture.
+      Three findings outside the receiver question: snr and evm as FskDemod computes them are one
+      statistic (rho = -0.989) so ADR-0015 section 1.3's sum double-counts; eye_open's quantile
+      table is non-invertible at 4 and 6 bits; a table of N windows cannot express more than
+      log2 N bits, which prices the 12-bit caps. Follow-ups T-616..T-619.
+
   - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
@@ -18852,32 +18912,12 @@ tasks:
       cell against the on-demand control across all 16 nodes and it agrees exactly. Assert
       residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
       already does, never with a wall-clock budget.
-    depends_on: [T-571, T-572]
-    use_cases: [AWARE-011]
-    acceptance: |
-      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
-      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
-      first "just moves contention". This ticket exists so the dependency is recorded, not so it
-      is started now.
-      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
-      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
-      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
-      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
-      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
-      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
-      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
-      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
-      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
-      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
-      requests is vacuous - report what each run actually exercised.
-      Prove the tests go RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
     status: done
-    status: in-progress
+    commit: a5a0bf84
     priority: normal
     parallel_group: OPS
     model: sonnet
@@ -19361,7 +19401,7 @@ tasks:
   - id: T-596
     milestone: MLIVE
     title: With the IQ ring refused, coverage lags the live edge by a whole dwell - 18 s of measured rows read unobserved
-    status: done
+    status: todo
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -19387,110 +19427,66 @@ tasks:
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     result: |
-      DONE (task-t596). The mark for a not-yet-sealed row is NOT a new one: it is `observed`, with
-      T-595's `Analysis` axis unchanged, and the DC notch inside it still `excluded`. The samples
-      are sampled and the analysis has run over the rows that exist; only the bookkeeping is
-      outstanding, so a cell must not change colour when the seal catches up to samples that never
-      changed. Coverage stays TWO variants, exactly as T-595 left it. What is new is a third
-      SOURCE, so the answer says which evidence carried the live edge.
+      WORKED on task-t596, in two passes; the first pass failed the merge gate and was pulled.
+      ROOT CAUSE: a record reaches the observation log only when a dwell SEALS - on a retune or
+      after `INTERACTIVE_RECORD_MAX_NS` (60 s) - so between a retune and the seal the log holds no
+      evidence for the band the radio is sitting on and measuring. The ring journal normally covers
+      that gap (a segment per provenance change); with the ring REFUSED nothing does.
+      THE MARK IS NOT A NEW ONE: it is `observed`, with T-595's `Analysis` axis unchanged and the DC
+      notch inside it still `excluded`. The samples are sampled and the analysis has run over the
+      rows that exist; only the bookkeeping is outstanding, so a cell must not change colour when
+      the seal catches up to samples that never changed. `Coverage` stays TWO variants. What is new
+      is a third SOURCE, so the answer says which evidence carried the live edge.
       WHERE: `ObservationStore` gains a per-device open-dwell slot on its OWN lock
       (`note_open_dwell` / `clear_open_dwell` / `open_dwells`, hk-store/src/observation/log.rs) -
-      deliberately not `query()`, so a provisional record never reaches the occupancy, POI or
-      report paths that count sealed visits. Both observers publish it every control tick
+      deliberately not `query()`, so a provisional record never reaches the occupancy, POI or report
+      paths that count sealed visits. Both observers publish it every control tick
       (`Observer::publish_open` and `InteractiveObserver::publish_open`, hk-pipeline/src/observe.rs;
       `ObservationRecorder::open_dwell` in hk-core builds the scheduler's), and `close()` drops it
       the instant the sealed record can speak, so no reader ever sees both.
       SERVED: `Evidence::collect` (hk-api/src/coverage.rs) folds the open dwells through the SAME
-      `hk_store::spans_from_records`, so `/api/coverage` and `/api/tiles` (and the coverage
-      short-circuit, which would otherwise answer the live tile as unobserved and never read it)
-      all see it. `sources[]` gains `{"kind":"open-dwell", …}` beside `iq-ring` and
-      `observation-log`; docs/api.md moved with it (T-079). No client change.
-      REFUSED RING: with `iq_buffer: None` the ring source reports `available:false` and the open
-      dwell carries the live edge on its own, so a full disk costs the lossless ring - not the
-      honesty of the canvas.
+      `hk_store::spans_from_records`, so `/api/coverage`, `/api/tiles` and the coverage
+      short-circuit all see it. `sources[]` gains `{"kind":"open-dwell", ...}`; docs/api.md moved
+      with it (T-079). No client change.
+      THE GATE FAILURE, AND THE FIX FOR IT: the first pass folded the open dwell in UNCLIPPED, so a
+      dwell open since before the record horizon painted `observed` over rows the same answer's
+      `horizon` declared `"unknown"` (T-413/T-507) - the response contradicted itself and the fix
+      was pointed backwards into the exact class of lie this ticket exists to remove. It failed
+      `hk-cli::api_contract::unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`
+      (row 4 of 8 `observed` against `horizon.unknown_from_row: 4`). `open_dwell_spans` now takes
+      `Memory::oldest_record` and CLIPS each open dwell to start at it, dropping it entirely when no
+      surviving record anywhere gives the horizon anything to admit. The dwell in flight may extend
+      the answer FORWARD to the live edge and never overrule it backward: it is provisional and
+      unsealed, and "we do not know whether we looked" is not "we did" - the same fail-closed rule
+      as `Coverage::Unobserved` is not quiet. It costs the ticket nothing, because the gap after a
+      retune lies after the last sealed record by construction.
+      ORDER AGAINST T-532 (decided at the merge with main): the open dwell is folded into `spans`
+      BEFORE `newest_record`/`as_of_s` is taken. T-532's rule is that the forward horizon comes from
+      the same spans the planes are rasterised from so summary and body cannot disagree; the open
+      dwell's spans rasterise, so taking the horizon first would publish `as_of_s` at the last SEAL
+      beside a plane claiming `observed` for seconds after it - the split T-532 closed - and a
+      client honouring `as_of_s` would discard exactly the live-edge rows this ticket serves. The
+      asymmetry is the invariant: an unsealed record may move the horizon FORWARD (a statement about
+      this answer's freshness) and may not move `oldest_record` BACKWARD (this server's statement
+      about what it has forgotten).
       COUNTS: `hk-api` tiles::tests::the_live_edge_is_observed_when_the_iq_ring_is_refused_and_the_
       dwell_has_not_sealed - cells holding a `max_db` that read `unobserved`/`unknown` == 0 over
-      2048 measured cells (floor N*N/4 overall AND N*N/8 at the live edge, so it cannot pass on
-      zero of zero). RED with the fold removed: 1024 of 2048 greyed. `hk-pipeline`
-      observe::tests::the_tune_in_flight_is_published_as_an_open_dwell_before_any_record_seals -
-      one open dwell over the 18 s T-588 measured, zero sealed records; RED without `publish_open`
-      (0 open dwells).
-      TARGETED: hk-store 202/202, hk-core 157/157, hk-api 220/220, hk-context 231/231,
-      hk-pipeline 316/316. precheck clean.
-      PRE-EXISTING, NOT MINE: `hk-cli::api_contract::coverage_greys_only_what_was_never_observed_
-      and_names_the_device_that_looked` fails on THIS machine on `main` as well, identically - the
-      ring is refused for lack of disk (4.8 GiB free against the 8 GiB floor) and the test asserts
-      `sources[iq-ring].spans > 0`. It is the ticket's own failure mode pointed at the test rig; it
-      wants a skip-with-a-reason or an assertion on the refused-ring behaviour. Filed as a
-      follow-up for the coordinator, not chased here.
-      BOARD DAMAGE (not mine to fix): this T-596 block is followed by an orphaned `use_cases: []` /
-      `acceptance: |` pair belonging to a ticket whose `- id:` line was lost in an earlier conflict
-      resolution (cf. 3591d2fa, d2c51540). Duplicate keys inside one entry - the tail of the block
-      below `Never just gate.` is not T-596's.
-      GATE FAILURE AND FIX (second pass, 2026-09-21). The first pass FAILED the merge gate on
-      `hk-cli::api_contract::unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`:
-      the open dwell was folded in UNCLIPPED, so a dwell that had been open since before the record
-      horizon painted `observed` over rows the same answer's `horizon` declared `"unknown"`
-      (T-413/T-507) - the response contradicted itself, and the fix was pointed backwards into the
-      exact class of lie the ticket exists to remove. Reproduced on the branch: row 4 of 8 came back
-      `observed` where the contract demands `unknown`, with `horizon.unknown_from_row: 4`.
-      ROOT CAUSE of the live-edge lag itself (unchanged): a record reaches the log only when a dwell
-      SEALS - on a retune or after `INTERACTIVE_RECORD_MAX_NS` (60 s) - so between a retune and the
-      seal the log holds no evidence for the band the radio is sitting on, and with the IQ ring
-      refused nothing else does.
-      THE FIX: `open_dwell_spans` now takes `Memory::oldest_record` and CLIPS each open dwell to
-      start at it (dropping it entirely when there is no surviving record anywhere, because the
-      horizon then admits nothing). The in-flight dwell may extend the answer FORWARD to the live
-      edge and never overrule it backward: it is provisional and unsealed, and *we do not know
-      whether we looked* is not *we did*, the same fail-closed reasoning as `Coverage::Unobserved`
-      is not quiet. It costs the ticket nothing - the gap after a retune lies after the last sealed
-      record by construction. docs/api.md says so.
-      PINNED BY: `hk-api` coverage::tests::the_dwell_in_flight_carries_the_live_edge_and_never_
-      overrules_an_unknown_row - T-507 case 2 (recorded since 7100, only surviving record
-      [7200,7260)) plus a dwell open since 7100 and still running at 7280, over ten 20-s rows:
-      1 `unobserved`, 5 `unknown`, 4 `observed`, the last of which is the live edge the open dwell
-      carries (a control without the open dwell reads `unobserved` there). RED without the clip:
-      5 `unknown` rows become `observed`.
-      SECOND-PASS TARGETED RESULTS: hk-api 220/220 + lib 129/129, hk-cli::api_contract 53/53 (the
-      gate's failure now green), hk-pipeline observe 5/5, hk-store+hk-core 359/359. RED proofs run
-      and reverted for all three new tests.
-    use_cases: []
-    acceptance: |
-      FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
-      probe binary - nothing in `hk-pipeline` ever populates `Fingerprint.structure` (T-233's
-      `envelope_shape`). So entity resolution compares a field that is always absent in production:
-      the comparison runs, contributes nothing, and nobody is told.
-      This is the same class as T-589 (a verifier that cannot run on the class it claims to handle)
-      and as T-321's own defect (an emitter silently not clustering): a stage that is structurally
-      unable to fire looks exactly like a stage that fired and agreed. It is worth measuring how
-      much of entity resolution is in this state rather than fixing only this one field.
-      Decide, with evidence: wire a producer in the pipeline, or remove the field and its comparison
-      and say so. A dead comparison kept "in case" is worse than an absent one, because its presence
-      implies a discrimination that is not happening.
-      If it is wired, note it also gives T-321's analogue-emitter field supply a fifth field, which
-      is margin rather than a reason to touch the floor.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
-      after, and how many comparisons actually used it. A test that passes because the field was
-      absent on both sides is vacuous.
-      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
-      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
-      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
-      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
-      fact, deriving it two different ways.
-      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
-      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
-      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
-      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
-      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
-      constants match - two independent derivations that happen to agree today will diverge again.
-      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
-      measurement exists.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
-      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
-      emitters in the window rather than a sampled one. A test that compares zero emitters is
-      vacuous - report how many it compared.
-      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      2048 measured cells (floors N*N/4 overall AND N*N/8 at the live edge, so it cannot pass on
+      zero of zero). RED with the fold removed: 1024 of 2048 greyed.
+      RED PROOFS, all run and reverted: the tiles count above (1024/2048); `hk-pipeline`
+      observe::tests::the_tune_in_flight_is_published_as_an_open_dwell_before_any_record_seals
+      without `publish_open` (0 open dwells); `hk-api`
+      coverage::tests::the_dwell_in_flight_carries_the_live_edge_and_never_overrules_an_unknown_row
+      without the clip (5 `unknown` rows read `observed`) and with the fold moved after
+      `newest_record` (`as_of_s` 7260 instead of 7280, beside a plane observed through 7280).
+      TARGETED: hk-api 221/221, hk-cli::api_contract 53/53, hk-pipeline observe 5/5,
+      hk-store+hk-core 359/359. precheck clean. Never ran the gate.
+      FOLLOW-UP FILED: T-680 (should the open dwell also SET `oldest_record`).
+      ALSO FOLDED IN: T-640, the same fail-open pointed the other way - `ring_available` measured
+      a HANDLE rather than a ring that can answer, so a refused ring served `"unobserved"` over
+      rows with no tune record. Same branch, same file; see that entry.
+
+
   - id: T-592
     milestone: M2-hardening
     title: /api/events refuses its own documented limit - 501..2000 is a 400
@@ -19537,95 +19533,7 @@ tasks:
       describes. Restored the fix; the test passes.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
       Ran `just precheck hk-api hk-cli` clean.
-    effort: high
-    depends_on: [T-586]
-    use_cases: [AWARE-011]
-    acceptance: |
-      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
-      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
-      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
-      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
-      three different absolute frequencies - which is exactly what the user saw.
-      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
-      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
-      absolute frequencies, each individually indistinguishable from a real emission. Only the
-      cross-centre relationship separates them, which is the whole point of retune diversity.
-      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
-      resolved as LO-relative carries that on the stored row, and the inventory merges the three
-      sightings into one artefact rather than minting three emitters.
-      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
-      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
-      same way a detected end is provisional and revocable. Do not delete the sightings; relate
-      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
-      harmonic is absolute-fixed and still an artefact.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
-      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
-      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
-      `retune_diversity`) reproduces it directly and its assertions already count what matters.
-      Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    notes: |
-      DONE 2026-09-21 (branch task-t598). The verdict is now written down and load-bearing.
-      WHERE IT IS PERSISTED. Two records, both APPEND-ONLY and both revocable.
-      (a) `detection_retune` (migration 0015, hk-model): one row per claim ABOUT a detection -
-      slope (absolute / lo-locked / image), the invariant coordinate `f - slope*f_LO`, the number
-      of distinct LOs that decided it, the spread, and the flag bits the slope implies. It is a
-      separate table because a detection row is IMMUTABLE by trigger (`detection_immutable`): a
-      measurement is what was measured and an interpretation must never rewrite it. The implied
-      suspect flags are applied on the READ path (`Repository::detection` /
-      `detections_in_region` -> `repo::retune::apply_verdicts`), so a reader sees
-      spur_candidate + lo-relative without the measurement being edited, and a revocation takes
-      them away by construction rather than by guessing which bits to unset.
-      (b) `RelationKind::RetuneSiblingOf` on `emitter_relation`: the N sightings of one LO-relative
-      family are RELATED to the one that represents them, so `/api/inventory` (which already hides
-      deferring rows by default) shows ONE artefact. Nothing is deleted: every sighting keeps its
-      id, detections, time extent and history, and is listed with `relations=all`. It is its own
-      kind, not `duplicate-of` / `artifact-of`, because the T-219 overlap resolver CLAIMS AND
-      REVOKES those two over overlapping bands and these sightings do not overlap at all (that is
-      the whole point) - a shared kind would have the two rules revoking each other every pass.
-      Migration 0015 rebuilds `emitter_relation` to widen its kind CHECK (SQLite cannot relax one
-      in place), copying every row, and adds an expression index on the provenance tune centre.
-      REVOCATION. `Repository::resolve_retune` re-derives the verdict from the stored rows and:
-      appends `active = 0` over any standing verdict whose slope changed (then the new claim);
-      revokes the sibling relation of any row the measurement no longer places in a family. The
-      sweep includes rows that merely DEFER TO an examined row even when they are no longer live,
-      so a claim cannot outlive the evidence. A verdict identical to the one standing writes
-      nothing. An `absolute` verdict is recorded and implies zero flag bits: it is the WEAK claim,
-      "not LO-relative", never "real" (a reference harmonic is absolute-fixed and still an
-      artefact).
-      WIRING AND ITS BOUND. `hk_pipeline::inventory::TrackInventory::touch` calls it after
-      `resolve_overlaps`, i.e. on every seam that reaches an entry. A cross-centre verdict can only
-      change when a NEW CENTRE appears, so the pass runs at most once per row per distinct-centre
-      count (`Repository::tune_centre_count`, answered from the new index) and not at all below
-      two centres - never once per sighting. The neighbourhood is bounded at 64 rows, 32 detections
-      per row and a band derived from the LOs within 100 MHz of the seed's own.
-      MEASURED, on T-586's `retune_diversity` fixture through the mock SDR (15 detections, 3
-      centres, 5 lines): BEFORE 3 emitters + 6 artefact rows = 9 shown; AFTER 3 emitters + 2
-      artefact rows = 5 shown, with all 6 artefact sightings still present under `relations=all`.
-      Stored verdicts 6 lo-locked + 9 absolute over 15 detections. Real emitters unchanged in
-      number and in absolute frequency (99.78 / 100.68 / 101.18 MHz).
-      RED WHEN BROKEN, both halves proven by removing the `touch` call: the verdict check failed
-      with "0 detections were recorded LO-relative" and, with that check skipped, the inventory
-      check failed with "the artefact at LO offset 0.0 kHz is shown as 3 emitters, not one".
-      Neither is vacuous: the scene asserts 3 sightings were kept per family (so there was
-      something to collapse) and 3 distinct centres were compared.
-      TESTS: 5 unit tests in `crates/hk-model/src/repo/retune_tests.rs` (the bug reproduced; the
-      fix; absolute flags nothing; revocation restores the prior single-capture flags exactly;
-      one centre claims nothing) and 2 new checks in the T-586 acceptance scene
-      `tests/e2e/tests/acceptance/t586_retune_diversity.rs`. Targeted runs: hk-model 317/317,
-      hk-model + hk-context 548/548, hk-pipeline 307/307, acceptance_m0 t586 2/2 (and an earlier
-      full acceptance_m0 50/50). `just precheck hk-model hk-pipeline hk-context hk-e2e` clean.
-      API: `docs/api.md` documents the new `relation.kind` value and its `detail`. The ROW SHAPE
-      and every route are unchanged - only a new enum value in an existing field - so
-      `api_contract.rs` (which asserts the `relation` key, not its vocabulary) needed no change.
-      FOLLOW-UPS SURFACED, NOT CHASED: (a) `hk_context::watch::StandingRelation::label` now has a
-      sentence for the new kind, but the SQL rank/trust proxy in `repo/relate.rs` still counts only
-      the MEASURED flag bits, so a resolved artefact does not yet rank below a clean row - joining
-      `detection_retune.flag_bits` into `EMITTER_DETECTION_EVIDENCE_SQL` is a small follow-up;
-      (b) the primary of a family is the row with most sightings, then the earliest - a Confirmed
-      row is never hidden by this rule, which is deliberate but means a wrongly-confirmed artefact
-      stays visible until a person acts; (c) the image slope (2) is still exercised by unit tests
-      only, since T-586's fixture omits images on purpose.
+
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
@@ -19803,34 +19711,6 @@ tasks:
     parallel_group: PIPE
     model: opus
     effort: medium
-    depends_on: [T-321]
-    use_cases: []
-    acceptance: |
-      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
-      has chased it:
-        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
-        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
-        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
-      A storage-engine error is being caught, printed and continued past. The suite stays green, so
-      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
-      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
-      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
-      per analogue session, at both `identify` and the full-window path, and its own agent flagged
-      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
-      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
-      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
-      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
-      duplicate that should be an upsert, or a genuinely new characterisation that should replace
-      the first? T-335 established that a re-characterisation must happen when the evidence changed;
-      if the second write is that, dropping it on a UNIQUE violation silently loses the very
-      re-characterisation T-335 added.
-      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
-      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
-      the wrong reason.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
-      one emission_features row per characterisation that should exist, and zero swallowed storage
-      errors over an acceptance run. Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     depends_on: []
     use_cases: []
     acceptance: |
@@ -20247,7 +20127,8 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
-    status: todo
+    status: review
+    branch: task-t605
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20280,6 +20161,38 @@ tasks:
       one emission_features row per characterisation that should exist, and zero swallowed storage
       errors over an acceptance run. Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      RESOLVED 2026-09-21 (task-t605). THE SUSPECT WAS HALF RIGHT AND THE DIAGNOSIS WAS NOT.
+      T-321's second `characterise_with` is the trigger, but two writes per session were never the
+      fault: `observe()` increments `observations` every time, so two writes mint two ids. The
+      fault is in `Repository::emitter_features`, which picked the fold source by largest `t`
+      rather than by insertion order. The second call of a session is stamped from a different
+      emitter row and lands up to ~1 s BEHIND the first (measured: snapshot_t 1789297824379318666
+      vs incoming_t 1789297823378252000). The fold then restarted from the SUPERSEDED snapshot,
+      which (a) dropped the intervening observation, (b) scored the catalogue match against stale
+      features, and (c) re-minted `features:{emitter}:{observations}` with a count already spent -
+      the UNIQUE violation.
+      THE SECOND WRITE IS A GENUINE RE-CHARACTERISATION, NOT A DUPLICATE: it carries the shape
+      flatness, which no fingerprint can hold and which is the fourth field keeping a purely
+      analogue emitter above the clustering floor. So the answer is neither upsert nor replace but
+      APPEND, as the append-only table already intends; dropping it on UNIQUE lost exactly what
+      T-335 added.
+      FIX: `emitter_features`/`emitter_features_history` order by `rowid DESC` (insertion order),
+      which makes `observations` strictly increasing and `features_id` unique by construction.
+      LOUD: new `/chains/storage_errors` counter plus `hk_pipeline::stats::storage_error`, which
+      every chain site that catches a `RepoError` and continues now goes through (analog x7,
+      plugin x3, refine x2); the run summary prints it beside `errors`.
+      TESTS (both proven RED with the ordering reverted):
+        - hk-pipeline lib `t605_a_characterisation_stamped_behind_the_snapshot_on_file_still_appends`
+          - 4 characterisations -> 4 snapshots, 4 distinct ids, observations exactly [1,2,3,4],
+            and each call's match scored against the snapshot that call wrote. RED: match read
+            `:1` where `:2` was written.
+        - hk-pipeline `signal_062_session_writes::t605_an_analogue_run_swallows_no_storage_error`
+          - the real FM capture through the mock SDR: `/chains/storage_errors` == 0, guarded
+            against vacuity by demodulations >= 1 and identifications >= 1. RED: 1.
+      FOLLOW-UP NOT CHASED: `current_signature_match` orders by `t`, so with out-of-order
+      characterisations the "current" match row can be an older one. Separate question from this
+      ticket; not filed.
+
   - id: T-614
     milestone: M2-hardening
     title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
@@ -20378,6 +20291,561 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
+  - id: T-616
+    milestone: MAUTO
+    title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      DESIGN / ADR change, no code. T-547 (docs/21 section 5.1) measured the dependence between the
+      seven calibrated metrics on 820 matched windows: snr and evm as hk_demod::fsk::FskDemod
+      computes them are a deterministic monotone map of one another (Spearman rho = -0.989, both
+      derived from the same (a, var) pair), line_violations and bit_structure sit at -0.706 (both
+      statistics of one bit sequence), and timing_var against snr at -0.52.
+      ADR-0015 section 1.3 defines evidence_bits = sum_j min(b_j, cap_j) - L_j. A sum of
+      significances is a log-probability only if the terms are independent under the null. They
+      are not. The 12-bit S0-S3 cap partially hides this, which is worse than it failing loudly.
+      DoD: an ADR-0015 amendment that states the combination rule within a stage - the obvious
+      safe choice is the MAXIMUM over metrics known to be dependent, not the sum - names which
+      MetricIds are in which dependence group for the blocks that exist, and says what a block
+      must declare when it publishes two metrics from one estimate. Also state what this does to
+      the 12-bit caps (they were sized for a sum). Must land before any block implements
+      Block::evidence, because the grouping is part of the contract.
+  - id: T-617
+    milestone: MAUTO
+    title: 'Calibration tables must declare their achievable bit levels and their n (eye_open is non-invertible at 4 and 6 bits)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      DESIGN, then a small schema change. T-547 (docs/21 sections 5.2, 5.3) measured two hard
+      limits on the synth/calibration/<block>.json design of ADR-0015 section 2.2:
+      (a) eye_open takes only 66 distinct values over 4200 noise windows at n = 112 symbols, with
+      an atom exactly at the 4-bit and 6-bit quantiles: asking that table for a 6-bit threshold
+      returns one worth 2.41 bits. The float reference is wrong by 3.6 bits before any ADC is
+      involved, so this is a property of the statistic at that support, not of the receiver.
+      (b) a table sampled with N windows cannot express more than log2 N bits: at N = 4200 the
+      ceiling is 12.04 bits, and bit_structure stops at 9.71 because of a 5-window atom.
+      ADR-0015 section 1.3 caps S0-S3 at 12 bits and S4 at 32.
+      DoD: the calibration-table schema carries, per (metric, n), the levels it can actually
+      express and the N it was sampled with; a block returns an explicit "cannot express b bits
+      here" rather than a silently wrong threshold; and ADR-0015's caps are restated against what
+      calibration can reach (32 bits is unreachable by calibration in principle). A Rust test
+      asserts a table rejects a level above its own ceiling.
+  - id: T-618
+    milestone: MAUTO
+    title: 'M-2: condition calibration tables on ADC FILL (sigma in LSB), not gain; size the sampling budget'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547, T-617]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      T-547 (docs/21 sections 3, 4) established the conditioning key M-2 must build in rather than
+      retrofit: it is the ADC FILL LEVEL, the per-component noise sigma in LSB, and NOT the
+      LNA/VGA/amp setting and NOT the clip fraction. The control is decisive - applying 51 dB of
+      gain without the ADC reproduces the float table to 0.02 bits on every metric and leaves the
+      demodulator's success rate bit-identical - so "stable across gain states" in ADR-0015 was
+      naming the wrong variable. Clipping is benign (28% clipped costs <= 0.34 bits at a 6-bit
+      claim); under-fill is the hazard (sigma = 0.21 LSB costs 1.0-1.6 bits and collapses
+      eye_open to 0.91 bits realised for a 6-bit claim, while changing the demod success rate from
+      19% to 53%).
+      DoD: (a) the generator writes one table per fill bucket, with the bucket boundaries derived
+      from measurement rather than chosen, and a documented cheap runtime rule for the degenerate
+      end (sigma < 0.5 LSB); (b) the sampling budget is stated per (block, support n, fill
+      bucket) cell against T-617's log2 N ceiling - >= 4096 windows to touch 12 bits once and
+      ~40k for an interval - and is budgeted, not discovered; (c) Provenance already carries
+      quantisation_limited and the clip count, so name which field the runtime reads and whether
+      sigma_LSB needs to join them (docs/07).
+  - id: T-619
+    milestone: MAUTO
+    title: 'Extend the T-547 ladder measurement to the AM/OOK and C4FM paths before either ships an evidence()'
+    status: todo
+    priority: medium
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-001, RESEARCH-008]
+    acceptance: |
+      T-547 measured exactly one path: the M1 2-FSK demodulator plus hk_classify's
+      if_local_bimodality, at one support (112 symbols). docs/21 section 7 says plainly that there
+      is no reason to assume delta transfers. AM/OOK envelope bimodality and the C4FM path
+      (hk_demod::fsk::c4fm) have different statistics and different failure modes under
+      under-fill; PSK EVM has no block at all yet (ADR-0015 section 1.1's Costas gap).
+      DoD: the same harness (crates/hk-pipeline/examples/t547_ladder.rs, extended) run over the
+      AM/OOK and C4FM metrics at two supports, reporting per metric the same four things docs/21
+      reports: whether a fixed table is valid, what it must be conditioned on, the measured
+      spread with its n, and a GO/CONDITIONAL/NO-GO. Append a section to docs/21 rather than
+      starting a new note. Cheap to run (the noise corpus takes ~90 s for 4200 windows x 12
+      conditions on 8 threads); it is the write-up that costs.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-547. Not urgent, but it is a precondition on those blocks publishing
+      evidence(), the same way T-547 was for the FSK path.
+  - id: T-628
+    milestone: MAUTO
+    title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-546]
+    use_cases: [SIGNAL-087]
+    acceptance: |
+      FOUND BY T-546 while making docs/19 section 7.6a's -9.6 ppm measurement a capability, and
+      deliberately not chased there.
+      `hk_detect::trunk::raster::fit_grid_offset` fits the receiver's own offset from the channel
+      grid as the power-weighted circular mean of the occupied bins MODULO the raster. That is
+      genuinely all the spectrum says - +4300 Hz and -8200 Hz name the same 12.5 kHz grid - and it
+      is enough to re-origin the grid, which is what candidacy needs. It is NOT enough to reach an
+      ABSOLUTE frequency, and a trunking grant is exactly that: the announced band plan fixes the
+      granted channel's transmit frequency unambiguously, so down-converting at `f + offset` with
+      the wrong alias measures the channel NEXT DOOR.
+      T-546's holding answer is to SKIP following while the receiver is measurably off-grid, on the
+      rule that a wrong measurement ("granted channel not radiating") is worse than a missing one.
+      That is right and it is also a hole: on every real 800 MHz capture this HackRF will ever make,
+      grant following is off.
+      Resolve the alias. Two constraints are available and neither is a band-plan lookup:
+      (1) the crystal's own ppm bound - a HackRF One is specified to +/-20 ppm, which at 852 MHz is
+      +/-17 kHz and so does NOT on its own pick one 12.5 kHz alias, but does bound the search to a
+      handful; (2) which alias actually has energy - try each candidate alias on a channel the
+      grants name and keep the one that measures power, which is a MEASUREMENT rather than an
+      assumption. Record the resolved offset as receiver provenance with the evidence that chose it,
+      and make the unresolved case visibly distinct from the resolved one (ADR-0021's tried vs
+      not-tried rule applies here too).
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: over the T-545 scene shifted by the measured -8200 Hz, the
+      granted voice channels are followed and their call count matches the unshifted run's. Prove
+      the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-621
+    milestone: M2-hardening
+    title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      `crates/hk-cli/tests/api_contract.rs` -
+      `coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked` (~line 6203)
+      and `coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked`
+      (~line 6651) both assert `sources[iq-ring].available == true` and `spans > 0`.
+      `hk serve` REFUSES the IQ ring below an 8 GiB free-space floor - "needs 134217728 bytes above
+      the 8589934592-byte free-space floor and N are free" - so on a machine near that floor both
+      tests fail for a reason that has nothing to do with the code under test.
+      THIS IS NOT HYPOTHETICAL AND IT IS NOT A FLAKE. On 2026-09-21 it sank at least three merge
+      gates. T-596's agent measured one of them FAILING ALONE on `main` with its own work stashed,
+      which by the standing triage rule makes it a real bug rather than a load-flake. Free disk on
+      the dev machine ranged from 43 GiB to 1.1 GiB across the day because each building worktree
+      costs 8-10 GiB of newly-private APFS blocks after the ld64.lld change.
+      DECIDE WHAT THE TEST SHOULD DO WHEN ITS PRECONDITION IS ABSENT, which is the real question.
+      A silent skip is not acceptable here - "a gate that skips is a gate that passes for the wrong
+      reason" (T-346/T-353) - but neither is a red gate that means "this machine is low on disk".
+      The honest shapes to weigh: fail with a message that NAMES the refusal reason the server
+      already reports, so triage is instant rather than a 20-minute hunt; or assert the honest
+      refused-ring answer as a second documented case, so the refusal itself is under test (T-596
+      made the product survive a refused ring honestly - these tests have not caught up).
+      Note the second shape is more than tidiness: a portable device WILL fill its disk, so
+      "what the coverage record says when the ring was refused" is a real product state that
+      deserves a test, not an environment to be excluded.
+      ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the test behaves correctly BOTH with a ring and with the ring refused.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-630
+    milestone: MCANVAS
+    title: One greedy tab holds all four server slots, so a second client's boot is a coin flip - the tile route needs a fair share, not a bigger cap
+    status: todo
+    priority: high
+    parallel_group: CANVAS-FE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: 'task-fixshared, 2026-09-21, measured while fixing four canvas e2e failures'
+    acceptance: |
+      MEASURED, NOT INFERRED, and explicitly left unfixed rather than tuned away. While the first tab
+      saturates `GET /api/tiles`, the SECOND tab's boot is marginal: mounted in 8.2 s and 11.7 s after
+      7 refusals in the clean runs, and FAILED OUTRIGHT TWICE before T-505's tier hysteresis landed
+      ("GET /api/tiles refused every attempt"). T-501's finer fidelity floor makes the first tab
+      hungrier, so this gets worse, not better.
+      THE MECHANISM IS ALREADY NAMED BY THE ROUTE'S OWN REFUSAL TEXT: the in-flight cap is
+      `in_flight_limit 4` GLOBAL, first-come-first-served. A client that enumerates a large viewport
+      takes all four slots and keeps them, because it re-asks the instant one frees. Nothing in the
+      route knows there is a second client, so a new client's FIRST request - the one it cannot start
+      without - competes on equal terms with the thousandth request of a tab that is already drawn.
+      THE DECISION THIS TICKET EXISTS TO MAKE IS A FAIR-SHARE POLICY, NOT A CONSTANT.
+      Raising the cap is the wrong answer and is out of scope: it moves the failure, keeps the
+      unfairness, and spends the capacity T-489/T-453 measured on the capture thread. Weigh instead:
+        (a) per-client share of the in-flight budget, so N clients get ceil(cap/N) each and a new
+            client is guaranteed at least one slot;
+        (b) admission priority by what the request IS - a client's bootstrap/first-paint enumeration
+            outranks an already-drawn client's fill, the same reasoning as T-457's visible-fetch
+            precedence and T-459's "no visible fetch is starved";
+        (c) both: a reserved slot for any client with nothing on screen yet, with the rest shared.
+      Whatever is chosen, a client identity has to exist on the route for the policy to be expressible;
+      say in the ticket resolution whether that is a connection, a session, or a declared client id,
+      and what happens when a client disappears without telling the server (a leaked share is the
+      failure mode T-454 already paid for once - a leaked slot keeps leaking).
+      ASSERT WITH COUNTS AND ORDERING, NOT WALL-CLOCK (user, 2026-09-21). The existing harness is the
+      place: `ui/e2e/surface-contention.e2e.mjs` already opens a SECOND TAB into the first tab's tile
+      storm and already declares itself INCONCLUSIVE if the probe was never refused, so it cannot bank
+      a green on a race it lost. Extend it:
+        - the second tab reaches first paint within a STATED number of its own requests, not a stated
+          number of seconds, with the first tab deliberately saturating;
+        - refusals seen by the second tab before its first successful tile is bounded and stated;
+        - the first tab's peak in-flight never exceeds its share, read from the status line;
+        - and the whole thing goes RED when the share is removed (prove it against the current
+          first-come-first-served route, which is the natural red baseline).
+      DO NOT weaken T-455's existing bounds to make room - they condition permission on the MECHANISM
+      (a refusal must be SEEN to halve the client's operating cap), which is the property that made
+      this measurable at all.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-ui`, and the e2e specs named), then
+      HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
+      ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
+      four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+  - id: T-622
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-062, SIGNAL-001]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 4.1 P6/P7 and 2 axis A7). ADR-0022 replaced ADR-0015's
+      guessed confirm constants with a derived gate, and the two rows that exercise exactly what
+      CHANGED cannot be generated today.
+      1. ARBITRARY CHECK WIDTH (8/16/24/32) on the generic generators. ADR-0022 section 4.3 lowered
+         the width floor from 16 to 8, so "a CRC-8 emitter, template-fixed, confirms at 3 differing
+         frames" (ADR-0022 section 10.1 A3) is a required recall row - and the case the OLD rule
+         refused outright. `fsk_burst_train` emits CRC-16 and nothing else.
+      2. AN ARBITRARY POLYNOMIAL NOT IN THE RevEng CATALOGUE, so a structured signal exists whose
+         check cannot be looked up. ADR-0015 section 7's "partial quality for unknowns" row and
+         docs/22's over-claim accounting both need it.
+      3. A CONSTANT-PAYLOAD BEACON mode: the same bytes every frame. ADR-0022 section 4.2 replaced
+         `distinct_valid` with `differences` precisely because repeated payloads over-credit an
+         emitter, and the assertion is that such a beacon does NOT confirm on repeat count alone.
+         Nothing in the corpus can currently produce one.
+      Truth annotations carry the polynomial, width, start bit, tail, bit order and the payloads,
+      so the assert harness can distinguish `differences` from `distinct_valid` without the system
+      seeing either.
+      DoD: the three parameters exposed on the generic FSK generator (and on T-621's OOK generator
+      if it has landed), with truth written and `just synth` round-tripping them.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Pairs with T-575, which implements the gate
+      these fixtures exercise; neither blocks the other.
+  - id: T-623
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-052, RESEARCH-002]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N3). ADR-0021 section 8.4's N3 population is
+      "REAL structure, no block": synthetic OFDM with a non-standard cyclic prefix, DSSS, CSS and
+      16-QAM. Only CSS exists (`lora_ism_burst`). The other three have no generator, so the
+      population that tests `unsupported-structure` - the result ADR-0021 section 7A.5 says the
+      product should be PROUD of - is three-quarters empty.
+      BUILD the three scenes. Each must be genuinely structured (a real CP, a real spreading code,
+      a real constellation), not noise dressed up, because the whole assertion is that the engine
+      MEASURES the structure, names it, names its `missing_block`, and still never reports
+      `solved`. Hidden truth records the structure kind and its parameters and nothing the engine
+      is allowed to use.
+      WHY IT MATTERS BEYOND COUNTING. docs/22 section 6.3 G1 states the limit honestly: you cannot
+      sample the complement of the catalogue, so N3 is a HELD-OUT set of KNOWN unknowns, not a
+      sample of the unknown. That makes the three structures chosen here the entire empirical basis
+      for the open-set behaviour claim, which is a reason to build them well rather than a reason
+      to treat them as optional.
+      DoD: three scenarios registered, truth annotated, `just synth` producing each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Note T-033/T-040 already record that steady
+      OFDM reads NoiseLike to the floor tracker - the same fixture serves both.
+  - id: T-624
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: standalone analog-voice negatives (NBFM voice, AM voice) for the N2 population'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: [SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N2). ADR-0021 section 8.4's N2 is "energy
+      without symbols: CW carrier, analog FM voice, AM voice". `tone` gives CW; analog voice exists
+      ONLY as decoy content inside the trunking scenes, where it cannot be run as its own negative
+      population at a controlled SNR and fill.
+      BUILD standalone NBFM-voice and AM-voice scenes with a controllable SNR, ADC fill and burst
+      structure, carrying `hackriff:truth` of `{"kind": "none"}` in the sense that matters: real
+      energy, no symbol alphabet.
+      THE POINT OF THE POPULATION, which is not obvious from its size: T-614 found the parameter
+      estimator giving bursty ANALOGUE FM a confident `"2fsk"` label with a 2390 Hz deviation. That
+      is the N2 failure mode in the estimator; N2 is where the synthesis engine's version of it
+      would appear, and the assertion is `deepest_verdict <= demodulated`, 0 labels >= `framed`.
+      DoD: two scenarios registered with truth, `just synth` producing each at several SNRs.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). Cheapest row in the corpus and it covers the
+      failure T-614 already observed in a neighbouring component.
+  - id: T-625
+    milestone: MAUTO
+    title: 'ADC fill (sigma in LSB) is the corpus stratification key and nothing stores it - record it as provenance and build the fill ladder'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [RESEARCH-001, RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 2 axis A3, 4.4 and 7.1), resting on T-547's measurement.
+      THE FINDING THIS IMPLEMENTS. T-547 measured that GAIN STATE MOVES THE EVIDENCE TAILS BY
+      NOTHING: a control applying 51 dB of gain with the ADC skipped reproduced the float
+      calibration table to 0.02 bits on every metric, with a bit-identical demod success rate. What
+      moves them is the ADC, and specifically the FILL: under-fill at sigma = 0.21 LSB costs 1.0-1.6
+      bits and swings demod success 19% -> 53%, while 28% CLIPPING costs <= 0.34 bits. So ADR-0015
+      section 2.2's phrase "across gain states" names the wrong variable, and any corpus, dashboard
+      or confirm-rate breakdown keyed on gain is keyed on a no-op.
+      WHAT TO DO.
+      1. Record ADC fill - the measured noise sigma in LSB - as a first-class provenance field
+         beside `quantisation_limited`, `overload` and the per-capture clip count, for both real
+         captures and `hkpy.synth` output. It is the key docs/22 stratifies on and the key
+         ADR-0022 section 8's decision-rate counter should break confirms down by. Nothing stores
+         it today.
+      2. Add the fill ladder as a runnable sweep over docs/22 section 2's six levels (0.21, 0.6,
+         2.0, 23, 43, 77 LSB / 28% clipped) - `adc_gain_db` already exists in
+         `hkpy.synth.impairments`, so this is a sweep and a recorded field, not new DSP.
+      3. Make the UNDER-FILL case detectable at runtime: sigma < 0.5 LSB is one cheap check and
+         T-547 found four of five real captures sit at 2.0-2.4 LSB, so the boundary is far from
+         normal operation but the failure is silent when crossed.
+      DoD: the field written and read end to end; the ladder reproducible; docs/22 section 4.4's
+      comparative report producible. NO threshold is set by this ticket - docs/22 section 4.4's
+      only bar is that an under-filled input is FLAGGED rather than silently answered.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). HIGH because every other MAUTO fixture ticket
+      stratifies on a key this ticket creates, and because a gain-keyed breakdown is actively
+      misleading rather than merely absent. Reads on T-547 (docs/21).
+  - id: T-626
+    milestone: MAUTO
+    title: 'MAUTO-FIXTURE: the N5 mismatched-hypothesis negative population - the null the search actually faces'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [SIGNAL-052, RESEARCH-002]
+    acceptance: |
+      FOUND BY T-551 (docs/22 section 4.3, population N5), and it is the one place where the corpus
+      spec ADDS to ADR-0021's four negative populations rather than detailing them.
+      THE ARGUMENT. ADR-0021 section 8.4's N1/N2/N3/N4 are noise, unmodulated energy,
+      out-of-catalogue structure and a real quiet capture. T-547 measured what the search's ACTUAL
+      null looks like and it is none of those: on pure noise the 6-bit calibrated tables over-claimed
+      <= 0.34 bits, but on a MISMATCHED-PARAMETER null - right block, wrong symbol rate - they
+      over-claimed up to 1.75 bits. FIVE TIMES WORSE, before any adjacent real emitter is in the
+      window. A negative suite built only from the four listed populations measures the engine
+      against the friendliest null available and would report a comfortable margin while the
+      operational null was five times fatter. ADR-0022's whole confidence rests on that margin
+      (section 10.1 A2).
+      BUILD the population as FIXTURES, not as engine configuration, because the blind rule forbids
+      steering the search: emitters whose true parameters lie OUTSIDE the proposal grid (a
+      non-decade symbol rate, a deviation ratio outside the operator's range) so the engine
+      necessarily evaluates wrong-parameter hypotheses in quantity; and scenes where a strong
+      adjacent emitter leaks into the analysed box.
+      ASSERTION: `unknown` with `reason: tied`, or a correct partial result - NEVER `solved` with
+      wrong parameters. Over-claim is counted here, and N5 is pooled into the false-label count and
+      into ADR-0022 A2's max-analytic-bits statistic.
+      DoD: the scenes generatable with truth, and the population wired into docs/22's counts.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 sections 4.3 and 9). HIGH because it is the population
+      most likely to move ADR-0022's margin, and a margin measured only on the easy nulls is the
+      failure ADR-0022 section 3.2 exists to prevent.
+  - id: T-627
+    milestone: MAUTO
+    title: 'MAUTO-TEST: the coverage manifest and the sealed hold-out - make the corpus sufficiency argument checkable instead of asserted'
+    status: todo
+    priority: normal
+    parallel_group: MAUTOD
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [RESEARCH-002, SIGNAL-052]
+    acceptance: |
+      FOUND BY T-551 (docs/22 sections 4.5, 6.2 and 6.4). A fixture corpus that is merely PRESENT
+      passes by covering what someone happened to think of, and its gaps are invisible from inside
+      it - the corpus cannot report an absence it does not represent. Two mechanisms make the gap
+      observable, and neither is a scene.
+      1. THE COVERAGE MANIFEST. The suite emits, every run, the DECLARED axis product from docs/22
+         section 2 with one mark per cell: `populated` (with n), `declared unreachable` (with the
+         reason and ticket, e.g. "OOK: no generator, T-621"), or `unmarked`. The third mark is the
+         point: a cell nobody thought about shows up as unmarked and is a FAILURE OF THE MANIFEST,
+         not of the engine. The M-12 review reads the manifest BEFORE any pass rate. Same
+         discipline as the canvas coverage map - an honest empty cell beats a silently absent one,
+         and `Coverage::Unobserved` is not `quiet`.
+      2. THE SEALED HOLD-OUT. 20% of every generated scene family, selected by a RULE
+         (`sha256(scene_id || seed) mod 5 == 0`) and not by judgement, is generated and truthed and
+         then not run until the M-12 review. If sealed-set performance differs materially from the
+         open set, the open set has been overfit - which is "the corpus covers only what someone
+         thought of", made measurable. The sealer cannot be gamed by the process that built the
+         corpus because it is a hash.
+      ALSO IN SCOPE: the expected-failure rows (docs/22 section 6.2 item 3) - at least one row per
+      family placed deliberately past the edge (6 dB at 112 symbols) and asserted to FAIL HONESTLY:
+      below `framed`, `reason: nothing-scored`, no over-claim. A corpus with no expected-failure
+      rows cannot distinguish a strong engine from a permissive threshold.
+      DoD: the manifest produced and diffable run to run; the hold-out rule implemented and its
+      selection reproducible; the expected-failure rows present and RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-551 (docs/22 section 9). This is the instrumentation that makes
+      docs/22 section 6's sufficiency argument checkable; without it the argument is prose.
+  - id: T-640
+    milestone: MLIVE
+    title: A refused IQ ring reports available:true with zero spans, so rows with no tune record are served unobserved instead of unknown
+    status: done
+    branch: task-t596
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: "T-621's agent, 2026-09-21, while putting the refused IQ ring under test; handed to T-596, which holds crates/hk-api/src/coverage.rs"
+    acceptance: |
+      `Evidence::collect` set `ring_available: state.iq_buffer.is_some()` - whether a ring HANDLE is
+      wired, not whether a tune journal could answer. A ring whose allocation was REFUSED for lack
+      of free space still presents that handle and still answers `/api/iqbuffer`, while holding no
+      journal and contributing zero spans, so it reported `sources[iq-ring].available: true`.
+      `Evidence::unknown_rows` reads `no_tune_history` from that flag, so a server with a refused
+      ring and no observation log served `"unobserved"` - a positive claim that the radio did not
+      look - over rows it has no tune record of at all, where the rule says `"unknown"`.
+      It is the fail-open T-596 closed pointed the other way: an unsealed dwell may not paint
+      `observed` over `unknown`, and a refused ring may not paint `unobserved` over it either.
+      "We cannot say" is neither - the same reasoning as `Coverage::Unobserved` is not quiet and
+      `BiasTee::Unknown` is not `Off`.
+    result: |
+      DONE on task-t596 (the file is that branch's). PREDICATE: `ring_can_answer(status)` =
+      the ring status's own `enabled` ("the run buffers IQ", which every no-buffer case - `refused`,
+      `locked`, `incompatible`, disabled by configuration - reports as false with a `reason`) AND
+      `allocation != "allocating"` (an enabled ring still being laid down holds nothing: "nothing is
+      buffered until it completes"). A status that does not say, or says a non-boolean, is NOT read
+      as available: it fails closed on to `"unknown"`, the answer that claims least. Measured off
+      the status `Memory::of` already reads, so there is no second `status()` call, and carried as
+      `Memory::ring_can_answer` into the `ring_available` that `unknown_rows` reads.
+      COUNTS, `hk-api` coverage::tests::a_refused_ring_is_not_available_and_its_rows_are_unknown_
+      rather_than_grey, ten rows x one cell with no observation log so the ring is the only source
+      there could be: refused ring -> 10 `"unknown"`, 0 `"unobserved"`, `available: false` beside 0
+      spans; allocating ring -> the same; enabled ring holding one segment -> `available: true`,
+      1 span, 1 `unobserved` + 5 `observed` + 4 `unobserved`, which is the non-vacuity half (the
+      predicate must not pass by calling every ring dead).
+      RED with the old `is_some()` predicate restored: the refused case serves 10 `"unobserved"`
+      rows - ten rows of "nothing looked" asserted by a ring that never opened.
+      docs/api.md now states what `sources[].available` means.
+      FOLLOW-UP, NOT DONE HERE: T-621's refused-ring contract test in
+      `crates/hk-cli/tests/api_contract.rs` deliberately asserts `spans == 0` and asserts NEITHER
+      value of `available`, because pinning today's would have enshrined this defect. With this
+      landed that assertion can be tightened to `available: false`. That file belongs to task-t621
+      and was not touched here.
+
+  - id: T-680
+    milestone: MLIVE
+    title: Decide whether the dwell in flight should also SET the record horizon, not only be clipped to it
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: [T-596]
+    use_cases: [AWARE-011]
+    found_by: 'T-596, 2026-09-21, as the design alternative it deliberately did not take'
+    acceptance: |
+      T-596 serves the dwell IN FLIGHT as coverage (so a refused IQ ring cannot grey the live edge)
+      and CLIPS it to `Memory::oldest_record`, so a provisional record can never turn a row the same
+      answer calls `"unknown"` into `"observed"`. The alternative, considered and rejected there,
+      is to let the open dwell also CONTRIBUTE to `oldest_record` - i.e. treat it as one of the tune
+      records the horizon is computed from.
+      THE ARGUMENT FOR IT: it is arguably the more honest answer. The open dwell IS a tune record
+      the server still holds, in memory, undiscarded. Over the interval it has been running we do
+      know we looked, so calling those rows "we no longer know whether we looked" is false, and the
+      clip makes the answer conservative rather than correct. Today the two halves are consistent
+      only because the clip silences the open dwell there.
+      THE ARGUMENT AGAINST, and why T-596 did not do it: it rewrites a SHIPPED contract - T-507's
+      `unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so` asserts
+      `horizon.unknown_rows` on a server whose ring has discarded its first seconds, and this would
+      empty that band - and it lets an UNSEALED claim redefine the server's own statement about what
+      it has forgotten. `oldest_record` is a statement about memory; a record that has not been
+      written is a poor thing to compute memory from, and the failure mode (a long-lived open dwell
+      quietly asserting that nothing was ever forgotten) is silent.
+      DECIDE WITH EVIDENCE, and if it changes, change T-507's contract test deliberately and say so
+      in docs/api.md rather than letting it fall out. Note that the FORWARD horizon already works
+      the other way: T-596 folds the open dwell in before `as_of_s` is taken, because the forward
+      horizon must agree with the plane. Whether the two horizons SHOULD be asymmetric is exactly
+      this ticket's question.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

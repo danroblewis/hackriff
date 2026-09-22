@@ -164,20 +164,38 @@ impl Repository {
     }
 
     /// The emitter's latest features snapshot, or `None` when it has none.
+    ///
+    /// **Latest means last written (`rowid`), not largest `t` (T-605).** A snapshot is a running
+    /// aggregate over every observation folded so far, so the tip of that chain is the row that
+    /// was appended last — not the row carrying the newest capture time. The two agree whenever
+    /// characterisations arrive in capture order, and they are the same query when they do.
+    ///
+    /// They do not always agree: the analogue chain characterises twice per session (T-321), and
+    /// the second call is stamped from a different emitter row, which can be up to a second
+    /// behind the first. Ordering by `t` then handed the *older* aggregate back as the fold
+    /// source, so the fold restarted from a stale snapshot — dropping the intervening
+    /// observation, scoring the catalogue match against superseded features, and re-minting a
+    /// `features_id` (`features:{emitter}:{observations}`) that the chain had already used. That
+    /// last one surfaced as `UNIQUE constraint failed: emission_features.features_id`, caught and
+    /// printed by the chains while the suite stayed green. Insertion order makes `observations`
+    /// strictly increasing again, which is what makes that id unique by construction.
     pub fn emitter_features(
         &self,
         emitter_id: EmitterId,
     ) -> Result<Option<EmissionFeatures>, RepoError> {
         let rows: Vec<EmissionFeatures> = bodies(
             &self.conn,
-            "SELECT body FROM emission_features WHERE emitter_id = ?1 ORDER BY t DESC, rowid DESC \
-             LIMIT 1",
+            "SELECT body FROM emission_features WHERE emitter_id = ?1 ORDER BY rowid DESC LIMIT 1",
             params![blob(emitter_id)],
         )?;
         Ok(rows.into_iter().next())
     }
 
-    /// The emitter's features snapshots, newest first.
+    /// The emitter's features snapshots, most recently written first.
+    ///
+    /// Same order as [`Self::emitter_features`], which is its `limit = 1` case (T-605): a history
+    /// whose head disagreed with "the latest snapshot" would be a second, quieter version of the
+    /// same bug.
     pub fn emitter_features_history(
         &self,
         emitter_id: EmitterId,
@@ -186,7 +204,7 @@ impl Repository {
         bodies(
             &self.conn,
             "SELECT body FROM emission_features WHERE emitter_id = ?1 \
-             ORDER BY t DESC, rowid DESC LIMIT ?2",
+             ORDER BY rowid DESC LIMIT ?2",
             params![blob(emitter_id), limit],
         )
     }

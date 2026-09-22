@@ -259,6 +259,20 @@ pub(super) fn start(
         repo: Mutex::new(repo),
         db_path: common.db_path.clone(),
         stop: Arc::new(AtomicBool::new(false)),
+        // T-505/T-510 collision: T-505 added `view_queue` to `Shared` while T-510 added this
+        // second construction site, so neither branch could see the other's half.
+        //
+        // A further front end gets its OWN queue, mirroring `run::start_segment`. That follows
+        // T-510's own split: the history reader is per front end (its own STFT and noise floor),
+        // while the view PYRAMID they feed is shared and already keys what it holds by each
+        // frame's provenance. Sharing one queue across devices would interleave two readers'
+        // frames into a single drop-oldest buffer, so a fast device could starve a slow one of
+        // view rows - and an under-fed view lattice greys time the radio really looked at.
+        view_queue: common.view.is_some().then(|| {
+            Arc::new(crate::history::ViewQueue::new(
+                crate::history::VIEW_QUEUE_FRAMES,
+            ))
+        }),
         survey_id: common.survey_id,
         fs,
         fft_len,

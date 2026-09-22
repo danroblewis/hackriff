@@ -25,7 +25,7 @@
 
 import type { ActiveWindow } from "../navigators";
 import { SurfaceChrome, readoutOf, type Readout, type RowActionFor, type WidthActionsFor } from "./chrome";
-import type { Box, Lattice } from "./lattice";
+import type { Box, Lattice, LatticeSet } from "./lattice";
 import {
   Minimap, liveSegmentQuads, paneOutlineQuads,
   type OverlayQuad, type OverlayStyle,
@@ -40,7 +40,10 @@ import { rulerLabel } from "./ticks";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
+  /** The **detail** lattice. Also what the pane model and the minimap snap their windows to. */
   lattice: Lattice;
+  /** Both tiers (T-505). Omitted, every viewport is drawn from `lattice` alone. */
+  lattices?: LatticeSet;
   /** The surface's extent: the device-available range and the retained window. Backend numbers. */
   bounds: Box;
   cache: TileCache<TilePlanes> | ((tex: TileTextures<TilePlanes>) => TileCache<TilePlanes>);
@@ -157,7 +160,7 @@ export class SurfaceView {
     this.trace = opts.trace ?? null;
     this.tracePx = opts.tracePx ?? 0;
     this.canvas = opts.canvas;
-    this.surface = new Surface(opts.canvas, opts.lattice, opts.cache, opts.surface ?? {});
+    this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
     this.overlay = new OverlayPass(this.surface.gl);
     this.tracePass = new TracePass(this.surface.gl);
     this.panes = new PaneModel({
@@ -263,7 +266,7 @@ export class SurfaceView {
     //    with — the minimap among them, because it is another viewport.
     const rects = new Map(views.map((v) => [v.id, v.rect]));
     const states = mapView ? [...this.panes.list(), this.minimap.state()] : this.panes.list();
-    const statuses = paneStatuses(states, reports, this.surface.lat, edgeNs, rects, (id) =>
+    const statuses = paneStatuses(states, reports, edgeNs, rects, (id) =>
       id === this.minimap.id ? this.minimap.following : this.panes.isFollowing(id));
     // T-459: the ruler line, from the SAME box `views` was just drawn from and the SAME
     // `(cellHz, cellS)` `statuses` just reported — never a second read of the pane's window, which

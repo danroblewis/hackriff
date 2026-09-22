@@ -9,7 +9,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ancestor, ancestorsOf, extentOf, fCellHz, fTileHz, intersects, keyOf, latticeFrom,
-  levelForHzPerPx, levelForNsPerPx, levelsFor, tCellNs, tilesFor, tileUrl, type Lattice,
+  levelForHzPerPx, levelForNsPerPx, levelsFor, tCellNs, tierFor, tilesFor, tileUrl,
+  VIEWPORT_TILE_BUDGET, type Lattice, type LatticeSet,
 } from "../src/surface/lattice";
 
 // The view lattice's floor is the store's own level-0 cell (T-438's fix for T-437 F1), not
@@ -144,11 +145,11 @@ test("the lattice is read off a response, never chosen by the client", () => {
 //
 // **The ceiling is a bound on level INDEX, and it does not move with the floor.** Measured on both
 // geometries with `hk_api::tiles::readable_ceiling` (T-501, a depth sweep over
-// `f_levels x t_levels` in 2..=10): the answer is identical at a 6250 Hz x 1 s floor and at a
-// 585.9375 Hz x 40.106667 ms one — 4x4 declares (9, 1) for both — and the best `level_f + level_t`
-// anywhere in that sweep is **11**, past which (F + T >= 13) the ceiling collapses to (0, 0). A
-// floor N doublings finer therefore shrinks the coarsest ADDRESSABLE tile by exactly 2^N, and no
-// lattice depth gives it back.
+// `f_levels x t_levels` in 2..=10): the answer is identical at a 6250 Hz x 1 s floor and at the
+// display plan's own 2343.75 Hz x 40.106667 ms one — 4x4 declares (9, 1) for both — and the best
+// `level_f + level_t` anywhere in that sweep is **11**, past which (F + T >= 13) the ceiling
+// collapses to (0, 0). A floor N doublings finer therefore shrinks the coarsest ADDRESSABLE tile by
+// exactly 2^N, and no lattice depth gives it back.
 //
 // The numbers below are that statement in tiles.
 const surfaceViewports = (lat: Lattice, spanS: number) => {
@@ -160,37 +161,203 @@ const surfaceViewports = (lat: Lattice, spanS: number) => {
   };
   return {
     // The tuned pane, opened on the observed extent (`surfaceBounds`), 1600 x 800.
-    pane: n({ f0Hz: 99.6e6, f1Hz: 102.0e6, t0Ns, t1Ns: nowNs }, 1600, 800),
+    pane: n(PANE(t0Ns, nowNs), 1600, 800),
     // The minimap: the whole device range over the whole record horizon, a 1600 x 120 strip.
-    minimap: n({ f0Hz: 0, f1Hz: 6e9, t0Ns, t1Ns: nowNs }, 1600, 120),
+    minimap: n(MINIMAP(t0Ns, nowNs), 1600, 120),
   };
 };
 
-/** The shipped view lattice: node (0, 0) 6250 Hz x 1 s, ceiling (9, 1). */
-const SHIPPED: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 12, levelsT: 15, maxLevelF: 9, maxLevelT: 1 };
-/** T-484's floor: the display STFT's own bin and row at 2.4 Msps, at the SAME declared ceiling. */
-const T484: Lattice = { ...SHIPPED, f0Hz: 585.9375, t0Ns: 40_106_667, levelsF: 16, levelsT: 19 };
+const NOW_NS = 1_789_300_000e9;
+const PANE = (t0Ns: number, t1Ns: number) => ({ f0Hz: 99.6e6, f1Hz: 102.0e6, t0Ns, t1Ns });
+const MINIMAP = (t0Ns: number, t1Ns: number) => ({ f0Hz: 0, f1Hz: 6e9, t0Ns, t1Ns });
+
+/**
+ * **T-439's floor**, 6250 Hz x 1 s — what shipped from T-439 until T-501 relanded the fidelity
+ * floor, and kept here as the control: the geometry for which one tier was enough.
+ */
+const COARSE: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 12, levelsT: 15, maxLevelF: 9, maxLevelT: 1 };
+/**
+ * **The shipped detail lattice (T-501)**: the display STFT's own bin and row at 2.4 Msps, at the
+ * SAME declared ceiling.
+ *
+ * **Every field is measured, not written down.** T-505 pinned this literal at
+ * `f0Hz: 585.9375, levelsF: 16` from T-501's investigation while the floor was reverted off main;
+ * relanding it makes the literal a checkable claim about the shipped server, and it was two
+ * doublings too fine — the default display plan is **1024** bins
+ * ([`hk_pipeline::config::DisplaySettings`]), so the bin at 2.4 Msps is 2343.75 Hz, which is
+ * exactly T-483's measured *"2.67 bins per cell"* against a 6250 Hz cell. The whole descriptor is
+ * asserted field for field on this side of the wire by
+ * `hk_pipeline`'s `live_edge_tiles::the_shipped_floor_is_the_lattice_the_client_test_pins`, which
+ * opens the real pyramids and reads `readable_ceiling` off them.
+ */
+const SHIPPED: Lattice = { ...COARSE, f0Hz: 2343.75, t0Ns: 40_106_667, levelsF: 14, levelsT: 19 };
+/**
+ * The finest floor the display plan can be *patched* to: `fft_size = 4096`, two doublings past the
+ * default. `DISPLAY_FFT_MAX` is 65536, so this is not even the worst case — which is the point of
+ * pinning it: the budget must hold for a floor the client never chose and cannot predict.
+ */
+const FINEST: Lattice = { ...SHIPPED, f0Hz: 585.9375, levelsF: 16 };
+/**
+ * **T-505's overview tier**: the same de-welded construction anchored on the SPECTRUM-HISTORY
+ * pyramid, which is a different store and therefore a different ceiling. Measured on real pyramids
+ * by `hk_api::tiles::the_overview_tier_reaches_past_the_whole_surface_whatever_the_view_floor_is`:
+ * floor 6250 Hz x 1 s, 12 x 15 axes, ceiling **(11, 14)** — a coarsest addressable tile of
+ * 3276.8 MHz x 48.5 days, against the view pyramid's 819.2 MHz x 512 s and the shipped detail
+ * floor's 307.2 MHz x 20.5 s.
+ *
+ * **It is the same numbers whichever floor the view pyramid has**, which is the entire point: it is
+ * anchored on a store whose cells do not move when the display's do.
+ */
+const OVERVIEW: Lattice = { scheme: "overview", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 12, levelsT: 15, maxLevelF: 11, maxLevelT: 14 };
 
 test("a viewport must be drawable in a bounded number of tiles, at every horizon", () => {
-  // 100 tiles is generous: it is ~3x what the shipped floor needs for the deepest viewport the
+  // 100 tiles is generous: it is ~3x what T-439's coarse floor needs for the deepest viewport the
   // surface can open, and well inside a 96 MB LRU and a four-slot in-flight cap.
-  const BUDGET = 100;
+  const BUDGET = VIEWPORT_TILE_BUDGET;
+  assert.equal(BUDGET, 100);
   for (const spanS of [20, 60, 300, 1200, 1800]) {
-    const v = surfaceViewports(SHIPPED, spanS);
+    const v = surfaceViewports(COARSE, spanS);
     assert.ok(v.pane <= BUDGET, `pane at ${spanS}s asks for ${v.pane} tiles`);
     assert.ok(v.minimap <= BUDGET, `minimap at ${spanS}s asks for ${v.minimap} tiles`);
   }
 });
 
-test("T-484's floor blows that budget by two orders of magnitude, and this is why the map went dark", () => {
+test("the fidelity floor blows that budget ON THE DETAIL TIER ALONE, and this is why the map went dark", () => {
   // Non-vacuity, and the measurement itself. Exact counts, so neither the defect nor a repair of it
   // can move unnoticed. The pane is survivable at a live edge and hopeless once the surface opens
   // on twenty minutes of observed extent; the minimap is hopeless from ~100 s of capture onward,
   // which is why every suite that runs against a seconds-old server stayed green.
-  assert.deepEqual(surfaceViewports(T484, 20), { pane: 15, minimap: 158 });
-  assert.deepEqual(surfaceViewports(T484, 100), { pane: 30, minimap: 474 });
-  assert.deepEqual(surfaceViewports(T484, 1200), { pane: 300, minimap: 4740 });
-  assert.deepEqual(surfaceViewports(T484, 1800), { pane: 445, minimap: 7031 });
-  // The same viewports on the shipped floor, for the ratio.
-  assert.deepEqual(surfaceViewports(SHIPPED, 1800), { pane: 8, minimap: 32 });
+  //
+  // **These are one tier's counts, not the client's.** Since T-505 `tierFor` is what `Surface`
+  // calls, and the test below measures it. This is the tier that would answer if there were only
+  // one — i.e. the system T-484 shipped.
+  assert.deepEqual(surfaceViewports(SHIPPED, 20), { pane: 15, minimap: 40 });
+  assert.deepEqual(surfaceViewports(SHIPPED, 100), { pane: 30, minimap: 120 });
+  assert.deepEqual(surfaceViewports(SHIPPED, 1200), { pane: 300, minimap: 1200 });
+  assert.deepEqual(surfaceViewports(SHIPPED, 1800), { pane: 445, minimap: 1780 });
+  // Patched to 4096 bins it is four times worse again, which is the reason the tier is chosen by
+  // the budget rather than by a span threshold: the floor is a runtime setting.
+  assert.deepEqual(surfaceViewports(FINEST, 1800), { pane: 445, minimap: 7031 });
+  // The same viewports on T-439's coarse floor, for the ratio.
+  assert.deepEqual(surfaceViewports(COARSE, 1800), { pane: 8, minimap: 32 });
+});
+
+// ——— T-505: the tiers, measured. ———
+//
+// **The harness gap this section exists to close.** The surface opens on the OBSERVED EXTENT, so a
+// server that has existed for seconds opens on a seconds-wide window and asks for a handful of
+// tiles — and every suite runs against exactly such a server. The defect is a function of ELAPSED
+// CAPTURE TIME, which no suite varies. So every count below is taken at an explicit horizon, thirty
+// minutes included, against a faked observed extent rather than a real server's age.
+
+/** Every tier a viewport could be drawn from, and what each would cost. */
+const tiers = (set: LatticeSet, spanS: number) => {
+  const t0Ns = NOW_NS - spanS * 1e9;
+  const pane = tierFor(set, PANE(t0Ns, NOW_NS), 1600, 800);
+  const minimap = tierFor(set, MINIMAP(t0Ns, NOW_NS), 1600, 120);
+  return {
+    pane: { tier: pane.tier, tiles: pane.addrs.length },
+    minimap: { tier: minimap.tier, tiles: minimap.addrs.length },
+  };
+};
+
+test("T-505/T-501: THE BUDGET HOLDS AT A THIRTY-MINUTE HORIZON, at the fidelity floor that broke it", () => {
+  // The fidelity floor, relanded by T-501, with the overview tier in place. Every count is a count
+  // for the SAME viewports the test above measures at 445 and 1780.
+  const set: LatticeSet = { detail: SHIPPED, overview: OVERVIEW };
+  for (const spanS of [20, 60, 100, 300, 1200, 1800]) {
+    const v = tiers(set, spanS);
+    assert.ok(v.pane.tiles <= VIEWPORT_TILE_BUDGET, `pane at ${spanS}s: ${v.pane.tiles} tiles from the ${v.pane.tier} tier`);
+    assert.ok(v.minimap.tiles <= VIEWPORT_TILE_BUDGET, `minimap at ${spanS}s: ${v.minimap.tiles} tiles from the ${v.minimap.tier} tier`);
+  }
+  // …and at the finest floor the display plan can be patched to, which the client cannot predict.
+  const patched: LatticeSet = { detail: FINEST, overview: OVERVIEW };
+  for (const spanS of [20, 60, 100, 300, 1200, 1800]) {
+    const v = tiers(patched, spanS);
+    assert.ok(v.pane.tiles <= VIEWPORT_TILE_BUDGET, `4096-bin pane at ${spanS}s: ${v.pane.tiles} tiles`);
+    assert.ok(v.minimap.tiles <= VIEWPORT_TILE_BUDGET, `4096-bin minimap at ${spanS}s: ${v.minimap.tiles} tiles`);
+  }
+  // The exact numbers, and WHICH TIER each came from — the measurement this ticket was filed for.
+  // 1780 -> 4 for the minimap, 445 -> 6 for a half-hour scrub of the tuned band.
+  assert.deepEqual(tiers(set, 1800), {
+    pane: { tier: "overview", tiles: 6 },
+    minimap: { tier: "overview", tiles: 4 },
+  });
+  assert.deepEqual(tiers(set, 1200), {
+    pane: { tier: "overview", tiles: 6 },
+    minimap: { tier: "overview", tiles: 4 },
+  });
+  // **And the live/tuned window stays on the DETAIL tier**, which is the whole reason the fidelity
+  // floor exists: what T-483 measured as missing is delivered exactly where it is looked at.
+  assert.deepEqual(tiers(set, 20), {
+    pane: { tier: "detail", tiles: 15 },
+    // The minimap stays on the detail tier at twenty seconds — 40 addresses, inside the budget —
+    // and leaves it at ~100 s of capture, which is precisely how long a suite has to run before it
+    // could have seen this. Patched to 4096 bins it is past the budget from the first second.
+    minimap: { tier: "detail", tiles: 40 },
+  });
+  assert.deepEqual(tiers(patched, 20).minimap, { tier: "overview", tiles: 4 });
+  assert.deepEqual(tiers(set, 100).minimap, { tier: "overview", tiles: 8 },
+    "the minimap leaves the detail tier once 120 addresses would be needed");
+  assert.deepEqual(tiers(set, 100).pane, { tier: "detail", tiles: 30 });
+  assert.deepEqual(tiers(set, 300).pane, { tier: "detail", tiles: 80 },
+    "five minutes of the tuned band is still inside the budget on the detail tier");
+});
+
+test("T-505: on T-439's coarse floor the tiers change nothing — the prerequisite landed before the change that needs it", () => {
+  const set: LatticeSet = { detail: COARSE, overview: OVERVIEW };
+  for (const spanS of [20, 100, 1200, 1800]) {
+    const v = tiers(set, spanS);
+    assert.equal(v.pane.tier, "detail", `pane at ${spanS}s left the detail tier on T-439's floor`);
+    assert.equal(v.minimap.tier, "detail", `minimap at ${spanS}s left the detail tier on T-439's floor`);
+  }
+  // Byte-for-byte the counts T-439's floor already produced: no viewport moved.
+  assert.deepEqual(tiers(set, 1800), {
+    pane: { tier: "detail", tiles: 8 },
+    minimap: { tier: "detail", tiles: 32 },
+  });
+});
+
+test("T-505: a coverage-first minimap alone is NOT enough — measured, which is why the tier exists", () => {
+  // **Shape (1) of the ticket, evaluated before shape (2) was built.** `/api/coverage` first, and
+  // request tiles only where something was observed: on a device-wide viewport almost all of
+  // 1 MHz - 6 GHz has never been sampled, so it is a large constant factor.
+  //
+  // It is a FACTOR, NOT A BOUND, and the two viewports show why. The observed region is modelled
+  // as the tuned band over the whole horizon — what the user's demo actually was.
+  const observed = (box: { f0Hz: number; f1Hz: number; t0Ns: number; t1Ns: number }, lat: Lattice, w: number, h: number, band: { f0Hz: number; f1Hz: number }) => {
+    const { levelF, levelT } = levelsFor(lat, box, w, h);
+    return tilesFor(lat, box, levelF, levelT)
+      .filter((a) => { const e = extentOf(lat, a); return e.f1Hz > band.f0Hz && e.f0Hz < band.f1Hz; })
+      .length;
+  };
+  const band = { f0Hz: 99.6e6, f1Hz: 102.0e6 };
+  const t0Ns = NOW_NS - 1800e9;
+  // The minimap: 1780 addresses, of which 89 intersect anything the radio ever sampled. A 20x
+  // saving — and still short of the budget, on its own.
+  assert.equal(observed(MINIMAP(t0Ns, NOW_NS), SHIPPED, 1600, 120, band), 89);
+  assert.ok(89 > VIEWPORT_TILE_BUDGET * 0.8, "close enough to the budget to fail on the next band tuned");
+  // The tuned pane is the case it cannot touch: the surface OPENS on the observed extent, so
+  // almost every address it enumerates is inside the observed band by construction. 445 -> 356 is
+  // one column of tiles at the band's edge, and still THREE AND A HALF TIMES the budget.
+  assert.equal(surfaceViewports(SHIPPED, 1800).pane, 445);
+  assert.equal(observed(PANE(t0Ns, NOW_NS), SHIPPED, 1600, 800, band), 356);
+  assert.ok(356 > VIEWPORT_TILE_BUDGET * 3, "coverage-first leaves the tuned-window viewport hopeless");
+});
+
+test("T-505: the tier is chosen by the BUDGET, and the choice is total", () => {
+  const set: LatticeSet = { detail: SHIPPED, overview: OVERVIEW };
+  const t0Ns = NOW_NS - 1800e9;
+  const chosen = tierFor(set, MINIMAP(t0Ns, NOW_NS), 1600, 120);
+  assert.equal(chosen.tier, "overview");
+  assert.equal(chosen.lat.scheme, "overview", "the address carries the scheme, so the two tiers cannot share a cache key");
+  assert.equal(chosen.addrs[0].scheme, "overview");
+  assert.equal(chosen.clamped, false, "the overview tier answers this window at the level the screen asks for");
+  // The detail tier's own verdict for the same viewport: clamped, and 1780 addresses.
+  const dense = tierFor({ detail: SHIPPED, overview: SHIPPED }, MINIMAP(t0Ns, NOW_NS), 1600, 120);
+  assert.equal(dense.tier, "detail");
+  assert.equal(dense.clamped, true, "it is asked for a level past its ceiling — the honest reason to leave it");
+  assert.equal(dense.addrs.length, 1780);
+  // Total: with no better tier available the cheaper one is still returned rather than nothing.
+  assert.ok(dense.addrs.length > VIEWPORT_TILE_BUDGET);
 });

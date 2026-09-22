@@ -144,12 +144,12 @@ test("a nearly-empty first screen arrives already explained, with a number rathe
 
 // ——— 2. the requests the client actually builds (the T-367 guard) ———
 
-test("probeSurface asks exactly four read-only routes, in dependency order", async () => {
+test("probeSurface asks exactly five read-only routes, in dependency order", async () => {
   const asked: string[] = [];
   const surfaceWide = observedExtent(coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 10, f1: 20, t0: 28, t1: 31 }));
   const p = await probeSurface(async (path) => {
     asked.push(path);
-    if (path.startsWith("/api/tiles")) return tileProbeResponse();
+    if (path.startsWith("/api/tiles")) return tileProbeResponse(path.includes("scheme=overview") ? "overview" : "view");
     if (path === "/api/navigation") return { frequency: { ranges_hz: [[1e6, 6e9]], center_step_hz: 28.6 }, time: { latest_s: T1 } };
     // The coarse map first, then the refinement over the box it returned — the same route, the same
     // question, at the resolution the first answer made available.
@@ -159,6 +159,9 @@ test("probeSurface asks exactly four read-only routes, in dependency order", asy
   });
   assert.deepEqual(asked, [
     "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8",
+    // T-505: the second tier, probed the same cheap way. Both lattices are READ OFF an answer;
+    // neither is ever chosen here.
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8",
     "/api/navigation",
     coverageUrl({ f0Hz: 1e6, f1Hz: 6e9, t0Ns: T0 * S, t1Ns: T1 * S }, ORIENT_CELLS, ORIENT_ROWS),
     coverageUrl(surfaceWide.box!, ORIENT_CELLS, ORIENT_ROWS),
@@ -166,6 +169,8 @@ test("probeSurface asks exactly four read-only routes, in dependency order", asy
   assert.equal(p.lattice.cells, 256, "the probe is cheap (8 cells); the surface renders at the route's default");
   assert.equal(p.lattice.f0Hz, 6250, "level 0 is read off the answer, never chosen here");
   assert.equal(p.opening.onCoverage, true);
+  assert.equal(p.lattices.detail, p.lattice);
+  assert.equal(p.lattices.overview.scheme, "overview", "the overview tier is its own lattice and its own cache key");
   assert.deepEqual(p.degraded, []);
 
   // The refinement decides where to OPEN; the note's share stays the surface-wide one, because it
@@ -179,7 +184,7 @@ test("probeSurface asks exactly four read-only routes, in dependency order", asy
 test("a refinement that finds nothing keeps the coarse box: an observed cell has something in it", async () => {
   let n = 0;
   const p = await probeSurface(async (path) => {
-    if (path.startsWith("/api/tiles")) return tileProbeResponse();
+    if (path.startsWith("/api/tiles")) return tileProbeResponse(path.includes("scheme=overview") ? "overview" : "view");
     if (path === "/api/navigation") return { frequency: { ranges_hz: [[1e6, 6e9]], center_step_hz: 28.6 }, time: { latest_s: T1 } };
     return ++n === 1 ? coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 10, f1: 20, t0: 28, t1: 31 }) : coverage(ORIENT_CELLS, ORIENT_ROWS, null);
   });
@@ -189,7 +194,7 @@ test("a refinement that finds nothing keeps the coarse box: an observed cell has
 
 test("a route that fails degrades visibly: the fallback is recorded, never silent", async () => {
   const p = await probeSurface(async (path) => {
-    if (path.startsWith("/api/tiles")) return tileProbeResponse();
+    if (path.startsWith("/api/tiles")) return tileProbeResponse(path.includes("scheme=overview") ? "overview" : "view");
     throw new Error("boom");
   });
   assert.equal(p.degraded.length, 2);
@@ -269,12 +274,22 @@ test("an unrelenting refusal is bounded, and is reported AS backpressure", async
 
 // ——— 3. the mounted surface ———
 
-function tileProbeResponse() {
+/**
+ * A tile probe answer. `scheme` echoes the address, because the two tiers are told apart by it
+ * (T-505) — a stub that answered every probe as `view` would make one lattice look like two.
+ * `overview` also reports the SPECTRUM-HISTORY geometry: absolutely coarse cells that do not move
+ * when the view pyramid's floor does, which is the whole reason it can answer a device-wide window.
+ */
+function tileProbeResponse(scheme = "view") {
   const n = 8 * 8;
+  const over = scheme === "overview";
   return {
-    key: { device: "any", scheme: "view", level_f: 0, level_t: 0, f_index: 0, t_index: 0, cells: 8 },
+    key: { device: "any", scheme, level_f: 0, level_t: 0, f_index: 0, t_index: 0, cells: 8 },
     extent: { nf: 8, nt: 8 },
-    axes: { frequency: { levels: 20, cell_hz: 6250 }, time: { levels: 15, cell_s: 1 } },
+    axes: {
+      frequency: { levels: 20, cell_hz: 6250, ...(over ? { max_level: 11 } : {}) },
+      time: { levels: 15, cell_s: 1, ...(over ? { max_level: 14 } : {}) },
+    },
     grid: { nf: 8, nt: 8, max_db: Array<number>(n).fill(-90) },
     coverage: { any: { cells: Array.from({ length: n }, () => ({ state: "observed" })) }, horizon: { oldest_record_s: T0 } },
     resolution: { source: "spectrum-history", answered: { level: 0 } },

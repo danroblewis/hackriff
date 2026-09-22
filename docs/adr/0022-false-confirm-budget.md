@@ -314,6 +314,8 @@ This costs one counter and one surfaced state, and it converts the derivation's 
 
 ## 9. What changes when T-547 lands — and what does not
 
+**T-547 has landed** ([docs/21](../21-evidence-bits-under-quantisation.md), 2026-09-21): **CONDITIONAL**, conditioning key **ADC fill** (not gain, not clip fraction), **δ = 1.8 bits at a claimed 6 bits** and 3.3 at 8, plus a separate ~2-bit unattributed spread on real captures. It deliberately did **not** write the amendment below; §8 of that note says what the amendment should say if it is written.
+
 T-547 measures whether the calibrated nulls (bimodality, eye openness, EVM, SNR and the rest of §2.1's second list) have stable tails across gain state, clipping fraction and 8-bit quantisation, and returns GO / CONDITIONAL / NO-GO.
 
 **What does not change, under any of the three outcomes:**
@@ -337,6 +339,8 @@ So the dependency is real but bounded: **T-547 does not gate this ADR, and T-547
 ---
 
 ## 10. How it is tested
+
+> **The fixture corpus A1/A2/A3 run on is specified in [docs/22](../22-mauto-acceptance-corpus.md)** (T-551, frozen 2026-09-21). One thing there is load-bearing for §10.1: a sample of `n` negative decisions resolves a tail no finer than `log2(n)` bits, so **A2's `18.0` is a function of `n`** — at n = 1600 it detects optimism above 7.4 bits (conservative against §3's 9.7-bit margin), and at a smaller n the same constant would read green with no power at all. docs/22 §3 freezes `n` alongside the constant. It amends nothing here.
 
 Protocol is ADR-0021 §8.4's, unchanged and non-negotiable: fixtures replay **through the mock SDR** behind the ordinary device interface, jobs start via `POST /api/analyze`, targets come from **blind detection** or an ad-hoc band and **never** from a truth frequency, truth is loaded only by the assert harness, and jobs are bounded by `max_evaluations` rather than by wall so the suite is deterministic.
 

@@ -159,11 +159,94 @@ pub(crate) fn history_welch(fft_len: usize) -> WelchConfig {
 /// side in the same data directory under their own scheme roots.
 pub const VIEW_SCHEME: u16 = 2;
 
-/// Time cell of the view lattice's node (0, 0). **Not configurable, and 1 s rather than
-/// `docs/16` §6.2's 128 s** — T-437's finding F1: a 128 s finest time cell puts the whole 120 s IQ
-/// retention inside *one* cell, so `level_t` pins at 0 and the de-welding buys nothing on the axis
-/// it was introduced for. The floor is the decision, not the ratio.
+/// Fallback time cell of the view lattice's node (0, 0), used only when the display plan cannot be
+/// read (a non-finite sample rate). **Superseded as the shipped floor by [`view_geometry`]**, which
+/// derives node (0, 0) from the display STFT's own row period — see that function for why.
+///
+/// It was 1 s rather than `docs/16` §6.2's 128 s because of T-437's finding F1: a 128 s finest
+/// time cell puts the whole 120 s IQ retention inside *one* cell, so `level_t` pins at 0 and the
+/// de-welding buys nothing on the axis it was introduced for. T-484 carries that argument one step
+/// further — 1 s against a 25 rows/s display stream folds 25 rows into one number, which is the
+/// measured 3 % of the station's level variation the canvas was keeping.
 pub const VIEW_T_CELL: Duration = Duration::from_secs(1);
+
+/// **The finest live tier's cell is the display STFT's own bin and row (T-484).**
+///
+/// # The gap this function closes, measured
+///
+/// T-483 read one capture twice — through the `spectrum/live` stream (the frames the retired
+/// waterfall drew) and through the view lattice's finest node (what `/api/tiles` serves and
+/// `ui/src/surface` renders) — and found the canvas standing in for **66.5 display measurements
+/// per cell**: 2.67 bins × 24.93 rows. The consequences it measured, on the same samples:
+/// the quiet band's floor lifted **+10.5 dB** (a max-hold over ~10³ FFT cells lifts noise and
+/// leaves a deterministic peak where it is), contrast at 100.465 MHz fell **12.7 → 7.7 dB**, the
+/// per-cell reproduction error was **15.8 dB** median in band, and a one-second cell kept **19 %**
+/// of that emission's level variation and **3 %** of the station's. That is the user's *"reads
+/// nearly straight"* and *"washed out"*, in dB.
+///
+/// # Why the grid alone could not have fixed it
+///
+/// The brief that filed T-484 named `RegridPlan::mean` — `f_cell / bin_width` bins averaged — and
+/// T-483 showed that fold produces the **mean** plane, which agrees with the display path to
+/// 0.00 dB. `/api/tiles` serves **`max_db`**. What acted on `max_db` was *what was folded*: the
+/// view lattice was fed [`run`]'s own STFT at `detection_resolution()`'s `fft_len` — 512 bins at
+/// 2.4 Msps, **4687.5 Hz, already coarser than the display stream before any cell fold**, at
+/// 10 rows/s and max-held over its Welch segments. No choice of `f_cell` can undo a coarser
+/// source, so the fix is a different **source**, not a different grid: the finest node is now fed
+/// the *display* frames ([`crate::spectrum`]), and its cell is set to their own bin and row so the
+/// fold at node (0, 0) is **1:1** — one FFT bin of one published row per cell, nothing averaged,
+/// nothing max-held, because at 1:1 there is nothing to summarise. Everything coarser folds from
+/// those, as it always did.
+///
+/// **One renderer, fed a different source.** No second render path and no resurrected waterfall
+/// (T-445): the same pane, the same `/api/tiles`, the same grid, the same honesty tiers. The
+/// duplication this *removes* is real — the canvas was drawing a second STFT's view of samples the
+/// display STFT had already transformed.
+///
+/// # What it costs, measured rather than assumed (T-453's budget)
+///
+/// Level-0 cells per second become `fft_len × rows_per_s` — **25 600/s at the shipped display plan,
+/// independent of the tuned span**, against `span / f_cell` per second before (384/s at 2.4 MHz,
+/// 3200/s at 20 MHz). Against T-453's two figures:
+///
+/// - **Residency does not grow, and shrinks at a wide edge.** The open accumulator is
+///   `f_cells_per_block × t_cells_per_block × 44 B` per open `(level, f_block)`, and `f_cell =
+///   fs / fft_len` makes the tuned span exactly **one** frequency block at any rate — ~3.1 MB
+///   total, where 6.25 kHz cells needed four blocks (~12 MB) at a 20 MHz edge.
+/// - **Write volume is paid off the capture thread.** The fold still runs on [`ViewWriter`]'s own
+///   thread, which is what T-453's `hk-pipeline` 262 s → 75 s bought; what changes is bytes, and
+///   the pyramid's own byte budget evicts the oldest finest tiles after promoting their coarse
+///   summaries, so the finest tier is *bounded live detail* and the coarse tiers stay the long
+///   history. That is the honesty tiers, enforced by retention rather than asserted.
+///
+/// # The one thing it does not do
+///
+/// The display plan turns per-segment Welch holds **off**, so a burst shorter than one display row
+/// is averaged across that row exactly as the retired waterfall averaged it. That is the user's
+/// *"same experience"* and it is deliberate: T-397's max-hold is what scheme 1 — `/api/timeline`,
+/// `/api/coverage`, `/api/floor`, the strips — still folds, from [`run`]'s own frames, unchanged.
+/// Do not turn holds on here to "fix" the peaks: `max_db` would stop being the number the row
+/// published, and T-483's comparison is exactly that equality.
+pub fn view_geometry(
+    fs: f64,
+    settings: &crate::config::PipelineSettings,
+    class: hk_model::ContentClass,
+) -> (f64, Duration) {
+    let fallback = (settings.view_f_cell_hz.unwrap_or(6250.0), VIEW_T_CELL);
+    if !(fs.is_finite() && fs > 0.0) {
+        return fallback;
+    }
+    let d = crate::config::DisplaySettings::from_settings(settings);
+    let plan = crate::class::row_plan(fs, d.fft_size, d.rows_per_s, class, d.window);
+    let f_cell = settings
+        .view_f_cell_hz
+        .unwrap_or(fs / plan.stft.welch.fft_len as f64);
+    let t_ns = (1e9 / plan.row_rate_hz).round();
+    if !(f_cell.is_finite() && f_cell > 0.0 && (1.0..=1e15).contains(&t_ns)) {
+        return fallback;
+    }
+    (f_cell, Duration::from_nanos(t_ns as u64))
+}
 
 /// **Time** cells per tile at every node, and the answer to T-434's RAM caveat.
 ///
@@ -209,7 +292,7 @@ pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
 /// the writes to their own thread (102 s) nor sealing through the last frame (112.7 s). Varying the
 /// **node count** did: a 4 × 4 lattice ran the same suite in 62.6 s against 8 × 8's 112.7 s and the
 /// control's 32.9 s, i.e. roughly **1.5 s of suite wall per lattice node**. That measurement is why
-/// [`VIEW_LEVELS`] is 4 and why T-453 exists; shipped, 4 × 4 with both write fixes runs it in
+/// [`VIEW_F_LEVELS`] is 4 and why T-453 exists; shipped, 4 × 4 with both write fixes runs it in
 /// **52.1 s**.
 ///
 /// That is not a defect, it is the **de-welding's running cost, and nobody had costed it**. T-434
@@ -239,14 +322,14 @@ pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
 /// 64 levels), which is what isolates the cost to the writes.
 pub const VIEW_F_CELLS_PER_BLOCK: u32 = 1024;
 
-/// Frequency and time levels of the view lattice: **4 × 4 = 16 nodes**, so frequency runs
-/// 6.25 kHz → 50 kHz (tiles 6.4 → 51.2 MHz) and time 1 s → 8 s (tiles 64 → 512 s). That is the
-/// range a **live edge** is actually looked at over, and a live edge is what this scheme exists
-/// for.
+/// **Frequency** levels of the view lattice — with [`VIEW_T_LEVELS`], **4 × 6 = 24 nodes** over a
+/// floor of `fs / spectrum_fft_len` × the display row period ([`view_geometry`]): at 2.4 Msps,
+/// frequency runs 2.34 → 18.75 kHz and time 40.1 ms → 1.28 s.
 ///
-/// # Why not 8 × 8, which [`hk_store::history::MAX_LEVELS`] would allow
+/// # The argument that used to make it 4 — kept because it is still the shape of the question
 ///
-/// Because the reach it buys is not real, and it is not free.
+/// T-438 and T-439 read: *"because the reach it buys is not real, and it is not free."* Both halves
+/// have since moved, and the T-484 section below is the current answer; this is what they said.
 ///
 /// **Not real:** T-438 found `docs/16` §6.2's V0 unbackable at the **coarse** end as well as the
 /// fine one — a 3.28 GHz × 48-day tile needs 32 768 frequency cells at scheme 1's coarsest and no
@@ -273,16 +356,105 @@ pub const VIEW_F_CELLS_PER_BLOCK: u32 = 1024;
 /// one tile row instead of one per time level. So this constant is a **reach** decision again,
 /// which is exactly what the ticket was for.
 ///
-/// It is still 4, because the *other* half of the argument is unchanged: T-438 found the nodes
-/// beyond this ladder address a surface nothing can serve, and reach nothing can back is not worth
-/// having at any price. Growing it now costs what the extra reach is worth rather than what the
-/// gate charges for it.
+/// # Why it is 7 (T-484), and why it was 4
+///
+/// T-453's note ended *"growing it now costs what the extra reach is worth rather than what the
+/// gate charges for it"*, and kept 4 because T-438 had found the nodes beyond that ladder addressed
+/// a surface nothing could serve. **T-484 moved the floor those levels are measured from** — node
+/// (0, 0) went from 6.25 kHz × 1 s to the display plan's own bin and row, 2343.75 Hz × 40.1 ms at
+/// 2.4 Msps — so the same *absolute* reach now needs about six more doublings (1.4 in frequency,
+/// 4.6 in time). Reach is not a taste: leaving it at 4 would have made a viewport that works today
+/// stop working.
+///
+/// **Measured** (`the_lattices_depth_keeps_the_canvass_zoom_out_affordable`, which is the standing
+/// guard, and `hk_api::tiles::affordable_levels`, which is the bound): a tile is affordable when
+/// `level_f + level_t ≤ 4 + (f_levels − 1) + (t_levels − 1)` — a bound on *level indices*, and
+/// therefore identical for both floors — while what a viewport **demands** is set by the floor's
+/// absolute cell size. Taking a 1600 × 800 canvas:
+///
+/// | viewport | shipped 6.25 kHz × 1 s, L4 | T-484 floor, L4 | T-484 floor, **L7** |
+/// |---|---|---|---|
+/// | tuned 2.4 MHz × 20 s | (0, 0) ok | (0, 0) ok | (0, 0) ok |
+/// | band 20 MHz × 10 min | (1, 0) ok | (3, 5) ok | (3, 5) ok |
+/// | device 6 GHz × 10 min | (10, 0) ok | (11, 5) **400** | (11, 5) ok |
+/// | device 6 GHz × 48 h | (10, 8) 400 | (11, 13) 400 | (11, 13) 400 |
+///
+/// The last row is **unchanged and pre-existing** — the whole device over the whole retention was
+/// never inside the work budget, which is what T-482's declared ceiling exists to tell a client
+/// before it asks. The third row is the regression this constant repairs, and **L6 does not repair
+/// it**: the measured reaches are L4 → `lf+lt ≤ 10`, L6 → 14, **L7 → 16**, L8 → 18. Seven is the
+/// smallest depth that restores what the canvas could already do, which is the whole claim being
+/// made; eight buys nothing either viewport needs and sits exactly on
+/// [`hk_store::history::MAX_LEVELS`].
+///
+/// **It is affordable to grow because T-453 made it so.** With
+/// [`hk_store::PyramidConfig::coarse_on_demand`] capture writes node (0, 0) and nothing else, so
+/// neither the resident accumulator (asserted at zero coarse open tiles in
+/// `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`) nor the per-second write
+/// cost scales with the node count; 49 nodes cost a reader that asks for them, and nothing else.
+/// T-439's *"~1.5 s of M0-acceptance wall per node"* was measured **before** that change and no
+/// longer holds — which is precisely why T-453's note could hand this decision back to reach.
 ///
 /// **This is a configuration, not a contract.** The alternative of ×4 steps per axis reaches the
 /// same node count by changing [`hk_store::ViewLattice`]'s own shape for every future consumer;
 /// that is a contract change, and the right time to consider it is when the real access pattern has
 /// been measured.
-pub const VIEW_LEVELS: usize = 4;
+pub const VIEW_F_LEVELS: usize = 4;
+
+/// **Time** levels: [`VIEW_F_LEVELS`]'s twin, set separately for the same reason
+/// [`VIEW_F_CELLS_PER_BLOCK`] and [`VIEW_T_CELLS_PER_BLOCK`] are — a symmetric number was an
+/// assumption, not a measurement.
+///
+/// # It is 4, and that is a CONSTRAINT, not the answer T-484 measured
+///
+/// T-484's floor is 25× finer in time (`fs / spectrum_fft_len` × the display row period, 40.1 ms at
+/// 2.4 Msps, against the 1 s T-439 shipped). A viewport's demanded level is
+/// `ceil(log2(nsPerPx / t_cell₀))`, so it moves with the floor, while what `/api/tiles` can serve is
+/// bounded by `level_f + level_t` — an **index** bound, blind to cell size. The finer cell therefore
+/// spends ~4.6 levels of reach, and since T-482 the client *clamps* to the declared ceiling rather
+/// than being refused: the cost is **fan-out, not a `400`**. Measured on a 1600 × 800 pane, tiles
+/// per viewport at the declared ceiling:
+///
+/// | `f × t` | ceiling | tuned 2.4 MHz × 20 s | band 20 MHz × 10 min | device 6 GHz × 10 min |
+/// |---|---|---|---|---|
+/// | T-439's floor, 4 × 4 | (9, 1) | 2 | 21 | 24 |
+/// | **T-484's floor, 4 × 4 (shipped)** | **(9, 1)** | **8** | **150** | **600** |
+/// | T-484's floor, 5 × 4 | (9, 2) | 8 | 75 | 300 |
+/// | T-484's floor, 4 × 6 | (7, 4) | 8 | **20** | 316 |
+/// | T-484's floor, 4 × 9 | (0, 0) | 8 | 2006 | 590 000 |
+///
+/// **4 × 6 is the shape the measurement points at** — it returns the band sweep to the coarse
+/// floor's own number — and it is **not shipped, because it does not work yet**. Every depth whose
+/// declared ceiling has `max_t ≥ 2` makes T-482's ceiling **false at its own corner**:
+///
+/// ```text
+/// the declared ceiling (7, 4) is a LIE: ["(7,4) -> 400 this tile's level cannot be built
+///  from the levels below it: building level 2 here needs more than 1024 tiles of folding"]
+/// ```
+///
+/// Level 2 is node (0, 2) — frequency-finest, time-coarser — which `affordable_levels` admits as a
+/// candidate (it is cheap to *read*) and `materialize` then refuses (it is expensive to *build*).
+/// `hk_api::tiles::servable` does not close that gap, and the shipped 4 × 4 geometry never exposed
+/// it because its ceiling is `(9, 1)`. Measured: 4 × 4 passes the contract test, and 4 × 5, 5 × 4,
+/// 3 × 6 and 4 × 6 all fail it the same way.
+///
+/// So the depth stays where T-439 put it, the zoom-out fan-out above is the **stated price** of the
+/// finer floor, and the repair is a separate ticket with two parts: make a candidate level's
+/// *buildability* part of `affordable_levels` (or of `servable`), then take the depth to 4 × 6. The
+/// standing guard is
+/// `hk-pipeline/tests/live_edge_tiles.rs::the_lattices_depth_keeps_the_canvass_zoom_out_affordable`,
+/// which pins these numbers so neither the cost nor its repair can move unnoticed.
+///
+/// # What is NOT a reason to leave it at 4 any more
+///
+/// T-439's ≈**1.5 s of M0-acceptance wall per node** predates T-453. With the coarse nodes built on
+/// demand ([`hk_store::PyramidConfig::coarse_on_demand`]) neither the resident accumulator nor the
+/// per-second write cost scales with the node count, which is why T-453's note handed this decision
+/// back to reach. Reach is also **not monotone in depth**: the ceiling is an *area* constraint and a
+/// node too deep to fold inside `MAX_MATERIALIZE_TILES` poisons the candidate list for every
+/// address — at 7 × 7 the ceiling collapses to `(0, 0)` and a 20 MHz view costs 2006 tiles. Any
+/// change here is grid-searched, not reasoned.
+pub const VIEW_T_LEVELS: usize = 4;
 
 /// The view lattice this run opens: `f_cell_hz` × 1 s at node (0, 0), doubling independently on
 /// each axis (`docs/16` §8.2).
@@ -320,22 +492,22 @@ pub const VIEW_LEVELS: usize = 4;
 /// `/api/tiles` says so on the wire instead of approximating one. Level 0's own `p_lo`/`p_hi` are
 /// exact per time column and unaffected; this only shrinks the per-tile rollup histogram that
 /// nothing in this scheme reads.
-pub fn view_lattice(f_cell_hz: f64) -> ViewLattice {
+pub fn view_lattice(f_cell_hz: f64, t_cell: Duration) -> ViewLattice {
     ViewLattice {
         scheme: VIEW_SCHEME,
         f_cell_hz,
-        t_cell: VIEW_T_CELL,
+        t_cell,
         // Sets both axes; `view_config` overrides the frequency one. `ViewLattice` has a single
         // knob because §6.2 assumed uniform tiles; the measurement above is why they differ.
         cells_per_block: VIEW_T_CELLS_PER_BLOCK,
-        f_levels: VIEW_LEVELS,
-        t_levels: VIEW_LEVELS,
+        f_levels: VIEW_F_LEVELS,
+        t_levels: VIEW_T_LEVELS,
     }
 }
 
 /// [`view_lattice`] as a [`PyramidConfig`]: dBFS (the unit every frame of the live chain carries
 /// before calibration), a coarse rollup histogram, and the run's own byte budget.
-pub fn view_config(f_cell_hz: f64) -> PyramidConfig {
+pub fn view_config(f_cell_hz: f64, t_cell: Duration) -> PyramidConfig {
     PyramidConfig {
         // The frequency blocking is a FILE-COUNT decision and the time blocking a MEMORY one, so
         // they are set separately. See [`VIEW_F_CELLS_PER_BLOCK`] for the measurement that
@@ -346,13 +518,24 @@ pub fn view_config(f_cell_hz: f64) -> PyramidConfig {
             step_db: 5.0,
             bins: 44,
         },
-        ..PyramidConfig::view_lattice(view_lattice(f_cell_hz))
+        ..PyramidConfig::view_lattice(view_lattice(f_cell_hz, t_cell))
     }
 }
 
-/// Frames the view writer may hold (about a minute at 10 rows/s, matching
-/// [`HISTORY_QUEUE_FRAMES`]).
-pub(crate) const VIEW_QUEUE_FRAMES: usize = HISTORY_QUEUE_FRAMES;
+/// Frames the view writer may hold: **about a minute at the DISPLAY row rate**, which is not the
+/// history reader's.
+///
+/// It was [`HISTORY_QUEUE_FRAMES`] (600, a minute at 10 rows/s) while this queue was fed from the
+/// history reader. Since T-501 it is fed from [`crate::spectrum`] at the display plan's own rate —
+/// ~25 rows/s at the shipped settings — so the same 600 frames is 24 seconds, and T-571's live
+/// cascade makes each one more work for the writer to retire. Measured: with a reader holding the
+/// pyramid for 15 ms out of every 16 (`live_edge_tiles::the_live_chain_grows_the_view_lattices_/// finest_node_without_blocking_capture`), 600 frames overflowed and 340 of the growing edge's
+/// frames were DROPPED — the same failure as blocking for a tile read, spelled as loss.
+///
+/// 1500 restores the minute the number was always meant to be. The cost is the queued PSDs:
+/// `fft_len` f32s each, ~4 kB at the shipped 1024 bins, so ~6 MB of headroom on a path whose
+/// resident tiles are already tens of MB.
+pub(crate) const VIEW_QUEUE_FRAMES: usize = 1500;
 
 /// The view pyramid's writer: **its own thread**, because the fold is not the expensive part —
 /// the seal is, and the seal must not land on a thread that gates capture.
@@ -377,15 +560,13 @@ pub(crate) const VIEW_QUEUE_FRAMES: usize = HISTORY_QUEUE_FRAMES;
 /// wall clock for stream time to advance — Listen's admission cap, and the RDS and POCSAG recipe
 /// starts.
 ///
-/// So the frames cross a thread boundary and the growing edge is written behind it. The history
-/// reader's per-frame cost becomes a clone and a push; nothing it does can block on a tile write,
-/// a zstd pass, or an `/api/tiles` reader.
-///
-/// **Drop-oldest, not drop-newest**, past [`VIEW_QUEUE_FRAMES`]: the newest frame is the growing
-/// edge, which is the whole point of the surface. That is why this is a `VecDeque` behind a
-/// `Condvar` rather than a `sync_channel`, which can only refuse the newest.
+/// So the frames cross a thread boundary and the growing edge is written behind it. The producing
+/// reader's per-frame cost becomes a clone and a push ([`ViewQueue::push`]); nothing it does can
+/// block on a tile write, a zstd pass, or an `/api/tiles` reader. **T-484** makes that producer
+/// [`crate::spectrum`]'s reader rather than this one, which changes nothing about the argument
+/// above: that reader holds a gate cursor too.
 pub(crate) struct ViewWriter {
-    shared: Arc<ViewQueue>,
+    queue: Arc<ViewQueue>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -398,50 +579,63 @@ struct ViewQueueState {
     finish: Option<bool>,
 }
 
-struct ViewQueue {
+/// The hand-off itself, created with the segment so the **producer** does not have to wait for the
+/// writer thread to exist (T-484).
+///
+/// The producer is [`crate::spectrum`]'s reader, not this one: the finest node is fed the display
+/// frames (see [`view_geometry`]). Both readers are started as workers in no guaranteed order, so
+/// the queue is built in `start_segment` and handed to both — frames pushed before the writer
+/// thread starts simply wait in it.
+pub(crate) struct ViewQueue {
     state: Mutex<ViewQueueState>,
     wake: Condvar,
     capacity: usize,
 }
 
-impl ViewWriter {
-    /// Starts the writer thread for `view`.
-    pub(crate) fn start(
-        view: Arc<Mutex<Pyramid>>,
-        shared: Arc<Shared>,
-        capacity: usize,
-    ) -> anyhow::Result<Self> {
-        let q = Arc::new(ViewQueue {
+impl ViewQueue {
+    /// An empty queue holding at most `capacity` frames.
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
             state: Mutex::new(ViewQueueState::default()),
             wake: Condvar::new(),
             capacity: capacity.max(1),
-        });
-        let (qt, st) = (Arc::clone(&q), Arc::clone(&shared));
-        let thread = std::thread::Builder::new()
-            .name("hk-view".into())
-            .spawn(move || view_writer(&qt, &view, &st))?;
-        Ok(Self {
-            shared: q,
-            thread: Some(thread),
-        })
+        }
     }
 
     /// Hands `frame` to the writer. Never blocks, never waits on the pyramid.
+    ///
+    /// **Drop-oldest, not drop-newest**, past the capacity: the newest frame is the growing edge,
+    /// which is the whole point of the surface. That is why this is a `VecDeque` behind a
+    /// `Condvar` rather than a `sync_channel`, which can only refuse the newest.
     pub(crate) fn push(&self, h: &HistoryCounters, frame: &SpectrumFrame, origin: FrameOrigin) {
-        let mut st = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         st.pending.push_back((frame.clone(), origin));
         let mut dropped = 0;
-        while st.pending.len() > self.shared.capacity {
+        while st.pending.len() > self.capacity {
             st.pending.pop_front();
             dropped += 1;
         }
         drop(st);
         add(&h.view_dropped, dropped);
-        self.shared.wake.notify_one();
+        self.wake.notify_one();
+    }
+}
+
+impl ViewWriter {
+    /// Starts the writer thread for `view`, draining `q`.
+    pub(crate) fn start(
+        q: Arc<ViewQueue>,
+        view: Arc<Mutex<Pyramid>>,
+        shared: Arc<Shared>,
+    ) -> anyhow::Result<Self> {
+        let (qt, st) = (Arc::clone(&q), Arc::clone(&shared));
+        let thread = std::thread::Builder::new()
+            .name("hk-view".into())
+            .spawn(move || view_writer(&qt, &view, &st))?;
+        Ok(Self {
+            queue: q,
+            thread: Some(thread),
+        })
     }
 
     /// Drains what is queued, seals when `seal` (T-446's **one** decision, passed in rather than
@@ -449,13 +643,13 @@ impl ViewWriter {
     pub(crate) fn finish(mut self, seal: bool) {
         {
             let mut st = self
-                .shared
+                .queue
                 .state
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             st.finish = Some(seal);
         }
-        self.shared.wake.notify_all();
+        self.queue.wake.notify_all();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -469,13 +663,13 @@ impl Drop for ViewWriter {
         if let Some(t) = self.thread.take() {
             {
                 let mut st = self
-                    .shared
+                    .queue
                     .state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 st.finish.get_or_insert(false);
             }
-            self.shared.wake.notify_all();
+            self.queue.wake.notify_all();
             let _ = t.join();
         }
     }
@@ -591,17 +785,16 @@ pub(crate) fn run(
     let mut tracker = NoiseFloorTracker::new(FloorConfig::default())
         .map_err(|e| anyhow::anyhow!("history floor tracker: {e:?}"))?;
     let mut queue = FloorIngestQueue::new(HISTORY_QUEUE_FRAMES);
-    // T-439: the same frames, into the de-welded view lattice. One STFT, one floor tracker, one
-    // origin — the live edge and the history are the SAME write, which is exactly §8's claim that
-    // there is no live-versus-history path to keep consistent. The WRITING happens on
-    // [`ViewWriter`]'s own thread, because this one gates capture and a tile seal must not.
-    let view_writer = match view {
-        Some(v) => Some(ViewWriter::start(
-            v,
-            Arc::clone(&shared),
-            VIEW_QUEUE_FRAMES,
-        )?),
-        None => None,
+    // T-439/T-484: this reader OWNS the view lattice's writer thread — it starts it, and it is the
+    // one place that decides whether the segment seals (T-446, below) — but it no longer FEEDS it.
+    // The frames folded into the finest node are the display STFT's ([`crate::spectrum`]), because
+    // this reader's own STFT is coarser than the display stream before any cell fold and no choice
+    // of `f_cell` can undo that; see [`view_geometry`] for the measurement. Scheme 1 — the floor
+    // product, `/api/history`, `/api/timeline`, `/api/coverage` — is still fed from here, with
+    // T-397's max-hold intact.
+    let view_writer = match (view, shared.view_queue.clone()) {
+        (Some(v), Some(q)) => Some(ViewWriter::start(q, v, Arc::clone(&shared))?),
+        _ => None,
     };
     let mut reader = shared.ring.reader_at(0);
     let cursor = shared.gate.register(0);
@@ -634,11 +827,6 @@ pub(crate) fn run(
         }
         add(&h.frames_dropped, r.dropped);
         tally(h, &r.folded);
-        // T-439: the growing edge. A clone and a push — no lock on the pyramid, no tile write, no
-        // zstd, nothing that a reader or the disk can make slow. This thread holds a gate cursor.
-        if let Some(w) = view_writer.as_ref() {
-            w.push(h, frame, origin);
-        }
         let dur = (frame.sample_count as f64 * 1e9 / frame.spectrum.sample_rate_hz) as i64;
         last_end = frame.t.host_time.saturating_add_nanos(dur);
         frames_since_update += 1;

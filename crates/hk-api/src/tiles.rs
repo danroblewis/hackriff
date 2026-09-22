@@ -25,6 +25,10 @@
 //!   through [`Geometry::axes_of`]/[`Geometry::level_at`] — and a **welded ladder is the diagonal**
 //!   of that lattice, so `level_at(3, 0)` is `None` and this route answers *this scheme has no such
 //!   node* (404) rather than snapping to a level whose time cell is a day (T-434).
+//!   `scheme=overview` (T-505) is **the second tier**: the same de-welded construction anchored at
+//!   the *spectrum-history* pyramid's level-0 cell and answered by that pyramid, so a
+//!   wide-and-long viewport has a source whose cells are absolutely coarse. See
+//!   [`TileLattice::overview`] for why one lattice cannot be both, measured.
 //! - **`device` is whose coverage decides this tile's grey.** Coverage is device-local
 //!   (T-259/T-305, §6.3), so it belongs in the key and not in a cell. `any` is the union and keeps
 //!   `"named": false`, so a merged plane can never wear one radio's identity.
@@ -282,6 +286,10 @@ pub fn tile_store(state: &ApiState, q: &Params) -> TileStore {
     };
     match param(q, "scheme") {
         None | Some("view") => TileStore::View,
+        // **The overview tier is the spectrum-history pyramid** (T-505). Its geometry does not
+        // move when the view pyramid's floor does, which is the whole reason it can answer a
+        // device-wide, record-long viewport at all — see [`TileLattice::overview`].
+        Some("overview") => TileStore::Main,
         Some(other) => match other.parse::<u16>() {
             Ok(n) => {
                 let is_view = v
@@ -381,6 +389,52 @@ impl TileLattice {
     /// The de-welded view lattice, anchored at the open pyramid's **own level-0 cell** (F1) and
     /// doubling each axis independently until §6.2's widest and tallest tile are reached.
     pub fn view(geom: &Geometry) -> Self {
+        Self::doubling(geom, "view")
+    }
+
+    /// **The overview tier's lattice** (T-505): the same de-welded construction, anchored at the
+    /// **spectrum-history** pyramid's level-0 cell and answered by that pyramid.
+    ///
+    /// # Why a second lattice, and why this is the only shape that works
+    ///
+    /// `axes.{frequency,time}.max_level` bounds level *indices*, never cell **size**, and
+    /// [`readable_ceiling`] is blind to absolute size because [`servable`] reasons about ratios.
+    /// So the coarsest tile a lattice can **address** shrinks by exactly the factor its floor
+    /// shrank. Measured on real pyramids (`the_overview_tier_reaches_past_the_whole_surface`):
+    ///
+    /// | lattice's store | floor | ceiling | coarsest addressable tile |
+    /// |---|---|---|---|
+    /// | view pyramid, shipped floor | 6250 Hz × 1 s | (9, 1) | 819.2 MHz × 512 s |
+    /// | view pyramid, T-484's floor | 585.9375 Hz × 40.1 ms | (9, 1) | **76.8 MHz × 20.5 s** |
+    /// | **scheme 1, this lattice** | 6250 Hz × 1 s | **(11, 14)** | **3276.8 MHz × 48.5 days** |
+    ///
+    /// The middle row is T-484's dark map: the same ceiling index over a floor eight doublings
+    /// finer is 133× less tile area, so a 6 GHz × 30 min minimap went from 32 addresses to 7031
+    /// behind a four-slot in-flight cap and nothing arrived. **No lattice depth gives it back** —
+    /// T-501 swept `f_levels × t_levels` in 2..=10 at both floors and the ceiling is identical
+    /// index for index — because the real bound is *work*: a tile's source grid is
+    /// `tile_hz / f_cell` by `tile_s / t_cell` over the store's **coarsest** level, so reach is
+    /// proportional to that level's absolute cell size. A store whose finest cell is the display
+    /// STFT's own bin has a coarsest cell that is finer in the same proportion, and it genuinely
+    /// cannot back a device-wide tile at any price.
+    ///
+    /// So the fix is not a wider ceiling but a **second source whose cells are absolutely coarse**,
+    /// and one is already open and already fed: `/api/history`'s scheme-1 pyramid, whose geometry
+    /// does not move when the view pyramid's floor does. That is what makes the honesty tiers real
+    /// in the tile *source* rather than only in the label (`docs/16` §8.5e, CLAUDE.md): the fine
+    /// lattice answers the tuned window at live-IQ detail, this one answers wide-and-long
+    /// viewports as spectrum-history / survey-overview, and [`tier`] still says per tile which of
+    /// the two a cell came from — a tile folded from a coarser source cell is `survey-overview`
+    /// here exactly as it is there.
+    ///
+    /// Grey does not move with the tier: the coverage plane is **record-derived**
+    /// ([`crate::coverage::TileOverlay`]), not read out of whichever pyramid answered, so the two
+    /// tiers cannot disagree about where the radio looked.
+    pub fn overview(geom: &Geometry) -> Self {
+        Self::doubling(geom, "overview")
+    }
+
+    fn doubling(geom: &Geometry, name: &str) -> Self {
         let f0 = geom.levels[0].f_cell_hz.max(f64::MIN_POSITIVE);
         let t0 = geom.levels[0].t_cell_ns.max(1);
         let cells = TILE_CELLS as f64;
@@ -402,7 +456,7 @@ impl TileLattice {
             t_cells_ns.push(t_cells_ns.last().copied().unwrap_or(t0).saturating_mul(2));
         }
         Self {
-            name: "view".into(),
+            name: name.into(),
             f_cells_hz,
             t_cells_ns,
             from_store: false,
@@ -491,10 +545,11 @@ pub fn parse_key(geom: &Geometry, q: &Params) -> Result<TileKey, ApiError> {
     }
     let lattice = match param(q, "scheme") {
         None | Some("view") => TileLattice::view(geom),
+        Some("overview") => TileLattice::overview(geom),
         Some(other) => {
             let n: u16 = other
                 .parse()
-                .map_err(|_| bad("scheme must be `view` or a store scheme id"))?;
+                .map_err(|_| bad("scheme must be `view`, `overview` or a store scheme id"))?;
             TileLattice::store(geom, n)
         }
     };
@@ -1043,12 +1098,23 @@ fn tier(key: &TileKey, r: &TileRead, max_live_span_hz: Option<f64>) -> DetailSou
 
 /// The tier before any replication claim: what a tile of this **width** is, whatever answered it.
 ///
-/// Never `live-iq`, and **T-439 does not change that**. T-439 makes the finest node of the view
-/// lattice the growing edge — "live" is a viewport, not a mode (docs/16 §8.1) — but a tile is still
-/// a *pyramid* read, served at a level's cell size, and `DetailSource::LiveIq` means exactly "live
-/// IQ from the front end at the resolution shown". A 6.25 kHz × 1 s cell is not that, however
-/// recently it was written. Claiming otherwise would trade §4's honesty rule for a word, and the
-/// ring is where a client goes for live-IQ resolution.
+/// Never `live-iq` — and since **T-484 that is an under-claim, kept on purpose**.
+///
+/// T-439 made the view lattice's finest node the growing edge ("live" is a viewport, not a mode,
+/// docs/16 §8.1), and the reasoning that stood here said a tile is still a *pyramid* read served at
+/// a level's cell size, so a 6.25 kHz × 1 s cell is not "live IQ from the front end at the
+/// resolution shown" however recently it was written. **That premise has gone:** T-484 sets node
+/// (0, 0)'s cell to the display STFT's own bin and row and folds the published rows into it 1:1, so
+/// such a tile now *is* the front end at the resolution shown, and `LiveIq` would be true.
+///
+/// It still answers `SpectrumHistory`, because [`crate::navigation::live_window_verdict`] defines
+/// the enum as a claim about **span** — could this width have come from one capture window — and
+/// four routes share that definition. Re-pointing it at *resolution* for one of them is a contract
+/// change nothing has asked for, and docs/api.md's own rule settles the direction: under-claiming
+/// costs a styling cue, over-claiming is the lie the invariant forbids. The distinction a reader
+/// actually needs is served per tile and is now sharper than the enum: `resolution.answered.level`
+/// `0` with `resolution.fold.*.direction` `exact` on both axes means one published row per cell,
+/// and anything coarser is a declared fold of those.
 fn base_tier(key: &TileKey, max_live_span_hz: Option<f64>) -> DetailSource {
     match crate::navigation::live_window_verdict(key.region.freq.width_hz(), max_live_span_hz) {
         DetailSource::LiveIq => DetailSource::SpectrumHistory,
@@ -1954,6 +2020,174 @@ mod tests {
         assert!(widest >= VIEW_MAX_TILE_HZ, "{widest}");
         let tallest = l.t_cells_ns.last().unwrap() * TILE_CELLS as i64;
         assert!(tallest >= VIEW_MAX_TILE_NS, "{tallest}");
+    }
+
+    /// **T-505's whole measurement, in one test: reach is a property of the STORE's coarsest
+    /// cell, and no ceiling, depth or `cells` recovers it.**
+    ///
+    /// The ceiling is a bound on level *index* and [`servable`] is blind to absolute size, so a
+    /// floor N doublings finer costs exactly 2^N of addressable tile span. T-484 paid that and the
+    /// user's tile map went dark. This asserts the three geometries side by side, so neither the
+    /// defect nor its repair can move unnoticed — and in particular so that the overview tier
+    /// cannot quietly be re-anchored on the view pyramid, which is the one change that would
+    /// reintroduce T-484 with every suite still green.
+    #[test]
+    fn the_overview_tier_reaches_past_the_whole_surface_whatever_the_view_floor_is() {
+        use std::time::Duration;
+
+        fn open(tag: &str, cfg: PyramidConfig) -> hk_store::Pyramid {
+            let p = std::env::temp_dir().join(format!(
+                "hk-api-t505-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            hk_store::Pyramid::open(&p, cfg).unwrap()
+        }
+        /// `(ceiling, coarsest addressable tile in Hz, in ns)` for a lattice over its own store.
+        fn reach(p: &hk_store::Pyramid, lat: &TileLattice) -> ((usize, usize), f64, i64) {
+            let c = readable_ceiling(p, lat);
+            (
+                c,
+                lat.f_cells_hz[c.0] * TILE_CELLS as f64,
+                lat.t_cells_ns[c.1] * TILE_CELLS as i64,
+            )
+        }
+        /// A view pyramid with the shipped 4 × 4 shape and the given node-(0, 0) cell.
+        fn view_pyramid(tag: &str, f0_hz: f64, t0: Duration) -> hk_store::Pyramid {
+            open(
+                tag,
+                PyramidConfig {
+                    f_cells_per_block: 1024,
+                    ..PyramidConfig::view_lattice(ViewLattice {
+                        scheme: 2,
+                        f_cell_hz: f0_hz,
+                        t_cell: t0,
+                        cells_per_block: 64,
+                        f_levels: 4,
+                        t_levels: 4,
+                    })
+                },
+            )
+        }
+
+        // The shipped view floor: scheme 1's own level-0 cell. 819.2 MHz x 512 s of reach.
+        let shipped = view_pyramid("shipped", 6250.0, Duration::from_secs(1));
+        let (c, f_hz, t_ns) = reach(&shipped, &TileLattice::view(shipped.geometry()));
+        assert_eq!(c, (9, 1));
+        assert_eq!((f_hz, t_ns), (819_200_000.0, 512_000_000_000));
+
+        // T-484's floor: the display STFT's own bin and row at 2.4 Msps, eight doublings finer in
+        // frequency and ~4.6 in time. THE CEILING DOES NOT MOVE, so the reach collapses 133x in
+        // area, and a 6 GHz x 30 min minimap needs 7031 addresses instead of 32.
+        let fine = view_pyramid("t484", 585.937_5, Duration::from_nanos(40_106_667));
+        let (c_fine, f_fine, t_fine) = reach(&fine, &TileLattice::view(fine.geometry()));
+        assert_eq!(
+            c_fine, c,
+            "the ceiling is an INDEX bound and must not move with the floor"
+        );
+        assert_eq!(f_fine, 76_800_000.0);
+        assert_eq!(t_fine, 20_534_613_504);
+        assert!(
+            (f_hz / f_fine) * (t_ns as f64 / t_fine as f64) > 130.0,
+            "the fine floor should cost ~133x of tile AREA",
+        );
+
+        // The overview tier, anchored on the spectrum-history pyramid. Its geometry does not move
+        // when the view floor does, so this row is the SAME whichever of the two above is open.
+        let main = open("main", PyramidConfig::default());
+        let over = TileLattice::overview(main.geometry());
+        assert_eq!(over.name, "overview");
+        let (c_over, f_over, t_over) = reach(&main, &over);
+        assert_eq!(c_over, (11, 14));
+        assert_eq!(
+            f_over, 3_276_800_000.0,
+            "wider than the 1 MHz-6 GHz surface"
+        );
+        assert!(
+            t_over as f64 / 1e9 > 30.0 * 86_400.0,
+            "taller than any retention window ({t_over} ns)",
+        );
+        // The property that makes the tiers real rather than labels: the overview tier's coarsest
+        // tile is wider than the whole device range AND longer than a month, at BOTH view floors.
+        // §6.2's V7: the whole 1 MHz-6 GHz range in **two** tiles (`VIEW_MAX_TILE_HZ` is 3 GHz),
+        // against 79 at the fine floor.
+        assert!((6e9f64 / f_over).ceil() == 2.0 && (6e9 / f_fine).ceil() == 79.0);
+        assert!(f_over > f_fine * 40.0);
+    }
+
+    /// `scheme=overview` is a third spelling, and it resolves to the spectrum-history pyramid
+    /// whether or not a view pyramid is open — the two tiers must not be able to become one.
+    #[test]
+    fn the_overview_scheme_names_its_own_lattice_and_the_spectrum_history_store() {
+        let g = geom();
+        let key = parse_key(
+            &g,
+            &params(&[
+                ("scheme", "overview"),
+                ("level_f", "10"),
+                ("level_t", "4"),
+                ("f_index", "0"),
+                ("t_index", "0"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(key.lattice.name, "overview");
+        assert!(!key.lattice.from_store, "it is de-welded, not the ladder");
+        assert_eq!(key.f_cell_hz, 6250.0 * 2f64.powi(10));
+        assert_eq!(key.t_cell_ns, 16_000_000_000);
+        // A `view` address of the same indices names the same cells on a server with no view
+        // pyramid open, and a DIFFERENT scheme name — so the two never share a cache key.
+        let view = parse_key(
+            &g,
+            &params(&[
+                ("level_f", "10"),
+                ("level_t", "4"),
+                ("f_index", "0"),
+                ("t_index", "0"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(view.lattice.name, "view");
+        assert_ne!(view.lattice.name, key.lattice.name);
+
+        // The store choice, with and without a view pyramid open.
+        let empty = ApiState::default();
+        assert_eq!(
+            tile_store(&empty, &params(&[("scheme", "overview")])),
+            TileStore::Main,
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "hk-api-t505-store-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = ApiState {
+            view_history: Some(Arc::new(std::sync::Mutex::new(
+                hk_store::Pyramid::open(
+                    &dir,
+                    PyramidConfig {
+                        f_cells_per_block: 1024,
+                        ..PyramidConfig::view_lattice(ViewLattice::default())
+                    },
+                )
+                .unwrap(),
+            ))),
+            ..ApiState::default()
+        };
+        assert_eq!(
+            tile_store(&state, &params(&[("scheme", "overview")])),
+            TileStore::Main,
+            "the overview tier must never be answered by the view pyramid: that is T-484",
+        );
+        assert_eq!(tile_store(&state, &params(&[])), TileStore::View);
+        assert_eq!(
+            tile_store(&state, &params(&[("scheme", "view")])),
+            TileStore::View,
+        );
     }
 
     /// A welded ladder is the **diagonal** of its own lattice, and off it there is no node

@@ -428,6 +428,8 @@ pub(crate) struct Evidence {
     /// observation log has sealed a record for it.
     open: usize,
     open_named: usize,
+    /// Whether the IQ ring **can contribute evidence**, not whether a handle is wired (T-640):
+    /// [`ring_can_answer`], and the coverage state that turns on the difference.
     ring_available: bool,
     log_available: bool,
     /// The earliest instant **any** consulted source still holds a record for; `None` when no
@@ -454,6 +456,30 @@ pub(crate) struct Evidence {
     /// A source has **discarded** records that could reach back before `recording_began`, so that
     /// boundary is not a floor and every row before `oldest_record` is `"unknown"`. `Some(why)`.
     pub forgotten: Option<&'static str>,
+    /// **How far forward this answer's evidence reaches** (T-532): the newest instant any consulted
+    /// span over *this band* ends at, clamped into the asked-for window; `None` when no record
+    /// touches the band at all.
+    ///
+    /// # Why the young end needs its own horizon, and why its absence was a bug
+    ///
+    /// [`Evidence::oldest_record`] exists because *absence of a span is not evidence of absence*
+    /// past the point the records reach — before it, "we did not look" is a claim nothing supports,
+    /// so those rows are `"unknown"` rather than grey. **The same is true at the other end, and was
+    /// not said.** A tune record is written as capture proceeds, so it stops at the newest sample;
+    /// every row after that is served `unobserved` — a positive claim that nothing ever looked —
+    /// about an instant the record simply has not reached yet.
+    ///
+    /// Served, that claim is momentarily harmless: nothing has happened there *yet*. **Held, it
+    /// becomes false the instant capture continues**, and a tile is held — a client keeps a resident
+    /// copy for as long as it can, and T-460/T-495 are two tickets about exactly how long that is.
+    /// With a one-second coverage cell the error hid inside the cell the live edge was already in;
+    /// at the fidelity floor's 40 ms cell (T-501) it is a visible band of grey across the newest
+    /// second of every live pane, over rows the radio recorded and this server is serving.
+    ///
+    /// So the answer states where its own evidence stops, and a reader may not read `unobserved`
+    /// past it as *"nothing looked"* — only as *"this answer does not reach here"*. It is the same
+    /// sentence as `oldest_record_s`, pointing the other way.
+    pub newest_record: Option<Timestamp>,
 }
 
 impl Evidence {
@@ -473,14 +499,36 @@ impl Evidence {
         }
         let log = spans.len() - ring;
         // T-596: the live edge, between the last seal and now. Counted as its own source: it is
-        // the one evidence a refused IQ ring leaves standing — and clipped to the record horizon,
+        // the one evidence a refused IQ ring leaves standing - and clipped to the record horizon,
         // so a provisional record can never overrule the `"unknown"` this same answer publishes.
+        //
+        // **Folded in BEFORE `newest_record` is taken, and the order is the semantics** (T-596 x
+        // T-532). T-532's rule is that the forward horizon comes from the SAME `spans` the planes
+        // are rasterised from, so the summary and the body cannot disagree; the open dwell's spans
+        // reach the live edge and DO rasterise, so taking `newest_record` first would publish an
+        // `as_of_s` at the last SEAL while the plane beside it paints `observed` for seconds after
+        // it - the exact split T-532 exists to close, and on the surface (a held live tile) it was
+        // written for. It also composes with this ticket's own rule rather than fighting it: the
+        // dwell in flight may extend the answer FORWARD to the live edge and never overrule it
+        // backward. The asymmetry is deliberate - an unsealed record may widen how far an answer
+        // reaches into the present, which is a statement about its own freshness, but may not
+        // rewrite this server's statement about what it has forgotten, so `oldest_record` is
+        // computed from sealed sources only and is what the open dwell is clipped to above.
         if let Some(store) = state.observations.as_ref() {
             let (open_spans, named) = open_dwell_spans(store, freq, window, memory.oldest_record);
             open = open_spans.len();
             open_named = named;
             spans.extend(open_spans);
         }
+        // The newest instant the consulted records reach over this band, never past the window they
+        // were asked about: an answer cannot be evidence about time it did not look at. Taken from
+        // the SAME `spans` the planes are rasterised from, so the horizon and the plane cannot
+        // disagree - the failure mode of serving a summary beside a body.
+        let newest_record = spans
+            .iter()
+            .map(|s| s.time.end)
+            .max()
+            .map(|t| t.min(window.end));
         Evidence {
             spans,
             ring,
@@ -489,11 +537,14 @@ impl Evidence {
             log_named,
             open,
             open_named,
-            ring_available: state.iq_buffer.is_some(),
+            // T-640: whether this source can actually contribute evidence, NOT whether a handle is
+            // wired — a refused ring answers `/api/iqbuffer` and holds no journal.
+            ring_available: memory.ring_can_answer,
             log_available: state.observations.is_some(),
             oldest_record: memory.oldest_record,
             recording_began: memory.recording_began,
             forgotten: memory.forgotten,
+            newest_record,
         }
     }
 
@@ -569,6 +620,10 @@ impl Evidence {
             "recording_began_s": secs(self.recording_began),
             // Why this server cannot bound what it forgot, or null when it can.
             "forgotten": self.forgotten,
+            // Unix s: how far FORWARD this answer's evidence reaches over this band (T-532), or
+            // null when no record touches the band at all. `oldest_record_s` pointing the other
+            // way — see [`Evidence::newest_record`] for why a held answer needs it.
+            "as_of_s": secs(self.newest_record),
             // The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row +
             // unknown_rows)` — a contiguous band, so a client can check the states it was sent.
             "unknown_rows": unknown.len(),
@@ -583,6 +638,14 @@ impl Evidence {
             "state_rule": "\"unknown\" carries no measurement keys, exactly like \"unobserved\", \
                 and must be drawn as neither grey nor a level - forgetting is not a measurement of \
                 nothing.",
+            "as_of_rule": "this answer's records reach forward only as far as `as_of_s`. An \
+                `\"unobserved\"` cell AFTER it means \"this answer does not reach here\", NOT \
+                \"nothing looked\" - a tune record is written as capture proceeds, so it always \
+                stops at the newest sample. A reader that KEEPS this answer (every tile cache does) \
+                must not draw grey past `as_of_s`: the rows there are being recorded while the copy \
+                ages, and grey is the one mark that may only mean the radio never looked. `null` \
+                means no record touches this band at all, and then nothing here was ever observed \
+                and the whole answer stands.",
         })
     }
 }
@@ -592,6 +655,36 @@ struct Memory {
     oldest_record: Option<Timestamp>,
     recording_began: Option<Timestamp>,
     forgotten: Option<&'static str>,
+    /// **Whether the IQ ring can contribute evidence at all** (T-640) — not whether a handle is
+    /// wired. See [`ring_can_answer`].
+    ring_can_answer: bool,
+}
+
+/// **Can the IQ ring journal actually answer "did we look here"?** (T-640)
+///
+/// `state.iq_buffer.is_some()` asks whether a *handle* is wired, which is not the same question. A
+/// ring whose allocation was **refused** for lack of free space — the field failure mode of a
+/// portable device, and exactly how T-588 hit T-596 — still presents a handle and still answers
+/// `/api/iqbuffer`, while holding no journal and contributing zero spans.
+///
+/// That distinction decides a coverage state. [`Evidence::unknown_rows`] reads `no_tune_history`
+/// from this flag and the log's: with **no** tune history a row's unsampled cells are `"unknown"`,
+/// because "we did not look" is a claim nothing supports. Reporting a refused ring as *available*
+/// made the server answer `"unobserved"` — a positive claim that the radio did not look — over
+/// rows it has no tune record of. It is the same fail-open T-596 closed from the other side: an
+/// unsealed dwell may not paint `observed` over `unknown`, and a refused ring may not paint
+/// `unobserved` over it either. *We cannot say* is neither.
+///
+/// So the predicate is the status's own `enabled` — "the run buffers IQ", which every no-buffer
+/// case (`refused`, `locked`, `incompatible`, disabled by configuration) reports as `false` with a
+/// `reason` — minus the one enabled state that is not yet holding anything: `allocation ==
+/// "allocating"`, where the ring is still being laid down and "nothing is buffered until it
+/// completes". A status that does not say, or says something that is not a boolean, is **not**
+/// read as available: this fails closed on to `"unknown"`, the answer that claims least.
+fn ring_can_answer(status: Option<&Value>) -> bool {
+    let Some(s) = status else { return false };
+    s.get("enabled").and_then(Value::as_bool).unwrap_or(false)
+        && s.get("allocation").and_then(Value::as_str) != Some("allocating")
 }
 
 impl Memory {
@@ -668,6 +761,8 @@ impl Memory {
             oldest_record: oldest_record.map(Timestamp::from_unix_nanos),
             recording_began: min(oldest_record, history_began).map(Timestamp::from_unix_nanos),
             forgotten,
+            // T-640: measured off the status this function already read, not off the handle.
+            ring_can_answer: ring_can_answer(ring.as_ref()),
         }
     }
 }
@@ -2131,6 +2226,24 @@ mod tests {
     /// RED without the clip: rows 1–5 read `"observed"` (states become 1 unobserved + 9 observed),
     /// i.e. five rows of "we no longer know whether we looked" rewritten as "we looked" by a record
     /// that has not sealed — the T-596 fix pointed backwards, which is the same class of lie.
+    ///
+    /// # And it pins the ORDER the two horizons are taken in (T-596 × T-532)
+    ///
+    /// `as_of_s` ([`Evidence::newest_record`]) is how far **forward** this answer's evidence
+    /// reaches, and T-532's rule is that it comes from the *same* `spans` the planes are rasterised
+    /// from so the summary and the body cannot disagree. The open dwell's spans rasterise, so they
+    /// must be folded in **before** `newest_record` is taken: here `as_of_s` is **7280** — the live
+    /// edge the plane's last `observed` row is drawn from — not **7260**, the last seal. Taking the
+    /// forward horizon first would publish "my evidence stops at 7260" beside a plane claiming
+    /// `observed` through 7280, which is exactly the split T-532 closed, and a client honouring
+    /// `as_of_s` would discard the live-edge rows this ticket exists to serve. The control below,
+    /// with no open dwell, reads 7260: the difference is the open dwell and nothing else.
+    ///
+    /// The asymmetry is the invariant, not an accident. An unsealed record may move the horizon
+    /// **forward** (a statement about this answer's own freshness) and may not move `oldest_record`
+    /// **backward** (this server's statement about what it has forgotten) — which is why
+    /// `oldest_record` is computed from sealed sources only, above, and is what the open dwell is
+    /// clipped to.
     #[test]
     fn the_dwell_in_flight_carries_the_live_edge_and_never_overrules_an_unknown_row() {
         let window = TimeRange::new(t(7080), t(7280));
@@ -2158,6 +2271,15 @@ mod tests {
              1-5 `unknown`: a provisional record does not overrule the horizon this same answer \
              publishes. {h}"
         );
+        // The ORDER: the open dwell is folded into `spans` BEFORE the forward horizon is taken, so
+        // `as_of_s` reaches the same live edge the plane's last `observed` row is drawn from.
+        assert_eq!(
+            h["as_of_s"],
+            json!(7280.0),
+            "`as_of_s` must reach the live edge the plane itself claims, not stop at the last seal \
+             (7260): the forward horizon is taken from the same spans the planes are rasterised \
+             from, so the summary and the body cannot disagree (T-532). {h}"
+        );
 
         // And it is really the open dwell doing the work on row 9, not the sealed record: without
         // it that row is `unobserved`.
@@ -2177,6 +2299,120 @@ mod tests {
                 ("unobserved", 1)
             ]),
             "{h}"
+        );
+        assert_eq!(
+            h["as_of_s"],
+            json!(7260.0),
+            "without the open dwell the forward horizon is the last seal: the 7280 above is the \
+             open dwell's doing and nothing else's. {h}"
+        );
+    }
+
+    /// A ring handle whose status is whatever the case under test needs (T-640).
+    struct FakeRing(Value);
+
+    impl crate::iqbuffer::IqBufferControl for FakeRing {
+        fn status(&self, _q: &crate::iqbuffer::IqBufferQuery) -> Value {
+            self.0.clone()
+        }
+        fn clip(
+            &self,
+            _r: &crate::iqbuffer::ClipStart,
+        ) -> Result<Value, crate::iqbuffer::IqBufferFailure> {
+            unreachable!("coverage never exports a clip")
+        }
+    }
+
+    /// **T-640: a REFUSED IQ ring is not an available one, and the difference is a coverage state.**
+    ///
+    /// `ring_available` used to be `state.iq_buffer.is_some()` — whether a *handle* is wired. A ring
+    /// whose allocation was refused for lack of free space (T-588's, and the field failure mode of
+    /// a portable device) still presents that handle and still answers `/api/iqbuffer`, while
+    /// holding no journal and contributing zero spans. [`Evidence::unknown_rows`] reads
+    /// `no_tune_history` from that flag, so such a server answered `"unobserved"` — *the radio did
+    /// not look* — over rows it has **no tune record of at all**.
+    ///
+    /// That is the fail-open T-596 closed pointed the other way: an unsealed dwell may not paint
+    /// `observed` over `unknown`, and a refused ring may not paint `unobserved` over it either.
+    /// *We cannot say* is neither, and it is `"unknown"`.
+    ///
+    /// Counted over ten rows × one cell, no observation log in any case, so the ring is the only
+    /// source there could be:
+    ///
+    /// - **refused** (`enabled: false`): 10 `"unknown"`, 0 `"unobserved"`, and `sources[iq-ring]`
+    ///   reports `available: false` beside its zero spans;
+    /// - **allocating** (`enabled: true`, nothing buffered yet): the same — an enabled ring that is
+    ///   still being laid down holds no journal;
+    /// - **enabled and holding a segment**: `observed` where the segment is, `unobserved` after it,
+    ///   and `available: true` — so the strictness above cannot pass by calling every ring dead.
+    ///
+    /// RED with the old `is_some()` predicate: the first two cases serve 10 `"unobserved"` rows and
+    /// `available: true`, i.e. ten rows of "nothing looked" asserted by a ring that never opened.
+    #[test]
+    fn a_refused_ring_is_not_available_and_its_rows_are_unknown_rather_than_grey() {
+        let window = TimeRange::new(t(7080), t(7280));
+        let rows_of = |status: Value| {
+            let state = ApiState {
+                iq_buffer: Some(std::sync::Arc::new(FakeRing(status))),
+                ..ApiState::default()
+            };
+            let v = overlay_json(&state, band(), window, 10, 1);
+            let rows: Vec<String> = v["any"]["cells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["state"].as_str().unwrap().to_string())
+                .collect();
+            let ring = v["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["kind"] == json!("iq-ring"))
+                .cloned()
+                .expect("the iq-ring source is always reported");
+            (rows, ring)
+        };
+
+        // 1. Refused: a handle, an answer, and no journal behind either.
+        let (rows, ring) = rows_of(json!({
+            "enabled": false,
+            "reason": "needs 134217728 bytes above the 8589934592-byte free-space floor and \
+                       4789297152 bytes are free",
+            "allocation": "refused",
+            "segments": [],
+        }));
+        assert_eq!(
+            rows,
+            states(&[("unknown", 10)]),
+            "a refused ring is no tune history, so no row may claim the radio did not look: {ring}"
+        );
+        assert_eq!(ring["available"], json!(false), "{ring}");
+        assert_eq!(ring["spans"], json!(0), "{ring}");
+
+        // 2. Allocating: enabled, but nothing is buffered until it completes.
+        let (rows, ring) = rows_of(json!({
+            "enabled": true, "reason": Value::Null, "allocation": "allocating",
+            "allocation_progress": 0.4, "segments": [],
+        }));
+        assert_eq!(rows, states(&[("unknown", 10)]), "{ring}");
+        assert_eq!(ring["available"], json!(false), "{ring}");
+
+        // 3. A ring that really is holding a journal: available, and its segment is observed. This
+        //    is the non-vacuity half - the predicate must not simply call every ring dead.
+        let (rows, ring) = rows_of(json!({
+            "enabled": true, "reason": Value::Null, "allocation": "full",
+            "t0": 7100.0, "t1": 7200.0,
+            "segments": [{
+                "device_id": RUNNING, "center_hz": 150e6, "sample_rate_hz": 20e6,
+                "t0_ns": 7_100i64 * 1_000_000_000, "t1_ns": 7_200i64 * 1_000_000_000,
+            }],
+        }));
+        assert_eq!(ring["available"], json!(true), "{ring}");
+        assert_eq!(ring["spans"], json!(1), "{ring}");
+        assert_eq!(
+            rows,
+            states(&[("unobserved", 1), ("observed", 5), ("unobserved", 4)]),
+            "the ring's own segment is observed, and after its reach nothing looked: {ring}"
         );
     }
 }

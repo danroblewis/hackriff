@@ -84,6 +84,12 @@ export interface ReadoutRow {
   readonly headline: string;
   /** **The stated level**: the cell size the pixels are made of, and the level indices. */
   readonly level: string;
+  /** **Which tier the pane drew from** (T-505): `detail` or `overview`. The honesty tiers are two
+   * real tile sources now, so the source is stated beside the level — a wide or deep zoom reads as
+   * survey overview rather than as upscaled detail presented as measurement. */
+  readonly tier: PaneStatus["tier"];
+  /** That tier in a sentence, shown as the level cell's title. */
+  readonly tierLabel: string;
   /** What the frame actually drew for it — resident tiles, coarse stand-ins, and not-yet-arrived. */
   readonly counts: string;
   /** The other viewports this one resolved to a different level from. */
@@ -125,7 +131,13 @@ export function readoutOf(
       following: s.following,
       headline: [s.freqLabel, s.timeLabel, s.device === "any" ? null : s.device].filter(Boolean).join(" · "),
       level: s.levelLabel,
-      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending`,
+      tier: s.tier,
+      tierLabel: s.tierLabel,
+      // The fourth count is appended rather than folded into `pending` (T-532): a tile whose
+      // newest rows are not yet in hand HAS arrived, and a readout that called that pending would
+      // report the fetch as outstanding. It is also, on a following pane, the one number that says
+      // the live edge has stopped keeping up.
+      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge`,
       differsFrom: s.differsFrom,
       // The map is a viewport, but it is not one you *look* through — it is the thing that says
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on
@@ -178,9 +190,13 @@ export class SurfaceChrome {
       if (!entry) entry = this.mint(row.id);
       entry.root.setAttribute("data-viewport", row.viewport);
       entry.root.setAttribute("data-following", row.following ? "true" : "false");
+      // The tier on the element as well as in the text, so a stylesheet (and a test) can see which
+      // source a viewport was drawn from without parsing a sentence.
+      entry.root.setAttribute("data-tier", row.tier);
       set(entry.cells[0], row.viewport === "minimap" ? `${row.id} (map)` : row.id);
       set(entry.cells[1], row.headline);
       set(entry.cells[2], row.level);
+      entry.cells[2].title = row.tierLabel;
       set(entry.cells[3], row.counts);
       // T-459: intermediate marks between the two edges `headline` already states. Its own line
       // (`flex-basis: 100%`, like `why`), hidden rather than emptied when there is nothing to mark.
