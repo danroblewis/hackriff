@@ -108,6 +108,13 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Poke the coordinator's pane the way the merge runner does; the file is the record, this is the wake-up.
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
+            subprocess.run(["tmux", "send-keys", "-t", "dev", "-l", f"WORK-RUNNER: {ticket} {kind} - {detail[:160]} See {NEEDS}."], capture_output=True)
+            subprocess.run(["tmux", "send-keys", "-t", "dev", "Enter"], capture_output=True)
+    except Exception:
+        pass
 
 
 def sh(args, cwd=REPO, timeout=120, check=False):
@@ -333,12 +340,18 @@ def record_done(claim, outcome, res):
                             "model": claim.get("model"), "outcome": outcome}) + "\n")
 
 
-def enqueue(branch):
+def enqueue(branch, wt=None):
     lines = [l.strip() for l in open(MERGE_QUEUE)] if os.path.exists(MERGE_QUEUE) else []
     if branch not in lines:
         with open(MERGE_QUEUE, "a") as f:
             f.write(branch + "\n")
     log(f"QUEUED {branch} for merge")
+    # A worker's build output is real disk (not a clone) - ~4-8 GB each, and twenty of them emptied
+    # a 45 GB margin in 20 minutes (2026-09-22). Once the branch is queued the target is dead weight;
+    # the source tree stays so a gate-failure fix can resume and rebuild (sccache makes that cheap).
+    if wt and os.path.isdir(os.path.join(wt, "target")):
+        shutil.rmtree(os.path.join(wt, "target"), ignore_errors=True)
+        log(f"RECLAIM {wt}/target (branch queued)")
 
 
 def reap(claims, dry):
@@ -369,7 +382,7 @@ def reap(claims, dry):
             if "VERDICT: PASS" in text:
                 c["state"] = "queued"
                 record_done(c, "review-pass", res)
-                enqueue(c["branch"])
+                enqueue(c["branch"], c.get("wt"))
             else:
                 fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
                 record_done(c, "review-fail", res)
@@ -413,7 +426,7 @@ def reap(claims, dry):
         else:
             c["state"] = "queued"
             record_done(c, "done", res)
-            enqueue(c["branch"])
+            enqueue(c["branch"], c.get("wt"))
     changed |= handle_gate_failures(claims, dry)
     return changed
 
