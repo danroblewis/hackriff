@@ -37,6 +37,20 @@
 //! lags)` with no ring, sample-buffer or device access at all: it runs off the capture path,
 //! wherever the caller resolves relationships.
 //!
+//! # A peak is not evidence on its own
+//!
+//! Two measurements beyond the correlation itself are taken here and handed to the rule, because
+//! a peak value cannot distinguish an earned match from a lucky one:
+//!
+//! - **support** — the shared window is cut into [`SUPPORT_SEGMENTS`] parts and each is scored on
+//!   its own, so a match carried by a single coincidence (two identical-model sensors that each
+//!   keyed once, 50 ms apart — which correlates a perfect 1.00) is told from one that dozens of
+//!   separate events agree on;
+//! - **self-similarity beyond the searched lag range** — `normalized_xcorr` reports its runner-up
+//!   only from inside ±`MULTIPATH_MAX_LAG_S`, so a keying cadence longer than 150 ms is invisible
+//!   to the dominance test, and a series that repeats every `P` has a lag ambiguous modulo `P`.
+//!   Either series repeating is enough to deny the delay.
+//!
 //! # Rows that do NOT compete here
 //!
 //! A partner whose band **overlaps** this row's is skipped outright: overlapping rows are T-219's
@@ -64,6 +78,16 @@ pub const MULTIPATH_RULE: &str = "hk-context/multipath@1";
 /// 4 dB apart would measure as equal and the echo could never be told from the direct path. A
 /// detection sixty times the width of the row it is attributed to is not a measurement of it.
 pub const DETECTION_BAND_MIN_FRACTION: f64 = 0.5;
+
+/// Independent parts the shared window is cut into to ask how many of them separately show the
+/// alignment (`hk_dsp::xcorr::segment_support`, and the guard in
+/// [`hk_model::multipath::MULTIPATH_MIN_SUPPORT`]).
+///
+/// Eight: enough that "at least three, and at least half" is a real demand on a sparse emitter,
+/// and few enough that each part still holds several seconds of a minute-long window — a part
+/// shorter than one keying cycle would be flat, and a flat part supports nothing whatever the
+/// content does.
+pub const SUPPORT_SEGMENTS: usize = 8;
 
 /// What bounds one review. Every value is a cost bound, not a threshold on the evidence — the
 /// evidence thresholds are all in [`hk_model::multipath`].
@@ -154,8 +178,11 @@ pub fn review(
         return Ok(out);
     }
     // One grid for every series in this review, so a lag is a delay and never a re-registration.
-    let bin_s = bin_for(repo, &subject, &partners, window, cfg)?;
-    let n = samples_in(window, bin_s, cfg);
+    let (bin_s, n) = grid(
+        window,
+        bin_for(repo, &subject, &partners, window, cfg)?,
+        cfg,
+    );
     if n < 2 {
         return Ok(out);
     }
@@ -164,6 +191,9 @@ pub fn review(
     };
     let max_lag = (MULTIPATH_MAX_LAG_S / bin_s).ceil() as usize;
     let min_overlap = ((MULTIPATH_MIN_OVERLAP_S / bin_s).ceil() as usize).max(2);
+    // Every lag the pair search does NOT cover, probed once for the subject. A repeat out here is
+    // what makes a lag ambiguous by whole periods, and the pair search is structurally blind to it.
+    let a_repeat = hk_dsp::xcorr::self_similarity(&a.samples, max_lag + 1);
     for partner in &partners {
         let Some(b) = series(repo, partner, window, bin_s, n, cfg)? else {
             continue;
@@ -172,6 +202,12 @@ pub fn review(
             continue;
         };
         out.compared += 1;
+        let b_repeat = hk_dsp::xcorr::self_similarity(&b.samples, max_lag + 1);
+        // The worse of the two: either series repeating is enough to deny the delay.
+        let repeat = [a_repeat, b_repeat]
+            .into_iter()
+            .flatten()
+            .max_by(|p, q| p.value.total_cmp(&q.value));
         let corr = ContentCorrelation {
             kind: ContentKind::Envelope,
             // `xcorr` reports `a[i + lag] ~ b[i]`, so a positive lag means b's content sits
@@ -182,6 +218,16 @@ pub fn review(
             dominance: x.dominance(),
             resolution_s: bin_s,
             overlap_s: x.peak.overlap as f64 * bin_s,
+            support: hk_dsp::xcorr::segment_support(
+                &a.samples,
+                &b.samples,
+                x.peak.lag,
+                SUPPORT_SEGMENTS,
+                hk_model::multipath::MULTIPATH_MIN_CORRELATION,
+            ),
+            segments: SUPPORT_SEGMENTS,
+            self_similarity: repeat.map_or(0.0, |p| p.value),
+            self_similarity_lag_s: repeat.map_or(0.0, |p| p.lag as f64 * bin_s),
         };
         let verdict = content_multipath(&a.row, &b.row, &corr);
         record(repo, &a.row, &b.row, &verdict, actor, t, &mut out)?;
@@ -302,10 +348,20 @@ fn bin_for(
     Ok(bin.clamp(cfg.min_bin_s, cfg.max_bin_s))
 }
 
-/// Samples on the grid, widening the bin rather than losing window when the cap bites.
-fn samples_in(window: TimeRange, bin_s: f64, cfg: &MultipathConfig) -> usize {
+/// The grid: bin and sample count, **widening the bin rather than losing window** when the sample
+/// cap bites.
+///
+/// Capping the count with the bin fixed would silently correlate only the window's OLDEST
+/// `max_samples` bins — a 60 s window at a 1 ms bin would forever re-compare its first 20 s and
+/// never see the content that just arrived, since the grid starts at `window.start`. Coarsening
+/// the bin keeps the whole window in view and costs only resolution, which is disclosed on the
+/// claim and which [`hk_model::multipath::MULTIPATH_MIN_LAG_RESOLUTIONS`] then holds the delay to.
+fn grid(window: TimeRange, bin_s: f64, cfg: &MultipathConfig) -> (f64, usize) {
     let span_s = window.duration_ns() as f64 / 1e9;
-    ((span_s / bin_s).ceil() as usize).min(cfg.max_samples)
+    let cap = cfg.max_samples.max(2);
+    let bin_s = bin_s.max(span_s / cap as f64);
+    let n = ((span_s / bin_s).ceil() as usize).clamp(0, cap);
+    (bin_s, n)
 }
 
 /// Rasterises one row's measured energy onto the shared grid (see the module docs). `None` when no
@@ -477,15 +533,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_bin_cap_widens_rather_than_truncating_the_window() {
+    fn the_sample_cap_widens_the_bin_rather_than_truncating_the_window() {
         let cfg = MultipathConfig::default();
         let w = TimeRange::new(
             Timestamp::from_unix_nanos(0),
             Timestamp::from_unix_nanos(60_000_000_000),
         );
-        // 60 s at 1 ms would be 60 000 samples; the cap holds it at max_samples.
-        assert_eq!(samples_in(w, 1e-3, &cfg), cfg.max_samples);
-        assert_eq!(samples_in(w, 50e-3, &cfg), 1200);
+        // 60 s at a 1 ms bin would be 60 000 samples. The cap must not answer "the first 20 000",
+        // which would correlate the window's oldest 20 s forever: it coarsens the bin instead, and
+        // the whole 60 s stays on the grid.
+        let (bin, n) = grid(w, 1e-3, &cfg);
+        assert_eq!(n, cfg.max_samples);
+        assert!((bin - 60.0 / cfg.max_samples as f64).abs() < 1e-12, "{bin}");
+        assert!(
+            (n as f64 * bin - 60.0).abs() < 1e-6,
+            "the grid still spans the window"
+        );
+        // Below the cap the measured bin is kept exactly.
+        assert_eq!(grid(w, 50e-3, &cfg), (50e-3, 1200));
     }
 
     #[test]

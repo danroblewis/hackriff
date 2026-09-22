@@ -73,6 +73,21 @@ fn scene() -> SynthRequest {
     SynthRequest::new("multipath_echo").seed(222)
 }
 
+/// The **false-positive** scene (review of 2026-09-22): the two paired channels are no longer one
+/// transmission but TWO INDEPENDENT emitters, each with its own payloads, keying on one fixed
+/// 0.5 s cadence a fixed 50 ms apart. Their envelopes are identical and correlate a perfect 1.00
+/// at that phase; the only thing that could compete with the peak is the cadence itself, which
+/// repeats 0.5 s away — more than three times further than the lag search ever looks.
+///
+/// This is the shape that must claim NOTHING. The weaker of the two is a real, independent
+/// emission, and relating it would hide it from the inventory and silence it in the watch.
+fn independent_pair_scene() -> SynthRequest {
+    SynthRequest::new("multipath_echo")
+        .seed(2229)
+        .param("pair_independent", 1)
+        .param("cadence_s", 0.5)
+}
+
 /// The private truth of the two-path scene, read only after the run.
 struct Truth {
     direct_hz: f64,
@@ -120,6 +135,25 @@ fn run() -> Option<&'static Run> {
         };
         let fx = out.fixture(0).unwrap();
         let blind = blind_replay(&fx.meta_path, "t222mp", BlindSource::default());
+        Some(Run { blind, fx })
+    })
+    .as_ref()
+}
+
+/// The independent-pair run; `None` when the synthetic generator is unavailable (skip).
+fn independent_pair_run() -> Option<&'static Run> {
+    static RUN: OnceLock<Option<Run>> = OnceLock::new();
+    RUN.get_or_init(|| {
+        let out = match SynthRequest::generate(&independent_pair_scene()) {
+            Ok(out) => out,
+            Err(err) if err.is_unavailable() && !hk_e2e::synth::require_synth() => {
+                eprintln!("SKIP {}: {err}", module_path!());
+                return None;
+            }
+            Err(err) => panic!("synthetic scenario generation failed: {err}"),
+        };
+        let fx = out.fixture(0).unwrap();
+        let blind = blind_replay(&fx.meta_path, "t222fp", BlindSource::default());
         Some(Run { blind, fx })
     })
     .as_ref()
@@ -473,4 +507,82 @@ fn t222_the_multipath_claim_is_reversible_ranked_evidence_and_never_a_delete() {
 
 fn row_id_of(e: &hk_model::InventoryEntry) -> EmitterId {
     e.emitter.id
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. The false positive the peak value cannot see.
+// ---------------------------------------------------------------------------------------------
+
+/// **Two independent emitters on one cadence, a sub-150 ms phase apart, are NOT one emission.**
+///
+/// Their envelopes are identical, so the correlation peak is perfect and — inside the ±150 ms the
+/// lag search covers — nothing competes with it, because the cadence that would repeats 0.5 s
+/// away. Peak and dominance alone therefore say "related" about two unrelated signals, and the
+/// weaker one would be hidden from the default inventory and silenced in the watch.
+///
+/// What refuses it is evidence *about the evidence*: the delay has to be earned by independent
+/// parts of the window, and neither series may repeat itself at any period — including the ones
+/// the lag search is structurally blind to.
+///
+/// **This test is not vacuous, and that was measured.** With
+/// [`hk_model::multipath::MULTIPATH_MIN_SUPPORT`] and
+/// [`hk_model::multipath::MULTIPATH_MAX_SELF_SIMILARITY`] disabled, this very scene records
+/// `multipath-of` on the weaker row: *"correlate 0.99 at that one lag (2.6x the next best) …
+/// 14 966 km of extra path"*. The scene reaches the correlation and is refused by these two
+/// guards, not by an earlier one. (Support alone does not save it — both emitters key constantly,
+/// so all 8 segments agree; it is the 0.5 s cadence, 3x further away than the lag search looks,
+/// that denies the delay. The sparse one-coincidence half of the defect is covered by
+/// `hk_model::multipath`'s unit tests.)
+#[test]
+fn t222_two_independent_emitters_on_one_cadence_are_never_one_emission() {
+    let Some(run) = independent_pair_run() else {
+        return;
+    };
+    let t = truth(&run.fx);
+    let r = repo(&run.blind.dir.0);
+    let first = rows_at(&r, t.direct_hz);
+    let second = rows_at(&r, t.echo_hz);
+    for e in first.iter().chain(second.iter()) {
+        eprintln!(
+            "[{T222}] false-positive scene: row {:.4} MHz, relations {:?}",
+            e.emitter.f_center_hz / 1e6,
+            r.emitter_relations(e.emitter.id)
+                .unwrap()
+                .iter()
+                .map(|x| (x.kind, x.reason.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        !first.is_empty() && !second.is_empty(),
+        "[{T222}] both emitters must be detected before the guard means anything"
+    );
+    for e in first.iter().chain(second.iter()) {
+        let claims: Vec<_> = r
+            .emitter_relations(e.emitter.id)
+            .unwrap()
+            .into_iter()
+            .filter(|x| x.kind == RelationKind::MultipathOf)
+            .collect();
+        assert!(
+            claims.is_empty(),
+            "[{T222}] two independent emitters sharing a cadence are not one emission over two \
+             paths: {claims:?}"
+        );
+    }
+    // And the consequence that matters: neither real emission is hidden.
+    for f_hz in [t.direct_hz, t.echo_hz] {
+        let shown = served_at(&run.blind.api_rows, f_hz);
+        assert_eq!(
+            shown.len(),
+            1,
+            "[{T222}] a real, independent emission stays listed at {:.4} MHz: {shown:?}",
+            f_hz / 1e6
+        );
+        assert!(
+            shown[0]["relation"].is_null(),
+            "[{T222}] and defers to nothing: {}",
+            shown[0]
+        );
+    }
 }

@@ -38,8 +38,6 @@ MULTIPATH_DEFAULTS: dict[str, Any] = {
     # Half a megahertz is wider than any box this detector has been seen to draw.
     "sample_rate": 2.0e6,
     "center_hz": 433.92e6,
-    # Three channels, far enough apart that no two occupied bands overlap: whatever relates two of
-    # them, it is not band geometry.
     # No two occupied bands overlap; none sits near the tuning centre (where a DC artefact would
     # widen a box into its neighbour); and none is the mirror `2*f_LO - f` of another, so the image
     # rule has nothing to say about any pair either. Whatever relates two of them, it is not
@@ -47,7 +45,7 @@ MULTIPATH_DEFAULTS: dict[str, Any] = {
     "direct_offset_hz": -700e3,
     "echo_offset_hz": -200e3,
     "decoy_offset_hz": 600e3,
-    # The injected path delay. 80 ms is ~24 000 km of extra path -- the long-path / multi-hop
+    # The injected path delay. 50 ms is ~15 000 km of extra path -- the long-path / multi-hop
     # regime, and the delay range a detection-record envelope can resolve honestly.
     "delay_s": 0.050,
     # A reflection loses energy. The copy must be weaker, and measurably so.
@@ -68,10 +66,21 @@ MULTIPATH_DEFAULTS: dict[str, Any] = {
     # air together, and a tracker reading three channels keying in turn has every reason to call
     # them ONE frequency-hopping emitter -- which is a sensible reading, and one that would merge
     # the scene into a single hop-set row before any content was compared. A hopper cannot
-    # transmit on two channels at once, so overlapping keyings are what refute it, and at ~30 %
-    # duty they are constant.
+    # transmit on two channels at once, so overlapping keyings are what refute it, and at ~70 %
+    # duty they are constant. The gaps stay RANDOM, so the keying pattern carries information: a
+    # fixed cadence would repeat, and a repeating series cannot pin a lag at all (T-222 guards).
     "gap_min_s": 0.015,
     "gap_max_s": 0.075,
+    # THE FALSE-POSITIVE MODE (review of 2026-09-22). With `pair_independent=1` the second channel
+    # stops being a copy and becomes a SEPARATE emitter -- its own payloads, its own identity --
+    # that merely keys `delay_s` after the first. With `cadence_s>0` both key on a FIXED period
+    # instead of random gaps. Together they are the case that fooled the first cut of the rule: two
+    # identical-model sensors on the same cadence, a sub-150 ms phase apart, whose envelopes
+    # correlate a perfect 1.00 at that phase and whose only competitor -- the cadence itself --
+    # repeats further away than the lag search ever looks. Nothing may relate them, and the weaker
+    # one is a real emission that must stay visible.
+    "pair_independent": 0,
+    "cadence_s": 0.0,
     "preamble_bits": 256,
     "sync_hex": "2dd4",
     "sensor_id": 0x5A3C,
@@ -96,15 +105,17 @@ def _burst_bits(p: dict[str, Any], sensor_id: int, k: int, rng: np.random.Genera
 
 
 def _schedule(scene: Scene, p: dict[str, Any], name: str) -> list[float]:
-    """Aperiodic burst start times, seconds."""
+    """Burst start times, seconds: aperiodic by default, fixed-cadence when ``cadence_s`` is set."""
     rng = scene.rng("schedule", name)
+    cadence = float(p["cadence_s"])
     t = float(p["first_burst_s"])
     out: list[float] = []
     # Leave room for the delayed copy of the last burst.
     last = float(p["duration_s"]) - float(p["delay_s"]) - 0.1
     while t < last:
         out.append(t)
-        t += float(rng.uniform(float(p["gap_min_s"]), float(p["gap_max_s"])))
+        t += cadence if cadence > 0 else float(
+            rng.uniform(float(p["gap_min_s"]), float(p["gap_max_s"])))
     return out
 
 
@@ -156,6 +167,10 @@ def multipath_echo(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     direct_off, echo_off = float(p["direct_offset_hz"]), float(p["echo_offset_hz"])
     payload_rng = scene.rng("payload", "direct")
     phase_rng = scene.rng("phase", "direct")
+    independent = bool(int(p["pair_independent"]))
+    pair_rng = scene.rng("payload", "pair")
+    pair_phase_rng = scene.rng("phase", "pair")
+    pair_id = (int(p["sensor_id"]) ^ 0x3C5A) & 0xFFFF
     n_bursts = 0
     for k, t in enumerate(_schedule(scene, p, "direct")):
         bits = _burst_bits(p, int(p["sensor_id"]), k, payload_rng)
@@ -167,13 +182,22 @@ def multipath_echo(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
             break
         # The second path: the SAME waveform, delayed and attenuated. Not a re-generation --
         # `iq` is reused, so the two copies are identical content by construction.
-        echo = place(start + delay_n, iq, echo_off, echo_amp)
+        #
+        # Unless `pair_independent`, in which case the second channel is a DIFFERENT emitter with
+        # its own payloads that merely keys `delay_s` later: same family, same bandwidth, same
+        # burst length, same cadence, different content. Identical envelope, unrelated signal.
+        second = iq
+        if independent:
+            second = fsk.cpfsk(_burst_bits(p, pair_id, k, pair_rng), fs, rate, dev, bt=bt,
+                               phase0=float(pair_phase_rng.uniform(0, 2 * math.pi)))
+        echo = place(start + delay_n, second, echo_off, echo_amp)
         if echo is None:
             break
         n_bursts += 1
         for (s, n), off, pw, kind in (
             (placed, direct_off, power, "fsk-burst"),
-            (echo, echo_off, echo_power, "multipath-echo"),
+            (echo, echo_off, echo_power,
+             "independent-station" if independent else "multipath-echo"),
         ):
             f = cap.center_hz + off
             truth = scene.emission_truth(
@@ -218,10 +242,15 @@ def multipath_echo(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         "delay_s": float(p["delay_s"]),
         "path_difference_m": float(p["delay_s"]) * 299_792_458.0,
         "attenuation_db": float(p["attenuation_db"]),
+        "pair_independent": independent,
+        "cadence_s": float(p["cadence_s"]),
         "n_bursts": n_bursts,
         "n_decoy_bursts": n_decoy,
         "aperiodic": {"gap_min_s": float(p["gap_min_s"]), "gap_max_s": float(p["gap_max_s"])},
-        "note": "the echo is the same waveform as the direct path, delayed and attenuated; the "
-                "decoy is an independent station of the same family, bandwidth and modulation",
+        "note": ("the two paired channels are TWO INDEPENDENT emitters keying on one cadence a "
+                 "fixed phase apart -- identical envelopes, unrelated content, nothing to relate"
+                 if independent else
+                 "the echo is the same waveform as the direct path, delayed and attenuated; the "
+                 "decoy is an independent station of the same family, bandwidth and modulation"),
     }
     return [scene], {}

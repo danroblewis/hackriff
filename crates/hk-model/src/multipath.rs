@@ -93,6 +93,31 @@ pub const MULTIPATH_MIN_LAG_RESOLUTIONS: f64 = 2.0;
 /// Shared observation needed before two content series are compared at all, seconds.
 pub const MULTIPATH_MIN_OVERLAP_S: f64 = 2.0;
 
+/// Independent parts of the shared window that must EACH show the alignment before a lag is
+/// called a path delay (`hk_dsp::xcorr::segment_support`).
+///
+/// Three, because a correlation peak says the two series match and says nothing about whether the
+/// match was earned. One coincidence correlates 1.00: two identical-model ISM sensors that each
+/// key once, 50 ms apart, are indistinguishable from a hundred-event alignment by peak value
+/// alone. Three separate parts of the window agreeing on one lag is the smallest number that is
+/// not a coincidence; below it the honest answer is "cannot tell", not "the same emission".
+pub const MULTIPATH_MIN_SUPPORT: usize = 3;
+
+/// …and at least this share of the parts examined, so a match confined to one corner of a long
+/// window is not read as a property of the whole.
+pub const MULTIPATH_MIN_SUPPORT_FRACTION: f64 = 0.5;
+
+/// Self-similarity past the searched lag range at which the delay stops being measurable
+/// (`hk_dsp::xcorr::self_similarity`).
+///
+/// A series that repeats itself every `P` matches a shifted copy of itself at `lag`, `lag ± P`,
+/// `lag ± 2P`… equally well, so its lag is ambiguous **modulo `P`** and is not a path difference,
+/// however dominant the peak looked. [`MULTIPATH_MIN_DOMINANCE`] cannot see this on its own: the
+/// runner-up is searched only inside ±[`MULTIPATH_MAX_LAG_S`], so every period longer than 150 ms
+/// — a sensor keying every five seconds, the common ISM case — is structurally invisible to it.
+/// This is the test that looks where that one cannot.
+pub const MULTIPATH_MAX_SELF_SIMILARITY: f64 = 0.7;
+
 /// How much *stronger* the later arrival may measure than the earlier one before the echo model is
 /// refused, dB. Slack for measurement noise only: a reflection does not gain energy.
 pub const MULTIPATH_LEVEL_SLACK_DB: f64 = 1.0;
@@ -178,6 +203,17 @@ pub struct ContentCorrelation {
     pub resolution_s: f64,
     /// Shared observation the correlation was computed over, seconds.
     pub overlap_s: f64,
+    /// Independent parts of the shared window that each showed the alignment on their own
+    /// (`hk_dsp::xcorr::segment_support`).
+    pub support: usize,
+    /// Parts the window was cut into to measure that.
+    pub segments: usize,
+    /// Strongest self-similarity either series shows at a lag **beyond** the searched range — the
+    /// repeat that would make the delay ambiguous (`hk_dsp::xcorr::self_similarity`). `0.0` when
+    /// neither series was long enough to probe.
+    pub self_similarity: f64,
+    /// The lag that self-similarity was found at, seconds (`0.0` when none was).
+    pub self_similarity_lag_s: f64,
 }
 
 /// Why two rows carrying the same identity are not, by that alone, one emission.
@@ -223,6 +259,11 @@ pub struct MultipathFinding {
     pub identity: IdentityAgreement,
     /// Shared observation the correlation was measured over, seconds.
     pub overlap_s: f64,
+    /// Independent parts of the window that each showed the alignment, of how many examined.
+    pub support: (usize, usize),
+    /// Strongest repeat either series shows beyond the searched lag range — the thing that would
+    /// have made the delay ambiguous, disclosed even when it did not.
+    pub self_similarity: f64,
     /// Frequency separation between the two rows' centres, Hz.
     pub separation_hz: f64,
 }
@@ -238,17 +279,20 @@ impl MultipathFinding {
     pub fn reason(&self) -> String {
         format!(
             "the same content as emitter {}, arriving {:.1} ms later and {:.1} dB weaker: their {} \
-             series correlate {:.2} at that one lag ({:.1}x the next best, over {:.1} s in \
-             common{}), which two independent emissions do not do. {:.1} ms of delay is {:.0} km \
-             of extra path (+/- {:.0} km) read as a reflection; a relay or a re-broadcast of the \
-             same programme would measure the same, so the delay is the finding and the distance \
-             its interpretation. This row is kept in full and revives if the evidence changes.",
+             series correlate {:.2} at that one lag ({:.1}x the next best, and {} of {} \
+             independent parts of the {:.1} s in common show it separately{}), which two \
+             independent emissions do not do. {:.1} ms of delay is {:.0} km of extra path \
+             (+/- {:.0} km) read as a reflection; a relay or a re-broadcast of the same programme \
+             would measure the same, so the delay is the finding and the distance its \
+             interpretation. This row is kept in full and revives if the evidence changes.",
             self.direct,
             self.delay_s * 1e3,
             self.attenuation_db,
             self.kind.as_str(),
             self.peak,
             self.dominance,
+            self.support.0,
+            self.support.1,
             self.overlap_s,
             match self.identity {
                 IdentityAgreement::Same => ", and both decode the same transmitter identity",
@@ -271,6 +315,9 @@ impl MultipathFinding {
             "path_difference_resolution_m": self.path_difference_resolution_m(),
             "correlation": self.peak,
             "dominance": self.dominance,
+            "support": self.support.0,
+            "support_segments": self.support.1,
+            "self_similarity": self.self_similarity,
             "attenuation_db": self.attenuation_db,
             "overlap_s": self.overlap_s,
             "separation_hz": self.separation_hz,
@@ -351,6 +398,25 @@ pub fn content_multipath(
              measured",
         );
     }
+    // 3b. **The match must be EARNED.** A peak says the series align; it does not say how many
+    // independent things had to line up for that. One coincidence scores 1.00.
+    if corr.segments == 0
+        || corr.support < MULTIPATH_MIN_SUPPORT
+        || (corr.support as f64) < MULTIPATH_MIN_SUPPORT_FRACTION * corr.segments as f64
+    {
+        return MultipathVerdict::Undecidable(
+            "the alignment rests on too few independent parts of the window to be a path delay \
+             rather than a coincidence",
+        );
+    }
+    // 3c. **And the series must not repeat itself**, at any period — including the ones longer
+    // than the searched lag range, which the dominance test above is structurally blind to.
+    if corr.self_similarity >= MULTIPATH_MAX_SELF_SIMILARITY {
+        return MultipathVerdict::Undecidable(
+            "the content repeats itself beyond the searched lag range, so the delay is ambiguous \
+             by whole periods and is not a path difference",
+        );
+    }
     // 4. A delay that is measurable, and physical.
     let lag = corr.lag_s;
     if !lag.is_finite() {
@@ -400,6 +466,8 @@ pub fn content_multipath(
         kind: corr.kind,
         identity,
         overlap_s: corr.overlap_s,
+        support: (corr.support, corr.segments),
+        self_similarity: corr.self_similarity,
         separation_hz: (a.f_center_hz - b.f_center_hz).abs(),
     }))
 }
@@ -428,6 +496,10 @@ mod tests {
             dominance: 4.0,
             resolution_s: 1e-3,
             overlap_s: 20.0,
+            support: 8,
+            segments: 8,
+            self_similarity: 0.1,
+            self_similarity_lag_s: 0.0,
         }
     }
 
@@ -538,6 +610,77 @@ mod tests {
             content_multipath(&a, &b, &corr(0.5)),
             MultipathVerdict::Independent(_)
         ));
+    }
+
+    /// **The review's false positive.** Two identical-model sensors on adjacent channels, each
+    /// keying once inside the window, 50 ms apart: the peak is a perfect 1.00 and it dominates,
+    /// because the only thing that could compete with it is a cadence the lag search never looks
+    /// far enough to see. Claiming here hides a real, independent emission.
+    #[test]
+    fn a_single_coincidence_is_never_a_path_delay_however_perfectly_it_correlates() {
+        let (a, b) = (row(1, 100e6, -20.0), row(2, 100.3e6, -28.0));
+        let mut c = corr(50e-3);
+        c.peak = 1.0;
+        c.dominance = 1.76;
+        c.support = 1;
+        c.segments = 8;
+        assert!(matches!(
+            content_multipath(&a, &b, &c),
+            MultipathVerdict::Undecidable(_)
+        ));
+        // Two is still a coincidence; three separate parts of the window is not.
+        c.support = 2;
+        assert!(matches!(
+            content_multipath(&a, &b, &c),
+            MultipathVerdict::Undecidable(_)
+        ));
+        c.support = 4;
+        assert!(content_multipath(&a, &b, &c).finding().is_some());
+    }
+
+    /// A match confined to one corner of a long window is not a property of the window.
+    #[test]
+    fn support_must_also_reach_half_the_parts_examined() {
+        let (a, b) = (row(1, 100e6, -20.0), row(2, 100.3e6, -28.0));
+        let mut c = corr(50e-3);
+        c.support = 3;
+        c.segments = 16;
+        assert!(matches!(
+            content_multipath(&a, &b, &c),
+            MultipathVerdict::Undecidable(_)
+        ));
+        c.support = 8;
+        assert!(content_multipath(&a, &b, &c).finding().is_some());
+    }
+
+    /// A series that repeats itself cannot pin a lag: the delay is ambiguous by whole periods,
+    /// and the dominance test cannot see a period longer than the searched range.
+    #[test]
+    fn a_repeating_content_series_claims_nothing_whatever_the_dominance_said() {
+        let (a, b) = (row(1, 100e6, -20.0), row(2, 100.3e6, -28.0));
+        let mut c = corr(50e-3);
+        c.dominance = 10.0;
+        c.self_similarity = 0.95;
+        c.self_similarity_lag_s = 5.0;
+        assert!(matches!(
+            content_multipath(&a, &b, &c),
+            MultipathVerdict::Undecidable(_)
+        ));
+    }
+
+    #[test]
+    fn the_finding_discloses_what_earned_it() {
+        let (a, b) = (row(1, 100e6, -20.0), row(2, 100.3e6, -28.0));
+        let f = content_multipath(&a, &b, &corr(20e-3))
+            .finding()
+            .cloned()
+            .expect("related");
+        assert_eq!(f.support, (8, 8));
+        let d = f.detail();
+        assert_eq!(d["support"], 8);
+        assert_eq!(d["support_segments"], 8);
+        assert!(d["self_similarity"].as_f64().is_some());
+        assert!(f.reason().contains("independent parts"));
     }
 
     #[test]
