@@ -735,16 +735,20 @@ impl PluginInstance {
                     None => (idle.max(startup), since),
                 };
                 if from.elapsed() >= budget {
+                    // Both messages carry "no progress for" so one search covers either budget,
+                    // and each then names what never arrived: a decoder that ran and wedged and
+                    // one that never reached its first instruction are different faults.
                     self.shared.log(match life {
                         Some(byte) => format!(
-                            "host: the plugin's first output arrived {:?} ago and it has made no \
-                             progress for {idle:?} after the input ended; stopping it",
+                            "host: no progress for {budget:?} after the input ended, measured \
+                             from the plugin's first output {:?} ago (responsiveness budget); \
+                             stopping it",
                             byte.elapsed()
                         ),
                         None => format!(
-                            "host: the plugin has produced no output at all in {:?} after the \
-                             input ended (startup budget {startup:?}); it may never have reached \
-                             its first instruction; stopping it",
+                            "host: no progress for {:?} after the input ended and the plugin has \
+                             produced no output at all (startup budget {budget:?}: it may never \
+                             have reached its first instruction); stopping it",
                             from.elapsed()
                         ),
                     });

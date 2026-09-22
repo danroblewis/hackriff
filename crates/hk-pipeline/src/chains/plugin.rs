@@ -562,3 +562,47 @@ pub(crate) fn classify_decoder_emitters(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-629: the rule every wait in this file shares. It is stated once here because the three
+    /// callers (readiness, queue room, the host's own end-of-input window) are hard to drive to
+    /// their expiry in an integration test without a 30 s replay, and getting this wrong is what
+    /// produced five separate gate flakes.
+    #[test]
+    fn a_budget_on_a_subprocess_runs_from_its_first_byte_and_from_the_startup_budget_before_it() {
+        let normal = Duration::from_millis(500);
+        let startup = Duration::from_secs(60);
+        let began = Instant::now();
+
+        // No sign of life: the child may not have reached its first instruction, so elapsed time
+        // is no evidence about it and the longer startup budget governs, from when we started
+        // watching.
+        let (bound, from) = budget(None, began, normal, startup);
+        assert_eq!(bound, startup);
+        assert_eq!(from, began);
+
+        // The first byte arrived after we started watching: the tight budget applies, timed from
+        // the byte, so the loader's share is not charged to the decoder.
+        let byte = began + Duration::from_secs(4);
+        let (bound, from) = budget(Some(byte), began, normal, startup);
+        assert_eq!(bound, normal);
+        assert_eq!(from, byte);
+
+        // The child had already spoken before this wait began (queue room, end of input): the
+        // budget runs from what we are watching, not from a byte that predates it — otherwise a
+        // long-running plugin would be judged to have expired the moment the wait started.
+        let earlier = began - Duration::from_secs(10);
+        let (bound, from) = budget(Some(earlier), began, normal, startup);
+        assert_eq!(bound, normal);
+        assert_eq!(from, began);
+
+        // A caller whose own budget is already longer than the startup budget keeps it (the
+        // lossless branch's PLUGIN_WAIT_STALL against a short startup_timeout).
+        let long = Duration::from_secs(90);
+        let (bound, _) = budget(None, began, long, startup);
+        assert_eq!(bound, long);
+    }
+}
