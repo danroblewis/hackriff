@@ -18,6 +18,7 @@ import threading
 import time
 
 OPEN = ("todo", "in-progress", "blocked", "paused")
+PLANNED = ("planned",)   # in the plan, not scheduled: drawn as a dashed line above the open stack, never as backlog
 _ID = re.compile(r"^  - id: (\S+)")
 _STATUS = re.compile(r"^    status: (\S+)")
 _MS = re.compile(r"^    milestone: (\S+)")
@@ -53,13 +54,15 @@ def scan(text):
 
 
 def _summarise(recs):
-    open_by, done_by = {}, {}
+    open_by, done_by, planned_by = {}, {}, {}
     for ms, st in recs.values():
         if st in OPEN:
             open_by[ms] = open_by.get(ms, 0) + 1
         elif st == "done":
             done_by[ms] = done_by.get(ms, 0) + 1
-    return open_by, done_by
+        elif st in PLANNED:
+            planned_by[ms] = planned_by.get(ms, 0) + 1
+    return open_by, done_by, planned_by
 
 
 def build(repo, cache_path, limit=None):
@@ -80,7 +83,7 @@ def build(repo, cache_path, limit=None):
                 prev = set(cache[h]["ids_done"]) , set(cache[h]["ids"])
                 continue
             recs = scan(_sh(["git", "show", f"{h}:docs/tasks.yaml"], repo))
-            open_by, done_by = _summarise(recs)
+            open_by, done_by, planned_by = _summarise(recs)
             ids = set(recs)
             ids_done = {i for i, (_, s) in recs.items() if s == "done"}
             if prev is None:
@@ -89,7 +92,7 @@ def build(repo, cache_path, limit=None):
                 prev_done, prev_ids = prev
                 filed = sorted(ids - prev_ids)
                 closed = sorted(ids_done - prev_done)
-            cache[h] = {"t": t, "open": open_by, "done": done_by, "filed": filed, "closed": closed,
+            cache[h] = {"t": t, "open": open_by, "done": done_by, "planned": planned_by, "filed": filed, "closed": closed,
                         "ids": sorted(ids), "ids_done": sorted(ids_done)}
             prev = ids_done, ids
             changed = True
@@ -100,7 +103,7 @@ def build(repo, cache_path, limit=None):
         rows = []
         for h, t in commits:
             c = cache[h]
-            rows.append({"h": h[:8], "t": t, "open": c["open"], "done": c["done"],
+            rows.append({"h": h[:8], "t": t, "open": c["open"], "done": c["done"], "planned": c.get("planned", {}),
                          "filed": len(c["filed"]), "closed": len(c["closed"])})
         return rows
 
@@ -118,7 +121,8 @@ def series(repo, cache_path):
     total_open = [sum(r["open"].values()) for r in rows]
     return {"rows": rows, "days": by_day, "milestones": milestones,
             "now": {"open": rows[-1]["open"] if rows else {}, "done": rows[-1]["done"] if rows else {},
-                    "total_open": total_open[-1] if rows else 0}}
+                    "planned": rows[-1]["planned"] if rows else {}, "total_open": total_open[-1] if rows else 0,
+                    "total_planned": sum(rows[-1]["planned"].values()) if rows else 0}}
 
 
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff burndown</title>
@@ -140,7 +144,7 @@ svg{width:100%;height:auto;display:block}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> · burndown</span><a href="/">← dashboard</a><a href="/graph">task map ↗</a><span class=sub id=sub>loading…</span></div>
 <div class=card><div class=stats id=stats></div></div>
-<div class=card><h2>Open tickets over time, by milestone <span class=sub>(todo + in-progress + blocked + paused; one point per board commit; click a legend entry to hide it)</span></h2><svg id=area viewBox="0 0 1000 380"></svg><div class=leg id=leg></div></div>
+<div class=card><h2>Open tickets over time, by milestone <span class=sub>(todo + in-progress + blocked + paused; dashed grey line = open + planned; one point per board commit; click a legend entry to hide it)</span></h2><svg id=area viewBox="0 0 1000 380"></svg><div class=leg id=leg></div></div>
 <div class=card><h2>Filed vs closed per day <span class=sub>(filed = id first appears on main; closed = status became done)</span></h2><svg id=bars viewBox="0 0 1000 200"></svg></div>
 <div class=tip id=tip></div>
 <script>
@@ -152,7 +156,7 @@ function draw(){
   const rows=D.rows, ms=D.milestones.filter(m=>!hidden.has(m));
   const W=1000,H=380,L=44,R=12,T=14,B=28; const x0=rows[0].t,x1=rows[rows.length-1].t;
   const X=t=>L+(t-x0)/Math.max(1,x1-x0)*(W-L-R);
-  const totals=rows.map(r=>ms.reduce((s,m)=>s+(r.open[m]||0),0)); const ymax=Math.max(10,...totals);
+  const totals=rows.map(r=>ms.reduce((s,m)=>s+(r.open[m]||0),0)); const planned=rows.map(r=>Object.values(r.planned||{}).reduce((a,b)=>a+b,0)); const ymax=Math.max(10,...totals.map((v,k)=>v+planned[k]));
   const Y=v=>T+(1-v/ymax)*(H-T-B);
   let g=''; // grid + y labels
   const step=ymax>200?50:ymax>80?20:10;
@@ -169,6 +173,7 @@ function draw(){
   // total line
   let tl='M'+rows.map((r,k)=>X(r.t)+','+Y(totals[k])).join(' L');
   areas+=`<path d="${tl}" fill="none" stroke="#D5DEE2" stroke-width="1.5"/>`;
+  if(planned.some(v=>v>0)){let pl='M'+rows.map((r,k)=>X(r.t)+','+Y(totals[k]+planned[k])).join(' L'); areas+=`<path d="${pl}" fill="none" stroke="#8595A0" stroke-width="1.2" stroke-dasharray="5 4"><title>open + planned</title></path>`;}
   $('#area').innerHTML=g+areas+`<rect id=hit x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}" fill="transparent"/><line id=cur x1="0" x2="0" y1="${T}" y2="${H-B}" stroke="#F0A542" stroke-dasharray="3 3" style="display:none"/>`;
   const svg=$('#area'), tip=$('#tip');
   svg.onmousemove=e=>{const pt=svg.createSVGPoint();pt.x=e.clientX;pt.y=e.clientY;const p=pt.matrixTransform(svg.getScreenCTM().inverse());
@@ -188,7 +193,7 @@ function draw(){
   $('#bars').innerHTML=b+`<text x="${W2-R}" y="${T2+4}" fill="#8595A0" font-size="11" text-anchor="end"><tspan fill="#E47B68">■</tspan> filed  <tspan fill="#52C2AE">■</tspan> closed</text>`;
   const last=rows[rows.length-1], first=rows[0]; const doneNow=Object.values(last.done).reduce((a,b)=>a+b,0);
   const d3=days.slice(-3).reduce((a,d)=>({f:a.f+D.days[d].filed,c:a.c+D.days[d].closed}),{f:0,c:0});
-  $('#stats').innerHTML=`<span>open now <b>${D.now.total_open}</b></span><span>done <b>${doneNow}</b></span><span>last 3 days: filed <b>${d3.f}</b> · closed <b>${d3.c}</b></span><span>snapshots <b>${rows.length}</b> from ${fmtT(first.t)} to ${fmtT(last.t)}</span>`;
+  $('#stats').innerHTML=`<span>open now <b>${D.now.total_open}</b></span><span>done <b>${doneNow}</b></span><span>planned (not backlog, dashed line) <b>${D.now.total_planned||0}</b></span><span>last 3 days: filed <b>${d3.f}</b> · closed <b>${d3.c}</b></span><span>snapshots <b>${rows.length}</b> from ${fmtT(first.t)} to ${fmtT(last.t)}</span>`;
   $('#sub').textContent='from git history of docs/tasks.yaml · '+new Date().toTimeString().slice(0,8);
 }
 async function load(){try{const r=await fetch('/burndown.json');D=await r.json(); if(D.error){$('#sub').textContent=D.error;return;} if(!D.rows.length){$('#sub').textContent='no snapshots yet';return;} draw();}catch(e){$('#sub').textContent='load failed: '+e;}}
