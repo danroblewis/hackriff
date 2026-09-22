@@ -213,6 +213,10 @@ async function main(): Promise<void> {
       `queue ${preview.view.surface.cache.queueDepth}`,
       `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
       `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,
+      // What the T-538 look-ahead lane cost and what it bought, side by side: a guess that is never
+      // drawn is waste, and the only honest way to say whether the lane earns its slot is to show
+      // both numbers rather than the one that flatters it.
+      `${s.speculativeIssued} guessed (${s.speculativeHits} drawn)`,
       f ? rangeLabel(preview.range) : "",
     ].filter(Boolean).join("  ·  "));
     // Auto-contrast moves the range every frame, so the key's scale row follows it here rather than
