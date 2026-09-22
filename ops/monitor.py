@@ -1553,12 +1553,17 @@ def gather():
                     w["task"] = t; break
     wt.sort(key=lambda w: (not w["is_main"], ticket_num(w.get("task")), w["name"]))
     mg = merge_status()
+    gates = last_gates()
+    # A gate with no end line and no gate process is one that was killed (a stopped runner, a
+    # reboot): say so rather than "running" for ever.
+    if gates and gates[0]["outcome"] == "running" and not mg.get("gate"):
+        gates[0]["outcome"] = "killed"
     return {
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
-        "gates": last_gates(), "junit": latest_junit(),
+        "gates": gates, "junit": latest_junit(),
         "budget": budget_status(),
     }
 
@@ -1728,7 +1733,7 @@ async function tick(){
       const fails=(g.fails||[]).map(f=>`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">✗ ${esc(f.test)} <span style="color:#5A6973">${esc(f.binary)} · ${f.s.toFixed(1)}s</span>${f.at?`<div style="color:#8595A0;padding-left:14px">${esc(f.at)} — ${esc(f.msg)}</div>`:''}</div>`).join('');
       const err=(!g.fails.length&&g.error)?`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">${esc(g.error)}</div>`:'';
       const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
-      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
+      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
     };
     const gates=G.length?G.map(gateRow).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
     const J=d.junit; let ju='';
