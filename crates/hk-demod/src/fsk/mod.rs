@@ -24,10 +24,12 @@ pub mod demod;
 pub mod receiver;
 pub mod record;
 pub mod stream;
+/// T-546: what a demodulator is TOLD versus what was MEASURED.
+pub mod structure;
 
 pub use c4fm::{
-    C4FM_INNER_DEVIATION_HZ, C4FM_OUTER_DEVIATION_HZ, C4FM_SYMBOL_RATE_BD, C4fmConfig, C4fmDemod,
-    C4fmError, C4fmSymbols,
+    C4FM_DEMOD_VERSION, C4FM_INNER_DEVIATION_HZ, C4FM_OUTER_DEVIATION_HZ, C4FM_SYMBOL_RATE_BD,
+    C4fmConfig, C4fmDemod, C4fmError, C4fmSymbols,
 };
 pub use demod::{
     FSK_DEMOD_VERSION, FskDemod, FskDemodConfig, FskDemodError, FskDemodRequest, FskLock,
@@ -43,3 +45,7 @@ pub use record::{
     framing_identity, write_framed_bursts,
 };
 pub use stream::{BitsPublishStats, bits_stream_header, publish_framed_bits};
+pub use structure::{
+    FmStructure, INNER_FRACTION_FOUR, INNER_FRACTION_TWO, Levels, MAX_VALLEY_RATIO, MIN_CLOCK_BITS,
+    MIN_SYMBOL_RATE_BD, STRUCTURE_VERSION, StructureError, measure as measure_fm_structure,
+};

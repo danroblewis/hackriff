@@ -257,7 +257,7 @@ fn nearest_ideal(v: f64) -> (u8, f64) {
 }
 
 /// Centred moving average of `w` samples.
-fn boxcar(x: &[f64], w: usize) -> Vec<f64> {
+pub(crate) fn boxcar(x: &[f64], w: usize) -> Vec<f64> {
     if w <= 1 {
         return x.to_vec();
     }
@@ -277,7 +277,7 @@ fn boxcar(x: &[f64], w: usize) -> Vec<f64> {
 }
 
 /// Linear interpolation at fractional index `t`.
-fn interp(x: &[f64], t: f64) -> f64 {
+pub(crate) fn interp(x: &[f64], t: f64) -> f64 {
     let i = t.floor() as usize;
     let f = t - i as f64;
     if i + 1 >= x.len() {
@@ -287,7 +287,7 @@ fn interp(x: &[f64], t: f64) -> f64 {
 }
 
 /// The `q` quantile of `|x|`.
-fn quantile_abs(x: &[f64], q: f64) -> f64 {
+pub(crate) fn quantile_abs(x: &[f64], q: f64) -> f64 {
     let mut v: Vec<f64> = x.iter().map(|a| a.abs()).collect();
     v.sort_by(f64::total_cmp);
     if v.is_empty() {

@@ -315,6 +315,17 @@ counter_group!(
         cc_demods,
         /// Candidates the per-pass admission cap refused a demodulation.
         cc_admission_refused,
+        /// T-546: hunt passes where the receiver's own offset from the channel grid was **fitted
+        /// and found to exceed the raster tolerance** (docs/19 §7.6a). It is a property of the
+        /// receiver, not of any signal, so one pass counts once however many channels it
+        /// re-aligned. A HackRF One at −9.6 ppm hides every 800 MHz channel without it.
+        cc_grid_corrections,
+        /// T-546: confirmed control channels whose decode was filed back onto the **inventory
+        /// emitter** at the same frequency — the product vision's "successful decode confirms it".
+        cc_attached,
+        /// T-546: confirmed control channels whose symbol structure (level count, symbol rate,
+        /// outer deviation) was blindly measured and persisted as `estimated_params`.
+        cc_structures,
         /// Control channels **confirmed** by frame sync *and* CRC (`CcConfirmer::confirm`).
         cc_confirmed,
         /// TrunkSystem rows written, one per distinct confirmed control channel (metadata only:
