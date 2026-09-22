@@ -1,39 +1,36 @@
-//! MAUTO acceptance suite — `SIGNAL-087`, the blind auto-decode target (T-545, phase 2).
+//! MAUTO acceptance suite — `SIGNAL-087`, the blind auto-decode target (T-545 phase 2, T-546
+//! phase 3).
 //!
 //! ```text
-//! cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto)' --run-ignored all
-//! # or:  cargo test -p hk-e2e --test acceptance_mauto -- --ignored --nocapture
+//! cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto)'
 //! ```
 //!
 //! # What this suite is
 //!
 //! The user asked for a three-phase target: (1) research + capture, (2) **failing** blind
-//! acceptance tests, (3) make them pass. This file is phase 2. **Five of its seven tests are
-//! expected to be red**, and their red output is the specification T-546 builds against. They are
-//! `#[ignore]`d for exactly the reason [`canvas_fidelity`](../canvas_fidelity.rs) ignores its four
-//! T-483 proofs: a known-red proof must not block every unrelated merge while the fix is built.
-//! **Deleting those five `#[ignore]` lines is T-546's definition of done.**
+//! acceptance tests, (3) make them pass. T-545 wrote phase 2 with five red tests and two green
+//! controls; **T-546 made all seven pass**, and the `#[ignore]` lines are gone, which was that
+//! ticket's stated definition of done. What each test now proves, and what had to be built:
 //!
-//! | Test | Ticket assertion | Today |
+//! | Test | Ticket assertion | What closing it took |
 //! |---|---|---|
-//! | `a_the_emission_is_detected_blind_as_a_time_frequency_region` | (1) detect centre, bandwidth, time extent | **green — control** |
-//! | `b_the_modulation_symbol_rate_and_deviation_are_estimated_from_the_signal` | (2) estimate parameters | red: no session on the digital emission, and `mod_order` cannot say 4 |
-//! | `c_the_demod_and_decode_pipeline_is_auto_selected_from_the_measurements` | (3) auto-select the pipeline | red: `POST /api/analyze` is `501`; no engine exists |
-//! | `d_the_decode_reaches_the_emission_the_run_detected` | (4) decode to the expected output | red: the decode lands in a side table and never confirms the emitter |
-//! | `e_a_sensible_explanation_ranks_among_the_top_suggestions` | (5) a sensible explanation ranks | **green — control** |
-//! | `e2_the_explanation_rests_on_measured_evidence_not_only_the_allocation` | (5), quality bar | red: allocation-only; the measurements buy nothing |
-//! | `f_the_receiver_clock_error_is_measured_not_assumed_zero` | the one thing phase 1 measured off the air | red: −9.6 ppm hides the control channel entirely |
+//! | `a_the_emission_is_detected_blind_as_a_time_frequency_region` | (1) detect centre, bandwidth, time extent | already passed — the control |
+//! | `b_the_modulation_symbol_rate_and_deviation_are_estimated_from_the_signal` | (2) estimate parameters | `hk_demod::fsk::structure`: a blind clock line, a level count with an abstention, and a `mod_order` that can say 4 |
+//! | `c_the_demod_and_decode_pipeline_is_auto_selected_from_the_measurements` | (3) auto-select the pipeline | `hk_pipeline::synth` + the `emitter_synthesis` row, served by `POST /api/analyze` with its ADR-0021 trace |
+//! | `d_the_decode_reaches_the_emission_the_run_detected` | (4) decode to the expected output | the trunking chain files its decode against the **inventory emitter**, not only a side table |
+//! | `e_a_sensible_explanation_ranks_among_the_top_suggestions` | (5) a sensible explanation ranks | already passed — the control |
+//! | `e2_the_explanation_rests_on_measured_evidence_not_only_the_allocation` | (5), quality bar | a `p25-tsbk`/`dmr-csbk`/`nxdn-cac` → `public-safety` mapping, so the ranking carries a decode |
+//! | `f_the_receiver_clock_error_is_measured_not_assumed_zero` | the one thing phase 1 measured off the air | `hk_detect::trunk::raster::fit_grid_offset`: the receiver's grid offset is fitted, not assumed zero |
 //!
-//! **Two tests are green on purpose and are not ignored.** `a_…` proves the fixture, the mock
-//! device and the truth plumbing are sound; `e_…` proves the explanation path still runs. They
-//! are the reason the other five failing means "the capability is missing" rather than "the
-//! harness is broken" — a phase-2 suite with no green control cannot tell the two apart, and
-//! `docs/19 §5.4` is the same argument made about the capture.
+//! **The two controls are still the reason the rest means anything.** `a_…` proves the fixture,
+//! the mock device and the truth plumbing are sound; `e_…` proves the explanation path runs. A
+//! suite with no green control cannot tell "the capability is missing" from "the harness is
+//! broken" — `docs/19 §5.4` is the same argument made about the capture.
 //!
 //! **Test `d_…` names its passing preconditions explicitly**, because two thirds of assertion (4)
-//! already work (a normal run decodes TSBKs, names P25 Phase 1, reads the band plan and resolves
-//! grants — `acceptance_m4::t268_tsbk`'s ground). Saying so is the only way the remaining third
-//! is visible.
+//! already worked before T-546 (a normal run decodes TSBKs, names P25 Phase 1, reads the band plan
+//! and resolves grants — `acceptance_m4::t268_tsbk`'s ground). Saying so is the only way the
+//! remaining third is visible.
 //!
 //! # Why the fixture is synthetic, and what a real capture would change
 //!

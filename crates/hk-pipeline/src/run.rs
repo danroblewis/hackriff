@@ -2882,12 +2882,16 @@ impl RunSummary {
             c("/detect/explanations")
         ));
         line(format!(
-            "chains:      {} attached, {} detached, {} refused (class), {} unmatched, {} errors",
+            "chains:      {} attached, {} detached, {} refused (class), {} unmatched, {} errors \
+             ({} from storage)",
             c("/chains/attached"),
             c("/chains/detached"),
             c("/chains/refused_class"),
             c("/chains/unmatched"),
-            c("/chains/errors") + c("/chains/attach_errors")
+            c("/chains/errors") + c("/chains/attach_errors"),
+            // T-605: broken out because a storage error is a write that did not happen, not a
+            // signal that would not demodulate, and it must be visible without reading the log.
+            c("/chains/storage_errors")
         ));
         line(format!(
             "characterise: {} sweep chain(s), {} window(s) examined, {} characterised, {} left \

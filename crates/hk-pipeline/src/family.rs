@@ -29,6 +29,7 @@
 //! | `ais-catcher` | decoder | `ais` | 0.95 | AIS frames |
 //! | `rtl_433`, `rtl-433` | decoder | `ism` | 0.9 | a Part 15 sensor protocol decoded |
 //! | `aptdec` | decoder | `noaa-apt` | 0.9 | APT imagery lines |
+//! | `p25-tsbk`, `dmr-csbk`, `nxdn-cac` | decoder | `public-safety` | 0.97 | a CRC-valid trunked control channel; nothing else transmits one (T-546) |
 //! | continuous, OBW 106–400 kHz | occupancy | `fm-broadcast` | 0.6 | [`WIDEBAND_FM_OBW_HZ`] |
 //! | `nbfm`, `nfm` | demod mode | — | — | land mobile, amateur, marine, public safety and FRS/GMRS share it |
 //! | `am` | demod mode | — | — | aviation, AM broadcast, CB and amateur share it |
@@ -260,6 +261,18 @@ const MODULATION_ONLY: &str = "a modulation names no service; a Part 15 / ISM st
 const RDS_NOTE: &str = "RDS rides only on FM broadcast";
 const ADSB_NOTE: &str = "CRC-checked Mode S / ADS-B frames";
 const ISM_NOTE: &str = "a Part 15 sensor protocol decoded";
+/// Why a decoded trunking control channel is public-safety / land-mobile evidence, and why it is
+/// *measured* evidence rather than an allocation row.
+///
+/// T-545 found the only explanation on a fully decoded P25 control channel scoring
+/// `evidence_confidence: 0` with the flag `allocation-only` — the identical suggestion the
+/// analogue FM neighbours got, and the one an empty channel would get, because 851–869 MHz is a
+/// public-safety allocation. **An explanation that does not discriminate is not evidence; it is a
+/// map of the band.** What the run actually held and spent nothing of: a continuous narrowband
+/// emission on the 12.5 kHz LMR raster, four-level, frame-synced, with CRC-valid trunking blocks.
+/// Nothing else transmits a CRC-valid trunked control channel, so the decode names the service.
+const TRUNK_CC_NOTE: &str = "CRC-valid trunking control blocks: a continuous narrowband four-level emission on the LMR \
+     raster whose frame sync and check both hold. Trunked LMR is public safety and land mobile";
 
 /// The vocabulary (see the module table).
 pub const VOCABULARY: &[VocabEntry] = &[
@@ -295,6 +308,30 @@ pub const VOCABULARY: &[VocabEntry] = &[
         Some("noaa-apt"),
         0.9,
         "APT imagery lines",
+    ),
+    // T-546: the trunking chain's own decoders. The id names the framing that CRC-checked, so a
+    // reader can tell which air interface said so, and every one of them is a *decode*, never a
+    // band-plan lookup.
+    entry(
+        "p25-tsbk",
+        Decoder,
+        Some("public-safety"),
+        0.97,
+        TRUNK_CC_NOTE,
+    ),
+    entry(
+        "dmr-csbk",
+        Decoder,
+        Some("public-safety"),
+        0.97,
+        TRUNK_CC_NOTE,
+    ),
+    entry(
+        "nxdn-cac",
+        Decoder,
+        Some("public-safety"),
+        0.97,
+        TRUNK_CC_NOTE,
     ),
 ];
 

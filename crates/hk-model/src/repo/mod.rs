@@ -95,6 +95,7 @@ mod selections;
 mod signature_tests; // T-218
 mod signatures; // T-201
 pub mod sites; // T-119
+pub mod synthesis; // T-546 (ADR-0015 §5.4 / ADR-0021): why a pipeline was chosen
 #[cfg(test)]
 mod tests;
 mod trunking; // T-266 C23 trunking metadata
@@ -123,6 +124,9 @@ pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
+// `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
+// `Resolution` and `Measured` are the decode-search vocabulary and would collide with
+// `classify::Stage` and `cluster::Resolution`, which mean entirely different things.
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
 pub use retune::{
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,
@@ -133,6 +137,7 @@ pub use selections::{
     SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, Selection, SelectionLink,
     SelectionLinkKind, SelectionWatch,
 };
+pub use synthesis::{EmitterSynthesis, SYNTHESIZED_BY_OUTPUT_ANALYSIS};
 pub use user_band::{USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand};
 pub use verification::{TrustTest, TrustVerdict};
 

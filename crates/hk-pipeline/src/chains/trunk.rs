@@ -106,13 +106,15 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::fsk::{C4fmConfig, C4fmDemod};
+use hk_demod::fsk::{C4fmConfig, C4fmDemod, measure_fm_structure};
 use hk_detect::trunk::{
-    CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, MIN_CC_FCO,
-    NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, Resolved, VoicePermit, best_lmr_raster,
-    dmr_protocol_of, nxdn_protocol_of, protocol_of, scan_blocks, scan_cacs, scan_csbks,
+    CC_FRAMINGS, CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant,
+    GridFit, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, Resolved, VoicePermit,
+    best_lmr_raster, dmr_protocol_of, fit_grid_offset, nxdn_protocol_of, protocol_of, scan_blocks,
+    scan_cacs, scan_csbks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
+use hk_model::repo::synthesis::ReceiverFit;
 use hk_model::{
     CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
     TrunkSystemId,
@@ -125,6 +127,7 @@ use crate::events::Candidate;
 use crate::gate::GateCursor;
 use crate::run::Shared;
 use crate::stats::{add, inc};
+use crate::synth::{CcObservation, FramingScore};
 
 /// How far above the band's own **measured** noise floor a raster channel counts as occupied, dB.
 ///
@@ -515,7 +518,18 @@ pub(crate) fn run(
         let last_chance = (closed || detach) && passes == 0 && buf.len() >= min_window;
         if buf.len() >= window || last_chance {
             if let Some(p) = prov.clone() {
-                hunt(&shared, &node, &buf, base, base_time, &p, &mut known);
+                hunt(
+                    &shared,
+                    &node,
+                    &Pass {
+                        buf: &buf,
+                        base,
+                        t_start: base_time,
+                        prov: &p,
+                        track: cand.track,
+                    },
+                    &mut known,
+                );
                 passes += 1;
                 inc(&c.cc_passes);
             }
@@ -530,15 +544,23 @@ pub(crate) fn run(
 
 /// One pass: sweep the raster for occupancy, demodulate the candidates admission allows, and
 /// confirm what framing confirms.
-fn hunt(
-    shared: &Shared,
-    node: &TrunkCcNode,
-    buf: &[Complex<i8>],
+struct Pass<'a> {
+    buf: &'a [Complex<i8>],
     base: u64,
     t_start: Timestamp,
-    prov: &ProvenanceHandle,
-    known: &mut HashMap<i64, KnownCc>,
-) {
+    prov: &'a ProvenanceHandle,
+    /// The detection track the chain was attached for, carried so a decode can be bound to it.
+    track: Option<hk_model::TrackId>,
+}
+
+fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMap<i64, KnownCc>) {
+    let Pass {
+        buf,
+        base,
+        t_start,
+        prov,
+        track,
+    } = *pass;
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
     let raster = node.raster_hz;
@@ -548,6 +570,35 @@ fn hunt(
     // The ONLY frequency the hunt is given is where the device says it is tuned. The raster is an
     // a-priori standard and its origin is that centre — no band-plan lookup, no truth.
     let tune_center = prov.tune.center_hz;
+    // ---- The receiver's own clock error, FITTED rather than assumed zero (docs/19 §7.6a,
+    // §4.4 step 1). A HackRF One has a plain crystal and no TCXO; this project's own unit is
+    // −9.6 ppm, which at 852 MHz is −8.2 kHz — ⅔ of a 12.5 kHz channel and 5.5× the raster
+    // tolerance. Every emission moves by the same constant, so an uncorrected grid rejects the
+    // whole band at once and candidacy never happens. A build that only works at 0 ppm works on
+    // synthetic IQ and nothing else.
+    let grid = grid_fit(buf, fs, raster);
+    let grid_offset = grid.map_or(0.0, |g| g.offset_hz);
+    if let Some(g) = grid {
+        if g.offset_hz.abs() > RASTER_TOLERANCE_HZ {
+            inc(&c.cc_grid_corrections);
+            if crate::debug_enabled() {
+                eprintln!(
+                    "hk-pipeline: trunk-cc receiver grid offset {:+.0} Hz ({:+.2} ppm at \
+                     {:.4} MHz), concentration {:.2} over {} bins: the {:.0} Hz raster is \
+                     re-origined, because the raster tolerance is {:.0} Hz and this is {:.1}x it",
+                    g.offset_hz,
+                    1e6 * g.offset_hz / tune_center,
+                    tune_center / 1e6,
+                    g.concentration,
+                    g.bins,
+                    raster,
+                    RASTER_TOLERANCE_HZ,
+                    g.offset_hz.abs() / RASTER_TOLERANCE_HZ,
+                );
+            }
+        }
+    }
+    let origin_hz = tune_center + grid_offset;
     let half = USABLE_FRACTION * fs / 2.0;
     let max_k = ((half - raster / 2.0) / raster).floor();
     if !max_k.is_finite() || max_k < 0.0 {
@@ -561,7 +612,7 @@ fn hunt(
         ks.truncate(node.max_channels);
         ks.sort_unstable();
     }
-    let Some(fco) = occupancy(buf, fs, raster, &ks) else {
+    let Some(fco) = occupancy(buf, fs, raster, grid_offset, &ks) else {
         return;
     };
     add(&c.cc_channels, ks.len() as u64);
@@ -609,9 +660,9 @@ fn hunt(
     let t_end = t_start.saturating_add_nanos((buf.len() as f64 * 1e9 / fs) as i64);
     for (i, fco_i) in cands {
         let k = ks[i];
-        let offset = k as f64 * raster;
-        let center_hz = tune_center + offset;
-        let Some(fit) = best_lmr_raster(center_hz, tune_center, RASTER_TOLERANCE_HZ) else {
+        let offset = k as f64 * raster + grid_offset;
+        let center_hz = origin_hz + k as f64 * raster;
+        let Some(fit) = best_lmr_raster(center_hz, origin_hz, RASTER_TOLERANCE_HZ) else {
             continue;
         };
         let Some(candidate) = CcCandidate::new(center_hz, raster, fco_i, fit) else {
@@ -851,13 +902,64 @@ fn hunt(
             }
         }
 
+        // ---- Confirm the SIGNAL, not just the system (T-546). Everything above wrote a
+        // `trunk_system` row; the emission the run detected blind at this frequency is an
+        // inventory emitter, and before this the two `docs/07` object graphs never met — the
+        // emitter read `family: null`, `estimated_params: null`, while a CRC-valid decode of a
+        // trunked control channel sat in a side table. "Successful decode confirms it" is the
+        // product vision's step 4 and this is where it happens.
+        //
+        // The measurements come first and the decode is filed against them: what the emission
+        // IS (four levels, 4800 Bd, ±1800 Hz) is measured blind from the same baseband the
+        // dibits came from, so `estimated_params` carries measured values or nothing at all.
+        let protocol = k.system.protocol;
+        attach_to_inventory(
+            shared,
+            &mut repo,
+            &AttachInput {
+                candidate: &candidate,
+                confirmed: &cc,
+                confirmer: &confirmer,
+                dibits: &symbols.dibits,
+                baseband: &baseband,
+                baseband_rate_hz: rate,
+                center_hz,
+                bandwidth_hz: raster,
+                fco: fco_i,
+                protocol,
+                grid,
+                tune_center_hz: tune_center,
+                raster_hz: raster,
+                t: t_end,
+                track,
+            },
+        );
+
         // ---- Follow (T-269): what the grants above entitle. The repository lock is released
         // first — the following is DSP over the window already in hand, and holding a database
         // lock across it would serialise every other writer behind a channelizer run.
         drop(repo);
-        follow_grants(
-            shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id,
-        );
+        // A grant resolves to an ABSOLUTE transmit frequency through the announced band plan, and
+        // the grid fit is only known modulo the raster (see `grid_fit`) — +4300 Hz and −8200 Hz
+        // name the same grid. Applying it to an already-unambiguous frequency would down-convert
+        // the channel NEXT DOOR and report "granted channel not radiating", which is a wrong
+        // measurement rather than a missing one. So following is skipped while the receiver is
+        // measurably off-grid, and says so.
+        if grid_offset.abs() > RASTER_TOLERANCE_HZ {
+            if crate::debug_enabled() {
+                eprintln!(
+                    "hk-pipeline: trunk-cc not following {} grant(s): the receiver is \
+                     {grid_offset:+.0} Hz off the grid and that fit is only known modulo the \
+                     {raster:.0} Hz raster, so an absolute grant frequency cannot be reached \
+                     without resolving the alias",
+                    events.len(),
+                );
+            }
+        } else {
+            follow_grants(
+                shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id,
+            );
+        }
     }
 }
 
@@ -1218,6 +1320,190 @@ fn follow_grants(
     }
 }
 
+/// Everything [`attach_to_inventory`] needs, gathered at the confirmation site.
+struct AttachInput<'a> {
+    candidate: &'a CcCandidate,
+    confirmed: &'a hk_detect::trunk::ConfirmedCc,
+    confirmer: &'a CcConfirmer,
+    dibits: &'a [u8],
+    baseband: &'a [Complex32],
+    baseband_rate_hz: f64,
+    center_hz: f64,
+    bandwidth_hz: f64,
+    fco: f64,
+    protocol: TrunkProtocol,
+    grid: Option<GridFit>,
+    tune_center_hz: f64,
+    raster_hz: f64,
+    t: Timestamp,
+    track: Option<hk_model::TrackId>,
+}
+
+/// Measures what the confirmed channel IS, then files the decode against the inventory emitter at
+/// the same frequency (T-546).
+///
+/// Three things happen, in this order, and each is a `docs/07` object rather than a log line:
+///
+/// 1. **The symbol structure is measured blind** from the same baseband the dibits came from
+///    ([`measure_fm_structure`]) — level count, symbol rate, outer deviation. The C4FM
+///    demodulator's `rate_bd` is the rate it was *told*, so it is not the input here.
+/// 2. **The analysis is written** as an `emitter_synthesis` row: the chosen pipeline, the
+///    per-stage evidence, and the ADR-0021 trace saying what else was tried and why it lost.
+/// 3. **The decode becomes evidence on the emitter** and the explanations are re-ranked, so a
+///    ranked suggestion carries a measurement instead of the bare allocation
+///    (`crate::family::record_decoder_evidence`'s call contract).
+///
+/// **It creates no emitter.** Like `Inventory::live_trust`, a measurement may be filed against an
+/// entry something else made, never conjure one: the emission was found by blind detection, and
+/// if detection has not offered a row yet there is nothing here to confirm.
+fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: &AttachInput<'_>) {
+    let c = &shared.counters.chains;
+    // The emitter blind detection already has here, when it has one. A control channel confirms
+    // inside the first window while the detector is still accumulating a track, so routinely it
+    // does not yet — and `synth::attach` records the sighting rather than dropping the strongest
+    // evidence in the run on the floor.
+    let emitter = crate::refine::emitter_for_channel(repo, input.center_hz, input.bandwidth_hz)
+        .unwrap_or(None);
+
+    // The symbol rate search is bounded by the channel itself: a rate wider than the channel is
+    // not physical. No expected rate is supplied.
+    let structure = match measure_fm_structure(
+        input.baseband,
+        input.baseband_rate_hz,
+        Some(input.bandwidth_hz),
+    ) {
+        Ok(s) => {
+            inc(&c.cc_structures);
+            Some(s)
+        }
+        Err(e) => {
+            if crate::debug_enabled() {
+                eprintln!(
+                    "hk-pipeline: trunk-cc {:.4} MHz symbol structure not measured: {e:?} -- the \
+                     channel framed and CRC-checked, so this is a gap in the MEASUREMENT, not \
+                     evidence about the signal",
+                    input.center_hz / 1e6,
+                );
+            }
+            None
+        }
+    };
+    // Every framing in the catalogue, with what it actually scored — so "why P25 and not DMR" is
+    // answered from measurements. The winner is re-scanned too rather than special-cased.
+    let framings: Vec<FramingScore> = CC_FRAMINGS
+        .iter()
+        .map(|&f| {
+            let o = input.confirmer.scan_framing(f, input.dibits);
+            FramingScore {
+                framing: f,
+                sync_hits: o.sync_hits,
+                crc_valid: o.crc_valid,
+                crc_checked: o.crc_checked,
+            }
+        })
+        .collect();
+    let receiver = input.grid.map(|g| ReceiverFit {
+        grid_hz: input.raster_hz,
+        offset_hz: g.offset_hz,
+        concentration: g.concentration,
+        ppm: 1e6 * g.offset_hz / input.tune_center_hz,
+    });
+    let obs = CcObservation {
+        center_hz: input.candidate.center_hz,
+        bandwidth_hz: input.bandwidth_hz,
+        fco: input.fco,
+        structure,
+        framings: &framings,
+        confirmed: input.confirmed,
+        protocol: input.protocol,
+        receiver,
+        t: input.t,
+    };
+    let attached = match crate::synth::attach(repo, emitter, &obs) {
+        Ok(a) => {
+            inc(&c.cc_attached);
+            if crate::debug_enabled() {
+                eprintln!(
+                    "hk-pipeline: trunk-cc {:.4} MHz attached to emitter {:?} ({}): decoder \
+                     evidence {}, structure {:?}",
+                    input.center_hz / 1e6,
+                    a.emitter,
+                    if a.created { "created" } else { "existing" },
+                    a.classified,
+                    structure,
+                );
+            }
+            a
+        }
+        Err(e) => {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: trunk-cc inventory attach: {e}");
+            return;
+        }
+    };
+    // Re-rank at once: a decode that does not change what the inventory says the signal is has
+    // confirmed nothing the user can see.
+    let mut inv = shared
+        .inventory
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(e) = inv.chain_emitter(repo, input.track, attached.emitter) {
+        inc(&c.errors);
+        eprintln!("hk-pipeline: trunk-cc chain emitter: {e}");
+    }
+}
+
+/// Fits the receiver's own offset from the `raster_hz` channel grid, over `buf` (T-546; docs/19
+/// §7.6a, §4.4 step 1).
+///
+/// One averaged power spectrum of the whole window, a floor taken as its own median, and the
+/// circular mean of the above-floor bins modulo the raster — which is
+/// [`fit_grid_offset`]'s whole job. Every emission in a capture shares the same receiver offset,
+/// so occupied channels reinforce each other and the estimate costs one extra FFT pass per hunt,
+/// not one per channel.
+///
+/// **The fit is modulo the raster, and that is all the data says.** It re-aligns the *grid*; it
+/// does not say which grid line an emission is on, so it is applied to the hunt's own channel
+/// arithmetic and never to a frequency that is already unambiguous (see [`follow_grants`]).
+fn grid_fit(buf: &[Complex<i8>], fs: f64, raster_hz: f64) -> Option<GridFit> {
+    let n = SWEEP_FFT_LEN;
+    let frames = buf.len() / n;
+    if frames == 0 || !(fs.is_finite() && fs > 0.0) {
+        return None;
+    }
+    let mut cfg = WelchConfig::new(n);
+    cfg.overlap = 0;
+    cfg.window = WindowKind::Hann;
+    cfg.holds = false;
+    cfg.spectral_kurtosis = false;
+    let mut engine = SegmentEngine::new(cfg).ok()?;
+    const INV: f32 = 1.0 / 128.0;
+    let mut seg = vec![Complex32::default(); n];
+    let mut avg = vec![0.0f64; n];
+    for f in 0..frames {
+        for (o, z) in seg.iter_mut().zip(&buf[f * n..(f + 1) * n]) {
+            *o = Complex32::new(f32::from(z.re) * INV, f32::from(z.im) * INV);
+        }
+        engine.process(&seg);
+        for (a, &v) in avg.iter_mut().zip(engine.last_power()) {
+            *a += f64::from(v);
+        }
+    }
+    // The floor is the spectrum's own median: most of a raster band is empty, so this is measured
+    // rather than assumed, exactly as `occupancy` measures the band floor.
+    let floor = median(&avg) * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0);
+    // Bin i is (i − N/2)·fs/N relative to the tuned centre, which is the frame the grid origin is
+    // assumed in.
+    let bin_hz = fs / n as f64;
+    fit_grid_offset(
+        avg.iter()
+            .enumerate()
+            .map(|(i, &p)| ((i as f64 - (n / 2) as f64) * bin_hz, p)),
+        floor,
+        raster_hz,
+    )
+}
+
 /// Frequency-channel occupancy of each channel in `ks`, over `buf`.
 ///
 /// One segmented power sweep gives every channel at once: per 1024-sample frame, the band power of
@@ -1226,7 +1512,13 @@ fn follow_grants(
 /// a frame is occupied when the channel sits [`OCCUPIED_MARGIN_DB`] above it.
 ///
 /// `None` when the window is too short to say anything, or when the measured floor is degenerate.
-fn occupancy(buf: &[Complex<i8>], fs: f64, raster: f64, ks: &[i64]) -> Option<Vec<f64>> {
+fn occupancy(
+    buf: &[Complex<i8>],
+    fs: f64,
+    raster: f64,
+    grid_offset_hz: f64,
+    ks: &[i64],
+) -> Option<Vec<f64>> {
     let n = SWEEP_FFT_LEN;
     let frames = buf.len() / n;
     if frames == 0 || ks.is_empty() {
@@ -1244,8 +1536,9 @@ fn occupancy(buf: &[Complex<i8>], fs: f64, raster: f64, ks: &[i64]) -> Option<Ve
     let bins: Vec<(usize, usize)> = ks
         .iter()
         .map(|&k| {
-            let lo = bin(k as f64 * raster - raster / 2.0) as usize;
-            let hi = bin(k as f64 * raster + raster / 2.0) as usize;
+            let centre = k as f64 * raster + grid_offset_hz;
+            let lo = bin(centre - raster / 2.0) as usize;
+            let hi = bin(centre + raster / 2.0) as usize;
             (lo, hi.max(lo))
         })
         .collect();
@@ -1324,7 +1617,7 @@ mod tests {
         // +3 continuous, −5 on for a quarter of the window, everything else empty.
         let buf = scene(n, fs, &[(3.0 * raster, 1.0), (-5.0 * raster, 0.25)]);
         let ks: Vec<i64> = (-8..=8).collect();
-        let fco = occupancy(&buf, fs, raster, &ks).expect("a measurable floor");
+        let fco = occupancy(&buf, fs, raster, 0.0, &ks).expect("a measurable floor");
         let at = |k: i64| fco[ks.iter().position(|&x| x == k).unwrap()];
         assert!(at(3) >= MIN_CC_FCO, "continuous channel: fco {:.3}", at(3));
         assert!(
@@ -1701,11 +1994,11 @@ mod tests {
     #[test]
     fn a_window_too_short_or_a_flat_floor_yields_nothing_rather_than_candidates() {
         let (fs, raster) = (500_000.0, 12_500.0);
-        assert!(occupancy(&[], fs, raster, &[0]).is_none());
-        assert!(occupancy(&vec![Complex::new(0i8, 0i8); 512], fs, raster, &[0]).is_none());
+        assert!(occupancy(&[], fs, raster, 0.0, &[0]).is_none());
+        assert!(occupancy(&vec![Complex::new(0i8, 0i8); 512], fs, raster, 0.0, &[0]).is_none());
         // An all-zero window has no floor to measure against, so it produces no candidates at all
         // rather than declaring every channel occupied above a zero threshold.
         let quiet = vec![Complex::new(0i8, 0i8); 1 << 14];
-        assert!(occupancy(&quiet, fs, raster, &[-1, 0, 1]).is_none());
+        assert!(occupancy(&quiet, fs, raster, 0.0, &[-1, 0, 1]).is_none());
     }
 }

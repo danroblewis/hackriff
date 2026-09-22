@@ -2646,12 +2646,17 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
     stop_server(serving);
 }
 
-/// T-190: `POST /api/analyze` (the MUI "Analyze / synthesize decoder" stub, docs/15 §7)
-/// validates its target — a selection, an inventory emitter (merged ids resolve to the live
-/// entity like `/api/inventory/{id}`), or an ad-hoc band — and answers `501 not_implemented`
-/// once the target is known to exist; the engine itself is MAUTO's (docs/15 §8), not built yet.
+/// T-190/T-546: `POST /api/analyze` validates its target — a selection, an inventory emitter
+/// (merged ids resolve to the live entity like `/api/inventory/{id}`), or an ad-hoc band.
+///
+/// A **selection or band** still answers `501`: the general region-analyze engine over acquired
+/// IQ (ADR-0015 §5.1) is not built. An **emitter** answers `200` with its analysis, and an
+/// emitter nothing has analysed answers `200` with `resolution.kind: "not-searched"` — which is
+/// *un-looked-at*, a different fact from *looked at and found nothing*, and the two must never be
+/// served alike (ADR-0021 §7A.4). The 101.3 MHz station here is analogue and has no synthesis
+/// row, so it is exactly that case.
 #[test]
-fn analyze_stub_validates_targets_and_answers_not_implemented() {
+fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
     let (_dir_guard, serving, addr) = start_server();
 
     // A valid band target: 501 not_implemented once it validates. No engine runs.
@@ -2665,7 +2670,12 @@ fn analyze_stub_validates_targets_and_answers_not_implemented() {
         (501, Some("not_implemented")),
         "{v}"
     );
-    assert_eq!(v["error"], json!("analyze is not implemented yet"), "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not implemented")),
+        "{v}",
+    );
 
     // A band target with a history time window: still just a stub answer.
     let (st, v) = post(
@@ -2690,7 +2700,7 @@ fn analyze_stub_validates_targets_and_answers_not_implemented() {
     );
     assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
 
-    // A valid emitter target (the blind-detected station, no frequency lookup): also 501.
+    // A valid emitter target (the blind-detected station, no frequency lookup).
     let emitter_id = {
         let mut found = None;
         wait_for(
@@ -2722,7 +2732,19 @@ fn analyze_stub_validates_targets_and_answers_not_implemented() {
         "/api/analyze",
         &json!({ "emitter_id": emitter_id }).to_string(),
     );
-    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["resolution"]["kind"],
+        json!("not-searched"),
+        "nothing has analysed this emitter, and saying so is not the same as saying `unknown`: \
+         {v}",
+    );
+    assert!(v["pipeline"].is_null(), "{v}");
+    assert_eq!(
+        v["resolution"]["reason"],
+        json!(null),
+        "an aborted-or-absent look rules nothing out: {v}"
+    );
 
     // 400 invalid: zero target forms, several target forms, an unknown field, a malformed band,
     // f_lo >= f_hi.

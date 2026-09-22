@@ -315,6 +315,17 @@ counter_group!(
         cc_demods,
         /// Candidates the per-pass admission cap refused a demodulation.
         cc_admission_refused,
+        /// T-546: hunt passes where the receiver's own offset from the channel grid was **fitted
+        /// and found to exceed the raster tolerance** (docs/19 §7.6a). It is a property of the
+        /// receiver, not of any signal, so one pass counts once however many channels it
+        /// re-aligned. A HackRF One at −9.6 ppm hides every 800 MHz channel without it.
+        cc_grid_corrections,
+        /// T-546: confirmed control channels whose decode was filed back onto the **inventory
+        /// emitter** at the same frequency — the product vision's "successful decode confirms it".
+        cc_attached,
+        /// T-546: confirmed control channels whose symbol structure (level count, symbol rate,
+        /// outer deviation) was blindly measured and persisted as `estimated_params`.
+        cc_structures,
         /// Control channels **confirmed** by frame sync *and* CRC (`CcConfirmer::confirm`).
         cc_confirmed,
         /// TrunkSystem rows written, one per distinct confirmed control channel (metadata only:
@@ -416,6 +427,17 @@ counter_group!(
         sweep_no_emitter,
         /// Chain errors (demod, repository).
         errors,
+        /// T-605: chain errors that came back from the **storage engine** — a write the database
+        /// refused, counted apart from every other chain error.
+        ///
+        /// It is counted apart because it is not a busy radio or a signal that would not
+        /// demodulate: it is a stage that could not complete, and a run that keeps going past one
+        /// looks exactly like a run where that stage completed and agreed. A caught-and-printed
+        /// constraint violation left `UNIQUE constraint failed: emission_features.features_id` in
+        /// the log of six green gates before anyone chased it. A test can assert **zero** of
+        /// these over a run; it cannot assert anything useful about `errors`, which legitimately
+        /// moves for reasons a healthy run has.
+        storage_errors,
     }
 );
 
@@ -1044,6 +1066,20 @@ pub fn add(c: &AtomicU64, n: u64) {
 #[inline]
 pub fn inc(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
+}
+
+/// T-605: records one chain error that came back from the **storage engine**, naming it and
+/// counting it twice — once in `errors` with every other chain error, and once in
+/// `storage_errors` on its own.
+///
+/// The second count is the point. A chain that catches a `RepoError`, prints it and carries on
+/// leaves a run that looks exactly like a run where that write succeeded; the printed line is the
+/// only evidence, and nobody reads the log of a green suite. `storage_errors` is a number a test
+/// can require to be **zero** over a run, which `errors` can never be.
+pub fn storage_error(c: &ChainCounters, what: &str, err: &hk_model::RepoError) {
+    inc(&c.errors);
+    inc(&c.storage_errors);
+    eprintln!("hk-pipeline: {what}: {err}");
 }
 
 /// Sets the value.

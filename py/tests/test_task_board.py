@@ -254,3 +254,33 @@ def test_no_ticket_carries_another_tickets_body() -> None:
         "carrying another ticket's text: "
         + "; ".join(f"{ids} -> {b[:70]!r}" for b, ids in shared.items())
     )
+
+def test_no_ticket_block_carries_a_key_twice() -> None:
+    """A lost `- id:` line merges two tickets into one, and both other guards miss it.
+
+    The third corruption shape from 2026-09-21. `test_no_ticket_lost_its_body_to_a_merge` passes
+    because the merged block HAS a body; `test_no_ticket_carries_another_tickets_body` passes
+    because the first provenance line is unique. What gives it away is that the swallowed ticket's
+    keys are now a second copy inside its neighbour: two `acceptance:` keys, two `use_cases:`.
+
+    YAML itself will not object - a duplicate key silently keeps the last value - so the swallowed
+    ticket's body wins and the host ticket's is discarded on load. That is how T-596's block came
+    to end with T-594's text: everything the host declared before the duplicate was live in the
+    file and dead in the parse.
+    """
+    import re
+    from collections import Counter
+
+    text = TASKS.read_text()
+    blocks = re.split(r"^  - id: ", text, flags=re.M)[1:]
+    offenders: list[str] = []
+    for blk in blocks:
+        tid = blk.split("\n", 1)[0].strip()
+        keys = Counter(re.findall(r"^    ([a-z_]+):", blk, re.M))
+        dupes = sorted(k for k, n in keys.items() if n > 1)
+        if dupes:
+            offenders.append(f"{tid}: {dupes}")
+    assert not offenders, (
+        "these blocks declare a key more than once, which is what a lost `- id:` line looks like "
+        "(the second ticket's keys land inside the first): " + "; ".join(offenders)
+    )
