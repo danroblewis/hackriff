@@ -7524,17 +7524,57 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
     let t_index_of = |lt: u32| (unix_now() / (t_cell * (1u64 << lt) as f64 * N as f64)) as u64;
 
-    // Wait for the pyramid to hold frames under the station.
+    // Wait for the pyramid to hold frames under the station, and **PIN the tile that proved it.**
+    //
+    // A level-0 tile here is `N` display rows — about 1.3 s — so re-reading the wall clock for the
+    // next request names the NEXT tile whenever a boundary passes between the two calls, and that
+    // tile is empty whenever capture's data edge lags the wall clock by more than the gap. Under a
+    // gate's load it does (measured, task-t299's gate: the tile asked for began at +4.78 s after
+    // `recording_began`, one full second past the store's newest frame at +3.77 s), so the
+    // coverage map answered it on its own — uniformly `unobserved`, `answered: null` — and every
+    // assertion below about the tile the wait had just seen observed was made about a different
+    // one. A tile is a fixed region of capture time: once observed it stays observed, so every
+    // read below that needs data addresses THIS index, never `unix_now()` again. (T-509's cause
+    // was the same wall-clock re-derivation, one tile further down this test.)
+    //
+    // **And the tile is found from the DATA EDGE, not the wall clock** — the store's newest frame,
+    // `shadow.edge_s`, which every tile answer carries. Polling the wall-clock tile instead waits
+    // for capture to catch up with a clock it trails: under enough load it never does within the
+    // budget (deflake-0922 measured the sibling shadow test timing out exactly that way).
+    //
+    // **And a tune record must exist** (`horizon.oldest_record_s` non-null) before the young-server
+    // claims below. For the first moments of a server the history has a frame (so
+    // `recording_began_s` is set) but the IQ ring's journal has no span yet, and T-507's
+    // `oldest_record == None` branch serves every row after `recording_began_s` as `"unknown"`.
+    // T-507 measured that window at ~30 ms; under a gate's load deflake-0922 caught `now_tile` in
+    // it (0.37 s into a run: 9 rows `"unknown"`, `oldest_record_s: null`).
+    let mut t_pin = 0u64;
     wait_for(
-        "the station's tile to be observed",
+        "the station's tile at the data edge to be observed, with a tune record behind it",
         Duration::from_secs(60),
         || {
-            get(addr, &tile(0, 0, f_index, t_index_of(0))).1["grid"]["observed_cells"]
-                .as_u64()
-                .is_some_and(|n| n > 0)
+            let Some(edge) =
+                get(addr, &tile(0, 0, f_index, t_index_of(0))).1["shadow"]["edge_s"].as_f64()
+            else {
+                return false;
+            };
+            let ti = ((edge - 0.5 * t_cell) / (t_cell * N as f64)) as u64;
+            let v = get(addr, &tile(0, 0, f_index, ti)).1;
+            let seen = v["grid"]["observed_cells"].as_u64().is_some_and(|n| n > 0)
+                && v["coverage"]["horizon"]["oldest_record_s"].is_f64();
+            if seen {
+                t_pin = ti;
+            }
+            seen
         },
     );
-    let (st, fine) = get(addr, &tile(0, 0, f_index, t_index_of(0)));
+    let (st, fine) = get(addr, &tile(0, 0, f_index, t_pin));
+    eprintln!(
+        "tile route: pinned t_index {t_pin} ({} tile(s) behind the wall clock's now), {} of {} cells observed",
+        t_index_of(0).saturating_sub(t_pin),
+        fine["grid"]["observed_cells"],
+        N * N
+    );
     assert_eq!(st, 200, "{fine}");
     // The level that ANSWERED, not the one the address implies (T-426). At the store's own floor
     // the tile sits on scheme 1's diagonal, so the node is exact and nothing was folded.
@@ -7800,7 +7840,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     );
 
     // ---- the de-welding, on the wire: one axis's level moves only its own axis's cell ----
-    let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_index_of(0)));
+    let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_pin));
     assert_eq!(st, 200, "{coarse_f}");
     assert_eq!(
         coarse_f["extent"]["f_cell_hz"],
@@ -7818,7 +7858,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         "the coarser frequency address greyed a band the finer one holds: {coarse_f}"
     );
 
-    let (st, coarse_t) = get(addr, &tile(0, 2, f_index, t_index_of(2)));
+    let (st, coarse_t) = get(addr, &tile(0, 2, f_index, t_pin / 4));
     assert_eq!(st, 200, "{coarse_t}");
     assert_eq!(
         coarse_t["extent"]["t_cell_s"],
@@ -7982,8 +8022,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     let (st, ev) = get(
         addr,
         &format!(
-            "/api/tiles/events?level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
-            t_index_of(0)
+            "/api/tiles/events?level_f=0&level_t=0&f_index={f_index}&t_index={t_pin}&cells={N}"
         ),
     );
     assert_eq!(st, 200, "{ev}");
@@ -8047,11 +8086,19 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     let tile_s = t_cell * N as f64;
     let t_index = |t: f64| (t / tile_s) as u64;
     let t_now = || t_index(unix_now());
+    // Readiness, found from the DATA EDGE (the store's newest frame, which every tile answer
+    // carries), never from the wall clock: under load capture trails the clock, and a wait on the
+    // wall-clock tile then waits for data that is always one tile in the future (deflake-0922: it
+    // timed out that way once in ten under a concurrent hk-store suite).
     wait_for(
-        "the station's tile to be observed",
+        "the station's tile at the data edge to be observed",
         Duration::from_secs(60),
         || {
-            get(addr, &tile(f_index, t_now())).1["grid"]["observed_cells"]
+            let Some(edge) = get(addr, &tile(f_index, t_now())).1["shadow"]["edge_s"].as_f64()
+            else {
+                return false;
+            };
+            get(addr, &tile(f_index, t_index(edge - 0.5 * t_cell))).1["grid"]["observed_cells"]
                 .as_u64()
                 .is_some_and(|c| c > 0)
         },
@@ -8068,77 +8115,157 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     assert_eq!(never["shadow"]["search"]["columns_found"], json!(0));
     assert_eq!(never["shadow"]["f"], json!([]), "{}", never["shadow"]);
 
-    // **Retune with room left in a tile the grid already holds, and then PIN that tile.**
+    // **Depart from the station, and PIN the tile the departure happened in — found from the
+    // DATA, never from a clock.**
     //
     // The subject of this test is one tile that carries both halves of the story: rows the grid
-    // measured while the station was swept, and rows it does not measure after the radio left. Two
-    // wall-clock alignments used to decide whether the tile this test looked at was that tile, and
-    // both were unmeasured:
+    // measured while the station was swept, and rows it does not measure after the radio left.
+    // A tile that *begins* after the departure has neither half — it is honestly unobserved end to
+    // end, so the coverage map short-circuits it and its grid carries `uniform` in place of the
+    // per-cell arrays (`tiles::unobserved_grid_json`) while still carrying a shadow. That answer is
+    // right; asking for it here is not.
     //
-    //  1. A tile that *begins* after the retune has neither half. It is honestly unobserved end to
-    //     end, so the coverage map short-circuits it and its grid carries the `uniform` cell in
-    //     place of the four per-cell arrays (`tiles::unobserved_grid_json`) while STILL carrying a
-    //     shadow — a departed band's last-known value is exactly what such a tile is for. That
-    //     answer is right; asking for it here was not. Following `t_now()` rolled onto one whenever
-    //     the retune landed near a tile boundary (reproduced 1 run in 30, panicking on a
-    //     `grid.max_db` the honest answer does not have). So: retune with room left in the tile,
-    //     and then PIN that tile's index. A tile is a fixed region of time and the route answers it
-    //     just as well once it is past, which also puts every row of it safely below the data edge
-    //     rather than racing it.
-    //  2. The run below the last measured row begins at the first row the grid does *not* hold, so
-    //     "a run that starts after the retune" used to need the row CONTAINING the retune to be a
-    //     measured one. It is a live, partial row, and it enters the grid only once a frame has
-    //     been folded into it — so a retune in the first fraction of a row left that row
-    //     unmeasured, the run began AT it, and `t0 + row * t_cell > retuned_at` was false for ever
-    //     (the runs below it merge into that one, so no later run rescues the condition).
+    // Which tile the departure landed in used to be computed from `unix_now()` taken after the
+    // retune POST returned (T-505 and T-519's rewrite of this block): the wall clock, three times
+    // over — the phase in the tile to retune at, the instant of the retune, and the tile to pin.
+    // But rows are stamped with CAPTURE time, and under a gate's load capture's data edge trails
+    // the wall clock by as much as the POST takes. Measured, task-t800's gate: the pinned tile
+    // spanned ..11.35–..12.63 s and the store's newest frame was at ..11.70 s, inside it, yet the
+    // tile held not one station row — the departure had reached the data before the tile began.
+    // The wall clock named the tile after the departure, and the test then read a tile that could
+    // never hold the half it asserts on.
     //
-    //     T-505 bought the room for that with a lead time: retune only in the first 70 % of a row,
-    //     leaving >= 0.3 s of it for the POST to complete in. THAT IS STILL A WALL CLOCK — 0.3 s
-    //     for an HTTP round trip on a box where four agents build by design — so the second
-    //     wait below no longer uses one. It asks the question in ROW INDICES instead: which row
-    //     the retune fell in is arithmetic on the pinned tile, and a run that COVERS any row
-    //     strictly below that one is unambiguously after the radio left, whether or not the
-    //     partial row the retune landed in had reached the grid. Nothing then depends on how long
-    //     the POST took, and the phase window this waits for widens from ~9.1 s of every tile to
-    //     ~13 s.
-    wait_for(
-        "a moment to retune at: inside a tile whose grid already holds the station's column",
-        Duration::from_secs(120),
-        || {
-            let into = unix_now().rem_euclid(tile_s);
-            // Room in the tile for both halves of the story. No sub-row condition: the assertion
-            // below is now indexed by row, so where in a row the POST lands does not matter.
-            if into < 3.0 * t_cell || into > 0.5 * tile_s {
-                return false;
-            }
-            // And the grid really holds this tile: a measured cell in the station's own column,
-            // read off the route rather than assumed from elapsed time.
-            get(addr, &tile(f_index, t_index(unix_now()))).1["grid"]["max_db"]
-                .as_array()
-                .is_some_and(|cells| (0..n).any(|r| !cells[r * n + station_col].is_null()))
-        },
-    );
-
-    // Depart: retune 3 MHz up, so 102.6-105.0 MHz is watched and the station at 101.3 MHz is not.
+    // So every instant here is read off the wire, in capture time:
+    //
+    //  - `armed` — the newest measured row of the station's column, seen at the data edge BEFORE
+    //    the retune is sent. The departure is after it.
+    //  - `arrived` — the first measured row of the band the radio moved TO, at or after `armed`.
+    //    The departure is before it, and it is measured data in the same store as the grid, so it
+    //    is there only once every older row is — the station rows before it are final.
+    //  - the last station row before `arrived`: the tile holding it is the pinned tile, and the
+    //    row itself is `last_row`. Every row after it in that tile is after the radio left.
+    //
+    // The one case with no such tile is a departure exactly at a tile boundary (the last station
+    // row is the tile's last row). That is a measured fact, not a timeout, and the test answers it
+    // by going back to the station and departing again — a bounded number of times, each named in
+    // the panic if they run out.
     let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
     let moved = step * (((FIXTURE_CENTER_HZ + 3.0e6) / step).round());
-    let (st, r) = post(
-        addr,
-        "/api/control/center",
-        &format!("{{\"center_hz\":{moved:?}}}"),
+    // A column of the band moved to, half a MHz off its centre so the DC notch is not the probe.
+    let arrived_f_index = ((moved + 0.5e6) / (f_cell * N as f64)).floor() as u64;
+    let edge_now = || {
+        get(addr, &tile(f_index, t_now())).1["shadow"]["edge_s"]
+            .as_f64()
+            .expect("a server with frames has an edge")
+    };
+    // `(t0_s, max_db)` of a tile, or `None` for a tile short-circuited from the coverage map.
+    let grid_of = |ti: u64, fi: u64| {
+        let v = get(addr, &tile(fi, ti)).1;
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        v["grid"]["max_db"].as_array().cloned().map(|g| (t0, g))
+    };
+    const ATTEMPTS: usize = 4;
+    let mut not_before = 0.0f64;
+    let mut boundary_departures = Vec::new();
+    let (t_pinned, last_row) = 'depart: {
+        for _attempt in 0..ATTEMPTS {
+            // Armed: the station's column is being measured at the data edge, after `not_before`
+            // (after a previous attempt's departure, that means the station is back).
+            let mut armed = 0.0f64;
+            wait_for(
+                "the station's column to be measured at the data edge",
+                Duration::from_secs(60),
+                || {
+                    let e = edge_now();
+                    let Some((t0, g)) = grid_of(t_index(e), f_index) else {
+                        return false;
+                    };
+                    let last = (0..n).rev().find(|&r| !g[r * n + station_col].is_null());
+                    match last.map(|r| t0 + r as f64 * t_cell) {
+                        Some(at) if at > not_before => {
+                            armed = at;
+                            true
+                        }
+                        _ => false,
+                    }
+                },
+            );
+            let (st, r) = post(
+                addr,
+                "/api/control/center",
+                &format!("{{\"center_hz\":{moved:?}}}"),
+            );
+            assert_eq!(st, 200, "{r}");
+            // Arrived: the first measured row of the new band at or after `armed`.
+            let mut arrived = 0.0f64;
+            wait_for(
+                "the band the radio moved to, to reach the grid",
+                Duration::from_secs(60),
+                || {
+                    let e = edge_now();
+                    (t_index(armed)..=t_index(e)).any(|ti| {
+                        let Some((t0, g)) = grid_of(ti, arrived_f_index) else {
+                            return false;
+                        };
+                        // Strictly after the armed row: a band measured before it is a previous
+                        // attempt's, not this departure's.
+                        let first = (0..n).find(|&r| {
+                            t0 + r as f64 * t_cell > armed + 0.5 * t_cell
+                                && (0..n).any(|c| !g[r * n + c].is_null())
+                        });
+                        first.is_some_and(|r| {
+                            arrived = t0 + r as f64 * t_cell;
+                            true
+                        })
+                    })
+                },
+            );
+            // The last station row that begins before `arrived`, searched back from its tile.
+            let mut found = None;
+            for ti in (t_index(armed)..=t_index(arrived)).rev() {
+                // A tile with no station row at all (the departure preceded it) is short-circuited
+                // from the coverage map; the row sought is in an older one.
+                let Some((t0, g)) = grid_of(ti, f_index) else {
+                    continue;
+                };
+                if let Some(r) = (0..n).rev().find(|&r| {
+                    t0 + r as f64 * t_cell <= arrived && !g[r * n + station_col].is_null()
+                }) {
+                    found = Some((ti, r, t0));
+                    break;
+                }
+            }
+            let (ti, row, t0) = found.unwrap_or_else(|| {
+                panic!("no station row between armed {armed} and arrived {arrived}")
+            });
+            if row + 1 < n {
+                break 'depart (ti, row as i64);
+            }
+            // The departure fell on the tile's own last row: no tile holds both halves. Go back.
+            boundary_departures.push(t0 + row as f64 * t_cell);
+            not_before = arrived;
+            let (st, r) = post(
+                addr,
+                "/api/control/center",
+                &format!("{{\"center_hz\":{FIXTURE_CENTER_HZ:?}}}"),
+            );
+            assert_eq!(st, 200, "{r}");
+        }
+        panic!(
+            "{ATTEMPTS} departures in a row landed on a tile's last row ({boundary_departures:?}), \
+             so no tile held both halves of the story"
+        );
+    };
+
+    eprintln!(
+        "tile shadow: departed on attempt {} (earlier ones on a tile's last row: {boundary_departures:?}); \
+         pinned t_index {t_pinned}, last station row {last_row} of {n}",
+        boundary_departures.len() + 1
     );
-    assert_eq!(st, 200, "{r}");
-    let retuned_at = unix_now();
-    let t_pinned = t_index(retuned_at);
 
-    // The retune's own row within the pinned tile, by arithmetic. Every row strictly below it
-    // begins after the radio left, so a run that covers one is a post-retune shadow — no matter
-    // how long the POST above took, and no matter whether the partial row it landed in had been
-    // folded into the grid yet.
-    let retune_row = ((retuned_at - t_pinned as f64 * tile_s) / t_cell).floor() as i64;
-
-    // Wait for a station-tile row after the retune that the grid does not measure and a shadow
-    // covers — in the PINNED tile, the one the retune happened in.
+    // Wait for a station-tile row after the departure that the grid does not measure and a shadow
+    // covers — in the PINNED tile. Rows after `last_row` are after the radio left by construction,
+    // so this asks only that the shadow has reached one, never how long anything took.
     let mut v = Value::Null;
     wait_for(
         "the departed station to carry a shadow",
@@ -8150,7 +8277,7 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
             f.as_array().is_some_and(|fs| {
                 fs.iter().enumerate().any(|(i, c)| {
                     let (r0, k) = (row[i].as_i64().unwrap_or(0), rows[i].as_i64().unwrap_or(0));
-                    c.as_u64() == Some(station_col as u64) && r0 + k > retune_row + 1
+                    c.as_u64() == Some(station_col as u64) && r0 + k > last_row + 1
                 })
             })
         },
@@ -8313,6 +8440,84 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         sh["rule"]
             .as_str()
             .is_some_and(|s| s.contains("GREY IS UNCHANGED"))
+    );
+    stop_server(serving);
+}
+
+/// deflake-0922: **`horizon.recording_began_s` is when THIS server began sampling, and a retune
+/// does not move it into the past.**
+///
+/// A retune seals the dwell in flight into the observation log, and the log files a record under
+/// the hour it falls in. Until this test, `/api/coverage` took the log's reach for
+/// `recording_began` from that HOUR (`hours()[0] * HOUR_NS`) — so the first retune on any server
+/// moved its stated start back to the top of the hour: measured, 923 s before a 15 s old server
+/// existed. Cell states survived it (time before the server is unobserved either way), but every
+/// reader that waits on the horizon — the browser tier's `waitForRecordToCover` among them — was
+/// told the record reached back a quarter of an hour further than it did, and returned at once.
+#[test]
+fn a_retune_does_not_move_recording_began_back_to_the_hour_the_log_files_it_under() {
+    let started = unix_now();
+    let (_dir_guard, serving, addr) = start_server();
+    // Both windows: the one the mock opens on and the one it is retuned to. An explicit window
+    // from a minute before the server to now, so the answer does not wait on a capture window.
+    let horizon = || {
+        let (st, v) = get(
+            addr,
+            &format!(
+                "/api/coverage?f_lo=99000000&f_hi=105200000&cells=4&t0={}&t1={}",
+                (started - 60.0).floor(),
+                (unix_now() + 1.0).ceil()
+            ),
+        );
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    wait_for("the server to record", Duration::from_secs(60), || {
+        horizon()["horizon"]["recording_began_s"].is_f64()
+    });
+    let before = horizon()["horizon"]["recording_began_s"].as_f64().unwrap();
+    assert!(
+        before >= started - 1.0,
+        "a server cannot have begun sampling {:.1} s before the test started it",
+        started - before
+    );
+
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 3.0e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Non-vacuity: the subject is a log that HOLDS the sealed dwell. Before it does, the log has no
+    // hour to misreport and this test would pass about nothing.
+    let mut v = Value::Null;
+    wait_for(
+        "the observation log to hold the sealed dwell",
+        Duration::from_secs(60),
+        || {
+            v = horizon();
+            v["sources"].as_array().is_some_and(|ss| {
+                ss.iter().any(|s| {
+                    s["kind"] == "observation-log" && s["spans"].as_u64().is_some_and(|n| n > 0)
+                })
+            })
+        },
+    );
+    let after = v["horizon"]["recording_began_s"].as_f64().unwrap();
+    eprintln!(
+        "recording_began: {before:.3} before the retune, {after:.3} after it, test started at {started:.3}; \
+         sources {}",
+        v["sources"]
+    );
+    assert!(
+        after >= started - 1.0 && after > before - 1.0,
+        "the retune moved recording_began_s {:.1} s into the past ({before} -> {after}), {:.1} s \
+         before this server was started — the observation log's filing hour, not a sample: {}",
+        before - after,
+        started - after,
+        v["horizon"]
     );
     stop_server(serving);
 }
