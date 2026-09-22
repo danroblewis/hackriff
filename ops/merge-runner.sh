@@ -330,6 +330,7 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   fi
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
+  TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
   # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
   # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
@@ -437,6 +438,24 @@ try_bulk(){
       notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
       rm -f "$BULKMARK"
       return 0
+    fi
+    # IS MAIN ITSELF RED? A test that fails alone on main+batch and ALSO fails alone on the
+    # rewound main is main's defect, and isolating would only re-prove it once per branch
+    # (15:45 on 2026-09-22: three branches isolated against a lattice test that main had
+    # failed since a hand-landed batch; the fix branch was sitting in the queue). Costs one
+    # scoped nextest run on the clean main; saves a full gate per branch.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -n "${TRIAGE_FILTER:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
+      if ! ( cd "$REPO" && cargo nextest run --workspace -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
     fi
     log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
   else
