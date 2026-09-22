@@ -9,6 +9,8 @@ make one itself.
 
 from __future__ import annotations
 
+import os
+
 import hkpy.reconcile as rec
 
 BOARD = """\
@@ -151,3 +153,60 @@ def test_the_grep_uses_a_plain_id_because_gits_ere_has_no_word_boundary(monkeypa
     rec.inspect(rec.Ticket("T-460", "in-progress", "x"), 0.0)
     assert seen["pattern"] == "T-460", "the grep pattern must be the bare id"
     assert "\\b" not in seen["pattern"]
+
+
+# --- the staged-bulk window -------------------------------------------------------------------
+#
+# The runner commits each branch of a batch as it goes and rewinds only if the gate then fails, so
+# for the length of that gate `main` carries ungated commits. Every state reconcile reports is read
+# off main, so the warning has to come FIRST and has to be unmissable: it invalidates all of the
+# findings at once rather than qualifying any one of them. These tests pin the three things that
+# actually went wrong on 2026-09-21 — a branch deleted on ahead=0, a batch announced as landed, and
+# a worktree cut from staged main — by pinning the advice against each.
+
+
+def test_no_marker_means_main_is_authoritative_and_nothing_is_printed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    assert rec.bulk_warning() == ""
+
+
+def test_a_staged_bulk_warns_before_any_finding_and_names_what_not_to_do(tmp_path, monkeypatch):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    (tmp_path / "bulk-in-progress").write_text(
+        "base=deadbeef\nstarted=2026-09-21 18:00:00\npid=%d\nbranches=task-a task-b\n" % os.getpid(),
+        encoding="utf-8",
+    )
+    out = rec.bulk_warning()
+    assert "PROVISIONAL" in out
+    assert "task-a task-b" in out
+    assert "deadbeef" in out
+    # The three actions that each caused an incident must be named, not merely implied.
+    assert "Do NOT delete a branch" in out
+    assert "do NOT flip a ticket" in out
+    assert "do NOT cut a new worktree" in out
+    # ahead=0 is the specific misreading; say what it does and does not mean.
+    assert "CURRENTLY merged, not DURABLY merged" in out
+
+
+def test_a_dead_runner_leaves_the_warning_standing_because_main_is_still_ungated(tmp_path, monkeypatch):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    # PID 1 is alive but not ours; use a pid that cannot exist instead.
+    dead = 2**22 - 1
+    (tmp_path / "bulk-in-progress").write_text(
+        f"base=deadbeef\npid={dead}\nbranches=task-a\n", encoding="utf-8"
+    )
+    out = rec.bulk_warning()
+    assert "PROVISIONAL" in out, "a dead runner does not make the staged commits gated"
+    assert "IS GONE" in out
+
+
+def test_the_warning_precedes_the_findings_in_the_rendered_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    (tmp_path / "bulk-in-progress").write_text(
+        "base=deadbeef\npid=%d\nbranches=task-a\n" % os.getpid(), encoding="utf-8"
+    )
+    board = tmp_path / "tasks.yaml"
+    board.write_text("tasks:\n", encoding="utf-8")
+    rec.main(["--board", str(board)])
+    out = capsys.readouterr().out
+    assert out.index("PROVISIONAL") < out.index("reconcile:"), "the warning must come first"

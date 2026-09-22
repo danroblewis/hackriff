@@ -40,6 +40,16 @@ separates a live agent from a lost one. It is a HINT, not a verdict: a long-runn
 reading rather than writing is legitimately quiet, which is why this prints evidence and refuses to
 draw the conclusion itself.
 
+EVERY READING HERE ASSUMES `main` IS AUTHORITATIVE, AND DURING A BULK MERGE IT IS NOT. The merge
+runner commits each branch of a batch as it goes and only rewinds if the ~20-minute gate then fails,
+so for that whole window main carries commits that have not passed a gate. `ahead=0` in that window
+means "currently merged", NOT "durably merged". On 2026-09-21 that distinction cost three incidents:
+a branch deleted on an ahead=0 read that had to be recovered from a merge commit's second parent, a
+batch announced as landed from `git log --merges` that the gate then rewound, and a worker branch cut
+from staged-but-ungated main that silently absorbed three other tickets' work. The runner therefore
+writes `$HACKRIFF_OPS/bulk-in-progress` for exactly that window, and this tool leads with it — a
+warning ABOVE the findings, because it invalidates all of them at once rather than qualifying any one.
+
 Exit status is 0 unless `--strict`, which exits 1 when anything needs attention, so a caller can
 gate on it. Stdlib only, like `hkpy.gate`.
 """
@@ -47,6 +57,7 @@ gate on it. Stdlib only, like `hkpy.gate`.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -222,6 +233,48 @@ def _age(sec: float | None) -> str:
     return f"{sec / 3600:.1f}h"
 
 
+
+def bulk_warning(now: float | None = None) -> str:
+    """Report the merge runner's staged-bulk window, or "" when main is authoritative.
+
+    Read straight off the runner's marker file rather than inferred from git, because the
+    distinction this draws — ungated commits currently on main vs. commits that passed a gate —
+    is not visible in the commit graph at all. No marker means no warning; a marker whose writing
+    process is gone is reported as such and NOT cleared, since a runner that died mid-bulk leaves
+    main provisional for real.
+    """
+    ops = Path(os.environ.get("HACKRIFF_OPS", Path.home() / ".hackriff-ops"))
+    mark = ops / "bulk-in-progress"
+    try:
+        fields = dict(
+            line.split("=", 1) for line in mark.read_text(encoding="utf-8").splitlines() if "=" in line
+        )
+    except OSError:
+        return ""
+    age = _age((now or time.time()) - mark.stat().st_mtime)
+    pid = fields.get("pid", "")
+    alive = True
+    if pid.isdigit():
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            pass
+    branches = fields.get("branches", "(unrecorded)")
+    lines = [
+        "  !! A BULK MERGE IS STAGED ON MAIN — EVERY READING BELOW IS PROVISIONAL.",
+        f"     branches: {branches}",
+        f"     gated-from: {fields.get('base', '?')}   started {age} ago"
+        + ("" if alive else f"   (runner pid {pid} IS GONE — main is left ungated)"),
+        "     `ahead=0` right now means CURRENTLY merged, not DURABLY merged: the gate can still",
+        "     fail and reset main back to gated-from. Do NOT delete a branch, do NOT flip a ticket",
+        "     to done, and do NOT cut a new worktree from main until this clears.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def render(findings: list[Finding]) -> str:
     if not findings:
         return "reconcile: no in-progress tickets — the board claims nothing is running.\n"
@@ -272,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     text = args.board.read_text(encoding="utf-8")
     now = time.time()
     findings = [inspect(t, now) for t in tickets(text) if t.status == "in-progress"]
-    sys.stdout.write(render(findings))
+    sys.stdout.write(bulk_warning(now) + render(findings))
     if args.strict and any(f.needs_attention for f in findings):
         return 1
     return 0

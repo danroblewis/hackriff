@@ -21513,6 +21513,56 @@ tasks:
       through plain `cargo test`, so nextest's serial group and thread cap never applied to
       sighting 2 at all).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-650
+    milestone: M2-hardening
+    title: A staged bulk leaves main carrying ungated commits and nothing says so, so every reading taken in that window is wrong
+    status: done
+    branch: task-bulkmark
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-582]
+    use_cases: []
+    found_by: 'the coordinator, 2026-09-21, after the third incident caused by the same window'
+    acceptance: |
+      `ops/merge-runner.sh`'s bulk path COMMITS EACH MERGE AS IT GOES and rewinds only if the gate
+      then fails, so for the 15-25 minutes a bulk gate runs, `main` carries commits that have not
+      passed a gate and may be reset away. Nothing declared that window, so every tool and every
+      person sampling main inside it read a PROVISIONAL state as a settled one.
+      THREE INCIDENTS, ALL THE SAME CAUSE, ALL ON 2026-09-21:
+      1. `task-t547` was deleted on an `ahead=0` reading taken while its merge was staged. It had to
+         be recovered from the merge commit's second parent (`e097ce8a^2` = `20bbfa87`).
+      2. A batch was announced as landed from a `git log --merges` snapshot taken during the bulk.
+         The gate then failed and rewound it. Caught only because a field was missing from the API.
+      3. `task-plugready` was cut from staged-but-ungated main and silently absorbed T-596's,
+         T-546's and T-547's work (3 hits of `open_dwell` in its `coverage.rs` against 0 on main;
+         git warned of multiple merge bases). T-596 was later pulled with a regression, so merging
+         that branch would have landed unfixed code. It had to be rebuilt from clean main.
+      RESOLUTION. The bulk declares itself. `ops/merge-runner.sh` writes
+      `$HACKRIFF_OPS/bulk-in-progress` (base, start time, pid, branch list; `after` once the batch is
+      staged) BEFORE the first merge commit, so there is no instant in which main is provisional and
+      nothing says so, and removes it on a gate pass and on a rewind.
+      IT IS DELIBERATELY NOT REMOVED when the runner dies mid-bulk or when the gate fails with HEAD
+      moved: in both of those cases main really is left carrying ungated commits, so the marker is
+      TRUE, not stale, and clearing it would be the same false-quiet this ticket exists to remove -
+      the same reasoning as `Coverage::Unobserved` is not quiet and `BiasTee::Unknown` is not `Off`.
+      `hkpy.reconcile` leads with the warning, ABOVE the findings rather than beside them, because
+      it invalidates all of them at once rather than qualifying any one: it names the branches, the
+      gated-from base, how long the window has been open, whether the runner pid is still alive, and
+      the three actions that each caused an incident - do not delete a branch, do not flip a ticket
+      to done, do not cut a new worktree from main.
+      NON-VACUITY PROVED: four tests in `py/tests/test_reconcile.py`, and two deliberate defects each
+      caught by the guard named for it - emitting the warning AFTER the findings fails
+      `test_the_warning_precedes_the_findings_in_the_rendered_output`, and treating a dead runner as
+      "window over" fails `test_a_dead_runner_leaves_the_warning_standing_because_main_is_still_ungated`.
+      The reconcile skill and the module docstring both carry the `ahead=0` distinction in words.
+    notes: |
+      Filed and resolved 2026-09-21 by the coordinator. The id is deliberately clear of the T-63x
+      range that three in-flight agents were told to file into; ids are permanent and gaps are normal.
+      Changing `ops/merge-runner.sh` needs a RUNNER RESTART to take effect - the running process
+      executes its own inode and `self_version()` only reports the drift, by design (swapping code
+      under a live gate is worse than running old code). The supervisor owns that restart.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
