@@ -17227,7 +17227,8 @@ tasks:
   - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
-    status: todo
+    status: done
+    resolved_by: docs/adr/0022-false-confirm-budget.md
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20355,6 +20356,35 @@ tasks:
       must declare when it publishes two metrics from one estimate. Also state what this does to
       the 12-bit caps (they were sized for a sum). Must land before any block implements
       Block::evidence, because the grouping is part of the contract.
+    notes: |
+      ANSWERED 2026-09-21 on task-evbits: ADR-0015 section 13.1 (new amendment).
+      RESIDUAL CHOSEN: within a stage, b_j = sum over DECLARED DEPENDENCE GROUPS of the MAXIMUM
+      within each group. The sum survives only BETWEEN groups. `Evidence` gains a required
+      `group: GroupId`; a block publishing >1 metric at a stage must ship the measured rank
+      correlation matrix in its calibration file, and UNDECLARED IS NOT INDEPENDENT - every metric
+      a block publishes at a stage is one group until it proves otherwise. Groups may split only at
+      |rho| < 0.3 in every fill bucket, on >= 4096 windows; there is no partial-credit tier because
+      the measurement that would size one does not exist (docs/21 section 2, n = 820).
+      WHY MAXIMUM: exact at perfect dependence (P(both exceed) = P(max exceeds)), and it
+      UNDER-reports under independence, so the error direction is fail-closed - the same rule as
+      `BiasTee::Unknown` is not `Off`.
+      COST: recall in the SEARCH, never validity of a confirm. Roughly 6-12 bits of `floor_j`
+      headroom per stage on the M1 FSK ladder; some weak-but-true signals degrade from beam nodes to
+      section 1.3 partial results; displayed `quality` falls where it was previously overstated.
+      Nothing reaches the confirm gate because ADR-0022 section 2.1 already excluded every
+      calibrated metric from it.
+      REJECTED: dropping one of each pair (discards a metric in the CONTRACT when the identity is a
+      property of THIS block version); joint/whitened scoring (needs a joint table against a log2 N
+      ceiling that already binds at one dimension); keeping the sum with a measured penalty (fails
+      OPEN - a stale penalty over-claims).
+      FALSIFIED BY: a block computing snr and evm from genuinely different estimates and shipping
+      |rho| < 0.3 (the designed exit - the group splits per block version); or docs/22's blind corpus
+      showing the maximum rule materially lowering the a-priori solve rate, which moves `floor_j`
+      (T-660), not the rule.
+      GROUPS AS MEASURED (n = 112): S2/S3 `soft_quality` = {snr, evm, timing_var}; S3 `bit_shape` =
+      {line_violations, bit_structure}; `bimodality` and `eye_open` singletons; S4-S6 untouched
+      (analytic nulls, ADR-0022's business). AM/OOK, PSK and C4FM are one group each by default
+      until T-619.
   - id: T-617
     milestone: MAUTO
     title: 'Calibration tables must declare their achievable bit levels and their n (eye_open is non-invertible at 4 and 6 bits)'
@@ -20379,6 +20409,32 @@ tasks:
       here" rather than a silently wrong threshold; and ADR-0015's caps are restated against what
       calibration can reach (32 bits is unreachable by calibration in principle). A Rust test
       asserts a table rejects a level above its own ceiling.
+    notes: |
+      ANSWERED 2026-09-21 on task-evbits: ADR-0015 section 13.2 (new amendment). The schema change
+      is to ADR-0015 section 2.2 itself - `hk-synth` does not exist and no
+      `synth/calibration/*.json` file exists in the tree, so the ADR IS the schema. Docs-only diff.
+      SCHEMA `hackriff.calibration/1`: per (metric, null, support n, fill bucket) cell, carrying
+      `windows` (the N sampled), `sample_ceiling_bits` = log2(N), `distinct_values`, an explicit
+      `levels` list of the ONLY expressible answers, an `unexpressible` list with the realised bits
+      and a reason, and `admissible_bits` = min(max expressible level, the 6-bit calibrated claim
+      cap, sample_ceiling_bits). Plus `conditioning` (T-618) and `correlation`/`groups` (T-616).
+      `levels` is a list of admissible answers, NOT a curve: no interpolation between levels, no
+      extrapolation past either end, supports enumerated never interpolated.
+      THE REFUSAL, quoted: asked for a level it does not hold a table returns
+      `Shortfall { requested_bits, admissible_bits, reason }` - for eye_open at n = 112 that is
+      `Shortfall { requested_bits: 6.0, admissible_bits: 3.0, reason: Atom { realised_bits: 2.41 } }`
+      - and asked for a cell it does not have it returns `NoTable`, which credits 0.0 bits.
+      Returning the nearest quantile is forbidden: that is the behaviour that reported 6 bits of
+      evidence for 2.41 bits of fact.
+      CAPS RESTATED: no calibrated metric may claim above 6 bits (docs/21 section 2 - above 6 the
+      discount is unmeasured, not small), so section 1.3's 12-bit S0-S3 cap becomes a belt; the
+      32-bit S4 cap stands and is ANALYTIC-ONLY, unreachable by calibration in principle.
+      `floor_j` snaps UP to an expressible level, never down; if none exists at or below
+      `admissible_bits` the cell is `floor_unreachable` and reported as a CALIBRATION DEFECT with
+      the node kept as a partial - the floor is never quietly lowered. eye_open at n = 112 against
+      floor 6 is exactly that case.
+      NOT DONE, DELIBERATELY: the Rust test the DoD asks for cannot be written - there is no crate
+      to put it in. Carried by T-660 with the exact assertion stated.
   - id: T-618
     milestone: MAUTO
     title: 'M-2: condition calibration tables on ADC FILL (sigma in LSB), not gain; size the sampling budget'
@@ -20405,6 +20461,36 @@ tasks:
       ~40k for an interval - and is budgeted, not discovered; (c) Provenance already carries
       quantisation_limited and the clip count, so name which field the runtime reads and whether
       sigma_LSB needs to join them (docs/07).
+    notes: |
+      ANSWERED 2026-09-21 on task-evbits: ADR-0015 section 13.3 (new amendment).
+      KEY: `conditioning.key = adc_fill_sigma_lsb`, the per-component noise sigma in ADC LSB - not
+      gain, not clip fraction. Rests on docs/21 section 4's control: 51 dB of gain with the ADC
+      SKIPPED reproduces the float table to 0.02 bits on every metric and leaves demod success
+      bit-identical at 0.1876 in every column, because every metric in the set is a ratio or a
+      power-normalised statistic. Clipping refuted: 28.4% clipped costs <= 0.34 bits at a 6-bit
+      claim. Under-fill is the hazard: sigma = 0.21 LSB over-claims 1.64 bits and collapses
+      eye_open to 0.91 realised for a 6-bit claim, while demod success jumps 19% -> 53%.
+      BUCKETS - TWO, because two is what the measurement buys: `nominal` (sigma >= 0.5 LSB AND clip
+      <= 0.30) gets one table per (metric, null, n); `under_filled` and `over_clipped` get NO table
+      and score 0.0 bits. The 0.5 LSB boundary is DERIVED: rows from 0.57 to 77 LSB sit within
+      0.34 bits of each other so an interior boundary would manufacture a distinction the data
+      cannot see, while 0.21 LSB is 1.64 bits away and breaks a metric outright. `over_clipped` is a
+      boundary of the MEASUREMENT (the null corpus stopped at 28.4%), stated as such.
+      RUNTIME RULE for the degenerate end: one pass over the evaluation window's pre-scaling
+      integer samples for sigma_LSB; < 0.5 -> every calibrated metric scores `NoTable`, window
+      flagged `under_filled`, analytic metrics unaffected. It never stops the demodulator, capture
+      or a gain - under-fill is a property of the recording.
+      PROVENANCE (docs/07): `quantisation_limited` already exists and is the right SHAPE (noise
+      floor within 3 dB of the ADC quantisation floor, spike S4) but is a boolean at a 3 dB
+      threshold where the boundary is a number, so Provenance GAINS `noise_sigma_lsb: f32` and the
+      two must agree. Clip reads the existing `Detection.clip_count` / sticky `overload`; no new
+      clip field. MISSING sigma is `under_filled`, not `nominal`.
+      BUDGET: N = 4096 windows per cell adopted (touches 12 bits once; also ~64 exceedances at the
+      6-bit cap, and the 6-bit cap from T-617 is what makes 4096 sufficient rather than 40k).
+      1 bucket x 3 nulls x >= 2 supports = 6 cells ~= 25k windows per block version. A five-step
+      gain ladder would have cost ~125k for distinctions the measurement cannot see - the practical
+      argument for deriving boundaries. A cell under the floor is loadable but must declare its
+      lower `sample_ceiling_bits`, so under-sampling is visible in the ANSWERS.
   - id: T-619
     milestone: MAUTO
     title: 'Extend the T-547 ladder measurement to the AM/OOK and C4FM paths before either ships an evidence()'
@@ -20846,6 +20932,105 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
+  - id: T-660
+    milestone: MAUTO
+    title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
+    status: todo
+    priority: medium
+    parallel_group: MAUTOD
+    model: sonnet
+    depends_on: [T-616, T-617, T-618]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      CODE, and it cannot start before `hk-synth` exists (ADR-0015 section 9) - there is no crate to
+      put it in today, which is why T-617's DoD line "a Rust test asserts a table rejects a level
+      above its own ceiling" was deliberately NOT satisfied by the design ticket.
+      Carries three obligations from ADR-0015 section 13:
+      (a) the `hackriff.calibration/1` loader and the two accessors of section 13.2 - raw -> bits
+      (`Score::{Bits, Saturated, NoTable}`) and bits -> raw (`Threshold::{At, Shortfall, NoTable}`).
+      A Rust test asserts the REFUSAL is non-vacuous: a table whose highest expressible level is
+      3.0 bits, asked for 6.0, returns `Shortfall { requested_bits: 6.0, admissible_bits: 3.0,
+      reason: Atom { realised_bits: 2.41 } }` and NOT a threshold; asked for a missing cell it
+      returns `NoTable` and the metric credits 0.0 bits; a `floor_j` above `admissible_bits` marks
+      the cell `floor_unreachable` rather than lowering the floor. Section 2.2's existing "re-sample
+      1000 noise windows" test keeps its job beside this one.
+      (b) the generator (py/, orchestration only) that writes a cell at the section 13.3 budget
+      (N = 4096 per (block, metric, null, n, fill bucket)), computes `levels` / `unexpressible` /
+      `admissible_bits` at the 0.25-bit expressibility tolerance, and emits the correlation matrix
+      section 13.1 requires. It must REFUSE to emit a level it cannot express rather than rounding.
+      (c) the section 13.1 combination in the engine: sum over declared groups of the maximum
+      within a group, with undeclared defaulting to ONE group per (block, stage). A test proves the
+      default by loading a file with two metrics and no `groups` key and asserting the stage scores
+      max, not sum.
+      ALSO MEASURE, and report as a finding rather than a silent tune: whether `floor_j = 6` at
+      S2/S3 is still achievable under the maximum rule on docs/22's corpus (ADR-0015 section 13.5
+      falsifier 2). If it is not, the answer is a restated floor WITH that measurement beside it,
+      never a return to the sum.
+    notes: |
+      Filed 2026-09-21 by the T-616/T-617/T-618 design work on task-evbits. Id taken from the T-660+
+      range the coordinator reserved; T-631..T-659 were being taken by another agent at the time.
+      Blocked on `hk-synth`, i.e. on MAUTO M-1/M-2 actually starting. Not `core_interface` itself -
+      the contract it implements is ADR-0015 section 13, which is already written.
+  - id: T-700
+    milestone: MCANVAS
+    title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: 'the coordinator, 2026-09-21, reconciling branches against the board'
+    acceptance: |
+      THE BOARD NEVER KNEW ABOUT THIS WORK. `task-t533` carries four commits, of which the tip
+      `f80857aa` is finished, measured work that no ticket anywhere in the board's history describes -
+      the id "T-533" appears in exactly ONE place in this repository, that commit's subject line. An
+      agent worked an id that was never filed, the worktree was paused ("machine oversubscribed"),
+      and the branch then sat while `main` moved 286 files past it. Its other three commits (T-505,
+      T-501, T-532) ALREADY LANDED by another route (`96e3cbcc`), so only the tip is new.
+      WHAT IT DID, measured through the route on one address, four spellings back to back:
+        json              1 879 209 B   build_ms 20.0
+        json + gzip         244 012 B
+        f16                 856 178 B
+        f16 + gzip          117 382 B   build_ms 20.4     -> 16x
+      `grid.max_db` was 1 197 118 B (64 %) of that JSON: seventeen significant digits per cell for
+      values whose destination is an R16F texture.
+        - `?planes=f16` (opt-in; `json` stays the default) serves `max_db` as base64 of little-endian
+          IEEE binary16, stating its own type, byte order, transfer, scale and absent-value. ONLY
+          that plane, and the branch establishes WHY: `frames` is 131 073 B as text against 349 528 B
+          as base64 u32, and `occupancy_max`/`coverage` lose likewise, so packing them would have
+          GROWN three planes to shrink one.
+        - `Accept-Encoding: gzip` on every routed JSON answer at or above 4096 B, with
+          `Vary: Accept-Encoding`; `gzip;q=0` honoured. A transfer coding, never a representation -
+          the contract test inflates and compares the JSON.
+        - flate2 on the `zlib-rs` backend DELIBERATELY: `miniz_oxide` builds its ~300 kB compressor
+          BY VALUE on the caller's stack and hk-api answers on a 256 kB connection thread, which
+          ABORTED THE PROCESS on the first compressed answer (measured, in the contract test). Keep
+          that choice and keep the comment explaining it.
+        - The client asks for `planes=f16`, decodes it, and REFUSES an encoding it does not know
+          rather than mis-rendering one it does (`TileDecodeError`, so the place stays pending, never
+          grey) - the honesty-tier rule applied to the wire format.
+      THE BRANCH IS HONEST ABOUT ITS OWN LIMIT AND SO IS THIS TICKET: `cost.build_ms` did NOT move
+      (20.0 -> 20.4 ms). Over loopback one tile's fetch-to-decoded hop is 36 -> 31 ms and a 16-tile
+      pane row at the four-slot cap 182 -> 166 ms, both dominated by tile PRODUCTION, not by bytes.
+      The win is for a tunnel, a phone or a second machine - the real device story - not the dev
+      loop. Do not re-sell it as a latency fix.
+      HOW TO RELAND. Cherry-pick `f80857aa` onto current main; a worktree is parked clean at
+      `task-tilebody`. Measured 2026-09-21: SIX conflict hunks - `crates/hk-api/src/http.rs` (1),
+      `crates/hk-api/src/tiles.rs` (4), `crates/hk-cli/tests/api_contract.rs` (1). `tiles.rs` moved
+      under T-571's live incremental maintenance and T-595's `excluded` state, so resolve by
+      understanding both sides, not by taking one.
+      RE-MEASURE THE FOUR SPELLINGS after relanding rather than quoting the numbers above: they were
+      taken before T-571 changed how a tile is produced.
+      ASSERT WITH COUNTS AND BYTE SIZES, NOT WALL-CLOCK (user, 2026-09-21).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by the coordinator. SERIALISE with T-572 (hot-tile LRU) and T-573 (batch
+      /api/tiles endpoint): all three edit `crates/hk-api/src/tiles.rs`, so they want ONE owner in
+      ONE worktree in sequence, not three agents contending for one file. This one goes first - it
+      is already written and measured.
+      The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
