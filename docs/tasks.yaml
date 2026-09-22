@@ -18243,7 +18243,8 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: todo
+    status: in-progress
+    branch: task-t565
     priority: normal
     parallel_group: SYN-E
     model: opus
