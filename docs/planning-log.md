@@ -5543,8 +5543,11 @@ retries existed for exactly two timing tests; the other five known-timing tests 
    mechanism that terminated and resumed workers — dumb, and only needed because nothing bounded
    them). 28 cores: the gate reserved 14; each worker bounded to ~3 by limits its whole process tree
    inherits — `CARGO_BUILD_JOBS=2`, `NEXTEST_TEST_THREADS=2`, and a permanent `background` QoS clamp
-   (E-cores only) — so the worker count is a known 4 and the gate never competes. `cpulimit` was
-   tried as a hard ceiling and measured inert on macOS (0 % effect in three tests); not used.
+   (E-cores only) — so the worker count is a known 4 and the gate never competes. The hard ceiling is
+   the HiGarfield fork of `cpulimit` (`-l 300 -i`, built from source into `$HACKRIFF_OPS/bin`):
+   Homebrew's `opsengine` build is inert on Apple Silicon (0 % effect in three tests, open issue #121),
+   the fork measured 164 % aggregate over four busy loops under `-l 200 -i`, descendants included.
+   macOS has no CPU affinity API; QoS→cluster (background = E-cores) is the only core-set control.
 4. *(folded into 3)*
 5. **One retry** for the five named load-sensitive tests in `.config/nextest.toml`, each with its
    ticket (T-603, T-509, T-430/436/621; two newly observed today need tickets). This is a bridge:
