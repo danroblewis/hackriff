@@ -163,6 +163,6 @@ pub use signature::{
 pub use time::{SampleTime, Timestamp, TimestampMethod};
 pub use trunking::{
     CALL_REASONS_MAX, CallRecord, ChannelPlanEntry, Encryption, EncryptionEvidence, GrantEvent,
-    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, NeighbourSite, P25_ALGID_CLEAR,
-    TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
+    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, MAX_TDMA_SLOTS, NeighbourSite,
+    P25_ALGID_CLEAR, TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
 };

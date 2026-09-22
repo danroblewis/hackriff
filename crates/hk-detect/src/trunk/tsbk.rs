@@ -64,6 +64,42 @@
 //!   and ×5 Hz gives 762 006 250 Hz, the frequency that example reports; channel 1554 at spacing
 //!   100 (×125 Hz) then lands on 762 006 250 + 1554 × 50 × 125 = 771 718 750 Hz, which is the
 //!   frequency that example resolves. Both units reproduce a third party's numbers exactly.
+//! - **P25 Phase 2 and the TDMA band plan (T-272).** A Phase 2 system's *control* channel is a
+//!   Phase 1 FDMA channel this module already reads; what makes it Phase 2 is the band plan it
+//!   announces. `IDEN_UP_TDMA`, **opcode `0x33`**, carries identifier (4), **channel type** (4),
+//!   transmit offset (14: sign + 13 magnitude), channel spacing (10) and base frequency (32) —
+//!   64 bits exactly, with spacing and base in the same places and the same units as `IDEN_UP`.
+//!   The channel type names how many TDMA slots share one carrier, and that number divides the
+//!   channel number:
+//!
+//!   ```text
+//!   f    = base + spacing × (channel / slots)
+//!   slot = channel % slots
+//!   ```
+//!
+//!   *Verified two ways.* First, against op25's `trunking.py`, whose `iden_up_tdma` handler reads
+//!   exactly these fields into `step = spacing × 125`, `frequency = base × 5` and
+//!   `tdma = slots_per_carrier[channel_type]`, and whose `channel_id_to_frequency` /
+//!   `channel_id_to_tdma_slot` divide and take the remainder as above. Second, **by arithmetic on
+//!   the same published worked example this module already reproduces**: that example is a TDMA
+//!   system, and its channel 1554 at a spacing field of 100 (12.5 kHz) lands on 771.718750 MHz
+//!   only if the channel number is divided by 2 first — `762 006 250 + 12 500 × 777`. The FDMA
+//!   reading of the same numbers is 9.7 MHz out. The two checks are independent, and the second is
+//!   arithmetic anyone can redo.
+//!
+//!   **This is C23's TDMA slot mix-up pitfall in its exact form:** read as FDMA, channels `2n` and
+//!   `2n+1` become two *different* frequencies, both wrong, and the two talkgroups sharing one
+//!   carrier are attributed to channels that do not exist. Read as TDMA they are one frequency and
+//!   two slots.
+//! - **UNVERIFIED — which channel types are which.** [`TDMA_SLOTS_PER_CHANNEL_TYPE`] gives 1 slot
+//!   for types 0–2, 2 for type 3 and 4 for type 4, following op25's `slots_per_carrier` table.
+//!   Types 5–15 are **refused**, not defaulted: op25 fills them with 2, and a guessed slot count
+//!   is both a wrong frequency (the division) and a wrong slot (the remainder). A channel type
+//!   this build cannot name therefore admits no entry at all, exactly as a degenerate base or
+//!   spacing does.
+//! - **UNVERIFIED — the TDMA transmit offset's units.** `IDEN_UP_TDMA`'s offset is in units of the
+//!   channel spacing rather than 250 kHz (op25 computes `offset × spacing × 125`), and like its
+//!   `IDEN_UP` sibling it is decoded, recorded and used to map nothing.
 //! - **UNVERIFIED — transmit offset.** The sign-plus-8-bit-magnitude encoding in units of 250 kHz
 //!   below is from the same family of references but no worked example was found to confirm it,
 //!   and one reference notes VHF/UHF bands follow a different rule. It is therefore decoded and
@@ -157,6 +193,43 @@ pub const OP_GRP_VCH_GRANT: u8 = 0x00;
 pub const OP_GRP_VCH_GRANT_UPDATE: u8 = 0x02;
 /// Identifier update: the band-plan entry a channel number is resolved through.
 pub const OP_IDEN_UP: u8 = 0x3D;
+/// Identifier update for a **TDMA** band plan (P25 Phase 2): the same entry plus a channel type
+/// naming how many slots share one carrier. *Verified* (see the module docs).
+pub const OP_IDEN_UP_TDMA: u8 = 0x33;
+
+/// Slots per carrier for each 4-bit `IDEN_UP_TDMA` channel type, or `None` where this build cannot
+/// say.
+///
+/// Types 0–2 are one slot (FDMA), type 3 is two (P25 Phase 2's H-DQPSK pair) and type 4 is four,
+/// following op25's `slots_per_carrier`. The reserved types are `None` **on purpose**: a guessed
+/// slot count is a wrong frequency *and* a wrong slot, and this module's whole discipline is that
+/// a table it cannot trust produces nothing rather than something plausible.
+pub const TDMA_SLOTS_PER_CHANNEL_TYPE: [Option<u8>; 16] = [
+    Some(1),
+    Some(1),
+    Some(1),
+    Some(2),
+    Some(4),
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+];
+
+/// The slot count a channel type names, or `None` for one this build cannot name.
+pub fn channel_type_slots(channel_type: u8) -> Option<u8> {
+    TDMA_SLOTS_PER_CHANNEL_TYPE
+        .get(channel_type as usize)
+        .copied()
+        .flatten()
+}
 
 /// Bytes in a TSBK, including its CRC.
 pub const TSBK_BYTES: usize = 12;
@@ -258,11 +331,25 @@ impl Tsbk {
         v
     }
 
-    /// The identifier update this block carries, if it is one.
+    /// The identifier update this block carries, whichever of the two announcements it is.
+    ///
+    /// [`OP_IDEN_UP`] announces an FDMA plan and [`OP_IDEN_UP_TDMA`] a TDMA one; both produce an
+    /// [`IdenUp`], and the difference between them is [`IdenUp::slots`], which the mapping
+    /// arithmetic then divides by. Reading them through one entry point is what keeps a Phase 2
+    /// band plan from needing a second code path that could quietly diverge from this one.
+    pub fn iden_up(&self) -> Option<IdenUp> {
+        match self.opcode {
+            OP_IDEN_UP => self.iden_up_fdma(),
+            OP_IDEN_UP_TDMA => self.iden_up_tdma(),
+            _ => None,
+        }
+    }
+
+    /// The FDMA identifier update ([`OP_IDEN_UP`]).
     ///
     /// Layout of the 64 argument bits, which sum to exactly 64: identifier (4), bandwidth (9),
     /// transmit offset (9: sign + 8 magnitude), channel spacing (10), base frequency (32).
-    pub fn iden_up(&self) -> Option<IdenUp> {
+    fn iden_up_fdma(&self) -> Option<IdenUp> {
         if self.opcode != OP_IDEN_UP || self.mfid != 0 {
             return None;
         }
@@ -281,6 +368,49 @@ impl Tsbk {
             spacing_hz: spacing as f64 * 125.0,
             tx_offset_hz: sign * offset_mag as f64 * 250_000.0,
             bandwidth_hz: (bandwidth > 0).then_some(bandwidth as f64 * 125.0),
+            // An FDMA plan divides a channel number by nothing and names no slot.
+            slots: Some(1),
+            channel_type: None,
+            args: self.args,
+        })
+    }
+
+    /// The **TDMA** identifier update ([`OP_IDEN_UP_TDMA`]) — the announcement that makes a system
+    /// P25 Phase 2 (T-272).
+    ///
+    /// Layout of the 64 argument bits, which sum to exactly 64: identifier (4), channel type (4),
+    /// transmit offset (14: sign + 13 magnitude, in units of the channel spacing), channel spacing
+    /// (10, ×125 Hz), base frequency (32, ×5 Hz). Spacing and base sit where `IDEN_UP` puts them,
+    /// in the same units; the channel type is what is new, and it is the slot count everything
+    /// downstream divides by.
+    ///
+    /// [`IdenUp::slots`] is `None` for a channel type this build cannot name, which makes the
+    /// announcement unusable rather than mapping it by an assumed division.
+    fn iden_up_tdma(&self) -> Option<IdenUp> {
+        if self.opcode != OP_IDEN_UP_TDMA || self.mfid != 0 {
+            return None;
+        }
+        let iden = self.bits(0, 4) as u8;
+        let channel_type = self.bits(4, 4) as u8;
+        let offset_sign = self.bits(8, 1);
+        let offset_mag = self.bits(9, 13);
+        let spacing = self.bits(22, 10);
+        let base = self.bits(32, 32);
+        let spacing_hz = spacing as f64 * 125.0;
+        // Verified units: base ×5 Hz, spacing ×125 Hz — the same as IDEN_UP. UNVERIFIED and used
+        // for nothing: the transmit offset, here in units of the channel spacing rather than
+        // 250 kHz, with 1 = positive.
+        let sign = if offset_sign == 1 { 1.0 } else { -1.0 };
+        Some(IdenUp {
+            iden,
+            base_hz: base as f64 * 5.0,
+            spacing_hz,
+            tx_offset_hz: sign * offset_mag as f64 * spacing_hz,
+            // IDEN_UP_TDMA has no bandwidth field; the channel type implies one, and this module
+            // interprets no bandwidth anyway (see the module docs).
+            bandwidth_hz: None,
+            slots: channel_type_slots(channel_type),
+            channel_type: Some(channel_type),
             args: self.args,
         })
     }
@@ -329,6 +459,13 @@ pub struct IdenUp {
     pub tx_offset_hz: f64,
     /// Channel bandwidth, Hz. **Unverified units**; recorded, never used to decide anything.
     pub bandwidth_hz: Option<f64>,
+    /// TDMA slots sharing one carrier: `Some(1)` for an FDMA announcement, `Some(2)`/`Some(4)` for
+    /// a TDMA one — and `None` for a channel type this build cannot name, which is what makes the
+    /// announcement unusable rather than divided by a guess.
+    pub slots: Option<u8>,
+    /// The 4-bit channel type, for a TDMA announcement only. Recorded so a refused type can be
+    /// named in the row that refuses it.
+    pub channel_type: Option<u8>,
     /// The raw argument bits, so two announcements can be compared exactly.
     args: [u8; 8],
 }
@@ -347,8 +484,16 @@ impl IdenUp {
             spacing_hz: self.spacing_hz,
             tx_offset_hz: self.tx_offset_hz,
             bandwidth_hz: self.bandwidth_hz,
+            // Only a usable announcement ever becomes an entry, so the slot count is known here;
+            // 1 is the FDMA reading and the only one a missing count could safely mean.
+            slots: self.slots.unwrap_or(1),
             t,
         }
+    }
+
+    /// Whether this announcement's channels are shared by more than one TDMA slot.
+    pub fn is_tdma(&self) -> bool {
+        self.slots.is_some_and(|s| s > 1)
     }
 
     /// Whether the announcement is usable at all: a band plan needs a real base and a real step.
@@ -356,12 +501,18 @@ impl IdenUp {
     /// This is a validity check, not a plausibility filter — it rejects what cannot be a frequency
     /// (zero, negative, non-finite), and deliberately does not second-guess *where* a system says
     /// its band is. Guessing that would be the known-signal database overriding a measurement.
+    /// A channel type whose slot count this build cannot name is refused here for the same reason:
+    /// without the divisor, the announcement states neither a frequency nor a slot, and assuming
+    /// one would produce both a wrong frequency and a wrong slot.
     pub fn is_usable(&self) -> bool {
         self.base_hz.is_finite()
             && self.base_hz > 0.0
             && self.spacing_hz.is_finite()
             && self.spacing_hz > 0.0
             && self.tx_offset_hz.is_finite()
+            && self
+                .slots
+                .is_some_and(|s| (1..=hk_model::MAX_TDMA_SLOTS).contains(&s))
     }
 }
 
@@ -543,6 +694,11 @@ pub enum Resolved {
         iden: u8,
         /// The channel within that table.
         channel_number: u16,
+        /// TDMA slots sharing that frequency: 1 on an FDMA plan.
+        slots: u8,
+        /// The TDMA slot this channel number names, or `None` on an FDMA plan — where there is no
+        /// slot and claiming slot 0 would be an invented measurement.
+        slot: Option<u8>,
         /// When the entry used was decoded.
         decoded_at: Timestamp,
     },
@@ -638,9 +794,10 @@ impl ChannelMap {
 
     /// Resolves a grant's 16-bit channel number as of `now`, or refuses and says why.
     ///
-    /// `f = base + spacing × channel` on the identifier the channel number names — *verified*
-    /// against a published worked example (see the module docs). No other identifier is ever
-    /// consulted, and an aged entry refuses rather than maps.
+    /// `f = base + spacing × (channel / slots)` on the identifier the channel number names, with
+    /// `slot = channel % slots` where the plan is TDMA — *verified* against a published worked
+    /// example and against op25 (see the module docs). No other identifier is ever consulted, and
+    /// an aged entry refuses rather than maps.
     pub fn resolve(&self, channel: u16, now: Timestamp) -> Resolved {
         let iden = (channel >> 12) as u8;
         let number = channel & 0x0FFF;
@@ -658,12 +815,25 @@ impl ChannelMap {
                 max_age_s: IDEN_MAX_AGE_S,
             });
         }
+        // An admitted entry always names a slot count (`is_usable` is what admits it), and the
+        // division is the identity on an FDMA plan.
+        let slots = e.iden_up.slots.unwrap_or(1).max(1);
         Resolved::Mapped {
-            f_hz: e.iden_up.base_hz + e.iden_up.spacing_hz * f64::from(number),
+            f_hz: e.iden_up.base_hz + e.iden_up.spacing_hz * f64::from(number / u16::from(slots)),
             iden,
             channel_number: number,
+            slots,
+            slot: (slots > 1).then(|| (number % u16::from(slots)) as u8),
             decoded_at: e.admitted_at,
         }
+    }
+
+    /// Whether any admitted entry announces a TDMA band plan — the fact that makes a system P25
+    /// Phase 2 rather than Phase 1.
+    pub fn has_tdma(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.admitted && e.iden_up.is_tdma())
     }
 }
 
@@ -714,8 +884,16 @@ pub fn scan_blocks<'a>(blocks: impl IntoIterator<Item = &'a [u8; TSBK_BYTES]>) -
 /// so the chance of naming a protocol from random CRC-valid blocks is 2^-64. Opcode-shaped luck
 /// is not evidence, and a window that decoded nothing corroborated says `Unknown` rather than
 /// guessing — which is what the T-266 column means by NULL.
+///
+/// **Phase 1 versus Phase 2 is decided by the band plan, not by the control channel** (T-272). A
+/// Phase 2 system's control channel *is* a Phase 1 FDMA channel — the same C4FM, the same TSBKs —
+/// so nothing about the channel itself could tell the two apart. What does is that a Phase 2
+/// system announces a **TDMA** plan, and a corroborated `IDEN_UP_TDMA` naming two or four slots
+/// per carrier is that evidence, held to the same agreement gate as any other entry.
 pub fn protocol_of(map: &ChannelMap) -> TrunkProtocol {
-    if map.admitted() > 0 {
+    if map.has_tdma() {
+        TrunkProtocol::P25Phase2
+    } else if map.admitted() > 0 {
         TrunkProtocol::P25Phase1
     } else {
         TrunkProtocol::Unknown
@@ -799,6 +977,224 @@ mod tests {
             f_hz, 771_718_750.0,
             "the published worked example's frequency"
         );
+    }
+
+    /// Packs an IDEN_UP_TDMA argument field: iden(4) channel-type(4) offset-sign(1)
+    /// offset-magnitude(13) spacing(10) base(32) — 64 bits exactly.
+    fn iden_up_tdma_args(
+        iden: u8,
+        channel_type: u8,
+        sign: u8,
+        mag: u16,
+        spacing: u16,
+        base: u32,
+    ) -> [u8; 8] {
+        let mut v: u64 = 0;
+        v |= u64::from(iden & 0x0F) << 60;
+        v |= u64::from(channel_type & 0x0F) << 56;
+        v |= u64::from(sign & 1) << 55;
+        v |= u64::from(mag & 0x1FFF) << 42;
+        v |= u64::from(spacing & 0x3FF) << 32;
+        v |= u64::from(base);
+        v.to_be_bytes()
+    }
+
+    /// **The published worked example, as the TDMA system it actually is** (T-272).
+    ///
+    /// This is the same third-party example the FDMA test above reproduces, read the way the
+    /// example itself states it: a two-slot TDMA plan with a spacing field of 100 (12.5 kHz), on
+    /// which channel 1554 is 771.718750 MHz. That only comes out if the channel number is divided
+    /// by the slot count first — `762 006 250 + 12 500 x 777`. The FDMA reading of the same
+    /// message lands 9.7 MHz away, and this test pins the difference, so the divide can neither be
+    /// dropped nor applied to an FDMA plan.
+    #[test]
+    fn a_tdma_plan_divides_the_channel_number_by_its_slot_count_and_names_the_slot() {
+        // Channel type 3: two slots per carrier.
+        let block = tsbk(
+            OP_IDEN_UP_TDMA,
+            iden_up_tdma_args(3, 3, 1, 0, 100, 0x0915_7562),
+        );
+        let iden = Tsbk::parse(&block)
+            .unwrap()
+            .iden_up()
+            .expect("an IDEN_UP_TDMA");
+        assert_eq!(iden.iden, 3);
+        assert_eq!(iden.base_hz, 762_006_250.0, "base field x 5 Hz");
+        assert_eq!(iden.spacing_hz, 12_500.0, "spacing field x 125 Hz");
+        assert_eq!(iden.slots, Some(2), "channel type 3 is two slots");
+        assert_eq!(iden.channel_type, Some(3));
+        assert!(iden.is_tdma());
+
+        let mut map = ChannelMap::new();
+        assert!(
+            map.observe(&iden, t(0)).is_none(),
+            "one message is not a plan"
+        );
+        let entry = map.observe(&iden, t(1)).expect("the second admits it");
+        assert_eq!(entry.slots, 2, "the stored plan carries its slot count");
+        entry
+            .validate()
+            .expect("a decoded TDMA entry is a valid model entry");
+        // The stored entry reads a channel number the same way the decoder does, so a consumer
+        // re-deriving a frequency from the database cannot land half a channel out.
+        assert_eq!(entry.downlink_hz(1554), 771_718_750.0);
+        assert_eq!(entry.slot_of(1554), Some(0));
+        assert_eq!(entry.slot_of(1555), Some(1));
+
+        // Channel 1554: the published frequency, on slot 0.
+        let Resolved::Mapped {
+            f_hz,
+            channel_number,
+            slots,
+            slot,
+            ..
+        } = map.resolve((3u16 << 12) | 1554, t(2))
+        else {
+            panic!("an admitted identifier must map");
+        };
+        assert_eq!(channel_number, 1554);
+        assert_eq!(slots, 2);
+        assert_eq!(slot, Some(0));
+        assert_eq!(
+            f_hz, 771_718_750.0,
+            "the published worked example's frequency"
+        );
+
+        // Channel 1555 is the SAME frequency on the other slot. This is the C23 pitfall: read as
+        // FDMA it would be a different frequency, and the two talkgroups sharing one carrier would
+        // be attributed to two channels that do not exist.
+        let Resolved::Mapped {
+            f_hz: f2, slot: s2, ..
+        } = map.resolve((3u16 << 12) | 1555, t(2))
+        else {
+            panic!("the odd channel number must map too");
+        };
+        assert_eq!(
+            f2, f_hz,
+            "consecutive TDMA channel numbers are one frequency"
+        );
+        assert_eq!(s2, Some(1));
+        let fdma_would_be = 762_006_250.0 + 12_500.0 * 1555.0;
+        assert!(
+            (f2 - fdma_would_be).abs() > 9.0e6,
+            "the FDMA reading is not being distinguished from the TDMA one"
+        );
+
+        // And the protocol the band plan names is Phase 2 — decided by the plan, not the channel.
+        assert!(map.has_tdma());
+        assert_eq!(protocol_of(&map), TrunkProtocol::P25Phase2);
+    }
+
+    /// An FDMA plan names no slot at all. Slot 0 would be a measurement nobody made, and a call
+    /// list that shows "slot 0" on a Phase 1 system is claiming the system is something it is not.
+    #[test]
+    fn an_fdma_plan_names_no_slot() {
+        let iden = Tsbk::parse(&tsbk(OP_IDEN_UP, iden_up_args(1, 0, 1, 0, 50, 170_200_000)))
+            .unwrap()
+            .iden_up()
+            .unwrap();
+        assert_eq!(iden.slots, Some(1));
+        assert_eq!(iden.channel_type, None);
+        assert!(!iden.is_tdma());
+        let mut map = ChannelMap::new();
+        map.observe(&iden, t(0));
+        let entry = map.observe(&iden, t(1)).expect("admitted");
+        assert_eq!(entry.slots, 1);
+        assert_eq!(entry.slot_of(6), None, "an FDMA entry has no slot to name");
+        let Resolved::Mapped {
+            slot, slots, f_hz, ..
+        } = map.resolve((1u16 << 12) | 6, t(2))
+        else {
+            panic!("must map");
+        };
+        assert_eq!(slot, None, "an FDMA grant claimed a TDMA slot");
+        assert_eq!(slots, 1);
+        assert_eq!(
+            f_hz,
+            iden.base_hz + iden.spacing_hz * 6.0,
+            "no division on FDMA"
+        );
+        assert!(!map.has_tdma());
+        assert_eq!(protocol_of(&map), TrunkProtocol::P25Phase1);
+    }
+
+    /// A channel type this build cannot name is REFUSED, not defaulted. A guessed slot count is a
+    /// wrong frequency (the division) and a wrong slot (the remainder) at once, so the entry never
+    /// enters the plan — the same treatment a zero base or a zero spacing gets.
+    #[test]
+    fn an_unnameable_channel_type_admits_no_entry_rather_than_guessing_a_slot_count() {
+        for (channel_type, slots) in [
+            (0u8, Some(1)),
+            (1, Some(1)),
+            (2, Some(1)),
+            (3, Some(2)),
+            (4, Some(4)),
+        ] {
+            assert_eq!(
+                channel_type_slots(channel_type),
+                slots,
+                "type {channel_type}"
+            );
+        }
+        for channel_type in 5u8..16 {
+            assert_eq!(
+                channel_type_slots(channel_type),
+                None,
+                "reserved channel type {channel_type} was given a slot count"
+            );
+            let iden = Tsbk::parse(&tsbk(
+                OP_IDEN_UP_TDMA,
+                iden_up_tdma_args(4, channel_type, 1, 0, 100, 0x0915_7562),
+            ))
+            .unwrap()
+            .iden_up()
+            .expect("it still parses; what it cannot do is be trusted");
+            assert_eq!(iden.slots, None);
+            assert!(!iden.is_usable(), "channel type {channel_type} was usable");
+            let mut map = ChannelMap::new();
+            map.observe(&iden, t(0));
+            map.observe(&iden, t(1));
+            assert_eq!(
+                map.admitted(),
+                0,
+                "channel type {channel_type} entered the plan"
+            );
+            assert!(matches!(
+                map.resolve((4u16 << 12) | 10, t(2)),
+                Resolved::Unmapped(Unmapped::NoIden)
+            ));
+        }
+    }
+
+    /// The two announcements are different messages about the same identifier, and the agreement
+    /// gate treats them as the disagreement they are: an FDMA claim and a TDMA claim for iden 1
+    /// never corroborate each other into a plan with a slot count nobody announced.
+    #[test]
+    fn an_fdma_and_a_tdma_announcement_for_one_identifier_do_not_corroborate_each_other() {
+        let fdma = Tsbk::parse(&tsbk(
+            OP_IDEN_UP,
+            iden_up_args(1, 0, 1, 0, 100, 0x0915_7562),
+        ))
+        .unwrap()
+        .iden_up()
+        .unwrap();
+        let tdma = Tsbk::parse(&tsbk(
+            OP_IDEN_UP_TDMA,
+            iden_up_tdma_args(1, 3, 1, 0, 100, 0x0915_7562),
+        ))
+        .unwrap()
+        .iden_up()
+        .unwrap();
+        let mut map = ChannelMap::new();
+        assert!(map.observe(&fdma, t(0)).is_none());
+        assert!(
+            map.observe(&tdma, t(1)).is_none(),
+            "a disagreement restarts the count"
+        );
+        assert_eq!(map.admitted(), 0);
+        // Corroborated, the TDMA claim wins, and the plan is a TDMA one.
+        assert!(map.observe(&tdma, t(2)).is_some());
+        assert!(map.has_tdma());
     }
 
     #[test]
