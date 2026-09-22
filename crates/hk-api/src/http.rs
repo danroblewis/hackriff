@@ -373,12 +373,14 @@ pub struct ApiState {
     /// T-166: the region watch behind `GET /api/selections/{id}/watch`
     /// ([`crate::selections::WatchControl`]); `None` answers 503.
     pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
-    /// T-438: tile reads in flight, the ingest-backpressure cap of `docs/16` §5.5 (cap 3).
+    /// T-438/T-630: who may have one of the tile route's in-flight slots — the
+    /// ingest-backpressure cap of `docs/16` §5.5 (cap 3), plus the per-client fair share that
+    /// decides whose request meets it ([`crate::tiles::TileAdmission`]).
     ///
     /// Per **state**, not a `static`: two servers in one process must not share a cap, and a cap
-    /// that leaks across tests is a cap nobody can assert. Cloning the state shares the counter,
+    /// that leaks across tests is a cap nobody can assert. Cloning the state shares the table,
     /// which is what makes it a server-wide cap rather than a per-request one.
-    pub tiles_in_flight: Arc<AtomicUsize>,
+    pub tile_admission: Arc<crate::tiles::TileAdmission>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

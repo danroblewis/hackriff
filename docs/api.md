@@ -861,7 +861,7 @@ A record that names no device — every record written before T-378, and any sou
 
 ### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
 
-Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)).
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)).
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
@@ -932,7 +932,9 @@ One route serves every viewport — the panes, the zoomable minimap and the live
     "grey_rule": "grey is decided by `coverage`, never by this block: …"
   },
   "cost": { "build_ms": 11.6, "source_cells": 65536, "chunks": 1,
-            "in_flight": 1, "in_flight_limit": 4, "statement": "…" }
+            "in_flight": 1, "in_flight_limit": 4, "in_flight_share": 2, "in_flight_held": 1,
+            "clients": 2, "client": "5f2c…", "reserved": 0, "fair_share": true,
+            "statement": "…" }
 }
 ```
 
@@ -1060,6 +1062,11 @@ T-437 measured rendering at p95 2.2 ms for 48 panes and tile **production** at ~
 
 - **`cost.chunks` is the number of history lock holds this tile took.** The read is chunked into whole output rows, re-acquiring the lock per chunk, so a tile fan-out at the live edge can never lock ingest out for a whole tile — the report builder's ≤ 256-row discipline, applied to §5.5's cap (3).
 - **`cost.in_flight_limit` is server backpressure**, chosen against `hk-store`'s lock behaviour rather than a browser's connection limit: the history store is behind one mutex, so concurrent tile reads serialise on it anyway and a deeper queue only lengthens the stretch during which ingest competes for it. Over the cap the answer is `503` **naming the cap**, which is what lets a client cancel tiles for a viewport it has left (§5.5's cap (1) is LIFO with viewport cancellation) instead of waiting.
+- **`cost.in_flight_share` is *this client's* cap, and it is the number a client should operate at** (T-630). The server-wide cap is unchanged; what changed is whose request meets it. Measured before this existed: while one tab enumerated a wide viewport it held **all four** slots continuously — it re-asks the instant one frees — so a second tab's *first* request, the one it cannot start without, competed on equal terms with the thousandth request of a tab that is already drawn. The second tab booted in 8.2 s and 11.7 s after 7 refusals, and twice did not boot at all. Raising the cap would only move that failure and would spend capacity the capture thread pays for (T-453), so the cap stays and the **policy** is two rules:
+  - **A share of the cap per client**: `in_flight_share = ceil(in_flight_limit / clients)`, so two clients get two slots each and a third is guaranteed one. A client over its share is refused even when the route has a free slot, which is what makes the slots a newcomer needs appear without anyone yielding them politely. `cost.clients` is how many are asking, so a client can see why its share moved, and `cost.in_flight_held` is what it holds.
+  - **Priority by what the request is**: a client that has never been *served* a tile is bootstrapping — asking for first paint, not fill — and while one exists the already-drawn clients are admitted only up to `in_flight_limit - 1` (`cost.reserved: 1`). This is T-457's visible-fetch precedence and T-459's "no visible fetch is starved" at the one place where the competing fetches belong to different clients. It costs nothing when nobody is bootstrapping: it is armed by the newcomer's own first (refused) request and disarmed by its first success.
+- **`client` is a declared identity, and a share it does not renew is reclaimed.** A tab's tile reads go over a pool of connections, so a connection is not a client; every tab of one browser carries the same token, so a session is not one either. `client` is therefore an opaque id the page makes for itself, fresh per page load (a reload is a newcomer, and its predecessor's abandoned reads are not charged to it). It is `[A-Za-z0-9-_.:]{1,64}`; anything else, or none, shares one **anonymous** bucket that behaves exactly as the route did before T-630 — so `curl` and the CLI are unaffected, and a caller that wants a share of its own says who it is. Since nothing tells the server when a client goes away, the table is a cache of *who is asking now*: an entry holding no slots and silent for 10 s is forgotten and its share returns to the clients still here (a leaked share is the failure T-454 paid for once with slots). Slots cannot leak either way — a slot releases both counters when the read ends, however it ends. At most 64 identities are tracked; past that the coldest idle one is dropped, and if every tracked client is busy a new identity is served from the anonymous bucket rather than growing the table.
+- **`cost.fair_share: false`** means the share is switched off (`HK_TILE_FAIR_SHARE=off`) and the route is first-come-first-served. Nothing in the product sets it: it exists so `ui/e2e/surface-contention.e2e.mjs` has the pre-T-630 route to go **red** against.
 
 #### What a tile does not carry
 

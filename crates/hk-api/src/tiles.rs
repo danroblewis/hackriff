@@ -146,8 +146,9 @@
 //! | GET | `/api/tiles` | `?level_f&level_t&f_index&t_index[&scheme][&device][&cells][&planes]` | `{key, extent, axes, grid, coverage, resolution, cost}` |
 //! | GET | `/api/tiles/events` | the same address | `{key, extent, counts, total, rule}` |
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hk_model::{FreqRange, TimeRange, Timestamp};
 use hk_store::history::Geometry;
@@ -236,49 +237,346 @@ const VIEW_MAX_TILE_NS: i64 = 30 * 86_400 * 1_000_000_000;
 /// Hard cap on axis levels, so a misconfigured floor cannot produce an unbounded axis.
 const MAX_VIEW_LEVELS: usize = 32;
 
-/// One tile read in flight. Dropping it releases the slot, so an error path cannot leak one.
+/// How long a client that has stopped asking for tiles stays in the share table (T-630).
 ///
-/// The counter lives on [`ApiState`], not in a `static`: two servers in one test process must not
-/// share a cap, and a cap that leaks across tests is a cap nobody can assert.
-#[derive(Debug)]
-pub struct TileSlot(Arc<AtomicUsize>);
+/// A client identity here is **declared**, not a connection: a browser tab makes its tile reads
+/// over a pool of connections and would otherwise be several "clients". So the server is never
+/// told when one goes away — a closed tab, a crashed browser, a `curl` that was `^C`'d — and a
+/// share table that only grew would hand every surviving client an ever-smaller share of the cap,
+/// which is the leak shape T-454 already paid for once with slots. The table is therefore a
+/// **cache of who is asking now**: an entry with no slots out and no request inside this window is
+/// forgotten, so the share of a client that disappears returns to the ones still here without
+/// anybody telling the server anything. Slots themselves cannot leak either way — a [`TileSlot`]
+/// decrements its client's counter on `Drop` even if the entry has since been evicted, because it
+/// holds the counter rather than a key into the table.
+pub const TILE_CLIENT_IDLE: Duration = Duration::from_secs(10);
 
-impl TileSlot {
-    /// Takes a slot, or `None` when [`TILE_MAX_IN_FLIGHT`] are already out.
-    pub fn acquire(counter: &Arc<AtomicUsize>) -> Option<Self> {
-        let mut seen = counter.load(Ordering::Acquire);
-        loop {
-            if seen >= TILE_MAX_IN_FLIGHT {
-                return None;
-            }
-            match counter.compare_exchange_weak(seen, seen + 1, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => return Some(Self(Arc::clone(counter))),
-                Err(now) => seen = now,
-            }
+/// Client identities tracked at once. Past this the least-recently-seen idle entry is dropped, and
+/// if every entry is busy a new identity is served from the shared anonymous bucket — degrading to
+/// the pre-T-630 first-come-first-served behaviour rather than growing without bound.
+pub const TILE_CLIENT_MAX: usize = 64;
+
+/// The bucket every request that declares no `client` shares (`curl`, the CLI, an old client).
+/// They compete with each other exactly as they did before T-630, and as one client against the
+/// declared ones — a caller that wants a share of its own says who it is.
+pub const ANONYMOUS_CLIENT: &str = "-";
+
+/// The `client` value this route will keep: short, printable, and its own.
+fn client_id(q: &Params) -> String {
+    let raw = param(q, "client").unwrap_or_default();
+    let ok = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+    if ok {
+        raw.to_string()
+    } else {
+        ANONYMOUS_CLIENT.to_string()
+    }
+}
+
+/// One client's place in the share table.
+#[derive(Debug)]
+struct TileClient {
+    id: String,
+    /// Slots this client holds. An [`Arc`] so a [`TileSlot`] outliving the table entry still
+    /// releases into the right counter.
+    held: Arc<AtomicUsize>,
+    last_seen: Instant,
+    /// Has this client ever been *served* a tile? A client with nothing on screen yet is the one
+    /// case this route treats as urgent (see [`TileAdmission::acquire`]).
+    served: bool,
+}
+
+/// What admission decided, so the wire can state it rather than leave a client to infer it.
+#[derive(Debug, Clone, Copy)]
+pub struct Share {
+    /// Slots this client may hold at once: `ceil(cap / clients)` under the fair share, the whole
+    /// cap when it is off.
+    pub share: usize,
+    /// Clients counted when that was computed (this one included).
+    pub clients: usize,
+    /// Was a slot being held back for a client that has nothing on screen yet?
+    pub reserved: usize,
+    /// Slots out across all clients at the moment of the decision.
+    pub in_flight: usize,
+    /// Is the fair share in force at all (`HK_TILE_FAIR_SHARE=off` turns it off — the
+    /// first-come-first-served route this ticket replaced, kept so the test that proves the share
+    /// matters has something to go red against).
+    pub fair: bool,
+}
+
+/// **Who may have one of the route's four slots, and why that is not first-come-first-served**
+/// (T-630).
+///
+/// [`TILE_MAX_IN_FLIGHT`] is ingest backpressure and stays exactly what it was. What changes is
+/// *whose* request meets it. Measured before this existed: while one tab enumerated a wide
+/// viewport it held all four slots continuously — it re-asks the instant one frees — so a second
+/// tab's **first** request, the one it cannot start without, competed on equal terms with the
+/// thousandth request of a tab that is already drawn. That second tab booted in 8.2 s and 11.7 s
+/// after 7 refusals in the runs that worked, and twice did not boot at all.
+///
+/// Raising the cap would move that failure rather than fix it, and would spend capacity on the
+/// capture thread that T-453 measured is paid whether or not anyone is looking. So the cap is
+/// unchanged and the *policy* is two rules:
+///
+/// 1. **A share of the budget per client.** `ceil(cap / clients)`, so two clients get two slots
+///    each and a third client is guaranteed one. A client's own greed can no longer reach past its
+///    share, however fast it re-asks — which is what makes the slots a newcomer needs appear
+///    without anybody yielding them politely.
+/// 2. **Priority by what the request *is*.** A client that has never been served a tile is
+///    bootstrapping: it is asking for first paint, not for fill. While one exists, clients that are
+///    already drawn are admitted only up to `cap - 1`, so the slot the newcomer needs is there on
+///    its *next* attempt instead of after a queue of an already-drawn client's reads. This is
+///    T-457's visible-fetch precedence and T-459's "no visible fetch is starved", at the one place
+///    where the competing fetches belong to different clients. The reserve costs nothing when
+///    nobody is bootstrapping, which is almost always: it is armed by the newcomer's own first
+///    (refused) request and disarmed by its first success.
+///
+/// A refusal still names its numbers, so a client adopts its share instead of guessing (the
+/// refusal is also how a client learns the share shrank because someone else arrived).
+#[derive(Debug)]
+pub struct TileAdmission {
+    in_flight: Arc<AtomicUsize>,
+    clients: Mutex<Vec<TileClient>>,
+    fair: bool,
+}
+
+impl Default for TileAdmission {
+    fn default() -> Self {
+        // Off is the pre-T-630 route, first-come-first-served, kept ONLY as the red baseline the
+        // fair-share e2e is proved against (`ui/e2e/surface-contention.e2e.mjs`). Nothing in the
+        // product sets it.
+        let fair = !matches!(
+            std::env::var("HK_TILE_FAIR_SHARE")
+                .unwrap_or_default()
+                .as_str(),
+            "off" | "0" | "false"
+        );
+        Self {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            clients: Mutex::new(Vec::new()),
+            fair,
         }
     }
+}
 
-    /// Slots currently out, including this one.
+impl TileAdmission {
+    /// Slots out across every client.
     pub fn in_flight(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    /// Is the fair share in force?
+    pub fn fair(&self) -> bool {
+        self.fair
+    }
+
+    fn share_for(fair: bool, clients: usize) -> usize {
+        if !fair {
+            return TILE_MAX_IN_FLIGHT;
+        }
+        TILE_MAX_IN_FLIGHT.div_ceil(clients.max(1)).max(1)
+    }
+
+    /// Forget clients that hold nothing and have not asked inside [`TILE_CLIENT_IDLE`].
+    fn sweep(clients: &mut Vec<TileClient>, now: Instant) {
+        clients.retain(|c| {
+            c.held.load(Ordering::Acquire) > 0 || now.duration_since(c.last_seen) < TILE_CLIENT_IDLE
+        });
+    }
+
+    /// Take a slot for `client`, or say why not. Either way the client is now *known*, including
+    /// when it was refused — that is what shrinks everyone else's share to make room for it.
+    pub fn acquire(self: &Arc<Self>, client: &str) -> Result<TileSlot, Share> {
+        let now = Instant::now();
+        let mut clients = self.clients.lock().expect("tile client table");
+        Self::sweep(&mut clients, now);
+        if !clients.iter().any(|c| c.id == client) {
+            if clients.len() >= TILE_CLIENT_MAX {
+                // Drop the coldest idle entry to make room; if every tracked client is busy, this
+                // request joins the anonymous bucket rather than growing the table.
+                let cold = clients
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.held.load(Ordering::Acquire) == 0)
+                    .min_by_key(|(_, c)| c.last_seen)
+                    .map(|(i, _)| i);
+                match cold {
+                    Some(i) => {
+                        clients.swap_remove(i);
+                    }
+                    None => return self.acquire_known(&mut clients, ANONYMOUS_CLIENT, now),
+                }
+            }
+            clients.push(TileClient {
+                id: client.to_string(),
+                held: Arc::new(AtomicUsize::new(0)),
+                last_seen: now,
+                served: false,
+            });
+        }
+        self.acquire_known(&mut clients, client, now)
+    }
+
+    fn acquire_known(
+        self: &Arc<Self>,
+        clients: &mut [TileClient],
+        client: &str,
+        now: Instant,
+    ) -> Result<TileSlot, Share> {
+        let n = clients.len().max(1);
+        let share = Self::share_for(self.fair, n);
+        let Some(me) = clients.iter_mut().find(|c| c.id == client) else {
+            // The table was full and every entry busy, and even the anonymous bucket is not in it:
+            // refuse rather than grow. Nothing is lost — the caller retries, and by then a slot has
+            // freed and an entry with it.
+            return Err(Share {
+                share,
+                clients: n,
+                reserved: 0,
+                in_flight: self.in_flight(),
+                fair: self.fair,
+            });
+        };
+        me.last_seen = now;
+        let served = me.served;
+        let held = Arc::clone(&me.held);
+        // The reserve is for a client with nothing on screen yet, so it is never held against one.
+        let reserved = usize::from(
+            self.fair
+                && served
+                && clients.iter().any(|c| {
+                    c.id != client
+                        && !c.served
+                        && now.duration_since(c.last_seen) < TILE_CLIENT_IDLE
+                }),
+        );
+        let mut decision = Share {
+            share,
+            clients: n,
+            reserved,
+            in_flight: self.in_flight(),
+            fair: self.fair,
+        };
+        let ceiling = TILE_MAX_IN_FLIGHT.saturating_sub(reserved).max(1);
+        if self.fair && held.load(Ordering::Acquire) >= share {
+            return Err(decision);
+        }
+        // The global cap is still the one that protects ingest; the share only ever narrows it.
+        let mut seen = self.in_flight.load(Ordering::Acquire);
+        loop {
+            if seen >= ceiling {
+                decision.in_flight = seen;
+                return Err(decision);
+            }
+            match self.in_flight.compare_exchange_weak(
+                seen,
+                seen + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(nowv) => seen = nowv,
+            }
+        }
+        held.fetch_add(1, Ordering::AcqRel);
+        decision.in_flight = seen + 1;
+        Ok(TileSlot {
+            global: Arc::clone(&self.in_flight),
+            held,
+            admission: Arc::clone(self),
+            client: client.to_string(),
+            decision,
+        })
+    }
+
+    /// Mark a client as *drawn*: it has been served a tile, so it no longer arms the reserve.
+    fn mark_served(&self, client: &str) {
+        let mut clients = self.clients.lock().expect("tile client table");
+        if let Some(c) = clients.iter_mut().find(|c| c.id == client) {
+            c.served = true;
+        }
+    }
+}
+
+/// One tile read in flight, held by a named client. Dropping it releases the slot **and** the
+/// client's share of it, so no error path can leak either.
+///
+/// The counters live on [`TileAdmission`] (which lives on [`ApiState`]), not in a `static`: two
+/// servers in one test process must not share a cap, and a cap that leaks across tests is a cap
+/// nobody can assert.
+#[derive(Debug)]
+pub struct TileSlot {
+    global: Arc<AtomicUsize>,
+    held: Arc<AtomicUsize>,
+    admission: Arc<TileAdmission>,
+    client: String,
+    decision: Share,
+}
+
+impl TileSlot {
+    /// Slots currently out across every client, including this one.
+    pub fn in_flight(&self) -> usize {
+        self.global.load(Ordering::Acquire)
+    }
+
+    /// What this client was admitted under.
+    pub fn share(&self) -> Share {
+        self.decision
+    }
+
+    /// Slots this client holds, including this one.
+    pub fn held(&self) -> usize {
+        self.held.load(Ordering::Acquire)
+    }
+
+    /// The client this read belongs to.
+    pub fn client(&self) -> &str {
+        &self.client
+    }
+
+    /// This client has now been served a tile, so it is drawn and no longer arms the bootstrap
+    /// reserve. Called on the answer, never on the request: the point of the reserve is a client
+    /// with nothing on screen, and a refused read put nothing on screen.
+    pub fn mark_served(&self) {
+        self.admission.mark_served(&self.client);
     }
 }
 
 impl Drop for TileSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.held.fetch_sub(1, Ordering::AcqRel);
+        self.global.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-/// The refusal served over the cap, so the body states the number rather than only the status.
-fn too_many_in_flight() -> ApiError {
+/// The refusal served when admission says no, so the body states the numbers rather than only the
+/// status. `limit` is the server-wide cap (unchanged, and what pre-T-630 clients parse); `share` is
+/// **this client's** cap, which is the number a client should operate at.
+fn too_many_in_flight(d: Share) -> ApiError {
+    let why = if d.share < TILE_MAX_IN_FLIGHT || d.reserved > 0 {
+        format!(
+            " — {} client(s) are reading tiles, so your share is {} of them{}",
+            d.clients,
+            d.share,
+            if d.reserved > 0 {
+                ", and one slot is held for a client that has nothing on screen yet"
+            } else {
+                ""
+            },
+        )
+    } else {
+        String::new()
+    };
     ApiError::new(
         503,
         format!(
-            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}): tile production takes the \
-             history lock, so the cap is ingest backpressure, not a queue — cancel tiles whose \
-             viewport you have left and retry the ones you still want"
+            "too many tile reads in flight (limit {TILE_MAX_IN_FLIGHT}, share {}){why}: tile \
+             production takes the history lock, so the cap is ingest backpressure, not a queue — \
+             cancel tiles whose viewport you have left and retry the ones you still want",
+            d.share
         ),
     )
 }
@@ -1266,6 +1564,15 @@ fn unobserved_tile_json(
             "chunks": 0,
             "in_flight": slot.in_flight(),
             "in_flight_limit": TILE_MAX_IN_FLIGHT,
+            // T-630: the cap is server-wide, the SHARE is this client's, and the share is the
+            // number a client should operate at. `clients` is how many are reading tiles right
+            // now, so a client can see why its share moved.
+            "in_flight_share": slot.share().share,
+            "in_flight_held": slot.held(),
+            "clients": slot.share().clients,
+            "client": slot.client(),
+            "reserved": slot.share().reserved,
+            "fair_share": slot.share().fair,
             "statement": "this tile's grid was answered from the coverage map alone (T-461): no \
                 history lock was taken for it, so `chunks` is 0. The last-known search behind \
                 `shadow` (T-519) is separate and states its own holds in `shadow.search.chunks`; \
@@ -1924,20 +2231,41 @@ fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
 }
 
 /// `GET /api/tiles`.
+///
+/// **Admission first** (T-630): the slot is taken for the *named client* before any work, and the
+/// answer marks that client as drawn. See [`TileAdmission`] for why a slot is not
+/// first-come-first-served.
 pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
-    const ALLOWED: [&str; 9] = [
-        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "planes", "token",
+    const ALLOWED: [&str; 10] = [
+        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "client", "planes",
+        "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
             "unknown parameter {k:?} (allowed: device, scheme, level_f, level_t, f_index, \
-             t_index, cells, planes)"
+             t_index, cells, client, planes)"
         )));
     }
+    // Refused before a slot is taken: a malformed request must not cost anyone a share.
     let planes = parse_planes(q)?;
-    let Some(slot) = TileSlot::acquire(&state.tiles_in_flight) else {
-        return Err(too_many_in_flight());
-    };
+    let slot = state
+        .tile_admission
+        .acquire(&client_id(q))
+        .map_err(too_many_in_flight)?;
+    let answer = tile_body(state, q, &slot, planes);
+    // Served means *drawn*: only an answer disarms this client's bootstrap reserve.
+    if answer.is_ok() {
+        slot.mark_served();
+    }
+    answer
+}
+
+fn tile_body(
+    state: &ApiState,
+    q: &Params,
+    slot: &TileSlot,
+    planes: Planes,
+) -> Result<Value, ApiError> {
     let store = tile_store(state, q);
     let (key, ceiling, readable, sealed) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
@@ -1988,10 +2316,7 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             ceiling,
             coverage,
             max_live,
-            ReadDiagnostics {
-                elapsed_ms,
-                slot: &slot,
-            },
+            ReadDiagnostics { elapsed_ms, slot },
             sealed,
             planes,
         );
@@ -2085,6 +2410,15 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             "chunks": r.chunks,
             "in_flight": slot.in_flight(),
             "in_flight_limit": TILE_MAX_IN_FLIGHT,
+            // T-630: the cap is server-wide, the SHARE is this client's, and the share is the
+            // number a client should operate at. `clients` is how many are reading tiles right
+            // now, so a client can see why its share moved.
+            "in_flight_share": slot.share().share,
+            "in_flight_held": slot.held(),
+            "clients": slot.share().clients,
+            "client": slot.client(),
+            "reserved": slot.share().reserved,
+            "fair_share": slot.share().fair,
             "statement": "tile PRODUCTION is the cost this surface is designed against, not \
                 rendering: T-437 measured 48 panes at p95 2.2 ms against ~500 ms per tile. \
                 `chunks` is the number of history lock holds this tile took.",
@@ -2571,13 +2905,13 @@ mod tests {
     /// The in-flight cap is a real cap: the N+1th reader is refused, and a released slot is reusable.
     #[test]
     fn the_in_flight_cap_refuses_over_the_limit_and_releases_on_drop() {
-        let c = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(TileAdmission::default());
         let held: Vec<TileSlot> = (0..TILE_MAX_IN_FLIGHT)
-            .map(|_| TileSlot::acquire(&c).expect("under the cap"))
+            .map(|_| a.acquire("one").expect("under the cap"))
             .collect();
         assert_eq!(held.last().unwrap().in_flight(), TILE_MAX_IN_FLIGHT);
-        assert!(TileSlot::acquire(&c).is_none(), "the cap must bind");
-        let err = too_many_in_flight();
+        let d = a.acquire("one").expect_err("the cap must bind");
+        let err = too_many_in_flight(d);
         assert_eq!(err.status, 503);
         assert!(
             err.message.contains(&TILE_MAX_IN_FLIGHT.to_string()),
@@ -2585,8 +2919,139 @@ mod tests {
             err.message
         );
         drop(held);
-        assert_eq!(c.load(Ordering::Acquire), 0);
-        assert!(TileSlot::acquire(&c).is_some());
+        assert_eq!(a.in_flight(), 0);
+        assert!(a.acquire("one").is_ok());
+    }
+
+    /// **The whole point of T-630**: one client cannot hold the whole cap once a second client is
+    /// asking. The share is `ceil(cap / clients)`, and it is computed from clients that are
+    /// *asking*, including one whose only request so far was refused.
+    #[test]
+    fn a_second_client_takes_a_share_of_the_cap_from_the_first() {
+        let a = Arc::new(TileAdmission::default());
+        // One client alone gets the whole cap — the share costs nothing when nobody else is here.
+        let mut first: Vec<TileSlot> = (0..TILE_MAX_IN_FLIGHT)
+            .map(|_| a.acquire("first").expect("alone, under the cap"))
+            .collect();
+        assert_eq!(first[0].share().share, TILE_MAX_IN_FLIGHT);
+        assert_eq!(first[0].share().clients, 1);
+
+        // The second client's FIRST request is refused — four reads are genuinely out — but it is
+        // that refused request which registers it, so the first client's share is halved from here.
+        let d = a.acquire("second").expect_err("four are out");
+        assert_eq!(d.clients, 2);
+        assert_eq!(d.share, TILE_MAX_IN_FLIGHT.div_ceil(2));
+
+        // The first client re-asking the instant a slot frees is exactly the behaviour that starved
+        // the second one. It is now refused above its share, whatever it does.
+        first.pop();
+        let d = a.acquire("first").expect_err("over its share");
+        assert_eq!(d.share, TILE_MAX_IN_FLIGHT.div_ceil(2));
+        assert!(d.in_flight < TILE_MAX_IN_FLIGHT, "a slot WAS free: {d:?}");
+
+        // And the slot it could not take is the second client's.
+        let s = a.acquire("second").expect("its share is free");
+        assert_eq!(s.client(), "second");
+        assert_eq!(s.held(), 1);
+    }
+
+    /// **The bootstrap reserve.** The share alone still lets the drawn clients fill the cap
+    /// between them, and then a newcomer's first request — the one it cannot start without — waits
+    /// on somebody's tile read. So while a client that has never been served a tile is asking, the
+    /// already-drawn clients are admitted only up to `cap - 1`.
+    #[test]
+    fn a_client_with_nothing_on_screen_yet_has_a_slot_held_for_it() {
+        let a = Arc::new(TileAdmission::default());
+        // Two clients, both drawn, holding the whole cap between them and inside their shares.
+        for id in ["a", "b"] {
+            a.acquire(id).unwrap().mark_served();
+        }
+        let mut a_held: Vec<TileSlot> = ["a", "a", "b", "b"]
+            .iter()
+            .map(|c| a.acquire(c).unwrap())
+            .collect();
+        assert_eq!(a.in_flight(), TILE_MAX_IN_FLIGHT);
+
+        // The newcomer's first request meets a genuinely full route and is refused — but it is now
+        // known, and it is known to have nothing on screen.
+        let d = a.acquire("new").expect_err("four are really out");
+        assert_eq!(d.clients, 3);
+        assert_eq!(
+            d.reserved, 0,
+            "the reserve is never held against the client it is for"
+        );
+
+        // A slot frees. A drawn client re-asking the instant that happens is the exact behaviour
+        // that starved the newcomer, and it is **the reserve** that refuses it here: "a" is inside
+        // its share of two.
+        drop(a_held.remove(0));
+        let d = a
+            .acquire("a")
+            .expect_err("the free slot is held for the newcomer");
+        assert_eq!((d.share, d.reserved), (2, 1), "{d:?}");
+        assert_eq!(
+            d.in_flight,
+            TILE_MAX_IN_FLIGHT - 1,
+            "a slot WAS free: {d:?}"
+        );
+
+        // It is the newcomer's, and once it has been served the reserve is gone.
+        let first_paint = a.acquire("new").expect("the reserved slot");
+        first_paint.mark_served();
+        drop(first_paint);
+        let back = a
+            .acquire("a")
+            .expect("the reserve is disarmed once the newcomer is drawn");
+        assert_eq!(back.share().reserved, 0);
+    }
+
+    /// A client that disappears without saying so must not keep its share forever (the leak shape
+    /// T-454 paid for). Its slots are released on drop, and its entry is swept once it is idle.
+    #[test]
+    fn a_client_that_vanishes_gives_its_share_back() {
+        let a = Arc::new(TileAdmission::default());
+        let gone = a.acquire("gone").unwrap();
+        let mine = a.acquire("mine").unwrap();
+        assert_eq!(mine.share().clients, 2);
+        drop(gone);
+        // Still two, because "gone" asked a moment ago — it is idleness that forgets a client, not
+        // an empty slot count, or a client between requests would lose its share mid-pan.
+        assert_eq!(a.acquire("mine").unwrap().share().clients, 2);
+        // Age it out by hand: the table is a cache of who is asking now.
+        {
+            let mut t = a.clients.lock().unwrap();
+            for c in t.iter_mut() {
+                if c.id == "gone" {
+                    c.last_seen -= TILE_CLIENT_IDLE * 2;
+                }
+            }
+        }
+        assert_eq!(
+            a.acquire("mine").unwrap().share().clients,
+            1,
+            "the share came back"
+        );
+    }
+
+    /// Requests that declare no client share one bucket, so the route behaves for `curl` and the
+    /// CLI exactly as it did before T-630.
+    #[test]
+    fn undeclared_clients_share_the_anonymous_bucket() {
+        assert_eq!(client_id(&params(&[])), ANONYMOUS_CLIENT);
+        assert_eq!(client_id(&params(&[("client", "a-b.c:1")])), "a-b.c:1");
+        assert_eq!(
+            client_id(&params(&[("client", "no spaces")])),
+            ANONYMOUS_CLIENT
+        );
+        assert_eq!(
+            client_id(&params(&[("client", &"x".repeat(65))])),
+            ANONYMOUS_CLIENT
+        );
+        let a = Arc::new(TileAdmission::default());
+        let s = a.acquire(&client_id(&params(&[]))).unwrap();
+        let t = a.acquire(&client_id(&params(&[("token", "k")]))).unwrap();
+        assert_eq!(s.client(), t.client());
+        assert_eq!(t.share().clients, 1);
     }
 
     // ---- store-backed reads ----------------------------------------------------------------
@@ -2802,9 +3267,13 @@ mod tests {
             tiles_json(&state, &q).unwrap()["cost"]["in_flight_limit"],
             json!(TILE_MAX_IN_FLIGHT)
         );
-        let held: Vec<TileSlot> = (0..TILE_MAX_IN_FLIGHT)
-            .map(|_| TileSlot::acquire(&state.tiles_in_flight).unwrap())
+        // Two OTHER clients, each within its own share (three clients, `ceil(4/3) = 2` each), so
+        // the cap is reached without any one of them exceeding what T-630 allows it.
+        let held: Vec<TileSlot> = ["o1", "o1", "o2", "o2"]
+            .iter()
+            .map(|c| state.tile_admission.acquire(c).unwrap())
             .collect();
+        assert_eq!(held.last().unwrap().in_flight(), TILE_MAX_IN_FLIGHT);
         let err = tiles_json(&state, &q).unwrap_err();
         assert_eq!(err.status, 503, "{}", err.message);
         assert!(

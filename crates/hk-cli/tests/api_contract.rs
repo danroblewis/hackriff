@@ -7496,6 +7496,25 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["extent"]["nf"], json!(N), "{probe}");
     assert_eq!(probe["grid"]["cells"], json!(N * N), "{probe}");
     assert_eq!(probe["cost"]["in_flight_limit"], json!(4), "{probe}");
+    // T-630: the cap is server-wide, the SHARE is this client's, and an undeclared caller shares
+    // the anonymous bucket — so `curl` and the CLI meet exactly the route they met before.
+    assert_eq!(probe["cost"]["in_flight_share"], json!(4), "{probe}");
+    assert_eq!(probe["cost"]["clients"], json!(1), "{probe}");
+    assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
+    assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
+    assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // A client that names itself is a client of its own, and two of them halve the share. The
+    // second client here has never been served, so it is also what arms the bootstrap reserve.
+    let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{mine}");
+    assert_eq!(mine["cost"]["client"], json!("tab-one"), "{mine}");
+    assert_eq!(mine["cost"]["clients"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_share"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_limit"], json!(4), "{mine}");
+    // An id that is not one is not an error: it shares the anonymous bucket.
+    let (st, odd) = get(addr, &format!("{}&client=not%20an%20id", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{odd}");
+    assert_eq!(odd["cost"]["client"], json!("-"), "{odd}");
     // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
     assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
     assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");

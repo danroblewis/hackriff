@@ -167,7 +167,7 @@ try {
   console.log(`e2e: chrome ${chrome}`);
   console.log(`e2e: hk serve on ${backend.origin}, ready in ${tUp} ms`);
   console.log(`e2e: CSP under test — ${csp.replace(/\s+/g, " ").trim()}`);
-  console.log(`e2e: /api/tiles cost.in_flight_limit = ${cost.in_flight_limit}`);
+  console.log(`e2e: /api/tiles cost.in_flight_limit = ${cost.in_flight_limit}, fair_share = ${cost.fair_share}`);
   console.log(`e2e: per-spec timeout ${SPEC_TIMEOUT_MS} ms (HK_E2E_SPEC_TIMEOUT_MS)`);
   console.log(cov.ok
     ? `e2e: ${cov.text} (after ${cov.ms} ms) — pages now open on the observed region`
@@ -188,6 +188,10 @@ try {
       ...process.env,
       HK_E2E_ORIGIN: backend.origin, HK_E2E_TOKEN: backend.token, CHROME: chrome,
       HK_E2E_TILE_LIMIT: String(cost.in_flight_limit ?? ""),
+      // T-630: whether this server divides its slots between clients, or serves whoever asks
+      // first. Read from the route itself, so the fair-share spec knows which route it met and a
+      // red baseline run (`HK_TILE_FAIR_SHARE=off`) cannot be mistaken for a green one.
+      HK_E2E_TILE_FAIR: String(cost.fair_share ?? ""),
     });
     const ms = Date.now() - s;
     times.push([f, ms, timedOut]);

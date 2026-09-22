@@ -251,7 +251,7 @@ function tile(a: TileAddr): TileData {
     value: new Float32Array([-90, -80, -70, -60]),
     state: new Uint8Array([CELL.OBSERVED, CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED]),
     tier: "survey-overview", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
-    rangeDb: { lo: -100, hi: -60 }, bytes: 192 * 1024, serverInFlightLimit: null,
+    rangeDb: { lo: -100, hi: -60 }, bytes: 192 * 1024, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 
