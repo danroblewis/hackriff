@@ -200,6 +200,12 @@ test-rust:
 # It is a member of `just test` rather than only a pytest because it is the cheap one: pure text,
 # no build, milliseconds, and it names the file and the filter when it fires.
 # Fail if a .config/nextest.toml override names a package no nextest run can ever see (T-631).
+# Refuse a tree carrying unresolved merge-conflict markers (T-843). Cheap enough - about a
+# second over the whole tree - that it should run for EVERY diff class, including `docs/`, which
+# currently runs nothing and is exactly how a half-resolved merge reached main unnoticed.
+conflict-check:
+    uv run --locked --project py python -m hkpy.conflictmarkers
+
 nextest-config-check:
     uv run --locked --project py python -m hkpy.nextest_config
 

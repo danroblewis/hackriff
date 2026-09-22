@@ -7015,7 +7015,8 @@ tasks:
     milestone: M2-hardening
     title: An unwatched spectrum stream still pays for its FFT, which is 13% of pipeline CPU on a headless
       survey run
-    status: todo
+    status: done
+    commit: 5583463b
     priority: low
     deps:
     - T-348
@@ -16016,7 +16017,8 @@ tasks:
   - id: T-536
     milestone: M2-hardening
     title: A re-plumb stalls every always-on reader for seconds while a multi-GB IQ ring opens
-    status: todo
+    status: done
+    commit: 712cfe5e
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -17403,7 +17405,8 @@ tasks:
   - id: T-551
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the acceptance-fixture corpus spec for the blind synthesis suite - written and frozen BEFORE the engine exists, because thresholds may not be tuned to results'
-    status: todo
+    status: done
+    commit: ea9366fa
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -22962,6 +22965,145 @@ tasks:
       in the repo and `$HACKRIFF_OPS/merge-queue.txt`), which produced three of tonight's four
       incidents. Unifying them is the remaining half and is not done here - this ticket only fixes
       the marker's visibility. Filed alongside as the open question for whoever owns `ops/`.
+  - id: T-840
+    milestone: M2-hardening
+    title: 'The merge runner commits without re-checking that the merge it gated is still staged, so a lost MERGE_HEAD becomes a single-parent commit'
+    status: done
+    branch: task-guards
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'hackriff-cb, 2026-09-22, after a stash in another session damaged a staged merge'
+    acceptance: |
+      MEASURED, NOT HYPOTHETICAL. On 2026-09-22 a `git stash` in another session dropped
+      `.git/MERGE_HEAD` while the runner was mid-gate. The gate passed, and
+      `git commit -m "Merge ..."` then wrote `ea91c27c`: an ORDINARY SINGLE-PARENT COMMIT carrying
+      4 of the branch's 44 files. It read as a merge in the log, the gate was green, and nothing
+      said otherwise - so the branch looked landed while most of its work was not on main. It was
+      caught only because a human went looking.
+      THE SHAPE OF THE BUG: `git commit` with no `MERGE_HEAD` does not fail. It commits whatever is
+      in the index, silently, as an ordinary commit. The runner already refuses to START a merge
+      when `MERGE_HEAD` is present; there was no symmetric check at the other end.
+      RESOLUTION. Before committing, assert `MERGE_HEAD` still exists AND equals
+      `git rev-parse $branch`. If it does not: do NOT commit, leave `main` untouched, write
+      `<date> <branch> <ticket> MERGE_STATE_LOST` to `merge-needs-attention.txt`, and notify. It
+      FAILS CLOSED - a wrong merge is far worse than a delayed one, and this is the same principle
+      as classification failing to the full gate and `Coverage::Unobserved` not reading as quiet.
+      STILL OPEN, and stated rather than quietly skipped: this covers the INDIVIDUAL merge path.
+      The BULK path commits each merge as it goes through a different call site and wants the same
+      assertion; it was left out here to keep the change reviewable, and is worth a follow-up.
+      Fault-injection to prove it: delete `MERGE_HEAD` during a dry gate and require the attention
+      line with no commit.
+  - id: T-841
+    milestone: M2-hardening
+    title: 'Two sessions allocate ticket ids as max+1 on different branches, so both file the same id and the board only finds out after merge'
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'hackriff-cb, 2026-09-22, after a 26-ticket collision'
+    acceptance: |
+      HAPPENED FIVE TIMES ON 2026-09-22, the largest being 26 tickets wide. Every session computes
+      "next free id" as max+1 over the board IT CAN SEE, which is its own branch. Two sessions
+      filing concurrently therefore pick the SAME ids: T-761..T-772 on the coordinator's branches
+      against T-761..T-786 filed on main from docs/26, renumbered under duress to T-800..T-825.
+      The duplicate-key guard in `py/tests/test_task_board.py` catches it, but only AFTER the merge
+      that creates the duplicate - by which point the ids are in commit messages, cross-references
+      and agent briefs.
+      TWO SHAPES, AND THE SIMPLEST IS PROBABLY RIGHT:
+      (a) ONLY THE COORDINATOR FILES TICKETS. Other sessions send a request; the coordinator
+          allocates and files. One writer, no allocation race, and it matches how the board is
+          already treated (it is the coordinator's job to manage tickets, not merely report them).
+          Cost: a round trip, and the coordinator becomes a bottleneck for a cheap operation.
+      (b) ALLOCATE ACROSS ALL BRANCH TIPS, not just the current one - roughly ten lines in
+          `hkpy.reconcile` / the file-ticket path, reading `git for-each-ref` and every tip's board.
+          Cost: still racy for two sessions filing in the same instant, and wrong if a branch is
+          deleted between allocation and merge.
+      Neither is airtight; (a) removes the race, (b) narrows it. DECIDE, write it into CLAUDE.md's
+      Coordination section so every role inherits it, and say plainly which failure remains.
+      A disjoint-range convention (the coordinator handing each agent its own block of ids at
+      spawn) is already in informal use and worked - no collision came from an AGENT on
+      2026-09-22, only from two SESSIONS. That is evidence for (a) and worth stating.
+  - id: T-842
+    milestone: M2-hardening
+    title: 'reconcile inspects only in-progress tickets, so a ticket that goes todo -> merged is invisible to the tool built to catch a stale board'
+    status: done
+    branch: task-guards
+    priority: normal
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: [T-477]
+    use_cases: []
+    found_by: 'hackriff-cb, 2026-09-22, after T-625/T-626 sat done-but-todo for hours'
+    acceptance: |
+      `hkpy.reconcile.inspect` runs only over tickets the board calls `in-progress`, which assumes
+      every ticket passes through that state. Many do not: an agent is briefed, works and hands
+      back while the board still reads `todo`, and the coordinator flips it straight to `done` at
+      merge. Miss that last step and the ticket is invisible FOREVER - not in-progress, so nothing
+      checks it; not done, so it reads as open work.
+      MEASURED: T-625 and T-626 merged via `task-adcfill` and still read `todo` hours later, while
+      `just reconcile` reported "no in-progress tickets - the board claims nothing is running". The
+      tool built to catch a stale board said the board was clean.
+      RESOLUTION. `reconcile` now also asks the other question: which `todo` ids does `main`
+      already NAME in a merge-commit subject? Reported under the findings as "worth checking",
+      never asserted as merged - a subject naming an id is weaker evidence than a merge commit
+      naming a branch TIP, and this tool's whole discipline is not overstating what git said.
+      IT EARNED ITS KEEP ON THE FIRST RUN, which is the honest test of a guard: it immediately
+      found THREE ids reading `todo` with merge commits naming them - T-489 (5583463b, 469
+      insertions), T-536 (712cfe5e, 399) and T-551 (ea9366fa, 497). All three verified by content
+      and flipped in the same commit. None had been noticed by anyone.
+  - id: T-843
+    milestone: M2-hardening
+    title: 'Unresolved conflict markers sat committed on main in docs/adr/README.md, because a docs-only diff runs no suite at all'
+    status: done
+    branch: task-guards
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'the T-800 agent, 2026-09-22, while editing the file for an unrelated reason'
+    acceptance: |
+      FOUND BY ACCIDENT, WHICH IS THE POINT. `docs/adr/README.md` carried `<<<<<<< HEAD`,
+      `=======` and `>>>>>>> task-t549` ON MAIN, committed in `6895eeb1` ("Merge branch
+      task-t549 into task-t548") weeks earlier. Two branches had each added an ADR row and the
+      merge was committed half-resolved. It was noticed only because an agent happened to open the
+      file for something else.
+      NOTHING COULD HAVE CAUGHT IT. `just gate` classifies a `docs/`-only diff as NOTHING TO RUN -
+      correctly, since no link checker or markdown linter exists - so a docs file can carry
+      anything at all onto main. That is the same structural hole as the board's YAML break
+      (T-764): a write path with no checker on it. The two findings are one day apart and are the
+      same shape.
+      RESOLUTION. `py/hkpy/conflictmarkers.py` + `just conflict-check`: stdlib, textual, about a
+      second over the whole tracked tree. It is DELIBERATELY NOT a docs-specific test - a conflict
+      marker is meaningless in every file type, so the check belongs to every diff class,
+      including the classes that currently run nothing.
+      CARE TAKEN, so the guard does not become a nuisance that gets disabled: `=======` alone is a
+      legal markdown and rst heading underline, so only the opening/closing/diff3 markers count as
+      evidence; unreadable and binary files are skipped rather than guessed at; and the allow-list
+      is exactly the two files that TALK about markers (the checker and its own test), because a
+      broad ignore list is how a checker stops checking.
+      NON-VACUITY: three tests - the real tree carries none; a planted marker IS found (the guard
+      must find one, not merely fail to find any); and a markdown underline does NOT trip it. On
+      the tree where it was written it printed the two real offenders and exited 1.
+      The markers themselves are resolved here, keeping BOTH ADR rows (0021 and 0022 were each
+      legitimate), matching `task-map00`'s independent resolution byte-for-byte so the two
+      branches do not collide.
+    notes: |
+      STILL OPEN and stated rather than quietly skipped: `just conflict-check` is not yet WIRED
+      INTO the gate for the `docs`-only class - doing that means changing `py/hkpy/gate.py`'s
+      classifier so `docs` runs one cheap check instead of nothing, which is a deliberate change
+      to the rule and wants its own review. Until then the guard runs in `just test` and catches
+      it on any diff that touches code. The remaining hole is a docs-ONLY diff, which is how this
+      one got in.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
