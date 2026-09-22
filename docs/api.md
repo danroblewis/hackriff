@@ -1156,6 +1156,43 @@ The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), ans
 
 `counts` is row-major on **exactly** the tile's axes (`nt` time rows × `nf` frequency cells, earliest row and lowest frequency first), so a client indexes it with the tile's own index.
 
+### `GET /ws/tiles/rows` — rows pushed to a subscription over an **address range** (T-468)
+
+WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.
+
+**The subscription is a range, never "the live stream", and there is no way to spell "now".** A request without `t_from` is refused, and nothing defaults it; so is one carrying `t_index` (a tile, not a range) or a `t_to` not after `t_from`. Historical playback (T-463) is a reader walking forward through **sealed** history at a rate of its choosing; a route that could only mean "the live stream" could not serve it and playback would grow a second mechanism beside this one — the two-implementations drift of T-420/T-388/T-397/T-412. "Live" is only what happens when a range's end is past the data edge: the route sends what is complete at once, then **waits and pushes** the rest as it is recorded. The same cursor serves a range sealed a month ago and one still being written; nothing in it knows which. To follow the growing edge, start at the row you have and leave `t_to` open. **Each subscription carries its own edge**, so one client can hold one per pane — a following pane and a playback pane advance on their own rows (`ui/src/surface/rowfeed.ts`).
+
+Messages are JSON text, in order:
+
+```jsonc
+{ "type": "subscribed",                       // first, always: what was asked, stated back
+  "address": { "scheme": "view", "device": "any", "level_f": 0, "level_t": 0, "f_index": 1266, "cells": 32 },
+  "range": { "t_from": 44731500123, "t_to": null, "t0_s": …, "t1_s": null, "open": true },
+  "extent": { "f_lo_hz": …, "f_hi_hz": …, "f_cell_hz": 2343.75, "t_cell_s": 0.040106667, "nf": 32 },
+  "store": "view-lattice", "candidates": [0, 1], "data_edge_s": …, "watermark_s": …, "rule": "…" }
+{ "type": "rows", "row0": 44731500123, "rows": 5, "tile": { "t_index": 1397859378, "row": 27 },
+  "t0_s": …, "t_cell_s": 0.040106667, "nf": 32,
+  "max_db": [-96.5, null, "…"],              // rows × nf, row-major; null = not measured, never quiet
+  "observed_cells": 160,
+  "coverage": { "encoding": "plane-rle", "states": ["unobserved", "observed", "unknown", "excluded"],
+                "nt": 5, "nf": 32, "aligned": true, "present": true,
+                "plane": { "runs": [1, 160], "cells": 160, "uniform": "observed", "…": "…" } },
+  "answered": { "level": 0, "store": "view-lattice", "f_cell_hz": …, "t_cell_s": …, "tried": [0] },
+  "final": false }
+{ "type": "unobserved", "row0": 0, "rows": 4096, "t0_s": …, "t1_s": …, "final": true, "rule": "…" }
+{ "type": "end", "row": 44731500200, "reason": "range-complete" }   // only when t_to is given
+```
+
+- **A row is pushed once, when it is complete** — when the store's data edge (the end of the newest folded frame, or the watermark if later) has passed its end. At level 0 that is one display row, so rows append as they are recorded and are never gated on a tile being buildable (the classic-waterfall invariant). A coarser `level_t` row is pushed when its whole cell has passed — "commits every N", stated by the address. A waiting subscription looks at the edge every `t_cell / 4`, clamped to 5–250 ms.
+- **`final`** is `true` when the block ends at or before the watermark, so no late frame can still land in it. A provisional row (`false`) can still be amended by a late frame; it is **not** re-sent, and the sealed tile from `/api/tiles` is then the authority.
+- **Blocks never cross a tile** (at most 64 rows), so each `rows` message patches exactly one tile: `tile.t_index` and `tile.row` say which and where.
+- **Grey is decided by each block's `coverage`**, the selected device's plane on the block's own axes, in the same four-state alphabet and run encoding as the tile route's (T-467): `unobserved` is grey, `excluded` is drawn. A named device with no record here is `present: false` and uniformly `unobserved`.
+- **`unobserved`** is a stretch the coverage map calls uniformly unobserved for the selected device, answered from the map alone (T-461's short-circuit, over a range): no `max_db`, no level. It may span many tiles. While consecutive probes keep finding grey the probe span doubles from 4096 rows, so a range starting at `t_from=0` reaches the first recorded row in a few dozen messages.
+- **The level that answered** is the tile read's own rule: finest affordable first, walking coarser only when a level holds nothing (T-426), stated per block in `answered`.
+- **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never holds the history mutex longer than one tile chunk. A subscription holds **no** `/api/tiles` in-flight slot (it is long-lived; a slot is the unit of a request); instead at most **16** are open per server and the seventeenth is refused `503`. The server never paces a sealed range — it writes as fast as the socket takes it; a reader that wants to walk slower asks for a shorter range.
+- **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
+- **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
+
 ### `GET /api/status` — pipeline counters (T-027)
 
 Opaque, per-build JSON object of counters (source samples, chain stats, control-loop stats under `"control"`, listen/chain admission under `"listen"`/`"budget"` when the pipeline exposes them, …), plus one field this route itself adds: **`t`**, the server's own wall clock (`Timestamp::now`, not the run's sample clock) at the instant the response was built — bare name, Unix seconds, per the units convention (T-351). Without it a caller could not tell a fresh read from a cached one, or measure its own clock skew against this device. Never content, never an identity. `404` when this server has no pipeline status function attached (e.g. a bare bridge with no composed pipeline).
@@ -1640,6 +1677,7 @@ Full framing, header fields, binary record layout, drop markers, backpressure an
 |---|---|---|---|
 | GET | `/ws/{stream_id}` | token (header or `?token=`) | Upgrades to WebSocket and bridges the named always-on stream (§10) |
 | GET | `/ws/open/{name}` | token | Upgrades and opens an on-demand stream (§12): `listen`, `bits`, `symbols`, `iq`, with query parameters per opener |
+| GET | `/ws/tiles/rows` | token | Rows pushed to a subscription over a tile-lattice **address range** — see [its section](#get-wstilesrows--rows-pushed-to-a-subscription-over-an-address-range-t-468) (T-468) |
 
 **`GET /ws/{stream_id}`** (e.g. `spectrum/live`): the header JSON is the first **text** message, verbatim; every later record is one message — text (NDJSON line) for `messages` streams, binary (32-byte record header + payload) for every binary kind. Refusals never upgrade the connection and are plain HTTP: `401` (bad/missing token, checked before the upgrade), `403` (a `own-key-decrypted` stream — those are Unix-socket-only and never served over the bridge), `404` (unknown `stream_id`), `410` (stream finished), `426` (not a valid WebSocket upgrade request), `503` (consumer cap reached, or `replumbing` — see below).
 

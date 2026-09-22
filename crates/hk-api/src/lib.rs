@@ -51,6 +51,7 @@ pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
 pub mod signatures; // T-201

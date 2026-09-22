@@ -8736,6 +8736,152 @@ fn the_tile_routes_declared_readable_ceiling_is_true_and_is_stated_for_the_route
     stop_server(serving);
 }
 
+/// T-468: `GET /ws/tiles/rows`, as `docs/api.md` documents it, on a real `hk serve`.
+///
+/// - **An address range, never "now"**: without `t_from` the upgrade completes with a `refused`
+///   message and close code `4400`; there is no default anchor for a range to fall back on.
+/// - **Rows pushed as recorded**: an open range starting behind the data edge delivers what exists,
+///   then keeps delivering rows past the edge it started at — contiguous, each at its own address.
+/// - **Sealed history as readily as the growing edge**: a closed range behind the edge is served
+///   exactly and ends, through the same route, and its rows are the ones the open range carried for
+///   the same addresses wherever both copies say `final`.
+#[test]
+fn row_push_route_serves_an_address_range_growing_or_sealed() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: i64 = 32;
+    let (st, probe) = get(
+        addr,
+        &format!("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells={N}"),
+    );
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["extent"]["f_cell_hz"].as_f64().unwrap();
+    let t_cell = probe["extent"]["t_cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as i64;
+    let rows_path = |range: &str| {
+        format!(
+            "/ws/tiles/rows?token={TOKEN}&level_f=0&level_t=0&f_index={f_index}&cells={N}{range}"
+        )
+    };
+    let text = |ws: &mut Ws| -> Option<Value> {
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => return Some(serde_json::from_str(&t).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    };
+
+    // ---- no range start, no subscription ----
+    let mut ws = connect_ws(addr, &rows_path("")).expect("refusals still upgrade");
+    let v = text(&mut ws).expect("refusal");
+    assert_eq!(v["type"], "refused", "{v}");
+    assert_eq!(v["status"], 400, "{v}");
+    let mut code = None;
+    while let Ok(m) = ws.read() {
+        if let Message::Close(f) = m {
+            code = f.map(|f| u16::from(f.code));
+        }
+    }
+    assert_eq!(code, Some(4400));
+
+    // ---- the data edge, from a one-row sealed range at the epoch (itself a range, not "now") ----
+    let mut edge_s = 0.0;
+    wait_for("the store to hold rows", Duration::from_secs(60), || {
+        let mut ws = connect_ws(addr, &rows_path("&t_from=0&t_to=1")).unwrap();
+        let s = text(&mut ws).expect("subscribed");
+        assert_eq!(s["type"], "subscribed", "{s}");
+        match s["data_edge_s"].as_f64() {
+            Some(e) if e > 10.0 * t_cell * N as f64 => {
+                edge_s = e;
+                true
+            }
+            _ => false,
+        }
+    });
+    let edge_row = (edge_s / t_cell).floor() as i64;
+    let from = edge_row - 3 * N / 2;
+
+    // ---- an open range from behind the edge: what exists, then what is recorded after ----
+    let mut live = connect_ws(addr, &rows_path(&format!("&t_from={from}"))).unwrap();
+    let s = text(&mut live).expect("subscribed");
+    assert_eq!(s["type"], "subscribed", "{s}");
+    assert_eq!(s["range"]["t_from"], json!(from), "{s}");
+    assert_eq!(s["range"]["open"], json!(true), "{s}");
+    assert_eq!(s["extent"]["t_cell_s"].as_f64(), Some(t_cell), "{s}");
+    let mut next = from;
+    let mut observed = 0u64;
+    let mut kept: std::collections::BTreeMap<i64, (bool, Vec<Value>)> = Default::default();
+    while next < edge_row + 10 {
+        let v = text(&mut live).expect("rows keep arriving past the edge the range started at");
+        assert_eq!(
+            v["row0"],
+            json!(next),
+            "contiguous, never skipped or repeated: {v}"
+        );
+        let n = v["rows"].as_i64().unwrap();
+        if v["type"] == "rows" {
+            assert_eq!(v["nf"], json!(N), "{v}");
+            let db = v["max_db"].as_array().unwrap();
+            assert_eq!(db.len() as i64, n * N, "{v}");
+            assert_eq!(v["tile"]["t_index"], json!(next.div_euclid(N)), "{v}");
+            assert_eq!(v["coverage"]["plane"]["cells"], json!(n * N), "{v}");
+            observed += v["observed_cells"].as_u64().unwrap();
+            for r in 0..n {
+                kept.insert(
+                    next + r,
+                    (
+                        v["final"] == json!(true),
+                        db[(r * N) as usize..((r + 1) * N) as usize].to_vec(),
+                    ),
+                );
+            }
+        } else {
+            assert_eq!(v["type"], "unobserved", "{v}");
+        }
+        next += n;
+    }
+    assert!(
+        observed > 0,
+        "the tuned station's column holds measurements"
+    );
+    drop(live);
+
+    // ---- the same addresses as a CLOSED range: served exactly, then `end` ----
+    let (a, b) = (from, from + N);
+    let mut past = connect_ws(addr, &rows_path(&format!("&t_from={a}&t_to={b}"))).unwrap();
+    assert_eq!(
+        text(&mut past).expect("subscribed")["range"]["open"],
+        json!(false)
+    );
+    let mut row = a;
+    loop {
+        let v = text(&mut past).expect("a message");
+        if v["type"] == "end" {
+            assert_eq!(v["row"], json!(b), "{v}");
+            break;
+        }
+        assert_eq!(v["row0"], json!(row), "{v}");
+        let n = v["rows"].as_i64().unwrap();
+        if v["type"] == "rows" && v["final"] == json!(true) {
+            let db = v["max_db"].as_array().unwrap();
+            for r in 0..n {
+                if let Some((true, earlier)) = kept.get(&(row + r)) {
+                    assert_eq!(
+                        &db[(r * N) as usize..((r + 1) * N) as usize],
+                        earlier.as_slice(),
+                        "row {} read two ways",
+                        row + r
+                    );
+                }
+            }
+        }
+        row += n;
+    }
+    assert_eq!(row, b, "every row of the range, once");
+    stop_server(serving);
+}
+
 #[test]
 fn every_route_in_the_route_table_is_documented() {
     let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");

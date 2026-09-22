@@ -1383,6 +1383,30 @@ impl TileOverlay {
             .then(|| COVERAGE_STATES[usize::from(first)])
     }
 
+    /// The **selected** plane alone, in the same `plane_json` form `planes[i]` takes, with the
+    /// alphabet and grid it is laid on — what `/ws/tiles/rows` (T-468) sends beside each block of
+    /// rows. A named device with no plane here is uniformly `unobserved` *for that device*, the
+    /// same answer [`Self::uniform_state`] gives, spelled as a plane rather than omitted.
+    pub(crate) fn selected_plane_json(&self, device: &str) -> Value {
+        let absent;
+        let codes: &[u8] = match self.selected(device) {
+            Selected::Plane(i) => &self.planes[i],
+            Selected::AbsentDevice => {
+                absent = vec![UNOBSERVED; self.any.nt * self.any.nf];
+                &absent
+            }
+        };
+        json!({
+            "encoding": "plane-rle",
+            "states": COVERAGE_STATES,
+            "nt": self.any.nt,
+            "nf": self.any.nf,
+            "aligned": self.any.nt == self.nt_asked && self.any.nf == self.nf_asked,
+            "present": self.selected(device) != Selected::AbsentDevice,
+            "plane": plane_json(codes),
+        })
+    }
+
     /// The compact `coverage` block.
     pub(crate) fn to_json(&self, device: &str, named: bool) -> Value {
         let g = &self.any;

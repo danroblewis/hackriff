@@ -662,7 +662,7 @@ pub(crate) fn with_tile_history<T>(
 /// A store reached only through the floor product is immutable here and is scheme 1, whose coarse
 /// levels are a seal-time product; [`hk_store::Pyramid::materialize`] is a no-op for it either way,
 /// so that path simply reads.
-fn with_tile_history_built<T>(
+pub(crate) fn with_tile_history_built<T>(
     state: &ApiState,
     store: TileStore,
     level: u8,
@@ -1073,7 +1073,7 @@ pub fn affordable_levels(p: &hk_store::Pyramid, key: &TileKey) -> Vec<usize> {
 ///
 /// Shared by the read and by [`servable`] on purpose: the readable ceiling is a claim about what
 /// the read will do, so the two must not be able to disagree about how the read is cut up.
-fn chunk_rows(geom: &Geometry, key: &TileKey, level: usize) -> usize {
+pub(crate) fn chunk_rows(geom: &Geometry, key: &TileKey, level: usize) -> usize {
     let g = &geom.levels[level];
     let (_, nf) = dims(geom, level, &key.region);
     let rows_per_out = (key.t_cell_ns as f64 / g.t_cell_ns as f64).ceil() + 1.0;
@@ -1752,7 +1752,7 @@ fn encoding_json(planes: Planes) -> Value {
 
 /// A measurement value on the wire: a finite number, or `null`. **`null` is *not observed*, never
 /// quiet** (C26) — there is no zero here for anything to read as a level.
-fn num(x: f32) -> Value {
+pub(crate) fn num(x: f32) -> Value {
     if x.is_finite() { json!(x) } else { Value::Null }
 }
 
@@ -2038,7 +2038,7 @@ fn shadow(
     })
 }
 
-fn store_name(s: TileStore) -> &'static str {
+pub(crate) fn store_name(s: TileStore) -> &'static str {
     match s {
         TileStore::View => "view-lattice",
         TileStore::Main => "spectrum-history",

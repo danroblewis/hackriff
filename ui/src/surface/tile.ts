@@ -468,7 +468,7 @@ function shadowCells(
  * state. A plane we cannot read is not a coverage answer: the place stays *pending*, never grey,
  * and never `observed`.
  */
-function expandPlane(addr: TileAddr, states: string[], runs: number[], cells: number): string[] {
+export function expandPlane(addr: TileAddr, states: string[], runs: number[], cells: number): string[] {
   if (!Array.isArray(runs) || runs.length % 2 !== 0) {
     throw new TileDecodeError(`tile ${keyOf(addr)}: coverage runs are not [code, count] pairs`);
   }
