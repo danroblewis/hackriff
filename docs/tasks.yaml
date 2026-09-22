@@ -19640,6 +19640,13 @@ tasks:
       likely. A fixture whose emitter grid leaves room for the mirrors would close it.
       ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 12:56).
+      (a) spur_decision now checks the DC rule before ref-harmonic, so a box on both the tuned centre and a 10 MHz-grid harmonic (e.g. tuned to exactly 100.0 MHz) is labelled dc, the more specific rule; added a regression test. (b) hkpy.synth.retune's retune_diversity fixture now injects a third artefact family, an IQ image of an independent virtual source frequency placed so its mirror clears the emitter grid, DC line and LO-relative spur at every centre. tests/e2e's t586_retune_diversity acceptance test asserts the image is classified under RetuneSlope::Image across all three centres, closing the end-to-end gap the ticket named, and asserts it is never confused with the absolute or LO-locked classes -- with counts and frequencies, not wall-clock.
+      Tests: cargo nextest run -p hk-detect -E 'test(rules::)' -> exit 0 (4 passed); cargo nextest run -p hk-e2e -E 'test(t586)' -> exit 0 (2 passed (1 pre-existing nextest leak notice on the unrelated layout-guard test, not a failure)); just lint-py -> exit 0 (ruff: all checks passed)
+      precheck exit 0
+      Commits: 9f9c8100
+      Use cases: AWARE-011
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
