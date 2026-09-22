@@ -91,17 +91,18 @@ fn request(params: &[(&str, String)]) -> OpenRequest {
     OpenRequest::from_query(&q, "t071-test")
 }
 
-/// Opens a stream, retrying only while the run is starting (409) or re-plumbing (503).
+/// Opens a stream, re-issuing the refusals that are the SOURCE's transient state.
+///
+/// **T-632.** THE SUBJECT REFUSAL OF THIS FILE IS `503 busy`: the budget step asserts that a
+/// fourth listener and a tap past `max_chains` are refused, naming "listener limit: 3 of 3" and
+/// "chain budget: 3 of 3 chains". That refusal is returned on the FIRST try and never re-issued —
+/// a budget that refuses while a slot is free is a real bug. What used to be fatal and is not a
+/// verdict about anything: `422 no-analog-mode` and `504 probe-timeout`, both of which say the
+/// probe was starved or landed on an unusable chunk of a looping replay, and which the retry
+/// `e.status == 409 || e.code == "replumbing"` did not cover. The bound is now on ATTEMPTS rather
+/// than the old 120 s deadline, which shrank as the box got busier.
 fn open(opener: &dyn StreamOpener, params: &[(&str, String)]) -> Result<OpenedStream, OpenRefusal> {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        match opener.open(&request(params)) {
-            Err(e) if (e.status == 409 || e.code == "replumbing") && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            r => return r,
-        }
-    }
+    open_retrying(TAG, opener, &request(params))
 }
 
 /// A stream with an in-process consumer that keeps the wire bytes.

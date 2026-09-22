@@ -20740,6 +20740,209 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+  - id: T-631
+    milestone: M2-hardening
+    title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 by T-603, which reproduced the listen acceptance failure 2 times in 3.
+      `.config/nextest.toml` has, as its FIRST override, `filter = 'package(hk-e2e)' ->
+      test-group = heavy-serial` (max-threads = 1), and its header says the group exists because
+      "tests/e2e (hk-e2e): the harness + M0 suite drive the whole pipeline end to end and spawn
+      real processes/servers". THAT OVERRIDE HAS NEVER APPLIED TO A SINGLE TEST RUN. Every recipe
+      that runs hk-e2e - the M0 slice recipe, the harness recipe, the six milestone recipes, and
+      therefore the CI acceptance job - uses PLAIN `cargo test`, which does not read
+      `.config/nextest.toml` at all; and every recipe that DOES use nextest (`just test-rust`,
+      `just test-doc`, `just test-seq`) excludes hk-e2e by name through `just _crate-scope
+      hk-e2e`. So all 125 `#[test]`s in hk-e2e run with nextest's config believing it covers them
+      and cargo test's semantics actually governing them. T-603 added
+      `RUST_TEST_THREADS=${RUST_TEST_THREADS:-6}` to the two recipes, which caps the
+      self-parallelism but leaves the config lying.
+      DECIDE AND MAKE THE TREE SAY IT, one of:
+        (a) run the hk-e2e suites through nextest (`cargo nextest run -p hk-e2e -E
+            'binary(acceptance_m0)'`), which makes the group real and lets the per-binary
+            serialisation be expressed where every other suite expresses it; or
+        (b) DELETE the `package(hk-e2e)` override and state in both files that hk-e2e's
+            parallelism is `RUST_TEST_THREADS` in the justfile, nowhere else.
+      Whichever is chosen, the measurement that must survive is T-603's: the M0 binary at cargo
+      test's DEFAULT parallelism (28 on this box) failed the listen test in 2 of 3 runs at load
+      ~16-19; at 8-way parallelism 24 of 24 single-test runs passed. State the number the recipes
+      end up with and why.
+      Touching `.config/nextest.toml` or the `justfile` forces the FULL gate by design.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603) from the audit its ticket asked for. T-603
+      fixed the one test that sank a gate; this is the structural half.
+      WORKED 2026-09-21 on branch task-e2eguard (worker). CHOSE (a), RUN hk-e2e UNDER NEXTEST -
+      but at max-threads = 6, not 1. MEASURED over the acceptance gate's 82 tests (the M0 slice
+      plus the ten harness targets), all 82 green in all three models, 28-core Mac at load ~10-18:
+        cargo test, RUST_TEST_THREADS=6 (what the gate ran)        390 s
+        nextest, heavy-serial as written (max-threads = 1)        1133 s   +12.4 min
+        nextest, new `e2e-bounded` group (max-threads = 6)         230 s    -2.7 min
+      So honouring the override AS WRITTEN would have added ~58 % to a 21.4 min median gate
+      (T-543) to buy a constraint stronger than the evidence asks for: T-603 measured the M0
+      binary failing 2 of 3 at cargo test's default 28-way in-binary parallelism and passing 4 of
+      4 at 6. Six is the measured number. Six is also FASTER than the path it replaces, because
+      nextest pools all 82 tests across the eleven binaries into one queue while `cargo test`
+      drains the binaries one after another (listen_live's single 67 s test used to have the box
+      to itself). Deleting the override would have kept the 390 s path and left hk-e2e outside the
+      config a second time.
+      SHIPPED: a new `e2e-bounded` test-group in `.config/nextest.toml` carrying the measurement;
+      `just _e2e-run`, the ONE place an hk-e2e target set becomes a command, used by all eight
+      recipes (M0 slice, harness, six milestones) instead of RUST_TEST_THREADS reaching two of
+      them and the other six running at the unprotected 28; `acceptance-ci` no longer passes
+      `-- --nocapture`, which under nextest becomes `--no-capture` and pins the run to ONE thread.
+      A `cargo test` fallback remains for a box without cargo-nextest and keeps the thread cap.
+      CLAUDE.md's Testing paragraph corrected - it still claimed tests/e2e was in `heavy-serial`.
+      THE GUARD, which is the deliverable: `just nextest-config-check` (`py/hkpy/nextest_config.py`,
+      `py/tests/test_nextest_config.py`) fails when an override's filter names a package that no
+      nextest invocation in the justfile can ever see, or that is no workspace member at all (the
+      same defect by typo). Parameterised recipes - `test-crate`, `test-one` - deliberately do NOT
+      count as evidence, since their scope comes from whoever types them; counting them would have
+      made the check pass on the exact tree that shipped this bug. It ran RED on that tree, naming
+      the file, the filter and the excluding recipe, before anything was changed. It is a member
+      of `just test` (not only a pytest) so it runs first and cheapest on a full gate.
+  - id: T-632
+    milestone: M2-hardening
+    title: 19 live-harness hk-e2e tests still read ANY on-demand refusal as a verdict, the defect T-603 fixed in one of them
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      AUDIT 2026-09-21 (T-603). 20 of hk-e2e's 125 tests drive the LIVE, LOOPING blind harness
+      (`blind_live*` / `listen_service`), so they assert against transient pipeline state rather
+      than a stored product. A Listen/tap open on such a run can be refused for reasons that say
+      nothing about what the test is asserting: `503 replumbing` between segments, `409
+      outside-window`, `504 probe-timeout` when the probe is starved of ring samples, `422
+      no-analog-mode` when the probe lands on a chunk with nothing recognisable in it. T-603
+      reproduced exactly that - and its mirror image, a slot FREED between two requests, which
+      turned an expected refusal into an admission - 2 times in 3 at cargo test's default
+      parallelism.
+      ONE of the 20 (`acceptance_m0 listen::signal_062_...`) now retries non-verdict refusals and
+      asserts on counts and ordering. THE OTHER 19 DO NOT:
+        - `tests/e2e/tests/stream_external.rs` (2): opens `/ws/open/listen` directly and
+          `panic!("refused: {t}")` on any non-header first frame. No retry at all.
+        - `tests/e2e/tests/concurrent_demod.rs` (5): its `open()` retries 409 and code
+          `replumbing` only, so 422/504 and the CPU-budget `503 busy` are fatal.
+        - `tests/e2e/tests/refine.rs` (2) and `tests/e2e/tests/listen_live.rs` (1): retry
+          `matches!(e.status, 409 | 503)` only - 422 and 504 are fatal.
+        - `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` (9): `tail()` opens a
+          stage/inspector tap over TCP and fails the test on a refusal frame in `read_header`.
+      FIX SHAPE, from T-603: name the refusals that are the SUBJECT of the assertion (a cap's
+      `503 busy` at the listener limit, a legal gate's 403) and fail on those immediately; re-issue
+      the others a BOUNDED NUMBER OF ATTEMPTS, printing each. Bound attempts, never wall clock -
+      lengthening a wait makes the failure rarer, which is the pattern this project rejects. Where
+      a test asserts a cap or a count, assert the count the admission path itself reads
+      (`listen.active`), not what a request happened to do in time.
+      AND THE OTHER HALF T-603 FOUND: `/ws/open/listen` (and every `/ws/open/*`) PINGS its peer
+      every `ondemand_ping_interval` and DROPS one it has not heard from for
+      `ondemand_peer_timeout` (5 s / 20 s), ending the chain `closed_client` and freeing its slot.
+      tungstenite answers a ping only from inside a read, so any test that opens a WebSocket
+      stream and then does something else for a while is holding a socket the server is entitled
+      to reap - an implicit 20 s window that only a loaded box exceeds. `stream_external.rs` holds
+      exactly such a socket. Read one record between steps (T-603's `touch()`), do not lengthen
+      anything.
+      VERIFY LIKE T-603 DID: reproduce before the change at cargo test's default parallelism
+      (`--test-threads 28` on the M0/harness binaries), state n-of-m before and after, and prove
+      each fixed assertion still goes RED for the real defect it is there to catch.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603). Related: T-631 (why none of these are covered
+      by the nextest group that claims them).
+      WORKED 2026-09-21 on branch task-e2eguard (worker), after T-631 in the same worktree.
+      ALL 19 ANSWERED; none left permissive, none left unexamined.
+      SUBJECT REFUSALS, the question each one had to answer first:
+        - `concurrent_demod.rs` (5): ITS SUBJECT IS `503 busy`. Its budget step asserts a fourth
+          listener and a tap past `max_chains` are refused naming "listener limit: 3 of 3" and
+          "chain budget: 3 of 3 chains". That refusal is now returned on the FIRST try and is
+          never re-issued. What used to be fatal and is not a verdict about anything - `422
+          no-analog-mode`, `504 probe-timeout` - is re-issued. (One of the five,
+          `a_seq_gap_is_loss_unless_the_stream_declared_it`, opens nothing at all; it parses.)
+        - `stream_external.rs` (2), `refine.rs` (2), `listen_live.rs` (1), the nine tutorial tests
+          in `tutorial_{rds,adsb,pocsag,acars}.rs`: NO refusal is any of their subjects - they
+          assert recovered payloads, a stalled client, a refined centre, decoded frames. So every
+          refusal is re-issued and a capacity `503 busy` still fails immediately, because nothing
+          in those tests should ever fill a budget.
+      THE SHAPE, shared rather than copied: `acceptance/common.rs` now carries `OPEN_TRIES = 8`,
+      `is_capacity_verdict` and `open_retrying`, used by the four harness/acceptance binaries that
+      include it; the four tutorial `tail()`s (verbatim copies of each other) read their header
+      SYNCHRONOUSLY with bounded re-issue instead of deferring the failure to `finish()`, so a
+      refusal now names the target at the call site.
+      BOUND ON ATTEMPTS, NOT WALL CLOCK, and that replaced something worse than nothing: the old
+      helpers polled inside 60/120 s DEADLINES, which shrink as the box gets busier - exactly when
+      the transient refusals get likelier - so load was being converted into failure. A count of
+      re-issues does not move with load. Nothing was lengthened.
+      RED PROOFS, both reproduced on this branch:
+        - `concurrent_demod three_fm_stations_...` with `max_listeners` raised from 3 to 9 (the
+          cap admits past what the test asserts): FAIL in 19.1 s at `a fourth listener is refused`.
+          The subject refusal is still fatal and was not retried away.
+        - `tutorial_acars` pointed at `inspector/{id}/no-such-node` (a tap that can never open):
+          FAIL in 0.35 s, printing all eight attempts and then `8 opens in a row produced no
+          stream header`. The bounded re-issue terminates and reports instead of hanging or
+          silently returning an empty stream. 0.35 s, against the 600 s LIMIT the old deadline
+          would have leaned on.
+      THE PING FUSE: NONE OF THE 19 CARRIES IT. The reap is `/ws/open/*`-only
+      (`hk-api/src/ondemand.rs`; `tcp.rs` has a handshake timeout and no peer timeout). Of the 19,
+      only `stream_external::fm_audio_streams_...` opens a WebSocket at all, and it reads
+      continuously from header to its 100th frame; the tutorials and the fsk test use TCP taps and
+      the rest use the in-process `StreamOpener`, where there is no socket to reap. The stalled
+      TCP client in that same test is a different mechanism (drop-not-block, then disconnect) and
+      is the test's subject.
+      TARGETED RUN: 18 of 18 green under `cargo nextest run -p hk-e2e` over stream_external,
+      concurrent_demod, refine, listen_live and the tutorial + listen tests of acceptance_m0,
+      91.9 s, zero retries, zero re-issues printed on a quiet box.
+  - id: T-633
+    milestone: M2-hardening
+    title: Under a starved source a range-selected Listen chain attaches and is immediately closed_client, while an emitter-selected one on the same station survives
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 (T-603), 3 times in 12, reproducibly, at cargo test's default in-binary
+      parallelism (28 threads on the M0 acceptance binary, ~28 pipelines at once on a 28-core
+      box). In that state the mock replay source is starved: the first Listen open is refused
+      `504 probe-timeout: no samples for the probe`, and the run's `listen.frames` counter reaches
+      1. What then happens, from the counters printed by the test at each retry:
+        - an EMITTER-selected listener on the truth station attaches and STAYS alive (the test
+          reads it, so it is not a liveness-ping reap - `active: 1, running: 1` throughout);
+        - a RANGE-selected listener (`f_lo`/`f_hi` around the same station, from the inventory
+          row) attaches - `attached` increments - and is ended `closed_client` within
+          milliseconds, before the test's next `/api/status` call. Eight times in a row, a fresh
+          one each time: `attached` 2,3,4... with `detached` and `closed_client` following one
+          behind and `active` never leaving 1.
+      `closed_client` means "the client went away: WebSocket close, reset, unresponsive peer,
+      Stop" - and none of those is plausible for a socket the test opened milliseconds earlier and
+      has not touched. So EITHER the end is misattributed (a chain ending for a source reason -
+      starvation, a duplicate channel claim against the first chain, a segment boundary - counted
+      as the client going away), OR the client really is being dropped and the write path is
+      losing the connection under starvation. Both are worth knowing: `closed_client` is the
+      counter an operator would read to blame their own client.
+      FIND OUT WHICH, on the pipeline side, not in the test: reproduce by starving the source
+      (that is the only condition needed - no 28-way test run is required to hold the ring back),
+      and make the chain's end carry the reason it actually had. Assert with counts and ordering:
+      a chain that ends for a source reason must count itself under the matching `closed_*`
+      counter, and the test for it should be a hk-pipeline test, not an e2e one.
+      Note the asymmetry is the clue: same station, same instant, emitter target survives and
+      range target does not. `crates/hk-pipeline/src/chains/analog.rs`'s `claim_emission` (the
+      duplicate-channel claim) and `listen.rs`'s `End` variants are where to look first.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603), which made this visible by printing the
+      listen counters at each retry instead of asserting "second listener". T-603's own fix is
+      correct regardless - it no longer reports a cap verdict when the cap was never full - and
+      passes 4 of 4 at the parallelism the recipe uses; this is the residue that only appears at
+      28-way oversubscription.
   - id: T-622
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
@@ -21122,138 +21325,94 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
-  - id: T-631
+  - id: T-720
     milestone: M2-hardening
-    title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
+    title: The six milestone acceptance recipes now run under nextest but have never been measured there
     status: todo
-    priority: high
+    priority: low
+    parallel_group: OPS
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      T-631 routed all eight hk-e2e recipes through `just _e2e-run`, so `acceptance-m2`,
+      `acceptance-m3`, `acceptance-m4`, `acceptance-mauto`, `acceptance-chirp` and `acceptance-ism`
+      run under nextest in the `e2e-bounded` group at max-threads = 6. Only the CI acceptance set
+      (M0 slice + harness, 82 tests) was MEASURED: 390 s under the old `cargo test` path, 230 s
+      under nextest at 6. The six milestone gates were converted on the same argument but never
+      timed, and the conversion changes two things for them at once: they lose cargo test's
+      DEFAULT 28-way in-binary parallelism (none of them carried a RUST_TEST_THREADS cap, so they
+      were the most exposed suites in the tree), and they gain process-per-test isolation.
+      Run each once and record its wall clock and pass count, the way T-631 did. The expected
+      result is that they get faster and steadier; the point of the ticket is that "expected" is
+      not "measured", and these are milestone EXIT gates, where a surprise costs most.
+      If one of them is slower under nextest, say by how much and why before changing anything.
+    notes: |
+      Filed 2026-09-21 by T-631 (worker, task-e2eguard). Not a defect - a measurement that was
+      deliberately not done inside T-631's scope, recorded rather than implied.
+
+  - id: T-721
+    milestone: M2-hardening
+    title: tail() is a verbatim fourfold copy across the tutorial acceptance files, and T-632 had to edit all four
+    status: todo
+    priority: low
+    parallel_group: PIPE
+    model: haiku
+    effort: low
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` each carry a
+      BYTE-IDENTICAL `struct Tail`, `fn tail()` and `impl Tail::finish()`. They are modules of the
+      same binary and all four already `use crate::common::*`, so there is no reason for four
+      copies. T-632 had to make the same edit four times to give the tap open a bounded re-issue,
+      and a fifth file (`m2_scene.rs`) has an unrelated `tail_z` that makes grep noisier.
+      Move `Tail`/`tail`/`finish` into `acceptance/common.rs` beside `open_retrying` (which T-632
+      put there for exactly this reason), and have the four tutorials call it. `TAG` differs per
+      file, so it becomes a parameter, as it already is for `open_retrying`.
+      Pure refactor: the four tutorial tests must pass unchanged afterwards, and the diff must
+      delete more than it adds.
+    notes: |
+      Filed 2026-09-21 by T-632 (worker, task-e2eguard), which lived the cost. Deliberately not
+      done inside T-632: that ticket's subject was which refusal each test is about, and folding a
+      four-file refactor into it would have hidden the behavioural change in a move diff.
+
+  - id: T-722
+    milestone: M2-hardening
+    title: heavy-serial's max-threads = 1 has never been measured against a bounded alternative for the crates that are in it
+    status: todo
+    priority: normal
     parallel_group: OPS
     model: opus
-    effort: small
-    depends_on: []
-    use_cases: []
-    acceptance: |
-      MEASURED 2026-09-21 by T-603, which reproduced the listen acceptance failure 2 times in 3.
-      `.config/nextest.toml` has, as its FIRST override, `filter = 'package(hk-e2e)' ->
-      test-group = heavy-serial` (max-threads = 1), and its header says the group exists because
-      "tests/e2e (hk-e2e): the harness + M0 suite drive the whole pipeline end to end and spawn
-      real processes/servers". THAT OVERRIDE HAS NEVER APPLIED TO A SINGLE TEST RUN. Every recipe
-      that runs hk-e2e - the M0 slice recipe, the harness recipe, the six milestone recipes, and
-      therefore the CI acceptance job - uses PLAIN `cargo test`, which does not read
-      `.config/nextest.toml` at all; and every recipe that DOES use nextest (`just test-rust`,
-      `just test-doc`, `just test-seq`) excludes hk-e2e by name through `just _crate-scope
-      hk-e2e`. So all 125 `#[test]`s in hk-e2e run with nextest's config believing it covers them
-      and cargo test's semantics actually governing them. T-603 added
-      `RUST_TEST_THREADS=${RUST_TEST_THREADS:-6}` to the two recipes, which caps the
-      self-parallelism but leaves the config lying.
-      DECIDE AND MAKE THE TREE SAY IT, one of:
-        (a) run the hk-e2e suites through nextest (`cargo nextest run -p hk-e2e -E
-            'binary(acceptance_m0)'`), which makes the group real and lets the per-binary
-            serialisation be expressed where every other suite expresses it; or
-        (b) DELETE the `package(hk-e2e)` override and state in both files that hk-e2e's
-            parallelism is `RUST_TEST_THREADS` in the justfile, nowhere else.
-      Whichever is chosen, the measurement that must survive is T-603's: the M0 binary at cargo
-      test's DEFAULT parallelism (28 on this box) failed the listen test in 2 of 3 runs at load
-      ~16-19; at 8-way parallelism 24 of 24 single-test runs passed. State the number the recipes
-      end up with and why.
-      Touching `.config/nextest.toml` or the `justfile` forces the FULL gate by design.
-    notes: |
-      Filed 2026-09-21 by T-603 (worker, task-t603) from the audit its ticket asked for. T-603
-      fixed the one test that sank a gate; this is the structural half.
-  - id: T-632
-    milestone: M2-hardening
-    title: 19 live-harness hk-e2e tests still read ANY on-demand refusal as a verdict, the defect T-603 fixed in one of them
-    status: todo
-    priority: medium
-    parallel_group: PIPE
-    model: sonnet
     effort: medium
     depends_on: []
     use_cases: []
     acceptance: |
-      AUDIT 2026-09-21 (T-603). 20 of hk-e2e's 125 tests drive the LIVE, LOOPING blind harness
-      (`blind_live*` / `listen_service`), so they assert against transient pipeline state rather
-      than a stored product. A Listen/tap open on such a run can be refused for reasons that say
-      nothing about what the test is asserting: `503 replumbing` between segments, `409
-      outside-window`, `504 probe-timeout` when the probe is starved of ring samples, `422
-      no-analog-mode` when the probe lands on a chunk with nothing recognisable in it. T-603
-      reproduced exactly that - and its mirror image, a slot FREED between two requests, which
-      turned an expected refusal into an admission - 2 times in 3 at cargo test's default
-      parallelism.
-      ONE of the 20 (`acceptance_m0 listen::signal_062_...`) now retries non-verdict refusals and
-      asserts on counts and ordering. THE OTHER 19 DO NOT:
-        - `tests/e2e/tests/stream_external.rs` (2): opens `/ws/open/listen` directly and
-          `panic!("refused: {t}")` on any non-header first frame. No retry at all.
-        - `tests/e2e/tests/concurrent_demod.rs` (5): its `open()` retries 409 and code
-          `replumbing` only, so 422/504 and the CPU-budget `503 busy` are fatal.
-        - `tests/e2e/tests/refine.rs` (2) and `tests/e2e/tests/listen_live.rs` (1): retry
-          `matches!(e.status, 409 | 503)` only - 422 and 504 are fatal.
-        - `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` (9): `tail()` opens a
-          stage/inspector tap over TCP and fails the test on a refusal frame in `read_header`.
-      FIX SHAPE, from T-603: name the refusals that are the SUBJECT of the assertion (a cap's
-      `503 busy` at the listener limit, a legal gate's 403) and fail on those immediately; re-issue
-      the others a BOUNDED NUMBER OF ATTEMPTS, printing each. Bound attempts, never wall clock -
-      lengthening a wait makes the failure rarer, which is the pattern this project rejects. Where
-      a test asserts a cap or a count, assert the count the admission path itself reads
-      (`listen.active`), not what a request happened to do in time.
-      AND THE OTHER HALF T-603 FOUND: `/ws/open/listen` (and every `/ws/open/*`) PINGS its peer
-      every `ondemand_ping_interval` and DROPS one it has not heard from for
-      `ondemand_peer_timeout` (5 s / 20 s), ending the chain `closed_client` and freeing its slot.
-      tungstenite answers a ping only from inside a read, so any test that opens a WebSocket
-      stream and then does something else for a while is holding a socket the server is entitled
-      to reap - an implicit 20 s window that only a loaded box exceeds. `stream_external.rs` holds
-      exactly such a socket. Read one record between steps (T-603's `touch()`), do not lengthen
-      anything.
-      VERIFY LIKE T-603 DID: reproduce before the change at cargo test's default parallelism
-      (`--test-threads 28` on the M0/harness binaries), state n-of-m before and after, and prove
-      each fixed assertion still goes RED for the real defect it is there to catch.
+      T-631 measured, for hk-e2e's 82 acceptance tests, that `max-threads = 1` cost 1133 s where
+      `max-threads = 6` cost 230 s and both were 82/82 green - a 4.9x wall-clock difference for a
+      constraint that the evidence (T-603: 2-of-3 failures at 28, 4-of-4 at 6) never asked for.
+      `heavy-serial` is still max-threads = 1 for everything else in it: all of hk-api and hk-cli,
+      hk-pipeline's listen/retune/lossless/refine/stream tests plus eight named binaries,
+      hk-core's ring_concurrency/ring_stress, hk-demod::refine_wfm_real, and six individually
+      named tests. NONE of those numbers was ever measured against a bounded alternative either;
+      `1` was chosen in T-077 as the obviously-safe value and has never been revisited, while
+      `.config/nextest.toml`'s own header (T-383) already records that membership did NOT help
+      three of the four flakes filed against it.
+      So: measure it. For each membership block, time `just test` with the block at 1 and at a
+      bounded value (2, 4, 6), on the same commit and comparable load, and report wall clock AND
+      pass/fail counts per run - the second number is the one that decides it, and a block that
+      only passes at 1 must STAY at 1 with the measurement recorded beside it. Expect the answer
+      to differ per block: hk-cli spawns a daemon and binds ports (contention is real), while
+      hk-demod::refine_wfm_real is a CPU-bound optimizer whose problem is the box being busy at
+      all, which no group setting fixes.
+      Do NOT change a value without the number beside it. That is the whole lesson of T-631.
     notes: |
-      Filed 2026-09-21 by T-603 (worker, task-t603). Related: T-631 (why none of these are covered
-      by the nextest group that claims them).
-  - id: T-633
-    milestone: M2-hardening
-    title: Under a starved source a range-selected Listen chain attaches and is immediately closed_client, while an emitter-selected one on the same station survives
-    status: todo
-    priority: medium
-    parallel_group: PIPE
-    model: opus
-    effort: medium
-    depends_on: []
-    use_cases: []
-    acceptance: |
-      MEASURED 2026-09-21 (T-603), 3 times in 12, reproducibly, at cargo test's default in-binary
-      parallelism (28 threads on the M0 acceptance binary, ~28 pipelines at once on a 28-core
-      box). In that state the mock replay source is starved: the first Listen open is refused
-      `504 probe-timeout: no samples for the probe`, and the run's `listen.frames` counter reaches
-      1. What then happens, from the counters printed by the test at each retry:
-        - an EMITTER-selected listener on the truth station attaches and STAYS alive (the test
-          reads it, so it is not a liveness-ping reap - `active: 1, running: 1` throughout);
-        - a RANGE-selected listener (`f_lo`/`f_hi` around the same station, from the inventory
-          row) attaches - `attached` increments - and is ended `closed_client` within
-          milliseconds, before the test's next `/api/status` call. Eight times in a row, a fresh
-          one each time: `attached` 2,3,4... with `detached` and `closed_client` following one
-          behind and `active` never leaving 1.
-      `closed_client` means "the client went away: WebSocket close, reset, unresponsive peer,
-      Stop" - and none of those is plausible for a socket the test opened milliseconds earlier and
-      has not touched. So EITHER the end is misattributed (a chain ending for a source reason -
-      starvation, a duplicate channel claim against the first chain, a segment boundary - counted
-      as the client going away), OR the client really is being dropped and the write path is
-      losing the connection under starvation. Both are worth knowing: `closed_client` is the
-      counter an operator would read to blame their own client.
-      FIND OUT WHICH, on the pipeline side, not in the test: reproduce by starving the source
-      (that is the only condition needed - no 28-way test run is required to hold the ring back),
-      and make the chain's end carry the reason it actually had. Assert with counts and ordering:
-      a chain that ends for a source reason must count itself under the matching `closed_*`
-      counter, and the test for it should be a hk-pipeline test, not an e2e one.
-      Note the asymmetry is the clue: same station, same instant, emitter target survives and
-      range target does not. `crates/hk-pipeline/src/chains/analog.rs`'s `claim_emission` (the
-      duplicate-channel claim) and `listen.rs`'s `End` variants are where to look first.
-    notes: |
-      Filed 2026-09-21 by T-603 (worker, task-t603), which made this visible by printing the
-      listen counters at each retry instead of asserting "second listener". T-603's own fix is
-      correct regardless - it no longer reports a cap verdict when the cap was never full - and
-      passes 4 of 4 at the parallelism the recipe uses; this is the residue that only appears at
-      28-way oversubscription.
+      Filed 2026-09-21 by T-631 (worker, task-e2eguard), which surfaced this and correctly did not
+      chase it: its brief was the inert hk-e2e override, and re-tuning six other membership blocks
+      on the strength of one crate's measurement would be the same guess in the other direction.
+      Relevant history in the file's own header: T-344, T-383 and T-436.
+
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

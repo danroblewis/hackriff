@@ -44,6 +44,7 @@ use hk_stream::{
 };
 use serde_json::{Value, json};
 use tungstenite::Message;
+use tungstenite::WebSocket;
 use tungstenite::stream::MaybeTlsStream;
 
 const FM_FIXTURE: &str = "fm_100p8M_2p4M_l32g30a1_t1p5_5s";
@@ -116,6 +117,38 @@ struct Burst {
     payload: Vec<u8>,
 }
 
+/// Connects `target` over TCP and returns a reader positioned past the header.
+///
+/// **T-632.** This used to be `read_header().expect("stream header (not a refusal)")`, so ANY
+/// refusal frame failed the test — and a tap open on a looping replay is refused for reasons that
+/// say nothing about the payloads this file asserts: the TCP server's own connection cap
+/// (`503 busy`), a chain/tap budget, a `409` while the run is still publishing its first tuning.
+/// None of those is this test's subject (it has none: it asserts recovered payloads), so each is
+/// re-issued on a fresh connection, a BOUNDED NUMBER of times, printing what it saw.
+fn connect_tap(
+    addr: SocketAddr,
+    target: &str,
+    capture: &Arc<Mutex<Vec<u8>>>,
+) -> (StreamHeader, StreamReader<Tee<TcpStream>>) {
+    for attempt in 1..=OPEN_TRIES {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(LIMIT)).unwrap();
+        writeln!(s, "{target}?token={API_TOKEN}").unwrap();
+        let mut r = StreamReader::new(Tee {
+            inner: s,
+            capture: Arc::clone(capture),
+            limit: 16 * 1024,
+        });
+        match r.read_header() {
+            Ok(h) => return (h.clone(), r),
+            Err(e) => eprintln!(
+                "[T-060] {target} attempt {attempt}/{OPEN_TRIES}: no header ({e:?}), re-requesting"
+            ),
+        }
+    }
+    panic!("[T-060] {target}: {OPEN_TRIES} opens in a row produced no stream header");
+}
+
 /// Opens `target` over TCP and reads bursts until `done` says so (on the calling thread).
 fn read_bursts(
     addr: SocketAddr,
@@ -123,18 +156,7 @@ fn read_bursts(
     capture: &Arc<Mutex<Vec<u8>>>,
     mut done: impl FnMut(&[Burst]) -> bool,
 ) -> (StreamHeader, Vec<Burst>, u64) {
-    let mut s = TcpStream::connect(addr).unwrap();
-    s.set_read_timeout(Some(LIMIT)).unwrap();
-    writeln!(s, "{target}?token={API_TOKEN}").unwrap();
-    let mut r = StreamReader::new(Tee {
-        inner: s,
-        capture: Arc::clone(capture),
-        limit: 16 * 1024,
-    });
-    let header = r
-        .read_header()
-        .expect("stream header (not a refusal)")
-        .clone();
+    let (header, mut r) = connect_tap(addr, target, capture);
     let (mut bursts, mut dropped, mut pending) = (Vec::new(), 0u64, None);
     while !done(&bursts) {
         match r.next_record().expect("record") {
@@ -374,6 +396,47 @@ fn found_blind(addr: SocketAddr, truth: &TruthItem) -> String {
     }
 }
 
+/// Opens `/ws/open/listen` and returns it past its header, re-issuing non-verdict refusals.
+///
+/// **T-632.** Bounded by ATTEMPTS, not by wall clock. No refusal is this test's subject, so every
+/// one is re-issued; running out of attempts is itself the failure, and it names the last refusal.
+fn open_listen(
+    addr: SocketAddr,
+    query: &str,
+) -> (WebSocket<MaybeTlsStream<TcpStream>>, StreamHeader) {
+    let mut last = String::new();
+    for attempt in 1..=OPEN_TRIES {
+        let (mut ws, _) = tungstenite::connect(format!(
+            "ws://{addr}/ws/open/listen?token={API_TOKEN}&{query}"
+        ))
+        .expect("upgrade");
+        if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+            s.set_read_timeout(Some(LIMIT)).unwrap();
+        }
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => match StreamHeader::from_json_bytes(t.as_bytes()) {
+                    Ok(h) => return (ws, h),
+                    Err(_) => {
+                        eprintln!(
+                            "[T-060] listen attempt {attempt}/{OPEN_TRIES}: refused, \
+                             re-requesting: {t}"
+                        );
+                        last = t.to_string();
+                        let _ = ws.close(None);
+                        break;
+                    }
+                },
+                // Not the first text frame yet (a ping/pong or an early binary): keep reading,
+                // which is also what answers the server's liveness ping (T-603).
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    panic!("[T-060] {OPEN_TRIES} listen opens in a row were refused; last: {last}");
+}
+
 fn listen_counter(handle: &PipelineHandle, pick: fn(&hk_pipeline::Counters) -> u64) -> u64 {
     pick(&handle.counters())
 }
@@ -418,19 +481,14 @@ fn fm_audio_streams_over_websocket_and_a_stalled_tcp_client_never_blocks_the_cha
     let emitter = found_blind(addr, &truth);
 
     // WebSocket: audio frames with signal energy.
-    let (mut ws, _) = tungstenite::connect(format!(
-        "ws://{addr}/ws/open/listen?token={API_TOKEN}&emitter={emitter}"
-    ))
-    .expect("upgrade");
-    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
-        s.set_read_timeout(Some(LIMIT)).unwrap();
-    }
-    let header = loop {
-        if let Message::Text(t) = ws.read().unwrap() {
-            break StreamHeader::from_json_bytes(t.as_bytes())
-                .unwrap_or_else(|_| panic!("refused: {t}"));
-        }
-    };
+    //
+    // T-632: this used to `panic!("refused: {t}")` on the first frame if it was not a header. A
+    // Listen open on a looping mock replay is refused `503 replumbing` between segments, `409
+    // outside-window`, `504 probe-timeout` when the probe is starved of ring samples, and `422`
+    // when the chunk it probed carries no recognisable analog mode — and this test's subject is
+    // the STALLED TCP CLIENT further down, not any refusal. So the open is re-issued a bounded
+    // number of times, printing each refusal.
+    let (mut ws, header) = open_listen(addr, &format!("emitter={emitter}"));
     assert_eq!(header.kind, StreamKind::Audio);
     assert_eq!(header.datatype.as_deref(), Some("ri16_le"));
     let (mut frames, mut energy, mut samples) = (0, 0.0f64, 0usize);
