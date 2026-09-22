@@ -1481,7 +1481,10 @@ def agents(status_map):
             continue
         c = claims.get(tid, {})
         alive = c.get("state") == "running" and _alive(c.get("pid"))
-        if not alive and s["age_s"] > ACTIVE:
+        # The runner's claim is the truth when it exists: a worker it has reaped (killed, done,
+        # uncommitted, no-work) is NOT running, however fresh its transcript - four killed workers
+        # showed as running for 210 s on 2026-09-22 while the user was asking for a full stop.
+        if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
         s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
