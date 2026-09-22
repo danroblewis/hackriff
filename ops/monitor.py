@@ -340,7 +340,8 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .filters select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;font-size:12px;padding:2px 4px;margin-left:4px;cursor:pointer}
 .legend{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
-.wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none}
+.wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.wrap svg text{user-select:none;-webkit-user-select:none;pointer-events:none}
 .wrap.grabbing{cursor:grabbing}
 #g{position:absolute;inset:0}
 #g svg{width:100%;height:100%;max-width:none;display:block}
@@ -407,7 +408,7 @@ wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb||!svgEl)return;
   const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), k=nw/vb.w;
   vb.x=p.x-(p.x-vb.x)*k; vb.y=p.y-(p.y-vb.y)*k; vb.w=nw; vb.h=vb.h*k; setVB();
 },{passive:false});
-wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
+wrap.addEventListener('pointerdown',e=>{ e.preventDefault(); down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
 wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
   if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
   if(dragMoved){ const a=svgPt(px,py), b=svgPt(e.clientX,e.clientY); vb.x-=(b.x-a.x); vb.y-=(b.y-a.y); px=e.clientX; py=e.clientY; setVB(); } });
