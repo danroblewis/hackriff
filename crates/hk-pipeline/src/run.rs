@@ -952,6 +952,16 @@ struct Common {
     /// ([`PipelineHandle::panic_worker`]). There is no other way to get an unwinding pipeline
     /// thread on demand, and a guard over a panic that no test can produce is not a guard.
     panic_worker: Mutex<Option<(String, u32)>>,
+    /// T-534: the run's reopen policy (`--loop`), held for the **run**, not the segment. Every
+    /// segment's capture thread reopens through it — the first, one a re-plumb starts and one a
+    /// capture recovery starts — so a looping replay keeps wrapping after a retune. It used to be
+    /// handed to the first segment alone, and every later segment started with `None`: a
+    /// `--loop` run then simply ended at the recording's end after the first retune.
+    ///
+    /// A mutex because it is `FnMut`; only one capture thread runs at a time (a re-plumb or a
+    /// recovery starts the next segment after the last one's threads have ended), so it is never
+    /// contended.
+    reopen: Option<Arc<Mutex<SourceFactory>>>,
 }
 
 impl Common {
@@ -1336,6 +1346,7 @@ impl Pipeline {
             .map_err(|e| eprintln!("observation log disabled: {e:#}"))
             .ok(),
             fail_segment_starts: std::sync::atomic::AtomicU32::new(0),
+            reopen: reopen.map(|f| Arc::new(Mutex::new(f))),
             worker_panic: Arc::default(),
             panic_worker: Mutex::new(None),
             aux: Vec::new(),
@@ -1365,7 +1376,7 @@ impl Pipeline {
             shared,
             tx,
             mut workers,
-        } = start_segment(&common, parts, info, source, reopen, None).map_err(|f| f.error)?;
+        } = start_segment(&common, parts, info, source, None).map_err(|f| f.error)?;
         // T-510: the further front ends start **after** the primary, so a primary that cannot
         // start leaves nothing to tear down. One of them that cannot start ends the run it was
         // part of, rather than leaving a run that is quietly one radio short of what was asked
@@ -1492,7 +1503,6 @@ fn start_segment(
     parts: Parts,
     info: SourceInfo,
     source: Box<dyn Source>,
-    reopen: Option<SourceFactory>,
     expect: Option<(f64, f64)>,
 ) -> Result<Started, SegmentFailure> {
     let Parts {
@@ -1518,15 +1528,38 @@ fn start_segment(
     let (writer, ring) = ring_buffer::<Complex<i8>>(ring_cfg);
     let gate = Arc::new(FlowGate::new(cfg.lossless, ring.sample_capacity()));
     let stop = Arc::new(AtomicBool::new(false));
-    let reopen: Option<SourceFactory> = reopen.map(|mut open| {
-        let (switch, pins, slot) = (
+    // T-534: every segment reopens through the run's one factory, whoever started it.
+    let live = cfg.live_window_class && common.switch.capabilities().controllable;
+    let reopen: Option<SourceFactory> = common.reopen.as_ref().map(|open| {
+        let (open, switch, pins, slot, commanded) = (
+            Arc::clone(open),
             Arc::clone(&common.switch),
             Arc::clone(&common.pins),
             Arc::clone(&common.slot),
+            Arc::clone(&common.commanded),
         );
         Box::new(move || -> anyhow::Result<Box<dyn Source>> {
-            let s = open()?;
-            switch.replace(s.control());
+            let s = (open.lock().unwrap_or_else(PoisonError::into_inner))()?;
+            let control = s.control();
+            // T-534: a reopened device starts where *it* defaults to, not where the run was
+            // moved. On a live run the commanded window is the truth (a re-plumb or an in-place
+            // retune set it), so it is re-sent before the first read; otherwise the segment's
+            // [`WindowGuard`] would drop every block of the new pass waiting for a window the
+            // device was never told about. A fixed-window run has nothing to re-send.
+            if live {
+                let (window, _) = commanded.get();
+                control
+                    .set_sample_rate(window.1)
+                    .and_then(|()| control.tune(window.0))
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "re-sending {} Hz / {} Hz to the reopened source failed: {e}",
+                            window.0,
+                            window.1
+                        )
+                    })?;
+            }
+            switch.replace(control);
             Ok(Calibrated::wrap(Lent::wrap(s, &slot), &pins))
         }) as SourceFactory
     });
@@ -2242,7 +2275,7 @@ fn recover(sup: &Supervisor, failure: Failure) -> Result<Vec<Worker>, String> {
                 c.counters.stream_time_ns.load(Ordering::Relaxed),
             ),
         };
-        match start_segment(c, *p, info, source, None, Some(window)) {
+        match start_segment(c, *p, info, source, Some(window)) {
             Ok(started) => {
                 inc(&c.stats.capture_recoveries);
                 return Ok(install(sup, started, window, class, None));
@@ -2424,7 +2457,7 @@ fn replumb(common: &Common, old: Arc<Shared>, req: &Replumb) -> Result<Replumbed
         ),
     };
     let started =
-        start_segment(common, parts, info, source, None, Some(window)).map_err(|f| Failure {
+        start_segment(common, parts, info, source, Some(window)).map_err(|f| Failure {
             parts: f.parts,
             why: format!("starting the new segment: {:#}", f.error),
         })?;
