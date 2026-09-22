@@ -163,6 +163,57 @@ pub fn close(mut ws: Ws) {
     let _ = drain(&mut ws);
 }
 
+/// Attempts allowed for a step that a transient refusal can spoil. A bound on ATTEMPTS, not on
+/// wall clock: the cap's own verdict still fails on the first try.
+const TRIES: u32 = 8;
+
+/// Is this refusal the LISTENER CAP's verdict? `503 busy` naming the listener limit
+/// (`hk_pipeline::chains::budget`). The other `503 busy` is the CPU budget, and every other
+/// refusal is about the source or the selection — none of them is a statement about the cap.
+fn is_listener_limit(r: &Value) -> bool {
+    r["status"] == 503
+        && r["code"] == "busy"
+        && r["reason"]
+            .as_str()
+            .is_some_and(|s| s.contains("listener limit"))
+}
+
+/// Opens a listener and returns once its slot is admitted and its header has arrived.
+///
+/// **T-603.** This suite used to read *any* refusal as "the cap refused a listener". A Listen open
+/// is also refused when the looping replay is between segments (`503 replumbing`), when the window
+/// moved under the request (`409 outside-window`), when the probe was starved of ring samples
+/// (`504 probe-timeout`) or when the chunk the probe happened to land on carries no recognisable
+/// analog mode (`422`) — transient states of the *source*, every one of them likelier the busier
+/// the box is, and none of them a decision of the cap. Those are re-requested; the cap's own
+/// refusal fails here immediately, because the claim under test is the cap's ORDERING and a cap
+/// that refuses while a slot is free is a real bug, not a slow machine.
+fn open_admitted(addr: SocketAddr, query: &str, busy_seen: &mut u64) -> (Ws, StreamHeader) {
+    for attempt in 1..=TRIES {
+        let mut ws = open(addr, query);
+        match first(&mut ws) {
+            Ok(h) => return (ws, h),
+            Err(r) => {
+                if r["code"] == "busy" {
+                    *busy_seen += 1;
+                }
+                assert!(
+                    !is_listener_limit(&r),
+                    "[{TAG}] the cap refused a listener while only {} of {} slots were held: {r}",
+                    listen_counter(addr, "active"),
+                    status(addr)["listen"]["budget"]["max_listeners"]
+                );
+                eprintln!(
+                    "[{TAG}] attempt {attempt}/{TRIES}: refusal that is not the cap's, \
+                     re-requesting: {r}"
+                );
+                close(ws);
+            }
+        }
+    }
+    panic!("[{TAG}] {TRIES} listen requests in a row were refused for non-cap reasons");
+}
+
 /// Mean power of `x` at `f` over Hann-windowed segments (Hz resolution `fs / seg`).
 pub fn band_power(x: &[f32], fs: f64, f_lo: f64, f_hi: f64) -> f64 {
     const SEG: usize = 4800;
@@ -204,8 +255,10 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
     let (emitter, f_center, bw) = found_blind(addr, &truth, 0.0);
 
     let started = Instant::now();
-    let mut ws = open(addr, &format!("emitter={emitter}"));
-    let header = first(&mut ws).unwrap_or_else(|r| panic!("[{TAG}] refused: {r}"));
+    // Every `503 busy` this test provokes, cap or CPU budget, so the counter assertion at the end
+    // states exactly what happened instead of assuming one.
+    let mut busy_seen = 0u64;
+    let (mut ws, header) = open_admitted(addr, &format!("emitter={emitter}"), &mut busy_seen);
     eprintln!(
         "[{TAG}] header after {:.2} s: {}",
         started.elapsed().as_secs_f64(),
@@ -226,16 +279,71 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
         "[{TAG}] demodulated channel {channel} Hz is the truth station"
     );
 
-    // A second listener (by selection) is admitted; a third is refused at the cap.
-    let mut second = open(
-        addr,
-        &format!("f_lo={}&f_hi={}", f_center - bw / 2.0, f_center + bw / 2.0),
+    // The cap's claim is an ORDERING, not a timing (T-603): while `max_listeners` chains hold
+    // slots, the next request is refused `503 busy` at the listener limit. So the step waits on
+    // the ADMISSION EVENT — the second listener's slot appearing in `listen.active`, the count the
+    // cap itself reads — and only then issues the third. Nothing here bounds elapsed time.
+    let range = format!("f_lo={}&f_hi={}", f_center - bw / 2.0, f_center + bw / 2.0);
+    let max_listeners = status(addr)["listen"]["budget"]["max_listeners"]
+        .as_u64()
+        .expect("the cap in force");
+    let (second, refused) = 'cap: {
+        for attempt in 1..=TRIES {
+            let (second, _) = open_admitted(addr, &range, &mut busy_seen);
+            let active = listen_counter(addr, "active");
+            if active < max_listeners {
+                // A chain ended under us, so the cap is no longer full and has no verdict to give.
+                eprintln!(
+                    "[{TAG}] attempt {attempt}/{TRIES}: {active} of {max_listeners} slots held \
+                     after the second was admitted; re-running the cap step"
+                );
+                close(second);
+                continue;
+            }
+            let mut third = open(addr, &format!("emitter={emitter}"));
+            match first(&mut third) {
+                Err(r) => {
+                    if r["code"] == "busy" {
+                        busy_seen += 1;
+                    }
+                    assert_eq!(
+                        drain(&mut third),
+                        (0, Some(4503)),
+                        "[{TAG}] a refused listener sends no audio and closes 4503"
+                    );
+                    break 'cap (second, r);
+                }
+                Ok(h) => {
+                    // Admitting one more is a CAP VIOLATION only if more slots are now held than
+                    // the cap allows — `listen.active` is the very count admission reads, so this
+                    // is the cap's own arithmetic and not an inference from timing. Otherwise a
+                    // chain ended and freed a slot, so the cap was never full and had no verdict
+                    // to give: re-run the step. (The released-slot case cannot be read off
+                    // `detached`: the chain frees its slot *before* it counts itself detached.)
+                    let held = listen_counter(addr, "active");
+                    assert!(
+                        held <= max_listeners,
+                        "[{TAG}] {held} listeners are running at once with max_listeners = \
+                         {max_listeners}: the cap admitted one past its own limit: {}",
+                        serde_json::to_string(&h).unwrap()
+                    );
+                    eprintln!(
+                        "[{TAG}] attempt {attempt}/{TRIES}: a chain freed its slot before the \
+                         third request landed ({held} of {max_listeners} held); re-running the \
+                         cap step"
+                    );
+                    close(third);
+                    close(second);
+                }
+            }
+        }
+        panic!("[{TAG}] the cap step never ran with {max_listeners} slots held");
+    };
+    assert!(
+        is_listener_limit(&refused),
+        "[{TAG}] the request past the cap must be refused AT THE LISTENER LIMIT: {refused}"
     );
-    assert!(first(&mut second).is_ok(), "[{TAG}] second listener");
-    let mut third = open(addr, &format!("emitter={emitter}"));
-    let refused = first(&mut third).expect_err("third listener refused");
     assert_eq!(refused["status"], 503, "{refused}");
-    assert_eq!(drain(&mut third), (0, Some(4503)));
     close(second);
 
     // Collect ≥ 3 s of audio.
@@ -322,7 +430,10 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
     let s = status(addr)["listen"].clone();
     eprintln!("[{TAG}] listen counters: {s}");
     assert_eq!(s["attached"], s["detached"]);
-    assert_eq!(s["refused_busy"], 1);
+    // Counts, not a guess: every `503 busy` the run recorded is one this test provoked, and at
+    // least one of them was the cap refusing the request past the limit.
+    assert!(busy_seen >= 1, "[{TAG}] the cap refusal was never counted");
+    assert_eq!(s["refused_busy"], busy_seen, "{s}");
     assert_eq!(s["refused_class"], 0);
 
     live.handle.stop();

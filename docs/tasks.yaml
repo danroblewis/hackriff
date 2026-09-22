@@ -19678,6 +19678,52 @@ tasks:
       under deliberate load before and after - "it passes now" on a quiet machine is the evidence
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
+    notes: |
+      WORKED 2026-09-21 on branch task-t603 (worker). What was varied, and the answer.
+      REPRODUCED, and NOT by generic load. 24 single-test runs at 8-way process parallelism (load
+      ~21) passed 24/24; what reproduces it is the ONE variable the acceptance path actually
+      changes - IN-BINARY parallelism. Running the whole `acceptance_m0` binary through plain
+      `cargo test` at its DEFAULT thread count (28 on this box, which is what the gate ran before
+      the RUST_TEST_THREADS cap) failed the listen test in 2 of 3 runs at load 16-19:
+        - run 2 failed at listen.rs:236 `expect_err("third listener refused")` - the THIRD
+          listener was ADMITTED (stream_id listen/3), because a slot had been freed between the
+          second's admission and the third's request;
+        - run 3 failed at listen.rs:234 with the gate's exact message, `[SIGNAL-062/listen] second
+          listener` - a refusal of the SECOND listener, and the old assertion printed nothing
+          about which refusal it was, which is why five minutes of triage buys nothing.
+      So the cap assertion was load-sensitive in BOTH directions, and the old code could not tell
+      either apart from a cap bug.
+      THE FIX (tests/e2e/tests/acceptance/listen.rs only, 122 insertions):
+        - `is_listener_limit()`: the cap's verdict is `503 busy` NAMING the listener limit. The
+          other `503 busy` is the CPU budget; `503 replumbing`, `409 outside-window`, `504
+          probe-timeout` and `422 no-analog-mode` are transient states of the SOURCE. None of
+          those is a statement about the cap.
+        - `open_admitted()`: re-issues a request refused for a non-cap reason, a BOUNDED NUMBER OF
+          ATTEMPTS (8) and printing each; the cap's own refusal still fails on the first try. No
+          wall clock was lengthened anywhere.
+        - the cap step waits on the ADMISSION EVENT - `listen.active` reaching `max_listeners`,
+          the very count `Slot::claim` reads - and only then issues the request past the cap. If a
+          chain frees its slot under it, it re-runs the step instead of recording a verdict about
+          a cap that was not full. A third listener being admitted is a violation iff
+          `listen.active > max_listeners`, which is the cap's own arithmetic (it cannot be read
+          off `detached`: a chain releases its slot BEFORE it counts itself detached).
+        - the final counter assertion is now `refused_busy == busy_seen`, the number this test
+          provoked, instead of a hard-coded 1.
+      AFTER: 6 of 6 full-binary runs at the same 28-way parallelism passed (details in the report).
+      RED PROOF: with the cap broken in `crates/hk-pipeline/src/chains/budget.rs`
+      (`listeners >= max_l` -> `>= max_l + 1`), the fixed test failed 2 of 2 runs at listen.rs:319
+      with "3 listeners are running at once with max_listeners = 2"; budget.rs was then restored
+      and the test is green.
+      THE AUDIT (the number the ticket asked for): ALL 125 hk-e2e tests are outside the nextest
+      group that claims them. `.config/nextest.toml`'s FIRST override pins `package(hk-e2e)` into
+      heavy-serial, and it has never applied to a single run: every recipe that runs hk-e2e uses
+      plain `cargo test`, and every nextest recipe excludes hk-e2e by name. Of the 125, 20 drive
+      the live LOOPING harness and so assert against transient pipeline state; this ticket fixes
+      1, and the other 19 still read any refusal as a verdict. Filed as T-631 (the dead override -
+      decide: run hk-e2e under nextest, or delete the override and say where parallelism lives)
+      and T-632 (the 19 tests, by file).
+      NOT TOUCHED: `.config/nextest.toml` and the `justfile` are unchanged by this branch, so it
+      does not force the full gate on their account.
   - id: T-604
     milestone: M2-hardening
     title: The bridge re-plumb test read a 503 body that had not arrived yet - a tungstenite tail race, not the wait it looked like
@@ -20496,6 +20542,86 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+  - id: T-631
+    milestone: M2-hardening
+    title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
+    status: todo
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: small
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 by T-603, which reproduced the listen acceptance failure 2 times in 3.
+      `.config/nextest.toml` has, as its FIRST override, `filter = 'package(hk-e2e)' ->
+      test-group = heavy-serial` (max-threads = 1), and its header says the group exists because
+      "tests/e2e (hk-e2e): the harness + M0 suite drive the whole pipeline end to end and spawn
+      real processes/servers". THAT OVERRIDE HAS NEVER APPLIED TO A SINGLE TEST RUN. Every recipe
+      that runs hk-e2e - the M0 slice recipe, the harness recipe, the six milestone recipes, and
+      therefore the CI acceptance job - uses PLAIN `cargo test`, which does not read
+      `.config/nextest.toml` at all; and every recipe that DOES use nextest (`just test-rust`,
+      `just test-doc`, `just test-seq`) excludes hk-e2e by name through `just _crate-scope
+      hk-e2e`. So all 125 `#[test]`s in hk-e2e run with nextest's config believing it covers them
+      and cargo test's semantics actually governing them. T-603 added
+      `RUST_TEST_THREADS=${RUST_TEST_THREADS:-6}` to the two recipes, which caps the
+      self-parallelism but leaves the config lying.
+      DECIDE AND MAKE THE TREE SAY IT, one of:
+        (a) run the hk-e2e suites through nextest (`cargo nextest run -p hk-e2e -E
+            'binary(acceptance_m0)'`), which makes the group real and lets the per-binary
+            serialisation be expressed where every other suite expresses it; or
+        (b) DELETE the `package(hk-e2e)` override and state in both files that hk-e2e's
+            parallelism is `RUST_TEST_THREADS` in the justfile, nowhere else.
+      Whichever is chosen, the measurement that must survive is T-603's: the M0 binary at cargo
+      test's DEFAULT parallelism (28 on this box) failed the listen test in 2 of 3 runs at load
+      ~16-19; at 8-way parallelism 24 of 24 single-test runs passed. State the number the recipes
+      end up with and why.
+      Touching `.config/nextest.toml` or the `justfile` forces the FULL gate by design.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603) from the audit its ticket asked for. T-603
+      fixed the one test that sank a gate; this is the structural half.
+  - id: T-632
+    milestone: M2-hardening
+    title: 19 live-harness hk-e2e tests still read ANY on-demand refusal as a verdict, the defect T-603 fixed in one of them
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    model: sonnet
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      AUDIT 2026-09-21 (T-603). 20 of hk-e2e's 125 tests drive the LIVE, LOOPING blind harness
+      (`blind_live*` / `listen_service`), so they assert against transient pipeline state rather
+      than a stored product. A Listen/tap open on such a run can be refused for reasons that say
+      nothing about what the test is asserting: `503 replumbing` between segments, `409
+      outside-window`, `504 probe-timeout` when the probe is starved of ring samples, `422
+      no-analog-mode` when the probe lands on a chunk with nothing recognisable in it. T-603
+      reproduced exactly that - and its mirror image, a slot FREED between two requests, which
+      turned an expected refusal into an admission - 2 times in 3 at cargo test's default
+      parallelism.
+      ONE of the 20 (`acceptance_m0 listen::signal_062_...`) now retries non-verdict refusals and
+      asserts on counts and ordering. THE OTHER 19 DO NOT:
+        - `tests/e2e/tests/stream_external.rs` (2): opens `/ws/open/listen` directly and
+          `panic!("refused: {t}")` on any non-header first frame. No retry at all.
+        - `tests/e2e/tests/concurrent_demod.rs` (5): its `open()` retries 409 and code
+          `replumbing` only, so 422/504 and the CPU-budget `503 busy` are fatal.
+        - `tests/e2e/tests/refine.rs` (2) and `tests/e2e/tests/listen_live.rs` (1): retry
+          `matches!(e.status, 409 | 503)` only - 422 and 504 are fatal.
+        - `tests/e2e/tests/acceptance/tutorial_{rds,adsb,pocsag,acars}.rs` (9): `tail()` opens a
+          stage/inspector tap over TCP and fails the test on a refusal frame in `read_header`.
+      FIX SHAPE, from T-603: name the refusals that are the SUBJECT of the assertion (a cap's
+      `503 busy` at the listener limit, a legal gate's 403) and fail on those immediately; re-issue
+      the others a BOUNDED NUMBER OF ATTEMPTS, printing each. Bound attempts, never wall clock -
+      lengthening a wait makes the failure rarer, which is the pattern this project rejects. Where
+      a test asserts a cap or a count, assert the count the admission path itself reads
+      (`listen.active`), not what a request happened to do in time.
+      VERIFY LIKE T-603 DID: reproduce before the change at cargo test's default parallelism
+      (`--test-threads 28` on the M0/harness binaries), state n-of-m before and after, and prove
+      each fixed assertion still goes RED for the real defect it is there to catch.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603). Related: T-631 (why none of these are covered
+      by the nextest group that claims them).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
