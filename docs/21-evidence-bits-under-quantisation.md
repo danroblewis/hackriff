@@ -285,3 +285,16 @@ T-616 (`snr`/`evm` are one statistic — ADR-0015 §1.3 must not sum correlated 
 T-617 (quantile tables must declare their achievable bit levels and their `n`),
 T-618 (calibration-table sizing and the ADC-fill conditioning key for M-2),
 T-619 (extend this measurement to the AM/OOK and C4FM paths before they ship an `evidence()`).
+
+**T-616, T-617 and T-618 are answered by [ADR-0015 §13](adr/0015-decoder-synthesis-contracts.md)**
+(2026-09-21): within a stage, declared dependence groups contribute their **maximum**, not their
+sum, and undeclared means one group; a calibration table declares its expressible levels, its
+`N` and its `admissible_bits`, and **refuses** a level it cannot express instead of returning
+the nearest quantile; tables are conditioned on **ADC fill** in two measured buckets
+(σ ≥ 0.5 LSB and clip ≤ 30 % gets a table, everything else gets none and scores 0 bits), at a
+budgeted 4 096 windows per cell. That amendment deliberately leaves
+[ADR-0022](adr/0022-false-confirm-budget.md)'s confirm gate untouched — §8 above recommends
+the maximum rule to it, and §2.1 of that ADR had already excluded every calibrated metric from a
+confirm, so §5.1's finding costs search recall and display honesty, not validity.
+**T-660** carries the Rust conformance test and the generator, which need `hk-synth` to exist.
+T-619 remains open.
