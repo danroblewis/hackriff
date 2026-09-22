@@ -249,6 +249,11 @@ you cannot fix in scope goes in your result: text with the exact evidence; the c
 HAND BACK: your final message must end with one line, exactly one of:
 HANDBACK: DONE
 HANDBACK: BLOCKED <one line: what specifically you need>
+HANDBACK: CANCEL <one line: why this ticket needs NO work - already done by T-x at <commit>, or obsoleted by <decision>>
+CANCEL is yours to propose when the evidence is in the repo: record it on your branch with
+`just task set {t['id']} status=cancelled cancelled_reason='<the same evidence>'` and commit that, so the
+cancellation is reviewed and lands like code. If `just task` is not available, hand back CANCEL anyway and the
+coordinator decides. Never silently exit with no commits - that reads as a lost agent, not a finding.
 
 TICKET:
 {body}
@@ -301,7 +306,11 @@ def launch(t, dry):
 def launch_review(claim):
     tid, branch, wt = claim["ticket"], claim["branch"], claim["wt"]
     d = f"{WORKDIR}/{tid}"
-    prompt = f"""Review branch {branch} for hackriff before it is queued for merge. The diff is `git diff main...{branch}`
+    cancel = c_reason = claim.get("cancel_reason")
+    extra = (f"\nTHIS BRANCH CANCELS THE TICKET. The worker's reason: {cancel}\nYour job is to verify that reason against the repo "
+             "(is the work really done at the commit named? is the decision real and does it obsolete THIS ticket?). "
+             "PASS only if the evidence holds; FAIL names what is missing.\n") if cancel else ""
+    prompt = f"""Review branch {branch} for hackriff before it is queued for merge. The diff is `git diff main...{branch}`{extra}
 (run it from {wt}). The ticket text is in {d}/brief.md and the worker's report in {d}/out.json (field "result").
 Check what the reviewer agent definition says to check, with CLAUDE.md's invariants and the thin-client rule.
 Do not edit anything. Your final message must end with exactly one line:
@@ -409,6 +418,17 @@ def reap(claims, dry):
             why = next((l for l in text.splitlines() if l.startswith("HANDBACK: BLOCKED")), "")
             attention(tid, c["branch"], "BLOCKED", why[18:220])
             record_done(c, "blocked", res)
+        elif "HANDBACK: CANCEL" in text:
+            why = next((l for l in text.splitlines() if l.startswith("HANDBACK: CANCEL")), "")[17:300]
+            if ahead > 0 and not dirty:
+                # The worker recorded the cancellation on its branch: an Opus reviewer confirms the
+                # evidence whatever the worker's model, then it lands through the gate like code.
+                record_done(c, "cancel-to-review", res)
+                claims[tid] = dict(launch_review(dict(c, cancel_reason=why)), state="running")
+            else:
+                c["state"] = "cancel-proposed"
+                attention(tid, c["branch"], "CANCEL_PROPOSED", why or "no reason given")
+                record_done(c, "cancel-proposed", res)
         elif dirty:
             record_done(c, "uncommitted", res)
             if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS:
