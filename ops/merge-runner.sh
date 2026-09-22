@@ -48,6 +48,8 @@ BULKMARK=$S/bulk-in-progress
 # this script already keeps rather than counted a second way.
 LANDED=$S/landed.jsonl
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
+# Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
+BULK_MAX=${BULK_MAX:-15}
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
@@ -157,7 +159,13 @@ process(){
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
-  if just gate-merge >>"$LOG" 2>&1; then
+  local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
+  just gate-merge >>"$LOG" 2>&1; rc=$?
+  # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
+  # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
+  # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
+  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge"; rc=$?; fi
+  if [ "$rc" -eq 0 ]; then
     # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
     #
     # `git commit` with no MERGE_HEAD writes an ORDINARY commit of whatever is in the index. On
@@ -256,6 +264,32 @@ ready_filter(){
 # merger to main, nothing has been pushed, and the batch is reconstructible from the
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
+FLAKY=$S/flaky.jsonl
+flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
+  # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
+  # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
+  # `--base` gate would diff the wrong thing.
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t rc
+  # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
+  # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
+  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
+  [ -z "$tests" ] && { log "TRIAGE: no FAIL lines found (lint/build failure?) - not a flake candidate"; return 1; }
+  filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
+  log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
+  # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
+  # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
+  # the reserve the gate always has.
+  if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+    log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
+    return $rc
+  fi
+  log "TRIAGE: a test FAILS alone -> a real defect in this merge"
+  return 1
+}
+
 try_bulk(){
   local branches=("$@") tickets="" b wt base after rc
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
@@ -308,7 +342,18 @@ try_bulk(){
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
+  # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
+  # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
+  # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
+  local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
+  # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
+  # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
+  # recorded in flaky.jsonl, and the whole gate is retried ONCE (workers are bounded, so the
+  # gate's reserved cores are the gate's - nothing is suspended). Only a test that fails alone,
+  # or a second red gate, still isolates.
+  if [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
@@ -389,6 +434,14 @@ while true; do
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     set -- $ready
+    # BATCH CAP (user, 2026-09-22: "reduce batch size to 15"). A 20-branch batch that goes red
+    # is 20 branches' worth of isolation; the rest of the queue keeps its order and goes in the
+    # next batch, so nothing is dropped - the tail is written back BEFORE anything runs.
+    if [ "$#" -gt "$BULK_MAX" ]; then
+      log "BULK cap: $# ready, taking the first $BULK_MAX; the other $(( $# - BULK_MAX )) stay queued in order"
+      i=0; for b in "$@"; do i=$((i+1)); [ "$i" -gt "$BULK_MAX" ] && echo "$b" >> "$QUEUE"; done
+      set -- "${@:1:$BULK_MAX}"
+    fi
     if [ "$#" -eq 1 ]; then
       process "$1" || echo "$1" >> "$QUEUE"
     elif [ "$#" -ge 2 ]; then
