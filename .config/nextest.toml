@@ -262,8 +262,36 @@ test-group = 'e2e-bounded'
 filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
 test-group = 'heavy-serial'
 
+# T-SDET (2026-09-22): the blanket `package(hk-api) or package(hk-cli)` this replaces cost 244 s of
+# the workspace run's CRITICAL PATH for no resource reason. The rule above is "binds real TCP ports
+# or spawns a daemon process" — and three hk-api binaries do neither. `tile_ceiling`, `tile_cost`
+# and `tile_no_generation` call `hk_api::tiles::tile_read` in-process against a `TempDir` named with
+# `process::id()` + `thread::id()`: grep for `TcpListener::bind`, `TcpStream::connect` or
+# `local_addr()` in them and you get ZERO hits, against 8-14 in every other hk-api test binary.
+# They are simply expensive (a 12 x 15 lattice walk on an empty store, by design — see the file's
+# own header), and `max-threads = 1` was serialising CPU work against itself.
+#
+# MEASURED, this worktree, `-p hk-api -E 'binary(tile_ceiling)+binary(tile_cost)+binary(tile_no_generation)'`,
+# 10 tests, CARGO_BUILD_JOBS=2 on a box at load ~12-20:
+#
+#   in `heavy-serial` (max-threads = 1)   243.9 s wall, 195 s CPU
+#   ungrouped, --test-threads 3           116.4 s wall, 189 s CPU   -52 %
+#
+# The CPU is identical; only the serialisation goes. And the saving is larger than the wall figure
+# says, because the group IS the workspace run's critical path (docs/test-speed-review-2026-09-22.md
+# §2: run wall == group sum to under a second, 17 of 17 gates), so these seconds come off the run
+# one-for-one while the 7 free threads they move onto had idle capacity in every gate measured.
+# In the gates themselves those three binaries were 171 s of a ~1000 s critical path.
+#
+# hk-cli keeps the blanket: api_contract, control_http and iq_buffer_allocation_http start a real
+# `hk serve`, ctrl_c spawns `hk`/`hackriffd` as child processes, and temp_dir_hygiene asserts on
+# the shared temp directory. Every hk-cli binary earns its place; three hk-api ones did not.
 [[profile.default.overrides]]
-filter = 'package(hk-api) or package(hk-cli)'
+filter = 'package(hk-api) and not (binary(tile_ceiling) or binary(tile_cost) or binary(tile_no_generation))'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'package(hk-cli)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
