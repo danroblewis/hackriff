@@ -22,10 +22,10 @@ Do not end a turn waiting on something backgrounded (a build, a gate). If someth
 Run it in isolation on a quiet machine. Fails alone → it's a **real bug** (yours or pre-existing) — fix it or report it precisely, don't paper over it. Passes alone / fails under load → a load-flake; note it, don't let it block you, and flag it for the `deflaker`. Never quarantine or retry a test that fails in isolation.
 
 ## Report — `handback.json` is the contract
-Write **`handback.json` in the root of your worktree** before you stop; the work runner (`ops/work-runner.py`) reads it, not your prose, and a ticket with no readable hand-back is treated as NO WORK. Shape:
+Write **`handback.json` at the exact path your brief names** (`$HACKRIFF_OPS/work/<T-id>/handback.json`) before you stop; the work runner (`ops/work-runner.py`) reads it, not your prose. A hand-back with neither the file nor the fallback line is logged as `NO_HANDBACK` and judged only by your commits. Shape:
 
 ```json
-{"outcome": "done|blocked|cancel", "summary": "one paragraph", "commits": ["sha …"],
+{"ticket": "T-nnn", "outcome": "done|blocked|cancel", "summary": "one paragraph", "commits": ["sha …"],
  "files": ["paths you changed"], "tests": [{"cmd": "just test-crate hk-store", "exit": 0, "summary": "42 passed"}],
  "precheck": {"exit": 0}, "use_cases": ["SIGNAL-012"],
  "blocked": {"needs": "what specifically unblocks it (user decision, hardware, another ticket)"},

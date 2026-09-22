@@ -509,8 +509,16 @@ def reap(claims, dry):
         if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
             bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        # How the hand-back arrived is the contract's own reliability measure: `json` is the
+        # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
+        # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
+        # `jq -r .how handbacks.jsonl | sort | uniq -c`, and `briefed` says whether the brief asked.
+        how = "json" if hb else ("line" if any(l.startswith("HANDBACK:") for l in text.splitlines()) else "none")
         if hb_err:
-            log(f"HANDBACK {tid}: {hb_err} - falling back to the text line ({outcome})")
+            log(f"HANDBACK {tid}: {hb_err} - {'falling back to the text line' if how == 'line' else 'NO_HANDBACK, judged by commits alone'} ({outcome})")
+        with open(f"{S}/handbacks.jsonl", "a") as f:
+            f.write(json.dumps({"ts": int(time.time()), "ticket": tid, "how": how, "outcome": outcome,
+                                "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
         if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
