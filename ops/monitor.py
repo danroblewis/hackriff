@@ -566,6 +566,19 @@ def merge_status():
                 ahead.append({"branch": b, "ticket": _tk(b), "commits": n})
     except Exception:
         pass
+    # What "ahead of main" MEANS depends on the work runner's claim: a worker still running (the
+    # commit is its first, more may come), a branch in the reviewer stage, one it already queued,
+    # or a branch nobody owns. The panel used to call all four "waiting" (2026-09-22).
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        for a in ahead:
+            c = claims.get(a["ticket"] or "", {})
+            st, kind = c.get("state"), c.get("kind")
+            a["state"] = ("review" if st == "running" and kind == "review" else "working" if st == "running"
+                          else "queued" if st == "queued" else st or "unowned")
+    except Exception:
+        for a in ahead:
+            a["state"] = "unowned"
     gates_running = 0
     try:
         gates_running = len([1 for l in out.splitlines() if "just gate-merge" in l and " grep " not in l])
@@ -1344,7 +1357,7 @@ async function tick(){
   // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
   {
     const testing=mg.testing||[], ahead=mg.ahead||[];
-    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' +'+t.commits):''}</span></div>`;
+    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' · '+t.commits+' commit'+(t.commits===1?'':'s')+' ahead of main'):''}</span></div>`;
     const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
     const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
     const mage=mg.merge_age_s||mg.elapsed_s||0;
@@ -1352,7 +1365,8 @@ async function tick(){
     const gl=(mg.state==='merging'||mg.gate)?`<div style="margin-bottom:3px"><span style="color:${over?'#E47B68':'#F0A542'}">⏱ ${dur(mage)}</span> <span style="color:#8595A0">· ${esc(mg.phase||mg.gate||'staged (between phases)')}</span>${mg.typical_s?`<span style="color:#5A6973"> · ~${Math.round(mg.typical_s/60)}m typical</span>`:''}</div>`:'';
     const hdr=t=>`<div style="margin:6px 0 2px;color:#8595A0;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${t}</div>`;
     const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
-    const wt=ahead.length?ahead.map(t=>row(t,'⏳ waiting','#8595A0')).join(''):'<div style="color:#5A6973">— none waiting —</div>';
+    const TAG={working:['🔧 worker running','#52C2AE'],review:['🔍 in review','#A395E0'],queued:['⏳ queued for merge','#F0A542'],unowned:['· unowned branch','#8595A0']};
+    const wt=ahead.length?ahead.map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join(''):'<div style="color:#5A6973">— none waiting —</div>';
     const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
