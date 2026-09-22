@@ -36,7 +36,7 @@ Write **`handback.json` at the exact path your brief names** (`$HACKRIFF_OPS/wor
 `done` is refused over a failing test, so the `tests` entries must be real exit codes from the commands you ran. `cancel` is a **proposal** with evidence — a reviewer confirms it, you do not close the ticket. If you cannot write the file, print one line `HANDBACK: <the same JSON>` as your last output. Then stop — you don't merge, you don't spawn subagents.
 
 ## The board is not yours to edit
-Never edit `docs/tasks.yaml` by hand (a hook blocks it). Your result reaches the board through `handback.json`; anything else about the ticket — a note, a dependency you found — goes in `observed_but_not_chased` or via `just task note <T-id> "<text>"`.
+Never edit `docs/tasks.yaml` by hand (a hook blocks it). Your result reaches the board through `handback.json` (the runner writes it with `just task result`); anything else about the ticket — a note, a dependency you found — goes in `observed_but_not_chased` or via `just task note <T-id> --text "<text>"`.
 
 ## Before you hand back
 Run **`just precheck <the crates you touched>`** — a whole-tree `cargo fmt --check` plus clippy over those crates, with `-D warnings`. It takes seconds to a minute. `just lint` is two halves and the merge gate runs both, so unformatted code fails a ~20-minute gate exactly as hard as a real lint does; T-574 lost two gate cycles that way, one of them to rustfmt whitespace in a test file. This is not the gate and does not replace it — the coordinator gates at merge — it is the cheap check that stops formatting reaching the gate at all.

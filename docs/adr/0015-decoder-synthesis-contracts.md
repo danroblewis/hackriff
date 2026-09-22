@@ -1077,8 +1077,14 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
    splits the bucket. The budget above then multiplies by the number of buckets, which is why it
    is stated per cell.
 5. **All of it, on blocks that were never measured.** Everything above rests on the FSK path at
-   n = 112 plus one classifier feature. **T-619** extends the measurement to AM/OOK and C4FM; a
-   different dependence structure there changes §13.1's table, not its rule.
+   n = 112 plus one classifier feature. **T-619** extended the measurement to AM/OOK and C4FM
+   (docs/21 §10, 2026-09-22): §13.1's rule survives and its table gains two groups
+   (`{eye_open, snr, evm}` on AM/OOK, `{evm, offset_ratio}` on C4FM, the first at ρ = 1.000
+   exactly), and **item 4's trigger fired** — the null side was measured to 77 % clipped and the
+   AM/OOK metrics over-claim 5–6 bits there, so the `nominal` bucket must split or tighten
+   (measured: σ ≥ 1.0 LSB and clip ≤ 10 % holds every path to ≤ 1.2 bits at a 6-bit claim). That
+   amendment is not taken here. docs/21 §10.4 also shows the runtime rule must measure the
+   **noise floor's** fill, not the window's.
 
 ### 13.6 Deltas to §§1–12
 
@@ -1104,3 +1110,65 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
 measures the 0.3–0.9 band); that 0.25 bits is the right expressibility tolerance; that
 `floor_j = 6` remains achievable at S2/S3 under the maximum rule on a real corpus (T-660); and
 every number inherited from docs/21, which measured one block family at one support.*
+
+---
+
+## 14. Amendment — the incremental region-decode contract (T-265 = [ADR-0017](0017-time-extent-signal-model.md) TM-10, 2026-09-22)
+
+**CONTRACT ONLY.** `POST /api/analyze` still answers `501` for a selection or band target and MAUTO is unscheduled, so nothing here runs a decoder, reads the ring or spawns a thread. ADR-0017 §9 blocked TM-10 on exactly that — *"attempting this earlier means building an incremental scheduler for a pipeline that does not exist"* — while leaving §6 as "a contract now; code when MAUTO is scheduled". This section is that contract written down where the analyze engine will read it, plus the types that make its four failure modes unrepresentable: `hk_pipeline::region` (T-265).
+
+### 14.1 What it is a contract for
+
+CLAUDE.md invariant 5: *"decode operates on a captured region and extends with it; live decoding **extends the region's time extent** and decodes only the newly-arrived part (incremental), never re-decoding what is already done."*
+
+ADR-0017 §6.2 turned that into two rules, and the load-bearing clause is that **the policy belongs to the reader, not to the pipeline, the recipe or the signal**:
+
+> **Rule L** — a reader attached at the live edge obeys ADR-0011 §8.5 unchanged: never a backlog, skip forward when behind, count and flag every skip.
+>
+> **Rule I** — a reader that is a bounded region of the ring processes `[t_start, t_end]` exactly once; extending the region enqueues only `[old_end, new_end]`.
+>
+> **A pipeline has exactly one input reader, so it is exactly one of the two.**
+
+§5's `AnalyzeJob` is a Rule I pipeline. §12's Listen is a Rule L pipeline. §6's burst path is Rule I with a discontinuous acquisition. Nothing in this ADR was ever both, and this section is what stops the first implementation making one.
+
+### 14.2 The objects
+
+| Object | What it is | Rule it carries |
+|---|---|---|
+| `ReaderPolicy` | `live-edge {max_backlog_ns}` \| `bounded-region` | one field, so a pipeline cannot declare both |
+| `PipelinePlan` | one reader policy + the outputs hanging off it | §6.2's "exactly one of the two", structurally |
+| `ReadLedger` | the spans a reader **actually read**, its skips, and the evidence credited from them | §6.3's coverage honesty and §6.4's evidence rule |
+| `RegionJob` | a Rule I job: extent, work queue, ledger, phase | §6.2 Rule I |
+| `RegionPhase` / `Handover` | `Region` → `HandedOver {at, live_from}`, and the record of what fell between | §6.3's "explicit, named state … never an implicit merge" |
+
+**Extent is not coverage.** A `RegionJob`'s *extent* is what the user asked for and it only ever grows; its *coverage* is what the reader got, and it is less whenever the ring had evicted part of the window, a segment boundary fell inside it (§5.3), or a handover abandoned enqueued work. The difference is recorded as skipped time and flagged, never rounded up — *"a coverage bar that silently has holes in it is worse than no coverage bar"*. The acceptance sentence is therefore **"a region job's coverage is exactly the samples it read"**, and it is a test, not a prose claim.
+
+**Closed intervals.** Spans are docs/07 §4 `TimeRange`s, closed `[start, end]`. Two are *contiguous* when the later starts exactly at the earlier's `end` — they meet at one instant of zero duration, so summed durations still equal the union's — *overlap* only when it starts strictly before (the re-read, refused), and leave a *gap* when it starts strictly after. Extending by `[old_end, new_end]` is the ADR-0017 §6.2 formula verbatim, and it is exactly-once under this reading.
+
+### 14.3 The four failure modes, and where each is refused
+
+ADR-0017 §6.3 names two ways to fuse the readers and says of both that *"one of the two contracts breaks silently — always the worst kind"*. Each now has a named error rather than a paragraph:
+
+| § | The mistake | Refused by |
+|---|---|---|
+| §6.2 | re-decoding what is done | `RegionJob::extend_to` answers `None` for an end already handed out; `ReadLedger::read` ⇒ `AlreadyRead` for a span overlapping one already read |
+| §6.3 | fuse onto the **region** reader — audio acquires the batch job's backlog (§12.10's "highest-risk item") | `PipelinePlan::validate` ⇒ `AudioOnBoundedRegion` |
+| §6.3 | fuse onto the **live-edge** reader — the skip discards the samples the job promised to process exactly once, and the job reports complete coverage over a region with holes | `ReadLedger::skip_to` ⇒ `SkipForbidden` under `bounded-region` |
+| §6.4 | a sibling decode output's evidence `n` inflated by time the audio reader skipped | `PipelinePlan::policy_for_output` has no per-output override; `ReadLedger::credit` ⇒ `NotRead` for a span that was not read |
+
+The last one is the one an implementer is most likely to get wrong while believing they are being generous. ADR-0011 §8.9's FM recipe has an `audio` output *and* an RDS `messages` output off the same `fm` node: **one reader, two outputs**, so RDS inherits the audio reader's live-edge policy and its text has a gap whenever the audio skips. That gap is correct and deliberate — the alternative buffers for RDS's benefit and makes the audio late — and it is recorded as a `DISCONTINUITY`. What must not happen is the §2.2 bits ladder counting the skipped seconds as evidence, which is why evidence is credited **against a span in the ledger** rather than against wall time. A user who wants gapless RDS runs a region job over the ring: Rule I, a second pipeline, and exactly the §6.3 shape.
+
+### 14.4 Handover
+
+A region job whose coverage catches the live edge **may** hand over to the live pipeline. That is one transition, out of one state, and it produces a record:
+
+`Handover {at, live_from, gap: Option<TimeRange>, abandoned_ns, flags}` — `gap` is `Some` when the live reader starts after the job's coverage ended; `abandoned_ns` is work that was enqueued and never read; either puts `DISCONTINUITY::GAP` on the record, and only a handover that loses neither is `is_seamless()`. After it the job owns no samples: `extend_to`, `complete` and a second `hand_over` all answer `HandedOver`. Continuing to decode means opening a new job, which is a new reader — never the old one re-pointed at the live edge.
+
+### 14.5 What this does **not** decide
+
+- **No engine.** No scheduler, no thread, no ring read, no `/api/analyze` behaviour change, no route and no schema. `AnalyzeJob.window` (§5.2) already carries `segments`/`samples`/`gaps`; when the engine lands it fills them **from the ledger** rather than from the requested window, and that is the only §5 delta this foresees.
+- **No persistence.** Nothing here is stored. A job's coverage lives as long as the job; `emitter_synthesis` (§5.4) keeps the verdict, not the coverage bar.
+- **Scrub-back audio is still unruled.** ADR-0017 §6.5 flagged it and this does not settle it: `AudioOnBoundedRegion` refuses audio on a *bounded-region* reader, which is the fusion, and says nothing about a future playback reader with its own policy. If one is added it is a **third** `ReaderPolicy`, declared as such, not a bounded region with the audio rule quietly relaxed.
+- **No number is introduced.** `max_backlog_ns` is carried, not defaulted: the runtime's value is `ListenConfig::max_backlog_s` (or a recipe's `input.liveness.max_backlog_s`), and a second spelling of it would be a new drift surface.
+
+*Unverified in this amendment: that the work-queue shape survives contact with the beam search's re-entrancy (§3.1 may want to re-run a stage over a span already read, which is a **re-analysis** of read samples rather than a re-read and is legal under Rule I, but nothing measures it); and whether the UI wants a handover offered automatically when coverage reaches the live edge, or only on request — §6.3 says "may hand over" and this contract does not choose.*

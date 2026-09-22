@@ -40,6 +40,7 @@
 // `applyDeviceAction`, T-343's one gate, on an explicit button press.
 import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
+import { newClientId, setTileClientId } from "../../surface/clientid";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
@@ -610,6 +611,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
 
   // ---- boot ----
   void (async () => {
+    // **Name this page before it asks for its first tile** (T-630): `GET /api/tiles` splits its
+    // four in-flight slots between the clients asking for them, and an unnamed page shares the
+    // anonymous bucket with every other unnamed caller. See `ui/src/surface/clientid.ts`.
+    setTileClientId(newClientId());
     let probe;
     try {
       probe = await probeSurface((path) => client.get(path));
@@ -629,6 +634,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
+        // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
+        survey: (path) => client.get(path),
         windows: () => windows,
         // The ring rules first, so a signal box or selection that crosses one is drawn over it.
         marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],

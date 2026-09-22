@@ -927,6 +927,7 @@ dependencies = [
  "hk-demod",
  "hk-detect",
  "hk-dsp",
+ "hk-ml",
  "hk-model",
  "hk-pipeline",
  "hk-plugins",

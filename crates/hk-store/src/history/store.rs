@@ -134,6 +134,10 @@ impl FloorTrack {
     }
 }
 
+/// T-583: a preview tile at some level of a producer chain, as `(f_block, t_block, tile, rows)` —
+/// the rows being the ones of it that have **not** propagated to the level above.
+type PreviewTile = (i64, i64, Box<Tile>, Vec<(usize, usize, usize)>);
+
 /// The spectrum-history pyramid under one data directory (see the [module docs](super)).
 pub struct Pyramid {
     pub(super) cfg: PyramidConfig,
@@ -187,6 +191,9 @@ pub struct Pyramid {
     /// T-571: tiles consulted to answer a query. Counted behind a shared reference because the
     /// read path takes `&self`; see [`Pyramid::source_tiles_read`].
     source_tiles: std::sync::atomic::AtomicU64,
+    /// T-583: producer rows folded on the READ path by [`Pyramid::live_preview`] to show a
+    /// coarse node's in-progress row. Behind a shared reference for the same reason.
+    preview_rows: std::sync::atomic::AtomicU64,
     buf: Vec<u8>,
     payload: Vec<u8>,
     /// Front-end state and resolved cell shape of the last folded frame **per source** (step
@@ -329,6 +336,7 @@ impl Pyramid {
             row_out: Vec::new(),
             closed_rows: Vec::new(),
             source_tiles: std::sync::atomic::AtomicU64::new(0),
+            preview_rows: std::sync::atomic::AtomicU64::new(0),
             buf: Vec::new(),
             payload: Vec::new(),
             last_state: HashMap::new(),
@@ -495,6 +503,13 @@ impl Pyramid {
     pub fn reset_source_tiles_read(&self) {
         self.source_tiles
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// T-583: producer rows folded on the read path to show coarse nodes' in-progress rows,
+    /// over the life of this pyramid. Bounded by one row per level in the producer chain per open
+    /// tile a read consults, and **zero** for any read of elapsed time.
+    pub fn preview_rows_folded(&self) -> u64 {
+        self.preview_rows.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn count_source_tile(&self) {
@@ -977,11 +992,15 @@ impl Pyramid {
     /// finest one only hears about a row once `2^j` of them have closed, and a chain of
     /// in-progress rows compounds: node `(i, j)` trails the finest row by up to `2^j − 1` of
     /// them, plus the finest level's own still-open column. At the shipped four time levels and a
-    /// 1 s cell that is up to **7 s** at `level_t = 3`, measured at 1, 2 and 4 rows for
-    /// `level_t` 1, 2 and 3. The cells are *correct* throughout — a partial row reads as fewer
-    /// observed seconds, never as wrong values — and node (0, 0), which is the live edge, is not
-    /// affected at all. Whether a zoomed-out pane should instead see its in-progress row is a
-    /// product decision, ticketed rather than assumed.
+    /// 1 s cell that is up to **8 s** at `level_t = 3` (measured on the 4 x 4 test lattice at 0,
+    /// 2, 4 and 8 finest rows for `level_t` 0 to 3, in the worst phase). The cells are *correct*
+    /// throughout — a partial row reads as fewer observed seconds, never as wrong values.
+    ///
+    /// **That trail stays here, and is undone on the read (T-583).** Propagating on commit is
+    /// what makes this fold exactly-once, and doing more on the capture thread is what T-453
+    /// forbids; but a pane must still *see* the rows, so [`Pyramid::live_preview`] folds what is
+    /// in flight into the answer when a reader asks, the way a level-0 read stands in for its own
+    /// open column with [`Tile::column_preview`].
     ///
     /// # Exactly once
     ///
@@ -1068,6 +1087,167 @@ impl Pyramid {
         }
         self.row_queue = q;
         self.row_out = out;
+    }
+
+    /// The `(f_block, t_block)` at the end of `chain` that block `(fb, tb)` of `chain[0]` folds
+    /// into. `chain` must be a producer chain (each level the producer of the next).
+    fn ascend(&self, chain: &[usize], fb: i64, tb: i64) -> (i64, i64) {
+        let (mut fb, mut tb) = (fb, tb);
+        for w in chain.windows(2) {
+            (fb, tb) = self.geom.fold_target(w[0], w[1], fb, tb);
+        }
+        (fb, tb)
+    }
+
+    /// **A coarse node's in-progress row, folded at READ time (T-583).**
+    ///
+    /// [`Pyramid::fold_row_live`] propagates a row to the level above only when that level
+    /// **commits** — the "commits every N" rule, and what makes the fold exactly-once — so a
+    /// chain of in-progress rows compounds: node `(i, j)` trailed the finest closed row by up to
+    /// `2^j − 1` of them, plus level 0's own still-open column. At four time levels and a 1 s cell
+    /// that was up to 7 s of recorded, held, *unshown* data at the top of a zoomed-out pane.
+    ///
+    /// **The product decision T-571 left open (answered here: show it).** CLAUDE.md is explicit
+    /// twice over — *"whenever data exists for that window it must be shown; a surface may render
+    /// grey/empty only where data genuinely does not exist"*, and *"a level that downsamples every
+    /// N rows **adjusts its in-progress top row as rows arrive**"*. A coarse cell that fills in
+    /// under the viewer as its remaining producer rows land is the same thing the live edge
+    /// already does at level 0 with [`Tile::column_preview`], and a partial row reads as fewer
+    /// observed seconds — honest, never a wrong value. Trailing quietly is the failure case the
+    /// display invariant names.
+    ///
+    /// **Why a read-time fold and not a push.** T-453's constraint binds the other end: work on
+    /// the capture thread is paid whether or not anyone looks, and that thread gates the ring.
+    /// Propagating an in-progress row eagerly would also have to be undone before the next one,
+    /// which is a per-node running copy of a producer row — the residency [`Tile::fold_row`]
+    /// refuses. So this runs **only when a reader asks**, exactly like `column_preview`, and costs
+    /// capture nothing.
+    ///
+    /// **Why it cannot double-count.** It never touches the pyramid: it folds into *clones*,
+    /// which are discarded with the answer. What it folds is only what has **not** propagated —
+    /// level 0's open column (which folds upward when it closes) and each node's
+    /// [`Tile::row_pending`] (which folds upward when it commits) — so the committed cells it
+    /// starts from are each still written exactly once by the live cascade.
+    ///
+    /// Returns `None` when nothing is in flight below this address, which is every read of
+    /// elapsed time; the caller then serves the open tile itself.
+    pub(super) fn live_preview(
+        &self,
+        level: usize,
+        fb: i64,
+        tb: i64,
+        margin: f32,
+        pct: (f32, f32),
+    ) -> Option<Box<Tile>> {
+        if !self.cfg.coarse_live || level == 0 || level >= self.geom.n_levels() {
+            return None;
+        }
+        // The producer chain, finest first. Every node has exactly one producer, so it is a path.
+        let mut chain = vec![level];
+        while let Some(from) = self.geom.levels[chain[chain.len() - 1]].from {
+            chain.push(from);
+        }
+        chain.reverse();
+        if chain[0] != 0 {
+            return None;
+        }
+        let bins = usize::from(self.cfg.histogram.bins);
+        let mut scratch = Vec::new();
+        let mut out = Vec::new();
+        // Preview tiles at the current level, each with the rows of it that have not propagated.
+        let mut cur: Vec<PreviewTile> = Vec::new();
+        for (k, &l) in chain.iter().enumerate() {
+            // Seed with the open tiles of this level that hold an un-propagated row and lead to
+            // this address — level 0's open column, or a coarser node's in-progress row. A node
+            // whose own producer is momentarily idle is reached here rather than missed.
+            let mut keys: Vec<(i64, i64)> = self.open[l]
+                .keys()
+                .copied()
+                .filter(|&(cfb, ctb)| {
+                    !cur.iter().any(|e| (e.0, e.1) == (cfb, ctb))
+                        && self.ascend(&chain[k..], cfb, ctb) == (fb, tb)
+                })
+                .collect();
+            keys.sort_unstable();
+            for key in keys {
+                let src = &self.open[l][&key];
+                let (tile, rows) = if l == 0 {
+                    if src.col_t.is_none() {
+                        continue;
+                    }
+                    // The column as it would stand if it ended now: `column_preview`'s statement,
+                    // taken on a clone so the occupancy and percentiles it decides fold upward too.
+                    let mut t = Box::new((**src).clone());
+                    let Some(row) = t.close_column(margin, pct, &mut scratch) else {
+                        continue;
+                    };
+                    (t, vec![(row, 0, self.geom.nf)])
+                } else {
+                    let Some(r) = src.row_pending else {
+                        continue;
+                    };
+                    (Box::new((**src).clone()), vec![r])
+                };
+                self.count_source_tile();
+                cur.push((key.0, key.1, tile, rows));
+            }
+            let Some(&up) = chain.get(k + 1) else { break };
+            let (ff, tf) = (self.geom.levels[up].f_factor, self.geom.levels[up].t_factor);
+            let mut next: Vec<PreviewTile> = Vec::new();
+            for (cfb, ctb, child, rows) in cur.drain(..) {
+                let (pfb, ptb) = self.geom.fold_target(l, up, cfb, ctb);
+                if self.sealed[up].contains_key(&(ptb, pfb)) {
+                    // Sealed: it is already the whole of its block, and nothing may change it.
+                    continue;
+                }
+                let i = match next.iter().position(|e| (e.0, e.1) == (pfb, ptb)) {
+                    Some(i) => i,
+                    None => {
+                        let t = match self.open[up].get(&(pfb, ptb)) {
+                            Some(t) => {
+                                self.count_source_tile();
+                                Box::new((**t).clone())
+                            }
+                            // Its first producer row is still in flight, so it does not exist yet.
+                            None => Box::new(Tile::new(
+                                TileKey {
+                                    scheme: self.cfg.scheme,
+                                    level: up as u8,
+                                    f_block: pfb,
+                                    t_block: ptb,
+                                },
+                                self.geom.nf,
+                                &self.geom.levels[up],
+                                bins,
+                            )),
+                        };
+                        next.push((pfb, ptb, t, Vec::new()));
+                        next.len() - 1
+                    }
+                };
+                for (t, lo, hi) in rows {
+                    out.clear();
+                    next[i].2.fold_row(&child, t, lo, hi, ff, tf, &mut out);
+                    self.preview_rows
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    next[i].3.extend(out.iter().copied());
+                }
+            }
+            if up != level {
+                // The row each of these is still accumulating has not propagated either — that is
+                // the whole lag — so it carries on up with the rows this step completed.
+                for e in &mut next {
+                    if let Some(r) = e.2.row_pending {
+                        e.3.push(r);
+                    }
+                }
+                next.retain(|e| !e.3.is_empty());
+            }
+            cur = next;
+        }
+        cur.into_iter()
+            .find(|e| (e.0, e.1) == (fb, tb))
+            .map(|e| e.2)
     }
 
     /// Drops every transient live-edge summary. Called wherever the data a derived tile was folded
