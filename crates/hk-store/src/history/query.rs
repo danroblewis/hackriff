@@ -1035,6 +1035,9 @@ pub fn burst_histogram(durations: &[f64], edges: &[f64]) -> Vec<usize> {
 
 enum Source<'a> {
     Mem(&'a Tile, Option<ColumnPreview>),
+    /// T-583: an open coarse tile **plus the rows still in flight below it**, folded for this
+    /// read into a clone ([`Pyramid::live_preview`]). Owned, and discarded with the answer.
+    Preview(Box<Tile>),
     Disk(Box<Tile>),
 }
 
@@ -1042,7 +1045,7 @@ impl Source<'_> {
     fn tile(&self) -> &Tile {
         match self {
             Source::Mem(t, _) => t,
-            Source::Disk(t) => t,
+            Source::Preview(t) | Source::Disk(t) => t,
         }
     }
 }
@@ -1576,6 +1579,12 @@ impl Pyramid {
         // lattice costs ONE of these; the read-time fold it replaced cost one per producer tile,
         // up to `MAX_MATERIALIZE_TILES` of them for a single address.
         self.count_source_tile();
+        // T-583: a coarse node's in-progress row, which the live cascade only propagates on
+        // commit. Folded here, on the read, so the capture thread pays nothing for it; `None`
+        // whenever nothing is in flight below this address, which is every read of elapsed time.
+        if let Some(t) = self.live_preview(level, fb, tb, margin, pct) {
+            return Ok(Some(Source::Preview(t)));
+        }
         if let Some(t) = self.open[level].get(&(fb, tb)) {
             let preview = if level == 0 {
                 t.column_preview(margin, pct)

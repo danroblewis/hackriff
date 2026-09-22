@@ -56,6 +56,7 @@ import {
 } from "./lattice";
 import { TileCache, type TileEntry, type TileTextures, type Viewport } from "./tilecache";
 import type { TileData } from "./tile";
+import type { Survey } from "./survey";
 import { HEADROOM_DB, MIN_SPAN_DB, ViewportScale } from "./vscale";
 
 /** A pane's pixel rectangle, in **GL convention**: origin at the bottom-left of the drawing buffer. */
@@ -142,6 +143,13 @@ export interface PaneReport {
    * pane can be fully resident, fully observed and still be almost entirely its own PENDING
    * ground if this is most of its height. */
   readonly shortNs: number;
+  /**
+   * **Places answered by the coverage survey and never requested** (T-580): the survey says the
+   * radio never sampled this tile's frequencies at any instant up to its end, so it is drawn as THE
+   * grey — from an `UNOBSERVED` state byte, up to the survey's horizon — without a tile request.
+   * Counted apart from `pending` because nothing is coming: that is the point.
+   */
+  readonly surveyed: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -400,6 +408,19 @@ export class Surface {
    * entry it leaves behind, which is one string and one enum. */
   private lastTier = new Map<string, ViewTier>();
 
+  /**
+   * **The coverage survey consulted before any tile is requested** (T-580, `./survey.ts`).
+   *
+   * `null` (the default) is *no survey*: every tile is fetched, as before T-580. `"awaiting"` is a
+   * host that has a survey on the way — then nothing is requested at all until it lands, because
+   * the whole point is to ask the coverage map FIRST; the pane shows its PENDING ground meanwhile,
+   * which is true. A host whose survey fails sets `null` again and loses only the saving.
+   */
+  private survey: Survey | "awaiting" | null = null;
+  /** One `UNOBSERVED` cell, uploaded once: what a surveyed place is drawn from, so its grey still
+   * comes out of a coverage state byte and out of nothing else. */
+  private greyTex: TilePlanes | null = null;
+
   constructor(
     readonly canvas: HTMLCanvasElement,
     lattice: Lattice | LatticeSet,
@@ -434,6 +455,16 @@ export class Surface {
   /** The detail lattice — the live edge's own, which is what an edge invalidation is about. */
   get lat(): Lattice { return this.lattices.detail; }
   get tiers(): LatticeSet { return this.lattices; }
+
+  /** Hand the renderer a coverage survey, `"awaiting"` one, or `null` for none (T-580). */
+  setSurvey(s: Survey | "awaiting" | null): void { this.survey = s; }
+  get surveyState(): Survey | "awaiting" | null { return this.survey; }
+
+  /** When the survey settles `region` as never sampled, the instant it is grey up to; else null. */
+  private surveyedThrough(region: Box): number | null {
+    const s = this.survey;
+    return s && s !== "awaiting" ? s.unobservedThrough(region) : null;
+  }
 
   /**
    * **Anchor** the display range: one `(lo, hi)` for every pane, held whatever the viewport does
@@ -556,9 +587,27 @@ export class Surface {
         tierFor(this.lattices, pane.box, r.w, r.h, pane.device ?? "any", this.lastTier.get(pane.id) ?? null);
       this.lastTier.set(pane.id, tier);
       viewports.push({ box: pane.box, levelF, levelT, lat });
-      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0;
+      let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
       let drawnToNs = -Infinity;
+      const awaiting = this.survey === "awaiting";
       for (const a of addrs) {
+        // **Ask the coverage map first** (T-580). A resident copy is always drawn — it is the finer
+        // answer — but a place the survey settles as never sampled is not requested at all, and a
+        // surface still waiting for its survey requests nothing yet.
+        if (!this.cache.isResident(a)) {
+          if (awaiting) { pending++; continue; }
+          const region = extentOf(lat, a);
+          const through = this.surveyedThrough(region);
+          if (through !== null) {
+            if (through > region.t0Ns) {
+              const drawn = through >= region.t1Ns ? region : { ...region, t1Ns: through };
+              this.drawSurveyed(pane, drawn, r);
+              drawnToNs = Math.max(drawnToNs, drawn.t1Ns);
+            }
+            surveyed++;
+            continue;
+          }
+        }
         const res = this.cache.acquire(a);
         if (res.kind === "resident") {
           const region = extentOf(lat, a);
@@ -607,13 +656,16 @@ export class Surface {
       // tile one parent covers four children's worth of screen through the fallback path, so a cold
       // viewport shows something honest in a quarter of the time. It is also what makes a zoom-out
       // draw instead of flash.
-      if (this.pinParents && levelF + 1 < lat.levelsF) {
+      if (this.pinParents && !awaiting && levelF + 1 < lat.levelsF) {
         for (const a of tilesFor(lat, pane.box, levelF + 1, Math.min(levelT + 1, lat.levelsT - 1), pane.device ?? "any")) {
+          // The same short-circuit as the pane's own tiles: a parent over never-sampled spectrum
+          // is not worth a request either (T-580).
+          if (!this.cache.isResident(a) && this.surveyedThrough(extentOf(lat, a)) !== null) continue;
           this.cache.prefetch(a);
         }
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
@@ -736,6 +788,43 @@ export class Surface {
     this.drawCalls++;
   }
 
+  /**
+   * A place the coverage survey settled as never sampled (T-580), drawn through the ordinary tile
+   * path from ONE `UNOBSERVED` state byte — so grey here, as everywhere, comes out of the cell rule's
+   * unobserved branch and out of no flat colour chosen in this file.
+   */
+  private drawSurveyed(pane: PaneView, region: Box, rect: PaneRect): void {
+    const gl = this.gl;
+    if (!this.greyTex) {
+      this.greyTex = new GlTileTextures(gl).upload({
+        addr: { device: "any", scheme: "survey", levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 1 },
+        key: "survey", nf: 1, nt: 1, t1Ns: null, asOfNs: null,
+        value: new Float32Array([NaN]), state: new Uint8Array([CELL.UNOBSERVED]),
+        tier: "survey-overview", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
+        measured: { nf: 1, nt: 1 }, rangeDb: null, bytes: 3, serverInFlightLimit: null,
+        serverInFlightShare: null,
+      });
+    }
+    const clip = toClip(region, pane.box);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.greyTex.value);
+    gl.uniform1i(this.u.uValue, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.greyTex.state);
+    gl.uniform1i(this.u.uState, 1);
+    gl.uniform1i(this.u.uKind, KIND_TILE);
+    gl.uniform1f(this.u.uFallback, 0);
+    gl.uniform1i(this.u.uTier, tierByte("survey-overview"));
+    gl.uniform4f(this.u.uRect, clip[0], clip[1], clip[2], clip[3]);
+    gl.uniform2f(this.u.uUv0, 0, 0);
+    gl.uniform2f(this.u.uUv1, 1, 1);
+    const wPx = ((clip[2] - clip[0]) / 2) * rect.w, hPx = ((clip[3] - clip[1]) / 2) * rect.h;
+    gl.uniform2f(this.u.uSizePx, wPx, hPx);
+    gl.uniform2f(this.u.uSrcPx, Math.max(2, Math.abs(wPx)), Math.max(2, Math.abs(hPx)));
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this.drawCalls++;
+  }
+
   /** A flat mark over `region`: [[PENDING]] for a tile that has not arrived. Never grey. */
   private drawFlat(pane: PaneView, region: Box, rgb: readonly [number, number, number], rect: PaneRect): void {
     const gl = this.gl;
@@ -765,6 +854,8 @@ export class Surface {
   }
 
   dispose(): void {
+    if (this.greyTex) new GlTileTextures(this.gl).destroy(this.greyTex);
+    this.greyTex = null;
     this.cache.dispose();
     this.gl.getExtension("WEBGL_lose_context")?.loseContext();
   }

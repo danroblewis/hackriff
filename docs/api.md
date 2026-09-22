@@ -19,7 +19,7 @@
   - `hk serve` keeps the token in a `0600` file (`hk_api::default_token_path`, `$HK_TOKEN_FILE` or `$XDG_CONFIG_HOME/hackriff/api-token`) or `$HK_TOKEN`; the UI reads it from the URL fragment (`#token=`, never sent to the server) and keeps it in `sessionStorage` for the tab.
 - **CORS.** No `Access-Control-Allow-*` header is ever sent. `OPTIONS` preflights always answer `403` (so a cross-origin page cannot ride a CORS grant to smuggle the token or a JSON body). A mutating request whose `Origin` names a different host than `Host` (or `X-Forwarded-Host`, trusted only from a loopback peer, i.e. the local cloudflared tunnel) also answers `403`. Same-origin use — the UI served by this same server, directly or through the tunnel — is unaffected.
 - **Methods.** `GET`, `POST`, `PUT`, `DELETE`, `OPTIONS` are parsed; anything else is `405`. A *known* path with the wrong method is `405` with an `Allow` header listing the methods it does accept. An *unknown* `/api/*` path is `404`.
-- **Errors.** Every non-2xx JSON body is `{"error": "<message>"}`; every route reached through the control dispatcher (`control.rs`/`selections.rs`/`outputs.rs`/`inventory.rs` — everything except the five read-only endpoints in the first table below and `/ws/*`) additionally carries a stable machine `"code"`: `{"error", "code"}`. Error messages never echo raw request values. Common codes: `invalid` (400, malformed/out-of-range field), `not_found` (404), `unauthorized` (401), `forbidden`/cross-origin (403), `not_live` (409, device settings on a replayed recording), `conflict` (409, a re-plumb or another operation is in progress), `refused` (409, legal/content-class gate said no), `finished` (409, the run has ended), `timeout` (504), `out_of_range` (400, a device value outside its capabilities), `unsupported` (501, the device lacks the capability, e.g. no bias tee), `not_implemented` (501, a route is defined but its engine isn't built yet, e.g. `POST /api/analyze` for a selection or band target until MAUTO's region-analyze engine lands), `busy`/`quota` (503/507, output-recording admission), `unavailable` (503, the server has no audit log / bookmark store / output recorder / etc. for this feature).
+- **Errors.** Every non-2xx JSON body is `{"error": "<message>"}`; every route reached through the control dispatcher (`control.rs`/`selections.rs`/`outputs.rs`/`inventory.rs` — everything except the five read-only endpoints in the first table below and `/ws/*`) additionally carries a stable machine `"code"`: `{"error", "code"}`. Error messages never echo raw request values. Common codes: `invalid` (400, malformed/out-of-range field), `not_found` (404), `unauthorized` (401), `forbidden`/cross-origin (403), `not_live` (409, device settings on a replayed recording), `device_required` (400, a device route on a run with several front ends and no `device_id` selector — T-511), `unknown_device` (404, a `device_id` selector naming no front end this run holds), `conflict` (409, a re-plumb or another operation is in progress), `refused` (409, legal/content-class gate said no), `finished` (409, the run has ended), `timeout` (504), `out_of_range` (400, a device value outside its capabilities), `unsupported` (501, the device lacks the capability, e.g. no bias tee), `not_implemented` (501, a route is defined but its engine isn't built yet, e.g. `POST /api/analyze` for a selection or band target until MAUTO's region-analyze engine lands), `busy`/`quota` (503/507, output-recording admission), `unavailable` (503, the server has no audit log / bookmark store / output recorder / etc. for this feature).
 - **Audit.** Every **mutating** request to `/api/control/*`, `/api/bookmarks*`, `/api/selections*`, `/api/outputs*` or `/api/inventory/{id}*` is written to the run's audit log (`<data dir>/control-audit.jsonl`, mode `0600`) once authenticated: time, token id (never the token), peer, method, path, action name, request body, old/new values, status, result. A request that reaches the front end also carries `device: {action, id}` (T-343), so the log distinguishes the requests that changed the radio from the ones that changed the view, and says which radio. Unauthenticated mutating attempts are logged too, coalesced per client to bound disk use. **`GET` requests are never audited**, on any route. Without an audit log every mutating endpoint answers `503 unavailable`. See `crates/hk-api/src/control.rs` module docs for the exact schema.
 - **Bounded resources.** At most `ServerConfig::max_connections` (default 64) connection threads at once (WebSocket consumers included); request heads ≤ 16 KiB, bodies ≤ 64 KiB, both within `request_timeout` (default 10 s); `/api/history`/`/api/floor`/`/api/inventory` cap result size (below).
 - **Receive only.** No route reaches a transmit path; `transmit.available` is always `false` (C37 stays gated at the type level, not just by convention — there is no transmit operation to call).
@@ -527,7 +527,7 @@ This is **absent-means-not-measured** (T-297: no field is written for a region t
 
 **`windows`** — **the currently-active capture windows, as a list** (T-340). Each entry is one live front end: its `device_id` (T-343's provenance identity, `null` when the source reports none — never a placeholder), `driver`, the tuned `center_hz`, the `span_hz` it is running at (a live window's span *is* its sample rate) and the window's edges `f_lo_hz`/`f_hi_hz`. The frequency navigator draws one **lit segment** per entry, on the whole device-available spectrum (`frequency.ranges_hz`).
 
-*Why a list on a server that runs one front end.* The count is a fact about the run, not a constant of the design: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305 keyed artifacts, baselines, history and the source-layer rule on the front end that produced each frame), and multiple simultaneous windows are an explicit product direction. The array's length is therefore **measured, never assumed** — `[]` on a replay, one entry on a live run — and a client must place segments from the list rather than from `frequency.current`, which is one device's tuned state and not an enumeration. **What would have to change to report N:** `ApiState::live_control` is one `Option<Arc<dyn LiveControl>>`; it becomes a collection built one handle per `ReceiveChain` where the pipeline composes the run. Neither this route's shape nor its clients change, because both already speak in lists. Multi-device *capture* is not built and this field does not claim it is.
+*Why a list on a server that runs one front end.* The count is a fact about the run, not a constant of the design: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305 keyed artifacts, baselines, history and the source-layer rule on the front end that produced each frame), and multiple simultaneous windows are an explicit product direction. The array's length is therefore **measured, never assumed** — `[]` on a replay, one entry on a live run — and a client must place segments from the list rather than from `frequency.current`, which is one device's tuned state and not an enumeration. **T-511 made that literal:** `ApiState::live_controls` is now a collection keyed by `device_id`, built one handle per front end where the pipeline composes the run — and, exactly as this paragraph predicted, *neither this route's shape nor its clients changed*, because both already spoke in lists. Which radio a device route moves is now a [selector](#which-radio-the-device-selector-t-511) on those routes, not an assumption here.
 
 **`resolved`** — present only when `center_hz` and `span_hz` are given together. The nearest realizable state, and the detail claim that comes with it.
 
@@ -817,7 +817,7 @@ The horizons on this server are **deliberately different lengths and they cross*
 | Field | Says |
 |---|---|
 | `oldest_record_s` | The earliest instant **any** consulted source still holds a tune record for — `min` over the IQ ring's buffered start and the observation log's oldest surviving hour. `min`, not `max`: a row is knowable if *at least one* record reaches it. `null` when nothing here holds a record. |
-| `recording_began_s` | **When this server's memory of recording begins** (T-507): `min` over the same two reaches and the spectrum history's own record of when it began recording (a fact it persists, so it outlives both a restart and the tiles that proved it). `null` when nothing here has ever recorded. Rows wholly before it are `"unobserved"`: before this installation recorded anything, nothing looked. |
+| `recording_began_s` | **When this server's memory of recording begins** (T-507): `min` over the IQ ring's buffered start, the observation log's **earliest record** (its first sampled instant — not its oldest hour, which is a filing boundary up to an hour before any sample and is what `oldest_record_s` uses) and the spectrum history's own record of when it began recording (a fact it persists, so it outlives both a restart and the tiles that proved it). `null` when nothing here has ever recorded. Rows wholly before it are `"unobserved"`: before this installation recorded anything, nothing looked. |
 | `forgotten` | `null`, or why the past before `recording_began_s` is unbounded: a source has **discarded** records that could reach back past it (the observation log deleted a segment by retention; or the IQ ring evicted data on a server with no spectrum history to remember when recording began). Then every row before `oldest_record_s` is `"unknown"`. |
 | `unknown_from_row`, `unknown_rows` | The rows served as `"unknown"` are exactly `[unknown_from_row, unknown_from_row + unknown_rows)` — a contiguous band: wholly before `oldest_record_s`, and not wholly before `recording_began_s` (a row straddling it counts as unknown). |
 | `as_of_s` | **How far FORWARD this answer's evidence reaches** (T-532): the newest instant any consulted span over *this band* ends at, clamped into the asked-for window. `null` when no record touches the band at all. |
@@ -861,7 +861,7 @@ A record that names no device — every record written before T-378, and any sou
 
 ### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
 
-Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)).
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)).
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
@@ -1181,17 +1181,17 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 
 ## Control API (T-050)
 
-Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. **Six of them reach the radio and the rest do not** — see [Device actions](#device-actions-t-343) — and one more *commissions* retunes without performing any: [the in-app survey sweep](#the-in-app-survey-sweep-and-who-wins-when-it-and-the-user-both-want-the-radio-t-452). Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `window`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_control`]); on a replayed recording they answer `409 not_live`, while display, recording and bookmarks keep working.
+Device, display, recording and bookmark endpoints, all behind the bearer token, all audited once authenticated. **Six of them reach the radio and the rest do not** — see [Device actions](#device-actions-t-343) — and one more *commissions* retunes without performing any: [the in-app survey sweep](#the-in-app-survey-sweep-and-who-wins-when-it-and-the-user-both-want-the-radio-t-452). Every mutating body is a JSON object (`Content-Type: application/json`); an unknown field is `400 invalid`. Device endpoints (`center`, `rate`, `window`, `gains`, `bias_tee`) act on a *live* source ([`ApiState::live_controls`]); on a replayed recording they answer `409 not_live`, while display, recording and bookmarks keep working. Each of them also takes an optional **device selector**, `"device_id"` — see [Which radio](#which-radio-the-device-selector-t-511); omitting it is correct whenever the run holds exactly one front end, which is every run today.
 
 | Method | Path | Body | Response | Notable errors |
 |---|---|---|---|---|
-| GET | `/api/control/state` | – | `{live, device, tuning, run, scan, display_limits, transmit: {available: false, reason}, audit, routes}` | – |
-| POST | `/api/control/center` | `{"center_hz"}` | `{tuning, run, device}` **(device action)** | 400 invalid/out_of_range, 409 not_live/conflict/device_busy/finished |
-| POST | `/api/control/rate` | `{"sample_rate_hz"}` | `{tuning, run, device}` **(device action)** | as above |
-| POST | `/api/control/window` (T-529) | `{"center_hz", "sample_rate_hz"}` — **both required** | `{tuning, run, device}` **(device action, `action: "window"`)**. One whole capture configuration, one class derivation, at most one re-plumb | as above |
-| POST | `/api/control/gains` | `{"gains": {"<stage>": <dB>, …}}` | `{tuning, device}` **(device action)** (gains quantised per stage) | 400, 409 not_live/device_busy |
-| POST | `/api/control/bias_tee` | `{"enabled"}` | `{tuning, device}` **(device action)** | 501 unsupported (no bias tee), 409 not_live/device_busy |
-| POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz"}` | `{tuning, device}` **(device action)** (validated against `device.baseband_filter`) | 501 unsupported (no selectable filter), 400 out_of_range, 409 not_live/device_busy |
+| GET | `/api/control/state` | – | `{live, device, tuning, devices, run, scan, display_limits, transmit: {available: false, reason}, audit, routes}` — `devices` (T-511) is every live front end, `[]` on a replay; `device`/`tuning` are the singular default and are `null` when the run holds more than one | – |
+| POST | `/api/control/center` | `{"center_hz", "device_id"?}` | `{tuning, run, device}` **(device action)** | 400 invalid/out_of_range/device_required, 404 unknown_device, 409 not_live/conflict/device_busy/finished |
+| POST | `/api/control/rate` | `{"sample_rate_hz", "device_id"?}` | `{tuning, run, device}` **(device action)** | as above |
+| POST | `/api/control/window` (T-529) | `{"center_hz", "sample_rate_hz", "device_id"?}` — the pair is **both required** | `{tuning, run, device}` **(device action, `action: "window"`)**. One whole capture configuration, one class derivation, at most one re-plumb | as above |
+| POST | `/api/control/gains` | `{"gains": {"<stage>": <dB>, …}, "device_id"?}` | `{tuning, device}` **(device action)** (gains quantised per stage) | 400 invalid/device_required, 404 unknown_device, 409 not_live/device_busy |
+| POST | `/api/control/bias_tee` | `{"enabled", "device_id"?}` | `{tuning, device}` **(device action)** | 501 unsupported (no bias tee), 400 device_required, 404 unknown_device, 409 not_live/device_busy |
+| POST | `/api/control/baseband_filter` (T-067) | `{"bandwidth_hz", "device_id"?}` | `{tuning, device}` **(device action)** (validated against `device.baseband_filter`) | 501 unsupported (no selectable filter), 400 out_of_range/device_required, 404 unknown_device, 409 not_live/device_busy |
 | POST | `/api/control/display` | any of `{"fft_size", "averaging", "rows_per_s", "window"}` (T-067; at least one) | `{display}` | 400 invalid |
 | GET | `/api/control/scan[?f_lo_hz&f_hi_hz&dwell_s&step]` (T-452, `step` T-517) | – | `{scan, proposed}` — `proposed` prices the named sweep **without starting it**, `null` when none is named | 400 invalid (a range the device cannot reach), 409 not_live |
 | POST | `/api/control/scan` (T-452) | `{"f_lo_hz"?, "f_hi_hz"?, "dwell_s"?, "step"?}`, or `{"resume": true}` | `{scan, proposed, device: {commissions, id, commissions_rate_hz}}` **(commissions retunes, and for a coarse step one rate change)** | 400 invalid, 409 refused (one already running / nothing to resume), 409 not_live |
@@ -1281,9 +1281,28 @@ The six endpoints marked **(device action)** above — `center`, `rate`, `window
 - **`device` on the answer and in the audit log.** A device action answers with `device: {action, id}` — `action` is `"retune"`, `"rate"`, `"window"`, `"gains"`, `"bias_tee"` or `"baseband_filter"`, and `id` is the front end's provenance `device_id` (e.g. `hackrf:<serial>`, `mock:<recorded id>`). The same object is written to the audit entry, whether the request succeeded or was refused, so the log always says **which device** a retune moved. `id` is `null` when the source reports no identity — "nothing said", never a placeholder. A view change (`display`, `record/*`, bookmarks, selections) carries **no `device` key at all**.
 - **`device.device_id` on `/api/control/state`.** The same id, so a client can name the front end a retune would move *before* it asks for one.
 - **`device.tuning_step` / `device.tuning_step_hz` on `/api/control/state` (T-341).** The centre-frequency granularity, three-valued like the bias tee: `"uniform"` with a step in Hz, or `"unknown"` with a `null` step when the source cannot say — **never read as 1 Hz and never as continuous**. It is the third axis of the achievable `(centre, span)` grid; [`GET /api/navigation`](#get-apinavigation--the-achievable-centre-span-grid-t-341) reports the whole grid, and this is the same fact beside the rest of the device's capabilities.
-- **`409 device_busy`.** Only one process can hold an SDR, and inside this server device actions serialise on one gate. A device action that cannot claim the front end within ~250 ms answers `409` with code `device_busy` and a message naming the device, the action holding it, and for how long. It does **not** race the holder to the driver, and it does not block for the length of a re-plumb. Distinct from `conflict` (the run's own state, e.g. a re-plumb in progress) and `not_live` (a replay). A client should report it, not retry into the race.
+- **`409 device_busy`.** Only one process can hold an SDR, and inside this server device actions serialise on one gate **per front end** (T-511: two radios are two resources, so a busy one never refuses the other). A device action that cannot claim the front end within ~250 ms answers `409` with code `device_busy` and a message naming the device, the action holding it, and for how long. It does **not** race the holder to the driver, and it does not block for the length of a re-plumb. Distinct from `conflict` (the run's own state, e.g. a re-plumb in progress) and `not_live` (a replay). A client should report it, not retry into the race.
 
 **A retune is not a view control.** `POST /api/control/center` re-derives the window's content class and, when the class or sample rate changes, stops and re-plumbs the running segment — tearing down and restarting its always-on readers. Pausing, scrubbing and zooming never reach the device; this does. A client must therefore call it only for an **explicit user action** (a frequency typed and submitted, a bookmark clicked, a retune button pressed, a region selected on the frequency navigator), **never as the continuation of a pan, a zoom or a drag**, and never automatically. In the web UI that rule is a type: `ui/src/app/centre/view.ts` takes a `DeviceAction` and is the only module besides the SDR control panel that names a device route; a pan that runs off the band edge leaves a *retune offer* for the user to accept.
+
+#### Which radio: the device selector (T-511)
+
+A run may hold **several** front ends. CLAUDE.md requires the source layer, scheduler and inventory to be N-source-capable; T-510 made one `Pipeline` spawn N `{source, ring, capture thread}` sets; this is the serving half. `ApiState::live_controls` is a collection keyed by `device_id` rather than one `Option`, and every route that reaches a radio takes an optional `"device_id"` body field.
+
+| The request says | With one front end | With several |
+|---|---|---|
+| no `device_id` | that front end (**unchanged** — every existing client) | `400 device_required`, listing the ids |
+| `device_id` of a held front end | that one (404 if it is not the one) | that one |
+| `device_id` naming nothing here | `404 unknown_device`, listing what is held | `404 unknown_device`, listing what is held |
+| `device_id` that is not a string | `400 invalid` | `400 invalid` |
+
+**Why an omitted selector is refused rather than defaulted.** Picking "the first composed" would be a plausible answer to a question the caller never asked, and the thing it would do is *move a radio*. It is the same rule as `BiasTee::Unknown` not being `Off` and `Coverage::Unobserved` not being quiet: where nothing was said, nothing is invented. A refusal costs a client one field; a default costs the user a band they were listening to.
+
+**What is unchanged.** `device.id` on the answer and in the audit entry is the front end the selector **resolved to** — with one radio, the same string as before. `GET /api/navigation`'s `windows` needed no change at all: it has spoken in lists since T-340, and its `frequency.current` is still explicitly *one* device's tuned state (the default front end), which is why a client places segments from `windows`. A pan or a wheel still reaches **no route**, so nothing here widens what navigation can command (T-340's spy-client assertions).
+
+**One capture at a time is per device.** Each front end carries its own gate, so a retune of one radio is never refused because another is busy, and `409 device_busy` still names the device that is held.
+
+**Discovering the ids.** `GET /api/control/state` carries `devices`: `[{device_id, device, tuning}, …]` in composition order — `[]` on a replay, one entry on a single-SDR run. Its singular `device`/`tuning` are that one entry on a single-SDR run and `null` when the run holds more than one, because then there is no "the" device to describe. `GET /api/navigation`'s `windows` is the same enumeration seen as capture windows.
 
 #### A window is one device action (T-529)
 
@@ -2250,6 +2269,52 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 | POST | `/api/outputs/record/start` | Unchanged in this plan (`kinds: ["audio"]` still opens its own chain). |
 
 **Staging.** The switch is flag-gated (`HK_LISTEN_PIPELINE=1`, default off) before it is defaulted on, and only for the modes that have blocks (WFM/NBFM/AM). USB/LSB/CW have no blocks and keep the existing chain. See ADR-0015 §12.9 for the numbered stages and what is observable after each.
+
+## Reserved: the map-UI research routes (MMAP, T-800 / ADR-0023)
+
+**These routes are SPECIFIED and RESERVED, not yet served.** T-800 (MAP-00) fixed their shapes so the
+four stores are four instances of one pattern rather than four designs; each owning ticket lands its
+route **and** its contract test in the same change (T-079). Until then a request to one of these paths
+answers `404 no such endpoint` **after** the ordinary `401` auth check — asserted by
+`api_contract.rs::mmap_research_routes_are_reserved_and_gated`, which also pins that they stay
+token-gated once they exist. Full contracts: [`docs/25 §10`](25-spectrum-research-workflow.md) (the
+four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023](adr/0023-map-ui-and-research-state.md).
+
+| Method | Path | Ticket | Body / query | Answer |
+|---|---|---|---|---|
+| GET | `/api/annotations` | MAP-16 | `f_lo`,`f_hi`,`t0`,`t1` **required**; `limit`? (200, max 2000), `cursor`? | `{annotations, count, matched, next_cursor}` |
+| POST | `/api/annotations` | MAP-16 | `{kind ("text"\|"box"\|"marker"), f_lo_hz, f_hi_hz, t0_s, t1_s, label, body?, collection_id?, view}` | `Annotation` (201, audited) |
+| GET/PUT/DELETE | `/api/annotations/{id}` | MAP-16 | any create field on PUT | `Annotation` / `{deleted}` |
+| GET | `/api/collections` | MAP-17 | `limit`? (500, max 2000), `cursor`? | `{collections, count, matched, next_cursor}` |
+| POST | `/api/collections` | MAP-17 | `{name, note?, color?}` | `Collection` (201, audited) |
+| GET/PUT/DELETE | `/api/collections/{id}` | MAP-17 | any create field; `{visible}` toggles | `Collection` / `{deleted, members_deleted}` |
+| GET/POST | `/api/collections/{id}/markers` | MAP-17 | `{name, f_center_hz, bandwidth_hz?, t_center_s?, duration_s?, note?, view}` | `{markers, …}` / `Marker` (201, audited) |
+| GET/PUT/DELETE | `/api/markers/{id}` | MAP-17 | any create field (`null` clears optionals) | `Marker` / `{deleted}` |
+| GET | `/api/measurements` | MAP-18 | `collection`?, `f_lo`/`f_hi`/`t0`/`t1`?, `limit`?, `cursor`? | `{measurements, …}` |
+| POST | `/api/measurements` | MAP-18 | `{kind, cursors, n?, note?, collection_id?, view}` — **`value`/`unit` in the body is `400 invalid`** | `Measurement` (201, audited) |
+| GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | `{cursors?, note?, collection_id?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
+| GET/POST | `/api/views` | MAP-19 | `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
+| GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | any create field | `SavedView` / `{deleted}` |
+| GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
+
+**Rules every one of them inherits** (`docs/25 §10`):
+
+- **Provenance is stamped by the server.** The client sends only `view` — the view context it was on
+  (`center_hz`, `span_hz`, `t_capture`, `tier`, `device_id`?). The server adds `actor` (a token
+  fingerprint, never the token), `authored_s` (wall clock) and `authored: true`, and keeps
+  `t_capture` (capture clock) and `authored_s` strictly apart. A request supplying a server-owned
+  provenance field is `400 invalid`.
+- **One paging contract**, the `/api/events` one. "Durable" is not "unbounded".
+- **Audited like `/api/bookmarks*`/`/api/selections*`**, and `503 unavailable` for every mutating
+  endpoint when there is no audit log.
+- **No entry ever carries a `device` key.** Authoring is a view act and reaches no radio; the one
+  research act that may command it is *restoring* a saved view whose frequency lies outside the tuned
+  window, which uses the ordinary gated retune offer (see "Device actions").
+- **`/api/bookmarks` is not replaced.** It becomes a compatibility facade over one reserved,
+  un-deletable collection; the bookmark rows and the collection's frequency-only markers are the same
+  rows.
+- **Nothing in these stores feeds blind detection** — on create or on import. They mint no candidate,
+  set no family and never pre-populate the inventory.
 
 ## Route table completeness
 

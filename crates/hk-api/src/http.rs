@@ -316,10 +316,17 @@ pub struct ApiState {
     pub inventory: Option<Arc<Mutex<Repository>>>,
     /// Pipeline counters for `/api/status` (T-027): a snapshot builder, called per request.
     pub status: Option<StatusFn>,
-    /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
-    /// scheduler-driven runs (device endpoints then answer 409 `not_live`).
-    pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
-    /// T-452: the in-app survey sweep over [`Self::live_control`] ([`crate::scan`]). `None` leaves
+    /// Live front-end control (T-042, [`crate::live_control`]): **every** front end this run
+    /// holds, keyed by `device_id`, empty for replays and scheduler-driven runs (device endpoints
+    /// then answer 409 `not_live`).
+    ///
+    /// T-511 made this a collection rather than one `Option`: the length is a fact about the run,
+    /// measured per request, and each handle carries its own [`crate::DeviceGate`], so "one
+    /// capture at a time" is per device rather than per server. Device routes resolve a selector
+    /// through [`crate::LiveControls::select`], which may be omitted only when there is exactly
+    /// one front end.
+    pub live_controls: crate::live_control::LiveControls,
+    /// T-452: the in-app survey sweep over one of [`Self::live_controls`] ([`crate::scan`]). `None` leaves
     /// `/api/control/scan*` answering 503 — the front end is there but nothing can sweep it.
     ///
     /// It is a *driver over the interactive retune path*, not a scheduler: `hk serve` still does
@@ -1407,15 +1414,20 @@ pub(crate) fn with_history<T>(
 /// Two answers, in order of how much they know:
 ///
 /// 1. a live front end's capabilities — its *widest* sample rate, because the span it can deliver
-///    is what the user could retune to, not only what it is set to now;
-/// 2. failing that, the running segment's own sample rate. A replay has no `live_control`, but it
+///    is what the user could retune to, not only what it is set to now. With several front ends
+///    (T-511) it is the widest any of them can deliver: a span is live-detail if **some** window
+///    could have captured it in one piece;
+/// 2. failing that, the running segment's own sample rate. A replay has no live control, but it
 ///    still has exactly one instantaneous bandwidth, and it is this. Nothing wider than it ever
 ///    came from one window.
 pub(crate) fn max_live_span_hz(state: &ApiState) -> Option<f64> {
     state
-        .live_control
-        .as_deref()
-        .and_then(|l| l.capabilities().max_live_span_hz())
+        .live_controls
+        .iter()
+        .filter_map(|l| l.capabilities().max_live_span_hz())
+        .fold(None, |acc: Option<f64>, hz| {
+            Some(acc.map_or(hz, |a| a.max(hz)))
+        })
         .or_else(|| {
             state
                 .run_control

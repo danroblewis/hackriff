@@ -157,6 +157,36 @@ def nextest_scopes(justfile: Path) -> list[Scope]:
     return scopes
 
 
+#: A `test(name)` token inside a filterset expression (substring matcher; no `=`/`~`/`/`).
+_TEST_NAME = re.compile(r"\btest\(\s*([A-Za-z0-9_:]+)\s*\)")
+
+
+def timing_tier(config: Path) -> tuple[set[str], set[str]]:
+    """The `timing` tier, read from both places that define it (docs/10 §3.6).
+
+    Returns ``(gate_skips, timing_runs)``: the test names `[profile.default]`'s
+    `default-filter` keeps out of every gate run, and the names `[profile.timing]`'s runs.
+    Both empty when the file defines no tier, so a config without one is not a problem.
+    """
+    import tomllib
+
+    cfg = tomllib.loads(config.read_text(encoding="utf-8"))
+    profiles = cfg.get("profile", {})
+    skips = set(_TEST_NAME.findall(profiles.get("default", {}).get("default-filter", "")))
+    runs = set(_TEST_NAME.findall(profiles.get("timing", {}).get("default-filter", "")))
+    return skips, runs
+
+
+def test_functions(repo: Path) -> set[str]:
+    """Every `fn` name under the Rust test trees — what a `test(name)` token can still match."""
+    names: set[str] = set()
+    pattern = re.compile(r"\bfn\s+([A-Za-z0-9_]+)\s*\(")
+    for root in ("crates", "tests"):
+        for src in (repo / root).rglob("*.rs"):
+            names.update(pattern.findall(src.read_text(encoding="utf-8", errors="replace")))
+    return names
+
+
 def check(repo: Path = REPO) -> Report:
     """Every package named by a nextest override must be visible to a gate nextest run."""
     report = Report(
@@ -164,6 +194,25 @@ def check(repo: Path = REPO) -> Report:
         scopes=nextest_scopes(repo / "justfile"),
         named=overrides(repo / ".config" / "nextest.toml"),
     )
+    # The `timing` tier is two lists that must stay one set (docs/10 §3.6): a name the gate
+    # skips that `just timing` does not run is a test nobody runs, a name in one list only is
+    # the same drift, and a name that no longer matches a `fn` is a renamed test that has
+    # silently re-entered the gate (or silently left the tier). The substring matcher makes
+    # "matches" mean `fn <name>` exists somewhere under crates/ or tests/.
+    skips, runs = timing_tier(repo / ".config" / "nextest.toml")
+    if skips != runs:
+        report.problems.append(
+            "the `timing` tier's two lists differ: [profile.default] default-filter skips "
+            f"{sorted(skips - runs) or '{}'} that [profile.timing] does not run, and [profile.timing] "
+            f"runs {sorted(runs - skips) or '{}'} that the gate does not skip"
+        )
+    if skips or runs:
+        defined = test_functions(repo)
+        for name in sorted((skips | runs) - defined):
+            report.problems.append(
+                f"`test({name})` in the `timing` tier matches no `fn` under crates/ or tests/: "
+                "renamed or deleted, so it no longer keeps that test out of the gate"
+            )
     real = [s for s in report.scopes if not s.parameterised]
     if not real:
         report.problems.append(

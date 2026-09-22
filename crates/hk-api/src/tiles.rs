@@ -2237,16 +2237,17 @@ fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
 /// first-come-first-served.
 pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     const ALLOWED: [&str; 10] = [
-        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "client",
-        "planes", "token",
+        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "planes",
+        "client", "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
             "unknown parameter {k:?} (allowed: device, scheme, level_f, level_t, f_index, \
-             t_index, cells, client, planes)"
+             t_index, cells, planes, client)"
         )));
     }
-    // Refused before a slot is taken: a malformed request must not cost anyone a share.
+    // T-700: the plane selection is validated BEFORE admission, so a misspelled `planes` is a 400
+    // that never takes a slot from the client's share.
     let planes = parse_planes(q)?;
     let slot = state
         .tile_admission
