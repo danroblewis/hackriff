@@ -1560,13 +1560,24 @@ def gather():
     # A gate with no end line and no gate process is one that was killed (a stopped runner, a
     # reboot): say so rather than "running" for ever.
     if gates and gates[0]["outcome"] == "running" and not mg.get("gate"):
-        gates[0]["outcome"] = "killed"
+        # merge_status's ps scan can time out under load; ask once more before saying "killed".
+        try:
+            alive = subprocess.run(["pgrep", "-f", "just gate"], capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            alive = "?"
+        if not alive:
+            gates[0]["outcome"] = "killed"
+    # The JUnit record belongs to the newest gate that RAN nextest; a later docs/board-only gate
+    # writes none. Say which gate it came from so a passed gate is not read as still failing.
+    junit = latest_junit()
+    if junit and gates:
+        junit["stale"] = gates[0]["outcome"] in ("passed", "running") and junit["age_s"] > gates[0].get("seconds", 0) + 120
     return {
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
-        "gates": gates, "junit": latest_junit(),
+        "gates": gates, "junit": junit,
         "budget": budget_status(),
     }
 
@@ -1738,13 +1749,17 @@ async function tick(){
       const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
       return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
     };
-    const gates=G.length?G.map(gateRow).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
+    // Only the NEWEST gate is shown in full; earlier ones collapse to one line each, their
+    // failures behind a toggle - a failure that was fixed must not keep reading as current.
+    const oneLine=g=>{const col=g.outcome==='passed'?'#52C2AE':g.outcome==='failed'?'#E47B68':'#8595A0'; const who=g.bulk?`bulk · ${g.branches.length}`:esc(g.branches[0]||'?'); const nf=(g.fails||[]).length; return `<details style="padding:2px 0;border-top:1px solid #1e2830"><summary style="cursor:pointer;color:#8595A0"><span style="color:${col}">${g.outcome}</span> ${esc(g.started)} · ${dur(g.seconds)} · ${who}${nf?` · ${nf} failed`:''}${(!nf&&g.error)?' · suite error':''}</summary>${gateRow(g)}</details>`;};
+    const gates=G.length?gateRow(G[0])+G.slice(1).map(oneLine).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
     const J=d.junit; let ju='';
     if(J){
       const fl=J.files||[]; const nf=fl.reduce((a,f)=>a+f.failures.length,0), nt=fl.reduce((a,f)=>a+f.tests,0);
       const slow=fl.flatMap(f=>f.slowest.map(c=>({...c,file:f.file}))).sort((a,b)=>b.s-a.s).slice(0,8);
-      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)
-        +fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('')
+      const stale=J.stale?` <span style="color:#F0A542">· from an EARLIER gate (the newest ran no nextest)</span>`:'';
+      const fails=J.stale?'':fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('');
+      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)+(J.stale?`<div style="color:#F0A542">${stale}</div>`:'')+fails
         +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
     }
     // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),
