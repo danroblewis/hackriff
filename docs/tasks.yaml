@@ -15392,7 +15392,8 @@ tasks:
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
-    status: in-review
+    status: done
+    commit: 666f51fb
     priority: high
     parallel_group: SDR
     core_interface: true
@@ -19402,7 +19403,8 @@ tasks:
   - id: T-596
     milestone: MLIVE
     title: With the IQ ring refused, coverage lags the live edge by a whole dwell - 18 s of measured rows read unobserved
-    status: todo
+    status: done
+    commit: b0cb0517
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -19707,7 +19709,8 @@ tasks:
   - id: T-603
     milestone: M2-hardening
     title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
-    status: todo
+    status: done
+    commit: c7ade3dc
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20185,7 +20188,8 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
-    status: review
+    status: done
+    commit: 7d061f18
     branch: task-t605
     priority: high
     parallel_group: PIPE
@@ -20612,7 +20616,8 @@ tasks:
   - id: T-621
     milestone: M2-hardening
     title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
-    status: todo
+    status: done
+    commit: "43873178"
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20948,7 +20953,8 @@ tasks:
   - id: T-631
     milestone: M2-hardening
     title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
-    status: todo
+    status: done
+    commit: 1577b449
     priority: high
     parallel_group: OPS
     model: opus
@@ -21015,7 +21021,8 @@ tasks:
   - id: T-632
     milestone: M2-hardening
     title: 19 live-harness hk-e2e tests still read ANY on-demand refusal as a verdict, the defect T-603 fixed in one of them
-    status: todo
+    status: done
+    commit: 1577b449
     priority: medium
     parallel_group: PIPE
     model: sonnet
@@ -21250,7 +21257,8 @@ tasks:
   - id: T-640
     milestone: M2-hardening
     title: A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got
-    status: todo
+    status: done
+    commit: "43873178"
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -21566,7 +21574,8 @@ tasks:
   - id: T-690
     milestone: M2-hardening
     title: 'ui/e2e specs that only hold on a FRESH backend: three pass alone, fail in the 13-spec suite'
-    status: in_progress
+    status: done
+    commit: 6ec27058
     priority: high
     parallel_group: OPS
     model: opus
@@ -21712,6 +21721,47 @@ tasks:
       origin), and on the same tree the same day `live-edge` saw peak 5 against a cap of 4 while
       `surface-nav` saw peak 4. Naming one made the verdict a coin toss about which file caught
       the excess.
+  - id: T-740
+    milestone: M2-hardening
+    title: "run.mjs's killSpecTree only sweeps a spec it timed out, so a run killed from outside leaves Chrome behind for hours"
+    status: todo
+    priority: normal
+    parallel_group: OPS
+    model: sonnet
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'task-e2estate, 2026-09-21, while measuring the tile route under T-690'
+    acceptance: |
+      MEASURED. **Ten orphaned Chrome processes were found running for THREE HOURS** after an e2e
+      run was killed from outside, and they were contending for the machine the whole time.
+      `ui/e2e/run.mjs`'s `killSpecTree` walks a spec's whole process tree - its Chrome, Chrome's
+      renderer/GPU children, and any `hk serve` that spec started - but it is only invoked on the
+      path where the RUNNER ITSELF times a spec out. A run killed by anything else (a coordinator
+      stopping it, a gate timeout, SIGKILL from a parent) exits without sweeping, and every browser
+      it started survives.
+      WHY THIS IS MORE THAN TIDINESS, and why it is filed against the ticket it distorted: T-690's
+      whole subject is that these specs fail as a function of the TILE ROUTE'S SERVICE RATE
+      (measured 167 ms/tile at cap 4/4 against 3612 ms/tile at cap 1/4). Ten stray browsers are a
+      direct, invisible input to that rate. The leak did not just waste the machine - it silently
+      poisoned the measurements of the investigation trying to explain the failures. A test harness
+      whose cleanup depends on HOW it died will mislead whoever debugs it next, in exactly the way
+      it already did.
+      DoD: cleanup that does not depend on the exit path - process-group kill, an exit/signal
+      handler that sweeps every spawned child, or a supervisor that reaps by marker - so that
+      SIGINT, SIGTERM, SIGKILL-of-the-parent and a normal finish all leave zero orphaned browsers.
+      SIGKILL of the runner cannot be trapped, so say explicitly how that case is handled (a
+      pre-registered process group, or a sweep at the NEXT run's start) rather than leaving it as
+      the silent gap.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: browsers alive before, during and after, over a stated
+      number of runs, for each way of ending the run. Prove it RED by reinstating the exit-path
+      dependence.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22 by the coordinator from T-690 finding 8. The agent that found them also
+      checked, rather than assumed, that 14 OTHER Chrome processes on the box belonged to a
+      different agent's live worktree and left those alone - the right instinct, and the reason a
+      blanket sweep is not the fix here either.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
