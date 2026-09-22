@@ -466,3 +466,71 @@ fn observation_records_carry_their_device_and_a_pre_t378_line_reads_back_unknown
         "{page:?}"
     );
 }
+
+/// deflake-0922: **the log's earliest record is not its oldest hour.** A segment is filed under the
+/// hour it falls in, so `hours()[0] * HOUR_NS` is up to an hour before anything was sampled; that
+/// is the boundary retention works in, and it is what `/api/coverage` served as
+/// `recording_began_s` — measured on a real server, the first sealed dwell moved a 15 s old
+/// server's start 923 s into the past. `earliest_start` is the first sampled instant.
+#[test]
+fn observation_earliest_start_is_the_first_sampled_instant_not_the_hour_it_is_filed_under() {
+    let dir = TempDir::new("earliest");
+    let mut cfg = ObservationLogConfig::new(dir.0.join("observations"));
+    cfg.max_age_ns = 2 * HOUR_NS;
+    let s = ObservationStore::open(cfg.clone()).unwrap();
+    assert_eq!(s.earliest_start(), None, "an empty log began nothing");
+
+    // 47 minutes into an hour, buffered and not yet flushed: the hour starts 47 min earlier.
+    let first = T0 + 47 * 60 * S;
+    s.append(&dwell(first, 10 * S, 100e6, Reason::PoiDwell { poi: 1 }));
+    assert_eq!(s.hours(), vec![hour_of(t(first))]);
+    assert_eq!(
+        s.hours()[0] * HOUR_NS,
+        T0,
+        "the premise: the filing hour is 47 min before the sample"
+    );
+    assert_eq!(s.earliest_start(), Some(t(first)), "from the buffer");
+    // A later record changes nothing; the cached answer survives a flush and a reopen.
+    s.append(&dwell(
+        first + 60 * S,
+        10 * S,
+        101e6,
+        Reason::PoiDwell { poi: 1 },
+    ));
+    assert_eq!(s.earliest_start(), Some(t(first)));
+    s.flush();
+    assert_eq!(s.earliest_start(), Some(t(first)));
+    drop(s);
+    let s = ObservationStore::open(cfg).unwrap();
+    assert_eq!(
+        s.earliest_start(),
+        Some(t(first)),
+        "from disk, after a reopen"
+    );
+    // A late record into the same (oldest, open) hour that began earlier moves it back: the cache
+    // follows appends rather than going stale.
+    s.append(&dwell(
+        first + 120 * S,
+        10 * S,
+        100e6,
+        Reason::PoiDwell { poi: 1 },
+    ));
+    s.append(&dwell(
+        first - 30 * S,
+        5 * S,
+        100e6,
+        Reason::PoiDwell { poi: 1 },
+    ));
+    assert_eq!(s.earliest_start(), Some(t(first - 30 * S)));
+    // Retention drops the oldest hour: the answer is the new oldest segment's first sample.
+    let later = T0 + 3 * HOUR_NS + 13 * 60 * S;
+    s.append(&dwell(later, 10 * S, 100e6, Reason::PoiDwell { poi: 1 }));
+    s.append(&dwell(
+        later + 20 * S,
+        10 * S,
+        100e6,
+        Reason::PoiDwell { poi: 1 },
+    ));
+    assert_eq!(s.hours(), vec![hour_of(t(later))], "the old hour aged out");
+    assert_eq!(s.earliest_start(), Some(t(later)));
+}
