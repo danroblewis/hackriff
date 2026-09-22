@@ -317,11 +317,15 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   # can be re-run alone with `npm run e2e -- <name>...` from ui/.
   local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
   if [ -z "$tests" ] && [ -n "$specs" ]; then
+    TRIAGE_SPECS="$specs"   # try_bulk re-runs these on main alone if this batch is red
     log "TRIAGE: browser specs red: $specs - re-running them alone"
     if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
-      log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+      # The browser tier is the LAST suite; the Rust workspace and acceptance already passed
+      # on this exact tree, so the retry re-runs only the acceptance phase (acceptance-ci +
+      # test-ui-e2e), not the 15-minute workspace suite again.
+      log "TRIAGE: they PASS alone -> load flake; retrying the gate's acceptance phase once"
       printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
-      ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+      ( cd "$REPO" && $retry --phase acceptance ) >>"$LOG" 2>&1; rc=$?
       [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
       return $rc
     fi
@@ -452,6 +456,21 @@ try_bulk(){
         log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
         echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
         notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
+    fi
+    # The same question for browser specs (fog-of-war on 2026-09-22 16:22: red on main since
+    # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
+      if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on browser spec(s): $TRIAGE_SPECS -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - browser spec(s) $TRIAGE_SPECS fail on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails browser spec(s) $TRIAGE_SPECS - the batch ($tickets) is re-queued and held; queue a fix for main."
         rm -f "$BULKMARK"
         return 0
       fi
