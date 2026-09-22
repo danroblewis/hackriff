@@ -283,6 +283,17 @@ export function ancestorsOf(lat: Lattice, a: TileAddr, maxSteps = 4): TileAddr[]
 export const keyOf = (a: TileAddr): string =>
   `${a.device}|${a.scheme}|${a.levelF}|${a.levelT}|${a.fIndex}|${a.tIndex}|${a.cells}`;
 
+/**
+ * The plane encoding this client asks for, on every tile request (T-533).
+ *
+ * `max_db` is 64 % of a live tile's body as JSON decimal text, and its destination is an R16F
+ * texture — seventeen digits sent for eleven bits kept. `f16` is the same values as base64
+ * binary16, which is what [[decodeTile]] knows how to read; asking for a spelling this client
+ * cannot decode would be worse than not asking at all, so **the name here and the decoder are one
+ * change**. A server that answers in another spelling is refused rather than mis-read.
+ */
+export const TILE_PLANES = "f16";
+
 /** The request this client builds for `a` (ui/test asserts the request, not only the response). */
 export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   const q = new URLSearchParams({
@@ -294,6 +305,8 @@ export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   if (a.scheme !== "view") q.set("scheme", a.scheme);
   if (a.device !== "any") q.set("device", a.device);
   if (a.cells !== 256) q.set("cells", String(a.cells));
+  // `/api/tiles/events` answers counts, not planes, and takes no `planes` parameter.
+  if (path === "/api/tiles") q.set("planes", TILE_PLANES);
   return `${path}?${q.toString()}`;
 }
 
