@@ -20442,6 +20442,88 @@ tasks:
       ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the test behaves correctly BOTH with a ring and with the ring refused.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Worked 2026-09-21 on task-t621. BOTH shapes, because they answer different questions and
+      compose: (a) the two existing tests now STATE their precondition and fail on it in the
+      server's own words; (b) the refused ring itself is a new, documented test case.
+      (a) `iq_ring_unavailable(addr)` / `require_iq_ring(addr)` in
+      `crates/hk-cli/tests/api_contract.rs` read `GET /api/iqbuffer` and fail the moment the
+      allocation has SETTLED into any non-`"allocating"` state while `enabled: false`, quoting the
+      route's own `reason` ("... needs 8388608 bytes above the 2147483648-byte free-space floor and
+      1048576 bytes are free"). Called inside both `wait_for` closures, so the answer is a STATE,
+      never a clock: every `enabled: false` allocation except `"allocating"` is terminal. Measured:
+      with the ring refused both tests now fail in 0.07 s naming the refusal, where before they
+      burned 60 s and 90 s and then failed on an assertion about coverage. No skip anywhere - the
+      gate cannot go green for a missing precondition.
+      (b) New test `coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey`.
+      A portable device fills its disk, so this is a real product state, and the test says what the
+      coverage record is then: the refusal is disclosed in full (`enabled: false`,
+      `allocation: "refused"`, a `reason` whose three byte counts are asserted to be the ones that
+      actually refuse it, `fs_*`/`min_free_bytes` null as documented); `sources[iq-ring]`
+      contributes ZERO spans; the OTHER tune history (`observation-log`) still answers and the tuned
+      band is still `observed` at the fixture's own centre and rate - a lost SOURCE is not evidence
+      that nothing looked; and the control band 2.4 GHz away is still `unobserved`, not `unknown`.
+      THE SEAM, and it fills no disk: `ServeOptions::iq_buffer_hooks`
+      (`hk_cli::pipeline::IqBufferHooksOverride`) with an `IqBufferHooks::fs_space` reporting 1 MiB
+      free of 8 GiB. The default floor (10 % within 2..8 GiB) is then 2 GiB, so not even two slots
+      fit and the documented `"refused"` path runs. `HK_IQ_BUFFER_MIN_FREE` is the same seam from
+      outside and is what the failure message tells a human to reach for.
+      NO `docs/api.md` CHANGE: the refusal contract (`allocation: "refused"` + `reason`;
+      `fs_free_bytes`/`fs_total_bytes`/`min_free_bytes` null when disabled) is ALREADY documented
+      there. This ticket makes the tests catch up with the docs, not the other way round.
+      EVIDENCE. Ring present: all four `coverage_*` contract tests pass unchanged. Ring refused:
+      the new test passes (62 s - it waits for one 60 s `SweepRecord::MAX_SPAN_NS` observation
+      record, the cadence the "log alone answers" property inherently needs, bounded at 90 s and
+      state-gated). Non-vacuity: with `Evidence::collect` mutated to drop the observation log, the
+      new test FAILS and all three pre-existing coverage tests still PASS - it guards a real
+      coverage defect none of them sees. Mutation reverted.
+      DEFECT FOUND, DELIBERATELY NOT FIXED HERE (filed as T-640): a REFUSED ring still reports
+      `sources[iq-ring].available: true` with zero spans, because the flag is
+      `state.iq_buffer.is_some()` - whether a ring HANDLE is wired, not whether a tune journal could
+      answer. `crates/hk-api/src/coverage.rs` was off limits to this ticket (T-596 held it), so the
+      new test asserts `spans == 0` and says in a comment why it asserts neither value of
+      `available`: pinning today's would enshrine the defect, pinning tomorrow's would fail now.
+  - id: T-640
+    milestone: M2-hardening
+    title: A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got
+    status: todo
+    priority: normal
+    parallel_group: PIPE
+    model: opus
+    effort: low
+    depends_on: []
+    use_cases: []
+    found_by: 'task-t621, 2026-09-21, measured on a server whose ring was refused through the fs_space seam'
+    acceptance: |
+      MEASURED, not inferred. With the IQ ring REFUSED (`GET /api/iqbuffer`: `enabled: false`,
+      `allocation: "refused"`), `GET /api/coverage` still answers
+      `sources[{"kind": "iq-ring", "available": true, "spans": 0, "named_spans": 0,
+      "device_known": true}]`. The flag comes from `Evidence::collect` in
+      `crates/hk-api/src/coverage.rs`: `ring_available: state.iq_buffer.is_some()` - whether a ring
+      HANDLE is wired into the API state, not whether a tune journal could answer. The handle exists
+      even when the ring was refused, so the row claims a source that contributed nothing and never
+      could.
+      WHY IT MATTERS, AND IT IS A FAIL-OPEN. The field's own documented meaning is "a client can
+      tell 'this record had nothing here' from 'this record was not consulted'" - and here it says
+      the opposite of both. Worse, `Evidence::unknown_rows` decides `no_tune_history` from exactly
+      these flags: `!ring_available && !log_available`. A server with a refused ring and no
+      observation log would therefore serve `"unobserved"` for rows it has NO tune record of, where
+      the rule says `"unknown"`. That is the cheap answer winning when the state is unsure, which is
+      the one thing coverage state is not allowed to do (`Coverage::Unobserved` is not quiet,
+      `BiasTee::Unknown` is not `Off`).
+      DoD: `available` reports whether the ring could be READ as a tune history (open and
+      buffering), not whether a handle exists; `device_known` on a source that answered nothing is
+      re-examined at the same time (`0 == 0` currently reads as "yes, known"). Then extend
+      `coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey` in
+      `crates/hk-cli/tests/api_contract.rs` - which today asserts `spans == 0` and deliberately
+      asserts NEITHER value of `available`, with a comment saying why - to pin the corrected value,
+      and add the no-log case that proves the `"unknown"` rows. Update `docs/api.md` alongside if
+      the field's stated meaning needs sharpening (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by T-621, which found it while putting the refused ring under test and was
+      scoped out of `crates/hk-api/src/coverage.rs` (T-596 held that file at the time). Small and
+      self-contained; the refused-ring test that exercises it already exists.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

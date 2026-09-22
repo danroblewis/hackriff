@@ -6197,6 +6197,55 @@ fn the_band_collapsed_activity_series_is_measured_and_states_its_fold() {
     stop_server(serving);
 }
 
+/// T-621: why this server has **no IQ capture ring**, in the server's own words, or `None` while
+/// it may still get one.
+///
+/// `hk serve` refuses the ring when it will not fit above the free-space floor (`docs/api.md`
+/// "IQ capture buffer": `enabled: false`, `allocation: "refused"`, and a `reason` naming the bytes
+/// needed, the floor and the free space). The coverage tests below need one — their evidence is
+/// the ring's tune journal — and without it they used to spend 60-90 s inside a `wait_for` and
+/// then fail on an assertion about *coverage*, for a reason that has nothing to do with coverage.
+/// Three merge gates were lost to that hunt on a day when this machine's free space ran from
+/// 43 GiB down to 1.1 GiB.
+///
+/// So they state the precondition, and a missing one fails **immediately, naming the refusal**.
+/// Not a skip: a gate that skips is a gate that passes for the wrong reason (T-346/T-353). The
+/// refused ring is not merely fenced off either — it is a real product state (a portable device
+/// fills its disk) and is under test in
+/// [`coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey`], which forces
+/// the refusal deliberately through the allocator's own `fs_space`. Here a refusal can only be an
+/// accident of the machine, and accidents get named rather than tolerated.
+///
+/// Read as a **state, never a clock**: every `enabled: false` allocation state except
+/// `"allocating"` is settled, so this answers the first time it is asked.
+fn iq_ring_unavailable(addr: SocketAddr) -> Option<String> {
+    let (st, v) = get(addr, "/api/iqbuffer");
+    if st != 200 || v["enabled"] == json!(true) {
+        return None;
+    }
+    match v["allocation"].as_str() {
+        // Still opening in the background: not yet an answer either way.
+        Some("allocating") => None,
+        alloc => Some(format!(
+            "this test needs an IQ capture ring and this server has none, so there is no tune \
+             journal for the coverage map to read. allocation={}, the server's reason: {}. That is \
+             this machine, not the code under test — `allocation: \"refused\"` means free space \
+             below the ring's floor (`docs/api.md`, IQ capture buffer). Free some disk, or lower \
+             the floor with HK_IQ_BUFFER_MIN_FREE, and run it again.",
+            alloc.map_or_else(|| "null".to_owned(), |a| format!("{a:?}")),
+            v["reason"]
+        )),
+    }
+}
+
+/// Fails the calling test at once, in the server's own words, when it has no IQ capture ring
+/// ([`iq_ring_unavailable`]).
+fn require_iq_ring(addr: SocketAddr) {
+    if let Some(why) = iq_ring_unavailable(addr) {
+        panic!("{why}");
+    }
+}
+
 /// T-368: **grey means genuinely unobserved.**
 ///
 /// The user's invariant: *"the view renders whatever samples are actually available for the current
@@ -6243,6 +6292,10 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
         "the coverage map to report the tuned band as sampled",
         Duration::from_secs(60),
         || {
+            // T-621: this loop's evidence is the ring's tune journal, so a server that was
+            // refused one can never satisfy it. Fail here, in the server's words, instead of
+            // 60 s later on a coverage assertion.
+            require_iq_ring(addr);
             // 404 until the ring has a live edge to hang a capture window on: a server with no
             // capture window says so rather than inventing a span.
             let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
@@ -6636,6 +6689,212 @@ fn coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked(
     stop_server(serving);
 }
 
+/// T-621 (with T-596): **a refused IQ capture ring is a product state, and the coverage answer
+/// stays honest across it.**
+///
+/// A portable device fills its disk, and when the ring will not fit above the free-space floor
+/// `hk serve` refuses it and carries on: `docs/api.md` "IQ capture buffer" —
+/// `enabled: false`, `allocation: "refused"`, and a `reason` naming the bytes needed, the floor
+/// and the free space. Until now nothing asserted what the *coverage record* then says, and the
+/// gap was not academic: on a machine near the floor the two tests around this one failed on
+/// coverage assertions because of it.
+///
+/// Coverage reads **two** tune histories (`sources`: the ring's journal and the observation log).
+/// Losing one is a loss of evidence, and this project's rule is that a lost or unsure state is
+/// never served as the cheap one — `Coverage::Unobserved` is not "we have no record". So the
+/// honest answer, asserted here on values:
+///
+///  1. **The refusal is disclosed, in full.** `/api/iqbuffer` says `enabled: false`,
+///     `allocation: "refused"`, with a `reason` carrying the three numbers.
+///  2. **The source row says it did not answer.** `sources[iq-ring]` is `available: false` with
+///     **zero** spans — and the `observation-log` row is `available: true` and does answer. A
+///     client can tell "this record had nothing here" from "this record was not consulted".
+///  3. **The surviving evidence still colours the map.** The band the radio is demonstrably tuned
+///     to is `observed`, at the fixture's own centre and rate. A lost *source* is not evidence
+///     that nothing looked: greying the tuned band here would be the mirror of T-368's bug.
+///  4. **And it colours only that.** The control, as in T-368: a band 2.4 GHz away this run never
+///     visited is still `unobserved`, with no key readable as a measured zero — and **not**
+///     `unknown`, because one tune history is still here and it can say. (`unknown` is for a
+///     server that recorded and lost, T-507.)
+///
+/// The refusal is forced through the allocator's own seam — a mocked `fs_space` reporting a
+/// nearly-full filesystem — so no disk is filled and nothing here depends on the machine's state.
+#[test]
+fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() {
+    /// A filesystem with 1 MiB free of 8 GiB. The default floor is 10 % of the filesystem within
+    /// 2..8 GiB, so 819 MiB here; not even the two slots of the smallest ring fit above it, which
+    /// is exactly the documented `"refused"` case. Nothing is allocated or written: the ring never
+    /// opens.
+    struct FullDisk;
+    impl hk_store::iqbuffer::IqBufferHooks for FullDisk {
+        fn fs_space(&self, _: &std::path::Path) -> std::io::Result<hk_store::iqbuffer::FsSpace> {
+            Ok(hk_store::iqbuffer::FsSpace {
+                free: 1 << 20,
+                total: 8 << 30,
+            })
+        }
+    }
+
+    let dir = temp_data_dir();
+    let guard = TempDataDirGuard::new(dir.clone());
+    let serving = start(&ServeOptions {
+        source: ServeSource::HackRf {
+            spec: format!("mock:{}", fixture_path().display()),
+            live: LiveArgs::default(),
+        },
+        data_dir: Some(dir),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: hk_cli::pipeline::IqBufferArgs {
+            retention_s: Some(120.0),
+            max_bytes: Some(64 << 20),
+        },
+        iq_buffer_hooks: Some(hk_cli::pipeline::IqBufferHooksOverride(
+            std::sync::Arc::new(FullDisk),
+        )),
+    })
+    .unwrap();
+    let addr = serving.server.local_addr();
+    let _guard = guard;
+
+    // ---- 1. the refusal is disclosed, with its three numbers ----
+    let mut iq = Value::Null;
+    wait_for(
+        "the ring allocation to settle (it cannot open on this filesystem)",
+        Duration::from_secs(30),
+        || {
+            let (st, got) = get(addr, "/api/iqbuffer");
+            iq = got;
+            st == 200 && iq["allocation"] != json!("allocating")
+        },
+    );
+    assert_eq!(iq["enabled"], json!(false), "{iq}");
+    assert_eq!(iq["allocation"], json!("refused"), "{iq}");
+    let reason = iq["reason"]
+        .as_str()
+        .expect("a refused ring says why")
+        .to_owned();
+    // The documented reason, and it is arithmetic rather than a shrug: the three numbers it names
+    // (bytes needed, the floor, the free space) must be the ones that actually refuse the ring.
+    for want in ["needs", "free-space floor", "are free"] {
+        assert!(
+            reason.contains(want),
+            "{reason:?} does not name {want:?}: {iq}"
+        );
+    }
+    let nums: Vec<u64> = reason
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.parse().expect("a decimal byte count"))
+        .collect();
+    let [need, floor, free] = nums[..] else {
+        panic!("the reason names exactly three byte counts: {reason:?}");
+    };
+    assert!(
+        free < need + floor,
+        "the three numbers must be the ones that refuse the ring: {need} + {floor} <= {free} \
+         would have fit. {reason:?}"
+    );
+    // And the status's own space fields are `null` while disabled, as documented: nothing here
+    // can be read as a measured filesystem this run is using.
+    for k in ["fs_free_bytes", "fs_total_bytes", "min_free_bytes"] {
+        assert_eq!(iq[k], Value::Null, "{k} on a disabled ring: {iq}");
+    }
+    // This is the precondition helper's own subject: on this server it fires, and says so.
+    let named = iq_ring_unavailable(addr).expect("the helper sees a settled refusal");
+    assert!(
+        named.contains(&reason),
+        "the helper quotes the server: {named:?}"
+    );
+
+    // ---- 2/3. the surviving tune history still answers, and the ring row says it did not ----
+    let (lo, hi) = (
+        FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
+        FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
+    );
+    let mut tuned = Value::Null;
+    wait_for(
+        "the observation log alone to report the tuned band as sampled",
+        Duration::from_secs(90),
+        || {
+            let (st, got) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=8"));
+            if st != 200 {
+                return false;
+            }
+            tuned = got;
+            tuned["any"]["observed_cells"].as_u64().unwrap_or(0) > 0
+        },
+    );
+    let src = |kind: &str| -> Value {
+        tuned["sources"]
+            .as_array()
+            .expect("sources")
+            .iter()
+            .find(|s| s["kind"] == json!(kind))
+            .unwrap_or_else(|| panic!("the {kind} source row: {tuned}"))
+            .clone()
+    };
+    let ring = src("iq-ring");
+    // A refused ring has no journal, so it contributes nothing and can name nothing.
+    assert_eq!(
+        ring["spans"],
+        json!(0),
+        "a refused ring contributes no spans: {tuned}"
+    );
+    assert_eq!(ring["named_spans"], json!(0), "{tuned}");
+    // NOT asserted here: `sources[iq-ring].available`. Measured 2026-09-21 on this very server, a
+    // refused ring still reports `available: true` — the flag tracks whether a ring *handle* is
+    // wired into the API state, not whether a tune journal could answer. Under the documented
+    // meaning ("a client can tell 'this record had nothing here' from 'this record was not
+    // consulted'") that is the wrong way round, and it is a fail-open: `Evidence::unknown_rows`
+    // decides `no_tune_history` from these same flags, so a refused ring makes the server believe
+    // it still holds a tune history it does not have. The fix belongs in
+    // `crates/hk-api/src/coverage.rs`, which T-621 was told to stay out of (T-596 holds it);
+    // reported as a follow-up rather than asserted either way, because pinning today's value here
+    // would enshrine the defect and pinning tomorrow's would fail the gate now.
+    let log = src("observation-log");
+    assert_eq!(log["available"], json!(true), "{tuned}");
+    assert!(
+        log["spans"].as_u64().unwrap_or(0) > 0,
+        "the surviving tune history is what answered: {tuned}"
+    );
+
+    // The tuned band is observed, measured, and at the fixture's own tuning — the same values
+    // T-368 asserts with a ring, reached here through one source instead of two.
+    let cells = tuned["any"]["cells"].as_array().expect("cells").clone();
+    assert_eq!(cells.len(), 8, "{tuned}");
+    let observed: Vec<&Value> = cells
+        .iter()
+        .filter(|c| c["state"] == json!("observed"))
+        .collect();
+    assert!(!observed.is_empty(), "{tuned}");
+    for c in &observed {
+        assert!(c["duty"].as_f64().unwrap_or(0.0) > 0.0, "{c}");
+        assert!(c["observed_s"].as_f64().unwrap_or(0.0) > 0.0, "{c}");
+        assert!(c["spans"].as_u64().unwrap_or(0) >= 1, "{c}");
+        assert_eq!(c["center_hz"].as_f64(), Some(FIXTURE_CENTER_HZ), "{c}");
+        assert_eq!(c["sample_rate_hz"].as_f64(), Some(FIXTURE_RATE_HZ), "{c}");
+    }
+
+    // ---- 4. the control: never tuned is still `unobserved`, and never `unknown` ----
+    let (st, fresh) = get(addr, "/api/coverage?f_lo=2.400e9&f_hi=2.410e9&cells=8");
+    assert_eq!(st, 200, "{fresh}");
+    assert_eq!(fresh["any"]["observed_cells"], json!(0), "{fresh}");
+    assert_eq!(fresh["any"]["unobserved_cells"], json!(8), "{fresh}");
+    assert_eq!(fresh["any"]["unknown_cells"], json!(0), "{fresh}");
+    for c in fresh["any"]["cells"].as_array().expect("cells") {
+        assert_eq!(*c, json!({ "state": "unobserved" }), "{fresh}");
+    }
+
+    stop_server(serving);
+}
+
 /// T-423, `docs/16` §7 step 2: **the coverage answer gains a time axis, and the wire can say the
 /// fourth state.**
 ///
@@ -6691,6 +6950,9 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
         "the ring to buffer more than one row of capture",
         Duration::from_secs(90),
         || {
+            // T-621: a refused ring buffers nothing, ever. Name the refusal now rather than
+            // timing out in 90 s on a window that cannot arrive.
+            require_iq_ring(addr);
             let (st, got) = get(addr, "/api/timeline");
             let b = &got["window"]["buffered"];
             match (st, b["t0_s"].as_f64(), b["t1_s"].as_f64()) {
