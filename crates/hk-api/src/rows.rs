@@ -287,6 +287,9 @@ pub struct RowCursor {
     next: i64,
     /// Rows the next coverage probe spans ([`GAP_PROBE_ROWS`], doubling across grey).
     gap_span: i64,
+    /// How far forward the tune record is known to reach, ns — cached because it only grows, so
+    /// a sealed walk far behind it never re-reads the record ([`Self::record_reach`]).
+    reach_ns: Option<i64>,
 }
 
 impl RowCursor {
@@ -297,7 +300,46 @@ impl RowCursor {
             sub,
             next,
             gap_span: GAP_PROBE_ROWS,
+            reach_ns: None,
         }
+    }
+
+    /// **How far forward the tune record reaches, over any band** — the evidence grey is decided
+    /// from, and the route's own `as_of_s` rule (T-532) applied to a stream (T-468 review).
+    ///
+    /// A row is pushed once and never again, so its coverage must be *final* when it goes: a row
+    /// past the newest tune record would be rasterised `unobserved` because the record has not
+    /// reached it yet, not because nothing looked — and with the IQ ring refused (T-588/T-596)
+    /// the record's live edge is the open dwell, which trails the spectrum by up to a control
+    /// tick. So the cursor delivers nothing past this instant. Over **any** band, because a record
+    /// that reaches past a row elsewhere proves the absence here is real: the radio was somewhere
+    /// else. `Ok(None)` means wait (a record source exists and has reached nothing yet);
+    /// `Ok(Some(i64::MAX))` means this server keeps no tune record at all, so every plane is
+    /// uniformly `unobserved` and nothing will ever change that.
+    fn record_reach(&mut self, state: &ApiState, want_ns: i64) -> Option<i64> {
+        if let Some(r) = self.reach_ns
+            && r >= want_ns
+        {
+            return Some(r);
+        }
+        let from = self.reach_ns.unwrap_or_else(|| self.sub.row_ns(self.next));
+        let ev = crate::coverage::Evidence::collect(
+            state,
+            FreqRange::new(0.0, 1e12),
+            TimeRange::new(
+                Timestamp::from_unix_nanos(from),
+                Timestamp::from_unix_nanos(i64::MAX / 4),
+            ),
+        );
+        if !ev.has_source() {
+            self.reach_ns = Some(i64::MAX);
+            return self.reach_ns;
+        }
+        if let Some(t) = ev.newest_record {
+            let t = t.as_unix_nanos();
+            self.reach_ns = Some(self.reach_ns.map_or(t, |r| r.max(t)));
+        }
+        self.reach_ns
     }
 
     /// The subscription.
@@ -332,11 +374,22 @@ impl RowCursor {
             },
         };
         // Row r is complete iff (r + 1)·T <= edge.
-        let complete = edge.div_euclid(s.t_cell());
+        let t_cell = s.t_cell();
+        let complete = edge.div_euclid(t_cell);
         let limit = s.to.map_or(complete, |t| t.min(complete));
         if self.next >= limit {
             return Ok(Step::Wait);
         }
+        // ...and no row the tune record has not reached yet (see `record_reach`).
+        let want = limit.saturating_mul(t_cell);
+        let Some(reach) = self.record_reach(state, want) else {
+            return Ok(Step::Wait);
+        };
+        let limit = limit.min(reach.div_euclid(t_cell));
+        if self.next >= limit {
+            return Ok(Step::Wait);
+        }
+        let s = &self.sub;
         let freq = s.key.region.freq;
         // T-461 applied to a range: a stretch the coverage map calls unobserved for the selected
         // device is answered from the map alone, as one message.

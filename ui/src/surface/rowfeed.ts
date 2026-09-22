@@ -129,15 +129,42 @@ export interface TileRows {
   readonly rowsSeen: Uint8Array;
 }
 
+/** A column key: a tile key without its time index. */
+const columnKey = (col: ColumnAddr): string => keyOf({ ...col, tIndex: -1 });
+
 /**
  * Rows filed by **tile address**. Two panes looking at the same place share one entry — the
  * accumulator is a property of the lattice, not of whoever subscribed.
+ *
+ * **Grey stretches are kept as ROW RANGES, never as tiles.** An `unobserved` message may span
+ * billions of rows (the route doubles its probe across grey, and `t_from=0` is a normal request), so
+ * expanding one into filled tiles would allocate a 256 × 256 plane per tile it crosses — an hour of
+ * an un-tuned band at the finest level is ~350 tiles. A range costs two numbers however long it is;
+ * a renderer asks [[greyAt]] / [[gapsOf]] for the rows it is drawing.
  */
 export class RowAccumulator {
   private tiles = new Map<string, TileRows>();
+  /** Per column: disjoint, sorted, merged `[row0, row1)` stretches the coverage map calls unobserved. */
+  private gaps = new Map<string, [number, number][]>();
 
   get(addr: TileAddr): TileRows | undefined { return this.tiles.get(keyOf(addr)); }
+  /** Tiles holding pushed rows. Grey stretches allocate none. */
   get size(): number { return this.tiles.size; }
+
+  /** The unobserved stretches filed for `col`, sorted and merged. */
+  gapsOf(col: ColumnAddr): readonly (readonly [number, number])[] { return this.gaps.get(columnKey(col)) ?? []; }
+
+  /** Whether row `row` of `col` lies in a filed unobserved stretch. */
+  greyAt(col: ColumnAddr, row: number): boolean {
+    const g = this.gaps.get(columnKey(col));
+    if (!g) return false;
+    let lo = 0, hi = g.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (g[mid][1] <= row) lo = mid + 1; else hi = mid;
+    }
+    return lo < g.length && g[lo][0] <= row;
+  }
 
   private tile(col: ColumnAddr, tIndex: number): TileRows {
     const addr: TileAddr = { ...col, tIndex };
@@ -151,31 +178,37 @@ export class RowAccumulator {
     return t;
   }
 
-  /** Files a block; returns the tile addresses it touched. */
-  apply(col: ColumnAddr, m: RowBlock | GapBlock): TileAddr[] {
-    const c = col.cells;
-    const touched: TileAddr[] = [];
-    for (let r = m.row0; r < m.row0 + m.rows;) {
-      const tIndex = Math.floor(r / c);
-      const t = this.tile(col, tIndex);
-      const end = Math.min(m.row0 + m.rows, (tIndex + 1) * c);
-      for (; r < end; r++) {
-        const y = r - tIndex * c, src = r - m.row0;
-        for (let f = 0; f < c; f++) {
-          const i = y * c + f;
-          if (m.kind === "rows") {
-            t.maxDb[i] = m.maxDb[src * c + f];
-            t.coverage[i] = m.coverage[src * c + f];
-          } else {
-            t.maxDb[i] = NaN;
-            t.coverage[i] = "unobserved";
-          }
-        }
-        t.rowsSeen[y] = 1;
-      }
-      touched.push(t.addr);
+  private addGap(col: ColumnAddr, a: number, b: number): void {
+    const k = columnKey(col);
+    const g = this.gaps.get(k) ?? [];
+    g.push([a, b]);
+    g.sort((x, y) => x[0] - y[0]);
+    const merged: [number, number][] = [];
+    for (const r of g) {
+      const last = merged[merged.length - 1];
+      if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]); else merged.push([r[0], r[1]]);
     }
-    return touched;
+    this.gaps.set(k, merged);
+  }
+
+  /** Files a block; returns the tile addresses whose pushed rows it changed (none for a gap). */
+  apply(col: ColumnAddr, m: RowBlock | GapBlock): TileAddr[] {
+    if (m.kind === "unobserved") {
+      this.addGap(col, m.row0, m.row0 + m.rows);
+      return [];
+    }
+    const c = col.cells;
+    const tIndex = Math.floor(m.row0 / c);
+    const t = this.tile(col, tIndex);
+    for (let src = 0; src < m.rows; src++) {
+      const y = m.row0 + src - tIndex * c;
+      for (let f = 0; f < c; f++) {
+        t.maxDb[y * c + f] = m.maxDb[src * c + f];
+        t.coverage[y * c + f] = m.coverage[src * c + f];
+      }
+      t.rowsSeen[y] = 1;
+    }
+    return [t.addr];
   }
 }
 

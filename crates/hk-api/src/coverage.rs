@@ -484,6 +484,12 @@ pub(crate) struct Evidence {
 }
 
 impl Evidence {
+    /// Whether any tune history on this server can contribute evidence at all (T-468). With none,
+    /// every plane is uniformly `unobserved` and there is no forward horizon to wait for.
+    pub(crate) fn has_source(&self) -> bool {
+        self.ring_available || self.log_available
+    }
+
     /// Reads both tune histories over `freq × window`, and each one's reach.
     pub(crate) fn collect(state: &ApiState, freq: FreqRange, window: TimeRange) -> Self {
         let memory = Memory::of(state);

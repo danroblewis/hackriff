@@ -113,17 +113,33 @@ test("rows are filed by TILE ADDRESS, each at its own row", () => {
   assert.equal(keyOf(t1.addr), keyOf({ ...col, tIndex: 1 }));
 });
 
-test("an unobserved stretch greys every tile it spans, with no level", () => {
+test("an unobserved stretch is filed as a ROW RANGE, never as tiles", () => {
   const t = fakeOpener();
   const feeds = new PaneFeeds(t.open);
   const p = feeds.subscribe("a", col, { fromRow: 4, toRow: 30 });
   t.send(p, subscribed(4, 30), JSON.stringify({ type: "unobserved", row0: 4, rows: 26, final: true }), end(30));
-  assert.equal(feeds.rows.size, 4, "tiles 0..3");
-  const t3 = feeds.rows.get({ ...col, tIndex: 3 })!;
-  assert.deepEqual([...t3.rowsSeen], [1, 1, 1, 1, 1, 1, 0, 0]);
-  assert.equal(t3.coverage[0], "unobserved");
-  assert.ok(Number.isNaN(t3.maxDb[0]));
+  assert.equal(feeds.rows.size, 0, "grey allocates no tile");
+  assert.deepEqual(feeds.rows.gapsOf(col), [[4, 30]]);
+  assert.equal(feeds.rows.greyAt(col, 3), false);
+  assert.equal(feeds.rows.greyAt(col, 4), true);
+  assert.equal(feeds.rows.greyAt(col, 29), true);
+  assert.equal(feeds.rows.greyAt(col, 30), false);
   assert.equal(feeds.feed("a")!.done, true);
+});
+
+test("a gap of billions of rows costs two numbers, and adjacent gaps merge", () => {
+  const t = fakeOpener();
+  const feeds = new PaneFeeds(t.open);
+  const p = feeds.subscribe("a", col, { fromRow: 0, toRow: null });
+  const huge = 4096 * 2 ** 30;
+  t.send(p, subscribed(0, null),
+    JSON.stringify({ type: "unobserved", row0: 0, rows: 4096, final: true }),
+    JSON.stringify({ type: "unobserved", row0: 4096, rows: huge, final: true }),
+    rows(4096 + huge, 2));
+  assert.deepEqual(feeds.rows.gapsOf(col), [[0, 4096 + huge]]);
+  assert.equal(feeds.rows.size, 1, "only the tile the real rows landed in");
+  assert.equal(feeds.rows.greyAt(col, 4096 + huge), false);
+  assert.equal(feeds.feed("a")!.edgeRow, 4096 + huge + 2);
 });
 
 test("a skipped or repeated row is a protocol error, never patched over", () => {

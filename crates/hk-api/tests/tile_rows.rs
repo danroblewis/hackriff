@@ -60,7 +60,7 @@ impl Drop for TempDir {
     }
 }
 
-fn dwell(lo: f64, hi: f64, t0_ns: i64, t1_ns: i64) -> ObservationRecord {
+fn dwell(seq: u64, lo: f64, hi: f64, t0_ns: i64, t1_ns: i64) -> ObservationRecord {
     let w = TimeRange::new(
         Timestamp::from_unix_nanos(t0_ns),
         Timestamp::from_unix_nanos(t1_ns),
@@ -68,7 +68,7 @@ fn dwell(lo: f64, hi: f64, t0_ns: i64, t1_ns: i64) -> ObservationRecord {
     ObservationRecord::Dwell(DwellRecord {
         schema: hk_model::attention::ATTENTION_SCHEMA_VERSION,
         survey_id: None,
-        seq: 1,
+        seq,
         plan_version: 1,
         site: SiteKey::Unassigned,
         device_id: Some(DEVICE.to_string()),
@@ -97,12 +97,18 @@ struct Fixture {
     _dir: TempDir,
     history: Arc<Mutex<hk_store::Pyramid>>,
     server: Server,
+    obs: ObservationStore,
     t_cell: i64,
     f_hi: f64,
 }
 
 impl Fixture {
     fn build(tag: &str, recorded: i64, sealed_through: Option<i64>) -> Self {
+        Self::build_tuned(tag, recorded, sealed_through, DWELL_ROWS)
+    }
+
+    /// [`Self::build`] with the tune record ending at row `dwell_rows`.
+    fn build_tuned(tag: &str, recorded: i64, sealed_through: Option<i64>, dwell_rows: i64) -> Self {
         let dir = TempDir::new(tag);
         let p = hk_store::Pyramid::open(dir.0.join("history"), PyramidConfig::default()).unwrap();
         let g = p.geometry().clone();
@@ -120,11 +126,11 @@ impl Fixture {
         }
         let obs =
             ObservationStore::open(ObservationLogConfig::new(dir.0.join("observations"))).unwrap();
-        obs.append(&dwell(0.0, f_hi, 0, DWELL_ROWS * t_cell));
+        obs.append(&dwell(1, 0.0, f_hi, 0, dwell_rows * t_cell));
         obs.flush();
         let state = ApiState {
             history: Some(history.clone()),
-            observations: Some(obs),
+            observations: Some(obs.clone()),
             ..ApiState::default()
         };
         let config = ServerConfig::new(
@@ -135,6 +141,7 @@ impl Fixture {
             _dir: dir,
             history,
             server: Server::start(config, state).unwrap(),
+            obs,
             t_cell,
             f_hi,
         }
@@ -146,6 +153,18 @@ impl Fixture {
 
     fn record(&self, from: i64, n: i64) {
         record(&self.history, self.t_cell, self.f_hi, from, n);
+    }
+
+    /// Extends the tune record over rows `[from, to)`.
+    fn tune(&self, seq: u64, from: i64, to: i64) {
+        self.obs.append(&dwell(
+            seq,
+            0.0,
+            self.f_hi,
+            from * self.t_cell,
+            to * self.t_cell,
+        ));
+        self.obs.flush();
     }
 }
 
@@ -373,5 +392,42 @@ fn an_unobserved_stretch_is_one_message_with_no_measurement() {
     assert_eq!(v["row0"], 0);
     assert_eq!(v["rows"], 30);
     assert!(v.get("max_db").is_none(), "grey carries no level: {v}");
+    assert_eq!(next(&mut ws).expect("end")["type"], "end");
+}
+
+/// **A row is never pushed ahead of the tune record that decides its grey** (T-468 review).
+///
+/// Rows are pushed once and never re-sent, so a row past the newest tune record would go out
+/// `unobserved` — not because nothing looked, but because the record had not reached it yet (the
+/// IQ ring refused, the open dwell trailing the spectrum by a control tick: T-588/T-596). Here the
+/// spectrum reaches row 20 and the record only row 12: rows 12..20 must WAIT, and arrive measured
+/// and `observed` once the record catches up. Before the fix they were sent at once as one
+/// `unobserved` stretch, which `rows_of` refuses.
+#[test]
+fn rows_wait_for_the_tune_record_and_are_never_greyed_ahead_of_it() {
+    let fx = Fixture::build_tuned("reach", 20, None, 12);
+    let mut ws = connect(fx.addr(), &path("&t_from=4&t_to=20"));
+    subscribed(&mut ws);
+    let mut blocks = Vec::new();
+    let mut rows = Vec::new();
+    while rows.len() < 8 {
+        let v = next(&mut ws).expect("rows");
+        rows.extend(rows_of(&v));
+        blocks.push(v);
+    }
+    assert_exact(&rows, 4, 12);
+    fx.tune(2, 12, 20);
+    while rows.len() < 16 {
+        let v = next(&mut ws).expect("rows");
+        rows.extend(rows_of(&v));
+        blocks.push(v);
+    }
+    assert_exact(&rows, 4, 20);
+    for v in &blocks {
+        assert_eq!(
+            v["coverage"]["plane"]["uniform"], "observed",
+            "a recorded row is never pushed grey: {v}"
+        );
+    }
     assert_eq!(next(&mut ws).expect("end")["type"], "end");
 }
