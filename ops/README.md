@@ -6,13 +6,13 @@ never lose them again (they used to live in a `/tmp` scratchpad that a reboot wi
 
 Runtime state (logs, tokens, the demo build, the merge queue) lives in **`$HACKRIFF_OPS`**,
 default **`~/.hackriff-ops`** — deliberately outside `/tmp` so it survives a reboot. Override
-with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The three scripts share that one dir.
+with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The four scripts share that one dir.
 
 Environment-specific constants at the top of each file (edit for a different machine/checkout):
 `REPO` (the repo path, `/Users/daniellewis/hackriff`); in `monitor.py` also `PROJ` (the Claude
 projects dir), `COORD` (the coordinator's conversation id), and `SUPER`.
 
-## The three scripts
+## The four scripts
 
 ### `stage.sh` — staging demo watcher (port 8899)
 Rebuilds the `hk` binary and restarts the "bears" demo on every **code** commit to `main`
@@ -72,12 +72,40 @@ is still staged, then start the new one. Note also that a fallback batch is held
 the runner is stopped after a bulk attempt fell back to individual gates, the branches it had
 already consumed from the queue are lost and must be re-queued by hand.
 
+### `work-runner.py` — automated, no-AI dispatch (the fourth script, 2026-09-22)
+Dispatch was the bottleneck: one serial coordinator loop deciding per tick whether to start a
+ticket, while builder slots sat idle for the length of every gate. This runner mirrors the merge
+runner's shape for the *start* of a ticket's life. Every 30 s it: **reaps** finished workers
+(commits ahead of `main` → the reviewer stage for `core_interface`/cheap-model tickets, then the
+merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-attention.txt`);
+**syncs the board** (started → `in-progress` + `branch:`, landed per `landed.jsonl` → `done` +
+`commit:`) in one small commit on `main`, only when `main` is safe (no `MERGE_HEAD`, no
+`bulk-in-progress`, clean tree); and **dispatches** `todo` tickets whose deps are done — not
+`blocked_on`, not `needs: user|hardware`, not `dispatch: manual`, one per `parallel_group` at a
+time, user-requested first, then priority, then number — into a fresh worktree + branch
+(`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
+`model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
+Builder cap is CLAUDE.md's 4 *including* a running gate (`WORK_CAP`), disk floor 20 GB.
+```bash
+HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
+# dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)
+# running:   cat $HACKRIFF_OPS/work-runner-status.json  ·  claims: work-claims.json
+# exceptions: cat $HACKRIFF_OPS/work-needs-attention.txt   ·  per run: work-done.jsonl
+# opt a ticket out of auto-dispatch: `dispatch: manual` on its board entry
+```
+Like the merge runner it logs `VERSION:` at startup — launch it from `ops/work-runner.py` in the
+repo, never a copy. The coordinator no longer dispatches by hand (`.claude/roles/coordinator.md`):
+it handles the two attention files, reviews, triage and ordering, and hand-launches only what the
+runner will not touch (`needs: user|hardware`, `dispatch: manual`). **Append to the merge queue,
+never rewrite it** — a rewrite on 2026-09-22 dropped a queued branch.
+
 ## Restart-all (after a reboot)
 ```bash
 export HACKRIFF_OPS=~/.hackriff-ops
 cd /Users/daniellewis/hackriff
 nohup bash ops/stage.sh        >/dev/null 2>&1 & disown
 nohup bash ops/merge-runner.sh >/dev/null 2>&1 & disown
+nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &
 # then re-tunnel the dashboard if needed: nohup cloudflared tunnel --url http://127.0.0.1:8901 &
 ```
