@@ -20815,6 +20815,23 @@ tasks:
            tab holding every slot is still the fair-share decision on the route itself, T-630; this
            only stops the client giving up while the route is still working.
 
+        7. THE SAME MISTAKE ONE LAYER DOWN, found by using the suite as evidence: the tier's own
+           `GET` helpers split two ways on backpressure. `canvas-journey` and `scan-everything`
+           retry a `503` ("a 503 is 'busy now', never 'no'"); `fog-of-war`, `surface-nav`,
+           `surface-retune` and `fog-of-war`'s tile replay treated it as a broken server. Each of
+           those is a PREMISE, so a refusal ended the test before its subject ran - measured,
+           `surface-nav`'s `timeRoom` threw `GET /api/tiles -> 503` 182 ms into T-456, before its
+           own 120 s wait for the record to grow had run once. All four retry now, and the tile
+           replay counts its reasons so "the route was busy" and "that band was never drawn" can
+           no longer be reported with the same words.
+        8. NOT A TEST DEFECT AT ALL, but worth recording because it distorted every measurement in
+           this ticket: TEN ORPHANED CHROME PROCESSES from a killed e2e run were still running
+           after THREE HOURS, contending for CPU and GPU throughout. `run.mjs`'s `killSpecTree`
+           only walks the tree of a spec it timed out; a runner killed from outside (an agent's
+           Ctrl-C, a `pkill` on `run.mjs`) leaves Chrome behind, because `cdp.mjs` deliberately
+           puts it in its own process group. Anyone triaging this class should check
+           `pgrep -f "Chrome for Testing"` before believing a rate measurement.
+
       ALSO ADDED: the first standing selftest faults for `fog-of-war.e2e.mjs`
       (`t520-shadow-drawn-as-grey` - the client decodes the server's shadow plane and draws THE
       grey anyway) and for `canvas-journey.e2e.mjs` (`t532-draw-past-the-coverage-horizon` - a tile
@@ -20822,6 +20839,17 @@ tasks:
       claims - T-521 is the guard for ADR-0020, one of the user's two top features - and neither
       had any fault in `ui/e2e/selftest.mjs`, so their non-vacuity had never been re-checked by
       anything.
+
+      AND TWO REPORTING DEFECTS IN `selftest.mjs` ITSELF, both found by relying on its verdicts:
+      `failedFiles` came from an UNANCHORED `/failed: ([^\n]+)/` over the whole captured output,
+      so it matched whatever a spec printed first - observed reporting the failed file as
+      `injected fault (T-508): the device has gone"` and then saying FAIL about a fault the right
+      guard had caught. And `expect` may now be an ARRAY, used for exactly one fault:
+      `t454-forget-abandoned-slots`'s only outward signature is wire concurrency, which
+      `surface-nav` itself documents as a LOWER bound (Chrome opens at most six connections per
+      origin), and on the same tree the same day `live-edge` saw peak 5 against a cap of 4 while
+      `surface-nav` saw peak 4. Naming one made the verdict a coin toss about which file caught
+      the excess.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
