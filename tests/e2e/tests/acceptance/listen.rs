@@ -167,6 +167,19 @@ pub fn close(mut ws: Ws) {
 /// wall clock: the cap's own verdict still fails on the first try.
 const TRIES: u32 = 8;
 
+/// Answers the server's liveness pings by reading one record.
+///
+/// **T-603.** `/ws/open/listen` pings every `ondemand_ping_interval` and drops a peer it has not
+/// heard from for `ondemand_peer_timeout` (5 s and 20 s by default), which ends the chain as
+/// `closed_client` and FREES ITS SLOT. tungstenite only replies to a ping from inside a read, so a
+/// socket nobody reads is a socket the server is entitled to reap — and that is what admitted a
+/// third listener under a cap of two while the test was busy elsewhere. Reading once per step
+/// keeps the peer responsive by ORDERING (a read between any two requests) rather than by hoping
+/// the step finishes inside an implicit 20 s window.
+fn touch(ws: &mut Ws) -> bool {
+    ws.read().is_ok()
+}
+
 /// Is this refusal the LISTENER CAP's verdict? `503 busy` naming the listener limit
 /// (`hk_pipeline::chains::budget`). The other `503 busy` is the CPU budget, and every other
 /// refusal is about the source or the selection — none of them is a statement about the cap.
@@ -188,8 +201,17 @@ fn is_listener_limit(r: &Value) -> bool {
 /// the box is, and none of them a decision of the cap. Those are re-requested; the cap's own
 /// refusal fails here immediately, because the claim under test is the cap's ORDERING and a cap
 /// that refuses while a slot is free is a real bug, not a slow machine.
-fn open_admitted(addr: SocketAddr, query: &str, busy_seen: &mut u64) -> (Ws, StreamHeader) {
+///
+/// `alive` is run before every attempt, to keep any socket the caller is already holding
+/// responsive across a step that may take several requests (see [`touch`]).
+fn open_admitted(
+    addr: SocketAddr,
+    query: &str,
+    busy_seen: &mut u64,
+    alive: &mut dyn FnMut(),
+) -> (Ws, StreamHeader) {
     for attempt in 1..=TRIES {
+        alive();
         let mut ws = open(addr, query);
         match first(&mut ws) {
             Ok(h) => return (ws, h),
@@ -258,7 +280,12 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
     // Every `503 busy` this test provokes, cap or CPU budget, so the counter assertion at the end
     // states exactly what happened instead of assuming one.
     let mut busy_seen = 0u64;
-    let (mut ws, header) = open_admitted(addr, &format!("emitter={emitter}"), &mut busy_seen);
+    let (mut ws, header) = open_admitted(
+        addr,
+        &format!("emitter={emitter}"),
+        &mut busy_seen,
+        &mut || {},
+    );
     eprintln!(
         "[{TAG}] header after {:.2} s: {}",
         started.elapsed().as_secs_f64(),
@@ -289,13 +316,19 @@ fn signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches() {
         .expect("the cap in force");
     let (second, refused) = 'cap: {
         for attempt in 1..=TRIES {
-            let (second, _) = open_admitted(addr, &range, &mut busy_seen);
+            let (second, _) = open_admitted(addr, &range, &mut busy_seen, &mut || {
+                touch(&mut ws);
+            });
+            let audio_alive = touch(&mut ws);
             let active = listen_counter(addr, "active");
             if active < max_listeners {
                 // A chain ended under us, so the cap is no longer full and has no verdict to give.
                 eprintln!(
                     "[{TAG}] attempt {attempt}/{TRIES}: {active} of {max_listeners} slots held \
-                     after the second was admitted; re-running the cap step"
+                     after the second was admitted (the audio socket is {}); re-running the cap \
+                     step. listen: {}",
+                    if audio_alive { "alive" } else { "GONE" },
+                    status(addr)["listen"]
                 );
                 close(second);
                 continue;

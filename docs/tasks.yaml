@@ -19679,49 +19679,60 @@ tasks:
       that misled everyone here.
       Prove the fixed test still catches a real cap violation.
     notes: |
-      WORKED 2026-09-21 on branch task-t603 (worker). What was varied, and the answer.
-      REPRODUCED, and NOT by generic load. 24 single-test runs at 8-way process parallelism (load
-      ~21) passed 24/24; what reproduces it is the ONE variable the acceptance path actually
-      changes - IN-BINARY parallelism. Running the whole `acceptance_m0` binary through plain
-      `cargo test` at its DEFAULT thread count (28 on this box, which is what the gate ran before
-      the RUST_TEST_THREADS cap) failed the listen test in 2 of 3 runs at load 16-19:
-        - run 2 failed at listen.rs:236 `expect_err("third listener refused")` - the THIRD
-          listener was ADMITTED (stream_id listen/3), because a slot had been freed between the
-          second's admission and the third's request;
-        - run 3 failed at listen.rs:234 with the gate's exact message, `[SIGNAL-062/listen] second
-          listener` - a refusal of the SECOND listener, and the old assertion printed nothing
-          about which refusal it was, which is why five minutes of triage buys nothing.
-      So the cap assertion was load-sensitive in BOTH directions, and the old code could not tell
-      either apart from a cap bug.
-      THE FIX (tests/e2e/tests/acceptance/listen.rs only, 122 insertions):
+      WORKED 2026-09-21 on branch task-t603 (worker). WHAT WAS VARIED, AND THE NUMBERS.
+      Not load: 24 single-test runs at 8-way PROCESS parallelism (load ~21) passed 24 of 24. The
+      variable that reproduces it is IN-BINARY parallelism - the one thing the acceptance path
+      actually changes, since `just acceptance` runs plain `cargo test`. Running the whole
+      `acceptance_m0` binary at cargo test's DEFAULT thread count (28 here, what the gate ran
+      before the RUST_TEST_THREADS cap) failed the listen test in 2 OF 3 RUNS at load 16-19, and
+      failed it at BOTH of its assertions:
+        - once at listen.rs:234 with the gate's exact message `[SIGNAL-062/listen] second
+          listener` - the SECOND listener refused. The refusal (which the old assertion never
+          printed, and which is why triage learns nothing from it) is `504 probe-timeout: no
+          samples for the probe`: the probe is starved of ring samples, not a cap decision.
+        - once at listen.rs:236 `expect_err("third listener refused")` - the THIRD listener
+          ADMITTED, because a slot had been freed between the two requests.
+      ROOT CAUSE OF THE FREED SLOT, named and fixed: `/ws/open/listen` pings every
+      `ondemand_ping_interval` and drops a peer it has not heard from for `ondemand_peer_timeout`
+      (5 s / 20 s, `hk-api/src/http.rs`), ending the chain `closed_client` and releasing its slot.
+      tungstenite answers a ping only from inside a read, and the test held its audio socket
+      UNREAD across the whole cap step - an implicit 20 s window that a loaded box exceeds.
+      THE FIX (tests/e2e/tests/acceptance/listen.rs only):
         - `is_listener_limit()`: the cap's verdict is `503 busy` NAMING the listener limit. The
           other `503 busy` is the CPU budget; `503 replumbing`, `409 outside-window`, `504
-          probe-timeout` and `422 no-analog-mode` are transient states of the SOURCE. None of
-          those is a statement about the cap.
+          probe-timeout` and `422 no-analog-mode` are transient states of the SOURCE and say
+          nothing about the cap.
         - `open_admitted()`: re-issues a request refused for a non-cap reason, a BOUNDED NUMBER OF
-          ATTEMPTS (8) and printing each; the cap's own refusal still fails on the first try. No
-          wall clock was lengthened anywhere.
+          ATTEMPTS (8), printing each refusal; the cap's own refusal still fails on the first try.
+          No wall-clock wait was lengthened anywhere.
+        - `touch()`: reads one record between requests, so the peer stays responsive by ORDERING
+          rather than by finishing inside an implicit 20 s window.
         - the cap step waits on the ADMISSION EVENT - `listen.active` reaching `max_listeners`,
-          the very count `Slot::claim` reads - and only then issues the request past the cap. If a
-          chain frees its slot under it, it re-runs the step instead of recording a verdict about
-          a cap that was not full. A third listener being admitted is a violation iff
-          `listen.active > max_listeners`, which is the cap's own arithmetic (it cannot be read
-          off `detached`: a chain releases its slot BEFORE it counts itself detached).
-        - the final counter assertion is now `refused_busy == busy_seen`, the number this test
-          provoked, instead of a hard-coded 1.
-      AFTER: 6 of 6 full-binary runs at the same 28-way parallelism passed (details in the report).
-      RED PROOF: with the cap broken in `crates/hk-pipeline/src/chains/budget.rs`
-      (`listeners >= max_l` -> `>= max_l + 1`), the fixed test failed 2 of 2 runs at listen.rs:319
-      with "3 listeners are running at once with max_listeners = 2"; budget.rs was then restored
-      and the test is green.
-      THE AUDIT (the number the ticket asked for): ALL 125 hk-e2e tests are outside the nextest
+          the count `Slot::claim` itself reads - then issues one more request. One admitted past
+          the cap is a violation iff `listen.active > max_listeners`, the cap's own arithmetic; it
+          cannot be read off `detached`, because a chain releases its slot BEFORE counting itself
+          detached. If a slot is freed under the step, the step re-runs instead of recording a
+          verdict about a cap that was not full, and says so with the counters.
+        - the final counter assertion is `refused_busy == busy_seen`, the number this test
+          provoked, rather than a hard-coded 1.
+      AFTER: at the parallelism the recipe actually uses (`--test-threads 6`, which `just
+      acceptance` now sets) 4 of 4 full-binary runs passed with ZERO retries. At 28 threads, 9 of
+      12 passed (was 1 of 3). RED PROOF: with the cap broken in
+      `crates/hk-pipeline/src/chains/budget.rs` (`listeners >= max_l` -> `>= max_l + 1`), the fixed
+      test failed 2 of 2 at listen.rs with "3 listeners are running at once with max_listeners =
+      2"; budget.rs restored, test green.
+      THE 3 OF 12 THAT STILL FAIL AT 28 THREADS ARE NOT THE CAP AND ARE NOW DIAGNOSED IN ONE LINE:
+      at that oversubscription the replay source is starved (the first open takes the 504
+      probe-timeout; `frames` reaches 1), and the second, RANGE-selected listener attaches and is
+      immediately ended `closed_client` while the audio socket is still alive - so two slots are
+      never held at once and the cap has no verdict to give. Filed as T-633; not papered over.
+      THE AUDIT (the count the ticket asked for): ALL 125 hk-e2e tests are outside the nextest
       group that claims them. `.config/nextest.toml`'s FIRST override pins `package(hk-e2e)` into
-      heavy-serial, and it has never applied to a single run: every recipe that runs hk-e2e uses
-      plain `cargo test`, and every nextest recipe excludes hk-e2e by name. Of the 125, 20 drive
-      the live LOOPING harness and so assert against transient pipeline state; this ticket fixes
-      1, and the other 19 still read any refusal as a verdict. Filed as T-631 (the dead override -
-      decide: run hk-e2e under nextest, or delete the override and say where parallelism lives)
-      and T-632 (the 19 tests, by file).
+      heavy-serial and has never applied to a single run - every recipe that runs hk-e2e uses plain
+      `cargo test`, and every nextest recipe excludes hk-e2e by name. Of the 125, 20 drive the live
+      LOOPING harness and so assert against transient pipeline state; this ticket fixes 1 and the
+      other 19 still read any refusal as a verdict. Filed T-631 (the dead override) and T-632 (the
+      19 tests, by file).
       NOT TOUCHED: `.config/nextest.toml` and the `justfile` are unchanged by this branch, so it
       does not force the full gate on their account.
   - id: T-604
@@ -20616,12 +20627,64 @@ tasks:
       lengthening a wait makes the failure rarer, which is the pattern this project rejects. Where
       a test asserts a cap or a count, assert the count the admission path itself reads
       (`listen.active`), not what a request happened to do in time.
+      AND THE OTHER HALF T-603 FOUND: `/ws/open/listen` (and every `/ws/open/*`) PINGS its peer
+      every `ondemand_ping_interval` and DROPS one it has not heard from for
+      `ondemand_peer_timeout` (5 s / 20 s), ending the chain `closed_client` and freeing its slot.
+      tungstenite answers a ping only from inside a read, so any test that opens a WebSocket
+      stream and then does something else for a while is holding a socket the server is entitled
+      to reap - an implicit 20 s window that only a loaded box exceeds. `stream_external.rs` holds
+      exactly such a socket. Read one record between steps (T-603's `touch()`), do not lengthen
+      anything.
       VERIFY LIKE T-603 DID: reproduce before the change at cargo test's default parallelism
       (`--test-threads 28` on the M0/harness binaries), state n-of-m before and after, and prove
       each fixed assertion still goes RED for the real defect it is there to catch.
     notes: |
       Filed 2026-09-21 by T-603 (worker, task-t603). Related: T-631 (why none of these are covered
       by the nextest group that claims them).
+  - id: T-633
+    milestone: M2-hardening
+    title: Under a starved source a range-selected Listen chain attaches and is immediately closed_client, while an emitter-selected one on the same station survives
+    status: todo
+    priority: medium
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      MEASURED 2026-09-21 (T-603), 3 times in 12, reproducibly, at cargo test's default in-binary
+      parallelism (28 threads on the M0 acceptance binary, ~28 pipelines at once on a 28-core
+      box). In that state the mock replay source is starved: the first Listen open is refused
+      `504 probe-timeout: no samples for the probe`, and the run's `listen.frames` counter reaches
+      1. What then happens, from the counters printed by the test at each retry:
+        - an EMITTER-selected listener on the truth station attaches and STAYS alive (the test
+          reads it, so it is not a liveness-ping reap - `active: 1, running: 1` throughout);
+        - a RANGE-selected listener (`f_lo`/`f_hi` around the same station, from the inventory
+          row) attaches - `attached` increments - and is ended `closed_client` within
+          milliseconds, before the test's next `/api/status` call. Eight times in a row, a fresh
+          one each time: `attached` 2,3,4... with `detached` and `closed_client` following one
+          behind and `active` never leaving 1.
+      `closed_client` means "the client went away: WebSocket close, reset, unresponsive peer,
+      Stop" - and none of those is plausible for a socket the test opened milliseconds earlier and
+      has not touched. So EITHER the end is misattributed (a chain ending for a source reason -
+      starvation, a duplicate channel claim against the first chain, a segment boundary - counted
+      as the client going away), OR the client really is being dropped and the write path is
+      losing the connection under starvation. Both are worth knowing: `closed_client` is the
+      counter an operator would read to blame their own client.
+      FIND OUT WHICH, on the pipeline side, not in the test: reproduce by starving the source
+      (that is the only condition needed - no 28-way test run is required to hold the ring back),
+      and make the chain's end carry the reason it actually had. Assert with counts and ordering:
+      a chain that ends for a source reason must count itself under the matching `closed_*`
+      counter, and the test for it should be a hk-pipeline test, not an e2e one.
+      Note the asymmetry is the clue: same station, same instant, emitter target survives and
+      range target does not. `crates/hk-pipeline/src/chains/analog.rs`'s `claim_emission` (the
+      duplicate-channel claim) and `listen.rs`'s `End` variants are where to look first.
+    notes: |
+      Filed 2026-09-21 by T-603 (worker, task-t603), which made this visible by printing the
+      listen counters at each retry instead of asserting "second listener". T-603's own fix is
+      correct regardless - it no longer reports a cap verdict when the cap was never full - and
+      passes 4 of 4 at the parallelism the recipe uses; this is the residue that only appears at
+      28-way oversubscription.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
