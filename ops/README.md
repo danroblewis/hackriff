@@ -93,11 +93,11 @@ status) on the worker's branch through `just task`, routes on `outcome` (cancel 
 confirms the evidence), and only then queues the branch. Workers never edit `docs/tasks.yaml`.
 **The resource model is a fixed budget (user, 2026-09-22).** 28 cores: the merge gate is reserved
 14 (`WORK_GATE_RESERVE`), each worker is bounded to ~3 (`WORK_WORKER_CORES`) by limits its whole
-process tree inherits — `cpulimit -l 300 -i` as a hard ceiling (children included), `CARGO_BUILD_JOBS=2`
-and `NEXTEST_TEST_THREADS=2` in the environment, and a permanent `taskpolicy -c background` QoS clamp
-(efficiency cores only on Apple Silicon) — so the count
+process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a
+permanent `taskpolicy -c background` QoS clamp (efficiency cores only on Apple Silicon) — so the count
 is `WORK_CAP` = (28 − 14) / 3 = 4 and the gate always has its reserve. No load heuristics, no gate-time
-throttling, no suspending workers. Disk floor 20 GB.
+throttling, no suspending workers. (`cpulimit` was measured inert on macOS on 2026-09-22 - it is not
+used.) Disk floor 20 GB.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)

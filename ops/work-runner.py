@@ -63,9 +63,9 @@ LANDED = f"{S}/landed.jsonl"
 # whole process tree: CARGO_BUILD_JOBS and NEXTEST_TEST_THREADS (environment - every rustc and test
 # runner it spawns obeys them) plus a `taskpolicy -c background` QoS clamp at launch, which on Apple
 # Silicon confines the tree to the efficiency cores. So a worker costs ~WORKER_CORES, the count is
-# CAP, and the gate always has its reserve. `cpulimit -l <cores*100> -i` wraps the tree as the hard
-# ceiling (SIGSTOP/SIGCONT duty-cycling, children included). No load-average admission, no gate-time
-# throttling, no suspend/resume: a known bound per worker is the whole mechanism.
+# CAP, and the gate always has its reserve. (cpulimit was measured inert on macOS, see launch().)
+# No load-average admission, no gate-time throttling, no suspend/resume: a known bound per worker
+# is the whole mechanism.
 CORES = int(os.environ.get("WORK_CORES", "28"))
 GATE_RESERVE = int(os.environ.get("WORK_GATE_RESERVE", "14"))
 WORKER_JOBS = os.environ.get("WORK_WORKER_JOBS", "2")            # cargo build jobs per worker
@@ -303,15 +303,14 @@ def launch(t, dry):
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    # The bound, inherited by the whole tree, three layers deep: cpulimit -i duty-cycles the tree to
-    # WORKER_CORES x 100 % of CPU (a hard ceiling by SIGSTOP/SIGCONT, children included); the
-    # `background` QoS clamp keeps it on the efficiency cores at low priority; and the CARGO/NEXTEST
-    # limits in env keep the build and test runners from asking for more in the first place. The
-    # claim's pid is cpulimit's (it lives exactly as long as the worker) and its process group.
-    p = subprocess.Popen(["cpulimit", "-l", str(WORKER_CORES * 100), "-i", "--",
-                          "taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+    # The bound, inherited by the whole tree: the CARGO/NEXTEST limits in env (every rustc and test
+    # runner the worker spawns obeys them) and a permanent `background` QoS clamp (efficiency cores
+    # only on Apple Silicon, low priority). `cpulimit` was tried as a third layer on 2026-09-22 and
+    # measured INERT on macOS - 0 % effect on a tree (-i), a single process, or an attached pid - so
+    # it is not here: a wrapper that looks like a bound and is not would be worse than none.
+    p = subprocess.Popen(["taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; cpulimit {WORKER_CORES * 100}% + background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
