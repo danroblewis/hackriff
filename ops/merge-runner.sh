@@ -236,16 +236,22 @@ except Exception:
     print(0)
 PY
 }
+# While this waits it holds `$S/gate-wanted`, which the work runner reads as "a gate is
+# pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
+# the box and the drain would never complete (observed 14:12: T-565 started during the wait).
+GATEWANT=$S/gate-wanted
 workers_drained(){ # 0 = no worker running (or waited long enough), 1 = wait
   local n; n=$(workers_running)
-  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; return 0; fi
+  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0; fi
   [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $n worker(s) running - the gate runs alone, dispatch is paused, waiting for them to hand back"; }
+  printf 'since=%s\nworkers=%s\n' "$DRAIN_SINCE" "$n" > "$GATEWANT"
   if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
     log "WAIT over: $n worker(s) still running after $WORKER_DRAIN_MAX s - gating anyway (a stuck worker must not hold every merge)"
-    DRAIN_SINCE=""; return 0
+    DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0
   fi
   return 1
 }
+rm -f "$GATEWANT"   # a marker from a previous run must not outlive it
 
 # preconditions for touching main; 0 = OK to proceed, 1 = wait
 main_ready(){
