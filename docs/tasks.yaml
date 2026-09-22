@@ -15784,7 +15784,8 @@ tasks:
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
-    status: todo
+    status: in-progress
+    branch: task-t512
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
@@ -22700,7 +22701,8 @@ tasks:
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: todo
+    status: in-progress
+    branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
     model: sonnet
