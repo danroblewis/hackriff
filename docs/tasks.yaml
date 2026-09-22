@@ -21183,6 +21183,80 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). Pairs with T-575, which implements the gate
       these fixtures exercise; neither blocks the other.
+    result: |
+      ## T-622: check and payload parameterisation on the generic FSK generator
+
+      **What changed** (`py/hkpy/synth/fsk.py`, `py/hkpy/synth/scenarios.py`, `py/tests/test_synth.py`,
+      `py/README.md`):
+
+      - `fsk.py`: a generic RevEng-model CRC engine, `crc_generic(data, width, poly, init, refin,
+        refout, xorout)`, bit-serial, any width 8..32 - verified bit-for-bit against
+        `crates/hk-estimate/src/framing/crc.rs`'s `CrcCore` via every catalogue entry's ASCII
+        `"123456789"` check value (CCITT-FALSE, KERMIT, XMODEM, ARC, CRC-32, CRC-8/SMBUS, CRC-8/MAXIM-DOW).
+        A Python mirror of that Rust `CATALOGUE` (`CRC_CATALOGUE`, 28 entries, widths 8/16/32 - the Rust
+        catalogue carries no width-24 entry, so every width-24 check is off-catalogue by construction)
+        plus `crc_catalogue_name()` and `crc_params_for(width, poly_hex)` (canonical template-fixed
+        defaults per width: init = all-ones, no reflection, no xorout, matching the existing
+        CRC-16/CCITT-FALSE style).
+      - `scenarios.py`'s `fsk_burst_train` (AWARE-036) gains exactly the three parameters the ticket
+        names, on `FSK_DEFAULTS`:
+        - `check_width` (8/16/24/32, default 16) - the check field width; `fsk_layout()` reflects the
+          real width in `frame.layout` instead of the old hard-coded `crc16`/16 entry.
+        - `check_poly_hex` (default `None` = the canonical default poly for `check_width`; an explicit
+          hex string lands off the RevEng catalogue on purpose - docs/22 A7's "random polynomial" row).
+        - `constant_payload` (default `False`) - a beacon mode: `seq` is frozen at 0 and `temp_dc` never
+          increments, so every burst carries byte-identical payload and CRC (docs/22 P7).
+        - **Default behaviour is unchanged byte-for-byte**: `check_width=16`, `check_poly_hex=None` ->
+          poly 0x1021, init 0xFFFF, no reflection, xorout 0 = exactly the old hard-coded
+          `crc16_ccitt_false`, and `crc_catalogue_name()` on the defaults resolves to
+          `"CRC-16/CCITT-FALSE"` - existing fixtures, determinism tests and every consumer that read
+          `t["crc"]["algorithm"]`/`t["frame"]["crc_hex"]` are unaffected.
+      - Truth (`hackriff:truth`) now carries, per docs/22's requirement ("polynomial, width, start bit,
+        tail, bit order and the payloads"): `crc.width`, `crc.poly`/`init`/`xorout` (hex strings sized to
+        the width), `crc.refin`/`refout`, `crc.start_bit` (bit offset where the covered payload begins),
+        `crc.covered_bits`, `crc.tail_bits` (0 - check is the last field), `crc.bit_order`,
+        `crc.in_reveng_catalogue` + `crc.catalogue_name`, and `constant_payload` on both the per-burst
+        emission truth and `scenario_truth["emitter"]`.
+
+      **New tests** in `py/tests/test_synth.py`:
+      - `test_fsk_check_width_is_parameterised_and_round_trips` (parametrised 8/16/24/32): generates,
+        decodes truth, and independently recomputes the CRC via `fsk.crc_generic` over the truth's own
+        stated params, asserting it matches `frame.crc_hex` and the layout's check-field width.
+      - `test_fsk_off_catalogue_polynomial_is_flagged_and_not_recognised`: `check_poly_hex="0x8F45"` at
+        width 16 is confirmed off-catalogue (`in_reveng_catalogue=False`, `catalogue_name=None`), and the
+        no-override default is confirmed still exactly `CRC-16/CCITT-FALSE`.
+      - `test_fsk_constant_payload_beacon_repeats_the_same_frame`: with `constant_payload=True`, every
+        burst's `payload_hex`/`crc_hex` is identical across >= 3 bursts (one distinct value however many
+        frames) versus the default run, which varies frame to frame - the ground truth distinguishing
+        `differences` (ADR-0022 SS4.2, stays 1 for a beacon) from `distinct_valid` (would count every
+        valid frame) that P7's "does NOT confirm on repeat count alone" assertion needs.
+
+      **Not done / correctly out of scope:** the ticket's DoD said "and on T-621's OOK generator if it
+      has landed" - T-621 on the current board is an unrelated ticket (IQ-ring disk-floor test fix), and
+      no generic OOK/ASK generator with a check exists in `py/hkpy/synth` yet (`mismatch.py`'s
+      `adjacent-interferer` kind="ook" is a different, non-check emitter). Per the ticket's own
+      conditional wording, that half is skipped rather than invented; whoever lands the OOK generator
+      should pick up the same three-parameter shape from this ticket's `fsk.py` helpers
+      (`crc_generic`/`crc_params_for`/`crc_catalogue_name`/`CRC_CATALOGUE` are generator-agnostic).
+
+      **Testing** (targeted only, per CLAUDE.md - never `just gate`):
+      - `uv run --project py pytest py/tests/test_synth.py -q` -> 65 passed, 2 skipped (pre-existing
+        skips, unrelated).
+      - `uv run --project py pytest py/tests/test_synth.py -k fsk -q` -> 9 passed (3 new + 6 existing FSK
+        tests, including the AWARE-036 demod-to-truth-bits test with the default CRC-16 unchanged).
+      - `uv run --project py pytest py/tests/test_stream_examples.py py/tests/test_mismatched_hypothesis.py -q`
+        -> 13 passed (both consume `fsk.crc16_ccitt_false`/`mismatch.py`, unaffected).
+      - `just lint-py` (ruff) -> clean.
+      - Manual `just synth fsk_burst_train` round-trips at width 8, 24, 32 (with an explicit off-catalogue
+        32-bit poly) and `constant_payload=true`, plus `--list` showing the three new defaults; inspected
+        the emitted `hackriff:truth` for each (repeated payload/CRC under `constant_payload`, correct
+        hex-width CRC and `in_reveng_catalogue=false` for the custom polynomials).
+      - `just precheck` not applicable - no Rust crate touched, only `py/`.
+      - Did **not** run the full `just test-py` (367 tests, whole py suite) - it exceeded a 300 s bound
+        under load on this machine; that is a load/timeout observation, not a regression I introduced
+        (the targeted subsets above, which include every test that imports `hkpy.synth.fsk` or
+        `scenarios.fsk_burst_train`, all pass). Flagging as observed evidence only, not filing a ticket
+        per the filing rule.
   - id: T-623
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
