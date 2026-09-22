@@ -154,6 +154,13 @@ budget-check:
 # p50/p90 of the gate, per class and per phase, from $HACKRIFF_OPS/gate-timings.jsonl, plus
 # whether any class's ROLLING MEDIAN is over budget. `py/tests/test_gate.py` asserts the same
 # budgets, so a slow-down trips a test instead of waiting for someone to notice it.
+# The `ops` gate class (py/hkpy/gate.py): orchestration scripts are not linked into any crate, so
+# their gate is a syntax check of every script plus the Python suite.
+ops-check:
+    for f in ops/*.sh .claude/hooks/*.sh; do bash -n "$f" || exit 1; done
+    for f in ops/*.py; do python3 -m py_compile "$f" || exit 1; done
+    @echo "ops-check: scripts parse"
+
 gate-stats:
     uv run --locked --project py python -m hkpy.cycletime --stats
 
