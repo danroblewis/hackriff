@@ -88,6 +88,11 @@ FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
 RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
+# EXCLUSIVE GATE: when the merge runner writes $HACKRIFF_OPS/gate-exclusive (its retry of a batch that
+# failed only on load-sensitive tests), every running worker is suspended - terminated now, resumed
+# later through its session id, the same path a gate-failure fix uses - and nothing is dispatched
+# until the flag is gone. The gate gets the whole machine for that one run.
+EXCLUSIVE = f"{S}/gate-exclusive"
 MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
 MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
@@ -814,9 +819,36 @@ def apply_gate_qos(claims):
         c["qos"] = want; c["qos_n"] = len(pids)
 
 
+def exclusive_gate(claims):
+    """Suspend workers while the merge runner holds gate-exclusive; resume them after."""
+    if os.path.exists(EXCLUSIVE):
+        for tid, c in claims.items():
+            if c.get("state") == "running" and c.get("kind") == "work" and alive(c["pid"]):
+                try:
+                    os.killpg(c["pid"], signal.SIGTERM)
+                except OSError:
+                    pass
+                c["state"] = "suspended"; c["suspended_at"] = time.time()
+                log(f"SUSPEND {tid}: exclusive gate (will resume session {str(c.get('session_id', '?'))[:8]})")
+        return True
+    for tid, c in list(claims.items()):
+        if c.get("state") == "suspended":
+            res = result_of(c.get("out") or f"{WORKDIR}/{tid}/out.json")
+            if res.get("session_id"):
+                c["session_id"] = res["session_id"]
+            if c.get("session_id") and os.path.isdir(c.get("wt", "")):
+                claims[tid] = dict(launch_fix(dict(c, kind="work"), "RESUME: the gate needed the machine and your run was suspended; continue exactly where you left off - nothing about the ticket changed"), fix_attempts=c.get("fix_attempts", 0))
+                log(f"RESUME {tid} after the exclusive gate")
+            else:
+                c["state"] = "no-work"
+                attention(tid, c["branch"], "NO_WORK", "suspended for an exclusive gate before it had a session to resume")
+    return False
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
+    exclusive = exclusive_gate(claims) if not dry else False
     try:
         apply_gate_qos(claims)
     except Exception as e:
@@ -833,7 +865,10 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
-    changed |= dispatch(claims, dry)
+    if not exclusive:
+        changed |= dispatch(claims, dry)
+    else:
+        log("HOLD: exclusive gate")
     if not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
