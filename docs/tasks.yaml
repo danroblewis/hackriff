@@ -23008,6 +23008,73 @@ tasks:
       Filed 2026-09-22 alongside T-762, which moved the detecting assertion off the merge path so
       this regression could be worked on at all. The guard was RIGHT; it was only in the wrong
       place.
+    result: |
+      MEASURED. The headline was two different quantities compared to each other, plus one real,
+      located 5-minute step. No full suite was run; every number below is read back out of
+      ops/merge-runner.log, which holds 48 full gates.
+
+      1. THE INSTRUMENTATION WAS NOT RECORDING THE RUNS THAT MATTER. $HACKRIFF_OPS/
+         gate-timings.jsonl held 33 runs, of which 31 were written BY THE TEST SUITE ITSELF -
+         py/tests/test_gate.py's round-trip through gate.main() used the real $HACKRIFF_OPS, so
+         every `just test-py` appended a 0.0 s `py` record to the production history (their
+         `root` is a pytest tmpdir). Exactly TWO real `full` gates were in there against 48 the
+         runner had run. Fixed: the test now points at its own tmp dir (verified - the log length
+         is unchanged across a run of test_gate.py). The per-suite history that survived is the
+         line gate.py PRINTS beside each gatelog.append(), captured in merge-runner.log since
+         before the structured log existed; `just cycle-time --suites` now reads it back.
+
+      2. 21.4 AND 34.0 ARE NOT THE SAME MEASUREMENT. The 21.4 in CLAUDE.md is cycle-time's BRANCH
+         table: gate start -> MERGED, passing gates only, ALL CLASSES POOLED - a 17 s `py` gate
+         and a 40 min `full` one in one median. The 34.0 the guard reported is `full` only with
+         failed and bulk runs included. Most of the apparent 60 % is that.
+
+      3. LIKE FOR LIKE, 24 complete passing `full` gates, 09-20 23:37 -> 09-22 05:06 (earlier half
+         -> recent half): TOTAL 30.0 -> 34.7 min (+16 %). Per phase: lint 60 -> 63 s (the lld gain
+         is real and holds); the Rust workspace suite 16.9 -> 19.1 min (THE ONE THAT MOVED); the
+         acceptance suite 3.7 -> 5.3 min; the UI e2e suite 7.5 -> 8.0 min.
+
+      4. THE RUST SUITE'S GROWTH IS ONE STEP, NOT TEST-COUNT GROWTH. nextest wall 462 -> 756 s at
+         the 09-21 04:55 gate while the count moved 2395 -> 2403 (+0.3 %); over the whole window
+         2302 -> 2485 (+8 %) cannot explain +64 %. In that same run four hk-classify binaries
+         (accuracy_sweep, below_gate_absorption, open_set_stats, verifier_gain) went from
+         never-slow to past the 60/120/180 s SLOW thresholds and stayed there, and
+         hk-estimate::receiver_lines went >60 s -> >240 s (later >300 s). The test FILES are weeks
+         old; they got ~3x dearer. That gate carried T-246 and T-589, which change the classifier
+         internals those sweeps exercise.
+
+      5. BUDGET UNCHANGED AT 35 MIN, deliberately, with the reasoning in BUDGET_S: ~5 min sitting
+         in 5 named binaries is a defect to shrink, not a new price for the loop.
+
+      Code: cycletime.parse_suite_runs/suite_stats + `just cycle-time --suites` (per CLASS and per
+      SUITE, complete passing runs only); rolling_medians now excludes FAILED runs (the gate aborts
+      at the first failure, so a failed run measures a PREFIX - 24 of the 48 full gates never
+      reached the UI e2e suite at all, and counting them makes a broken suite look fast);
+      test_gate.py isolated from the production log; docs/10 + CLAUDE.md + justfile corrected;
+      .config/nextest.toml notes that T-436's "the heavy-serial group IS the critical path" is now
+      STALE - all five dominating binaries are outside the group.
+
+      Tests: py/tests/test_cycle_time.py (5 new, pass) + py/tests/test_gate.py (80, pass) +
+      test_nextest_config.py. `just precheck` clean (no Rust crates touched; ruff/format clean).
+
+      OBSERVED, NOT CHASED (evidence, for the coordinator to decide):
+      - THE REAL CYCLE COST IS RE-GATES, NOT DURATION. 36 gate failures against 44 runner gates;
+        HALF of all full gates never finish their suite set. One failure costs a whole re-gate plus
+        a requeue - more than the entire 4.7 min of drift this ticket was filed for. The UI e2e
+        suite alone aborted 9 of them (its exit-1s at 09-21 04:30, 06:02, 09:29, 12:03, 15:08,
+        15:50, 18:22, 09-22 00:42, 04:31).
+      - THE FIVE SLOW BINARIES ARE THE LEVER: ~300 s recoverable, and they are the new critical
+        path. Shrinking hk-classify's four sweeps and hk-estimate::receiver_lines is worth a
+        ticket; it needs someone who can judge the statistical power those sweeps are buying.
+      - T-631 DID LAND A GAIN, smaller than predicted: the acceptance suite's day-median went
+        300 s (09-21, mostly pre-T-631) -> 262 s (09-22), against the 390 -> 230 s it measured in
+        isolation. Directionally right; invisible in the total because the Rust suite grew more.
+      - $HACKRIFF_OPS/gate-timings.jsonl LOST ~460 records around 06:15 on 09-22, when nearly every
+        file in ~/.hackriff-ops was rewritten (uniform 06:15 mtimes, and an `active-ops-dir` file
+        appears). A copy of the pre-loss content with 126 gate_end records including 61 `full` runs
+        is at /private/tmp/claude-501/-Users-daniellewis-hackriff/573a0024-6d5e-4600-b164-
+        feaca9d406c6/scratchpad/gate-timings.jsonl (mtime 09-22 06:00); its run ids are disjoint
+        from the live file's. I did NOT touch shared ops state - the runner writes it concurrently.
+        The merge-runner-log parser above makes the loss much less damaging either way.
   - id: T-764
     milestone: M2-hardening
     title: 'The board is validated only where it is gated, and the path that broke it is ungated: direct board commits'
