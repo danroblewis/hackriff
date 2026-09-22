@@ -1,0 +1,43 @@
+{
+ "plugin": [
+  "./hk-gr-satellites",
+  "--rate",
+  "192000",
+  "--satellite",
+  "NuSat 1"
+ ],
+ "realtime": true,
+ "record_samples": 8192,
+ "repeat": 5,
+ "drop_every": 0,
+ "fixture_s": 29.493333333333332,
+ "ready_s": 1.3040027919923887,
+ "first_decode_s": 5.010920708999038,
+ "feed_s": 29.546,
+ "exit_s": 31.001,
+ "rc": 0,
+ "truth_frames": 55,
+ "expected_frames": 55,
+ "found": 55,
+ "decodes": 55,
+ "false_or_garbled": 0,
+ "crc_invalid": 0,
+ "sample_index_err": null,
+ "rss_mib_peak": 81.0,
+ "rss_mib_last": 80.8,
+ "maxrss_mib_rusage": 81.0,
+ "cpu_s": 3.387,
+ "cpu_pct_of_core_over_feed": 11.5,
+ "malformed_stdout": 0,
+ "stdin_broken": false,
+ "stderr_lines": 58,
+ "stderr_tail": [
+  "nusat_decoder :info: Reed-Solomon decoding OK",
+  "nusat_decoder :info: Reed-Solomon decoding OK",
+  "nusat_decoder :info: Reed-Solomon decoding OK",
+  "[hk_gr_satellites +30.782s] eof: 5662720 samples, 55 decodes"
+ ],
+ "plugin_log": [
+  "{\"t556_stats\": {\"decodes\": 55, \"markers\": 0, \"samples_in\": 5662720, \"first_sample_t\": 1.4648170829750597, \"first_decode_t\": 4.937078415998258, \"header\": {\"sample_rate_hz\": 192000.0, \"center_hz\": 868100000.0, \"datatype\": \"cf32_le\"}}, \"import_s\": 0.7515596249722876, \"ready_s\": 1.2301552079734392}"
+ ]
+}
