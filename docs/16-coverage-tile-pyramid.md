@@ -1499,6 +1499,35 @@ things to prove end to end:
 If it proves out, this section becomes the UI direction and §7's remaining steps are re-planned around
 it.
 
+### 8.7 The map-UI extension (MMAP, T-800 / ADR-0023)
+
+§8 is the **engine**; the MMAP milestone is the **instrument** built on it, and it is an extension —
+nothing in §8 changes. The specs live outside this document so §8 stays the canvas contract:
+
+| What | Where |
+|---|---|
+| Decision record | [ADR-0023](adr/0023-map-ui-and-research-state.md) |
+| Full-bleed layout, z-bands, chrome/fade, the sheet, gestures, panel→route map | [`docs/23 §10–§11`](23-map-ui-philosophy.md) |
+| Per-pane **layer registry**, plane taxonomy, paint order, **pins**, client slices | [`docs/24 §13–§15`](24-canvas-as-data-surface.md) |
+| The four durable **research stores** and their route contract | [`docs/25 §10`](25-spectrum-research-workflow.md) |
+| Layout reference | [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html) |
+
+**Three couplings back into §8, stated so a later ticket cannot loosen them.**
+
+1. **Layers do not add a render path.** Every `overlay` layer is composed into the **one existing
+   `marks` hook** (`marks: (pane, edge) => OverlayQuad[]`) and drawn by the **one** overlay pass —
+   which still has no sampler and no ramp. The byte-identical-with-overlays-off guard (§8.5d) is
+   untouched and covers the whole registry.
+2. **Coverage, the honesty tiers and the shadow stay in the `data` plane** — the one cell rule
+   (§8.5a, ADR-0020) — so the layers menu's coverage switch sets a cell-rule flag rather than adding a
+   quad. Only the state plane may paint a cell; grey's meaning is unchanged.
+3. **Pins are content-anchored DOM laid out *in the render frame***, through the same per-pane
+   capture-time mapping as the boxes (§8.4a). A pin positioned on the data-poll cadence is T-388
+   again, and is a defect.
+
+None of it reaches a device route: the pane model, the follow/frozen window, the retune-on-pan offer
+and the gated `DeviceAction` path are all unchanged.
+
 ## Sources
 
 - User direction, 2026-09-16 (recorded in the session memory `user-full-spectrum-zoomable-history-view`);

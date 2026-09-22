@@ -16,6 +16,13 @@ hk-dsp.workspace = true
 num-complex.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# T-323: the GNSS-SDR plugin wrapper (src/bin/hk-plugin-gnss-sdr.rs) reads the plugin host's
+# hackriff-v1 framed input and writes NDJSON decode lines. GNSS-SDR itself (GPL-3.0) is only ever
+# exec'd, never linked: no build script, no FFI (tests/gnss_sdr_boundary.rs).
+hk-stream.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
+# T-323: the wrapper is driven end to end through the real plugin host.
+hk-plugins.workspace = true
 # T-274: the boundary guard test parses workspace manifests as text; no toml dependency.

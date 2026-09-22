@@ -16,9 +16,10 @@
 //!   traits.
 //!
 //! Implementations: [`SigmfReplaySource`] (deterministic file replay, the basis of offline tests),
-//! [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a) and the [`mock`] SDR device
-//! (a SigMF recording behind the device contract, retuned realistically; T-049). Every device
-//! passes the [`conformance`] suite.
+//! [`HackRfSource`] (libhackrf receive, cargo feature `hackrf`; T-037a), [`RtlSdrSource`]
+//! (librtlsdr receive, cargo feature `rtlsdr`; T-514) and the [`mock`] SDR device (a SigMF
+//! recording behind the device contract, retuned realistically; T-049). Every device passes the
+//! [`conformance`] suite.
 //!
 //! TX is not part of these traits. It stays gated (C37).
 //!
@@ -95,6 +96,7 @@ pub mod conformance;
 pub mod format;
 pub mod hackrf;
 pub mod mock;
+pub mod rtlsdr;
 pub mod sigmf_replay;
 
 use std::path::PathBuf;
@@ -116,6 +118,10 @@ pub use hackrf::{
 pub use mock::{
     Coverage, MockClock, MockEnd, MockFault, MockOptions, MockSdrControl, MockSdrDriver,
     MockSdrSource, MockStats, Recording,
+};
+pub use rtlsdr::{
+    R820T_GAINS_DB, R820T_MAX_HZ, R820T_MIN_HZ, R820T_RATES_HZ, R820T_TUNING_STEP_HZ, RtlSdrConfig,
+    RtlSdrControl, RtlSdrDeviceInfo, RtlSdrDriver, RtlSdrSource, RtlSdrStats,
 };
 pub use sigmf_replay::{Pacing, ReplayOptions, SigmfReplaySource};
 
@@ -637,6 +643,51 @@ impl SourceCapabilities {
             external_clock: true,
             hardware_timestamps: false,
             rf_path_boundaries_hz: HACKRF_ONE_RF_PATH_BOUNDARIES_HZ.to_vec(),
+        }
+    }
+
+    /// RTL-SDR with a Rafael Micro R820T tuner (NooElec NESDR Nano 3 and friends; T-514):
+    /// 25 MHz–1.75 GHz, the [`R820T_RATES_HZ`] rates topping out at 2.4 Msps, centres on a
+    /// [`R820T_TUNING_STEP_HZ`] grid, 8-bit **unsigned** (`cu8`) samples, receive only, one
+    /// combined gain stage `lna` over 0–49.6 dB in 29 non-uniform steps, **no** RF amplifier,
+    /// **no** selectable baseband filter, **no** bias tee, **no** external clock, no hardware
+    /// timestamps.
+    ///
+    /// Every "no" above is a real limit of this front end, declared so nothing upstream offers
+    /// the user a control or a span the hardware cannot deliver. The gain stage is declared
+    /// continuous because [`GainStage`] cannot express 29 uneven steps; the driver snaps each
+    /// request to the device's own table and records what the device reports back, so
+    /// provenance never claims a gain the tuner did not take (see [`rtlsdr`] for the detail, and
+    /// [`R820T_GAINS_DB`] for the table).
+    pub fn rtl_sdr_r820t() -> Self {
+        Self {
+            driver: "rtl-sdr".into(),
+            kind: SourceKind::Hardware,
+            frequency_ranges: vec![FrequencyRange {
+                min_hz: R820T_MIN_HZ,
+                max_hz: R820T_MAX_HZ,
+            }],
+            sample_rates: SampleRates::Discrete(R820T_RATES_HZ.to_vec()),
+            tuning_step: TuningStep::Uniform {
+                step_hz: R820T_TUNING_STEP_HZ,
+            },
+            adc_bits: 8,
+            native_format: Datatype::Cu8,
+            duplex: Duplex::ReceiveOnly,
+            tx_capable: false,
+            controllable: true,
+            gain_stages: vec![GainStage {
+                name: "lna".into(),
+                min_db: 0.0,
+                max_db: 49.6,
+                step_db: 0.0,
+            }],
+            rf_amp: false,
+            baseband_filter: None,
+            bias_tee: false,
+            external_clock: false,
+            hardware_timestamps: false,
+            rf_path_boundaries_hz: Vec::new(),
         }
     }
 

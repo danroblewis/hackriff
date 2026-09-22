@@ -49,7 +49,7 @@ function data(a: TileAddr): TileData {
     // An `exact` fold on both axes measured every cell it served (T-441). `decodeTile` always fills
     // this in; a fixture that stands in for it has to say what the decoder would have said.
     measured: { nf: 2, nt: 2 },
-    rangeDb: { lo: -100, hi: -60 }, bytes: 192 * 1024, serverInFlightLimit: null,
+    rangeDb: { lo: -100, hi: -60 }, bytes: 192 * 1024, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

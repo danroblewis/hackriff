@@ -148,6 +148,19 @@ Note the load averages: removing the de-prioritisation survived 129 while keepin
 
 **Rules for the next entry here (T-436, T-383).** A cap or a skip makes a defect rarer or invisible, not fixed. So a quarantine is `#[ignore]` with its measurement and its owning ticket inline, never a deletion, a looser bound or a new `heavy-serial` member; each stays runnable by the exact command in its own `#[ignore = "…"]` message. Add a test here only with its own isolation-vs-load measurement — a suspicion is not evidence — and never quarantine a test that turned out to be a real, fixed defect (e.g. `tests/e2e/tests/app-trace.e2e.mjs`, `surface-region.e2e.mjs`), which would hide a regression instead of a runner artifact.
 
+### 3.6 Timing-based tests: two kinds, two treatments (user, 2026-09-22)
+
+Since 2026-09-21 every red merge gate came from **eleven tests**, 31 red lines in `ops/merge-runner.log`, all green alone. Reading them, "timing-based" covers two different things, and each gets a different treatment:
+
+1. **A test that reads the wall clock to decide *what* to assert on is a bug — fix it, never remove it.** `api_contract::tile_shadow…` (5 reds), `unknown_is_only_what_a_server_recorded…` (4), `coverage_answers_per_cell…` (4), `tile_route…` (2), the three `*_spectrum_handshake` tests (2 each) and `bridge::a_notched_dwell…` (2) all chose *which tile, row or window* to assert on from `unix_now()` while the data is stamped in capture time; under a loaded gate the data edge trails the wall clock and the test asks about a tile that does not exist yet. These are the contract tests for the invariants — grey = genuinely unobserved, ongoing-until-ended, a run that ended still says so — so deleting them would take those invariants out of the gate. **The fix pattern** (`task-deflake-0922`, then `task-deflake-cov`): read every instant off the wire (the route's own data edge, `oldest_record_s`, the newest measured row), **pin** the index that proved observed, and assert on the pin; never re-derive an index from the clock after a wait. Readiness waits keep a bound only when its natural range has been measured (§3.2, T-383).
+2. **A test whose *assertion* is a latency or throughput bound goes in the `timing` tier — out of the gate, not out of the repo.** `three_fm_stations_demodulate_concurrently…`, `listen::signal_062…` and `the_live_chain_grows_the_view_lattices…` measure whether the real-time path keeps up; that is a property of the machine's headroom as much as of the code, and the gate runs on a box that by policy carries four bounded workers beside it, so a gate cannot honestly measure it. `.config/nextest.toml`'s `default-filter` keeps them out of every default-profile run (and `ci`, which inherits) and the `timing` profile inverts it; **`just timing`** runs exactly that set, one at a time, on a quiet box or nightly — the same tier as HIL (T5): logged, never gating. `just nextest-config-check` fails when a listed name no longer matches a `fn` in the tree, so a rename can neither re-admit a test to the gate nor drop it from the tier.
+
+Which kind a new flake is: if removing the wall-clock read leaves an assertion about *state*, it is kind 1; if the wall clock *is* the assertion, kind 2. A test that fails alone is neither — it is a defect (§3.5 rules).
+
+**Interim (user, 2026-09-22, "mark all of the timing tests as skipped for now"):** with `main` drifting behind ~20 unmerged branches, the seven kind-1 tests above sit in the `default-filter` skip list *alongside* the three kind-2 ones, so the gate stops paying for them while their rewrites are in flight. Each kind-1 name leaves the list **with** its rewrite (the deflake branch that fixes it also removes it from both lists), never before and never silently — `just nextest-config-check` holds the two lists equal and every name real. `bridge::a_notched_dwell…` is not listed because it does not exist on the base tree yet; the check refuses a name it cannot find.
+
+**Every gate run is recorded test by test.** `.config/nextest.toml` names a `[profile.default.junit]` report, so each nextest run writes `target/nextest/<profile>/junit.xml` — every `<testcase>` with its `time`, in run order, failures with output — and `just gate` copies it to `$HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml` after each suite (nextest overwrites the file per run; `just test` and `just acceptance-ci` share a profile). `ops/monitor.py` renders the newest gate's failures and slowest tests. A 36-minute gate is a per-test table, not a total.
+
 ## 4. From a use-case ID to tests
 
 A use-case ID becomes one or more test cases that assert on the **data-model objects** it should produce. Every T3/T4 case loads its fixture into the mock device, lets the system survey and detect blind, and then asserts against the hidden truth list. Worked pattern (matching the [docs/07 §5](07-data-model.md) examples):
@@ -573,3 +586,76 @@ turns shared blocks private. Anyone repeating this should use a **dedicated thro
 an otherwise idle box**, watch `df` between runs, and prefer the per-target `cargo rustc` trick
 above wherever the question allows it — it answered the linker question for a few seconds of build
 instead of a few gigabytes.
+
+#### The "60 % slower in two days" was two different measurements, plus one real 5-minute step (T-763, 2026-09-22)
+
+The duration guard T-543 built fired on 2026-09-22: the rolling median of the last seven `full`
+runs read 34.0 min against a 35 min budget set from the 21.4 min recorded above. T-762 moved the
+assertion off the merge path (a monitor on the merge path deadlocks the pipeline); T-763 is the
+regression it flagged. **Most of the step is an artefact, and the remainder is one located
+defect.** Both halves are measurable from records nobody had to be watching to collect.
+
+**The first finding is that the instrumentation was not recording the runs that mattered.**
+`$HACKRIFF_OPS/gate-timings.jsonl` held **33 runs, 31 of them written by the test suite itself** —
+`py/tests/test_gate.py`'s round-trip through `gate.main()` used the real `$HACKRIFF_OPS`, so every
+`just test-py` appended a 0.0-second `py` record to the production history (their `root` is a
+pytest tmpdir; fixed by pointing the test at its own). Exactly **two** real `full` gates were in
+there, against **48** the merge runner had run over the same window. The record that survived is
+the line `py/hkpy/gate.py` *prints* next to each `gatelog.append()` — `gate: just test took 1221s
+(exit 0)` — which `ops/merge-runner.log` has captured since before the structured log existed, and
+which is per suite. `just cycle-time --suites` (`parse_suite_runs`/`suite_stats`) reads it back.
+
+**Two rules make that history mean something, and both were being broken:**
+
+- **An aborted run is not a measurement of the suite.** The gate stops at the first failing suite,
+  so a failed run measures a *prefix*. Of the 48 full gates, **24 never reached the UI e2e suite at
+  all**. Averaged in, they make the gate look faster every time an unrelated test breaks.
+  `rolling_medians` now excludes them.
+- **Two classes are never pooled into one median.** `suite_stats` reports per class, where a run's
+  class is the set of suites it launched.
+
+**That second rule is where the 21.4 min came from.** It is this document's table above: gate start
+-> `MERGED`, so *passing gates only*, **across all classes** — and a 17-second `py` gate sits in
+the same median as a 40-minute `full` one. The 34.0 the guard reported is `full` only, failures
+and bulk runs included. They are not the same quantity, and the step between them is mostly that.
+
+**Like for like, over the 24 complete passing `full` gates recorded 09-20 23:37 -> 09-22 05:06:**
+
+| suite | earlier half | recent half | moved |
+|---|---|---|---|
+| lint | 60 s | 63 s | +3 s (the `ld64.lld` link gain is real and holds) |
+| the Rust workspace suite | 16.9 min | 19.1 min | **+2.2 min** |
+| the acceptance suite | 3.7 min | 5.3 min | +1.6 min |
+| the UI e2e suite | 7.5 min | 8.0 min | +0.5 min |
+| **total** | **30.0 min** | **34.7 min** | **+4.7 min, +16 %** |
+
+So: **test-bound, as the ticket said — and +16 %, not +60 %.**
+
+**The Rust-suite growth is one step on one day, not a suite outgrowing its budget.** From the
+nextest `Summary` lines in the same log, the workspace run went **462 s -> 756 s at the 09-21 04:55
+gate**, while the test count moved **2395 -> 2403 (+0.3 %)**. Test-count growth (2302 on 09-19 to
+2485 on 09-22, +8 %) does not explain a 64 % jump. What changed in that same run is visible in the
+`SLOW` lines: four `hk-classify` binaries — `accuracy_sweep`, `below_gate_absorption`,
+`open_set_stats`, `verifier_gain` — went from never-slow to past the 60/120/180 s thresholds and
+have stayed there every run since, and `hk-estimate::receiver_lines` went from `>60 s` to `>240 s`
+(later `>300 s`) alongside them. That gate carried T-246 and T-589, both of which change the
+classifier internals those statistical sweeps exercise. The test *files* are weeks old; they did
+not appear, they got about three times more expensive.
+
+**The mechanism is that these are now the critical path, and T-436's measurement of it is stale.**
+None of the five binaries is in `heavy-serial`. T-436 measured the serial group at 224 s = 96 % of
+a 234 s run; with `receiver_lines` alone past 300 s and four classify binaries at 60-180 s in the
+free pool of 8 threads, the critical path has moved outside the group that was tuned for it. Any
+further tuning of `test-threads` or of the group memberships should be re-measured against that,
+not against the 2026-09-14 numbers still recorded in `.config/nextest.toml`.
+
+**The budget stays at 35 min, deliberately.** The extra ~5 minutes is attributable to roughly 300 s
+in five named binaries, which makes it a defect to shrink rather than a new honest price for the
+loop. Raising the number to fit it is the move that turns a budget into a record of whatever
+happened.
+
+**What dominates the loop is still not the gate's duration.** 36 gate failures are recorded against
+44 merge-runner gates, and *half of all full gates never finish their suite set*. A failure costs a
+whole re-gate plus a requeue — more than the entire 4.7 min of drift this ticket was filed for —
+and the UI e2e suite alone aborted 9 of them. The 2026-09-20 conclusion holds unchanged: queue
+wait and re-gates are the cycle, and the gate's own minutes are ~8 % of it.

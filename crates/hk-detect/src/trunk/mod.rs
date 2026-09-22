@@ -34,6 +34,13 @@
 //!    so a grant resolves to nothing until somebody supplies one, and nothing here supplies a
 //!    default.
 
+//! 7. **P25 Phase 2** ([`tsbk`], T-272). A Phase 2 system's control channel is a Phase 1 channel
+//!    this module already decodes; what makes it Phase 2 is the band plan it announces. An
+//!    `IDEN_UP_TDMA` entry names how many slots share a carrier, so `f = base + spacing ×
+//!    (channel / slots)` and `slot = channel % slots` — consecutive channel numbers are ONE
+//!    frequency and two talkgroups, which is C23's TDMA slot mix-up pitfall read the right way
+//!    round.
+
 pub mod confirm;
 pub mod dmr;
 pub mod nxdn;
@@ -73,8 +80,9 @@ pub use support::{
 };
 pub use tsbk::{
     ChannelMap, Grant, IDEN_MAX_AGE_S, IdenUp, MAX_TSBK_PER_WINDOW, MIN_IDEN_AGREEMENTS,
-    OP_GRP_VCH_GRANT, OP_GRP_VCH_GRANT_UPDATE, OP_IDEN_UP, P25_ALGIDS, Resolved, SVC_ENCRYPTED,
-    ServiceOptions, TSBK_BYTES, Tsbk, TsbkScan, Unmapped, algid_encryption, algid_name,
-    is_algid_evidence, protocol_of, scan_blocks,
+    OP_GRP_VCH_GRANT, OP_GRP_VCH_GRANT_UPDATE, OP_IDEN_UP, OP_IDEN_UP_TDMA, P25_ALGIDS, Resolved,
+    SVC_ENCRYPTED, ServiceOptions, TDMA_SLOTS_PER_CHANNEL_TYPE, TSBK_BYTES, Tsbk, TsbkScan,
+    Unmapped, algid_encryption, algid_name, channel_type_slots, is_algid_evidence, protocol_of,
+    scan_blocks,
 };
 pub use voice::{VoicePermit, VoiceRefused};

@@ -59,3 +59,4 @@ So:
 - Some residual channels remain open to a plugin that modulates them deliberately: timing and ordering of lines, `t` within the input range, and values within their allowlisted types. They are noted in [docs/stream-contract.md §11](../docs/stream-contract.md), not fixed.
 
 - `dummy/`: the test plugin for the host (`hk-dummy-plugin`, a bin target of `crates/hk-plugins`).
+- `gnss-sdr/`: GPS L1 full receiver (T-323). GNSS-SDR (GPL-3.0-or-later) exec'd per recorded dwell behind `hk-plugin-gnss-sdr` (a bin target of `crates/hk-gnss`); emits `hackriff.gnss/1` evidence decodes only — no identity, no annotation. See the C36 card.

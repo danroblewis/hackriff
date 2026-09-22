@@ -101,7 +101,6 @@ def test_python_only_runs_the_python_suites():
         "CLAUDE.md",
         ".gitattributes",
         "spikes/s9-whatever/main.rs",
-        "prompts/model-selection.md",
         "tools/sweep_plot.py",
     ],
 )
@@ -408,6 +407,13 @@ def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tm
     monkeypatch.setattr(gate_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(gate_mod.shutil, "which", lambda name: "/usr/bin/just")
     monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+    # T-763: main() records the run through gatelog, which writes to $HACKRIFF_OPS. Without
+    # this the SUITE'S OWN fake gates land in the production history that `just cycle-time`
+    # and the budget guard read: on 2026-09-22, 31 of the 33 runs in the real
+    # `gate-timings.jsonl` were records written from here (their `root` is a pytest tmpdir),
+    # a 0.0-second `py` run each time. A measurement tool whose own tests pollute the
+    # measurement is worse than one nobody runs.
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "ops"))
 
     rc = gate_mod.main(["--files", "py/hkpy/synth.py", "--root", str(tmp_path)])
 
@@ -1006,3 +1012,24 @@ def test_t562_the_coordinator_only_guard_is_wired_to_the_expensive_recipes():
     assert "just test-crate <crate>" in text
     assert "cargo nextest run -p <crate> -E 'binary(<name>)'" in text
     assert "NOT 'just test-one'" in text
+
+
+def test_ops_paths_run_the_ops_suites_not_the_full_gate():
+    """ops/, .claude/ and prompts/ are orchestration: no crate links them, no suite reads them. Four
+    docs/ops-only branches lost 50-minute full gates to load-sensitive Rust tests on 2026-09-22."""
+    from hkpy.gate import classify, OPS
+    d = classify(["ops/work-runner.py", ".claude/roles/coordinator.md", "prompts/model-selection.md"])
+    assert d.classes == (OPS,)
+    cmds = d.commands()
+    assert ["just", "ops-check"] in cmds and ["just", "test-py"] in cmds and ["just", "lint-py"] in cmds
+    assert ["just", "test"] not in cmds and ["just", "acceptance-ci"] not in cmds
+
+
+def test_ops_plus_crates_is_still_full():
+    from hkpy.gate import classify
+    assert classify(["ops/stage.sh", "crates/hk-core/src/lib.rs"]).is_full
+
+
+def test_the_justfile_stays_full_even_though_it_lives_beside_ops():
+    from hkpy.gate import classify
+    assert classify(["justfile", "ops/stage.sh"]).is_full

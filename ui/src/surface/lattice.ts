@@ -12,6 +12,8 @@
 // constant, no level policy, no fold: those are the route's (docs/api.md, "the budget is a fold
 // target, never a level selector").
 
+import { tileClientId } from "./clientid";
+
 /** How a tile's grid is addressed. Every part of it is in the key the route is keyed by. */
 export interface TileAddr {
   /** Whose coverage decides this tile's grey (`any` = the union). Part of the key: coverage is device-local. */
@@ -294,7 +296,14 @@ export const keyOf = (a: TileAddr): string =>
  */
 export const TILE_PLANES = "f16";
 
-/** The request this client builds for `a` (ui/test asserts the request, not only the response). */
+/**
+ * The request this client builds for `a` (ui/test asserts the request, not only the response).
+ *
+ * T-630: it also carries **who is asking** (`client`), when a host has named this page
+ * ([[setTileClientId]]). That is what lets the route give each client a share of its four in-flight
+ * slots instead of serving whoever asks first — see `ui/src/surface/clientid.ts`. Unnamed is
+ * unchanged, byte for byte, which is why every URL assertion in `ui/test` still reads as it did.
+ */
 export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   const q = new URLSearchParams({
     level_f: String(a.levelF),
@@ -307,6 +316,8 @@ export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   if (a.cells !== 256) q.set("cells", String(a.cells));
   // `/api/tiles/events` answers counts, not planes, and takes no `planes` parameter.
   if (path === "/api/tiles") q.set("planes", TILE_PLANES);
+  const client = tileClientId();
+  if (client) q.set("client", client);
   return `${path}?${q.toString()}`;
 }
 

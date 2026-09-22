@@ -32,6 +32,8 @@ tungstenite.workspace = true
 [features]
 # T-037a: the live HackRF One source (links the system libhackrf through hk-core). Off by default.
 hackrf = ["hk-core/hackrf"]
+# T-514: the live RTL-SDR source (links the system librtlsdr through hk-core). Off by default.
+rtlsdr = ["hk-core/rtlsdr"]
 # T-056: the Mac compute providers (wgpu GPU, Apple Accelerate); pick one at runtime with
 # `--compute` or HK_COMPUTE. Off by default (the CPU reference).
 gpu-wgpu = ["hk-pipeline/gpu-wgpu"]
