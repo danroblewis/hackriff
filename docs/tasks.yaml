@@ -19913,6 +19913,8 @@ tasks:
       precheck exit 0
       Commits: 9f9c8100
       Use cases: AWARE-011
+    notes: |
+      Review (fix attempt 1) found: py/tests/test_synth.py::test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo asserted every artefact truth's kind was in ("dc-offset", "lo-spur"), so it failed against the new iq-image artefact added for part (b). Fixed by branching the check: dc-offset/lo-spur still assert a fixed LO offset; iq-image asserts its invariant f - 2*f_LO is fixed instead, plus a new IQ-domain tone-power check for the image at each centre's own baseband offset. Merged main (clean, no conflicts). Re-ran targeted tests: py/tests/test_synth.py (71 passed, 2 skipped), hk-detect rules:: (4 passed), hk-e2e t586_retune_diversity (2 passed, no leak this run). just precheck hk-detect hk-e2e and just lint-py both clean.
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
