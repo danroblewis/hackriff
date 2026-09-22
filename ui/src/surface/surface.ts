@@ -801,7 +801,8 @@ export class Surface {
         key: "survey", nf: 1, nt: 1, t1Ns: null, asOfNs: null,
         value: new Float32Array([NaN]), state: new Uint8Array([CELL.UNOBSERVED]),
         tier: "survey-overview", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
-        measured: { nf: 1, nt: 1 }, rangeDb: null, bytes: 3, serverInFlightLimit: null,
+        measured: { nf: 1, nt: 1 }, rangeDb: null, bytes: 3,
+        serverInFlightLimit: null, serverInFlightShare: null,
       });
     }
     const clip = toClip(region, pane.box);
