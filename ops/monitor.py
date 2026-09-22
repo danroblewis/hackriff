@@ -278,7 +278,7 @@ def runtime_states(smap, tl=None, limit=10):
 
 
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
-               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True):
+               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
     try:
         import yaml
         d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
@@ -342,7 +342,10 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         if s == "deferred": return scope == "all"
         return True  # in-progress, review, etc. always anchor
     keep = {tid for tid, r in rt.items() if tid in tasks and show_rt.get(r, True)}
-    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
+    # "Opening" a milestone (click its node) shows EVERY ticket under it - done, todo, deferred,
+    # cancelled excepted - regardless of scope and the status filters, until it is clicked again.
+    opened = {x["id"] for x in tl if _nm_ms(x.get("milestone")) in set(open_ms) and x.get("status") != "cancelled"}
+    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep | opened
     # ALWAYS keep the dependency chain leading to any anchor, whatever its status/filter
     nodes = {}
     stack = list(anchors)
@@ -407,11 +410,15 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         open_states = {"todo", "in-progress", "blocked", "paused", "review"}
         return "cur" if any(t.get("status") in open_states for t in ts) else "done"
     mscls = {"done": "msdone", "cur": "mscur", "next": "msnext"}
+    lines.append("classDef msopen fill:#3a2c0a,stroke:#FFD98a,color:#FFF0C2,stroke-width:5px;")
     for ms in ORDER:
         ts = by_ms.get(ms, [])
         d_ = sum(1 for t in ts if t.get("status") in ("done", "cancelled"))
         cnt = f"{d_}/{len(ts)}" if ts else "planned"
-        lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
+        if ms in set(open_ms):
+            lines.append(f'MS_{ms}(["▼ {ms} · {cnt} · open"]):::msopen')
+        else:
+            lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
     chain = [m for m in ORDER if m != "MUI"]
     for a, b in zip(chain, chain[1:]):
         lines.append(f"MS_{a} --> MS_{b}")
@@ -499,11 +506,13 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <a href="/">← dashboard</a>
 <span class=legend><span><i class=hex style="background:#FF6B57"></i>FAILED / redo (pulsing)</span><span><i class=stad style="background:#FFC14D"></i>IN THE GATE (moving dashes)</span><span><i class=sub style="background:#F0A542"></i>QUEUED</span><span><i class=asym style="background:#5EE0C4"></i>IN REVIEW</span><span><i class=trap style="background:#C7B8FF"></i>UP NEXT</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
-<div class=hint>scroll = zoom · drag = pan · click a ticket for details · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
+<div class=hint>scroll = zoom · drag = pan · click a ticket for details · <b>click a milestone to open/close all its tickets</b> · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
 let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+let openMs=new Set(); try{ openMs=new Set(JSON.parse(localStorage.getItem('graph.openMs')||'[]')); }catch(e){}
+function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); try{localStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} last=''; draw(); }
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
@@ -511,10 +520,11 @@ function setScope(s){scope=s;document.getElementById('sc-frontier').classList.to
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  if(openMs.size) q+='&open='+encodeURIComponent([...openMs].join(','));
   const d=await (await fetch(q,{cache:'no-store'})).json();
   const hid=['done','todo','blocked','next','merging','queue','review','failed'].filter(k=>!flt[k]);
   const rt=d.runtime||{}; const rts=['failed','testing','queued','review','next'].filter(k=>rt[k]).map(k=>`${rt[k]} ${k}`).join(' · ');
-  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}${rts?' · '+rts:''}`;
+  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}${rts?' · '+rts:''}${openMs.size?' · open: '+[...openMs].join(', '):''}`;
   if(d.mermaid===last) return; last=d.mermaid;
   const {svg}=await mermaid.render('gg'+Date.now(), d.mermaid);
   document.getElementById('g').innerHTML=svg;
@@ -533,7 +543,8 @@ function wireNodes(){
   svgEl.setAttribute('preserveAspectRatio','xMidYMid meet');
   if(!vb) vb={x:(bb&&bb.x)||0,y:(bb&&bb.y)||0,w:W||1000,h:H||800};   // initial: fit whole graph, crisp
   setVB();
-  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); });
+  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]);
+    else { const mm=(n.id||'').match(/MS_([A-Za-z0-9]+)/) || (n.textContent||'').match(/^\s*(?:▼\s*)?(M[A-Za-z0-9]+)\s*·/); if(mm) n.setAttribute('data-node-ms',mm[1]); } });
 }
 // Pointer -> SVG user units via the screen CTM. The old code scaled dy by vb.h/r.height, which is
 // only right when the graph is height-limited; a wide LR graph is width-limited under
@@ -548,7 +559,8 @@ wrap.addEventListener('pointerdown',e=>{ e.preventDefault(); down=true; dragMove
 wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
   if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
   if(dragMoved){ const a=svgPt(px,py), b=svgPt(e.clientX,e.clientY); vb.x-=(b.x-a.x); vb.y-=(b.y-a.y); px=e.clientX; py=e.clientY; setVB(); } });
-function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); }
+function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid'));
+    const mnode=e.target.closest('[data-node-ms]'); if(mnode&&!n) toggleMs(mnode.getAttribute('data-node-ms')); }
   down=false; dragMoved=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
 wrap.addEventListener('pointerup',endDrag);
 wrap.addEventListener('pointercancel',()=>{ down=false; dragMoved=false; wrap.classList.remove('grabbing'); });
@@ -2040,8 +2052,10 @@ class H(BaseHTTPRequestHandler):
             keep_failed = "failed=0" not in self.path
             keep_queue = "queue=0" not in self.path
             keep_review = "review=0" not in self.path
+            _oq = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("open", [""])[0]
+            open_ms = tuple(m for m in _oq.split(",") if m)
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
