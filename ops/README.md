@@ -113,7 +113,13 @@ in `merge-queue.txt`, and while a gate runs; running workers finish and join the
 suspended); the merge runner **starts a gate only when the claims file shows no running worker**
 (`workers_drained`, capped at `WORKER_DRAIN_MAX` = 45 min so a stuck worker cannot hold every merge);
 when the batch lands the queue drops below the threshold and dispatch resumes. `just gate` therefore
-measures the code, not the neighbours.
+measures the code, not the neighbours. While the merge runner waits for that drain it holds
+`$HACKRIFF_OPS/gate-wanted`, which the work runner reads as a running gate. **A full stop is a
+file:** `touch $HACKRIFF_OPS/dispatch-paused` stops every dispatch until the file is removed
+(reaping, results and queueing continue) — the conditional holds each have a window, this has none.
+A batch that goes red **without a test FAIL** (lint, a build error, the UI unit step) is re-queued
+in order and held until the queue changes, never isolated: main+batch is broken as a whole and every
+isolated gate would reproduce it.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)
