@@ -1,7 +1,11 @@
 # 24 — The canvas as a data-projection surface
 
-**Status: design, not built.** Proposed by the user on 2026-09-20, from a study of Google Maps and
-general mapping-software UX. This document is an **extension of [`docs/16 §8`](16-coverage-tile-pyramid.md)
+**Status: SPEC (T-800 / MAP-00, 2026-09-22) - the normative half is §13 (the layer registry), §14
+(pins) and §15 (the client slices); §0-§12 are the argument behind them.** Proposed by the user on
+2026-09-20, from a study of Google Maps and general mapping-software UX, and approved 2026-09-22
+with the layout reference [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html). The decision
+record is [ADR-0023](adr/0023-map-ui-and-research-state.md); the layout contract is
+[`docs/23 §10-§11`](23-map-ui-philosophy.md). This document is an **extension of [`docs/16 §8`](16-coverage-tile-pyramid.md)
 (MCANVAS — the unified full-spectrum canvas) and [`docs/14`](14-ui-rewrite.md) (the MUI rewrite)**. It
 contradicts neither. MCANVAS already gives us the one WebGL2 surface, N scissored panes, the
 minimap-as-viewport, `GET /api/tiles` at independent `(level_f, level_t)`, the four-state coverage
@@ -20,8 +24,8 @@ never a source of truth (CLAUDE.md; ADR-0017/0019). This document is where those
 the map idiom.
 
 Companion document [`docs/23`](23-map-ui-philosophy.md) (the full-bleed chrome / immersive-shell
-study) is referenced for the symbology and figure-ground rules in §8; where it is not yet written,
-those cross-references are marked *forthcoming*.
+study) carries the symbology and figure-ground rules referenced in §8, and since T-800 the normative
+layout contract in its §10-§11.
 
 ---
 
@@ -349,8 +353,8 @@ the client builds* (the guard against T-367's wrong-request class of bug).
 
 ## 8. Symbology, figure-ground, accessibility
 
-Cross-reference [`docs/23 §7`](23-map-ui-philosophy.md) *(forthcoming)* for the full symbol table;
-the load-bearing rules here:
+Cross-reference [`docs/23 §7`](23-map-ui-philosophy.md) for the full symbol table and
+[`docs/23 §10.5`](23-map-ui-philosophy.md) for the accessibility floors; the load-bearing rules here:
 
 - **Figure-ground.** The base waterfall recedes — low contrast, desaturated — so detections, pins,
   annotations and coverage-grey read as the figure ([Esri: figure-ground
@@ -484,6 +488,10 @@ invariant).
 
 ## 12. Proposed tickets and time estimate
 
+> **Superseded as a plan by [`docs/26`](26-map-ui-redesign-tickets.md)** (the approved MAP-00…MAP-25
+> ticket set, in `docs/tasks.yaml` as T-800…T-825). Kept for the reasoning behind the phase order and
+> the effort tiering.
+
 *Effort tiers per `prompts/model-selection.md`; a `core_interface` tag marks work that touches the
 schema, a stream/route contract, or the render pass and cannot go to Sonnet/Haiku alone. Estimates are
 engineering days for one developer with the agent workflow, and are **planning-grade, not committed**.*
@@ -548,6 +556,244 @@ pin model, and Phases D–E (≈ 24 d) deliver the two things the user names Goo
 A and B can overlap after their design tickets land; D and E are independent of each other and of C.
 These are **planning estimates for a design document, not commitments** — the coordinator finalises
 IDs, dependencies and `parallel_groups` when the tickets enter `docs/tasks.yaml`.
+
+---
+
+## 13. The layer registry (normative)
+
+*The contract MAP-06 builds and MAP-07…MAP-13 extend. Rationale: [ADR-0023](adr/0023-map-ui-and-research-state.md) §2.*
+
+### 13.1 A layer declares its plane, and the plane is fixed
+
+"Layer" has meant three different mechanisms in §1–§12. The spec separates them, because putting a
+coverage wash in the stroke pass or a detection box in the DOM would quietly retire the honesty
+guards MCANVAS was built around.
+
+```ts
+/** Which pass a layer renders in. Fixed at registration; never changes at runtime. */
+type LayerPlane =
+  | "data"      // the tile pass: value plane + cell-rule state plane. May paint a cell.
+  | "overlay"   // the stroke pass: OverlayQuad edges/bars. CANNOT paint a cell (no sampler, no ramp).
+  | "dom";      // band-1 focusable marks, laid out in the render frame.
+
+type LayerId =
+  | "base"        // data    - amplitude ramp / phosphor over the tile value plane (T-475/T-505)
+  | "coverage"    // data    - the four coverage states + the shadow tier, via the one cell rule
+  | "tier"        // data    - honesty-tier banding, per pane
+  | "detections"  // overlay - Confirmed / Candidate boxes (MAP-08)
+  | "artifacts"   // overlay - image / harmonic / IMD connectors to their source (MAP-11)
+  | "priors"      // overlay - band-plan allocations drawn as explanations (MAP-12)
+  | "rules"       // overlay - retention bound, IQ horizon, HUD ticks, time cursor
+  | "research"    // overlay - saved measurements + annotations (MAP-20/22)
+  | `collection:${string}`   // overlay - one durable marker collection, toggled as a layer (MAP-21)
+  | "pins";       // dom     - detection markers, curated markers, clusters (MAP-09/10)
+
+interface Layer {
+  readonly id: LayerId;
+  readonly plane: LayerPlane;
+  readonly z: number;      // orders WITHIN the plane only; never across planes
+  visible: boolean;
+}
+
+/** A pane's registry: presentation state only. It commands nothing and holds no signal logic. */
+interface PaneLayers {
+  readonly paneId: string;
+  readonly base: "ramp" | "phosphor";   // the base-style axis: exactly one
+  readonly layers: readonly Layer[];    // the overlay-content axis: any number
+}
+```
+
+**Planes render in a fixed order — `data`, then `overlay`, then `dom` — and `z` never crosses a
+plane.** No toggle, ordering or user preference can put a stroke beneath a measurement's colour, or a
+DOM mark beneath a stroke. A layer that wanted to wash colour over energy would have to change its
+`plane`, which it cannot.
+
+### 13.2 An `overlay` layer is a pure function, and they all reach one hook
+
+```ts
+type OverlayLayerFn = (pane: PaneView, edgeNs: number) => readonly OverlayQuad[];
+```
+
+- It reads its source through an accessor over store state, places each record through **that pane's
+  own** `Box`/`PaneRect` mapping (so a record sits at its capture-time/frequency coordinate), and
+  returns strokes. It mutates nothing, reads no other layer, and touches no global.
+- The visible layers, sorted by `z`, are **concatenated into the single existing `marks` hook** —
+  `marks: (pane, edge) => OverlayQuad[]` in `ui/src/app/centre/surface.ts`, which `SurfacePreview`
+  already takes. There remains exactly one place overlay geometry is produced and one pass that draws
+  it, so **the byte-identical-with-overlays-off guard needs no change and loses no force** however
+  many layers exist.
+- MAP-06 therefore *refactors* that one call site into a registry; it does not add a second path.
+
+### 13.3 A `data` layer is cell-rule/ramp state, not geometry
+
+`coverage`, `tier` and `base` toggle uniforms on the **one** ramp module (T-397) and the **one** cell
+rule (`ui/src/surface/cellrule.ts`, T-440/T-520). That is why the coverage fog may honestly draw
+`unobserved` grey, `unknown`, `excluded` and the ADR-0020 shadow at all: the state plane is the only
+thing permitted to paint a cell, and it is decided by one rule. **The layers menu's coverage switch
+sets a cell-rule flag; it never adds a quad.** Forking a second ramp or a second cell rule is the
+defect these guards exist to catch.
+
+### 13.4 Paint order and defaults
+
+Within `overlay`, ascending `z`: `rules` (10) → `detections` (20) → `research` (30) →
+`collection:*` (40) → `artifacts` (50) → `priors` (60). Suggestions sit on top so they never obscure a
+measurement; rules sit at the bottom so a box that crosses one is drawn over it (the existing
+`ringQuads`-before-`markQuads` order, preserved).
+
+| Layer | Default |
+|---|---|
+| `base`, `coverage`, `detections`, `rules`, `pins` | **visible** |
+| `collection:*` | the collection's own stored `visible` |
+| `tier`, `artifacts`, `priors`, `research` | hidden until asked |
+
+**The hard rule on defaults:** a view that highlights only what it has *explained* hides the
+interesting part. Unknown and Candidate detections are **never hidden by default**, and any
+"explained-only" filter is an explicit, reversible opt-in that says in words that it is hiding data.
+
+### 13.5 Scope and the per-pane rule
+
+The registry is **per pane** — a pane is where you look *from*, so two panes may legitimately show the
+same window with different layers on. A new pane inherits the creating pane's registry **by value**
+and diverges thereafter. The registry is serialised to `localStorage` per viewer and must render
+correctly when storage is unavailable.
+
+### 13.6 What a layer may never do
+
+- Tint, wash or multiply over the value plane (only `data` may paint a cell; the overlay program has
+  no sampler and no ramp, which is what makes this structural rather than a rule to remember).
+- Draw grey for anything but genuinely-unobserved, or manufacture "observed" out of "unobserved".
+- Lay out on the data-poll cadence. Every layer re-lays-out in the render frame, through the pane's
+  own capture-time mapping (T-388).
+- Stack competing Confirmed/Candidate boxes as though overlap were a feature. Overlap is an error
+  signal the backend re-analyses (ADR-0019); the client draws what the backend resolved, and an
+  overlap that reaches the screen is a backend bug to report, never something to z-order away.
+- Fabricate a timespan (see §14.3).
+- Call a device route. Toggling a layer is presentation; the spy-client call list stays empty.
+
+---
+
+## 14. Pins (normative)
+
+*The contract MAP-09 and MAP-10 build to. Rationale: [ADR-0023](adr/0023-map-ui-and-research-state.md) §3.*
+
+### 14.1 Pins are DOM, in band 1, laid out in the render frame
+
+Pins live in the `#pins` container (docs/23 §10.1 band 1): `pointer-events: none` on the container,
+`auto` on each pin, positioned from **content space** through the pane's own capture-time and Hz
+mappings, **in the same pass as the canvas draw**. They are DOM because a mark must be
+keyboard-focusable and carry an accessible name, which a GPU glyph cannot; they are affordable as DOM
+because §14.4 caps them.
+
+### 14.2 Three states, and a glyph vocabulary that survives colour-vision deficiency
+
+| State | Behaviour |
+|---|---|
+| **rest** | a glyph at its (t, f) place |
+| **hover / keyboard focus** | a **MapTip**: centre, bandwidth, family suggestion, on-air. Reads already-loaded state; **fetches nothing, changes nothing** |
+| **selected** | opens the detail sheet (docs/23 §10.3) and selects the same object in the Research table |
+
+| Kind | Shape | Hue role |
+|---|---|---|
+| Confirmed emitter | filled square | category |
+| Candidate | open diamond | category |
+| Unknown / unexplained | open circle with `?` | category |
+| Human-curated marker | filled pennant | provenance tier |
+| Cluster | rounded count chip | count |
+
+**Never hue alone.** Shape carries state so ~8 % of men are not excluded; red–green pairings are
+avoided. Glyphs are legible at **≥ 11 px** with a **≥ 24 px** hit area. Keyboard: pins are tab-stops
+over the visible set, focus shows the MapTip, `Enter` selects, arrow keys step to neighbours.
+
+**Two kinds stay distinguishable.** *Detection markers* are a rendering of the live catalogue
+(`/api/events`, `/api/inventory`) and churn with it. *Curated markers* are durable research objects a
+human placed (`/api/collections`). A glance must tell measured-vs-mine apart — the OpenWebRX
+provenance-colour precedent, with a shape cue so it survives CVD.
+
+### 14.3 Clustering, and the coarse-zoom honesty rule
+
+Clusters come from the existing **`GET /api/tiles/events`** count-per-cell aggregate, on exactly the
+tile's own axes, and resolve into individual pins on zoom-in — the point-layer form of the pyramid's
+coarsen/refine.
+
+**The rule, which the aggregate already enforces server-side and the client must not violate in
+reverse:** at a zoom where a detection's box would be smaller than a glyph, draw **the glyph or the
+count** — *never* a fattened box that invents duration. The server refuses to inflate a sub-cell burst
+or to count a long emission once per crossed row; the client refuses to widen one back. Clusters are
+pickable: hover shows count and band, click either zooms to resolve or lists members in the sheet.
+
+### 14.4 The element budget, picking, and the deferred GPU pass
+
+- **Hard cap: 400 pin elements per pane.** Above it the pane draws the next coarser cluster level.
+  The cap is what makes DOM pins defensible and the per-frame cost predictable.
+- **MAP-09/MAP-10 owe a measurement, not an assumption** (the T-453 discipline applied to the client):
+  per-frame layout + hit-test cost at the cap, on the reference machine, recorded in the ticket.
+- **Picking is a CPU quadtree** over the laid-out set, rebuilt in the frame that lays the pins out.
+- **GPU picking is deferred with a stated trigger:** if layout + hit-test exceeds **2 ms per pane at
+  the cap**, the picking pass becomes its own ticket, and its accessibility cost (a parallel focusable
+  tree) is known in advance.
+
+---
+
+## 15. Client state: the four new slices (normative)
+
+*The contract every MMAP client ticket composes into. Rationale:
+[ADR-0023](adr/0023-map-ui-and-research-state.md) §6; the store model is
+[ADR-0013](adr/0013-ui-architecture.md) §3 and `ui/src/app/store.ts`, unchanged.*
+
+Four slices are added in their owning areas' `slice.ts` and composed into `AppState` exactly like the
+existing eight, so no panel ticket edits `state.ts` beyond one import line.
+
+```ts
+// app/map/slice.ts — ephemeral chrome + the ONE shared selection
+type Tool = "navigate" | "measure" | "annotate" | "pin";
+type SheetState = "hidden" | "peek" | "half" | "full";
+type Selected =
+  | { kind: "emitter"; id: string }
+  | { kind: "marker" | "measurement" | "annotation" | "view"; id: string }
+  | null;
+
+interface MapState {
+  map: {
+    chrome: { idle: boolean; gotoOpen: boolean; layersOpen: boolean; tool: Tool };
+    sheet: { state: SheetState; tab: "explore" | "detail" };
+    research: { open: boolean; tab: "all" | "marker" | "measurement" | "annotation" | "view";
+                filterToWindow: boolean; sort: string };
+    selection: Selected;            // canvas, sheet and table all read THIS
+    pins: { hoveredId: string | null };
+  };
+}
+
+// app/map/layers-slice.ts — per-pane registries (presentation only)
+interface LayersState { layers: Readonly<Record<string, PaneLayers>> }
+
+// app/research/slice.ts — a mirror of the four durable stores, as served
+interface ResearchState {
+  research: {
+    collections: Collection[]; markers: Marker[];
+    measurements: Measurement[]; annotations: Annotation[]; views: SavedView[];
+    loaded: Record<"collections" | "markers" | "measurements" | "annotations" | "views", boolean>;
+    error: string | null;
+  };
+}
+
+// app/map/priors-slice.ts — the current viewport's suggestions
+interface PriorsState { priors: { rows: Prior[]; forWindow: Box | null; loaded: boolean } }
+```
+
+**Four rules the slices encode.**
+
+1. **One selection, three renderers.** Canvas, detail sheet and Research table read the *same*
+   `map.selection` and the *same* `research.*` rows. Selecting a row selects the mark and vice versa;
+   a liveness change moves both. There is never a second "boxes list" a poll advances while the table
+   lags — that was the T-388 class.
+2. **Edits go through the backend, not around it.** Dragging a saved measurement cursor or editing a
+   note is a `PUT`; the slice updates **from the response**. No surface short-circuits the round trip:
+   a measurement's value is the backend's to compute and the audit entry is the backend's to write.
+3. **`research.*` is a mirror, not a source.** It holds rows exactly as served, with no derived signal
+   measurement computed in the browser (the existing `state.ts` rule).
+4. **Ephemeral and durable never share a slice.** `map.*`, `layers` and `priors` are ephemeral
+   (`localStorage` at most); `research.*` mirrors durable backend state. Keeping them apart in the
+   store is what keeps them apart on screen (docs/25 §1).
 
 ---
 

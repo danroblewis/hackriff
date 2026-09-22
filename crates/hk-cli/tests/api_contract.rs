@@ -8509,6 +8509,82 @@ fn every_route_in_the_route_table_is_documented() {
     );
 }
 
+/// T-800 (MAP-00, ADR-0023): the MMAP research routes are **reserved, not yet served**, and they
+/// stay token-gated the day they are.
+///
+/// `docs/api.md` "Reserved: the map-UI research routes" fixes the four durable stores' shapes
+/// (annotations, collections/markers, measurements, views) and the band-plan-priors query before
+/// any of them has code, so MAP-12 and MAP-16..MAP-19 are five instances of one contract rather
+/// than five designs. This test is the half of that pairing (T-079) which can be asserted today,
+/// and it is written so it does **not** have to be deleted as the routes land:
+///
+/// - **Without a token, every reserved path answers `401`** — auth runs *before* dispatch
+///   (`http.rs`), so this holds whether or not the route exists, and it is exactly the property a
+///   reserved name must keep once it does exist. A store of a researcher's notes that answered an
+///   unauthenticated caller would be a real defect, and this is what would catch it.
+/// - **With a token, a reserved path either 404s (not landed yet) or answers its own contract.**
+///   It may never answer `401` with a valid token, and it may never 404 *without* one, which is
+///   what pins the ordering.
+/// - **Every reserved path is documented**, so the table cannot quietly drift out of `docs/api.md`
+///   while the tickets are open.
+#[test]
+fn mmap_research_routes_are_reserved_and_gated() {
+    // (method, path) exactly as docs/api.md reserves them. Paths with an `{id}` are probed with a
+    // concrete id: a served route answers 404 `not_found` for it, which is indistinguishable from
+    // "not served" on purpose — the shape is the owning ticket's test to assert, not this one's.
+    const RESERVED: &[(&str, &str)] = &[
+        ("GET", "/api/annotations"),
+        ("POST", "/api/annotations"),
+        ("GET", "/api/collections"),
+        ("POST", "/api/collections"),
+        ("GET", "/api/markers"),
+        ("GET", "/api/measurements"),
+        ("POST", "/api/measurements"),
+        ("GET", "/api/views"),
+        ("POST", "/api/views"),
+        ("GET", "/api/priors"),
+    ];
+
+    let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", doc_path.display()));
+    assert!(
+        doc.contains("## Reserved: the map-UI research routes"),
+        "docs/api.md must carry the reserved MMAP route table (T-800)"
+    );
+    for (_, path) in RESERVED {
+        assert!(
+            doc.lines().any(|l| l.contains(path)),
+            "{path} is reserved in the contract test but not in docs/api.md"
+        );
+    }
+
+    let (_dir_guard, serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    for (method, path) in RESERVED {
+        let body = (*method == "POST").then_some("{}");
+
+        // Unauthenticated: 401, before anything about whether the endpoint exists.
+        let (st, v) = call(addr, method, path, None, body);
+        assert_eq!(st, 401, "{method} {path} unauthenticated: {v}");
+        let (st, v) = call(addr, method, path, Some("Bearer nope"), body);
+        assert_eq!(st, 401, "{method} {path} with a wrong token: {v}");
+
+        // Authenticated: not yet served (404 `no such endpoint`), or the route's own answer —
+        // never a 401, which would mean the gate and the dispatch had swapped order.
+        let (st, v) = call(addr, method, path, Some(&bearer), body);
+        assert_ne!(st, 401, "{method} {path} refused a valid token: {v}");
+        if st == 404 {
+            assert_eq!(
+                v.get("error").and_then(|e| e.as_str()),
+                Some("no such endpoint"),
+                "{method} {path} is not served yet, so it must 404 as an unknown endpoint: {v}"
+            );
+        }
+    }
+    stop_server(serving);
+}
+
 /// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
 /// follow-hops pipeline over the mock device's FM window, as `docs/api.md` documents them: the
 /// answer shape, a no-op change, `400 invalid` bodies, the refresh back to the recipe's
