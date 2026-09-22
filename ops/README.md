@@ -97,8 +97,9 @@ process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in t
 permanent `taskpolicy -c background` QoS clamp (efficiency cores only on Apple Silicon) — so the count
 is `WORK_CAP` = (28 − 14) / 3 = 4 and the gate always has its reserve. No load heuristics, no gate-time
 throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` from the HiGarfield fork**
-(`$HACKRIFF_OPS/bin/cpulimit`; build it with `git clone https://github.com/HiGarfield/cpulimit && make`
-and copy `src/cpulimit` there) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
+(`$HACKRIFF_OPS/bin/cpulimit`; source kept at `$HACKRIFF_OPS/src/cpulimit`; rebuild with
+`cd $HACKRIFF_OPS/src/cpulimit && make install DESTDIR=$HOME/.local/bin && cp src/cpulimit $HACKRIFF_OPS/bin/` —
+no sudo needed; do NOT `brew install cpulimit`, that is the inert opsengine build) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
 the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. Disk floor 20 GB.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
