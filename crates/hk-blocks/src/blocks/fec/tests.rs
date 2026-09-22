@@ -492,3 +492,47 @@ fn synced_correction_is_refused_outside_block_mode_and_above_two_bits() {
     wide["synced_correction"]["burst_bits"] = json!(3);
     assert!(try_build("crc", wide, PortType::Frames).is_err());
 }
+
+/// T-552 (ADR-0015 §3.3 measurement): S5 check-block release timing over many frames.
+/// `cargo test --release -p hk-blocks --lib fec::tests::s5_check_throughput_bench -- --ignored --nocapture`
+#[test]
+#[ignore = "timing bench, release builds"]
+fn s5_check_throughput_bench() {
+    use std::time::Instant;
+
+    let n = 50_000;
+    let crc24: Vec<Owned> = (0..n)
+        .map(|i| frame(&hex_bits(&format!("8D4840D6202CC371C32CE0{i:06x}"))))
+        .collect();
+    let bch_bits: Vec<Owned> = (0..n)
+        .map(|i| frame(&bits_of(u64::from(pocsag_word(i as u32 & 0x1F_FFFF)), 32)))
+        .collect();
+
+    let cases: Vec<(&str, &str, serde_json::Value, &[Owned])> = vec![
+        (
+            "crc width24 (Mode-S)",
+            "crc",
+            json!({"width": 24, "poly": "0xFFF409", "strip": false}),
+            &crc24,
+        ),
+        (
+            "bch(31,21)",
+            "bch",
+            json!({"word_bits": 32, "n": 31, "k": 21, "poly": "0x769"}),
+            &bch_bits,
+        ),
+    ];
+    eprintln!("{:<24} {:>12} {:>14}", "case", "frames/s", "ns/frame");
+    for (label, block, params, frames) in cases {
+        let mut b = build(block, params, PortType::Frames);
+        let t0 = Instant::now();
+        let out = run_frames(b.as_mut(), frames, 256, false);
+        let secs = t0.elapsed().as_secs_f64();
+        assert_eq!(out.len(), frames.len());
+        eprintln!(
+            "{label:<24} {:>12.3e} {:>14.1}",
+            frames.len() as f64 / secs,
+            secs * 1e9 / frames.len() as f64
+        );
+    }
+}
