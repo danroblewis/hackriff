@@ -5515,3 +5515,19 @@ shadow; never swept = grey; re-swept = bright). T-519 (2A) adds the missing carr
 query-time fold (no per-row capture cost) and a shadow plane on the tile route, plus a short ADR note;
 T-520 (2B) the client tier; T-521 (2C) the standing e2e guard. Sequence 2A → 2B → 2C, 2A+2B landing
 together so the effect is visible.
+
+**The board is now validated where it is WRITTEN, not only where it is gated (T-764, 2026-09-22).**
+T-640's unquoted `sources[iq-ring].available: true` in a title made `yaml.safe_load` reject the whole
+board and blanked the dashboard, past every textual guard in the tree. T-762 closed the gate half —
+but the break arrived through a **direct board commit**, and those run no gate at all, several times
+an hour. So `hkpy.boardcheck` is one stdlib-plus-strict-parse validator, called from
+`.githooks/pre-commit` (installed by `just setup-git`, which `ops/merge-runner.sh` runs at startup)
+before **any** commit that touches `docs/tasks.yaml` — a coordinator's board flip and the runner's
+merge commit alike — and from `hkpy.boardmerge._validate`, so the driver vouches for the same
+property when it resolves a merge with nobody watching. It **fails closed**: unreadable board,
+missing `pyyaml`, missing checker, or a checker that runs without printing its `board-ok:` token all
+REFUSE the commit (an override that exits 0 and validates nothing is the failure mode, not a
+convenience). `py/tests/test_boardcheck.py` asserts the **refusal** of that exact 2026-09-22 payload
+down each path — direct commit, driver-resolved merge, merge commit, gated merge — never merely that
+a good board passes. Unchanged and still the supervisor's: `ops/monitor.py` should say "the board did
+not parse, here is why" rather than render an empty graph.

@@ -179,7 +179,17 @@ process(){
       notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
       return 0
     fi
-    git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
+    # T-764: the commit can now be REFUSED — `.githooks/pre-commit` validates docs/tasks.yaml
+    # before any commit that touches it, and a merge commit is one of the two writers that can
+    # put a malformed board on main. An unchecked `git commit` here would log "MERGED ✓" for a
+    # merge that never happened, which is the same false-success shape as T-840's lost MERGE_HEAD.
+    if ! git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
+      log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
+      git merge --abort 2>/dev/null || true
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"
+      notify_coordinator "$ticket ($branch) gated GREEN but its merge COMMIT was refused (see the log; usually a malformed docs/tasks.yaml). main is untouched."
+      return 0
+    fi
     log "MERGED $branch ✓"
     record_landed "$branch"
     clear_attempts "$branch"
