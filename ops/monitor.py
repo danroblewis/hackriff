@@ -881,6 +881,119 @@ def merge_status():
 
 _PRI_RANK = {"high": 0, "medium": 1, "normal": 2, "low": 3}
 
+_GATE_START = re.compile(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\] (?:GATE (\S+) \(just gate-merge|BULK gate \(just gate --base (\w+) over (\d+) merged branches)")
+_GATE_END = re.compile(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\] (GATE FAILED (\S+)|MERGED (\S+) ✓|BULK MERGED ✓ (.*)|BULK gate FAILED.*|MERGE STATE LOST.*|GIVE UP.*)")
+_GATE_FAIL = re.compile(r"^\s+(?:TRY \d+ )?FAIL \[\s*([\d.]+)s\]\s*\S*\s*(\S+)\s+(\S+)\s*$")
+_GATE_SUITE = re.compile(r"^gate: (just \S+) took (\d+)s \(exit (\d+)\)")
+_GATE_PANIC = re.compile(r"panicked at ([^:]+:\d+):\d+:\s*$")
+
+def last_gates(n=4):
+    """The newest gate runs, from ops/merge-runner.log: outcome, duration, suites, the tests
+    that failed with the first line of their panic, or the build error when no test ran.
+
+    User, 2026-09-22: "Our merge gate failed again. I don't know what the results are, because
+    the agent dashboard doesn't show me." The log has had every answer all along; this reads
+    the last ~2 MB of it (a gate is ~0.3-1 MB) rather than making a person scroll it.
+    """
+    path = os.path.join(SCRATCH, "merge-runner.log")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 2_500_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return []
+    gates, cur = [], None
+    for i, l in enumerate(lines):
+        m = _GATE_START.search(l)
+        if m:
+            cur = {"started": m.group(1), "branches": [m.group(2)] if m.group(2) else [], "bulk": bool(m.group(3)),
+                   "base": m.group(3) or "", "suites": [], "fails": [], "triage": [], "error": "", "outcome": "running", "ended": ""}
+            if cur["bulk"]:
+                # the batch's branches are on the preceding BULK attempt line
+                for back in range(i - 1, max(0, i - 40), -1):
+                    bm = re.search(r"BULK attempt \(\d+\): (.*)$", lines[back])
+                    if bm:
+                        cur["branches"] = bm.group(1).split(); break
+            gates.append(cur); continue
+        if cur is None:
+            continue
+        s = _GATE_SUITE.search(l)
+        if s:
+            cur["suites"].append({"suite": s.group(1), "s": int(s.group(2)), "rc": int(s.group(3))}); continue
+        fm = _GATE_FAIL.search(l)
+        if fm:
+            name = fm.group(3)
+            if name not in [x["test"] for x in cur["fails"]]:
+                cur["fails"].append({"test": name, "binary": fm.group(2), "s": float(fm.group(1)), "at": "", "msg": ""})
+            continue
+        pm = _GATE_PANIC.search(l)
+        if pm and cur["fails"]:
+            # the panic line names the test thread: attach to that failure, else the newest without one
+            tgt = next((x for x in cur["fails"] if ("'" + x["test"].split("::")[-1] + "'") in l), None) \
+                or next((x for x in reversed(cur["fails"]) if not x["at"]), None)
+            if tgt is not None and not tgt["at"]:
+                tgt["at"] = pm.group(1)
+                nxt = next((lines[j].strip() for j in range(i + 1, min(i + 4, len(lines))) if lines[j].strip()), "")
+                tgt["msg"] = nxt[:300]
+            continue
+        if l.startswith("[") and "TRIAGE:" in l:
+            cur["triage"].append(l.split("] ", 1)[-1][:200]); continue
+        if not cur["error"] and re.match(r"^(error(\[E\d+\])?: |gate: FAILED )", l) and "test run failed" not in l and "recipe" not in l:
+            cur["error"] = l.strip()[:300]
+        e = _GATE_END.search(l)
+        if e:
+            cur["ended"] = e.group(1)
+            cur["outcome"] = "passed" if "MERGED" in e.group(2) else "failed"
+            cur["end_line"] = e.group(2)[:160]
+            cur = None
+    for g in gates:
+        try:
+            t0 = time.mktime(time.strptime("2026-" + g["started"], "%Y-%m-%d %H:%M:%S"))
+            t1 = time.mktime(time.strptime("2026-" + g["ended"], "%Y-%m-%d %H:%M:%S")) if g["ended"] else time.time()
+            g["seconds"] = int(t1 - t0)
+        except Exception:
+            g["seconds"] = 0
+        for k in ("suites", "fails", "triage"):
+            g[k] = g[k][:12]
+    return gates[-n:][::-1]
+
+def latest_junit():
+    """The newest gate's per-test record: $HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml,
+    written by `just gate` after each nextest suite (py/hkpy/gate.py keep_junit). Per file: how
+    many tests, which failed (with the first line of the failure), and the slowest ten with
+    their `time` - the machine-readable answer to "why did this gate take 36 minutes".
+    """
+    root = os.path.join(SCRATCH, "junit")
+    try:
+        runs = sorted((d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))),
+                      key=lambda d: os.path.getmtime(os.path.join(root, d)))
+    except Exception:
+        return None
+    if not runs:
+        return None
+    import xml.etree.ElementTree as ET
+    run = runs[-1]; files = []
+    for fn in sorted(os.listdir(os.path.join(root, run))):
+        if not fn.endswith(".xml"):
+            continue
+        try:
+            tree = ET.parse(os.path.join(root, run, fn)).getroot()
+        except Exception:
+            continue
+        cases = []
+        for tc in tree.iter("testcase"):
+            f = tc.find("failure") if tc.find("failure") is not None else tc.find("error")
+            msg = ""
+            if f is not None:
+                msg = (f.get("message") or (f.text or "")).strip().splitlines()[0][:240] if (f.get("message") or f.text) else "failed"
+            cases.append({"name": tc.get("name", ""), "class": tc.get("classname", ""),
+                          "s": float(tc.get("time") or 0), "failed": f is not None, "msg": msg})
+        files.append({"file": fn, "tests": len(cases),
+                      "failures": [c for c in cases if c["failed"]][:20],
+                      "slowest": sorted(cases, key=lambda c: -c["s"])[:10],
+                      "total_s": round(sum(c["s"] for c in cases))})
+    return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
+
 def work_queue(smap, wts, ags, merge_ticket=""):
     """Two queues the dashboard couldn't show before:
       merge_ready  in-progress tickets whose branch has commits AHEAD of main and
@@ -1445,6 +1558,7 @@ def gather():
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
+        "gates": last_gates(), "junit": latest_junit(),
         "budget": budget_status(),
     }
 
@@ -1603,7 +1717,29 @@ async function tick(){
     const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
     const TAG={working:['🔧 worker running','#52C2AE'],review:['🔍 in review','#A395E0'],queued:['⏳ queued for merge','#F0A542'],unowned:['· unowned branch','#8595A0']};
     const wt=ahead.length?ahead.map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join(''):'<div style="color:#5A6973">— none waiting —</div>';
-    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt;
+    // Last gate results (user, 2026-09-22): the outcome, the suites' durations, the tests that
+    // failed with their panic line, or the build error - read from ops/merge-runner.log - and the
+    // newest JUnit record's failures + slowest tests when the gate wrote one.
+    const G=d.gates||[]; const mono='font-family:ui-monospace,Menlo,monospace;font-size:11px';
+    const gateRow=g=>{
+      const col=g.outcome==='passed'?'#52C2AE':g.outcome==='failed'?'#E47B68':'#F0A542';
+      const who=g.bulk?`bulk · ${g.branches.length} branches`:esc(g.branches[0]||'?');
+      const suites=(g.suites||[]).map(s=>`<span style="color:${s.rc?'#E47B68':'#8595A0'}">${esc(s.suite.replace('just ',''))} ${dur(s.s)}</span>`).join(' · ');
+      const fails=(g.fails||[]).map(f=>`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">✗ ${esc(f.test)} <span style="color:#5A6973">${esc(f.binary)} · ${f.s.toFixed(1)}s</span>${f.at?`<div style="color:#8595A0;padding-left:14px">${esc(f.at)} — ${esc(f.msg)}</div>`:''}</div>`).join('');
+      const err=(!g.fails.length&&g.error)?`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">${esc(g.error)}</div>`:'';
+      const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
+      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
+    };
+    const gates=G.length?G.map(gateRow).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
+    const J=d.junit; let ju='';
+    if(J){
+      const fl=J.files||[]; const nf=fl.reduce((a,f)=>a+f.failures.length,0), nt=fl.reduce((a,f)=>a+f.tests,0);
+      const slow=fl.flatMap(f=>f.slowest.map(c=>({...c,file:f.file}))).sort((a,b)=>b.s-a.s).slice(0,8);
+      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)
+        +fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('')
+        +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
+    }
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt+hdr('Last gate results')+gates+ju;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
   const b=d.budget||{}; const bEl=$('#budget');
