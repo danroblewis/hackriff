@@ -27,6 +27,28 @@
 //! C22 process boundary (ADR-0010 keeps GPLv3 stacks out of the core) the day a real off-air
 //! capture exists. It is not a dependency of decoding.
 //!
+//! # No independent oracle has confirmed this decoder (T-299)
+//!
+//! **Say this plainly, because the fact it guards against is easy to miss:** this decoder and its
+//! own test fixtures were written from the same reading of the same references, by the same
+//! author, in the same task family. A shared misreading of the spec — a wrong bit position, a
+//! wrong unit, a wrong opcode — would pass both the decoder and the synthetic scene that exercises
+//! it, because nothing here checks this module's output against a second, independently-written
+//! implementation on the *same* IQ. The "verified" markers throughout this file are real (each
+//! checks one field against a named third-party source), but that is verification of individual
+//! facts, not an end-to-end oracle comparison of decoded output.
+//!
+//! §5.3 of `docs/19-bart-800mhz-trunked.md` lays out that oracle: run Trunk Recorder, OP25 or
+//! SDRTrunk offline over the same captured IQ this decoder sees, behind the C22 plugin boundary,
+//! gated on the hardware/off-air test tier so CI never depends on a GPLv3 binary being present —
+//! cross-validated against a spectrogram-derived grant/activity check so no single third-party
+//! decoder gets to author the answer key by itself. Building that harness is blocked on a real
+//! off-air P25 capture existing to feed it both implementations. T-544 went looking for one in the
+//! BART 800 MHz system and came back negative (`docs/19` §7, 2026-09-20): no BART signal was
+//! receivable at that location, and no trunked control channel was found anywhere in the
+//! 850.9–862.1 MHz downlink band it surveyed. **This ticket (T-299) remains blocked on that
+//! capture; nothing in this module changes until one exists.**
+//!
 //! # What is verified, and what is not
 //!
 //! Every number below was checked against an independent reference before it was written, because
