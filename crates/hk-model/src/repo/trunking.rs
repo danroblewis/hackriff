@@ -379,7 +379,7 @@ impl Repository {
         entry.validate().map_err(invalid)?;
         self.conn.execute(
             "INSERT INTO trunk_channel_plan (trunk_system_id, iden, base_hz, spacing_hz, \
-             tx_offset_hz, bandwidth_hz, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             tx_offset_hz, bandwidth_hz, slots, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 blob(system),
                 i64::from(entry.iden),
@@ -387,6 +387,7 @@ impl Repository {
                 entry.spacing_hz,
                 entry.tx_offset_hz,
                 entry.bandwidth_hz,
+                i64::from(entry.slots),
                 entry.t.as_unix_nanos(),
             ],
         )?;
@@ -396,7 +397,7 @@ impl Repository {
     /// The current channel table: the newest entry per `iden`, by `iden`.
     pub fn channel_plan(&self, system: TrunkSystemId) -> Result<Vec<ChannelPlanEntry>, RepoError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT iden, base_hz, spacing_hz, tx_offset_hz, bandwidth_hz, t \
+            "SELECT iden, base_hz, spacing_hz, tx_offset_hz, bandwidth_hz, slots, t \
              FROM trunk_channel_plan c WHERE c.trunk_system_id = ?1 AND NOT EXISTS ( \
                SELECT 1 FROM trunk_channel_plan c2 WHERE c2.trunk_system_id = c.trunk_system_id \
                AND c2.iden = c.iden AND (c2.t > c.t OR (c2.t = c.t AND c2.entry_id > c.entry_id))) \
@@ -417,7 +418,7 @@ impl Repository {
         limit: u32,
     ) -> Result<Vec<ChannelPlanEntry>, RepoError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT iden, base_hz, spacing_hz, tx_offset_hz, bandwidth_hz, t \
+            "SELECT iden, base_hz, spacing_hz, tx_offset_hz, bandwidth_hz, slots, t \
              FROM trunk_channel_plan WHERE trunk_system_id = ?1 AND iden = ?2 \
              ORDER BY t DESC, entry_id DESC LIMIT ?3",
         )?;
@@ -722,7 +723,11 @@ fn plan_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelPlanEntry> {
         spacing_hz: r.get(2)?,
         tx_offset_hz: r.get(3)?,
         bandwidth_hz: r.get(4)?,
-        t: ts(r.get(5)?),
+        slots: {
+            let slots: i64 = r.get(5)?;
+            u8::try_from(slots).unwrap_or(1)
+        },
+        t: ts(r.get(6)?),
     })
 }
 
@@ -1011,6 +1016,7 @@ mod tests {
             spacing_hz: 6250.0,
             tx_offset_hz: -45.0e6,
             bandwidth_hz: Some(12_500.0),
+            slots: 1,
             t: t(1),
         };
         let new = ChannelPlanEntry {

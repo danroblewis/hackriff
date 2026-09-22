@@ -4861,6 +4861,71 @@ tasks:
     model: opus
     effort: medium
     core_interface: false
+    result: |
+      P25 Phase 2 is decoded from the band plan, and a grant's slot is attributed (C23 TDMA
+      slot mix-up pitfall). Acceptance met: two talkgroups granted on alternating slots of ONE
+      frequency produce two distinct CallRecords with correct slot attribution.
+
+      What changed
+      - hk-detect/trunk/tsbk.rs: IDEN_UP_TDMA (opcode 0x33) decoded -- iden(4) channel-type(4)
+        tx-offset(14) spacing(10) base(32); `TDMA_SLOTS_PER_CHANNEL_TYPE` maps the channel type
+        to slots (1/1/1/2/4, op25's `slots_per_carrier`). `ChannelMap::resolve` now returns
+        `f = base + spacing * (channel / slots)` with `slot = channel % slots` on a TDMA plan
+        (`Resolved::Mapped` gained `slots` + `slot`). `protocol_of` names P25Phase2 when a
+        corroborated TDMA entry exists -- the band plan is the only thing that can say, since a
+        Phase 2 control channel IS a Phase 1 channel. Verified two independent ways: against
+        op25's `iden_up_tdma` / `channel_id_to_frequency` / `channel_id_to_tdma_slot`, and by
+        arithmetic on the published worked example this module already reproduced (channel 1554,
+        spacing field 100 -> 771.718750 MHz only if divided by 2 first; the FDMA reading is
+        9.7 MHz out). A reserved channel type (5-15) is REFUSED, not defaulted to 2: a guessed
+        slot count is a wrong frequency and a wrong slot at once.
+      - hk-model: `ChannelPlanEntry.slots` (+ migration 0016, `NOT NULL DEFAULT 1 CHECK 1..4`),
+        `downlink_hz` divides by it and `slot_of` is new. A plan stored without its slot count is
+        ambiguous between the FDMA and TDMA readings, so a consumer re-deriving a frequency from
+        the database would land half a channel out -- the pitfall preserved in the DB.
+      - hk-pipeline/chains/trunk.rs: grant_event carries `slot`, the slot count and the mapping
+        it used; the follower's dedup key is now (frequency, slot) instead of frequency alone,
+        which is what stops two talkgroups on one carrier merging into one call. The DDC is still
+        paid ONCE per frequency -- targets are grouped by frequency and each slot's call is
+        written from that one envelope measurement. Every TDMA call carries the new
+        `tdma-shared-envelope` reason: nothing here demodulates the two-slot bursts, so the
+        boundaries are the shared carrier's and the row says so rather than implying per-slot
+        timing this build never measured.
+      - hk-detect/trunk/support.rs: P25 Phase 2 moves Unimplemented -> Decoded, with a reason
+        that states both what it decodes and what it still does not (the TDMA traffic side).
+      - py/hkpy/synth: `iden_up_tdma_args` + `tdma_channel_number`, and a `phase2` branch on the
+        trunk scene registered as scenario `trunk_p25p2_control_channel` -- a TDMA band plan plus
+        two talkgroups granted on consecutive channel numbers of one frequency, with the
+        frequency chosen first and the channel numbers derived from the plan (blind).
+      - tests/e2e t272_p25p2.rs (wired into acceptance_m4): blind through the mock SDR; asserts
+        the system is named p25-phase2, the stored plan carries slots, two distinct CallRecords
+        on one frequency with slots 0/1 and their own talkgroups, the `tdma-shared-envelope`
+        reason, and that NEITHER frequency an FDMA misreading produces (851.350 / 851.3625 MHz)
+        appears anywhere -- not as a call, a grant or even an outside-window refusal.
+      - docs/07 §2.28/§2.29 and docs/18's P25 Phase 2 "unknown" row updated. No API route
+        changed, so docs/api.md is untouched.
+
+      Tests (targeted)
+      - `cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)'`: 8/8 pass, including the new
+        t272 test (t267/t268/t269/t270/t271/t287/t345 unaffected -- their scenes keep `phase2`
+        off and are byte-identical).
+      - `cargo nextest run -p hk-model -p hk-detect`: 534 pass.
+      - `cargo nextest run -p hk-pipeline --no-fail-fast`: 331 pass.
+      - `py -m pytest tests/test_synth.py`: 65 pass; `just lint-py` clean.
+      - `just precheck hk-model hk-detect hk-pipeline hk-e2e`: fmt + clippy clean.
+
+      Surfaced, not chased
+      - LOAD FLAKE, not mine: on the first (loaded) hk-pipeline run
+        `live_edge_tiles::the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture`
+        failed; run alone it passes (5/5 in that binary), and the full re-run was 331/331. Nothing
+        in this diff touches the live tile path. For the deflaker.
+      - The synthetic scene's phase-2 messages had to be inserted near the FRONT of the control
+        channel's message cycle: a hunt decodes only the first ~9 blocks of the window it buffers,
+        and with the 11-frame cycle the pass period was commensurate with the cycle length, so a
+        message late in the cycle was late in EVERY pass and never decoded. Worth knowing if a
+        future scene adds more messages; it is a property of the fixture, not a decoder bug.
+      - SIGNAL-081 (P25 Phase 2 TDMA trunk following) is NOT claimed: it asks for both slots to be
+        demodulated, and the TDMA traffic side is still undecoded (docs/18 row updated to say so).
   - id: T-273
     milestone: M4
     title: 'M4 trunking load index (metadata only) over the API'
