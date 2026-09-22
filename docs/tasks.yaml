@@ -19906,6 +19906,15 @@ tasks:
       likely. A fixture whose emitter grid leaves room for the mirrors would close it.
       ASSERT WITH COUNTS AND FREQUENCIES, NOT WALL-CLOCK (user, 2026-09-21).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 13:19).
+      (a) spur_decision now checks the DC rule before ref-harmonic, so a box on both the tuned centre and a 10 MHz-grid harmonic (e.g. tuned to exactly 100.0 MHz) is labelled dc, the more specific rule; added a regression test. (b) hkpy.synth.retune's retune_diversity fixture now injects a third artefact family, an IQ image of an independent virtual source frequency placed so its mirror clears the emitter grid, DC line and LO-relative spur at every centre; tests/e2e's t586_retune_diversity acceptance test asserts the image is classified under RetuneSlope::Image across all three centres and never confused with the absolute or LO-locked classes -- with counts and frequencies, not wall-clock. Review round 1 found py/tests/test_synth.py's own generator-physics test still assumed only dc-offset/lo-spur artefact kinds; fixed by branching that check for iq-image (fixed invariant f - 2*f_LO, plus an IQ-domain tone-power check at each centre's own baseband offset). Merged main cleanly (no conflicts).
+      Tests: cargo nextest run -p hk-detect -E 'test(rules::)' -> exit 0 (4 passed); cargo nextest run -p hk-e2e -E 'test(t586)' -> exit 0 (2 passed, no leak notice on re-run); uv run --locked pytest tests/test_synth.py (py/) -> exit 0 (71 passed, 2 skipped (pre-existing multimon_ng skips, unrelated)); just lint-py -> exit 0 (ruff: all checks passed)
+      precheck exit 0
+      Commits: 9f9c8100, 57db784a, 3921b971, 367ee584
+      Use cases: AWARE-011
+    notes: |
+      Review (fix attempt 1) found: py/tests/test_synth.py::test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo asserted every artefact truth's kind was in ("dc-offset", "lo-spur"), so it failed against the new iq-image artefact added for part (b). Fixed by branching the check: dc-offset/lo-spur still assert a fixed LO offset; iq-image asserts its invariant f - 2*f_LO is fixed instead, plus a new IQ-domain tone-power check for the image at each centre's own baseband offset. Merged main (clean, no conflicts). Re-ran targeted tests: py/tests/test_synth.py (71 passed, 2 skipped), hk-detect rules:: (4 passed), hk-e2e t586_retune_diversity (2 passed, no leak this run). just precheck hk-detect hk-e2e and just lint-py both clean.
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
