@@ -57,8 +57,15 @@ MERGE_QUEUE = f"{S}/merge-queue.txt"
 BULKMARK = f"{S}/bulk-in-progress"
 LANDED = f"{S}/landed.jsonl"
 
-CAP = int(os.environ.get("WORK_CAP", "4"))              # Rust builders incl. a running gate
+# Agents are cheap while they think (~1% CPU each, measured 2026-09-22); builds are what saturate
+# the 28 cores. So the ceiling is on AGENTS (8), and admission per tick is dynamic: the 1-minute
+# load average must be under WORK_LOAD_MAX, disk over the floor, and a running gate counts as one
+# builder. At most WORK_PER_TICK launches per tick so the load ramps instead of bursting.
+CAP = int(os.environ.get("WORK_CAP", "8"))
+LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "20"))
+PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
+REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
@@ -231,10 +238,6 @@ def launch(t, dry):
             sh(["git", "worktree", "add", wt, branch], check=True)
     else:
         sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
-    if os.path.isdir(f"{REPO}/target") and not os.path.exists(f"{wt}/target"):
-        # APFS clone; instant per file but it walks the whole tree, and main's target is large
-        # enough that this takes minutes and blocks the tick. Paid once per ticket.
-        subprocess.run(["cp", "-c", "-R", "-p", f"{REPO}/target", f"{wt}/target"], capture_output=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
@@ -243,13 +246,18 @@ def launch(t, dry):
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     if effort in EFFORTS:
         cmd += ["--effort", effort]
+    # The build-target clone (`cp -c`, an APFS clone) walks main's whole target tree and takes
+    # minutes; done inline it blocked every tick for that long (2026-09-22: two dispatches took
+    # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
+    # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
+    # it alive through both phases, and the tick returns at once. The brief is read from its file.
+    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err, env=env, start_new_session=True, text=True)
-    p.stdin.write(brief)
-    p.stdin.close()
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt}")
+    p = subprocess.Popen(["bash", "-c", script], cwd=wt, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude)")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
@@ -466,6 +474,11 @@ def dispatch(claims, dry):
     if disk_free_gb() < DISK_MIN_GB:
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
         return False
+    load1 = os.getloadavg()[0]
+    if load1 > LOAD_MAX:
+        log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} ({len(running)} running)")
+        return False
+    free = min(free, PER_TICK)
     try:
         tasks = board()
     except Exception as e:
@@ -490,6 +503,38 @@ def dispatch(claims, dry):
     return changed
 
 
+def reap_worktrees(claims, dry):
+    """Disk is the binding resource (29 GB free on 2026-09-22, ~10 GB per built worktree), and the
+    merge runner removes a worktree only when IT merges the branch. Orphans - killed sessions,
+    no-work dispatches, merged-by-hand branches - stay forever. Remove a worktree when its branch
+    is MERGED into main, or when it is clean with NO commits ahead and no live claim; never one
+    that is dirty, has unmerged commits, belongs to a running claim, or is younger than
+    REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
+    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    out = sh(["git", "worktree", "list", "--porcelain"])
+    paths = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ") and "/.claude/worktrees/" in l]
+    for wt in paths:
+        if wt in live or not os.path.isdir(wt):
+            continue
+        if time.time() - os.path.getmtime(wt) < REAP_AFTER_MIN * 60:
+            continue
+        branch = sh(["git", "branch", "--show-current"], cwd=wt).strip()
+        if not branch:
+            continue
+        dirty = any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+        if dirty:
+            continue
+        ahead = int(sh(["git", "rev-list", "--count", f"main..{branch}"]).strip() or 0)
+        merged = bool(sh(["git", "log", "main", "--merges", "--format=%H", "--fixed-strings", "--grep", branch, "-n", "1"]).strip())
+        if ahead and not merged:
+            continue
+        if dry:
+            log(f"DRY-RUN would reap worktree {wt} ({branch}: {'merged' if merged else 'no commits'})")
+            continue
+        r = subprocess.run(["git", "worktree", "remove", wt], cwd=REPO, capture_output=True, text=True)
+        log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
+
+
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
@@ -497,12 +542,17 @@ def tick(dry):
         sync_board(claims, dry)
     except Exception as e:
         log(f"sync_board error: {e}")
+    try:
+        reap_worktrees(claims, dry)
+    except Exception as e:
+        log(f"reap_worktrees error: {e}")
     changed |= dispatch(claims, dry)
     if changed and not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
     status = {"tick": int(time.time()), "running": running, "cap": CAP - (1 if gate_running() else 0),
-              "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb())}
+              "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
+              "load_max": LOAD_MAX, "per_tick": PER_TICK}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 
