@@ -1676,7 +1676,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
-    <div class="card" id=mergecard style="flex:0 0 auto"><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
+    <div class="card" id=mergecard style="flex:0 1 auto;max-height:62%;min-height:0"><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
     <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
@@ -1744,7 +1744,10 @@ async function tick(){
         +fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('')
         +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
     }
-    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt+hdr('Last gate results')+gates+ju;
+    // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),
+    // and the waiting list capped: the full set is in the Work trees card.
+    const CAP=12; const wtShown=ahead.length>CAP?ahead.slice(0,CAP).map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join('')+`<div style="color:#5A6973;padding:2px 0">… and ${ahead.length-CAP} more (see Work trees)</div>`:wt;
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+gates+ju+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
   const b=d.budget||{}; const bEl=$('#budget');
