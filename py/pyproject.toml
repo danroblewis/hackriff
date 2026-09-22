@@ -14,6 +14,10 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff==0.12.0",
+    # MIT. The board test parses docs/tasks.yaml with the SAME strict loader ops/monitor.py uses,
+    # so a file the dashboard would reject cannot pass the board test (2026-09-22: T-640's
+    # unquoted colon broke the task graph and the "Up next" queue while every textual guard passed).
+    "pyyaml>=6",
 ]
 
 [build-system]

@@ -15475,7 +15475,8 @@ tasks:
     milestone: MSDR
     title: The serving layer holds N live controls, and device-control routes take a device selector
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     core_interface: true
     model: opus
@@ -15495,7 +15496,8 @@ tasks:
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: sonnet
     depends_on: [T-510, T-511]
@@ -15512,7 +15514,8 @@ tasks:
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: sonnet
     depends_on: [T-510, T-511]
@@ -15530,7 +15533,8 @@ tasks:
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
     status: todo
-    priority: normal
+    priority: high
+    requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
     parallel_group: SDR
     model: opus
     depends_on: []
@@ -21945,57 +21949,6 @@ tasks:
       HONEST RESIDUAL: the budget is checked BETWEEN frames, so one cascade (1.0 s observed) is
       still atomic. On a disk that cannot retire tiles as fast as rows arrive, frames are still
       dropped - which is then an honest statement that the disk is the bottleneck. Filed as T-771.
-  - id: T-761
-    milestone: M2-hardening
-    title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
-    status: done
-    branch: task-opsdir
-    priority: high
-    parallel_group: OPS
-    model: opus
-    effort: medium
-    depends_on: [T-650]
-    use_cases: []
-    found_by: 'the supervisor, 2026-09-22, verifying T-650 on its first live bulk'
-    acceptance: |
-      T-650 SHIPPED WITH A HOLE, AND THE HOLE WAS THE READER IT WAS WRITTEN FOR.
-      On the first live bulk (`task-t633` + `task-adcfill`, 2026-09-22 02:42) the marker behaved
-      exactly as designed: `$HACKRIFF_OPS/bulk-in-progress` appeared before the first merge commit
-      with base, start time, pid, branches and the after-sha. And `just reconcile` in the
-      COORDINATOR's session printed "no in-progress tickets - the board claims nothing is running",
-      with NO warning, while that bulk was staged.
-      CAUSE. `HACKRIFF_OPS` is per-process. The runner is launched with it pointing at the
-      supervisor's session scratchpad; the coordinator's session has it UNSET, so `reconcile`
-      looked in `~/.hackriff-ops` and found nothing. A warning nobody receives is not a warning.
-      This is the same false-quiet the marker exists to remove, reproduced one level up - and it is
-      the same shape as a nextest override whose filter names a package no run can see, and as
-      `Coverage::Unobserved` being allowed to read as quiet.
-      IT WAS THE FOURTH HACKRIFF_OPS-CONSISTENCY INCIDENT OF THE SAME NIGHT. The others: two
-      branches stranded because a queue append went to a file the runner never read; a stale entry
-      left in the other copy; and phantom queue contents. Each was individually benign. This one
-      was not.
-      RESOLUTION. The runner PUBLISHES its choice at the fixed default path: on every start it
-      writes `$HACKRIFF_OPS` into `~/.hackriff-ops/active-ops-dir`. `hkpy.reconcile.ops_dir()`
-      resolves most-specific-first - an explicit `HACKRIFF_OPS`, then that pointer, then the fixed
-      default - so a session that sets nothing still lands in the right directory, and a restart
-      under a different env corrects the pointer rather than leaving a stale claim. A pointer to a
-      directory that no longer exists is IGNORED rather than trusted, so staleness degrades to the
-      default instead of silently hiding the marker again.
-      Also: the warning now states pid liveness BOTH ways ("runner pid N alive" / "IS GONE" / "no
-      runner pid recorded"), which the spec asked for and the first implementation only printed in
-      the dead case.
-      VERIFIED AGAINST THE LIVE BULK, not a fixture: with `HACKRIFF_OPS` unset, `just reconcile`
-      now leads with "A BULK MERGE IS STAGED ON MAIN", naming `task-t633 task-adcfill`, gated-from
-      `93b7596e`, "started 4m ago", "(runner pid 96468 alive)".
-      Five tests in `py/tests/test_reconcile.py` pin the resolution order, the stale-pointer
-      degrade, pid liveness both ways, and the exact 2026-09-22 failure (no env + marker in the
-      runner's directory must still be seen). 19 pass.
-    notes: |
-      NEEDS A RUNNER RESTART to publish the pointer; until then the pointer is whatever last wrote
-      it. STILL OPEN and the same root cause: the merge QUEUE is two files (`ops/merge-queue.txt`
-      in the repo and `$HACKRIFF_OPS/merge-queue.txt`), which produced three of tonight's four
-      incidents. Unifying them is the remaining half and is not done here - this ticket only fixes
-      the marker's visibility. Filed alongside as the open question for whoever owns `ops/`.
   - id: T-750
     milestone: MAUTO
     title: 'Measure ADC fill on the live capture path - or prove the per-row cost first (T-625 residual)'
@@ -22814,6 +22767,57 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
+  - id: T-761
+    milestone: M2-hardening
+    title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
+    status: done
+    branch: task-opsdir
+    priority: high
+    parallel_group: OPS
+    model: opus
+    effort: medium
+    depends_on: [T-650]
+    use_cases: []
+    found_by: 'the supervisor, 2026-09-22, verifying T-650 on its first live bulk'
+    acceptance: |
+      T-650 SHIPPED WITH A HOLE, AND THE HOLE WAS THE READER IT WAS WRITTEN FOR.
+      On the first live bulk (`task-t633` + `task-adcfill`, 2026-09-22 02:42) the marker behaved
+      exactly as designed: `$HACKRIFF_OPS/bulk-in-progress` appeared before the first merge commit
+      with base, start time, pid, branches and the after-sha. And `just reconcile` in the
+      COORDINATOR's session printed "no in-progress tickets - the board claims nothing is running",
+      with NO warning, while that bulk was staged.
+      CAUSE. `HACKRIFF_OPS` is per-process. The runner is launched with it pointing at the
+      supervisor's session scratchpad; the coordinator's session has it UNSET, so `reconcile`
+      looked in `~/.hackriff-ops` and found nothing. A warning nobody receives is not a warning.
+      This is the same false-quiet the marker exists to remove, reproduced one level up - and it is
+      the same shape as a nextest override whose filter names a package no run can see, and as
+      `Coverage::Unobserved` being allowed to read as quiet.
+      IT WAS THE FOURTH HACKRIFF_OPS-CONSISTENCY INCIDENT OF THE SAME NIGHT. The others: two
+      branches stranded because a queue append went to a file the runner never read; a stale entry
+      left in the other copy; and phantom queue contents. Each was individually benign. This one
+      was not.
+      RESOLUTION. The runner PUBLISHES its choice at the fixed default path: on every start it
+      writes `$HACKRIFF_OPS` into `~/.hackriff-ops/active-ops-dir`. `hkpy.reconcile.ops_dir()`
+      resolves most-specific-first - an explicit `HACKRIFF_OPS`, then that pointer, then the fixed
+      default - so a session that sets nothing still lands in the right directory, and a restart
+      under a different env corrects the pointer rather than leaving a stale claim. A pointer to a
+      directory that no longer exists is IGNORED rather than trusted, so staleness degrades to the
+      default instead of silently hiding the marker again.
+      Also: the warning now states pid liveness BOTH ways ("runner pid N alive" / "IS GONE" / "no
+      runner pid recorded"), which the spec asked for and the first implementation only printed in
+      the dead case.
+      VERIFIED AGAINST THE LIVE BULK, not a fixture: with `HACKRIFF_OPS` unset, `just reconcile`
+      now leads with "A BULK MERGE IS STAGED ON MAIN", naming `task-t633 task-adcfill`, gated-from
+      `93b7596e`, "started 4m ago", "(runner pid 96468 alive)".
+      Five tests in `py/tests/test_reconcile.py` pin the resolution order, the stale-pointer
+      degrade, pid liveness both ways, and the exact 2026-09-22 failure (no env + marker in the
+      runner's directory must still be seen). 19 pass.
+    notes: |
+      NEEDS A RUNNER RESTART to publish the pointer; until then the pointer is whatever last wrote
+      it. STILL OPEN and the same root cause: the merge QUEUE is two files (`ops/merge-queue.txt`
+      in the repo and `$HACKRIFF_OPS/merge-queue.txt`), which produced three of tonight's four
+      incidents. Unifying them is the remaining half and is not done here - this ticket only fixes
+      the marker's visibility. Filed alongside as the open question for whoever owns `ops/`.
   - id: T-762
     milestone: M2-hardening
     title: A duration-budget assertion inside the merge suite is a deadlock - it measures this machine's history, so no diff can clear it and every failure makes it worse
