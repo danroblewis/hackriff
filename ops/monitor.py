@@ -449,7 +449,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
     counts = {}
     for tid, sname in rt.items():
-        counts[sname] = counts.get(sname, 0) + 1
+        if tid in tasks:   # ticket rows only; a branch-level line (task-planned CONFLICT) is not a ticket
+            counts[sname] = counts.get(sname, 0) + 1
     return {"mermaid": "\n".join(lines), "active": len(active), "nodes": len(nodes),
             "total": total, "done": done, "runtime": counts}
 
