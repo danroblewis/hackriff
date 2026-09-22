@@ -629,6 +629,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
+        // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
+        survey: (path) => client.get(path),
         windows: () => windows,
         // The ring rules first, so a signal box or selection that crosses one is drawn over it.
         marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],

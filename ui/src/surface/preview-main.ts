@@ -122,7 +122,9 @@ async function main(): Promise<void> {
   const canvas = slot("canvas") as HTMLCanvasElement;
   let preview: SurfacePreview;
   try {
-    preview = new SurfacePreview({ canvas, probe, token, fetchFn: (u, i) => fetch(u, i), chrome: slot("chrome") });
+    preview = new SurfacePreview({ canvas, probe, token, fetchFn: (u, i) => fetch(u, i), chrome: slot("chrome"),
+      // T-580: the coverage map is asked FIRST, so never-sampled spectrum costs no tile request.
+      survey: (path) => client.get(path) });
   } catch (e) {
     fail("WebGL2 is unavailable in this browser.", e instanceof Error ? e.message : String(e));
     return;
