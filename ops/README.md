@@ -85,6 +85,12 @@ merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-a
 time, user-requested first, then priority, then number — into a fresh worktree + branch
 (`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
 `model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
+**The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
+(`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
+`precheck`, `blocked.needs`, `cancel.evidence`, `observed_but_not_chased`, `use_cases`). The runner
+validates it, refuses `done` over a failing test, writes the ticket's `result:` (and a cancel's
+status) on the worker's branch through `just task`, routes on `outcome` (cancel → an Opus review
+confirms the evidence), and only then queues the branch. Workers never edit `docs/tasks.yaml`.
 Agent cap 8 (`WORK_CAP`), load-based admission (`WORK_LOAD_MAX`, `WORK_PER_TICK`), disk floor 20 GB.
 **The gate comes first:** while any gate runs, admission drops to `WORK_GATE_CAP` (3) workers and
 `WORK_GATE_LOAD_MAX` (10), and every running worker's process group is demoted to **background QoS**

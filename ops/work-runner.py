@@ -220,6 +220,7 @@ def landed_tickets():
 
 # ---------- launch ----------
 def brief_for(t, wt, branch):
+    d = f"{WORKDIR}/{t['id']}"          # where handback.json goes
     fields = {k: t.get(k) for k in ("id", "milestone", "title", "priority", "model", "effort", "core_interface",
                                      "parallel_group", "depends_on", "use_cases", "capabilities", "acceptance",
                                      "notes", "found_by", "requested_by") if t.get(k) is not None}
@@ -234,10 +235,8 @@ never append to any merge queue - the runner does that after you hand back.
 DONE MEANS: the acceptance below is met, targeted tests pass, `just precheck <crates you touched>` is clean, and
 everything is COMMITTED on {branch} with a message that starts "{t['id']}: " and ends with the line
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Record your result on your branch with the task CLI, never by editing docs/tasks.yaml (a hook denies that):
-write your report to a file, then `just task result {t['id']} --from <that file>` (what changed, test results,
-anything you surfaced but correctly did not chase). `just task show {t['id']}` prints the ticket. Do NOT change its
-status - the runner does.
+You do NOT edit docs/tasks.yaml (a hook denies it) and you do not need to: the runner writes the ticket's
+result and status FROM YOUR HAND-BACK FILE (below). `just task show {t['id']}` prints the ticket if you need it.
 
 TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate <crate>`, `cargo nextest run -p <crate>
 -E 'binary(<name>)'`, `just test-ui`. NEVER `just gate`, `just acceptance` or the full suite (a hook blocks
@@ -246,14 +245,23 @@ them). Never end a turn waiting on a background command; block on its output fil
 FILING RULE (user, 2026-09-22): do not file new tickets for things you merely suspect. An OBSERVED failure
 you cannot fix in scope goes in your result: text with the exact evidence; the coordinator decides.
 
-HAND BACK: your final message must end with one line, exactly one of:
-HANDBACK: DONE
-HANDBACK: BLOCKED <one line: what specifically you need>
-HANDBACK: CANCEL <one line: why this ticket needs NO work - already done by T-x at <commit>, or obsoleted by <decision>>
-CANCEL is yours to propose when the evidence is in the repo: record it on your branch with
-`just task set {t['id']} status=cancelled cancelled_reason='<the same evidence>'` and commit that, so the
-cancellation is reviewed and lands like code. If `just task` is not available, hand back CANCEL anyway and the
-coordinator decides. Never silently exit with no commits - that reads as a lost agent, not a finding.
+HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no comments):
+  {d}/handback.json
+  {{"ticket": "{t['id']}",
+   "outcome": "done" | "blocked" | "cancel",
+   "summary": "what changed and why - 3 to 10 lines, written for the ticket's result: field",
+   "commits": ["<short sha>", ...],
+   "files": ["<path>", ...],
+   "tests": [{{"cmd": "just test-crate hk-x", "exit": 0, "summary": "41 passed"}}, ...],
+   "precheck": {{"exit": 0}},
+   "blocked": {{"needs": "<what specifically, if outcome is blocked>"}},
+   "cancel": {{"evidence": "<why this ticket needs NO work: done by T-x at <sha>, or obsoleted by <decision>>"}},
+   "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
+   "use_cases": ["<the use-case ids your tests assert on>", ...]}}
+The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
+"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
+Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
 TICKET:
 {body}
@@ -311,7 +319,8 @@ def launch_review(claim):
              "(is the work really done at the commit named? is the decision real and does it obsolete THIS ticket?). "
              "PASS only if the evidence holds; FAIL names what is missing.\n") if cancel else ""
     prompt = f"""Review branch {branch} for hackriff before it is queued for merge. The diff is `git diff main...{branch}`{extra}
-(run it from {wt}). The ticket text is in {d}/brief.md and the worker's report in {d}/out.json (field "result").
+(run it from {wt}). The ticket text is in {d}/brief.md, the worker's structured hand-back in {d}/handback.json
+(review the diff against what it CLAIMS: tests listed, files listed, summary) and its transcript result in {d}/out.json.
 Check what the reviewer agent definition says to check, with CLAUDE.md's invariants and the thin-client rule.
 Do not edit anything. Your final message must end with exactly one line:
 VERDICT: PASS
@@ -338,6 +347,75 @@ def result_of(path):
         return d
     except Exception:
         return {}
+
+
+def load_handback(d, tid):
+    """The worker's hand-back file: the contract. (dict, None) when valid; (None, reason) otherwise."""
+    p = f"{d}/handback.json"
+    if not os.path.exists(p):
+        return None, "no handback.json"
+    try:
+        hb = json.load(open(p))
+    except Exception as e:
+        return None, f"handback.json is not JSON: {str(e)[:80]}"
+    if not isinstance(hb, dict) or hb.get("outcome") not in ("done", "blocked", "cancel"):
+        return None, "handback.json: outcome must be done|blocked|cancel"
+    if str(hb.get("ticket", tid)) != tid:
+        return None, f"handback.json names {hb.get('ticket')}, not {tid}"
+    if not isinstance(hb.get("summary", ""), str) or not hb.get("summary", "").strip():
+        return None, "handback.json: summary missing"
+    return hb, None
+
+
+def handback_outcome(hb, text):
+    """(outcome, why) from the JSON when valid, else from the fallback HANDBACK: line, else done-by-default
+    (the commit/dirty checks that follow still decide what actually happens)."""
+    if hb:
+        o = hb["outcome"]
+        why = (hb.get("blocked") or {}).get("needs") if o == "blocked" else (hb.get("cancel") or {}).get("evidence") if o == "cancel" else ""
+        return o, why or ""
+    line = next((l for l in text.splitlines() if l.startswith("HANDBACK:")), "")
+    if "BLOCKED" in line:
+        return "blocked", line[18:300]
+    if "CANCEL" in line:
+        return "cancel", line[17:300]
+    return "done", ""
+
+
+def write_result(c, hb):
+    """Write the ticket's result: block on the worker's branch from handback.json, through the task CLI,
+    committed by the runner - so the board edit is deterministic and workers never touch tasks.yaml.
+    Needs the CLI on the branch (py/hkpy/tasks.py, task-taskcli); otherwise the summary waits in the file."""
+    tid, wt = c["ticket"], c["wt"]
+    if not os.path.exists(f"{wt}/py/hkpy/tasks.py"):
+        log(f"RESULT {tid}: no task CLI on the branch yet; summary stays in handback.json")
+        return
+    lines = [f"{hb['outcome'].upper()} (work-runner, from handback.json, {time.strftime('%Y-%m-%d %H:%M')}).", hb["summary"].strip()]
+    if hb.get("tests"):
+        lines.append("Tests: " + "; ".join(f"{t.get('cmd')} -> exit {t.get('exit')}{' (' + str(t.get('summary')) + ')' if t.get('summary') else ''}" for t in hb["tests"] if isinstance(t, dict)))
+    if hb.get("precheck"):
+        lines.append(f"precheck exit {hb['precheck'].get('exit')}")
+    if hb.get("commits"):
+        lines.append("Commits: " + ", ".join(map(str, hb["commits"])))
+    if hb.get("observed_but_not_chased"):
+        lines.append("Observed, not chased: " + " | ".join(map(str, hb["observed_but_not_chased"])))
+    if hb.get("use_cases"):
+        lines.append("Use cases: " + ", ".join(map(str, hb["use_cases"])))
+    if hb["outcome"] == "cancel":
+        lines.append("Cancel evidence: " + str((hb.get("cancel") or {}).get("evidence", "")))
+    rp = f"{WORKDIR}/{tid}/result.txt"
+    open(rp, "w").write("\n".join(lines) + "\n")
+    args = ["uv", "run", "--locked", "--project", "py", "python", "-m", "hkpy.tasks"]
+    r = subprocess.run(args + ["result", tid, "--from", rp, "--file", f"{wt}/docs/tasks.yaml"], cwd=wt, capture_output=True, text=True)
+    if r.returncode == 0 and hb["outcome"] == "cancel":
+        r = subprocess.run(args + ["set", tid, "status=cancelled", f"cancelled_reason={(hb.get('cancel') or {}).get('evidence', '')[:300]}", "--file", f"{wt}/docs/tasks.yaml"], cwd=wt, capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"RESULT {tid}: task CLI failed: {(r.stderr or r.stdout).strip()[:160]}")
+        subprocess.run(["git", "checkout", "--", "docs/tasks.yaml"], cwd=wt, capture_output=True)
+        return
+    subprocess.run(["git", "add", "docs/tasks.yaml"], cwd=wt, capture_output=True)
+    r = subprocess.run(["git", "commit", "-q", "-m", f"{tid}: result and status from handback.json (work-runner)"], cwd=wt, capture_output=True, text=True)
+    log(f"RESULT {tid}: board {'written on the branch' if r.returncode == 0 else 'commit failed: ' + r.stderr.strip()[:100]}")
 
 
 def record_done(claim, outcome, res):
@@ -407,19 +485,27 @@ def reap(claims, dry):
         text = str(res.get("result", ""))
         if res.get("session_id"):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
+        hb, hb_err = load_handback(d, tid)
+        outcome, why = handback_outcome(hb, text)
+        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
+            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+            outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        if hb_err:
+            log(f"HANDBACK {tid}: {hb_err} - falling back to the text line ({outcome})")
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+        if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
+            write_result(c, hb)                    # the board line the worker used to write by hand
+            ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         if res.get("is_error"):
             c["state"] = "error"
             attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
             record_done(c, "error", res)
-        elif "HANDBACK: BLOCKED" in text:
+        elif outcome == "blocked":
             c["state"] = "blocked"
-            why = next((l for l in text.splitlines() if l.startswith("HANDBACK: BLOCKED")), "")
-            attention(tid, c["branch"], "BLOCKED", why[18:220])
+            attention(tid, c["branch"], "BLOCKED", (why or "")[:220])
             record_done(c, "blocked", res)
-        elif "HANDBACK: CANCEL" in text:
-            why = next((l for l in text.splitlines() if l.startswith("HANDBACK: CANCEL")), "")[17:300]
+        elif outcome == "cancel":
             if ahead > 0 and not dirty:
                 # The worker recorded the cancellation on its branch: an Opus reviewer confirms the
                 # evidence whatever the worker's model, then it lands through the gate like code.
@@ -467,7 +553,8 @@ Passes alone but failed in the gate = load-sensitive: make it deterministic (nev
 If the failure is in code you did not touch and is a known bug on main, say so precisely and hand back BLOCKED.
 Then: targeted tests, `just precheck <crates>`, commit on {branch}, `just task note {tid} --text "<what the gate found and what you changed>"`.
 Same rules as before: never touch the main checkout, never the full gate, never edit docs/tasks.yaml by hand.
-Your final message must end with exactly one line: HANDBACK: DONE  or  HANDBACK: BLOCKED <why>
+When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
+your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
