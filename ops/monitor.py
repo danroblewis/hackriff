@@ -280,9 +280,9 @@ def runtime_states(smap, tl=None, limit=10):
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
                keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
     try:
-        import yaml
-        d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
-        tl = d["tasks"] if isinstance(d, dict) else d
+        tl = load_tasks_yaml()      # mtime-cached; a fresh PyYAML parse per poll had the monitor at 65 % CPU (2026-09-22)
+        if not tl:
+            raise RuntimeError("docs/tasks.yaml did not load (see the dashboard's error line)")
     except Exception as e:
         return {"mermaid": f"graph LR\n  err[\"{e}\"]", "active": 0}
     # Milestone filter (for isolating a side-project milestone in the graph). The
