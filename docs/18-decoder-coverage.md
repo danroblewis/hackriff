@@ -540,7 +540,7 @@ SIGNAL-051 (wM-Bus), SIGNAL-052 (rtl_433 long tail), SIGNAL-057 (ALERT gauges), 
 growth), RESEARCH-001/002/012.
 Why it is first: it converts "support many more decode types" from an engineering cost into a
 template-authoring cost, **and** every template is a MAUTO search seed, so it improves the synthesis
-engine at the same time. T-557 designs the bridge.
+engine at the same time. T-557 designs the bridge: [ADR-0015 §15](adr/0015-decoder-synthesis-contracts.md).
 
 **2. VHF/UHF data and paging beyond what is already built.**
 *Disposition: **native recipes**, existing blocks.* AFSK/AX.25 (APRS), railroad EOT and ATCS,
