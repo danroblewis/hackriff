@@ -237,7 +237,9 @@ def runtime_states(smap, tl=None, limit=10):
                 pass   # working: drawn by the agents() path, not here
             elif cs == "queued":
                 put(tid, "queued", "merge queue")
-            elif cs in ("gate-failed", "review-failed", "blocked", "uncommitted", "cancel-proposed", "error", "timeout"):
+            elif cs == "blocked":
+                put(tid, "blocked", "worker handed back BLOCKED - needs a person")
+            elif cs in ("gate-failed", "review-failed", "uncommitted", "cancel-proposed", "error", "timeout"):
                 put(tid, "failed", cs.upper().replace("-", "_"))
             elif cs == "no-work":
                 put(tid, "stopped", "stopped or lost agent (NO_WORK)")
@@ -253,7 +255,9 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
             f = l.split()   # date time branch ticket KIND detail...
-            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "GATE_FAIL_ESCALATE", "GATE_FAIL_NO_SESSION", "CANCEL_PROPOSED"):
+            if len(f) >= 5 and f[4] == "BLOCKED":
+                put(f[3], "blocked", "worker handed back BLOCKED - needs a person")
+            elif len(f) >= 5 and f[4] in ("REVIEW_FAIL", "ERROR", "TIMEOUT", "UNCOMMITTED", "GATE_FAIL_ESCALATE", "GATE_FAIL_NO_SESSION", "CANCEL_PROPOSED"):
                 put(f[3], "failed", f[4])
             elif len(f) >= 5 and f[4] == "NO_WORK":
                 put(f[3], "stopped", "stopped or lost agent (NO_WORK)")
@@ -366,7 +370,7 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     rt, rt_why = runtime_states(smap, tl)
     # Runtime-state filters, one per state, same semantics as the status filters: off hides those
     # nodes, on shows them whatever their status filter says.
-    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed, "stopped": keep_failed}
+    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed, "stopped": keep_failed, "blocked": show_blocked}
     def passes(x):
         s = x.get("status")
         r = rt.get(x.get("id"))
@@ -410,8 +414,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         ms = x.get("milestone") or ""
         state = rt.get(x["id"])
         if state:
-            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT", "stopped": "STOPPED"}[state]
-            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF", "stopped": "#8595A0"}[state]
+            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT", "stopped": "STOPPED", "blocked": "BLOCKED"}[state]
+            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF", "stopped": "#8595A0", "blocked": "#E47B68"}[state]
             why = rt_why.get(x["id"], "")
             why = "" if why in ("bulk gate", "merge queue", "reviewer stage") else " · " + why
             t = f"<b style='color:{col};font-size:10px;letter-spacing:.08em'>{word}{why}</b><br/>" + t
@@ -468,9 +472,9 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         lines.append(f"MS_{a} --> MS_{b}")
     lines.append("MS_M1 --> MS_MUI")
     for nid, x in nodes.items():
-        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped"}.get(rt.get(nid)) \
+        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped", "blocked": "blocked"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
-        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'),
+        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'), "blocked": ('(["', '"])'),
                  "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
         lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
     # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
