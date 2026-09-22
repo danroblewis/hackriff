@@ -21,6 +21,13 @@
 //! (as they can during the 15 s wait for `Running` that precedes it): the bound is a sample-loss
 //! budget, which is why the readsb manifest sets it explicitly (docs/stream-contract.md §9.6).
 //!
+//! **Every wait here is on two budgets, told apart by observation ([`budget`]).** `ready_timeout`
+//! and [`PLUGIN_WAIT_STALL`] are budgets on a *subprocess*, and a freshly linked one is spawned in
+//! ~193 µs and then executes nothing for up to ~30 s (T-493) — every gate relinks. So they run
+//! from the child's **first byte of output**, the host's only evidence it reached its first
+//! instruction (`PluginInstance::first_output_at`, T-540); before that byte the manifest's
+//! `startup_timeout` governs, and the log says which budget expired and what never arrived.
+//!
 //! **Backpressure (lossless replay, T-037b).** Plugin input is drop-not-block, which is right for
 //! a live source but lost decodes when an unpaced recording outran the plugin (readsb's 8 MiB
 //! queue filled on long recordings). In lossless mode the chain waits for queue room before each
@@ -54,13 +61,38 @@ use crate::stats::{ChainCounters, add, inc};
 
 /// Queue bytes a record needs beyond its payload (length prefix, record header, a drop marker).
 const RECORD_OVERHEAD_BYTES: usize = 128;
-/// A lossless wait gives up after this long without any change in queue room.
+/// A lossless wait gives up after this long without any change in queue room — **once the plugin
+/// has shown a sign of life**. Before that byte the manifest's `startup_timeout` governs instead
+/// (see [`budget`]).
 const PLUGIN_WAIT_STALL: Duration = Duration::from_secs(30);
+
+/// The two-budget rule every "has the subprocess got there yet?" wait in this file uses, the same
+/// one the host's hang watchdog uses (T-540).
+///
+/// A freshly linked binary is `posix_spawn`ed in ~193 µs and then executes **nothing** for up to
+/// ~30 s while the loader and code-signing path warm (T-493), and every gate relinks. So elapsed
+/// wall-clock time is not evidence about a child that has produced no output: until its first
+/// byte the longer `startup_timeout` applies, measured from when the wait began; from that byte
+/// on, the caller's own budget applies, measured from the later of the byte and the last change
+/// the wait was watching. Nothing is made slower once the child has started, so a genuine hang is
+/// still caught on the tight budget.
+fn budget(
+    life: Option<Instant>,
+    watched_since: Instant,
+    normal: Duration,
+    startup: Duration,
+) -> (Duration, Instant) {
+    match life {
+        Some(byte) => (normal, watched_since.max(byte)),
+        None => (normal.max(startup), watched_since),
+    }
+}
 
 /// Lossless replay: waits until the plugin's input queue has room for a `payload`-byte record
 /// (capped at the queue's `capacity`). Gives up, and the record is offered anyway, on `stop`,
 /// when the plugin has failed, or after [`PLUGIN_WAIT_STALL`] without progress
-/// (`plugin_wait_timeouts`).
+/// (`plugin_wait_timeouts`) — on the [`budget`] rule, so a plugin that has not reached its first
+/// instruction is given the manifest's `startup_timeout` instead.
 fn wait_for_room(
     inst: &PluginInstance,
     payload: usize,
@@ -69,6 +101,7 @@ fn wait_for_room(
     c: &ChainCounters,
 ) {
     let need = (payload + RECORD_OVERHEAD_BYTES).min(capacity);
+    let startup = inst.limits().startup_timeout;
     let mut waited = false;
     let mut last = None;
     let mut since = Instant::now();
@@ -83,9 +116,12 @@ fn wait_for_room(
         if free != last {
             last = free;
             since = Instant::now();
-        } else if since.elapsed() >= PLUGIN_WAIT_STALL {
-            inc(&c.plugin_wait_timeouts);
-            return;
+        } else {
+            let (bound, from) = budget(inst.first_output_at(), since, PLUGIN_WAIT_STALL, startup);
+            if from.elapsed() >= bound {
+                inc(&c.plugin_wait_timeouts);
+                return;
+            }
         }
         if !waited {
             waited = true;
@@ -95,26 +131,58 @@ fn wait_for_room(
     }
 }
 
+/// How a readiness wait ended. The variants exist so the log can name **what never arrived**
+/// rather than only how long the chain waited: a decoder that ran and never signalled and one
+/// that never ran at all are different failures with different fixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadyWait {
+    /// The plugin sent its `ready` line (or is ready without one).
+    Ready,
+    /// The plugin ran — its first byte arrived — and then did not signal within its bound.
+    NeverSignalled,
+    /// The plugin produced no output at all within the startup budget: it may never have reached
+    /// its first instruction.
+    NeverStarted,
+    /// The run is stopping, or the plugin failed or stopped. Not a readiness timeout (T-224).
+    Ended,
+}
+
 /// Waits for a plugin that declares `input.ready_signal` to report itself ready (T-223), bounded
 /// by `timeout` **and** by shutdown: like [`wait_for_room`], it gives up at once on `stop`, so a
 /// plugin that declares readiness and never signals cannot hold this chain thread for the whole
-/// bound past a stop or a detach (T-224). Returns whether the plugin is ready.
-fn wait_ready_or_stop(inst: &PluginInstance, timeout: Duration, stop: &AtomicBool) -> bool {
-    let deadline = Instant::now() + timeout;
+/// bound past a stop or a detach (T-224).
+///
+/// The bound follows the [`budget`] rule. A `ready` line is output, so a plugin that has produced
+/// **no** output has not got as far as the thing being waited for; charging it `timeout` measures
+/// the loader, not the decoder (the T-493 cold link, and the shared cause of this test family).
+/// Until its first byte the manifest's `startup_timeout` governs; from that byte on, `timeout`
+/// does, so a decoder that runs and then fails to signal is still caught just as fast.
+fn wait_ready_or_stop(
+    inst: &PluginInstance,
+    timeout: Duration,
+    startup: Duration,
+    stop: &AtomicBool,
+) -> ReadyWait {
+    let began = Instant::now();
     let mon = inst.monitor();
     loop {
         let s = mon.stats();
         if s.ready {
-            return true;
+            return ReadyWait::Ready;
         }
         if stop.load(Ordering::SeqCst)
             || matches!(s.state, PluginState::Failed | PluginState::Stopped)
         {
-            return false;
+            return ReadyWait::Ended;
         }
-        let left = deadline.saturating_duration_since(Instant::now());
+        let life = inst.first_output_at();
+        let (bound, from) = budget(life, began, timeout, startup);
+        let left = bound.saturating_sub(from.elapsed());
         if left.is_zero() {
-            return false;
+            return match life {
+                Some(_) => ReadyWait::NeverSignalled,
+                None => ReadyWait::NeverStarted,
+            };
         }
         std::thread::sleep(left.min(Duration::from_millis(2)));
     }
@@ -292,11 +360,34 @@ fn run_inner(
         };
         // Bounded by the timeout and by shutdown (T-224): a stop or detach must not wait out a
         // plugin that never signals. A stop is not a readiness timeout, so it is not counted.
-        if !wait_ready_or_stop(&inst, wait, &shared.stop) && !shared.stop.load(Ordering::SeqCst) {
-            inc(&c.plugin_ready_timeouts);
-            eprintln!(
-                "hk-pipeline: plugin {plugin_id} was not ready within {wait:?}; feeding anyway"
-            );
+        let startup = inst.limits().startup_timeout;
+        match wait_ready_or_stop(&inst, wait, startup, &shared.stop) {
+            ReadyWait::Ready => {}
+            // A stop is not a readiness timeout (T-224); a plugin that died before signalling is
+            // one, and says which it was.
+            ReadyWait::Ended => {
+                if !shared.stop.load(Ordering::SeqCst) {
+                    inc(&c.plugin_ready_timeouts);
+                    eprintln!(
+                        "hk-pipeline: plugin {plugin_id} failed or stopped before reporting \
+                         ready; feeding anyway"
+                    );
+                }
+            }
+            ReadyWait::NeverSignalled => {
+                inc(&c.plugin_ready_timeouts);
+                eprintln!(
+                    "hk-pipeline: plugin {plugin_id} ran but sent no ready line within {wait:?} \
+                     of its first output; feeding anyway"
+                );
+            }
+            ReadyWait::NeverStarted => {
+                inc(&c.plugin_ready_timeouts);
+                eprintln!(
+                    "hk-pipeline: plugin {plugin_id} produced no output at all within \
+                     {startup:?} (it may never have reached its first instruction); feeding anyway"
+                );
+            }
         }
     }
     let mut bytes = Vec::new();

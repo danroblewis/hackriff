@@ -3321,7 +3321,21 @@ impl PipelineHandle {
                 if let Err(e) =
                     repo.finish_survey(common.survey_id, SurveyState::Closed, t_end, &summary)
                 {
-                    errors.push(format!("closing the survey: {e}"));
+                    // T-629: `survey <id> not found` has been seen here once, at the end of a run
+                    // that inserted this very row at start-up, and has not reproduced since (170
+                    // runs to load average 35). "Not found" means the row is absent from the
+                    // database *this* connection opened, so the report names the file and what it
+                    // held: a wrong or re-created file and a vanished row are different bugs, and
+                    // one line of evidence saves the next person a triage from scratch.
+                    let held = match repo.survey(common.survey_id) {
+                        Ok(s) => format!("state {:?}, t_start {:?}", s.state, s.t_start),
+                        Err(e2) => format!("no row ({e2})"),
+                    };
+                    errors.push(format!(
+                        "closing the survey: {e} [survey {} in {}: {held}]",
+                        common.survey_id,
+                        common.db_path.display()
+                    ));
                 }
                 detections_stored = repo.detection_count().unwrap_or(0);
                 let mut q = InventoryQuery {
