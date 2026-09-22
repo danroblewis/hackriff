@@ -5925,6 +5925,17 @@ tasks:
       and refuted: lag-product PAPR measures a coherent carrier not a sweep (chirped-FSK 2.61 but am 2.52,
       ssb 2.47), and per-window IF slope consistency does not separate (keying dominates the drift within
       a window). Report a negative honestly if the remainder cannot be closed without tuning'
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 13:35).
+      Negative result: the remainder stays documented, and no code, constant or density changed. The named case is already closed. Held-out chirped-FSK seed 1700074 (20 dB) abstains on main (open set 1.000). Bisected: T-404 (b3fac0e2, the IF level-count rewrite) closed it, and in the same commit flipped 8-FSK seed 1700039 (20 dB) from abstaining (open 0.392) to analog/wfm at plausibility 1.000. So wrong-family is still 1 of 396; only the snippet changed.
+      The new case has the same shape: a low-tail draw of its own generator. It resolves 2 IF levels where its 20 dB peers resolve 3-7 (if_modality 2.00, if_local_modality 1.86), and those peers escape wfm only narrowly (m 1.98-2.62 vs wfm m_p95 1.596).
+      The tail-term route was measured and refuted. wfm's own dev members are heavy-tailed on every order statistic (|z| p99: 2nd 5.50, 3rd 4.73, 4th 4.17; up to 9 dims beyond 2 sigma), and 1700039's 3.58/2.18/2.06/2.05 sits under all of them. Only a p95 operating point would catch it, and T-248 measured that pushing known top-1 below the 0.90 floor. Narrowing T-404's KDE kernel (0.30) or IF_LOCAL_WINDOW would be fitting the seed.
+      The finding is recorded where the wrong-family count is printed (tests/e2e/tests/acceptance/m3_grid.rs).
+      Tests: HK_E2E_REQUIRE_SYNTH=1 cargo nextest run -p hk-e2e -E 'binary(acceptance_m3) & test(/m3_unknown_recall/)' -> exit 0 (1 passed; unknown recall 0.9924, false-known 0.0076; wrong-family 1 of 396 (held-out:8fsk -> analog))
+      precheck exit 0
+      Commits: 4fd2eb69
+      Observed, not chased: wfm's dev density is itself heavy-tailed (z2_p99 5.502, z3 p99 4.73, up to 9 of 28 dims beyond 2 sigma at p99), so the T-248 tail term is effectively inert against wfm. Measured with the builtin densities over DEV_SEEDS 0..60 at analog gate+{0,5,10,15}. Not investigated why.
+      Use cases: SIGNAL-062
   - id: T-307
     milestone: M3
     title: artifact_detail() discloses the arithmetic of an artifact claim but not the receive chain it
