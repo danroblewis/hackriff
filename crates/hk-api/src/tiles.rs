@@ -2237,8 +2237,8 @@ fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
 /// first-come-first-served.
 pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     const ALLOWED: [&str; 10] = [
-        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "client", "planes",
-        "token",
+        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "client",
+        "planes", "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
@@ -2738,7 +2738,13 @@ fn tiles_batch_json_capped(
     max_bytes: usize,
 ) -> Result<Value, ApiError> {
     const ALLOWED: [&str; 7] = [
-        "device", "scheme", "cells", "planes", "client", "addresses", "token",
+        "device",
+        "scheme",
+        "cells",
+        "planes",
+        "client",
+        "addresses",
+        "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
