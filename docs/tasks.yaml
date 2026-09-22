@@ -20230,46 +20230,6 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-532
-    milestone: MLIVE
-    title: A kept tile answer may not claim the radio never looked at time it never saw
-    status: done
-    priority: high
-    parallel_group: PIPE
-    core_interface: true
-    model: opus
-    depends_on: [T-501, T-505]
-    use_cases: [AWARE-011, AWARE-042]
-    acceptance: |
-      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
-      never had a board block, which is why `just reconcile` could not see it.
-      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
-      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
-      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
-      the third hop, and it is two things.
-      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
-      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
-      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
-      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
-      40 ms it is ~32 rows of THE grey over rows the radio recorded.
-      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
-      gate was charged per TILE rather than per PASS over the edge.
-      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
-      from the same spans the planes are rasterised from; the renderer draws nothing past it and
-      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
-      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
-      merely measured.
-    branch: task-t505-v2
-    notes: |
-      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
-      worktree, because they share their conflict files.
-      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
-      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
-      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
-      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
-      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
-      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
-      did not exist on the original branch - T-528 landed after it was cut.
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
@@ -20405,6 +20365,46 @@ tasks:
       granted voice channels are followed and their call count matches the unshifted run's. Prove
       the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
   - id: T-621
     milestone: M2-hardening
     title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
@@ -20440,6 +20440,84 @@ tasks:
       deserves a test, not an environment to be excluded.
       ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
       Prove the test behaves correctly BOTH with a ring and with the ring refused.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-629
+    milestone: M2-hardening
+    title: "The plugin-readiness test family: five gate flakes, one mechanism - a budget on a freshly linked subprocess started at the spawn instead of at the child's first byte"
+    status: in-progress
+    priority: high
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FIVE SIGHTINGS, ONE MECHANISM (2026-09-21). Each was triaged on its own and each "passed
+      alone", which is why it took five:
+      1. hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_reports_ready_after_its_bounded_wait
+         - the most frequent. Failed a gate at 46.07 s; passes alone in 4.7-19 s. task-flakes could
+         not reproduce it in 42 runs incl. 12 cold relinks; it failed under load 3+ more times.
+      2. tests/e2e/tests/acceptance/signal_001.rs: `plugin_fed_before_ready == 0` (readsb chain).
+         Passes alone in 6.34 s. Its own comment already recorded "the first one did, under load".
+      3. hk-pipeline::retune_is_the_one_device_action::only_a_retune_stops_the_running_segment -
+         `survey <id> not found`. SEE BELOW: this one is NOT in the family.
+      4/5. hk-plugins::readsb and hk-plugins::host - the T-493 cold link: a child spawned in 193 us
+         that then executes nothing for up to 30 s. Reproduces at load 9, absent at load 150: the
+         trigger is a FRESH LINK, not CPU pressure, and every gate relinks.
+      THE MECHANISM. Four separate places asked "has this subprocess got there yet?" and answered
+      it with a wall clock started at the parent's convenience - the spawn, the last push, the end
+      of input - while the subject of the budget had not reached its first instruction. T-540 fixed
+      exactly one of them (the hang watchdog) with the right rule: the child's FIRST BYTE on stdout
+      or stderr is the only evidence it ran, so the budget runs from there and a longer
+      `startup_timeout` covers the silence before it. The other three kept their spawn-relative
+      clocks:
+        - `PluginInstance::finish(idle)` - the no-progress window after the input ends (settle_s);
+        - `chains/plugin.rs::wait_ready_or_stop` - the readiness wait (`ready_timeout`);
+        - `chains/plugin.rs::wait_for_room` - the lossless backpressure wait (PLUGIN_WAIT_STALL).
+      REPRODUCED, not inferred. Sighting 1 was reproduced on the ORIGINAL test by relinking
+      hk-dummy-plugin before every run: 2 failures in 14 runs (33 s runs, `0 plugin decodes, 149
+      records dropped` - the 30 s settle window expiring against a child that had not run), while
+      20 runs at load 13 and 150 runs at load 35 WITHOUT a relink gave 0 failures. That is why load
+      loops kept coming back clean.
+      THE FIX (all four places now use one rule, `chains/plugin.rs::budget` / the same shape in
+      `host.rs`): before the child's first byte, the manifest's `startup_timeout` governs; from
+      that byte on, the caller's own budget runs, measured from the later of the byte and the last
+      change being watched. Nothing is slower once the child has started, so genuine-hang detection
+      is unchanged, and every expiry message now names WHAT NEVER ARRIVED (ran-but-never-signalled
+      vs never-produced-a-byte) instead of only how long it waited.
+      New observational API: `PluginStats::signs_of_life`, `PluginMonitor::first_output_at()`,
+      `PluginInstance::first_output_at()`/`limits()`. T-493's `wait_started` test helper now reads
+      the host's own first-byte record instead of its counter proxy.
+      RED-WHEN-BROKEN, deterministically, using hk-dummy-plugin's `--cold-start-ms` (the loader
+      stall in miniature): two new tests in crates/hk-pipeline/tests/data_path.rs -
+      `a_cold_starting_plugin_is_waited_for_because_the_ready_bound_runs_from_its_first_output`
+      and `a_cold_starting_plugin_is_not_cut_off_by_the_end_of_input_settle_window` - each failed
+      6 of 6 runs on the old code and passes on the new one, in 5-7 s. They assert counts and
+      ordering (records 1..n, fed-before-ready, ready timeouts), never elapsed time.
+      SIGHTING 3 IS A SEPARATE, STILL-OPEN BUG - do not fold it in. That test runs with
+      `cfg.settings.chains = Some(Vec::new())`: no plugin, no subprocess, so it cannot be this
+      mechanism. `survey <id> not found` comes from `finish_survey` finding NO ROW for a survey the
+      same run inserted at start-up, which means the closing connection read a database without it.
+      Ruled out by reading the code: no DELETE on `survey` anywhere; `migrate()` runs in an
+      IMMEDIATE transaction so concurrent opens serialise; every temp dir is unique per pid; the
+      insert is autocommitted before the run starts. NOT reproduced in 170 runs (20 at load ~13,
+      150 at load ~35). T-629 added the only thing that will settle it: the close-path error now
+      names the database file and what that file held for the id
+      (`crates/hk-pipeline/src/run.rs`, "closing the survey: ... [survey <id> in <path>: ...]"), so
+      the next sighting is evidence instead of a sixth triage. Leave the test alone until then - it
+      has not been quarantined, retried or widened.
+      NOT DONE, DELIBERATELY: no `retries`, no `heavy-serial` pin, no widened timeout. task-flakes
+      spent a day removing a `retries = 1` and a serial pin that existed only to prop up a
+      wall-clock bound.
+    notes: |
+      Filed by the deflaker on branch task-plugready (2026-09-21). Files: crates/hk-plugins/src/host.rs,
+      crates/hk-plugins/tests/common/mod.rs, crates/hk-pipeline/src/chains/plugin.rs,
+      crates/hk-pipeline/src/run.rs, crates/hk-pipeline/tests/data_path.rs,
+      tests/e2e/tests/acceptance/signal_001.rs.
+      Related: T-493 (cold link measured), T-540 (the watchdog's two budgets), T-603 (hk-e2e runs
+      through plain `cargo test`, so nextest's serial group and thread cap never applied to
+      sighting 2 at all).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."

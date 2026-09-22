@@ -72,6 +72,14 @@ pub const START_GRACE: Duration = Duration::from_secs(120);
 /// `input.ready_signal` is ready the moment its process is *attached*. The failing runs showed
 /// exactly that: `ready: true`, `records_enqueued: 100`, `decodes: 0`, empty log.
 pub fn plugin_has_run(mon: &PluginMonitor) -> bool {
+    // T-540 made this directly observable and T-629 wired it through here: the host records the
+    // **first byte** the child writes on stdout or stderr, which is the same evidence the hang
+    // watchdog, the chain's readiness wait and `PluginInstance::finish` now hang their budgets
+    // off. The counter evidence below stays as a second reading of the same event, so this helper
+    // is never weaker than it was.
+    if mon.first_output_at().is_some() {
+        return true;
+    }
     let s: PluginStats = mon.stats();
     let evidence = s.decodes
         + s.annotations

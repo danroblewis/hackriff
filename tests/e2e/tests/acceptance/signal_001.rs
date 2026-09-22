@@ -410,15 +410,24 @@ fn signal_001_adsb_readsb_plugin_chain() {
     );
     // T-223: nothing is fed before the decoder reports ready, so no squitter is decoded while the
     // wrapper is still setting up and loses its sample time (the first one did, under load).
+    //
+    // T-629: "under load" was the wrong reading. The readiness bound was a wall clock started at
+    // the spawn, racing the loader over a freshly linked `hk-plugin-readsb` — and every gate
+    // relinks. It now runs from the wrapper's own first byte of output, so this stays 0 whatever
+    // the machine is doing, and a non-zero count means the decoder really was fed early.
     assert_eq!(
         s.counter("/chains/plugin_fed_before_ready"),
         0,
-        "[{SIGNAL_001}] records reached the decoder before it was ready"
+        "[{SIGNAL_001}] records reached the decoder before it reported ready \
+         ({} readiness timeouts, {} plugin restarts): the ready line never arrived, or arrived \
+         after the chain had given up",
+        s.counter("/chains/plugin_ready_timeouts"),
+        s.counter("/chains/plugin_restarts"),
     );
     assert_eq!(
         s.counter("/chains/plugin_ready_timeouts"),
         0,
-        "[{SIGNAL_001}] the readiness wait timed out"
+        "[{SIGNAL_001}] the chain gave up waiting for the decoder's ready line"
     );
     assert_eq!(
         decodes, PLUGIN_DECODES,
