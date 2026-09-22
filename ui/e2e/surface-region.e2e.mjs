@@ -234,13 +234,70 @@ test("T-340's control, in the browser: no drag of any kind — region stroke inc
   // The repo's oldest standing control, restated over the gesture this ticket adds. It is asserted
   // ON THE WIRE, from CDP's own request log, rather than from anything the client says about
   // itself — a client whose bookkeeping is wrong cannot certify itself (T-454's lesson).
+  //
+  // ——— WHY THE NON-VACUITY PREMISE IS THE PAGE'S OWN STATE AND NOT A TILE COUNT (T-690) ———
+  //
+  // An empty device list only means something if the drags were delivered AND acted on. That
+  // premise used to be read as "at least one `/api/tiles` request went out during the window",
+  // and **that is a measurement of the tile route's service rate, not of the gesture**. The
+  // client asks through a queue behind an AIMD operating cap, so how many addresses become HTTP
+  // requests inside this test's ~1 s window is decided by how fast the route is answering:
+  //
+  //     this file run with one other spec  ·  ~167 ms/tile  · cap 4/4 · queue 0  -> 112 requests
+  //     this file run in the 13-spec suite · ~3612 ms/tile · cap 1/4 · queue 28 ->   0 requests
+  //
+  // Same page, same six drags, same product, twenty-one-fold difference in the route's rate —
+  // and the second run failed with "the drags moved nothing at all", about a page that had just
+  // panned three times in the tests above. The guard was right to refuse to bank a green on a
+  // race it lost; it was asking the wrong witness.
+  //
+  // So each leg now states its OWN effect, read off the page rather than off the wire's volume:
+  // a pan leg must MOVE THE VIEW, and the region leg must COMMIT A REGION and NOT move the view.
+  // Both are direct evidence that the browser delivered the stream and the client acted on it,
+  // and neither can be satisfied by a page that ignored the pointer. Nothing here is timed: the
+  // evidence is a state change and a request COUNT, in order (user, 2026-09-21).
   const page = await app();
   const f = await field(page);
   const mark = page.requests.length;
 
-  for (const mods of [{}, { shift: true }, { alt: true }]) {
-    await page.drag({ x: f.x0, y: f.y0 }, { x: f.x1, y: f.y1 }, 8, mods);
-    await page.drag({ x: f.x1, y: f.y1 }, { x: f.x0, y: f.y0 }, 8, mods);
+  // Per leg, what it must be SEEN to have done: `pan` moves the view; `region` marks out exactly
+  // one region and leaves the window exactly where it was.
+  const legs = [
+    { mods: {}, expect: "pan" },
+    { mods: { shift: true }, expect: "region" },
+    { mods: { alt: true }, expect: "pan" },
+  ];
+  const evidence = [];
+  for (const leg of legs) {
+    const label = JSON.stringify(leg.mods);
+    const before = await page.eval(READOUT);
+    const selsBefore = committed(page);
+    await page.drag({ x: f.x0, y: f.y0 }, { x: f.x1, y: f.y1 }, 8, leg.mods);
+    await page.frames(3);
+    const mid = await page.eval(READOUT);
+    if (leg.expect === "pan") {
+      assert.notEqual(mid, before,
+        `${label}+drag did not move the view, so the empty device list below would prove nothing ` +
+        "about it: the page never received or never acted on this leg's pointer stream");
+    } else {
+      assert.equal(mid, before,
+        `${label}+drag MOVED the view — a rectangle drawn over a window that panned under it ` +
+        "describes a window that has already gone");
+      // The stroke's own effect, on the wire: the client's POST, polled on the harness's request
+      // log rather than assumed to have gone out by the time the frames ran.
+      for (let i = 0; committed(page) === selsBefore && i < 100; i++) await new Promise((r) => setTimeout(r, 100));
+      assert.equal(committed(page), selsBefore + 1,
+        `${label}+drag committed ${committed(page) - selsBefore} regions, not exactly one — this ` +
+        "leg's stroke did not reach the page's region gesture");
+    }
+    // …and back, so the next leg starts where this one did rather than walking the view away.
+    // ONLY for the legs that moved: a return stroke with shift still held would mark out a
+    // SECOND region, and the count below is exact.
+    if (leg.expect === "pan") {
+      await page.drag({ x: f.x1, y: f.y1 }, { x: f.x0, y: f.y0 }, 8, leg.mods);
+      await page.frames(3);
+    }
+    evidence.push(`${label} ${leg.expect === "pan" ? "panned out and back" : "committed 1 region, view held"}`);
   }
   await page.frames(5);
 
@@ -248,10 +305,14 @@ test("T-340's control, in the browser: no drag of any kind — region stroke inc
   const device = after.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter|record)/.test(r.url));
   assert.deepEqual(device.map((r) => `${r.method} ${r.url}`), [],
     "a drag reached a device route: no pointer stream may command the radio");
-  // Non-vacuity: the drags did reach the page and made it work, so an empty device list is a
-  // finding rather than an artefact of nothing having happened.
-  assert.ok(after.some((r) => r.url.includes("/api/tiles")), "the drags moved nothing at all, so this proves nothing");
+  // Non-vacuity, restated as a count over the legs rather than as tile volume: every leg above
+  // was SEEN to do its own job, so an empty device list is a finding about a page that worked.
+  assert.equal(evidence.length, legs.length,
+    `only ${evidence.length} of ${legs.length} gesture legs produced their own evidence`);
   const regions = after.filter((r) => r.method === "POST" && /\/api\/selections/.test(r.url));
-  assert.ok(regions.length > 0, "no region was committed, so the region leg of this control is vacuous");
-  t.diagnostic(`${after.length} requests after the drags; ${regions.length} selection POSTs; 0 device calls`);
+  assert.equal(regions.length, 1, `the region leg committed ${regions.length} regions, not 1 — the region leg of this control is ${regions.length ? "over-counted" : "vacuous"}`);
+  t.diagnostic(`${after.length} requests after the drags (${after.filter((r) => r.url.includes("/api/tiles")).length} of them tiles — ` +
+    "reported, never asserted on: it is the route's service rate, not the gesture); " +
+    `${regions.length} selection POSTs; ${device.length} device calls`);
+  t.diagnostic(`per-leg evidence: ${evidence.join(" · ")}`);
 });

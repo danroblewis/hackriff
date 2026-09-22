@@ -94,6 +94,56 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // **T-521/ADR-0020, and the first standing fault for `fog-of-war.e2e.mjs`** (T-690). That file
+    // is the guard for one of the user's two top features and had no FAULTS entry at all, so its
+    // non-vacuity had never been measured by anything that re-checks itself.
+    //
+    // The smallest edit that is the defect: `tile.ts` decodes the server's `shadow` plane and then
+    // refuses to use it, so every unobserved cell takes THE grey whether or not a last-known value
+    // exists for it. The shadow tier is served, decoded and thrown away — which is exactly the
+    // failure ADR-0020 exists to prevent, stated as "we have it but didn't render it". The file's
+    // SERVER-side claims (the `shadow` plane carries a run over departed band A; band C carries
+    // none) all still pass, which is the point: this is a rendering defect and the guard that must
+    // see it is the pixel one.
+    name: "t520-shadow-drawn-as-grey",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-521/ADR-0020: the client decodes the server's `shadow` plane and then draws those " +
+      "cells as THE grey anyway, so spectrum the radio swept and left is indistinguishable from " +
+      "spectrum it never looked at — the one thing the last-known tier exists to prevent.",
+    file: "surface/tile.ts",
+    patch: (src) => {
+      const from = "      if (Number.isFinite(sv)) { state[i] = CELL.SHADOW; value[i] = sv; } else { state[i] = CELL.UNOBSERVED; value[i] = NaN; }";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in surface/tile.ts: shadow branch`);
+      return src.replace(from,
+        "      // injected by ui/e2e/selftest.mjs — the shadow plane is decoded and then ignored\n" +
+        "      { void sv; state[i] = CELL.UNOBSERVED; value[i] = NaN; }");
+    },
+  },
+  {
+    // **T-532, and the first standing fault for `canvas-journey.e2e.mjs`** (T-690). Same hole: the
+    // file carries the live-edge grey claim and the grey-tracks-coverage claim and nothing ever
+    // put either defect back.
+    //
+    // The smallest edit that is it: `drawUpToHorizon` stops clamping a tile to how far forward its
+    // coverage evidence reaches (`coverage.horizon.as_of_s`), so the rows past that horizon are
+    // drawn from a plane that cannot speak about them — as UNOBSERVED, i.e. THE grey. That is the
+    // pre-T-532 behaviour verbatim: measured 10-38 % of the live-edge zone grey before the fix and
+    // 0.0 % after, over a band the server reports fully observed.
+    name: "t532-draw-past-the-coverage-horizon",
+    expect: "canvas-journey.e2e.mjs",
+    what: "T-532: a tile is drawn beyond how far forward its own coverage evidence reaches, so the " +
+      "newest rows — recorded, folded and served — are painted THE grey, the one colour that may " +
+      "only mean the radio never looked.",
+    file: "surface/surface.ts",
+    patch: (src) => {
+      const from = "    if (!Number.isFinite(asOf as number) || (asOf as number) >= region.t1Ns) {";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/surface.ts: drawUpToHorizon");
+      return src.replace(from,
+        "    // injected by ui/e2e/selftest.mjs — ignore the horizon and draw the whole tile\n" +
+        "    if (true) {");
+    },
+  },
+  {
     // T-472, and the smallest edit that is it: take the uniform branch out of `SurfacePreview.wheel`
     // and the two axes go back to taking the same factor and each clamping alone — which is exactly
     // T-456 as shipped, not a mutant. The guard sees it as a plain wheel that keeps widening

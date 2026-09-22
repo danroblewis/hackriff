@@ -238,16 +238,43 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   /** The client's own queue depth, off the status line it already prints ("queue N"). */
   const queueDepth = async () => Number((await page.eval(STATUS)).match(/queue (\d+)/)?.[1] ?? -1);
   const queueAtStart = await queueDepth();
+  /**
+   * The client's own outstanding work, off the status line it already prints:
+   * `N+M/L in flight · queue Q` — N issued, M charged for abandoned reads, L the operating cap.
+   *
+   * **This is the premise that decides what a refusal MEANS** (T-690). `/api/tiles` takes its slot
+   * before it does any work, so a full budget refuses the probe below whether the slots are held
+   * by reads nobody will ever collect (T-454's leak — a defect) or by reads THIS PAGE IS STILL
+   * WAITING FOR (backpressure — correct). Those are opposite findings, and the only thing that
+   * tells them apart is whether the client has anything outstanding.
+   */
+  const outstanding = async () => {
+    const st = await page.eval(STATUS);
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight/);
+    return {
+      inflight: Number(f?.[1] ?? -1), abandoned: Number(f?.[2] ?? -1),
+      queue: Number(st.match(/queue (\d+)/)?.[1] ?? -1),
+    };
+  };
   const probes = [];
+  const probeFrom = Date.now();
+  // Where the steady window's own cap samples start, so an additive increase the GESTURES paid for
+  // cannot license a refusal inside this window.
+  const capsAtSteadyStart = caps.length;
   for (let i = 0; i < STEADY_STATE_MS / 500; i++) {
     await new Promise((r) => setTimeout(r, 500));
     await sampleCap();
     if (i % 2 === 1) {
+      const held = await outstanding();
       const t0 = Date.now();
       const status = await fetch(probeUrl).then((r) => r.status, () => 0);
-      probes.push({ status, ms: Date.now() - t0 });
+      // IDLE means the client is holding nothing and wants nothing: no request in flight, no
+      // abandoned read still charged, and an empty queue. A refusal HERE is unattributable to
+      // this page and is therefore the leak, stated from outside the client.
+      probes.push({ status, ms: Date.now() - t0, held, idle: held.inflight === 0 && held.abandoned === 0 && held.queue === 0 });
     }
   }
+  const probeTo = Date.now();
   const followingAfter = await page.eval(FOLLOWING);
   const queueAtEnd = await queueDepth();
   const frozen = (f) => f.length > 0 && !f.split(",").includes("true");
@@ -327,9 +354,20 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   t.diagnostic(`panes following the live edge across the steady window: [${followingBefore}] -> ` +
     `[${followingAfter}] (${frozen(followingBefore) && frozen(followingAfter)
       ? "all frozen: the still-view claim applies" : "one is live: claim not made"})`);
+  const idleProbes = probes.filter((p) => p.idle);
+  const idleRefusals = idleProbes.filter((p) => p.status === 503);
+  // Tile reads the route COMPLETED for the page during the probe window, counted from CDP's own
+  // network log rather than from anything the client says about itself: a `200` whose body
+  // finished inside the window. This is the budget turning over, measured from outside.
+  const served = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200 &&
+    r.endedMs !== null && r.endedMs >= probeFrom && r.endedMs <= probeTo).length;
   t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
     `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
     `statuses ${probes.map((p) => p.status).join(" ")} · ${probes.map((p) => `${p.ms}ms`).join(" ")}`);
+  t.diagnostic(`  of those, ${idleProbes.length} were taken while the client held NOTHING ` +
+    `(0 in flight, 0 abandoned, queue 0) — ${idleRefusals.length} of them refused · ` +
+    `client state per probe: ${probes.map((p) => `${p.held.inflight}+${p.held.abandoned}/q${p.held.queue}`).join(" ")}`);
+  t.diagnostic(`  route turnover across the probe window: ${served} tile read(s) completed 200 for the page`);
   if (refused.length) {
     t.diagnostic(`refusals at: ${refused.map((r) => `${r.startedMs - loadedAt}ms`).join(" ")} after load`);
   }
@@ -352,11 +390,31 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // suffers (refusals arriving indefinitely) while permitting the probe that prevents it. Measured
   // zero over 25 s and ~3 700 requests on the fixed client; before the fix, refusals continued
   // throughout.
-  assert.equal(steadyRefusals.length, 0,
+  // **BOUNDED BY THE SEARCH THAT PAID FOR IT, not by zero (T-690).** This was
+  // `steadyRefusals.length === 0`, and its own premise — "after the AIMD controller has FOUND ITS
+  // SHARE" — is the thing that stops being true on a slow route. AIMD only raises on a completion,
+  // so with the gestures' backlog still draining (measured here: queue 41 -> 26 at ~1424 ms a
+  // tile) the client is still SEARCHING during this window: it probes upward, gets refused once,
+  // and halves. The cap trace says so in order — `2×20 3×7 4×3 2×4` — and one refusal is what that
+  // costs. Calling it "a slot that was never released" makes a load meter out of the assertion.
+  //
+  // So it is bounded by the mechanism that licenses it: **an additive increase may cost at most
+  // one refusal**, which is AIMD's own contract, counted over THIS window's cap samples. What it
+  // still forbids is the regime the user suffers and the one `t454-never-back-off` produces — a
+  // client pinned at the ceiling, refused over and over, never raising because it never fell
+  // (measured there: 8 refusals against 0 rises). Counts and ordering, never a duration.
+  const steadyCaps = caps.slice(capsAtSteadyStart);
+  const capRises = steadyCaps.reduce((n, c, i) => n + (i > 0 && c > steadyCaps[i - 1] ? 1 : 0), 0);
+  t.diagnostic(`operating cap across the steady window: ${steadyCaps.join(" ")} — ${capRises} additive ` +
+    `increase(s), ${steadyRefusals.length} refusal(s) of ${steadyRequests} request(s)`);
+  assert.ok(steadyRefusals.length <= capRises,
     `the tile route refused ${steadyRefusals.length} of ${steadyRequests} tile requests during ` +
-    `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which NOTHING moved the view. After the AIMD ` +
-    "controller has found its share, backpressure must stop: a refusal here is not discovery, it " +
-    "is a slot that was never released — the leak T-454's abandoned-slot accounting exists to close.");
+    `${(STEADY_STATE_MS / 1000).toFixed(0)} s in which NOTHING moved the view, while the client ` +
+    `raised its operating cap only ${capRises} time(s) (cap trace over the window: ` +
+    `${steadyCaps.join(" ")}). A refusal is permitted only as the cost of an additive increase — ` +
+    "that is what makes backpressure a SEARCH. More refusals than increases is backpressure as a " +
+    "REGIME: a client pinned at the ceiling, or a slot that was never released — the leak T-454's " +
+    "abandoned-slot accounting exists to close.");
 
   // (2b) …AND THE WINDOW WAS ACTUALLY ASKED. (2) is a claim about a set the page may leave empty —
   // measured empty on this fixture, every run — so on its own it certifies nothing. These two say
@@ -367,14 +425,41 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   assert.ok(probes.length >= 4,
     `only ${probes.length} slot probes were made during the steady-state window — too few for (2) ` +
     "to be a test rather than a formality");
-  assert.deepEqual(probeRefusals, [],
-    `the tile route refused ${probeRefusals.length} of ${probes.length} single, serial tile ` +
-    `requests made while the page was idle (statuses: ${probes.map((p) => p.status).join(" ")}). ` +
-    "Nothing else was asking, so the budget those slots came out of was held by reads this client " +
+  // **THE LEAK, STATED WHERE IT IS UNAMBIGUOUS (T-690).** This used to be `probeRefusals == []`
+  // — every refusal a leak — and that is a claim about the route's SERVICE RATE, not about its
+  // accounting. `/api/tiles` takes its slot before it does any work, so whether a serial probe
+  // lands between the page's own reads depends entirely on how long one read takes:
+  //
+  //     this file with one other spec  · ~167 ms/tile  · queue 0  -> 8 of 8 probes answered
+  //     this file in the 13-spec suite · ~3612 ms/tile · queue 28 -> 8 of 8 probes refused
+  //
+  // and in the second run the client held two slots and wanted twenty-eight more tiles. Those
+  // refusals are the route being BUSY WITH WORK THIS PAGE IS WAITING FOR, which is backpressure
+  // working, not a slot that was never released. Calling them a leak makes the guard a load
+  // meter. So the claim is made where the two cannot be confused: a probe taken while the client
+  // holds NOTHING AND WANTS NOTHING can only be refused by a slot nobody is waiting for.
+  //
+  // On a quiet route every probe is an idle probe and the original bound is recovered exactly.
+  assert.deepEqual(idleRefusals.map((p) => p.status), [],
+    `the tile route refused ${idleRefusals.length} of ${idleProbes.length} single, serial tile ` +
+    "requests made while THE CLIENT HELD NOTHING AT ALL — 0 in flight, 0 abandoned, queue 0 " +
+    `(all ${probes.length} probe statuses: ${probes.map((p) => p.status).join(" ")}; client state ` +
+    `at each: ${probes.map((p) => `${p.held.inflight}+${p.held.abandoned}/q${p.held.queue}`).join(" ")}). ` +
+    "Nothing was asking, so the budget those slots came out of was held by reads this client " +
     "abandoned and the server is still producing — T-454's leak, from outside the client.");
-  assert.ok(probes.every((p) => p.status === 200),
-    `a steady-state slot probe did not get an answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
-    "a probe that errors proves nothing either way, so the assertion above would be vacuous");
+  // …AND THE BUDGET WAS SEEN TO TURN OVER, so the assertion above is never satisfied by a route
+  // that answered nobody. A window in which no probe was answered AND no tile read completed for
+  // the page is a budget that is simply stuck, whatever the client is holding — the leak's other
+  // face, and the one the idle partition cannot see because a stuck route never lets the client
+  // reach idle. Counts, not durations.
+  const answeredProbes = probes.filter((p) => p.status === 200).length;
+  assert.ok(answeredProbes + served > 0,
+    `across the whole steady-state window the tile route answered ${answeredProbes} of ` +
+    `${probes.length} serial probes AND completed ${served} tile reads for the page: its slot ` +
+    "budget never turned over at all. Whoever holds those slots is not giving them back.");
+  assert.ok(probes.every((p) => p.status === 200 || p.status === 503),
+    `a steady-state slot probe did not get an HTTP answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
+    "a probe that errors proves nothing either way, so the assertions above would be vacuous");
 
   // (2c) A FROZEN VIEW THAT NOTHING TOUCHES ASKS FOR NOTHING. The premise is measured at both ends
   // of the window, not assumed: every pane is off the live edge, so nothing new can be wanted, and
