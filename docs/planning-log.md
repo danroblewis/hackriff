@@ -5515,3 +5515,38 @@ shadow; never swept = grey; re-swept = bright). T-519 (2A) adds the missing carr
 query-time fold (no per-row capture cost) and a shadow plane on the tile route, plus a short ADR note;
 T-520 (2B) the client tier; T-521 (2C) the standing e2e guard. Sequence 2A → 2B → 2C, 2A+2B landing
 together so the effect is visible.
+
+### B0.692 — The merge gate was the bottleneck all along: 50 % red for three days, then 11 of 16 (2026-09-22)
+
+**Measured, from `merge-runner.log`:** gate verdicts 09-20 32 pass / 40 fail, 09-21 42 / 34, 09-22 5 / 11
+(by 11:15). Today's reds fell on *different* tests each time — `listen::signal_062`, `api_contract
+tile_shadow…`, `api_contract tile_route…`, `recovery_spectrum_handshake a_run_that_really_ended…`,
+`coverage_answers…` — on branches that could not have touched them (`t800` docs+ui, `t763` ops/py,
+`t299` docs), with 6–8 workers building beside the gate at load ~17. Each red batch then ran the
+"rewind and isolate every branch" fallback at ~50 min per branch: 22 branches = 14 h for one flake.
+Half a day, one landing. The user's verdict: unacceptable, and right.
+
+**Why it was structural, not bad luck.** (1) A fail-closed classifier sends every `ops/`, `.claude/`,
+`docs/` branch through the 30–50 min full workspace run — more rolls of a 50 % die for changes that
+cannot fail it. (2) The batch fallback treats one red test as evidence against every branch. (3) Per-test
+retries existed for exactly two timing tests; the other five known-timing tests had none. (4) Dispatch
+(new today) put 8 builds beside the gate with nothing yielding.
+
+**Decided and built (task-gatefix, task-workrunner):**
+1. **`ops` gate class** — `ops/`, `.claude/`, `prompts/` → `just ops-check` (bash -n / py_compile) +
+   `lint-py` + `test-py`. Minutes, and it cannot lose to a Rust timing test. `justfile`/`.github`/the
+   classifier stay full (the gate never certifies its own weakening).
+2. **Triage before isolating** (`flake_retry` in `ops/merge-runner.sh`): on a red batch, re-run the
+   failing tests *alone* first. Pass alone → load flake, appended to `$HACKRIFF_OPS/flaky.jsonl`, and
+   the full gate retried **once** with the machine to itself. Fail alone → a real defect → isolate.
+3. **Exclusive gate** — `$HACKRIFF_OPS/gate-exclusive` makes the work runner suspend every worker
+   (resumed afterwards via `claude -p --resume`) and dispatch nothing until the flag clears.
+4. **The gate comes first, always** — workers run at `utility` QoS + nice 10; while any gate runs they
+   drop to background QoS (E-cores only on this M3 Ultra) and admission tightens.
+5. **One retry** for the five named load-sensitive tests in `.config/nextest.toml`, each with its
+   ticket (T-603, T-509, T-430/436/621; two newly observed today need tickets). This is a bridge:
+   `flaky.jsonl` is the coordinator's burn-down list, and a retry that keeps firing is a defect.
+
+**Measure it:** the dashboard gets gate pass rate per day beside the burndown. The target is a batch
+pass rate above 80 % by 09-24; below that, the next lever is running the gate's `nextest` at fewer
+threads under load, then the deflake work itself.
