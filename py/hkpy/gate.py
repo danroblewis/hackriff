@@ -94,7 +94,8 @@ DOCS = "docs"
 PY = "py"
 
 #: Classes in the order they are reported when a change spans more than one.
-CLASS_ORDER = (FULL, UI, DOCS, PY)
+OPS = "ops"
+CLASS_ORDER = (FULL, UI, DOCS, PY, OPS)
 
 #: Phases. CI runs the two separately (two jobs, one recipe call each — T-358); a local
 #: `just gate` runs both. The classification is identical either way: the phase only says
@@ -108,6 +109,16 @@ PHASES = (PHASE_ALL, PHASE_CHECK, PHASE_ACCEPTANCE)
 #: M0 slice + harness targets) rather than bare `acceptance`, so the gate an agent runs
 #: locally and the gate CI runs are one definition rather than two similar ones.
 SUITES: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {
+    # Orchestration: ops/ scripts, .claude/ roles-agents-skills-hooks, prompts/. None of it is
+    # linked into a crate or read by a suite, so the full workspace run proves nothing about it -
+    # and on 2026-09-22 four docs/ops-only branches each burned a 50-minute full gate and lost it
+    # to a load-sensitive Rust test they could not have touched. What CAN break here is a bash
+    # script or a Python tool, so: syntax-check the scripts and run the Python suite (which also
+    # validates the board).
+    OPS: {
+        PHASE_CHECK: (("just", "ops-check"), ("just", "lint-py"), ("just", "test-py")),
+        PHASE_ACCEPTANCE: (),
+    },
     FULL: {
         PHASE_CHECK: (("just", "lint"), ("just", "test")),
         PHASE_ACCEPTANCE: (("just", "acceptance-ci"), ("just", "test-ui-e2e")),
@@ -230,6 +241,9 @@ _RULES: tuple[tuple[str, str, str, str], ...] = (
     ("exact", "docs/use-cases.yaml", PY, "machine-readable use cases - the Python suite reads it"),
     ("prefix", "docs/", DOCS, "documentation"),
     ("prefix", "py/", PY, "Python tooling (orchestration/research only)"),
+    ("prefix", "ops/", OPS, "orchestration scripts - not linked into any crate"),
+    ("prefix", ".claude/", OPS, "roles, agents, skills, hooks - prompts and hook scripts"),
+    ("prefix", "prompts/", OPS, "model-selection and briefing prompts"),
 )
 
 _UNCLASSIFIED = "unclassified path — the gate fails closed"
