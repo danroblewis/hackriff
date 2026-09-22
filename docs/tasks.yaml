@@ -20755,6 +20755,74 @@ tasks:
       Filed 2026-09-21 by the coordinator from task-fixshared's closing note, which said this "wants a
       ticket of its own and a fair-share decision, not a constant moved here". That branch fixed the
       four canvas e2e failures and made the tier switch hysteretic; it deliberately did NOT touch this.
+    result: |
+      DONE. The decision: (a) + (c) together - a per-client SHARE of the in-flight budget, plus a
+      slot reserved for a client with nothing on screen yet. The cap (TILE_MAX_IN_FLIGHT = 4) is
+      UNCHANGED, as the ticket required.
+
+      CLIENT IDENTITY: a DECLARED id (`?client=`), not a connection and not a session. A tab's tile
+      reads go over a pool of connections (so a connection is not a client) and every tab of one
+      browser carries the same API token (so a session is not one either). The page makes an opaque
+      id per PAGE LOAD (`ui/src/surface/clientid.ts`, `crypto.randomUUID`), never persisted: a
+      reload is a newcomer, and its predecessor's abandoned reads are not charged to it. Format
+      `[A-Za-z0-9-_.:]{1,64}`; anything else, or none, shares one ANONYMOUS bucket that behaves
+      exactly as the route did before (so `curl`, the CLI and the contract tests are unaffected).
+
+      DISAPPEARING CLIENTS (the T-454 leak shape): slots cannot leak - a `TileSlot` holds its
+      client's counter by `Arc` and decrements both counters on `Drop`, whatever the exit path, even
+      if the table entry was evicted meanwhile. The SHARE cannot leak either: the table is a cache of
+      who is asking NOW, and an entry holding no slots and silent for `TILE_CLIENT_IDLE` (10 s) is
+      swept, returning its share to the clients still here. At most 64 identities are tracked; past
+      that the coldest idle one is dropped, and if every tracked client is busy a new identity is
+      served from the anonymous bucket rather than growing the table.
+
+      THE POLICY: `in_flight_share = ceil(cap / clients)`, computed over clients that are asking -
+      INCLUDING one whose only request so far was refused, which is what shrinks the incumbent's
+      share the moment a newcomer appears. On top of it, while any client that has never been SERVED
+      a tile is asking, already-drawn clients are admitted only to `cap - 1` (`cost.reserved: 1`).
+      The reserve costs nothing when nobody is bootstrapping: it is armed by the newcomer's own first
+      (refused) request and disarmed by its first success.
+
+      WIRE: `cost.in_flight_share`, `.in_flight_held`, `.clients`, `.client`, `.reserved`,
+      `.fair_share`; the 503 names `limit N, share M` and why. docs/api.md and
+      `crates/hk-cli/tests/api_contract.rs` updated together (T-079). The client adopts the share as
+      its CEILING in both directions (a share that grew because a tab closed is as true as one that
+      shrank); T-455's mechanism is untouched - the operating cap still only halves on a SEEN
+      refusal and only rises by AIMD. The preview status line now reads
+      `1+0/2 in flight (share 2)`.
+
+      MEASURED (browser tier, `ui/e2e/surface-contention.e2e.mjs`, extended to assert counts and
+      ordering, never wall-clock):
+        - fair share ON:  second tab's first SERVED tile was its request #1 after 0 refusals; boot
+          285 ms; first tab's peak ADMITTED concurrency 1 over the contention window (bound: its
+          share, 2); its status line "1+0/1 in flight (share 1)". GREEN.
+        - fair share OFF (`HK_TILE_FAIR_SHARE=off`, the pre-T-630 first-come-first-served route,
+          which exists only as this baseline): first tab's peak 3 of 4 while the second booted, boot
+          4049 ms. RED on exactly the share assertion, with the status line also stating share 4.
+        So the guard is proved non-vacuous against the natural baseline. The spec also stages the
+        race (the second tab's Chrome page is created BEFORE the first tab's storm starts, because
+        opening a tab takes longer than the storm lasts on a young record) and measures the first
+        tab's peak over requests that OVERLAP the window rather than start in it - measured the
+        naive way first, and it reported "0 requests" over a window in which the second tab was
+        refused three times.
+
+      TESTS RUN (targeted): `just test-ui` 50/50 files; `cargo nextest -p hk-api tiles::tests` 27/27
+      (4 new: share, bootstrap reserve, vanishing client, anonymous bucket);
+      `ui/e2e/surface-contention.e2e.mjs` green + red-baseline as above. `just precheck hk-api
+      hk-cli` clean.
+
+      SURFACED, NOT CHASED (pre-existing, evidence): `hk-cli::api_contract
+      tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell` fails on this
+      machine - `resolution.answered` is null where `json!(0)` is expected, because every coverage
+      source (`iq-ring`, `observation-log`, `open-dwell`) reports `spans: 0`, so the tile
+      short-circuits as uniformly unobserved. TRIAGED: reverted `crates/hk-api` + `crates/hk-cli` to
+      this branch's base commit (0f6bbf17) in place and it fails IDENTICALLY there (same assertion,
+      shifted only by the 19 lines this branch adds), so it is not this diff. Likely environmental:
+      the machine's data volume was below `hk`'s 8 GB IQ-ring free-space floor during the first runs
+      ("allocation refused: the IQ capture ring needs 72000000 bytes above the 8589934592-byte
+      free-space floor and 1893339136 bytes are free" - seen directly in an `hk serve` log), and the
+      test's own tile address is recomputed from `unix_now()` per call over a 1.28 s time cell.
+      Coordinator to decide whether that is a ticket.
   - id: T-622
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'
