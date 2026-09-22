@@ -551,6 +551,16 @@ def merge_status():
             testing.append({"branch": nm, "ticket": _tk(nm if brs else mmsg)})
         if not testing and mticket:
             testing.append({"branch": "(staged)", "ticket": mticket})
+    # A BULK batch has no MERGE_HEAD: its branches are named in $HACKRIFF_OPS/bulk-in-progress for
+    # exactly the window the gate runs. Every merge on 2026-09-22 was a bulk, and this panel stayed
+    # blank through all of them.
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            if b not in {t["branch"] for t in testing}:
+                testing.append({"branch": b, "ticket": _tk(b), "bulk": True, "started": bm.get("started", "")})
+    except Exception:
+        pass
     tbranch = {t["branch"] for t in testing}
     ahead = []
     try:
