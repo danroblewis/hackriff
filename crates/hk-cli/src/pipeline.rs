@@ -1177,7 +1177,7 @@ pub fn serve_api(
             handle.data_dir().to_path_buf(),
         ))),
         // T-438: the tile route's ingest-backpressure cap, per server.
-        tiles_in_flight: Default::default(),
+        tile_admission: Default::default(),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
