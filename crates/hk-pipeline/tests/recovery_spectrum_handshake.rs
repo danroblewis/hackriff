@@ -27,10 +27,12 @@
 //! a permanent "try again".
 
 mod common;
+#[path = "support/http_response.rs"]
+mod http_response;
 #[path = "support/radio.rs"]
 mod radio;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,22 +74,10 @@ fn root(addr: SocketAddr) -> (u16, String) {
     read_status(s)
 }
 
-fn read_status(mut s: TcpStream) -> (u16, String) {
-    let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
-    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
-        match s.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-            Err(e) => panic!("reading the response: {e}"),
-        }
-    }
-    let text = String::from_utf8_lossy(&got).into_owned();
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("no status line in {text:?} ({} bytes)", got.len()));
-    (status, text)
+/// The head **and the body**: the assertions below read the body (`"finished"`), and the server
+/// writes it separately from the head (see `support/http_response.rs`).
+fn read_status(s: TcpStream) -> (u16, String) {
+    http_response::read_response(s)
 }
 
 /// The answer must never be "this stream is gone" while the run is still trying to capture.

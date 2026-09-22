@@ -27,10 +27,12 @@
 //! passes either way (it is the guard that the fix did not make a real end look like a gap).
 
 mod common;
+#[path = "support/http_response.rs"]
+mod http_response;
 #[path = "support/radio.rs"]
 mod radio;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,21 +67,9 @@ fn handshake(addr: SocketAddr) -> (u16, String) {
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     )
     .unwrap();
-    let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
-    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
-        match s.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => got.extend_from_slice(&buf[..n]),
-            Err(e) => panic!("reading the handshake response: {e}"),
-        }
-    }
-    let text = String::from_utf8_lossy(&got).into_owned();
-    let status = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or_else(|| panic!("no status line in {text:?} ({} bytes)", got.len()));
-    (status, text)
+    // The head and the body: `stream finished` / `replumbing` are in the body, which the server
+    // writes separately from the head (see `support/http_response.rs`).
+    http_response::read_response(s)
 }
 
 /// The answer must never be "this stream is gone" while the run is still capturing.
