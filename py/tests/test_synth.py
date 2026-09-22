@@ -43,6 +43,7 @@ SMALL: dict[str, dict] = {
     "trunk_control_channel": {"duration_s": 0.2},
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
+    "trunk_p25p2_control_channel": {"duration_s": 0.2},
     "trunk_dmr_control_channel": {"duration_s": 0.2},
     "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,

@@ -22,7 +22,7 @@ Do not end a turn waiting on something backgrounded (a build, a gate). If someth
 Run it in isolation on a quiet machine. Fails alone → it's a **real bug** (yours or pre-existing) — fix it or report it precisely, don't paper over it. Passes alone / fails under load → a load-flake; note it, don't let it block you, and flag it for the `deflaker`. Never quarantine or retry a test that fails in isolation.
 
 ## Report
-A short summary: what you changed, which use-case IDs it satisfies, the targeted-test result, and any follow-up you surfaced but correctly didn't chase (so the coordinator can file it). Put detailed results in files, not the summary. Then stop — you don't merge, you don't spawn subagents.
+A short summary: what you changed, which use-case IDs it satisfies, the targeted-test result, and any follow-up you surfaced but correctly didn't chase (so the coordinator can file it). Put detailed results in files, not the summary, and if your ticket's board entry wants the result recorded, use `just task result T-nnn --from <report>` — never edit `docs/tasks.yaml` directly, a hook denies it. Then stop — you don't merge, you don't spawn subagents.
 
 ## Before you hand back
 Run **`just precheck <the crates you touched>`** — a whole-tree `cargo fmt --check` plus clippy over those crates, with `-D warnings`. It takes seconds to a minute. `just lint` is two halves and the merge gate runs both, so unformatted code fails a ~20-minute gate exactly as hard as a real lint does; T-574 lost two gate cycles that way, one of them to rustfmt whitespace in a test file. This is not the gate and does not replace it — the coordinator gates at merge — it is the cheap check that stops formatting reaching the gate at all.

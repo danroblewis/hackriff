@@ -187,7 +187,98 @@ def tasks():
                            "title": str(x.get("title", ""))[:80]})
     return {"counts": counts, "active": active, "total": len(t), "status_map": status_map}
 
-def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None):
+def _tk_of_branch(b):
+    m = re.match(r"^task-t0*(\d+)$", b or "", re.I)
+    return f"T-{m.group(1)}" if m else b
+
+
+def runtime_states(smap, tl=None, limit=10):
+    """What the runners know that the board does not: per ticket, one of
+    failed (a gate/review/worker failure needing a person), testing (in the current gate),
+    queued (waiting for the merge runner), review (in the reviewer stage), next (the runner's
+    projected next dispatches). Read from $HACKRIFF_OPS files only; never guessed."""
+    st, why = {}, {}
+    def put(tid, state, reason=""):
+        if tid and smap.get(tid) not in ("done", "cancelled") and tid not in st:
+            st[tid] = state; why[tid] = reason
+    try:  # failures first: they win over every other state
+        for l in open(os.path.join(SCRATCH, "merge-needs-attention.txt")):
+            f = l.split()   # date time branch ticket KIND detail...
+            if len(f) >= 5 and f[4].startswith(("GATE_FAIL", "CONFLICT", "GAVE_UP", "UNCHANGED")):
+                put(_tk_of_branch(f[2]) if f[3].startswith("task-") else f[3], "failed", f[4].split("(")[0])
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
+            f = l.split()   # date time branch ticket KIND detail...
+            if len(f) >= 5 and f[4] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
+                put(f[3], "failed", f[4])
+    except Exception:
+        pass
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            put(_tk_of_branch(b), "testing", "bulk gate")
+    except Exception:
+        pass
+    try:
+        first = open(os.path.join(REPO, ".git", "MERGE_MSG")).read().splitlines()[0]
+        m = re.search(r"task-t\d+", first)
+        if m:
+            put(_tk_of_branch(m.group(0)), "testing", "staged merge")
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "merge-queue.txt")):
+            put(_tk_of_branch(l.strip()), "queued", "merge queue")
+    except Exception:
+        pass
+    working = set(); claims = {}
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        working = {tid for tid, c in claims.items() if c.get("state") == "running" and c.get("kind") == "work"}
+        for tid, c in claims.items():
+            if c.get("state") == "running" and c.get("kind") == "review":
+                put(tid, "review", "reviewer stage")
+            elif c.get("state") == "running" and c.get("kind") == "fix":
+                put(tid, "failed", "fixing a gate failure")
+            elif c.get("state") == "queued":
+                put(tid, "queued", "merge queue")
+    except Exception:
+        pass
+    # UP NEXT = the work runner's own dispatch order (ops/work-runner.py candidates()): todo, deps done,
+    # not blocked_on / needs user|hardware / dispatch: manual, not claimed; user-requested first,
+    # then priority, then number. Mirrored here rather than imported so the page has no runner dependency.
+    claimed = set(claims)
+    try:
+        tl = tl or load_tasks_yaml()
+        by = {t.get("id"): t for t in tl}
+        pri = {"high": 0, "medium": 1, "normal": 2, "low": 3}
+        def is_user(t):
+            return bool(t.get("requested_by") or t.get("user_report") or str(t.get("found_by", ""))[:40].lower().startswith("user"))
+        def num(tid):
+            m = re.search(r"(\d+)", tid or ""); return int(m.group(1)) if m else 10**9
+        cands = []
+        for t in tl:
+            tid = t.get("id")
+            if t.get("status") != "todo" or tid in claimed or tid in st or tid in working:
+                continue
+            if t.get("needs") in ("user", "hardware") or t.get("blocked_on") or t.get("dispatch") == "manual":
+                continue
+            dps = t.get("depends_on") or t.get("deps") or []
+            if any(by.get(d, {}).get("status") not in ("done", "cancelled") for d in dps if d in by):
+                continue
+            cands.append(t)
+        cands.sort(key=lambda t: (not is_user(t), pri.get(t.get("priority", "normal"), 2), num(t.get("id"))))
+        for i, t in enumerate(cands[:limit]):
+            put(t["id"], "next", f"up next #{i + 1}")
+    except Exception:
+        pass
+    return st, why
+
+
+def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
+               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
     try:
         import yaml
         d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
@@ -235,16 +326,27 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         cand = [x for x in tl if x.get("status") != "cancelled"]
     else:
         cand = [x for x in active if x.get("status") != "deferred"]
+    rt, rt_why = runtime_states(smap, tl)
+    # Runtime-state filters, one per state, same semantics as the status filters: off hides those
+    # nodes, on shows them whatever their status filter says.
+    show_rt = {"testing": keep_merging, "queued": keep_queue, "review": keep_review, "next": keep_next, "failed": keep_failed}
     def passes(x):
         s = x.get("status")
+        r = rt.get(x.get("id"))
+        if r:
+            return show_rt.get(r, True)
         if s == "cancelled": return False
         if s == "done": return show_done
         if s == "todo": return show_todo
         if s in ("blocked", "paused"): return show_blocked
         if s == "deferred": return scope == "all"
         return True  # in-progress, review, etc. always anchor
-    anchors = {x["id"] for x in cand if passes(x)} | set(running)
-    # ALWAYS keep the dependency chain leading to any anchor, whatever its status/filter
+    keep = {tid for tid, r in rt.items() if tid in tasks and show_rt.get(r, True)}
+    # "Opening" a milestone (click its node) shows EVERY ticket under it - done, todo, deferred,
+    # cancelled excepted - regardless of scope and the status filters, until it is clicked again.
+    opened = {x["id"] for x in tl if _nm_ms(x.get("milestone")) in set(open_ms) and x.get("status") != "cancelled"}
+    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
+    # ALWAYS keep the dependency chain leading to any NORMAL anchor, whatever its status/filter
     nodes = {}
     stack = list(anchors)
     seen = set()
@@ -256,6 +358,12 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         for dp in deps(x):
             if dp not in seen:
                 stack.append(dp)
+    # An OPENED milestone adds exactly its own tickets - no chain walk in either direction. The
+    # walk above turned "open M2" into the whole graph (2026-09-22); edges to tickets outside the
+    # drawn set are simply not drawn.
+    for tid in opened:
+        if tid not in nodes:
+            nodes[tid] = node_for(tid)
     cls = {"in-progress": "inprog", "todo": "todo", "blocked": "blocked", "paused": "blocked",
            "review": "review", "deferred": "deferred", "done": "done", "cancelled": "done"}
     def label(x):
@@ -263,6 +371,13 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         t = str(x.get("title", "")).translate(str.maketrans("", "", '"[]<>|`{}')).strip()[:24]
         tick = "✓ " if done else ""
         ms = x.get("milestone") or ""
+        state = rt.get(x["id"])
+        if state:
+            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT"}[state]
+            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF"}[state]
+            why = rt_why.get(x["id"], "")
+            why = "" if why in ("bulk gate", "merge queue", "reviewer stage") else " · " + why
+            t = f"<b style='color:{col};font-size:10px;letter-spacing:.08em'>{word}{why}</b><br/>" + t
         sub = " · ".join(p for p in (ms, t) if p)
         return f"{tick}{x['id']}<br/><span style='font-size:9px;opacity:.75'>{sub}</span>" if sub else f"{tick}{x['id']}"
     lines = ["graph LR",
@@ -275,7 +390,12 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
              "classDef deferred fill:#15191c,stroke:#5A6973,color:#8595A0;",
              "classDef msdone fill:#123a2c,stroke:#52C2AE,color:#8FD9C9,stroke-width:2px;",
              "classDef mscur fill:#3a2c0a,stroke:#F0A542,color:#FFD98a,stroke-width:3px;",
-             "classDef msnext fill:#181f24,stroke:#5A6973,color:#8595A0,stroke-dasharray:5 4;"]
+             "classDef msnext fill:#181f24,stroke:#5A6973,color:#8595A0,stroke-dasharray:5 4;",
+             "classDef failed fill:#5a1a12,stroke:#FF6B57,color:#FFD9D2,stroke-width:4px;",
+             "classDef testing fill:#4a3608,stroke:#FFC14D,color:#FFF0C2,stroke-width:4px,stroke-dasharray:9 5;",
+             "classDef queued fill:#33280c,stroke:#F0A542,color:#FFE3B0,stroke-width:3px,stroke-dasharray:4 4;",
+             "classDef reviewing fill:#0f3a33,stroke:#5EE0C4,color:#D6FFF5,stroke-width:4px;",
+             "classDef next fill:#2b2352,stroke:#C7B8FF,color:#EFEAFF,stroke-width:4px;"]
     # milestone backbone: the roadmap chain, coloured by how far along each milestone is
     norm_ms = lambda m: re.sub(r"-(fix|hardening)$", "", m or "")   # fold M2-hardening/M1-fix into their base
     by_ms = {}
@@ -296,18 +416,25 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         open_states = {"todo", "in-progress", "blocked", "paused", "review"}
         return "cur" if any(t.get("status") in open_states for t in ts) else "done"
     mscls = {"done": "msdone", "cur": "mscur", "next": "msnext"}
+    lines.append("classDef msopen fill:#3a2c0a,stroke:#FFD98a,color:#FFF0C2,stroke-width:5px;")
     for ms in ORDER:
         ts = by_ms.get(ms, [])
         d_ = sum(1 for t in ts if t.get("status") in ("done", "cancelled"))
         cnt = f"{d_}/{len(ts)}" if ts else "planned"
-        lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
+        if ms in set(open_ms):
+            lines.append(f'MS_{ms}(["▼ {ms} · {cnt} · open"]):::msopen')
+        else:
+            lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
     chain = [m for m in ORDER if m != "MUI"]
     for a, b in zip(chain, chain[1:]):
         lines.append(f"MS_{a} --> MS_{b}")
     lines.append("MS_M1 --> MS_MUI")
     for nid, x in nodes.items():
-        c = "running" if nid in running else cls.get(x.get("status"), "done")
-        lines.append(f'{nid}["{label(x)}"]:::{c}')
+        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next"}.get(rt.get(nid)) \
+            or ("running" if nid in running else cls.get(x.get("status"), "done"))
+        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'),
+                 "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
+        lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
     # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
     for nid, x in nodes.items():
         for dp in deps(x):
@@ -316,12 +443,16 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     # membership links (dotted) — connect every task to its milestone node
     for nid, x in nodes.items():
         ms = norm_ms(x.get("milestone"))
-        if ms in ORDER:
+        if ms in ORDER and not (ms in set(open_ms) and x.get("status") in ("done", "cancelled")):
             lines.append(f"MS_{ms} -.-> {nid}")
     total = len(tl)
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
+    counts = {}
+    for tid, sname in rt.items():
+        if tid in tasks:   # ticket rows only; a branch-level line (task-planned CONFLICT) is not a ticket
+            counts[sname] = counts.get(sname, 0) + 1
     return {"mermaid": "\n".join(lines), "active": len(active), "nodes": len(nodes),
-            "total": total, "done": done}
+            "total": total, "done": done, "runtime": counts}
 
 GRAPH_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff task map</title>
@@ -337,10 +468,29 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .filters{display:flex;gap:2px;align-items:center;color:var(--dim);font-size:12px;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:2px 6px 2px 8px}
 .filters button{border:1px solid var(--line);background:transparent;color:var(--dim);padding:2px 8px;border-radius:5px;cursor:pointer;font-size:12px;margin-left:2px}
 .filters button.on{color:var(--txt);border-color:var(--dim);background:#1E2A33}
+.filters button.rt{font-weight:600;letter-spacing:.04em;font-size:11px}
+.filters button.chipx{color:#FFF0C2;border-color:#FFD98a;background:#3a2c0a;font-weight:600}.filters button.chipx.all{color:var(--mut);border-color:var(--line);background:transparent;font-weight:400}
+.filters button.rt-next.on{color:#C7B8FF;border-color:#C7B8FF;background:#2b2352}.filters button.rt-merging.on{color:#FFC14D;border-color:#FFC14D;background:#4a3608}
+.filters button.rt-queue.on{color:#F0A542;border-color:#F0A542;background:#33280c}.filters button.rt-review.on{color:#5EE0C4;border-color:#5EE0C4;background:#0f3a33}
+.filters button.rt-failed.on{color:#FF6B57;border-color:#FF6B57;background:#5a1a12}
 .filters select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;font-size:12px;padding:2px 4px;margin-left:4px;cursor:pointer}
 .legend{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
-.wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none}
+.wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+@keyframes pulse-red{0%,100%{filter:drop-shadow(0 0 3px #FF6B57)}50%{filter:drop-shadow(0 0 16px #FF6B57) drop-shadow(0 0 4px #FF6B57)}}
+@keyframes ants{to{stroke-dashoffset:-28}}
+@keyframes glow-violet{0%,100%{filter:drop-shadow(0 0 2px #C7B8FF)}50%{filter:drop-shadow(0 0 12px #C7B8FF)}}
+@keyframes glow-teal{0%,100%{filter:drop-shadow(0 0 2px #5EE0C4)}50%{filter:drop-shadow(0 0 12px #5EE0C4)}}
+.node.failed{animation:pulse-red 1.1s ease-in-out infinite}
+.node.testing rect,.node.testing path,.node.testing polygon{animation:ants .9s linear infinite}
+.node.testing{filter:drop-shadow(0 0 8px #FFC14D)}
+.node.next{animation:glow-violet 1.8s ease-in-out infinite}
+.node.reviewing{animation:glow-teal 1.8s ease-in-out infinite}
+.legend i.hex{clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);border-radius:0;width:16px}
+.legend i.stad{border-radius:8px;width:18px}.legend i.sub{border-radius:0;width:16px;box-shadow:inset 3px 0 #0D1317,inset -3px 0 #0D1317}
+.legend i.trap{clip-path:polygon(15% 0,85% 0,100% 100%,0 100%);border-radius:0;width:18px}.legend i.asym{clip-path:polygon(0 0,100% 0,80% 50%,100% 100%,0 100%);border-radius:0;width:16px}
+@media (prefers-reduced-motion:reduce){.node.failed,.node.next,.node.reviewing,.node.testing rect,.node.testing path,.node.testing polygon{animation:none}}
+.wrap svg text{user-select:none;-webkit-user-select:none;pointer-events:none}
 .wrap.grabbing{cursor:grabbing}
 #g{position:absolute;inset:0}
 #g svg{width:100%;height:100%;max-width:none;display:block}
@@ -358,26 +508,40 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button></span>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button>
+<button id=f-next class="on rt rt-next">UP NEXT</button><button id=f-merging class="on rt rt-merging">MERGING</button><button id=f-queue class="on rt rt-queue">IN QUEUE</button><button id=f-review class="on rt rt-review">IN REVIEW</button><button id=f-failed class="on rt rt-failed">FAILED</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
+<span class=filters id=openms></span>
 <a href="/">← dashboard</a>
-<span class=legend><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
+<span class=legend><span><i class=hex style="background:#FF6B57"></i>FAILED / redo (pulsing)</span><span><i class=stad style="background:#FFC14D"></i>IN THE GATE (moving dashes)</span><span><i class=sub style="background:#F0A542"></i>QUEUED</span><span><i class=asym style="background:#5EE0C4"></i>IN REVIEW</span><span><i class=trap style="background:#C7B8FF"></i>UP NEXT</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
-<div class=hint>scroll = zoom · drag = pan · click a ticket for details · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
+<div class=hint>scroll = zoom · drag = pan · click a ticket for details · <b>click a milestone to open/close all its tickets</b> · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
-mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
+mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
 let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
+// Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
+// on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
+// is open and close it.
+let openMs=new Set(); try{ localStorage.removeItem('graph.openMs'); openMs=new Set(JSON.parse(sessionStorage.getItem('graph.openMs')||'[]')); }catch(e){}
+function renderOpenChips(){ const el=document.getElementById('openms'); if(!el) return;
+  el.innerHTML=openMs.size?('open: '+[...openMs].map(m=>`<button class="chipx" data-ms="${m}" title="close ${m}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
+  el.querySelectorAll('button[data-ms]').forEach(b=>b.onclick=()=>toggleMs(b.dataset.ms)); const ca=document.getElementById('closeall'); if(ca) ca.onclick=()=>{openMs.clear(); saveMs(); last=''; draw();}; }
+function saveMs(){ try{sessionStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} renderOpenChips(); }
+function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); saveMs(); last=''; draw(); }
+renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked'].forEach(k=>{document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
+['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
 async function draw(){
  try{
-  let q='/graph.json?scope='+scope; ['done','todo','blocked'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  if(openMs.size) q+='&open='+encodeURIComponent([...openMs].join(','));
   const d=await (await fetch(q,{cache:'no-store'})).json();
-  const hid=['done','todo','blocked'].filter(k=>!flt[k]);
-  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}`;
+  const hid=['done','todo','blocked','next','merging','queue','review','failed'].filter(k=>!flt[k]);
+  const rt=d.runtime||{}; const rts=['failed','testing','queued','review','next'].filter(k=>rt[k]).map(k=>`${rt[k]} ${k}`).join(' · ');
+  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}${rts?' · '+rts:''}${openMs.size?' · open: '+[...openMs].join(', '):''}`;
   if(d.mermaid===last) return; last=d.mermaid;
   const {svg}=await mermaid.render('gg'+Date.now(), d.mermaid);
   document.getElementById('g').innerHTML=svg;
@@ -396,18 +560,24 @@ function wireNodes(){
   svgEl.setAttribute('preserveAspectRatio','xMidYMid meet');
   if(!vb) vb={x:(bb&&bb.x)||0,y:(bb&&bb.y)||0,w:W||1000,h:H||800};   // initial: fit whole graph, crisp
   setVB();
-  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]); });
+  gg.querySelectorAll('.node').forEach(n=>{ const m=(n.textContent||'').match(/T-\d+/); if(m) n.setAttribute('data-node-tid',m[0]);
+    else { const mm=(n.id||'').match(/MS_([A-Za-z0-9]+)/) || (n.textContent||'').match(/^\s*(?:▼\s*)?(M[A-Za-z0-9]+)\s*·/); if(mm) n.setAttribute('data-node-ms',mm[1]); } });
 }
-wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb)return;
-  const r=wrap.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
-  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), nh=nw*(vb.h/vb.w);
-  vb.x=(vb.x+fx*vb.w)-fx*nw; vb.y=(vb.y+fy*vb.h)-fy*nh; vb.w=nw; vb.h=nh; setVB();
+// Pointer -> SVG user units via the screen CTM. The old code scaled dy by vb.h/r.height, which is
+// only right when the graph is height-limited; a wide LR graph is width-limited under
+// preserveAspectRatio=meet, so a full-screen vertical drag moved the graph a fraction (2026-09-22).
+function svgPt(x,y){ const q=svgEl.createSVGPoint(); q.x=x; q.y=y; return q.matrixTransform(svgEl.getScreenCTM().inverse()); }
+wrap.addEventListener('wheel',e=>{ e.preventDefault(); if(!vb||!svgEl)return;
+  const p=svgPt(e.clientX,e.clientY);                       // zoom about the cursor: this point stays put
+  const nw=Math.min(W*3,Math.max(W*0.012,vb.w*Math.exp(e.deltaY*0.0015))), k=nw/vb.w;
+  vb.x=p.x-(p.x-vb.x)*k; vb.y=p.y-(p.y-vb.y)*k; vb.w=nw; vb.h=vb.h*k; setVB();
 },{passive:false});
-wrap.addEventListener('pointerdown',e=>{ down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
+wrap.addEventListener('pointerdown',e=>{ e.preventDefault(); down=true; dragMoved=false; px=e.clientX; py=e.clientY; });
 wrap.addEventListener('pointermove',e=>{ if(!down||!vb)return; const r=wrap.getBoundingClientRect(), dx=e.clientX-px, dy=e.clientY-py;
   if(!dragMoved&&Math.abs(dx)+Math.abs(dy)>3){ dragMoved=true; wrap.classList.add('grabbing'); try{wrap.setPointerCapture(e.pointerId);}catch(_){} }
-  if(dragMoved){ vb.x-=dx*(vb.w/r.width); vb.y-=dy*(vb.h/r.height); px=e.clientX; py=e.clientY; setVB(); } });
-function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid')); }
+  if(dragMoved){ const a=svgPt(px,py), b=svgPt(e.clientX,e.clientY); vb.x-=(b.x-a.x); vb.y-=(b.y-a.y); px=e.clientX; py=e.clientY; setVB(); } });
+function endDrag(e){ if(down&&!dragMoved){ const n=e.target.closest('[data-node-tid]'); if(n&&window.openTicketModal) window.openTicketModal(n.getAttribute('data-node-tid'));
+    const mnode=e.target.closest('[data-node-ms]'); if(mnode&&!n) toggleMs(mnode.getAttribute('data-node-ms')); }
   down=false; dragMoved=false; wrap.classList.remove('grabbing'); try{wrap.releasePointerCapture(e.pointerId);}catch(_){} }
 wrap.addEventListener('pointerup',endDrag);
 wrap.addEventListener('pointercancel',()=>{ down=false; dragMoved=false; wrap.classList.remove('grabbing'); });
@@ -474,6 +644,13 @@ def stage_status():
         if "SMOKE FAIL" in l: smoke = "fail"; break
     return {"alive": alive, "source": rd("hk-serve-source").replace("source: ", ""),
             "built": rd("hk-serve-built-commit"), "smoke": smoke, "lines": lines}
+
+def _ms_of(tid):
+    try:
+        return next((t.get("milestone", "") for t in load_tasks_yaml() if t.get("id") == tid), "")
+    except Exception:
+        return ""
+
 
 def merge_status():
     """Is the coordinator handling the merge queue right now? Distinguishes a
@@ -551,6 +728,22 @@ def merge_status():
             testing.append({"branch": nm, "ticket": _tk(nm if brs else mmsg)})
         if not testing and mticket:
             testing.append({"branch": "(staged)", "ticket": mticket})
+    # A BULK batch has no MERGE_HEAD: its branches are named in $HACKRIFF_OPS/bulk-in-progress for
+    # exactly the window the gate runs. Every merge on 2026-09-22 was a bulk, and this panel stayed
+    # blank through all of them.
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            if b not in {t["branch"] for t in testing}:
+                testing.append({"branch": b, "ticket": _tk(b), "bulk": True, "started": bm.get("started", ""), "milestone": _ms_of(_tk(b))})
+    except Exception:
+        pass
+    if not gate and any(t.get("bulk") for t in testing):
+        gate = "bulk gate (%d branches)" % sum(1 for t in testing if t.get("bulk"))
+        try:
+            elapsed = time.time() - time.mktime(time.strptime(bm.get("started", ""), "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            pass
     tbranch = {t["branch"] for t in testing}
     ahead = []
     try:
@@ -563,9 +756,22 @@ def merge_status():
             except Exception:
                 n = 0
             if n > 0:
-                ahead.append({"branch": b, "ticket": _tk(b), "commits": n})
+                ahead.append({"branch": b, "ticket": _tk(b), "commits": n, "milestone": _ms_of(_tk(b))})
     except Exception:
         pass
+    # What "ahead of main" MEANS depends on the work runner's claim: a worker still running (the
+    # commit is its first, more may come), a branch in the reviewer stage, one it already queued,
+    # or a branch nobody owns. The panel used to call all four "waiting" (2026-09-22).
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        for a in ahead:
+            c = claims.get(a["ticket"] or "", {})
+            st, kind = c.get("state"), c.get("kind")
+            a["state"] = ("review" if st == "running" and kind == "review" else "working" if st == "running"
+                          else "queued" if st == "queued" else st or "unowned")
+    except Exception:
+        for a in ahead:
+            a["state"] = "unowned"
     gates_running = 0
     try:
         gates_running = len([1 for l in out.splitlines() if "just gate-merge" in l and " grep " not in l])
@@ -1066,6 +1272,7 @@ def ticket_detail(tid):
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
+    mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
     coord_path = f"{PROJ}/{COORD}.jsonl"
     if os.path.exists(coord_path):
         s = session_summary(coord_path, "coordinator")
@@ -1091,8 +1298,39 @@ def agents(status_map):
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
         key = tid or p
         if key not in best or s["age_s"] < best[key]["age_s"]:
-            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, "")
+            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
             best[key] = s
+    # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
+    # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
+    # under the coordinator's. 2026-09-22: two workers were 6 min into real work and the panel
+    # showed none. Liveness comes from the runner's claim (pid) first, transcript age second.
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+    except Exception:
+        claims = {}
+    def _alive(pid):
+        try:
+            os.kill(int(pid), 0); return True
+        except Exception:
+            return False
+    for d in glob.glob(f"{PROJ}--claude-worktrees-*"):
+        m = re.match(r"t(\d+)$", d.rsplit("-worktrees-", 1)[1])
+        tid = f"T-{m.group(1)}" if m else None
+        if not tid or status_map.get(tid) in ("done", "cancelled"):
+            continue
+        files = [p for p in glob.glob(f"{d}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+        if not files:
+            continue
+        s = session_summary(max(files, key=os.path.getmtime), "agent")
+        if not s:
+            continue
+        c = claims.get(tid, {})
+        alive = c.get("state") == "running" and _alive(c.get("pid"))
+        if not alive and s["age_s"] > ACTIVE:
+            continue
+        s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
 
@@ -1191,7 +1429,7 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .counts{display:flex;gap:6px;flex-wrap:wrap}
 .chip{font:11px var(--mono);padding:2px 8px;border-radius:5px;border:1px solid var(--line);color:var(--mut)}
 .chip.done{color:var(--teal)}.chip.in-progress{color:var(--amber)}.chip.blocked,.chip.paused{color:var(--coral)}.chip.todo{color:var(--lav)}
-.chip.ms{color:var(--dim);border-color:var(--line);letter-spacing:.04em}
+.chip.ms{color:var(--amber);border-color:rgba(240,165,66,.4);padding:1px 6px;letter-spacing:.04em}
 .qsec{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:10px 0 5px;display:flex;justify-content:space-between}
 .qsec:first-child{margin-top:0}
 .qsec .hint{text-transform:none;letter-spacing:0;color:var(--dim);font-weight:400}
@@ -1313,7 +1551,7 @@ async function tick(){
   // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
   {
     const testing=mg.testing||[], ahead=mg.ahead||[];
-    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> <span style="color:#5A6973">${esc(t.branch)}${t.commits?(' +'+t.commits):''}</span></div>`;
+    const row=(t,tag,col)=>`<div style="padding:1px 0"><span style="color:${col}">${tag}</span> <b data-tid="${esc(t.ticket)}" style="cursor:pointer">${esc(t.ticket||t.branch)}</b> ${t.milestone?`<span class="chip ms">${esc(t.milestone)}</span> `:''}<span style="color:#5A6973">${esc(t.branch)}${t.commits?(' · '+t.commits+' commit'+(t.commits===1?'':'s')+' ahead of main'):''}</span></div>`;
     const warn=(mg.gates_running||0)>1?`<div style="color:#E47B68;margin-bottom:4px">⚠ ${mg.gates_running} gate-merges running at once — likely duplicate/colliding</div>`:'';
     const testCol=(mg.state==='gating'||mg.state==='merging')?'#F0A542':'#5A6973';
     const mage=mg.merge_age_s||mg.elapsed_s||0;
@@ -1321,7 +1559,8 @@ async function tick(){
     const gl=(mg.state==='merging'||mg.gate)?`<div style="margin-bottom:3px"><span style="color:${over?'#E47B68':'#F0A542'}">⏱ ${dur(mage)}</span> <span style="color:#8595A0">· ${esc(mg.phase||mg.gate||'staged (between phases)')}</span>${mg.typical_s?`<span style="color:#5A6973"> · ~${Math.round(mg.typical_s/60)}m typical</span>`:''}</div>`:'';
     const hdr=t=>`<div style="margin:6px 0 2px;color:#8595A0;font-size:11px;text-transform:uppercase;letter-spacing:.04em">${t}</div>`;
     const ts=testing.length?testing.map(t=>row(t,'⚙ in test',testCol)).join(''):'<div style="color:#5A6973">— nothing being tested —</div>';
-    const wt=ahead.length?ahead.map(t=>row(t,'⏳ waiting','#8595A0')).join(''):'<div style="color:#5A6973">— none waiting —</div>';
+    const TAG={working:['🔧 worker running','#52C2AE'],review:['🔍 in review','#A395E0'],queued:['⏳ queued for merge','#F0A542'],unowned:['· unowned branch','#8595A0']};
+    const wt=ahead.length?ahead.map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join(''):'<div style="color:#5A6973">— none waiting —</div>';
     const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wt;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
@@ -1340,7 +1579,7 @@ async function tick(){
   const idleWhy = mg.state==='merging' ? 'no builder agents — coordinator merging ('+esc(mg.msg||'')+')'
     : mg.state==='gating' ? 'no builder agents — coordinator gating ('+esc(mg.gate)+' '+dur(mg.elapsed_s)+')'
     : 'no agents running — coordinator idle';
-  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
+  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.milestone?` <span class="chip ms">${esc(a.milestone)}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
   const W=d.worktrees||[]; $('#wtn').textContent=W.length+' trees';
   $('#wts').innerHTML=W.map(w=>{
     const badge = w.is_main ? (w.uncommitted?`<span class="badge chg">${w.uncommitted} uncommitted</span>`:`<span class="badge clean">clean</span>`)
@@ -1361,7 +1600,7 @@ async function tick(){
         : r.ahead>0?`<span class="qi ready">${r.ahead} commit${r.ahead===1?'':'s'} · queued</span>`
         : r.building?`<span class="qi building">building</span>`
         : `<span class="qi wait" title="in-progress but 0 commits vs main — likely merged already (board lag) or not started; reconcile will resolve">0 vs main — check board</span>`;
-      qh+=`<div class="qrow ${r.merging?'merging':''}"><b>${tk_(r.id)}</b>${tag}<span class=qt title="${esc(r.title)}">${esc(r.title)}</span></div>`;
+      qh+=`<div class="qrow ${r.merging?'merging':''}"><b>${tk_(r.id)}</b>${r.milestone?`<span class="chip ms">${esc(r.milestone)}</span>`:''}${tag}<span class=qt title="${esc(r.title)}">${esc(r.title)}</span></div>`;
     });
   } else qh+=`<div class=qrow><span class=qt>nothing waiting to merge</span></div>`;
   const up=q.upcoming||[];
@@ -1825,8 +2064,15 @@ class H(BaseHTTPRequestHandler):
             show_done = "done=0" not in self.path
             show_todo = "todo=0" not in self.path
             show_blocked = "blocked=0" not in self.path
+            keep_merging = "merging=0" not in self.path
+            keep_next = "next=0" not in self.path
+            keep_failed = "failed=0" not in self.path
+            keep_queue = "queue=0" not in self.path
+            keep_review = "review=0" not in self.path
+            _oq = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("open", [""])[0]
+            open_ms = tuple(m for m in _oq.split(",") if m)
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")

@@ -89,7 +89,7 @@ function tile(a: TileAddr, value: Float32Array, state: Uint8Array, rangeDb: { lo
   return {
     addr: a, key: keyOf(a), nf: N, nt: N, t1Ns: null, value, state,
     tier: "spectrum-history", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
-    measured: { nf: N, nt: N }, rangeDb, bytes: N * N * 3, serverInFlightLimit: null,
+    measured: { nf: N, nt: N }, rangeDb, bytes: N * N * 3, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

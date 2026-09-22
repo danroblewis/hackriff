@@ -376,12 +376,22 @@ impl Encryption {
 // TrunkSystem and its parts
 // ---------------------------------------------------------------------------------------------
 
-/// One entry of a system's channel table: `f = base + spacing × channel`, with the TX offset for
-/// the uplink side (P25 `IDEN_UP`; docs/04 §8.1).
+/// One entry of a system's channel table: `f = base + spacing × (channel / slots)`, with the TX
+/// offset for the uplink side (P25 `IDEN_UP` and `IDEN_UP_TDMA`; docs/04 §8.1).
 ///
 /// Entries are kept with the time they were decoded and appended rather than overwritten, so a
 /// **stale** table is detectable instead of silently mapping a grant to the wrong frequency (a C23
 /// pitfall, asserted by T-268).
+///
+/// # `slots` is part of the entry, not a detail of the decoder (T-272)
+///
+/// An FDMA entry has `slots == 1` and the division is the identity. A **TDMA** entry (P25 Phase 2,
+/// announced by `IDEN_UP_TDMA`) has two or four slots sharing one carrier, so consecutive channel
+/// numbers are the *same frequency* on different slots. An entry stored without its slot count is
+/// ambiguous between those two readings, and a reader re-deriving a frequency from it lands half a
+/// channel out on every other channel — C23's TDMA slot mix-up pitfall, preserved in the database.
+/// [`Self::downlink_hz`] and [`Self::slot_of`] are therefore the only sanctioned readings of a
+/// channel number, and both go through `slots`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelPlanEntry {
     /// The protocol's table identifier (P25 IDEN is 4 bits; others index their own table).
@@ -394,6 +404,8 @@ pub struct ChannelPlanEntry {
     pub tx_offset_hz: f64,
     /// Channel bandwidth, Hz, when the message carried it.
     pub bandwidth_hz: Option<f64>,
+    /// TDMA slots sharing one carrier: 1 for FDMA, 2 or 4 for a P25 Phase 2 channel type.
+    pub slots: u8,
     /// When this entry was decoded.
     pub t: Timestamp,
 }
@@ -407,14 +419,32 @@ impl ChannelPlanEntry {
         if !self.tx_offset_hz.is_finite() {
             return Err(bad("channel plan tx offset must be finite"));
         }
+        if !(1..=MAX_TDMA_SLOTS).contains(&self.slots) {
+            return Err(bad(format!(
+                "channel plan slots must be 1..={MAX_TDMA_SLOTS}"
+            )));
+        }
         Ok(())
     }
 
     /// Downlink frequency of a channel number under this entry, Hz.
+    ///
+    /// The channel number is divided by [`Self::slots`] first, so a two-slot TDMA entry puts
+    /// channels `2n` and `2n+1` on the **same** frequency. For an FDMA entry (`slots == 1`) this
+    /// is `base + spacing × channel`, unchanged.
     pub fn downlink_hz(&self, channel: u32) -> f64 {
-        self.base_hz + self.spacing_hz * f64::from(channel)
+        self.base_hz + self.spacing_hz * f64::from(channel / u32::from(self.slots.max(1)))
+    }
+
+    /// The TDMA slot a channel number names, or `None` on an FDMA entry — where there is no slot
+    /// to attribute and claiming slot 0 would be an invented measurement.
+    pub fn slot_of(&self, channel: u32) -> Option<u8> {
+        (self.slots > 1).then(|| (channel % u32::from(self.slots)) as u8)
     }
 }
+
+/// Most TDMA slots one carrier may be divided into (P25 Phase 2 channel types name 1, 2 or 4).
+pub const MAX_TDMA_SLOTS: u8 = 4;
 
 /// A neighbour site a control channel advertised. At least one of the two fields is present:
 /// an announcement with neither says nothing.
@@ -934,6 +964,7 @@ mod tests {
             spacing_hz: 6250.0,
             tx_offset_hz: -45.0e6,
             bandwidth_hz: Some(12_500.0),
+            slots: 1,
             t: t(1),
         };
         let new = ChannelPlanEntry {

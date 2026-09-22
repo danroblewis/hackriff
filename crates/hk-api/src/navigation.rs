@@ -45,6 +45,8 @@
 //! **nothing may claim more than it can show**: with no live capabilities known, `live-iq` is
 //! unreachable, because "we could not check" is not evidence of live IQ.
 
+use std::sync::Arc;
+
 use hk_core::SourceCapabilities;
 use hk_core::source::SampleRates;
 use hk_store::Pyramid;
@@ -182,14 +184,16 @@ fn window_json(l: &dyn crate::live_control::LiveControl) -> Value {
 /// have to be re-shaped — and every consumer with it — the day a second chain exists.
 ///
 /// So the length of this array is **measured, never assumed**: it is however many live front ends
-/// this run holds. Today [`ApiState::live_control`] is one optional handle, so the array is empty
-/// on a replay and holds one entry on a live run. **What would have to change to report N:**
-/// `ApiState::live_control` becomes a collection of handles rather than an `Option`, built one per
-/// `ReceiveChain` where the pipeline composes the run; nothing in this function or in its clients
-/// changes, because both already speak in lists.
+/// this run holds — empty on a replay, one entry on a single-SDR run, N when N are composed.
+///
+/// **T-511 made that literal.** [`ApiState::live_controls`] is now a collection keyed by
+/// `device_id` rather than one `Option`, and — exactly as this doc predicted — *neither this
+/// function nor any client changed*, because both already spoke in lists. The prediction is the
+/// test: if the shape had been a singleton, every consumer would have had to be re-shaped the day
+/// a second chain existed.
 fn windows_json(state: &ApiState) -> Vec<Value> {
     state
-        .live_control
+        .live_controls
         .iter()
         .map(|l| window_json(l.as_ref()))
         .collect()
@@ -362,7 +366,11 @@ fn resolved_json(
 pub fn navigation_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     let req = requested(q)?;
 
-    let live = state.live_control.as_deref();
+    // The `frequency` block's capabilities and `current` are **one device's** tuned state, which
+    // `docs/api.md` has always said they are and which `windows` (above) is the enumeration of. So
+    // with several front ends this is the default one (the first composed); a client placing
+    // segments reads `windows`, never this.
+    let live = state.live_controls.primary().map(Arc::as_ref);
     let caps = live.map(|l| l.capabilities().clone());
     let current = live.map(|l| {
         let t = l.tuning();

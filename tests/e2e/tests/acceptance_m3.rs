@@ -4,7 +4,7 @@
 //! for wall time: the full evaluation grid is ~1 700 classified snippets, which ADR-0016 §7 calls
 //! for before a number is trusted for a gate, and that costs well over a minute in a debug build.
 //!
-//! Two halves, both required:
+//! Three parts, all required:
 //!
 //! - [`m3_grid`] measures classification accuracy against the five a-priori floors of ADR-0016 §7,
 //!   per family and per SNR bin, over the acceptance seed range the densities were never fitted on.
@@ -13,6 +13,10 @@
 //! - [`m3_scene`] drives blind scenes **through the mock SDR device** and asserts that a real run
 //!   produces the rows §7 is stated over: a classification, a signature match, and a cluster of
 //!   repeated unknowns.
+//! - [`m3_ml`] asserts §7's **ML row** — shadow changes no `Classification` row, each `active`
+//!   family has enable evidence, zero ring sample drops with ML on — over a real run, and proves
+//!   the assertion non-vacuous by constructing each state the row forbids (T-366). Before it, that
+//!   row was asserted nowhere.
 //!
 //! **Blind.** Truth lives only in the assertions. No test looks a value up and tunes to it, and
 //! nothing seeds the catalogue or the inventory from truth — the catalogue entry that explains an
@@ -29,6 +33,9 @@ mod blind;
 
 #[path = "acceptance/m3_grid.rs"]
 mod m3_grid;
+
+#[path = "acceptance/m3_ml.rs"]
+mod m3_ml;
 
 #[path = "acceptance/m3_scene.rs"]
 mod m3_scene;

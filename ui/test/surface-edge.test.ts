@@ -50,7 +50,7 @@ function data(a: TileAddr, asOfNs: number | null): TileData {
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNOBSERVED]),
     tier: "live-iq", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
     measured: { nf: 2, nt: 2 }, rangeDb: { lo: -100, hi: -60 },
-    bytes: 4 * 1024, serverInFlightLimit: null,
+    bytes: 4 * 1024, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 
