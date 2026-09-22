@@ -5770,6 +5770,22 @@ tasks:
       SDRTrunk/OP25/DSD+ offline over the same IQ, behind the C22 plugin boundary, hardware/off-air
       tier only, cross-validated against a spectrogram-derived grant/activity check so no single
       decoder authors the answer key.
+    result: |
+      2026-09-22: STILL BLOCKED on a real off-air P25 capture (T-544's BART attempt was negative,
+      docs/19 section 7) - no oracle harness was built, per the ticket's own acceptance text. Did
+      the part that does not depend on the capture: crates/hk-detect/src/trunk/tsbk.rs's module
+      header now says explicitly, in its own section ("No independent oracle has confirmed this
+      decoder (T-299)"), that the decoder and its test fixtures share one author's reading of the
+      same references, so a shared misreading would pass both, and that nothing here has been
+      checked against a second, independently-written implementation on the same IQ. It names the
+      docs/19 section 5.3 oracle design (Trunk Recorder/OP25/SDRTrunk offline, C22 plugin boundary,
+      hardware/off-air tier, cross-validated against a spectrogram-derived check) as what to build
+      once a capture exists, and points at T-544's negative BART result as why none exists yet.
+      No decoder logic changed. Targeted test: `just test-crate hk-detect` - 199 tests run, 199
+      passed (1 reported leaky, pre-existing and unrelated to this change - a doc comment only
+      edit), 1 skipped. `just precheck hk-detect` clean. Not chasing: finding another off-air P25
+      system to capture from is out of scope for this ticket (capture is user-triggered per the
+      acceptance text) and not something I can do from this worktree.
   - id: T-300
     title: 'T-267 confirmer uses CRC-16/CCITT-FALSE, but real P25 TSBKs use the AUGMENTED CRC-CCITT - on the first real capture this will look like a demodulator fault'
     milestone: M4
