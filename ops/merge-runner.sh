@@ -159,7 +159,7 @@ process(){
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
-  local gate_line rc; gate_line=$(wc -l < "$LOG")
+  local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
   just gate-merge >>"$LOG" 2>&1; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
   # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
@@ -342,7 +342,10 @@ try_bulk(){
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
-  local gate_line; gate_line=$(wc -l < "$LOG")
+  # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
+  # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
+  # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
+  local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
   ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
