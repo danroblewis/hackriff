@@ -43,6 +43,7 @@ import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type Viewport } from "./tilecache";
+import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
@@ -554,6 +555,16 @@ export interface PreviewOptions {
   trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
   tracePx?: number;
+  /**
+   * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
+   * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,
+   * and a tile over spectrum it settles as never sampled is not requested at all; a following
+   * surface re-asks every [[SURVEY_EVERY_MS]]. Omitted, every tile is fetched (the pre-T-580
+   * behaviour), which is also what a failed survey falls back to.
+   */
+  survey?: ((path: string) => Promise<unknown>) | null;
+  /** The clock the survey cadence is measured on, ms. Injected by tests; never a capture time. */
+  now?: () => number;
 }
 
 /**
@@ -577,6 +588,15 @@ export class SurfacePreview {
   private edgeSeen: number;
   /** The anchored range this host returns to, validated once. See [[anchorOf]]. */
   private readonly anchor: { lo: number; hi: number; source: string };
+  private readonly surveyFn: ((path: string) => Promise<unknown>) | null;
+  private readonly nowMs: () => number;
+  private surveyInFlight = false;
+  /** When the next survey may be asked, ms; 0 = at the first frame. */
+  private surveyNextAt = 0;
+  /** How far back the survey must reach: the surface's floor, widened to `recording_began_s`. */
+  private surveyFloorNs = Number.POSITIVE_INFINITY;
+  /** The survey requests this host has built, in order — the T-367 guard reads them. */
+  readonly surveyRequests: string[] = [];
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -585,6 +605,8 @@ export class SurfacePreview {
     this.edgeFn = opts.edge ?? null;
     this.windowsFn = opts.windows ?? null;
     this.edgeSeen = probe.origin.edgeNs;
+    this.surveyFn = opts.survey ?? null;
+    this.nowMs = opts.now ?? (() => Date.now());
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
@@ -620,6 +642,8 @@ export class SurfacePreview {
       this.view.panes.goTo(this.activePane, probe.opening.centerNs);
     }
     this.view.minimap.setFollowing(!!this.edgeFn);
+    // Coverage FIRST (T-580): with a survey source, nothing is requested until it has answered.
+    if (this.surveyFn) this.view.surface.setSurvey("awaiting");
     // The map opens on the whole surface — it is the thing that says where the opened pane sits in
     // a mostly-grey world, which is half the answer to the empty-screen problem.
     this.view.minimap.setFreq(
@@ -669,6 +693,8 @@ export class SurfacePreview {
     if (!Number.isFinite(t0Ns) || !(t0Ns < b.t0Ns)) return false;
     this.boundsNow = { ...b, t0Ns };
     this.view.setBounds(this.boundsNow);
+    // A survey that does not reach the new floor is stale about the part it cannot see.
+    this.surveyNextAt = 0;
     return true;
   }
 
@@ -676,6 +702,7 @@ export class SurfacePreview {
    * and a lit segment placed from a fixed historical instant would be a live claim with no live
    * evidence. */
   frame(): SurfaceFrame {
+    this.maybeSurvey();
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
     return this.lastFrame;
@@ -709,6 +736,55 @@ export class SurfacePreview {
       if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
     if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+  }
+
+  /**
+   * **Re-ask the coverage survey when it is due** (T-580). Once at open; again every
+   * [[SURVEY_EVERY_MS]] while anything follows the live edge (the edge is where "never sampled"
+   * stops being true, the moment the radio tunes there); again when the surface's floor moves. A
+   * historical surface's edge never advances, so its first survey stays true and it asks once.
+   *
+   * A failed or unreadable survey drops back to fetching every tile — the saving is lost, never an
+   * answer — and is retried on the same cadence.
+   */
+  private maybeSurvey(): void {
+    const get = this.surveyFn;
+    if (!get || this.surveyInFlight) return;
+    const t = this.nowMs();
+    if (t < this.surveyNextAt) return;
+    const b = this.bounds;
+    const t0 = Math.min(b.t0Ns, this.surveyFloorNs);
+    const t1 = Math.max(b.t1Ns, this.edgeNs);
+    if (!(t1 > t0) || !(b.f1Hz > b.f0Hz)) return;
+    const path = surveyUrl(b.f0Hz, b.f1Hz, t0, t1);
+    this.surveyRequests.push(path);
+    this.surveyInFlight = true;
+    const following = !!this.edgeFn;
+    // Historical: one survey is the whole answer, unless it failed or could not see far enough back.
+    this.surveyNextAt = following ? t + SURVEY_EVERY_MS : Number.POSITIVE_INFINITY;
+    get(path).then(
+      (body) => {
+        const s = decodeSurvey(body as SurveyResponse);
+        if (this.disposed) return;
+        if (s && !s.complete) {
+          // The survey says recording began before the window it was asked over, so rows a shadow
+          // could come from were outside it: ask again over the whole past, and keep whatever the
+          // surface had (still "awaiting" at open) rather than skip nothing in the meantime.
+          // Only ever further back, so a server that keeps answering short cannot make this re-ask
+          // on every frame: then it waits out the ordinary cadence like a failure.
+          if (s.floorNs < this.surveyFloorNs) { this.surveyFloorNs = s.floorNs; this.surveyNextAt = 0; }
+          else this.surveyNextAt = t + SURVEY_EVERY_MS;
+          return;
+        }
+        if (!s) this.surveyNextAt = t + SURVEY_EVERY_MS;
+        this.view.surface.setSurvey(s);
+      },
+      () => {
+        if (this.disposed) return;
+        this.surveyNextAt = t + SURVEY_EVERY_MS;
+        this.view.surface.setSurvey(null);
+      },
+    ).finally(() => { this.surveyInFlight = false; });
   }
 
   /** Match the drawing buffer to the element's CSS box at the device's pixel ratio. */

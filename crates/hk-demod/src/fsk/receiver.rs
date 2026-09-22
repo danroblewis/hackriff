@@ -342,19 +342,141 @@ impl FskBurst {
         self.tuned_center_hz + self.channel_offset_hz + off
     }
 
-    /// Data-model parameters (docs/07 §2.14).
+    /// Whether this burst's two-level alphabet is a **measurement** or only the demodulator's
+    /// output (T-614), with no framing evidence. See [`FskBurst::alphabet_evidence_framed`].
+    pub fn alphabet_evidence(&self) -> AlphabetEvidence {
+        self.alphabet_evidence_framed(FrameEvidence::default())
+    }
+
+    /// Whether this burst's two-level alphabet is a **measurement** (T-614), given what framing
+    /// inference found in its bits.
+    ///
+    /// A 2-FSK demodulator *always* returns bits — that is what it is for — so bits existing is
+    /// no evidence that the emission has a symbol alphabet. Analogue FM demodulated at a
+    /// standard-rate trial returns bits too, and before T-614 every such burst was stored as
+    /// `mod_order: 2` with a rate and a deviation. The alphabet counts as measured only when
+    /// something independent of the trial agrees, in this order:
+    ///
+    /// 1. a CRC checked on this burst's frame, or a sync prior was confirmed in its bits;
+    /// 2. **veto**: the bits are periodic ([`periodic_bits`]) — a tone-modulated carrier
+    ///    sampled at any rate yields a repeating pattern, as does an unmodulated carrier, while
+    ///    data does not;
+    /// 3. framing found the learned sync word in this burst;
+    /// 4. the rate was C14's trusted clock, or a cluster prior built from trusted C14 rates.
+    ///
+    /// Anything else — the best-lock standard-rate trial nothing confirmed — abstains.
+    pub fn alphabet_evidence_framed(&self, framed: FrameEvidence) -> AlphabetEvidence {
+        let Some(s) = self.symbols.as_ref() else {
+            return AlphabetEvidence::Abstained("nothing demodulated");
+        };
+        if framed.crc_valid {
+            return AlphabetEvidence::Measured("frame CRC valid");
+        }
+        if self.seed.sync_confirmed == Some(true) {
+            return AlphabetEvidence::Measured("sync prior confirmed");
+        }
+        if periodic_bits(&s.bits).is_some_and(|(_, r)| r >= PERIODIC_BITS_MIN_CORR) {
+            return AlphabetEvidence::Abstained(
+                "periodic bits: a modulating waveform, not symbols",
+            );
+        }
+        if framed.sync_found {
+            return AlphabetEvidence::Measured("framing sync found");
+        }
+        match self.seed.source {
+            SeedSource::TrustedC14 => AlphabetEvidence::Measured("trusted C14 clock"),
+            SeedSource::ClusterPrior { .. } => AlphabetEvidence::Measured("cluster prior"),
+            SeedSource::StandardRate => {
+                AlphabetEvidence::Abstained("unconfirmed standard-rate trial")
+            }
+        }
+    }
+
+    /// Data-model parameters (docs/07 §2.14), with no framing evidence. See
+    /// [`FskBurst::estimated_params_framed`].
     pub fn estimated_params(&self) -> EstimatedParams {
-        let s = self.symbols.as_ref();
+        self.estimated_params_framed(FrameEvidence::default())
+    }
+
+    /// Data-model parameters (docs/07 §2.14). The symbol rate, deviation and `mod_order` are
+    /// reported only when [`FskBurst::alphabet_evidence_framed`] says the alphabet was measured;
+    /// otherwise they are `None` (measured values only, never a default — T-614), and the CFO
+    /// falls back to C13's, which is a measurement of the carrier, not of symbols.
+    pub fn estimated_params_framed(&self, framed: FrameEvidence) -> EstimatedParams {
+        let s = self
+            .symbols
+            .as_ref()
+            .filter(|_| self.alphabet_evidence_framed(framed).is_measured());
         EstimatedParams {
             symbol_rate_hz: s.map(|s| s.lock.tracked_rate_bd),
             deviation_hz: s.and_then(|s| s.deviation_hz),
-            cfo_hz: s.map(FskSymbols::cfo_hz),
-            mod_order: Some(2),
+            cfo_hz: s
+                .map(FskSymbols::cfo_hz)
+                .or_else(|| self.params.cfo_hz.value()),
+            mod_order: s.map(|_| 2),
             roll_off: None,
             bandwidth_hz: self.params.obw99_hz.value(),
             pilot_hz: None,
         }
     }
+}
+
+/// What framing inference found in one burst (T-614), for [`FskBurst::alphabet_evidence_framed`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameEvidence {
+    /// The learned sync word was located in the burst's bits.
+    pub sync_found: bool,
+    /// The frame's CRC checked.
+    pub crc_valid: bool,
+}
+
+/// Whether a burst's symbol alphabet was measured (T-614).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlphabetEvidence {
+    /// Measured; the evidence.
+    Measured(&'static str),
+    /// Not measured; why the estimator abstains.
+    Abstained(&'static str),
+}
+
+impl AlphabetEvidence {
+    /// `true` for [`AlphabetEvidence::Measured`].
+    pub fn is_measured(&self) -> bool {
+        matches!(self, AlphabetEvidence::Measured(_))
+    }
+}
+
+/// Longest lag [`periodic_bits`] searches, symbols.
+///
+/// **A priori.** A sinusoid sampled at any rate, sliced to a sign, repeats to within `1/(L+1)` of
+/// a cycle at some lag `L ≤ PERIODIC_BITS_MAX_LAG` (Dirichlet), which makes its sign sequence
+/// agree with itself at that lag on `1 − 2/(L+1)` of symbols: ≥ 0.97 at 64. Data does not repeat.
+pub const PERIODIC_BITS_MAX_LAG: usize = 64;
+
+/// Least |autocorrelation| of the ±1 bit sequence, at the best lag, that marks the bits periodic.
+///
+/// **A priori.** For random data the autocorrelation at each lag has standard deviation
+/// `1/√N`; over ≥ 4 × 64 bits and 64 lags its maximum is ~0.25. A framed packet's periodic part is
+/// its preamble, a fraction of the burst (a quarter for a 32-bit preamble on a 128-bit frame), so
+/// 0.8 leaves every real packet shape clear while a tone (≥ 0.97 noiseless) and an unmodulated
+/// carrier (1.0) exceed it.
+pub const PERIODIC_BITS_MIN_CORR: f64 = 0.8;
+
+/// The lag and |autocorrelation| of the most self-similar lag of `bits` in
+/// `1..=`[`PERIODIC_BITS_MAX_LAG`], using only lags with at least three periods' worth of
+/// overlap. `None` when fewer than 64 bits.
+pub fn periodic_bits(bits: &[u8]) -> Option<(usize, f64)> {
+    if bits.len() < 64 {
+        return None;
+    }
+    let max_lag = PERIODIC_BITS_MAX_LAG.min(bits.len() / 4);
+    (1..=max_lag)
+        .map(|lag| {
+            let n = bits.len() - lag;
+            let agree = bits[lag..].iter().zip(bits).filter(|(a, b)| a == b).count();
+            (lag, ((2 * agree) as f64 / n as f64 - 1.0).abs())
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
 }
 
 /// The receiver.
@@ -634,4 +756,47 @@ fn raster_cfo(cluster: &Option<&ClusterPrior>, snip: &hk_estimate::ChannelSnippe
     let centre = snip.rf_center_hz();
     let channel = origin + ((centre - origin) / raster).round() * raster;
     Some(channel - centre)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg_bits(n: usize, mut x: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (x >> 63) as u8
+            })
+            .collect()
+    }
+
+    /// T-614: a sinusoid sliced at any rate repeats; random data does not.
+    #[test]
+    fn a_sliced_tone_is_periodic_at_any_rate_and_data_is_not() {
+        for ratio in [2.0, 2.4, 4.8, 9.6, 3.3, 7.77] {
+            let bits: Vec<u8> = (0..1000)
+                .map(|k| u8::from((std::f64::consts::TAU * k as f64 / ratio + 0.3).sin() > 0.0))
+                .collect();
+            let (lag, r) = periodic_bits(&bits).unwrap();
+            assert!(
+                r >= PERIODIC_BITS_MIN_CORR,
+                "ratio {ratio}: lag {lag} r {r}"
+            );
+        }
+        for seed in 0..20 {
+            let bits = lcg_bits(150, seed);
+            let (lag, r) = periodic_bits(&bits).unwrap();
+            assert!(r < 0.5, "seed {seed}: lag {lag} r {r}");
+        }
+        // A 32-bit alternating preamble ahead of 112 random bits stays clear of the veto.
+        let mut framed: Vec<u8> = (0..32).map(|i| (i % 2) as u8).collect();
+        framed.extend(lcg_bits(112, 7));
+        assert!(periodic_bits(&framed).unwrap().1 < PERIODIC_BITS_MIN_CORR);
+        // An unmodulated carrier (every bit equal) is periodic; too few bits is no answer.
+        assert_eq!(periodic_bits(&[1; 200]).map(|p| p.1), Some(1.0));
+        assert_eq!(periodic_bits(&[1; 63]), None);
+    }
 }

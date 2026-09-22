@@ -1077,8 +1077,14 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
    splits the bucket. The budget above then multiplies by the number of buckets, which is why it
    is stated per cell.
 5. **All of it, on blocks that were never measured.** Everything above rests on the FSK path at
-   n = 112 plus one classifier feature. **T-619** extends the measurement to AM/OOK and C4FM; a
-   different dependence structure there changes §13.1's table, not its rule.
+   n = 112 plus one classifier feature. **T-619** extended the measurement to AM/OOK and C4FM
+   (docs/21 §10, 2026-09-22): §13.1's rule survives and its table gains two groups
+   (`{eye_open, snr, evm}` on AM/OOK, `{evm, offset_ratio}` on C4FM, the first at ρ = 1.000
+   exactly), and **item 4's trigger fired** — the null side was measured to 77 % clipped and the
+   AM/OOK metrics over-claim 5–6 bits there, so the `nominal` bucket must split or tighten
+   (measured: σ ≥ 1.0 LSB and clip ≤ 10 % holds every path to ≤ 1.2 bits at a 6-bit claim). That
+   amendment is not taken here. docs/21 §10.4 also shows the runtime rule must measure the
+   **noise floor's** fill, not the window's.
 
 ### 13.6 Deltas to §§1–12
 
@@ -1107,13 +1113,75 @@ every number inherited from docs/21, which measured one block family at one supp
 
 ---
 
-## 14. Amendment — protocol facts cross as template data: fact provenance, the fact/implementation line, bulk import (T-557, 2026-09-22)
+## 14. Amendment — the incremental region-decode contract (T-265 = [ADR-0017](0017-time-extent-signal-model.md) TM-10, 2026-09-22)
+
+**CONTRACT ONLY.** `POST /api/analyze` still answers `501` for a selection or band target and MAUTO is unscheduled, so nothing here runs a decoder, reads the ring or spawns a thread. ADR-0017 §9 blocked TM-10 on exactly that — *"attempting this earlier means building an incremental scheduler for a pipeline that does not exist"* — while leaving §6 as "a contract now; code when MAUTO is scheduled". This section is that contract written down where the analyze engine will read it, plus the types that make its four failure modes unrepresentable: `hk_pipeline::region` (T-265).
+
+### 14.1 What it is a contract for
+
+CLAUDE.md invariant 5: *"decode operates on a captured region and extends with it; live decoding **extends the region's time extent** and decodes only the newly-arrived part (incremental), never re-decoding what is already done."*
+
+ADR-0017 §6.2 turned that into two rules, and the load-bearing clause is that **the policy belongs to the reader, not to the pipeline, the recipe or the signal**:
+
+> **Rule L** — a reader attached at the live edge obeys ADR-0011 §8.5 unchanged: never a backlog, skip forward when behind, count and flag every skip.
+>
+> **Rule I** — a reader that is a bounded region of the ring processes `[t_start, t_end]` exactly once; extending the region enqueues only `[old_end, new_end]`.
+>
+> **A pipeline has exactly one input reader, so it is exactly one of the two.**
+
+§5's `AnalyzeJob` is a Rule I pipeline. §12's Listen is a Rule L pipeline. §6's burst path is Rule I with a discontinuous acquisition. Nothing in this ADR was ever both, and this section is what stops the first implementation making one.
+
+### 14.2 The objects
+
+| Object | What it is | Rule it carries |
+|---|---|---|
+| `ReaderPolicy` | `live-edge {max_backlog_ns}` \| `bounded-region` | one field, so a pipeline cannot declare both |
+| `PipelinePlan` | one reader policy + the outputs hanging off it | §6.2's "exactly one of the two", structurally |
+| `ReadLedger` | the spans a reader **actually read**, its skips, and the evidence credited from them | §6.3's coverage honesty and §6.4's evidence rule |
+| `RegionJob` | a Rule I job: extent, work queue, ledger, phase | §6.2 Rule I |
+| `RegionPhase` / `Handover` | `Region` → `HandedOver {at, live_from}`, and the record of what fell between | §6.3's "explicit, named state … never an implicit merge" |
+
+**Extent is not coverage.** A `RegionJob`'s *extent* is what the user asked for and it only ever grows; its *coverage* is what the reader got, and it is less whenever the ring had evicted part of the window, a segment boundary fell inside it (§5.3), or a handover abandoned enqueued work. The difference is recorded as skipped time and flagged, never rounded up — *"a coverage bar that silently has holes in it is worse than no coverage bar"*. The acceptance sentence is therefore **"a region job's coverage is exactly the samples it read"**, and it is a test, not a prose claim.
+
+**Closed intervals.** Spans are docs/07 §4 `TimeRange`s, closed `[start, end]`. Two are *contiguous* when the later starts exactly at the earlier's `end` — they meet at one instant of zero duration, so summed durations still equal the union's — *overlap* only when it starts strictly before (the re-read, refused), and leave a *gap* when it starts strictly after. Extending by `[old_end, new_end]` is the ADR-0017 §6.2 formula verbatim, and it is exactly-once under this reading.
+
+### 14.3 The four failure modes, and where each is refused
+
+ADR-0017 §6.3 names two ways to fuse the readers and says of both that *"one of the two contracts breaks silently — always the worst kind"*. Each now has a named error rather than a paragraph:
+
+| § | The mistake | Refused by |
+|---|---|---|
+| §6.2 | re-decoding what is done | `RegionJob::extend_to` answers `None` for an end already handed out; `ReadLedger::read` ⇒ `AlreadyRead` for a span overlapping one already read |
+| §6.3 | fuse onto the **region** reader — audio acquires the batch job's backlog (§12.10's "highest-risk item") | `PipelinePlan::validate` ⇒ `AudioOnBoundedRegion` |
+| §6.3 | fuse onto the **live-edge** reader — the skip discards the samples the job promised to process exactly once, and the job reports complete coverage over a region with holes | `ReadLedger::skip_to` ⇒ `SkipForbidden` under `bounded-region` |
+| §6.4 | a sibling decode output's evidence `n` inflated by time the audio reader skipped | `PipelinePlan::policy_for_output` has no per-output override; `ReadLedger::credit` ⇒ `NotRead` for a span that was not read |
+
+The last one is the one an implementer is most likely to get wrong while believing they are being generous. ADR-0011 §8.9's FM recipe has an `audio` output *and* an RDS `messages` output off the same `fm` node: **one reader, two outputs**, so RDS inherits the audio reader's live-edge policy and its text has a gap whenever the audio skips. That gap is correct and deliberate — the alternative buffers for RDS's benefit and makes the audio late — and it is recorded as a `DISCONTINUITY`. What must not happen is the §2.2 bits ladder counting the skipped seconds as evidence, which is why evidence is credited **against a span in the ledger** rather than against wall time. A user who wants gapless RDS runs a region job over the ring: Rule I, a second pipeline, and exactly the §6.3 shape.
+
+### 14.4 Handover
+
+A region job whose coverage catches the live edge **may** hand over to the live pipeline. That is one transition, out of one state, and it produces a record:
+
+`Handover {at, live_from, gap: Option<TimeRange>, abandoned_ns, flags}` — `gap` is `Some` when the live reader starts after the job's coverage ended; `abandoned_ns` is work that was enqueued and never read; either puts `DISCONTINUITY::GAP` on the record, and only a handover that loses neither is `is_seamless()`. After it the job owns no samples: `extend_to`, `complete` and a second `hand_over` all answer `HandedOver`. Continuing to decode means opening a new job, which is a new reader — never the old one re-pointed at the live edge.
+
+### 14.5 What this does **not** decide
+
+- **No engine.** No scheduler, no thread, no ring read, no `/api/analyze` behaviour change, no route and no schema. `AnalyzeJob.window` (§5.2) already carries `segments`/`samples`/`gaps`; when the engine lands it fills them **from the ledger** rather than from the requested window, and that is the only §5 delta this foresees.
+- **No persistence.** Nothing here is stored. A job's coverage lives as long as the job; `emitter_synthesis` (§5.4) keeps the verdict, not the coverage bar.
+- **Scrub-back audio is still unruled.** ADR-0017 §6.5 flagged it and this does not settle it: `AudioOnBoundedRegion` refuses audio on a *bounded-region* reader, which is the fusion, and says nothing about a future playback reader with its own policy. If one is added it is a **third** `ReaderPolicy`, declared as such, not a bounded region with the audio rule quietly relaxed.
+- **No number is introduced.** `max_backlog_ns` is carried, not defaulted: the runtime's value is `ListenConfig::max_backlog_s` (or a recipe's `input.liveness.max_backlog_s`), and a second spelling of it would be a new drift surface.
+
+*Unverified in this amendment: that the work-queue shape survives contact with the beam search's re-entrancy (§3.1 may want to re-run a stage over a span already read, which is a **re-analysis** of read samples rather than a re-read and is legal under Rule I, but nothing measures it); and whether the UI wants a handover offered automatically when coverage reaches the live edge, or only on request — §6.3 says "may hand over" and this contract does not choose.*
+
+---
+
+## 15. Amendment — protocol facts cross as template data: fact provenance, the fact/implementation line, bulk import (T-557, 2026-09-22)
 
 **Status:** PROVISIONAL, design only, no code and no template files. Use cases: **SIGNAL-049**
 (ERT meters), **SIGNAL-053** (LoRa), **RESEARCH-002** (flex decoder for a never-seen sensor).
 Source: [docs/18 §0, §3 Tier 1, §6](../18-decoder-coverage.md), which rank the short-range ISM long
-tail as the highest-return coverage and call it "templates, not code". §§1–13 stand, except for the
-deltas in §14.8.
+tail as the highest-return coverage and call it "templates, not code". §§1–14 stand, except for the
+deltas in §15.8.
 
 **What binds, and what doesn't.** The only licence rule is the existing one in
 [ADR-0010](0010-language-and-licence-ledger.md) and [ADR-0003](0003-process-plugin-model.md): GPLv3
@@ -1122,20 +1190,20 @@ said on 2026-09-20 (T-555) that there is **no separate licence rule**. docs/18 �
 proposal was cancelled, and this section neither cites nor revives it. What follows is a data
 schema and a bookkeeping discipline. It adds no new gate.
 
-### 14.1 Why templates are the bridge
+### 15.1 Why templates are the bridge
 
 A **template is data about a protocol** and a **block is code**. The licence question is only ever
 about code. A template holds the same things every GNU Radio or rtl_433 decoder holds, and every
 specification those decoders were written from: modulation family, symbol rate, sync word, check
 polynomial, field layout and expected band. These are **protocol facts**. The schema has no place
-for the rest of a decoder, which is its loops, taps, thresholds and state machines (§14.3).
+for the rest of a decoder, which is its loops, taps, thresholds and state machines (§15.3).
 
 The costs differ by orders of magnitude. A template takes hours. A block takes days. A wrapped
 plugin is a dependency forever. For every protocol whose structure the ADR-0011 catalogue can
 already express (docs/18 §3 Tier 1: OOK/ASK/FSK with PWM, PPM or Manchester coding and a CRC),
 coverage therefore becomes data entry. And every template is also a MAUTO search seed (§4.2).
 
-### 14.2 The fact-source field
+### 15.2 The fact-source field
 
 §4.1's `provenance.kind` (`builtin | user | discovered`) says **who authored the template**. It
 does not change, and ADR-0022 §5.1's template-fixed rule still reads it. This amendment adds a
@@ -1146,7 +1214,7 @@ second, independent record: **where each fact came from**.
   "kind": "builtin",
   "facts": [
     { "fields": ["priors.families", "priors.symbol_rate_bd", "evidence_targets.S4"],
-      "basis": "spec",                       // spec | tolerance | measured   (§14.3)
+      "basis": "spec",                       // spec | tolerance | measured   (§15.3)
       "source": { "kind": "standard",       // see the table below
                   "ref": "ITU-R M.584-2", "locator": "Annex 1 §4", "accessed": "2026-09-22" } },
     { "fields": ["free[clock].domain"],
@@ -1187,7 +1255,7 @@ Rules:
 - **No prose crosses.** `name` and `description` are written fresh. A wiki's or decoder's text is
   never pasted in, because text is expression even when the numbers beside it are facts.
 
-### 14.3 The line: fact versus implementation, per §4.1 field
+### 15.3 The line: fact versus implementation, per §4.1 field
 
 A **fact** is a statement about the air interface or the message format that two independent,
 interoperable implementations must agree on. If a transmitter could change it and still be heard by
@@ -1196,8 +1264,8 @@ receiver's author chose in order to receive well.
 
 | §4.1 field | Fact side | Implementation side | The awkward middle and its rule |
 |---|---|---|---|
-| `recipe` / `skeleton` | The protocol's **layering**: line code (NRZ, NRZI, Manchester, PWM, PPM), whether whitening is applied, where the check sits | Any other decoder's flowgraph or file decomposition. A skeleton is **always** expressed in ADR-0011's own blocks, never transcribed from someone's graph | A layer the catalogue lacks (`css_demod` for LoRa, docs/18 §7 rank 9) makes the template **inert** (§14.6), not a reason to copy a block |
-| Node params the template fixes | Protocol parameters: `sync_word`, CRC RevEng model (`width, poly, init, refin, refout, xorout`), BCH code, whitening polynomial and seed, deviation, bit order, frame length | Loop bandwidths, filter taps and lengths, AGC constants, slicer thresholds and hysteresis, lock/unlock run lengths, timeouts, retry logic, any decoder state machine | **The schema enforces this line.** ADR-0011's `ParamSchema` gains `class: protocol \| tuning` (§14.8). A template may fix, range or seed only `protocol` params. `tuning` params keep the block's own defaults and are refined from the processed output (§2.3, T-070). No field exists to carry them, so a template *cannot* import them |
+| `recipe` / `skeleton` | The protocol's **layering**: line code (NRZ, NRZI, Manchester, PWM, PPM), whether whitening is applied, where the check sits | Any other decoder's flowgraph or file decomposition. A skeleton is **always** expressed in ADR-0011's own blocks, never transcribed from someone's graph | A layer the catalogue lacks (`css_demod` for LoRa, docs/18 §7 rank 9) makes the template **inert** (§15.6), not a reason to copy a block |
+| Node params the template fixes | Protocol parameters: `sync_word`, CRC RevEng model (`width, poly, init, refin, refout, xorout`), BCH code, whitening polynomial and seed, deviation, bit order, frame length | Loop bandwidths, filter taps and lengths, AGC constants, slicer thresholds and hysteresis, lock/unlock run lengths, timeouts, retry logic, any decoder state machine | **The schema enforces this line.** ADR-0011's `ParamSchema` gains `class: protocol \| tuning` (§15.8). A template may fix, range or seed only `protocol` params. `tuning` params keep the block's own defaults and are refined from the processed output (§2.3, T-070). No field exists to carry them, so a template *cannot* import them |
 | `free[].domain` | An `enum` of values the spec lists (POCSAG 512/1200/2400) | — | **Ranges are the middle.** See the tolerance rule below |
 | `priors.families`, `bursty` | Modulation family and duty cycle as the protocol defines them | — | — |
 | `priors.symbol_rate_bd` | The nominal rate | — | The width of the range is a tolerance: tolerance rule |
@@ -1225,7 +1293,7 @@ from any recorded source, with three properties that make its origin low-stakes:
    permitted, recorded as `basis: tolerance, source: decoder-source`, and listed by the
    `resource_wanted` lint.
 
-### 14.4 What a template can and cannot do, and the one exposure bulk import creates
+### 15.4 What a template can and cannot do, and the one exposure bulk import creates
 
 These safeguards make it safe to import a template from a reference decoder, which would not be
 true of importing the decoder itself. Each restates an existing rule:
@@ -1236,7 +1304,7 @@ true of importing the decoder itself. Each restates an existing rule:
 - **`bands_hz` only raises rank for an emitter already detected there** (§4.1). A template never
   tunes, never creates a candidate and never pre-populates the inventory (CLAUDE.md, workflow #4).
 - **A template cannot starve unknowns**: open-search floor and defer-don't-delete (§4.2).
-- **A validated template earns nothing extra** (§14.6). Validation is quality control on the
+- **A validated template earns nothing extra** (§15.6). Validation is quality control on the
   library. It is never a bit source.
 
 A template imported from a reference decoder therefore cannot make the system claim something it
@@ -1262,9 +1330,9 @@ confident classification, priors put a handful of templates first, the job stops
 charge is small. The charge counts **what was tried, not the library's size**. So a large library
 costs confirmations only when the search actually had to spread across it, which is correct.
 Without this rule, bulk import would be the one way a template *could* help cause a false confirm.
-This delta belongs to ADR-0022 and is handed to **T-575**, which applies that ADR (§14.8).
+This delta belongs to ADR-0022 and is handed to **T-575**, which applies that ADR (§15.8).
 
-### 14.5 The bulk path: hand-authored, spec-first, one skeleton at a time
+### 15.5 The bulk path: hand-authored, spec-first, one skeleton at a time
 
 There are three candidate paths. The position is: **(a) and (c) yes; (b) no mechanical generator
 from any decoder corpus; one narrow format importer.**
@@ -1281,16 +1349,16 @@ problem, because they are data. The reasons are these:
 - **rtl_433's facts live in code, not data.** Its ~380 decoders are C (`src/devices/*.c`). The
   `r_device` initialisers hold pulse timings, but the sync match, CRC call and field extraction are
   inside decode functions. A generator would be a C parser for arbitrary decode functions: brittle,
-  and most of its output would fall on the implementation side of §14.3 (`gap_limit`,
+  and most of its output would fall on the implementation side of §15.3 (`gap_limit`,
   `reset_limit`, and the decoder's own acceptance logic).
 - **A generator ships hundreds of unvalidated claims in one commit.** Each one costs budget and
-  §14.4 multiplicity. The library's value grows with *validated* templates, not with its size
-  (§14.6).
+  §15.4 multiplicity. The library's value grows with *validated* templates, not with its size
+  (§15.6).
 
 **The one structured translator worth building is for RESEARCH-002.** It is an importer for the
 **rtl_433 flex (`-X`) spec language**, a small declarative format (`modulation`, `short`, `long`,
 `gap`, `reset`, `preamble`/`match`, `bits`, `repeats`). It maps directly onto the generic OOK
-skeletons and applies §14.3 as it translates:
+skeletons and applies §15.3 as it translates:
 - `modulation` becomes the skeleton;
 - `short` and `long` become `priors` with `basis: measured` (someone measured those pulses) and a
   derived tolerance;
@@ -1314,17 +1382,17 @@ a corpus as a fact source, like the gpsjam data-source row. None is adopted by t
 | Corpus | Licence | Status | Proposed use |
 |---|---|---|---|
 | rtl_433 (code, `conf/`, docs) | GPL-2.0-or-later | In the ADR-0010 ledger (subprocess plugin row) | Index for prioritising; per-field `decoder-source`; per-file flex import. **No bulk generator.** The plugin stays the long-tail escape |
-| rtl_433_tests (sample `.cu8` captures) | **Unverified**: read the repo's licence file before use | Not adopted | Candidate **validation fixtures** (§14.6). Nothing enters `fixtures/` until the licence is read from the file |
+| rtl_433_tests (sample `.cu8` captures) | **Unverified**: read the repo's licence file before use | Not adopted | Candidate **validation fixtures** (§15.6). Nothing enters `fixtures/` until the licence is read from the file |
 | sigidwiki.com | **Unverified**: read the site's content licence and terms before use | Not adopted | Facts only (frequency, mode, bandwidth, baud), at S0–S2 depth. Better suited to the explanation/recommendation database than to decode templates, because it rarely carries field maps or checks. No scraping; no prose |
-| CRC RevEng catalogue | Parameter facts; already used (T-013 ledger row: "parameters only, no code copied") | Precedent | The `crc` model and its `check` value (§14.6) |
+| CRC RevEng catalogue | Parameter facts; already used (T-013 ledger row: "parameters only, no code copied") | Precedent | The `crc` model and its `check` value (§15.6) |
 | rtlamr (SIGNAL-049) | AGPL-3.0 (**verify** from the file) | Not adopted | `decoder-source` (artefact `docs`) for the SCM/IDM formats, pending a better public description |
-| gr-lora_sdr (SIGNAL-053) | GPL-3.0 | Not used | Not needed: the LoRa PHY is described in a paper and vendor application notes (§14.7) |
+| gr-lora_sdr (SIGNAL-053) | GPL-3.0 | Not used | Not needed: the LoRa PHY is described in a paper and vendor application notes (§15.7) |
 | Standards bodies (ITU-R, ETSI, CCSDS; IEEE where accessible) | Each document's own terms; facts only | — | The preferred `standard` source |
 
-### 14.6 The test: templates are claims about the world and can be wrong
+### 15.6 The test: templates are claims about the world and can be wrong
 
 The design already refuses to trust a template: nothing a template says ranks or confirms anything
-(§14.4). Validation is therefore **quality control on the library, never trust**. A template's
+(§15.4). Validation is therefore **quality control on the library, never trust**. A template's
 parameters are a claim, and there are four levels of checking them, which report honestly what
 each one proves:
 
@@ -1341,8 +1409,8 @@ each one proves:
    includes the RevEng `check` value (the CRC of `"123456789"`), and the loader verifies that
    `hk_estimate::framing::crc` reproduces it, which catches a mistyped polynomial, init or reflect
    flag at load. Sync length matches `evidence_targets.S4.sync_bits`. Field-map widths sum to the
-   frame length. Every `free` path names a `protocol`-class param (§14.3). Every fact field is
-   sourced (§14.2). Failure is a load error for builtins and a validation error for user templates.
+   frame length. Every `free` path names a `protocol`-class param (§15.3). Every fact field is
+   sourced (§15.2). Failure is a load error for builtins and a validation error for user templates.
 2. **`synthetic`: proves expressibility, not truth.** A synthetic generator built from the template's
    own facts shows that ADR-0011's blocks can express and decode the signal. **It is circular about
    the facts**, because a wrong sync word produces a synthetic with the same wrong sync word, so it
@@ -1357,7 +1425,7 @@ each one proves:
 
 Beyond the four levels:
 - **Unvalidated templates may ship, and are listed as such.** A `consistency`-only builtin is legal.
-  It costs budget and §14.4 multiplicity, which is the real price of an untested claim. A builtin
+  It costs budget and §15.4 multiplicity, which is the real price of an untested claim. A builtin
   whose skeleton names a block the catalogue lacks is **`inert`**: it loads, validates and is
   listed, but is never seeded. The analyze trace reports it as ADR-0021's
   `missing_block` with `suspected_by: template`.
@@ -1367,7 +1435,7 @@ Beyond the four levels:
   auto-deletes, never demotes, and never changes a prior. Removing or fixing a template is a human
   act and a new version (§4.1 immutability).
 
-### 14.7 Worked sketches (illustrative; every number below is unverified)
+### 15.7 Worked sketches (illustrative; every number below is unverified)
 
 - **RESEARCH-002, a never-seen 433 MHz sensor.** The user pastes
   `-X "n=probe,m=OOK_PWM,s=500,l=1000,r=4000,bits>=36"`. The importer yields `generic-ook-pwm` with
@@ -1389,10 +1457,10 @@ Beyond the four levels:
   (docs/18 §7 ranks 9 and 2), so the template ships `inert` until those blocks land. Once they do,
   it becomes live with no template change.
 
-### 14.8 Deltas
+### 15.8 Deltas
 
-- **§4.1 schema:** `provenance.facts[]` (§14.2), `validation[]` (§14.6), and a `timing` class for
-  the tolerance rule (§14.3). The `inert` state is derived from the catalogue, not stored.
+- **§4.1 schema:** `provenance.facts[]` (§15.2), `validation[]` (§15.6), and a `timing` class for
+  the tolerance rule (§15.3). The `inert` state is derived from the catalogue, not stored.
   `hackriff.template` stays `schema_version: 1` because nothing has been implemented yet. If
   implementation lands first, these fields are `2`.
 - **§4.3 save-as-template:** stamps `facts: [{fields: <all fixed/narrowed>, basis: measured,
@@ -1402,13 +1470,13 @@ Beyond the four levels:
   whichever ticket next amends ADR-0011 (docs/18 §8's T-606 carries catalogue deltas already), and
   **not applied by this amendment**.
 - **ADR-0022 §5.1:** `L_check` for template-fixed checks counts the template-fixed check hypotheses
-  tried against the window (§14.4). **For T-575**, which applies ADR-0022. It is not applied here.
-- **ADR-0010 ledger:** a corpus row when a corpus is first used as a fact source (§14.5).
-- **Unchanged:** §§1–3, §§5–13, and ADR-0022's confirm inequality apart from the `L_check`
+  tried against the window (§15.4). **For T-575**, which applies ADR-0022. It is not applied here.
+- **ADR-0010 ledger:** a corpus row when a corpus is first used as a fact source (§15.5).
+- **Unchanged:** §§1–3, §§5–14, and ADR-0022's confirm inequality apart from the `L_check`
   counting above.
 
 *Unverified in this amendment: the tolerance-class widenings (±2/25/50 %); the licences of
-rtl_433_tests, sigidwiki and rtlamr (to be read from their files); the §14.7 protocol constants;
+rtl_433_tests, sigidwiki and rtlamr (to be read from their files); the §15.7 protocol constants;
 the rtl_433 decoder and flex-conf counts; and whether a handful of templates really suffices on a
-well-classified burst for §14.4's charge to stay small. That last point is measured by the templates-on
+well-classified burst for §15.4's charge to stay small. That last point is measured by the templates-on
 runs in §7.*

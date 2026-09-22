@@ -1451,4 +1451,83 @@ mod tests {
             assert!(bad.validate().is_err(), "{bad:?} must be refused");
         }
     }
+
+    /// **ADR-0016 §7's ML exit-gate row, proved non-vacuous against a real host (T-366).**
+    ///
+    /// The gate clause "each `active` family has enable evidence" can only be caught at the gate
+    /// if something reaches `active` without it, and exactly one path does: [`ModelHost::set_mode`]
+    /// with `force`, which ADR-0016 §4.6 audits rather than refuses. So the forbidden state is
+    /// *constructed here through the real API* and handed to
+    /// [`crate::exit_gate::MlGateSnapshot::from_host`], which must report it — the T-287/T-297
+    /// pattern: build the state the clause forbids and show the assertion catching it.
+    ///
+    /// The same host, with its evidence and no force, satisfies the row. Neither half is a
+    /// hand-built struct: both are read out of a loaded host's own mode table.
+    #[test]
+    fn a_forced_active_model_without_evidence_fails_the_adr_0016_s7_exit_gate() {
+        use crate::exit_gate::{GateViolation, MlAttributedRow, MlGateSnapshot};
+
+        let (host, _, _) = new_host(Fake::new(true, Duration::ZERO));
+        let consumer = ConsumerId::new("hk-classify/dl");
+
+        // No evidence on the manifest, so `active` is refused outright...
+        let model = host.load(&manifest(false), BYTES).unwrap();
+        assert!(
+            host.set_mode(&model, &consumer, MlMode::Active, false)
+                .is_err(),
+            "active without enable evidence must be refused (ADR-0016 §4.6)"
+        );
+        // ...and the one path that gets there anyway is audited, not blocked.
+        host.set_mode(&model, &consumer, MlMode::Active, true)
+            .unwrap();
+
+        let snap = MlGateSnapshot::from_host(&host, Vec::new(), 0);
+        assert_eq!(
+            snap.check(),
+            [GateViolation::ActiveWithoutEnableEvidence {
+                model: model_key(&model),
+                consumer: "hk-classify/dl".into(),
+                forced: true,
+            }],
+            "the exit gate must catch a forced active model: {}",
+            snap.summary()
+        );
+
+        // A shadow prediction the host really produced, recorded as a classification by a
+        // hypothetical consumer, is caught as clause 1 — over this same live host.
+        host.set_mode(&model, &consumer, MlMode::Shadow, false)
+            .unwrap();
+        let p = host
+            .observe(&model, &request("fsk", 1.0), None)
+            .unwrap()
+            .expect("shadow runs the model");
+        assert!(!p.decides(), "a shadow prediction never decides");
+        let snap = MlGateSnapshot::from_host(
+            &host,
+            vec![MlAttributedRow {
+                subject: "emitter-under-test".into(),
+                model: Some(p.model.to_string()),
+                stage: "dl".into(),
+            }],
+            0,
+        );
+        assert!(
+            snap.check()
+                .iter()
+                .any(|v| matches!(v, GateViolation::ClassificationFromANonActiveModel { .. })),
+            "a classification attributed to a shadow model must fail the gate: {:?} / {}",
+            snap.check(),
+            snap.summary()
+        );
+
+        // And with the evidence, unforced, the row is satisfied: the gate is about the evidence,
+        // not about ML existing.
+        let (host, _, _) = new_host(Fake::new(true, Duration::ZERO));
+        let model = host.load(&manifest(true), BYTES).unwrap();
+        host.set_mode(&model, &consumer, MlMode::Active, false)
+            .unwrap();
+        let snap = MlGateSnapshot::from_host(&host, Vec::new(), 0);
+        assert_eq!(snap.check(), [], "{}", snap.summary());
+        assert!(snap.ml_on().is_some(), "{}", snap.summary());
+    }
 }

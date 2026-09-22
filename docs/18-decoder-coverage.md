@@ -540,7 +540,7 @@ SIGNAL-051 (wM-Bus), SIGNAL-052 (rtl_433 long tail), SIGNAL-057 (ALERT gauges), 
 growth), RESEARCH-001/002/012.
 Why it is first: it converts "support many more decode types" from an engineering cost into a
 template-authoring cost, **and** every template is a MAUTO search seed, so it improves the synthesis
-engine at the same time. T-557 designs the bridge: [ADR-0015 §14](adr/0015-decoder-synthesis-contracts.md).
+engine at the same time. T-557 designs the bridge: [ADR-0015 §15](adr/0015-decoder-synthesis-contracts.md).
 
 **2. VHF/UHF data and paging beyond what is already built.**
 *Disposition: **native recipes**, existing blocks.* AFSK/AX.25 (APRS), railroad EOT and ATCS,
@@ -871,7 +871,7 @@ delta. Families already shipped are marked ✓.
 |---|---|---|
 | HFDL | The FEC, interleaver and frame geometry. There is **no GNU Radio OOT** (§1.4); `dumphfdl` is the living tool and is non-GR | A public HFDL PHY description, or a `dumphfdl` plugin spike |
 | Iridium bursts | The burst structure, LCW handling and the demod's acquisition strategy. The modulation is DQPSK and native-shaped, but whether the framing is expressible as a block DAG is not knowable from the outside | Reading the published Iridium RE write-ups, or a `gr-iridium` plugin spike |
-| P25 Phase 2 | H-DQPSK / H-CPM TDMA burst structure. The TIA standard is paywalled and the only public implementation is op25 | Access to the standard, or a scoped op25 plugin |
+| P25 Phase 2 **voice/traffic** | H-DQPSK / H-CPM TDMA burst structure. The TIA standard is paywalled and the only public implementation is op25. The *control* side is not unknown: a Phase 2 system trunks on a Phase 1 FDMA control channel this build decodes, and T-272 attributes a grant's frequency **and slot** from its `IDEN_UP_TDMA` band plan — what is missing is demodulating the two slots | Access to the standard, or a scoped op25 plugin |
 | DJI DroneID / OcuSync | Proprietary OFDM; public RE exists but the scrambler/frame detail was not verified here | Reading the published DroneID papers |
 | TETRA voice | The ACELP codec's availability and licensing; `osmo-tetra` is **AGPL-3.0**, whose network clause is stricter than GPL's | A licence read, if voice is ever wanted. The control channel is unaffected |
 | GSM native partial | Whether a BCCH-only native recipe is expressible without the TDMA burst scheduler living outside the block DAG | A read of the GSM 05.03 channel coding spec against the catalogue |
