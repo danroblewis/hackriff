@@ -15492,6 +15492,57 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      AWARE-011. The serving layer holds N live controls and device routes take a selector.
+
+      hk-api: new `LiveControls` (live_control.rs) - an ordered collection keyed by device_id,
+      with `select(Option<&str>)`, `primary()`, `iter()`, `device_ids()`, and `LiveControls::new`
+      refusing a set a selector could not address (duplicate device_id, or >1 handle reporting
+      none - "nothing said" is never a key, the T-325 rule). `SelectError` carries the wire
+      answer: NotLive 409 not_live, Ambiguous 400 device_required, Unknown 404 unknown_device.
+      `ApiState.live_control: Option<Arc<dyn LiveControl>>` -> `ApiState.live_controls:
+      LiveControls`; `Option<Arc<dyn LiveControl>>` and `Arc<dyn LiveControl>` both `Into` it, so
+      hk-cli's single-device composition is unchanged (`serve_api` takes `impl Into<LiveControls>`).
+
+      ONE GATE PER DEVICE came free and is asserted, not assumed: each `SourceLiveControl` already
+      carries its own `DeviceGate`, so holding radio A's gate refuses A with 409 device_busy and
+      leaves B servable (t511_the_device_gate_is_per_device_not_per_server). There is no
+      server-wide gate left to share.
+
+      Routes: `device_id` is an optional body field on all six device routes (center, rate,
+      window, gains, bias_tee, baseband_filter). Omitted = "the device", legal only with exactly
+      one front end; with several it is 400 device_required listing the ids, NOT a default to the
+      first (moving a radio nobody named is the BiasTee::Unknown/Coverage::Unobserved defect).
+      Unknown id 404, non-string 400 invalid. `device.id` on the answer AND in the audit entry is
+      the front end the selector RESOLVED to (audit resolves it from the request best-effort, and
+      logs null rather than a guess when it does not resolve). `GET /api/control/state` gained
+      `devices: [{device_id, device, tuning}]`; its singular `device`/`tuning` stay the same on a
+      one-device run and are null when the run holds more than one, because then there is no "the"
+      device. `max_live_span_hz` is now the widest across front ends. navigation.windows_json was
+      NOT changed (already a list) - only its "what would have to change to report N" comment,
+      which is now history; `frequency.current` stays the default device's, as api.md always said.
+
+      Docs updated together (T-079): docs/api.md (new "Which radio: the device selector (T-511)"
+      section, route bodies/errors, error-code list, state row, device_busy per front end, the
+      navigation paragraph) and docs/14-ui-rewrite.md's matching paragraph.
+
+      Tests (targeted): `cargo nextest run -p hk-api` 231/231 pass, including 4 new HTTP tests
+      (control_api.rs: selector routing with a two-device rig where the unselected radio records
+      ZERO calls; state enumeration; per-device gate; one-device omission) and 3 new unit tests in
+      live_control.rs. `hk-cli -E 'binary(api_contract) and test(t511...)'` passes the new contract
+      test t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it (devices[] agrees
+      with device/tuning and with /api/navigation windows[]; omitted selector retunes; wrong
+      selector 404 and the front end does NOT move). binary(control_http) 2/2. `just test-ui`
+      50/50 files, so T-340's spy assertions stay green (ui/ untouched). `just precheck hk-api
+      hk-cli` clean.
+
+      OBSERVED, not chased - environment, not this diff: two api_contract tests fail on this
+      machine for lack of disk. `coverage_answers_per_cell_in_time_...` and
+      `the_timeline_spans_the_capture_window_and_draws_it` both need the IQ ring, and the server
+      refuses to allocate it: "the IQ capture ring needs 8388608 bytes above the 8589934592-byte
+      free-space floor and 2436370432 bytes are free". `df` shows 2.5 GiB free on / (100% on
+      /System/Volumes/Data). The test's own message says this is the machine, not the code. They
+      touch nothing this ticket changed; a merge gate on a full-disk machine will fail them.
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
