@@ -336,10 +336,15 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     def label(x):
         done = x.get("status") in ("done", "cancelled")
         t = str(x.get("title", "")).translate(str.maketrans("", "", '"[]<>|`{}')).strip()[:24]
-        tick = "✓ " if done else {"failed": "✗ ", "testing": "⚙ ", "queued": "⏳ ", "review": "🔍 ", "next": "▶ "}.get(rt.get(x["id"]), "")
+        tick = "✓ " if done else ""
         ms = x.get("milestone") or ""
-        if rt.get(x["id"]) and rt_why.get(x["id"]):
-            ms = (ms + " · " if ms else "") + rt_why[x["id"]]
+        state = rt.get(x["id"])
+        if state:
+            word = {"failed": "FAILED", "testing": "IN THE GATE", "queued": "QUEUED", "review": "IN REVIEW", "next": "UP NEXT"}[state]
+            col = {"failed": "#FF6B57", "testing": "#FFC14D", "queued": "#F0A542", "review": "#5EE0C4", "next": "#C7B8FF"}[state]
+            why = rt_why.get(x["id"], "")
+            why = "" if why in ("bulk gate", "merge queue", "reviewer stage", "up next") else " · " + why
+            t = f"<b style='color:{col};font-size:10px;letter-spacing:.08em'>{word}{why}</b><br/>" + t
         sub = " · ".join(p for p in (ms, t) if p)
         return f"{tick}{x['id']}<br/><span style='font-size:9px;opacity:.75'>{sub}</span>" if sub else f"{tick}{x['id']}"
     lines = ["graph LR",
@@ -353,11 +358,11 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
              "classDef msdone fill:#123a2c,stroke:#52C2AE,color:#8FD9C9,stroke-width:2px;",
              "classDef mscur fill:#3a2c0a,stroke:#F0A542,color:#FFD98a,stroke-width:3px;",
              "classDef msnext fill:#181f24,stroke:#5A6973,color:#8595A0,stroke-dasharray:5 4;",
-             "classDef failed fill:#3a1410,stroke:#E47B68,color:#FFB4A6,stroke-width:3px;",
-             "classDef testing fill:#3a2c0a,stroke:#F0A542,color:#FFD98a,stroke-width:3px,stroke-dasharray:6 3;",
-             "classDef queued fill:#2a2410,stroke:#F0A542,color:#F0A542,stroke-dasharray:6 3;",
-             "classDef reviewing fill:#10222a,stroke:#52C2AE,color:#8FD9C9,stroke-width:3px;",
-             "classDef next fill:#241e3e,stroke:#A395E0,color:#D6CCFF,stroke-width:3px;"]
+             "classDef failed fill:#5a1a12,stroke:#FF6B57,color:#FFD9D2,stroke-width:4px;",
+             "classDef testing fill:#4a3608,stroke:#FFC14D,color:#FFF0C2,stroke-width:4px,stroke-dasharray:9 5;",
+             "classDef queued fill:#33280c,stroke:#F0A542,color:#FFE3B0,stroke-width:3px,stroke-dasharray:4 4;",
+             "classDef reviewing fill:#0f3a33,stroke:#5EE0C4,color:#D6FFF5,stroke-width:4px;",
+             "classDef next fill:#2b2352,stroke:#C7B8FF,color:#EFEAFF,stroke-width:4px;"]
     # milestone backbone: the roadmap chain, coloured by how far along each milestone is
     norm_ms = lambda m: re.sub(r"-(fix|hardening)$", "", m or "")   # fold M2-hardening/M1-fix into their base
     by_ms = {}
@@ -390,7 +395,9 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     for nid, x in nodes.items():
         c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
-        lines.append(f'{nid}["{label(x)}"]:::{c}')
+        shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'),
+                 "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
+        lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
     # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
     for nid, x in nodes.items():
         for dp in deps(x):
@@ -427,6 +434,19 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .legend{margin-left:auto;display:flex;gap:10px;font-size:11px;color:var(--dim);flex-wrap:wrap}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
 .wrap{flex:1;min-height:0;overflow:hidden;position:relative;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+@keyframes pulse-red{0%,100%{filter:drop-shadow(0 0 3px #FF6B57)}50%{filter:drop-shadow(0 0 16px #FF6B57) drop-shadow(0 0 4px #FF6B57)}}
+@keyframes ants{to{stroke-dashoffset:-28}}
+@keyframes glow-violet{0%,100%{filter:drop-shadow(0 0 2px #C7B8FF)}50%{filter:drop-shadow(0 0 12px #C7B8FF)}}
+@keyframes glow-teal{0%,100%{filter:drop-shadow(0 0 2px #5EE0C4)}50%{filter:drop-shadow(0 0 12px #5EE0C4)}}
+.node.failed{animation:pulse-red 1.1s ease-in-out infinite}
+.node.testing rect,.node.testing path,.node.testing polygon{animation:ants .9s linear infinite}
+.node.testing{filter:drop-shadow(0 0 8px #FFC14D)}
+.node.next{animation:glow-violet 1.8s ease-in-out infinite}
+.node.reviewing{animation:glow-teal 1.8s ease-in-out infinite}
+.legend i.hex{clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);border-radius:0;width:16px}
+.legend i.stad{border-radius:8px;width:18px}.legend i.sub{border-radius:0;width:16px;box-shadow:inset 3px 0 #0D1317,inset -3px 0 #0D1317}
+.legend i.trap{clip-path:polygon(15% 0,85% 0,100% 100%,0 100%);border-radius:0;width:18px}.legend i.asym{clip-path:polygon(0 0,100% 0,80% 50%,100% 100%,0 100%);border-radius:0;width:16px}
+@media (prefers-reduced-motion:reduce){.node.failed,.node.next,.node.reviewing,.node.testing rect,.node.testing path,.node.testing polygon{animation:none}}
 .wrap svg text{user-select:none;-webkit-user-select:none;pointer-events:none}
 .wrap.grabbing{cursor:grabbing}
 #g{position:absolute;inset:0}
@@ -449,7 +469,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <span class=filters title="always shown, whatever the other filters say">always: <button id=f-merging class=on>merging</button><button id=f-next class=on>up next</button><button id=f-failed class=on>failed</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <a href="/">← dashboard</a>
-<span class=legend><span><i style="background:#E47B68"></i>✗ failed / redo</span><span><i style="background:#F0A542;border:1px dashed #FFD98a"></i>⚙ in the gate</span><span><i style="background:#2a2410;border:1px dashed #F0A542"></i>⏳ queued</span><span><i style="background:#52C2AE"></i>🔍 in review</span><span><i style="background:#A395E0"></i>▶ up next</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
+<span class=legend><span><i class=hex style="background:#FF6B57"></i>FAILED / redo (pulsing)</span><span><i class=stad style="background:#FFC14D"></i>IN THE GATE (moving dashes)</span><span><i class=sub style="background:#F0A542"></i>QUEUED</span><span><i class=asym style="background:#5EE0C4"></i>IN REVIEW</span><span><i class=trap style="background:#C7B8FF"></i>UP NEXT</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
 <div class=hint>scroll = zoom · drag = pan · click a ticket for details · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
