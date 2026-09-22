@@ -141,8 +141,16 @@ svg{width:100%;height:auto;display:block}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .tip{position:fixed;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:11.5px;display:none;max-width:280px}
 .stats{display:flex;flex-wrap:wrap;gap:8px 22px;font-size:12px;color:var(--mut)}.stats b{color:var(--txt);font-family:var(--mono)}
+.ctl{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut)}
+.seg button{background:var(--panel);border:1px solid var(--line);color:var(--mut);font-size:11px;padding:2px 8px;cursor:pointer;border-radius:0}
+.seg button:first-child{border-radius:5px 0 0 5px}.seg button:last-child{border-radius:0 5px 5px 0}.seg button.on{color:var(--amber);border-color:rgba(240,165,66,.5)}
+.ctl input{background:var(--panel);border:1px solid var(--line);color:var(--txt);font:11px var(--mono);padding:2px 4px;border-radius:4px;color-scheme:dark}
+.ctl #now{background:var(--panel);border:1px solid var(--line);color:var(--mut);font-size:11px;padding:2px 7px;border-radius:5px;cursor:pointer}
 </style></head><body>
-<div class=top><span>hack<b>riff</b> · burndown</span><a href="/">← dashboard</a><a href="/graph">task map ↗</a><span class=sub id=sub>loading…</span></div>
+<div class=top><span>hack<b>riff</b> · burndown</span><a href="/">← dashboard</a><a href="/graph">task map ↗</a>
+<span class=ctl>range <span class=seg id=seg><button data-h=24>24h</button><button data-h=72>3d</button><button data-h=168>7d</button><button data-h=0 class=on>all</button></span>
+<input type=datetime-local id=from step=60> → <input type=datetime-local id=to step=60> <button id=now title="set 'to' to now">now</button></span>
+<span class=sub id=sub>loading…</span></div>
 <div class=card><div class=stats id=stats></div></div>
 <div class=card><h2>Open tickets over time, by milestone <span class=sub>(todo + in-progress + blocked + paused; dashed grey line = open + planned; one point per board commit; click a legend entry to hide it)</span></h2><svg id=area viewBox="0 0 1000 380"></svg><div class=leg id=leg></div></div>
 <div class=card><h2>Filed vs closed per day <span class=sub>(filed = id first appears on main; closed = status became done)</span></h2><svg id=bars viewBox="0 0 1000 200"></svg></div>
@@ -151,9 +159,25 @@ svg{width:100%;height:auto;display:block}
 const COL=["#52C2AE","#F0A542","#A395E0","#E47B68","#7FB3D5","#F3E3BF","#8FBF6A","#D08BC6","#6A9E8C","#C9A25E","#8595A0","#5DA6A0","#B5865A","#9AA5E0","#E0A395","#6FCF97","#C0C0C0","#FF9F6B","#88C0D0","#B48EAD"];
 const $=s=>document.querySelector(s); const hidden=new Set();
 let D=null;
+// Time range: a preset (hours back from now; 0 = everything) or explicit from/to, client-side over the
+// full series (it is ~1000 points). Remembered per viewer.
+const R={hours:0, from:null, to:null};
+try{ Object.assign(R, JSON.parse(localStorage.getItem('burndown.range')||'{}')); }catch(e){}
+const toLocal=t=>{const d=new Date(t*1000); const z=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+'T'+z(d.getHours())+':'+z(d.getMinutes());};
+function bounds(){ if(!D||!D.rows.length) return [0,Infinity]; const last=D.rows[D.rows.length-1].t;
+  if(R.from!=null||R.to!=null) return [R.from!=null?R.from:0, R.to!=null?R.to:last];
+  return R.hours? [last-R.hours*3600, last] : [0,last]; }
+function syncControls(){ const [a,b]=bounds(); $('#seg').querySelectorAll('button').forEach(x=>x.classList.toggle('on', R.from==null&&R.to==null&&+x.dataset.h===R.hours));
+  if(D&&D.rows.length){ $('#from').value=toLocal(Math.max(a,D.rows[0].t)); $('#to').value=toLocal(Math.min(b,D.rows[D.rows.length-1].t)); }
+  try{ localStorage.setItem('burndown.range', JSON.stringify(R)); }catch(e){} }
+$('#seg').addEventListener('click',e=>{const b=e.target.closest('button'); if(!b)return; R.hours=+b.dataset.h; R.from=R.to=null; syncControls(); draw();});
+$('#from').addEventListener('change',()=>{ R.from=new Date($('#from').value).getTime()/1000||null; syncControls(); draw(); });
+$('#to').addEventListener('change',()=>{ R.to=new Date($('#to').value).getTime()/1000||null; syncControls(); draw(); });
+$('#now').addEventListener('click',()=>{ R.to=null; syncControls(); draw(); });
 function fmtT(t){const d=new Date(t*1000);return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toTimeString().slice(0,5);}
 function draw(){
-  const rows=D.rows, ms=D.milestones.filter(m=>!hidden.has(m));
+  const [t0,t1]=bounds(); let rows=D.rows.filter(r=>r.t>=t0&&r.t<=t1); if(rows.length<2) rows=D.rows.slice(-2);
+  const ms=D.milestones.filter(m=>!hidden.has(m));
   const W=1000,H=380,L=44,R=12,T=14,B=28; const x0=rows[0].t,x1=rows[rows.length-1].t;
   const X=t=>L+(t-x0)/Math.max(1,x1-x0)*(W-L-R);
   const totals=rows.map(r=>ms.reduce((s,m)=>s+(r.open[m]||0),0)); const planned=rows.map(r=>Object.values(r.planned||{}).reduce((a,b)=>a+b,0)); const ymax=Math.max(10,...totals.map((v,k)=>v+planned[k]));
@@ -186,16 +210,17 @@ function draw(){
   $('#leg').innerHTML=D.milestones.map(m=>`<label class="${hidden.has(m)?'off':''}" data-m="${m}"><i style="background:${COL[D.milestones.indexOf(m)%COL.length]}"></i>${m} <span class=num>${D.now.open[m]||0}</span></label>`).join('');
   $('#leg').querySelectorAll('label').forEach(l=>l.onclick=()=>{const m=l.dataset.m; hidden.has(m)?hidden.delete(m):hidden.add(m); draw();});
   // bars
-  const days=Object.keys(D.days).sort(); const W2=1000,H2=200,B2=26,T2=10; const bw=(W2-L-R)/days.length; const vmax=Math.max(5,...days.map(d=>Math.max(D.days[d].filed,D.days[d].closed)));
+  const dayKey=t=>{const d=new Date(t*1000); const z=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate());};
+  const days=Object.keys(D.days).sort().filter(d=>d>=dayKey(t0)&&d<=dayKey(t1)); const W2=1000,H2=200,B2=26,T2=10; const bw=(W2-L-R)/days.length; const vmax=Math.max(5,...days.map(d=>Math.max(D.days[d].filed,D.days[d].closed)));
   let b=''; days.forEach((d,i)=>{const f=D.days[d].filed,c=D.days[d].closed; const x=L+i*bw; const hf=f/vmax*(H2-T2-B2), hc=c/vmax*(H2-T2-B2);
     b+=`<rect x="${x+bw*0.12}" y="${H2-B2-hf}" width="${bw*0.36}" height="${hf}" fill="#E47B68" fill-opacity=".8"><title>${d}: filed ${f}</title></rect><rect x="${x+bw*0.52}" y="${H2-B2-hc}" width="${bw*0.36}" height="${hc}" fill="#52C2AE" fill-opacity=".8"><title>${d}: closed ${c}</title></rect>`;
     b+=`<text x="${x+bw/2}" y="${H2-B2+14}" fill="#8595A0" font-size="11" text-anchor="middle">${d.slice(5)}</text><text x="${x+bw*0.30}" y="${H2-B2-hf-3}" fill="#E47B68" font-size="10" text-anchor="middle" font-family="Menlo,monospace">${f||''}</text><text x="${x+bw*0.70}" y="${H2-B2-hc-3}" fill="#52C2AE" font-size="10" text-anchor="middle" font-family="Menlo,monospace">${c||''}</text>`;});
   $('#bars').innerHTML=b+`<text x="${W2-R}" y="${T2+4}" fill="#8595A0" font-size="11" text-anchor="end"><tspan fill="#E47B68">■</tspan> filed  <tspan fill="#52C2AE">■</tspan> closed</text>`;
   const last=rows[rows.length-1], first=rows[0]; const doneNow=Object.values(last.done).reduce((a,b)=>a+b,0);
-  const d3=days.slice(-3).reduce((a,d)=>({f:a.f+D.days[d].filed,c:a.c+D.days[d].closed}),{f:0,c:0});
-  $('#stats').innerHTML=`<span>open now <b>${D.now.total_open}</b></span><span>done <b>${doneNow}</b></span><span>planned (not backlog, dashed line) <b>${D.now.total_planned||0}</b></span><span>last 3 days: filed <b>${d3.f}</b> · closed <b>${d3.c}</b></span><span>snapshots <b>${rows.length}</b> from ${fmtT(first.t)} to ${fmtT(last.t)}</span>`;
+  const d3=days.reduce((a,d)=>({f:a.f+D.days[d].filed,c:a.c+D.days[d].closed}),{f:0,c:0});
+  $('#stats').innerHTML=`<span>open now <b>${D.now.total_open}</b></span><span>done <b>${doneNow}</b></span><span>planned (not backlog, dashed line) <b>${D.now.total_planned||0}</b></span><span>in range: filed <b>${d3.f}</b> · closed <b>${d3.c}</b></span><span>snapshots <b>${rows.length}</b> from ${fmtT(first.t)} to ${fmtT(last.t)}</span>`;
   $('#sub').textContent='from git history of docs/tasks.yaml · '+new Date().toTimeString().slice(0,8);
 }
-async function load(){try{const r=await fetch('/burndown.json');D=await r.json(); if(D.error){$('#sub').textContent=D.error;return;} if(!D.rows.length){$('#sub').textContent='no snapshots yet';return;} draw();}catch(e){$('#sub').textContent='load failed: '+e;}}
+async function load(){try{const r=await fetch('/burndown.json');D=await r.json(); if(D.error){$('#sub').textContent=D.error;return;} if(!D.rows.length){$('#sub').textContent='no snapshots yet';return;} syncControls(); draw();}catch(e){$('#sub').textContent='load failed: '+e;}}
 load(); setInterval(load,60000);
 </script></body></html>"""
