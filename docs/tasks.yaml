@@ -20396,7 +20396,8 @@ tasks:
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
-    status: todo
+    status: done
+    commit: 2e3c0a46
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20449,7 +20450,8 @@ tasks:
   - id: T-617
     milestone: MAUTO
     title: 'Calibration tables must declare their achievable bit levels and their n (eye_open is non-invertible at 4 and 6 bits)'
-    status: todo
+    status: done
+    commit: 2e3c0a46
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20499,7 +20501,8 @@ tasks:
   - id: T-618
     milestone: MAUTO
     title: 'M-2: condition calibration tables on ADC FILL (sigma in LSB), not gain; size the sampling budget'
-    status: todo
+    status: done
+    commit: 2e3c0a46
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -21762,6 +21765,62 @@ tasks:
       checked, rather than assumed, that 14 OTHER Chrome processes on the box belonged to a
       different agent's live worktree and left those alone - the right instinct, and the reason a
       blanket sweep is not the fix here either.
+  - id: T-760
+    milestone: MLIVE
+    title: The growing edge still loses frames to a reader - raising the view queue 600 to 1500 did not fix it, because the writer is starved of the pyramid lock
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: 'the coordinator, 2026-09-22, triaging a gate failure on task-t633'
+    acceptance: |
+      MEASURED IN ISOLATION, ON MAIN, AND IT IS A REAL BUG - NOT A LOAD-FLAKE.
+      `hk-pipeline::live_edge_tiles the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture`
+      fails its final assertion, `view_dropped == 0` ("the growing edge lost frames to a reader"),
+      running the binary ALONE:
+        task-t633 (merged with main):  2 failures in 5 runs
+        main alone (dc7c3bdc):         1 failure in 5 runs
+      Small samples, so do not read a difference between those two rates - the point is that MAIN
+      REPRODUCES IT. t633 is innocent; its gate failure was this defect and it should be re-queued.
+      It first surfaced 2026-09-22 in the gate for task-t633 (2447 of 2448 passed), and had never
+      failed before in the merge runner's log - so it also passed inside the eight-branch bulk gate
+      an hour earlier. At a ~20-40 % rate a single full-suite run gets lucky most of the time, which
+      is exactly how a real defect hides in a gate that runs each test once.
+      WHY THIS IS NOT A TUNING PROBLEM, AND MUST NOT BE FIXED BY ANOTHER CAPACITY BUMP.
+      `VIEW_QUEUE_FRAMES` in `crates/hk-pipeline/src/history.rs` was ALREADY raised from 600 to
+      1500 for this exact symptom, and its own doc comment records the measurement: "with a reader
+      holding the pyramid for 15 ms out of every 16 ... 600 frames overflowed and 340 of the
+      growing edge's frames were DROPPED - the same failure as blocking for a tile read, spelled as
+      loss." It is still dropping. Raising it again would make the failure rarer without making it
+      wrong less often, which is the pattern this project rejects (see T-603: "do not lengthen a
+      wait; that makes it rarer").
+      THE MECHANISM TO ATTACK IS LOCK STARVATION, NOT QUEUE DEPTH. `ViewQueue::push` is correct and
+      deliberately drop-OLDEST ("the newest frame is the growing edge, which is the whole point of
+      the surface"), so a drop means the WRITER could not retire frames, not that the producer
+      misbehaved. The writer folds into `Arc<Mutex<Pyramid>>` on its own thread - that thread exists
+      precisely so the seal does not land on a thread that gates capture - but a `/api/tiles` reader
+      holding the same mutex 15 ms in every 16 leaves the writer ~1/16 of the time, and T-571's live
+      cascade made each frame more work to retire. No queue depth survives an arbitrarily long
+      reader.
+      SHAPES TO WEIGH, and say why you chose one: give the writer priority or a fair share of the
+      pyramid lock; let readers work from a snapshot or a read-copy so they do not hold the writer's
+      mutex at all; or bound how long any single reader may hold it, which turns an unbounded stall
+      into a stated one. Whatever is chosen, the INVARIANT is the one the test already states: the
+      writer being behind is expected and fine, DROPPING the growing edge is not.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): `view_dropped` over a stated number of
+      runs under a reader that holds the pyramid a stated fraction of the time. Report the failure
+      rate BEFORE and AFTER over at least 20 isolated runs - 5 is enough to prove a bug exists and
+      nowhere near enough to prove one is gone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-22. This is an MLIVE invariant: "the live view renders like a classic SDR
+      waterfall, rows append in real time as they are recorded, and live is NEVER gated on batch
+      tile generation". Losing rows to a tile reader is that invariant failing in the "lost them
+      instead" direction, which the test's own comment names: "losing the growing edge would be the
+      same failure as blocking for it, spelled differently."
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
