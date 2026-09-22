@@ -582,6 +582,12 @@ def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
+    # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
+    # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
+    # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
+    if os.path.exists(f"{S}/dispatch-paused") or os.path.exists(f"{S}/gate-wanted") or gate_running():
+        attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
+        return dict(c, state="fix-held", fail_line=fail_line[:300])
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
