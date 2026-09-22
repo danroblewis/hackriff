@@ -535,7 +535,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="p50/p90 per class and per phase only — what `just gate-stats` prints",
     )
+    parser.add_argument(
+        "--check-budget",
+        action="store_true",
+        help=(
+            "exit 1 if a class's rolling median is over budget. T-762 moved this assertion off "
+            "the merge path, where it deadlocked the pipeline: a slow run failed every branch, "
+            "including the ones that would have made it faster, and each failure appended "
+            "another slow record and pushed the median further over. Here a human asks on "
+            "purpose, so failing is useful rather than paralysing."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.check_budget:
+        breaches = budget_breaches(gatelog.runs(gatelog.read()))
+        for line in breaches:
+            print(f"OVER BUDGET: {line}")
+        if breaches:
+            print(
+                "\nThis measures THIS MACHINE'S recorded history, not the code under test - "
+                "no diff clears it. Reduce the cost, or change the budget deliberately."
+            )
+            return 1
+        print("duration: every class within budget")
+        return 0
     if args.stats:
         for line in stats(gatelog.runs(gatelog.read())):
             print(line)

@@ -19,6 +19,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use hk_model::ContentClass;
@@ -63,6 +64,63 @@ impl OpenRequest {
     }
 }
 
+/// How the **transport** saw an on-demand session end (T-633).
+///
+/// The session guard is a bare `drop`, so a producer that counted every dropped guard as "the
+/// client went away" reported a server-side reap and a transport fault under the same label an
+/// operator reads to blame their own client. These are the cases the transport can actually
+/// distinguish; a producer maps them onto its own counters, and [`SessionEnd::Unattributed`]
+/// stays its own answer rather than collapsing into the convenient one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SessionEnd {
+    /// The guard was dropped without the transport saying why. **Not** a client end.
+    #[default]
+    Unattributed = 0,
+    /// An affirmative end from the client: a close frame, a hang-up, a data message, or Stop.
+    Client = 1,
+    /// The server stopped hearing the peer (no pong for the peer timeout) and reaped it. Nobody
+    /// said the client went away; the server gave up on it.
+    Unresponsive = 2,
+    /// A reset, or a read/write error on the connection.
+    Transport = 3,
+}
+
+impl SessionEnd {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Client,
+            2 => Self::Unresponsive,
+            3 => Self::Transport,
+            _ => Self::Unattributed,
+        }
+    }
+}
+
+/// The slot a transport sets **before** dropping [`OpenedStream::session`], so the producer can
+/// count the end it actually had (T-633). Shared with the producer; `Unattributed` until set.
+#[derive(Clone, Debug, Default)]
+pub struct SessionEndSlot(Arc<AtomicU8>);
+
+impl SessionEndSlot {
+    /// Records how the transport saw the session end. The **first** attribution wins, so a
+    /// later, less informed drop cannot overwrite it.
+    pub fn set(&self, end: SessionEnd) {
+        let _ = self.0.compare_exchange(
+            SessionEnd::Unattributed as u8,
+            end as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    /// What the transport reported, or [`SessionEnd::Unattributed`].
+    #[must_use]
+    pub fn get(&self) -> SessionEnd {
+        SessionEnd::from_u8(self.0.load(Ordering::SeqCst))
+    }
+}
+
 /// A stream opened for one consumer.
 pub struct OpenedStream {
     /// The stream header (also the first frame every consumer receives).
@@ -71,6 +129,8 @@ pub struct OpenedStream {
     pub handle: PublisherHandle,
     /// Dropping it stops the producer (detaches its chain).
     pub session: Box<dyn Any + Send>,
+    /// How the transport saw the session end (T-633), set before `session` is dropped.
+    pub end: SessionEndSlot,
 }
 
 /// Why a stream was not opened. Carries no content.

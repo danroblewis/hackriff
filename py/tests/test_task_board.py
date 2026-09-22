@@ -340,3 +340,38 @@ def test_the_board_parses_as_strict_yaml_and_ids_are_unique() -> None:
     ids = [str(t.get("id")) for t in tasks]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     assert not dupes, f"duplicate ticket ids after a merge: {dupes} - renumber one side (never reuse an id)"
+
+
+def test_no_scalar_field_reads_as_a_nested_mapping(records) -> None:
+    """An unquoted scalar containing ``": "`` is a MAPPING to a YAML loader, not a string.
+
+    T-640's title contained ``sources[iq-ring].available: true``. Unquoted, `yaml.safe_load`
+    reads that as a nested key and rejects the document: "mapping values are not allowed here".
+    The board still worked everywhere that parses it leniently — this file's own guards and
+    `hkpy.reconcile` both tolerated it — so the break reached `main` invisibly and surfaced only
+    as a dashboard render error, which is the worst way to find out.
+
+    That is the gap this closes: **every other guard here is textual, so a file that strict YAML
+    rejects could still pass all of them.** A checker that cannot see the failure mode it exists
+    to prevent is the same shape as a nextest override naming a package no run can see, and as a
+    staged-bulk marker written where its only reader never looks.
+
+    Deliberately stdlib, like the rest of this file: `pyyaml` is not a dependency of `py/`
+    (`hkpy.boardmerge` says so explicitly), and adding one to run a linter would be a heavier
+    answer than the defect deserves. This catches the specific construct that broke it — a
+    plain scalar whose value contains a colon-space — which is the only way this has ever failed.
+    """
+    bad = [
+        (i, k, v)
+        for i, f in records
+        for k, v in f.items()
+        if isinstance(v, str)
+        and v[:1] not in ("'", '"', "|", ">", "[")
+        and ": " in v
+    ]
+    assert not bad, (
+        "these values contain ': ' and are not quoted, so a YAML loader reads them as a nested "
+        "mapping and rejects the file:\n  "
+        + "\n  ".join(f"{i}: {k}: {v[:80]}" for i, k, v in bad)
+        + "\nQuote the value."
+    )

@@ -234,6 +234,38 @@ def _age(sec: float | None) -> str:
 
 
 
+
+def ops_dir() -> Path:
+    """Where the merge runner's state actually lives — asked, not assumed.
+
+    `HACKRIFF_OPS` is per-process, so the runner and whoever reads its state can disagree about
+    the directory. On 2026-09-22 they did, and the worst instance was this module: a bulk was
+    staged, `bulk-in-progress` existed, and `just reconcile` in a session with no `HACKRIFF_OPS`
+    printed "no in-progress tickets" with no warning at all. The marker's whole purpose is to stop
+    a reader trusting a provisional `main`, so a marker the reader cannot see is the same
+    false-quiet one level up — the failure this project keeps rediscovering in new clothes
+    (`Coverage::Unobserved` is not quiet; an override naming a package no run can see).
+
+    Resolution order, most specific first: an explicit `HACKRIFF_OPS`; then the pointer the runner
+    publishes at the fixed default (`~/.hackriff-ops/active-ops-dir`), which is how a session that
+    sets nothing still finds it; then the fixed default itself.
+
+    A pointer to a directory that no longer exists is ignored rather than trusted, so a stale
+    pointer degrades to the default instead of silently hiding the marker again.
+    """
+    env = os.environ.get("HACKRIFF_OPS")
+    if env:
+        return Path(env)
+    default = Path.home() / ".hackriff-ops"
+    try:
+        pointed = Path((default / "active-ops-dir").read_text(encoding="utf-8").strip())
+        if pointed.is_dir():
+            return pointed
+    except OSError:
+        pass
+    return default
+
+
 def bulk_warning(now: float | None = None) -> str:
     """Report the merge runner's staged-bulk window, or "" when main is authoritative.
 
@@ -243,8 +275,7 @@ def bulk_warning(now: float | None = None) -> str:
     process is gone is reported as such and NOT cleared, since a runner that died mid-bulk leaves
     main provisional for real.
     """
-    ops = Path(os.environ.get("HACKRIFF_OPS", Path.home() / ".hackriff-ops"))
-    mark = ops / "bulk-in-progress"
+    mark = ops_dir() / "bulk-in-progress"
     try:
         fields = dict(
             line.split("=", 1) for line in mark.read_text(encoding="utf-8").splitlines() if "=" in line
@@ -266,13 +297,52 @@ def bulk_warning(now: float | None = None) -> str:
         "  !! A BULK MERGE IS STAGED ON MAIN — EVERY READING BELOW IS PROVISIONAL.",
         f"     branches: {branches}",
         f"     gated-from: {fields.get('base', '?')}   started {age} ago"
-        + ("" if alive else f"   (runner pid {pid} IS GONE — main is left ungated)"),
+        + (
+            f"   (runner pid {pid} alive)"
+            if alive and pid
+            else f"   (runner pid {pid} IS GONE — main is left ungated)"
+            if pid
+            else "   (no runner pid recorded)"
+        ),
         "     `ahead=0` right now means CURRENTLY merged, not DURABLY merged: the gate can still",
         "     fail and reset main back to gated-from. Do NOT delete a branch, do NOT flip a ticket",
         "     to done, and do NOT cut a new worktree from main until this clears.",
         "",
     ]
     return "\n".join(lines)
+
+
+
+def landed_but_not_in_progress(text: str) -> list[tuple[str, str]]:
+    """`todo` tickets whose id is named by a merge commit on `main` — (id, subject) pairs.
+
+    `inspect` only looks at tickets the board calls `in-progress`, which assumes every ticket
+    passes through that state. Plenty do not: an agent is briefed, works and hands back while the
+    board still says `todo`, and the coordinator flips it straight to `done` at merge. When that
+    last step is missed the ticket is invisible to this tool FOREVER — it is not in-progress, so
+    nothing checks it, and it is not done, so it looks like open work.
+
+    That happened on 2026-09-22 to T-625 and T-626: both merged via `task-adcfill` and both still
+    read `todo` hours later, with `reconcile` reporting "no in-progress tickets — the board claims
+    nothing is running". The tool designed to catch a stale board said the board was clean.
+
+    So this asks git the other question: which `todo` ids does `main` already name in a merge
+    subject? It is deliberately a WEAKER signal than `inspect`'s — a subject naming an id is not
+    proof the work landed, only that something merged claiming to be it — so it is reported as
+    "worth checking", never asserted as merged. Same discipline as MERGED meaning "a merge commit
+    names this tip", not mere ancestry.
+    """
+    subjects = _git("log", "--merges", "--format=%h %s", "main", "-n", "400").splitlines()
+    todo = {
+        m.group(1)
+        for m in re.finditer(r"(?m)^  - id: (T-\d+[a-z]?)\n(?:    .*\n)*?    status: todo$", text)
+    }
+    out: list[tuple[str, str]] = []
+    for line in subjects:
+        for tid in sorted(todo):
+            if re.search(rf"\b{re.escape(tid)}\b", line):
+                out.append((tid, line.strip()))
+    return sorted(set(out))
 
 
 def render(findings: list[Finding]) -> str:
@@ -326,6 +396,14 @@ def main(argv: list[str] | None = None) -> int:
     now = time.time()
     findings = [inspect(t, now) for t in tickets(text) if t.status == "in-progress"]
     sys.stdout.write(bulk_warning(now) + render(findings))
+    landed = landed_but_not_in_progress(text)
+    if landed:
+        sys.stdout.write(
+            "\n  !! These tickets still read `todo`, but a merge commit on main NAMES them —\n"
+            "     they never passed through `in-progress`, so the checks above cannot see them:\n"
+            + "".join(f"       {tid}  {subject}\n" for tid, subject in landed)
+            + "     A subject naming an id is not proof the work landed. Verify by CONTENT, then flip.\n"
+        )
     if args.strict and any(f.needs_attention for f in findings):
         return 1
     return 0

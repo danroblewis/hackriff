@@ -63,7 +63,8 @@ use hk_stream::audio::{
 };
 use hk_stream::{
     BinaryRecord, OpenRefusal, OpenRequest, OpenedStream, Publisher, PublisherConfig,
-    PublisherHandle, RecordFlags, StreamHeader, StreamKind, StreamOpener,
+    PublisherHandle, RecordFlags, SessionEnd, SessionEndSlot, StreamHeader, StreamKind,
+    StreamOpener,
 };
 use num_complex::Complex;
 
@@ -287,9 +288,23 @@ impl Drop for StopOnDrop {
 }
 
 /// Why a chain ended (`/listen/closed_*`).
+///
+/// **T-633.** The session guard is a bare `drop`, so every end that arrived through it used to be
+/// counted `closed_client` — "the client went away" — including a peer the *server* reaped for
+/// silence, a transport fault, and a drop nobody attributed. `closed_client` is the counter an
+/// operator reads to blame their own client, so those now have their own answers, and a chain
+/// that ended for a **source** reason is counted under that reason whoever dropped the guard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum End {
+    /// The client affirmatively went away: a close frame, a FIN, a data message, or Stop.
     Client,
+    /// The server stopped hearing the peer and reaped it.
+    Unresponsive,
+    /// A reset, or a read/write error on the connection. The connection was torn down; whether
+    /// the client went away is not something this says.
+    Transport,
+    /// The guard was dropped and the transport reported no reason.
+    Unattributed,
     Idle,
     Squelch,
     Retune,
@@ -302,6 +317,9 @@ impl End {
     fn count(self, lc: &ListenCounters) {
         inc(match self {
             End::Client => &lc.closed_client,
+            End::Unresponsive => &lc.closed_unresponsive,
+            End::Transport => &lc.closed_transport,
+            End::Unattributed => &lc.closed_unattributed,
             End::Idle => &lc.closed_idle,
             End::Squelch => &lc.closed_squelch,
             End::Retune => &lc.closed_retune,
@@ -639,6 +657,8 @@ impl ListenManager {
         stat.set_channel(plan.channel_center_hz, plan.channel_bandwidth_hz);
         stat.set_stream(&header.stream_id, handle.clone());
         let stop = Arc::new(AtomicBool::new(false));
+        // T-633: the transport records how the session ended here before dropping the guard.
+        let end_slot = SessionEndSlot::default();
         // T-070: the refined tuning goes on the target emitter (or the inventory emitter at the
         // refined channel) and keeps being refined in the background while streaming.
         let refine_emitter = refined.as_ref().and_then(|o| {
@@ -661,6 +681,7 @@ impl ListenManager {
             refiner,
             refine_emitter: refine_emitter.or(emitter),
             refined: refined_tuning,
+            end_slot: end_slot.clone(),
             _slot: slot.clone(),
             stat,
         };
@@ -682,6 +703,7 @@ impl ListenManager {
             header,
             handle,
             session: Box::new(StopOnDrop { stop, slot }),
+            end: end_slot,
         })
     }
 }
@@ -737,6 +759,8 @@ struct Session {
     refine_emitter: Option<EmitterId>,
     /// Refined centre and bandwidth in force.
     refined: Option<(f64, f64)>,
+    /// How the transport said the session ended (T-633), read when `stop` is seen.
+    end_slot: SessionEndSlot,
     _slot: Slot,
     /// The chain's own counters (T-071).
     stat: ChainStatGuard,
@@ -771,6 +795,29 @@ impl Session {
         }
     }
 
+    /// Why this chain stopped when its session guard was dropped (T-633).
+    ///
+    /// A **source** reason outranks the session: a chain whose segment has already closed did not
+    /// end because the client went away, whichever thread got there first — and the guard is
+    /// dropped by the very socket shutdown a finished producer causes, so the race is real, not
+    /// theoretical. Otherwise the end is the one the transport reported, and an end the transport
+    /// did not attribute stays unattributed rather than resolving to the convenient label.
+    fn session_end(&self) -> End {
+        if self.shared.ring.is_closed() || self.shared.stop.load(Ordering::SeqCst) {
+            return if self.shared.continues.load(Ordering::SeqCst) {
+                End::Segment
+            } else {
+                End::Source
+            };
+        }
+        match self.end_slot.get() {
+            SessionEnd::Client => End::Client,
+            SessionEnd::Unresponsive => End::Unresponsive,
+            SessionEnd::Transport => End::Transport,
+            SessionEnd::Unattributed => End::Unattributed,
+        }
+    }
+
     fn run(mut self) {
         let counters = Arc::clone(&self.shared.counters);
         let lc = &counters.listen;
@@ -795,7 +842,7 @@ impl Session {
         super::set_thread_stat(Some(self.stat.stat()));
         let end = loop {
             if self.stop.load(Ordering::SeqCst) {
-                break End::Client;
+                break self.session_end();
             }
             if self.handle.open_consumers() > 0 {
                 last_consumer = Instant::now();

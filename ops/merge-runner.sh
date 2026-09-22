@@ -10,6 +10,21 @@
 set -uo pipefail
 REPO=/Users/daniellewis/hackriff
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"; mkdir -p "$S"
+# T-761: SAY WHERE THE OPS STATE IS, at a location everyone can find without being told.
+#
+# `HACKRIFF_OPS` is per-process, so the runner and the coordinator can disagree about where the
+# queue, the log and the staged-bulk marker live — and on 2026-09-22 they did, four times: two
+# branches were stranded because a queue append went to a file the runner never read, a stale
+# entry sat in the other copy, and — worst — T-650's `bulk-in-progress` marker was INVISIBLE to
+# the coordinator's `just reconcile`, which is the one reader it was written for. A warning nobody
+# receives is the false-quiet the marker exists to remove, reproduced one level up.
+#
+# So the runner publishes its own choice at the FIXED default path. Anything that needs the ops
+# state reads this pointer instead of guessing, and a session with no `HACKRIFF_OPS` at all lands
+# in the right directory. The pointer is written on every start, so a restart under a different
+# env corrects it rather than leaving a stale claim.
+mkdir -p "$HOME/.hackriff-ops"
+printf '%s\n' "$S" > "$HOME/.hackriff-ops/active-ops-dir"
 QUEUE=$S/merge-queue.txt
 NEEDS=$S/merge-needs-attention.txt
 DONELOG=$S/merge-done.txt
@@ -124,6 +139,27 @@ process(){
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
   if just gate-merge >>"$LOG" 2>&1; then
+    # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
+    #
+    # `git commit` with no MERGE_HEAD writes an ORDINARY commit of whatever is in the index. On
+    # 2026-09-22 a `git stash` in another session dropped MERGE_HEAD mid-gate, and this line
+    # committed `ea91c27c`: a SINGLE-PARENT commit carrying 4 of the branch's 44 files. It looked
+    # like a merge in the log, the gate had passed, and nothing said otherwise - the branch read as
+    # landed while most of its work was not on main.
+    #
+    # The runner already refuses to START a merge when MERGE_HEAD is present; this is the symmetric
+    # check at the other end, and it fails CLOSED: if the state is not exactly what we gated, do not
+    # commit, leave main untouched, and hand it to a person. A wrong merge is far worse than a
+    # delayed one.
+    local staged_head branch_tip
+    staged_head=$(git -C "$REPO" rev-parse --verify --quiet MERGE_HEAD || true)
+    branch_tip=$(git -C "$REPO" rev-parse --verify --quiet "$branch" || true)
+    if [ -z "$staged_head" ] || [ "$staged_head" != "$branch_tip" ]; then
+      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - NOT committing"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST" >> "$NEEDS"
+      notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
+      return 0
+    fi
     git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
     log "MERGED $branch ✓"
     record_landed "$branch"
