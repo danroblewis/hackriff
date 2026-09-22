@@ -57,24 +57,26 @@ MERGE_QUEUE = f"{S}/merge-queue.txt"
 BULKMARK = f"{S}/bulk-in-progress"
 LANDED = f"{S}/landed.jsonl"
 
-# Agents are cheap while they think (~1% CPU each, measured 2026-09-22); builds are what saturate
-# the 28 cores. So the ceiling is on AGENTS (8), and admission per tick is dynamic: the 1-minute
-# load average must be under WORK_LOAD_MAX, disk over the floor, and a running gate counts as one
-# builder. At most WORK_PER_TICK launches per tick so the load ramps instead of bursting.
-CAP = int(os.environ.get("WORK_CAP", "8"))
-LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "20"))
+# THE RESOURCE MODEL IS A FIXED BUDGET, NOT A HEURISTIC (user, 2026-09-22). This box has 28 cores
+# (M3 Ultra: 20 performance + 8 efficiency). The merge gate is reserved 14 (its 6 build jobs + 8 test
+# threads, on P-cores, never contended). Each worker is BOUNDED, and the bound is inherited by its
+# whole process tree: CARGO_BUILD_JOBS and NEXTEST_TEST_THREADS (environment - every rustc and test
+# runner it spawns obeys them) plus a `taskpolicy -c background` QoS clamp at launch, which on Apple
+# Silicon confines the tree to the efficiency cores. So a worker costs ~WORKER_CORES, the count is
+# CAP, and the gate always has its reserve. No load-average admission, no gate-time throttling, no
+# suspend/resume: a known bound per worker is the whole mechanism.
+CORES = int(os.environ.get("WORK_CORES", "28"))
+GATE_RESERVE = int(os.environ.get("WORK_GATE_RESERVE", "14"))
+WORKER_JOBS = os.environ.get("WORK_WORKER_JOBS", "2")            # cargo build jobs per worker
+WORKER_TEST_THREADS = os.environ.get("WORK_WORKER_TEST_THREADS", "2")
+WORKER_CORES = int(os.environ.get("WORK_WORKER_CORES", "3"))    # what one worker may occupy at peak
+CAP = int(os.environ.get("WORK_CAP", str(max(1, (CORES - GATE_RESERVE) // WORKER_CORES))))
 PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
+LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "40"))   # a tripwire only; the budget is the mechanism
 # Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
 # behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
-# THE GATE COMES FIRST. 2026-09-22 08:06-09:55: three docs-only branches (t800, t763, t299) each failed
-# an individual gate on a different load-sensitive test while 6-8 workers built beside it at load ~17,
-# and every failure costs a 50-minute isolation pass. So while a gate runs, admission drops to
-# GATE_CAP workers and GATE_LOAD_MAX load; the original CLAUDE.md rule (4 builders INCLUDING the
-# gate) was this, and raising the cap to 8 without it was the mistake.
-GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "5"))
-GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "18"))   # the gate alone runs this box at 8-13; workers are on E-cores meanwhile
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -88,18 +90,13 @@ FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
 RELEASE_AFTER_H = float(os.environ.get("WORK_RELEASE_AFTER_H", "4"))
-# EXCLUSIVE GATE: when the merge runner writes $HACKRIFF_OPS/gate-exclusive (its retry of a batch that
-# failed only on load-sensitive tests), every running worker is suspended - terminated now, resumed
-# later through its session id, the same path a gate-failure fix uses - and nothing is dispatched
-# until the flag is gone. The gate gets the whole machine for that one run.
-EXCLUSIVE = f"{S}/gate-exclusive"
 MERGE_NEEDS = f"{S}/merge-needs-attention.txt"
 MERGE_LOG = f"{S}/merge-runner.log"
 BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
 MODEL_ALIAS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "claude-fable-5-1"}
 EFFORTS = ("low", "medium", "high")
 PRI = {"high": 0, "medium": 1, "normal": 2, "low": 3}
-CARGO_ENV = {"CARGO_BUILD_JOBS": "6", "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
+CARGO_ENV = {"CARGO_BUILD_JOBS": WORKER_JOBS, "NEXTEST_TEST_THREADS": WORKER_TEST_THREADS, "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
 
 
 def log(msg):
@@ -305,12 +302,11 @@ def launch(t, dry):
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    # QoS: a worker runs at `utility` + nice 10 from birth, below the gate's default tier for CPU and
-    # I/O. While a gate runs, apply_gate_qos() drops every worker to `background`, which on Apple
-    # Silicon means the efficiency cores only - the 20 P-cores of this M3 Ultra belong to the gate.
-    p = subprocess.Popen(["taskpolicy", "-c", "utility", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+    # The bound, inherited by the whole tree: the CARGO/NEXTEST limits in env, and a permanent
+    # `background` QoS clamp (efficiency cores only on Apple Silicon). Nothing ever lifts it.
+    p = subprocess.Popen(["taskpolicy", "-c", "background", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; utility QoS)")
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
@@ -719,8 +715,7 @@ def candidates(tasks, claims):
 
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
-    gate = gate_running()
-    cap = min(CAP - 1, GATE_CAP) if gate else CAP
+    cap = CAP
     free = cap - len(running)
     if free <= 0:
         return False
@@ -728,9 +723,8 @@ def dispatch(claims, dry):
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
         return False
     load1 = os.getloadavg()[0]
-    lmax = GATE_LOAD_MAX if gate else LOAD_MAX
-    if load1 > lmax:
-        log(f"HOLD: load {load1:.0f} > {lmax:.0f} ({len(running)} running{', gate running' if gate else ''})")
+    if load1 > LOAD_MAX:
+        log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
         return False
     free = min(free, PER_TICK)
     try:
@@ -796,63 +790,12 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
-def apply_gate_qos(claims):
-    """The macOS stand-in for a cgroup: while a gate runs, every worker process group goes to
-    background QoS (E-cores only, throttled I/O); when it ends they come back to utility. Applied to
-    every pid in the group each tick, so children spawned since are caught too."""
-    gate = gate_running()
-    for tid, c in claims.items():
-        if c.get("state") != "running":
-            continue
-        pgid = c.get("pid")
-        pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
-        if not pids:
-            continue
-        want = "bg" if gate else "fg"
-        if c.get("qos") == want and len(pids) == c.get("qos_n"):
-            continue
-        flag = "-b" if gate else "-B"
-        for pid in pids:
-            subprocess.run(["taskpolicy", flag, "-p", pid], capture_output=True)
-        if c.get("qos") != want:
-            log(f"QOS {tid}: {'background (E-cores) while the gate runs' if gate else 'restored to utility'} ({len(pids)} processes)")
-        c["qos"] = want; c["qos_n"] = len(pids)
-
-
-def exclusive_gate(claims):
-    """Suspend workers while the merge runner holds gate-exclusive; resume them after."""
-    if os.path.exists(EXCLUSIVE):
-        for tid, c in claims.items():
-            if c.get("state") == "running" and c.get("kind") == "work" and alive(c["pid"]):
-                try:
-                    os.killpg(c["pid"], signal.SIGTERM)
-                except OSError:
-                    pass
-                c["state"] = "suspended"; c["suspended_at"] = time.time()
-                log(f"SUSPEND {tid}: exclusive gate (will resume session {str(c.get('session_id', '?'))[:8]})")
-        return True
-    for tid, c in list(claims.items()):
-        if c.get("state") == "suspended":
-            res = result_of(c.get("out") or f"{WORKDIR}/{tid}/out.json")
-            if res.get("session_id"):
-                c["session_id"] = res["session_id"]
-            if c.get("session_id") and os.path.isdir(c.get("wt", "")):
-                claims[tid] = dict(launch_fix(dict(c, kind="work"), "RESUME: the gate needed the machine and your run was suspended; continue exactly where you left off - nothing about the ticket changed"), fix_attempts=c.get("fix_attempts", 0))
-                log(f"RESUME {tid} after the exclusive gate")
-            else:
-                c["state"] = "no-work"
-                attention(tid, c["branch"], "NO_WORK", "suspended for an exclusive gate before it had a session to resume")
-    return False
 
 
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
-    exclusive = exclusive_gate(claims) if not dry else False
-    try:
-        apply_gate_qos(claims)
-    except Exception as e:
-        log(f"apply_gate_qos error: {e}")
+
     try:
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
@@ -865,10 +808,7 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
-    if not exclusive:
-        changed |= dispatch(claims, dry)
-    else:
-        log("HOLD: exclusive gate")
+    changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
@@ -895,7 +835,7 @@ def tick(dry):
         frontier["held_groups"] = held
     except Exception:
         pass
-    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "gate_cap": GATE_CAP, "gate_load_max": GATE_LOAD_MAX, "cap": (min(CAP - 1, GATE_CAP) if gate_running() else CAP),
+    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
               "load_max": LOAD_MAX, "per_tick": PER_TICK}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))

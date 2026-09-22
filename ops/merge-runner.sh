@@ -246,7 +246,6 @@ ready_filter(){
 # merger to main, nothing has been pushed, and the batch is reconstructible from the
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
-EXCLUSIVE=$S/gate-exclusive
 FLAKY=$S/flaky.jsonl
 flake_retry(){ # base gate_log_start_line tickets -> exit 0 if the retried gate passed
   local base=$1 from=$2 tickets=$3 tests filter t rc
@@ -254,16 +253,16 @@ flake_retry(){ # base gate_log_start_line tickets -> exit 0 if the retried gate 
   [ -z "$tests" ] && { log "TRIAGE: no FAIL lines found (lint/build failure?) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
-  touch "$EXCLUSIVE"; sleep 45   # let the work runner suspend its workers and the load fall
+  # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
+  # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
+  # the reserve the gate always has.
   if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
-    log "TRIAGE: they PASS alone -> load flake; retrying the full gate with the machine to itself"
+    log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
     printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
     ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
-    rm -f "$EXCLUSIVE"
-    [ "$rc" -eq 0 ] && log "TRIAGE: exclusive retry PASSED" || log "TRIAGE: exclusive retry FAILED too -> isolating"
+    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> isolating"
     return $rc
   fi
-  rm -f "$EXCLUSIVE"
   log "TRIAGE: a test FAILS alone -> a real defect in this batch; isolating"
   return 1
 }
