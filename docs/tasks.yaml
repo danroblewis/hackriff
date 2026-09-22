@@ -20405,6 +20405,42 @@ tasks:
       granted voice channels are followed and their call count matches the unshifted run's. Prove
       the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-621
+    milestone: M2-hardening
+    title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      `crates/hk-cli/tests/api_contract.rs` -
+      `coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked` (~line 6203)
+      and `coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked`
+      (~line 6651) both assert `sources[iq-ring].available == true` and `spans > 0`.
+      `hk serve` REFUSES the IQ ring below an 8 GiB free-space floor - "needs 134217728 bytes above
+      the 8589934592-byte free-space floor and N are free" - so on a machine near that floor both
+      tests fail for a reason that has nothing to do with the code under test.
+      THIS IS NOT HYPOTHETICAL AND IT IS NOT A FLAKE. On 2026-09-21 it sank at least three merge
+      gates. T-596's agent measured one of them FAILING ALONE on `main` with its own work stashed,
+      which by the standing triage rule makes it a real bug rather than a load-flake. Free disk on
+      the dev machine ranged from 43 GiB to 1.1 GiB across the day because each building worktree
+      costs 8-10 GiB of newly-private APFS blocks after the ld64.lld change.
+      DECIDE WHAT THE TEST SHOULD DO WHEN ITS PRECONDITION IS ABSENT, which is the real question.
+      A silent skip is not acceptable here - "a gate that skips is a gate that passes for the wrong
+      reason" (T-346/T-353) - but neither is a red gate that means "this machine is low on disk".
+      The honest shapes to weigh: fail with a message that NAMES the refusal reason the server
+      already reports, so triage is instant rather than a 20-minute hunt; or assert the honest
+      refused-ring answer as a second documented case, so the refusal itself is under test (T-596
+      made the product survive a refused ring honestly - these tests have not caught up).
+      Note the second shape is more than tidiness: a portable device WILL fill its disk, so
+      "what the coverage record says when the ring was refused" is a real product state that
+      deserves a test, not an environment to be excluded.
+      ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the test behaves correctly BOTH with a ring and with the ring refused.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
