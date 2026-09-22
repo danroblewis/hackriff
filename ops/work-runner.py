@@ -225,10 +225,15 @@ def launch(t, dry):
         log(f"DRY-RUN would dispatch {tid} [{model}/{effort}] group={t.get('parallel_group')} -> {branch}")
         return None
     if sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
-        attention(tid, branch, "BRANCH_EXISTS", "a branch already exists; someone worked this by hand - reconcile it")
-        return None
-    sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
+        if os.path.isdir(wt):
+            log(f"REUSE {tid}: branch and worktree exist with no commits - a dispatch that never ran")
+        else:
+            sh(["git", "worktree", "add", wt, branch], check=True)
+    else:
+        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
     if os.path.isdir(f"{REPO}/target") and not os.path.exists(f"{wt}/target"):
+        # APFS clone; instant per file but it walks the whole tree, and main's target is large
+        # enough that this takes minutes and blocks the tick. Paid once per ticket.
         subprocess.run(["cp", "-c", "-R", "-p", f"{REPO}/target", f"{wt}/target"], capture_output=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
@@ -439,7 +444,14 @@ def candidates(tasks, claims):
         if t.get("parallel_group") in busy_groups:
             continue
         if sh(["git", "rev-parse", "--verify", "-q", branch_of(tid)]).strip():
-            continue  # someone is on it by hand
+            # A branch with commits, or a dirty worktree, is someone's work: leave it. A branch with
+            # NO commits and a clean (or absent) worktree is a dispatch that never ran - this runner
+            # killed mid-tick on 2026-09-22 left exactly that - and launch() reuses it.
+            ahead = int(sh(["git", "rev-list", "--count", f"main..{branch_of(tid)}"]).strip() or 0)
+            wt = worktree_of(tid)
+            dirty = os.path.isdir(wt) and any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+            if ahead or dirty:
+                continue
         out.append(t)
     out.sort(key=lambda t: (not is_user(t), PRI.get(t.get("priority", "normal"), 2), ticket_num(t["id"])))
     return out
