@@ -773,6 +773,43 @@ async function waitForRecordToCover(page, backend, view, { timeoutMs = 60000 } =
   }
 }
 
+/**
+ * **Wait until the server reports no UNOBSERVED row in the pane's body** — the part of the pane
+ * below the live-edge zone, over the pane's own band, bounded in time by its ruler — and return
+ * the answer that said so.
+ *
+ * The premise of a grey-share baseline is that the rows it measures are rows the radio sampled.
+ * A following pane's oldest rows can legitimately predate the server (or sit in a retune's settle
+ * gap), and those are honestly grey; they leave the body as the pane follows, within one pane span.
+ * So the budget is that span plus a margin, derived from the pane, and a body still unobserved
+ * after it is reported with the server's own counts.
+ *
+ * Rows are ~2 s: coarse enough that no row falls inside one of the store's 1 s cells (see
+ * [[RECENT_S]]), fine enough that time before the server began is a whole unobserved row. A partial
+ * row (a sub-second settle gap) is `observed` with `duty < 1` and is within the baseline's 5 %.
+ */
+async function waitForBodyObserved(page, backend, view) {
+  const t0 = Date.now();
+  let paneS = null, bodyS = 0, last = null, first = null;
+  for (;;) {
+    const ruler = await page.eval(
+      `document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-ruler')?.textContent ?? ""`);
+    paneS = paneSpanBoundS(ruler);
+    assert.ok(paneS !== null, `the pane's ruler states no time extent to bound: ${JSON.stringify(ruler)}`);
+    const now = Date.now() / 1000;
+    const bodyT1 = now - paneS * LIVE_EDGE_ZONE;
+    bodyS = paneS * (1 - LIVE_EDGE_ZONE);
+    last = await coverage(backend, view, now - paneS, bodyT1, 16, Math.max(1, Math.floor(bodyS / 2)));
+    first ??= last;
+    if (last.unobserved === 0 && last.observed > 0) return { waitedMs: Date.now() - t0, paneS, bodyS, first, last };
+    assert.ok(Date.now() - t0 < (paneS + 30) * 1000,
+      `the server still reports ${last.unobserved}/${last.known} cells UNOBSERVED in the pane's body ` +
+      `(${spanOf(view)}, the ${bodyS.toFixed(0)} s below the live-edge zone) after ${(Date.now() - t0) / 1000} s, ` +
+      `longer than the ${paneS.toFixed(0)} s the pane spans: rows that old do not age out of a following pane`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 // ===========================================================================
 // 1. PAN AND ZOOM: tiles where data exists, grey where it does not, zero 4xx
 // ===========================================================================
@@ -1276,6 +1313,31 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     t.diagnostic(`onto the freshly-live tile: ${spanOf(windowOf((await pane0(page)).where))}, ` +
       `resident after ${fresh.ms} ms (${fresh.counts})`);
     await new Promise((r) => setTimeout(r, 6000)); // let it accumulate rows while it is being watched
+
+    // **The control measurement is only a control over rows the radio SAMPLED** — asked of the
+    // server, over the pane body's own time window, and waited on. A following pane spans ~80 s
+    // here (its time extent is floored at the capture window, not at the server's age) while this
+    // server is ~75 s old by now, so the pane's oldest rows are time before recording began:
+    // honestly unobserved, honestly grey, draining out of the bottom of the pane one row per row
+    // period. Measured alone (deflake-0922): pane 78–106 s against a server 72–75 s old, and a
+    // first frame 6.3 % grey that was 0.0 % two frames later; in three gates it was 11.8 %, 22.9 %
+    // and 62.3 %, every time in the oldest tenths, and every time read as "no clean baseline".
+    // Whether that grey was still on screen was a race between two clocks this test never
+    // compared.
+    //
+    // Why not `waitForRecordToCover`, which test 1 uses for the same premise: it reads
+    // `horizon.recording_began_s`, and after test 2's retune that is the HOUR the observation log's
+    // first segment is filed under, not the server's first sample (measured: 923 s before a 15 s
+    // old server existed) — so it returned at once with the pre-start rows still on screen. The
+    // premise is "no row of the body is unobserved", so that is the question asked.
+    const pre = await sampleGrey(page, await bodyNow(), { n: 1 });
+    const body = await waitForBodyObserved(page, backend, windowOf((await pane0(page)).where));
+    t.diagnostic(`before the wait: ${(pre.mean * 100).toFixed(2)} % THE grey, by vertical tenth ` +
+      `(newest first) ${pre.last.bandsText}; the server's first answer over the body: ` +
+      `${body.first.unobserved}/${body.first.known} cells unobserved`);
+    t.diagnostic(`the server reports the pane body observed after ${body.waitedMs} ms: ` +
+      `${body.last.observed}/${body.last.known} cells over the ${body.bodyS.toFixed(0)} s below ` +
+      `the live-edge zone of a pane spanning at most ${body.paneS.toFixed(0)} s`);
 
     // ——— on screen: the control measurement ———
     const beforeRes = await waitForResident(page);

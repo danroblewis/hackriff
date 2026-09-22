@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use hk_model::Timestamp;
 use hk_model::attention::observation::{DwellRecord, ObservationRecord, SweepGeometry};
 use serde_json::{Value, json};
 
-use super::segment::{HOUR_NS, encode_line, hour_of, list_segments, segment_path};
+use super::segment::{HOUR_NS, decode_segment, encode_line, hour_of, list_segments, segment_path};
 
 /// Geometries kept in memory. Each segment repeats every kept geometry its sweep records
 /// reference (just before the first such record), so a segment decodes on its own.
@@ -165,6 +166,10 @@ pub(super) struct Inner {
     checked_hours: HashSet<i64>,
     newest_ns: i64,
     last_flush: Instant,
+    /// `(hour, ns)`: the earliest start of any record in segment `hour`, valid while `hour` is
+    /// still the oldest (see [`ObservationStore::earliest_start`]). Kept current by appends to that
+    /// hour; any other change of the oldest hour makes it stale, and the next read rescans.
+    earliest: Option<(i64, i64)>,
 }
 
 /// A shared handle on an observation log (see the module docs). Cloning shares the log.
@@ -218,6 +223,7 @@ impl ObservationStore {
                 checked_hours: HashSet::new(),
                 newest_ns: i64::MIN,
                 last_flush: Instant::now(),
+                earliest: None,
             })),
             stats: Arc::new(ObservationLogStats::default()),
             open: Arc::new(Mutex::new(BTreeMap::new())),
@@ -344,6 +350,58 @@ impl ObservationStore {
         g.segments.values().sum::<u64>() + g.pending.len() as u64
     }
 
+    /// **The earliest instant any record this log holds begins at** — the first sampled instant
+    /// of the oldest segment's records, not the hour that segment is filed under.
+    ///
+    /// The distinction is what `/api/coverage`'s `horizon.recording_began_s` needs. A segment is
+    /// named by its hour, so [`Self::hours`] times [`HOUR_NS`] is the boundary *retention* works
+    /// in (a whole hour is kept or dropped), and that is the right reach for "the oldest instant a
+    /// record could still speak for". It is not when recording began: a server started at 10:47
+    /// seals its first dwell into segment 10, and its hour start is 47 minutes before this
+    /// installation sampled anything (deflake-0922, measured: the first retune moved a 15 s old
+    /// server's `recording_began_s` 923 s into the past).
+    ///
+    /// Cached per oldest hour: the first call after that hour changes decodes its one segment
+    /// (outside the lock), and appends to it keep the cache current. `None` when the log is empty;
+    /// a segment holding no timed record reads as its hour start, the conservative bound.
+    pub fn earliest_start(&self) -> Option<Timestamp> {
+        let oldest = {
+            let g = self.lock();
+            let oldest = g.oldest_hour()?;
+            match g.earliest {
+                Some((h, ns)) if h == oldest => return Some(Timestamp::from_unix_nanos(ns)),
+                _ => oldest,
+            }
+        };
+        let snap = self.snapshot(oldest, oldest);
+        let mut min: Option<i64> = None;
+        let mut fold = |bytes: &[u8]| {
+            for rec in decode_segment(bytes) {
+                if let Some(s) = record_start_ns(&rec) {
+                    min = Some(min.map_or(s, |m: i64| m.min(s)));
+                }
+            }
+        };
+        for f in &snap.files {
+            if let Ok(b) = std::fs::read(f) {
+                fold(&b);
+            }
+        }
+        fold(&snap.pending);
+        let ns = min.unwrap_or(oldest.saturating_mul(HOUR_NS));
+        let mut g = self.lock();
+        if g.oldest_hour() == Some(oldest) {
+            // An append that landed between the snapshot and here is later than what it holds,
+            // except in a clock step; keep the smaller of the two either way.
+            let ns = match g.earliest {
+                Some((h, cached)) if h == oldest => cached.min(ns),
+                _ => ns,
+            };
+            g.earliest = Some((oldest, ns));
+        }
+        Some(Timestamp::from_unix_nanos(ns))
+    }
+
     /// Hours present (on disk or buffered), oldest first.
     pub fn hours(&self) -> Vec<i64> {
         let g = self.lock();
@@ -371,7 +429,26 @@ impl ObservationStore {
     }
 }
 
+/// The first sampled instant of a timed record: a dwell's `observed` start, a sweep's first hop.
+fn record_start_ns(rec: &ObservationRecord) -> Option<i64> {
+    match rec {
+        ObservationRecord::Dwell(d) => Some(d.observed.start.as_unix_nanos()),
+        ObservationRecord::Sweep(s) => Some(s.span.start.as_unix_nanos()),
+        ObservationRecord::Geometry(_) => None,
+    }
+}
+
 impl Inner {
+    /// The oldest hour present, on disk or buffered — the first of [`ObservationStore::hours`].
+    fn oldest_hour(&self) -> Option<i64> {
+        let disk = self.segments.keys().next().copied();
+        let open = self.open_hour.filter(|_| !self.pending.is_empty());
+        match (disk, open) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     fn append(&mut self, rec: &ObservationRecord, stats: &ObservationLogStats) {
         let end = match rec {
             ObservationRecord::Dwell(d) => Some(d.planned.end.max(d.observed.end)),
@@ -416,6 +493,14 @@ impl Inner {
         }
         self.pending.extend_from_slice(encode_line(rec).as_bytes());
         stats.written.fetch_add(1, Ordering::Relaxed);
+        // Keep `earliest_start`'s cache current for the segment this record went into.
+        if let (Some(start), Some(open), Some((h, ns))) =
+            (record_start_ns(rec), self.open_hour, self.earliest.as_mut())
+        {
+            if *h == open {
+                *ns = (*ns).min(start);
+            }
+        }
         if opened {
             // After the new hour's first lines are buffered, so the quota counts them.
             self.retain(stats);

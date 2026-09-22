@@ -140,7 +140,10 @@ pub fn spur_map_hit(f_lo_hz: f64, f_hi_hz: f64, total_gain_db: f64, mask: &SpurM
 }
 
 /// The spur reason a box gets from rules 1–3 and the clock-harmonic rule, in precedence order
-/// ref-harmonic, DC, clock-harmonic, spur map.
+/// DC, ref-harmonic, clock-harmonic, spur map. DC comes first: it is the more specific rule (it
+/// is tied to *this* capture's own tuned centre, not any reference grid) and a box that sits on
+/// both the tuned centre and an incidental 10 MHz-grid harmonic (e.g. tuning to exactly
+/// 100.0 MHz) is the DC spike, not a coincidental reference harmonic.
 /// (Comb, rule 4, needs the integrated line set and is applied by the caller.)
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SpurDecision {
@@ -163,6 +166,12 @@ pub fn spur_decision(
     mask: Option<&SpurMask>,
     total_gain_db: f64,
 ) -> SpurDecision {
+    if dc_hit(f_lo_hz, f_hi_hz, width_hz, geometry.center_hz, &rules.dc) {
+        return SpurDecision {
+            reason: Some(SpurReason::Dc),
+            harmonic_hz: None,
+        };
+    }
     if let Some(h) = ref_harmonic(
         f_center_hz,
         width_hz,
@@ -172,12 +181,6 @@ pub fn spur_decision(
         return SpurDecision {
             reason: Some(SpurReason::RefHarmonic),
             harmonic_hz: Some(h),
-        };
-    }
-    if dc_hit(f_lo_hz, f_hi_hz, width_hz, geometry.center_hz, &rules.dc) {
-        return SpurDecision {
-            reason: Some(SpurReason::Dc),
-            harmonic_hz: None,
         };
     }
     // After DC: a centre on a clock harmonic (e.g. 100.8 MHz = 42 × 2.4 Msps) is DC first.
@@ -274,6 +277,18 @@ mod tests {
             spur_decision(433.9995e6, 434.0005e6, 434e6, 1e3, &g, &off, None, 0.0).reason,
             None
         );
+    }
+
+    #[test]
+    fn dc_wins_over_ref_harmonic_at_own_tuned_centre() {
+        // T-599: tuning to exactly 100.0 MHz puts the DC spike on the same frequency as a
+        // ref-harmonic (n=10 x 10 MHz). DC is the more specific rule (it is tied to this
+        // capture's own tuned centre) and must win.
+        let rules = Rules::default();
+        let g = Geometry::new(100e6, 2.4e6, 512, 1.75e6, &EdgeRule::default());
+        let d = spur_decision(99.999e6, 100.001e6, 100e6, 2e3, &g, &rules, None, 0.0);
+        assert_eq!(d.reason, Some(SpurReason::Dc));
+        assert_eq!(d.harmonic_hz, None);
     }
 
     #[test]

@@ -22,4 +22,13 @@ if printf '%s' "$CMD" | grep -Eq 'just gate([[:space:]]|-|$)|just acceptance|jus
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' "$(printf '%s' "$R" | jq -Rs .)"
   exit 0
 fi
+
+# docs/tasks.yaml is edited through `just task ...` only (user, 2026-09-22): a redirect or
+# `sed -i` in a Bash command is the same forbidden direct edit as an Edit/Write tool call
+# (blocked separately by block-board-edits.sh), just spelled as a shell command instead.
+if printf '%s' "$CMD" | grep -Eq '(>|>>|sed -i[^|]*|tee )[^|]*docs/tasks\.yaml'; then
+  R="docs/tasks.yaml is edited through the task CLI only: \`just task show|list|set|result|note|new|validate\` (py/hkpy/tasks.py). Direct edits broke the board's YAML twice on 2026-09-22."
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' "$(printf '%s' "$R" | jq -Rs .)"
+  exit 0
+fi
 exit 0

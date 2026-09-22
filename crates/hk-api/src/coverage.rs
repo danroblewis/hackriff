@@ -444,7 +444,8 @@ pub(crate) struct Evidence {
     pub oldest_record: Option<Timestamp>,
     /// **When this server's memory of recording begins** (T-507): the earliest instant any source
     /// knows recording happened here — the spectrum history's own record of when it began, the IQ
-    /// ring's oldest sample, the observation log's oldest hour. `None` when nothing here has ever
+    /// ring's oldest sample, the observation log's earliest record (not its oldest hour, which is
+    /// a filing boundary up to an hour before any sample). `None` when nothing here has ever
     /// recorded anything.
     ///
     /// This is what keeps `"unknown"` narrow. Before it, nothing this installation knows of was
@@ -696,8 +697,10 @@ impl Memory {
     /// retains whole hour segments and drops whole hour segments, so its oldest hour's start is
     /// the exact boundary. A source that is absent, or holds nothing, contributes no reach.
     ///
-    /// **The start of recording** (`recording_began`): the earliest of the same two reaches and
-    /// the spectrum history's own record of when it began ([`hk_store::Pyramid::recording_began`]
+    /// **The start of recording** (`recording_began`): the earliest of the IQ ring's reach, the
+    /// observation log's earliest RECORD ([`hk_store::observation::ObservationStore::earliest_start`]
+    /// — not its oldest hour, which `oldest_record` uses) and the spectrum history's own record of
+    /// when it began ([`hk_store::Pyramid::recording_began`]
     /// — a fact it keeps from open and ingest, so it outlives the tiles that proved it).
     ///
     /// **Forgetting** is a discard that could predate that start: the observation log deleting a
@@ -742,6 +745,15 @@ impl Memory {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0
         });
+        // The log's reach for `recording_began` is its earliest RECORD, not its oldest hour: the
+        // hour is what retention keeps or drops, so it bounds `oldest_record`, but a segment is
+        // filed under the hour it falls in, which begins up to an hour before anything was sampled
+        // (deflake-0922: the first sealed dwell moved a 15 s old server's start 923 s back).
+        let log_began = state
+            .observations
+            .as_ref()
+            .and_then(|s| s.earliest_start())
+            .map(Timestamp::as_unix_nanos);
         let (history_present, history_began) = history_began(state);
         let min = |a: Option<i64>, b: Option<i64>| match (a, b) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -759,7 +771,8 @@ impl Memory {
         };
         Memory {
             oldest_record: oldest_record.map(Timestamp::from_unix_nanos),
-            recording_began: min(oldest_record, history_began).map(Timestamp::from_unix_nanos),
+            recording_began: min(min(ring_t0, log_began), history_began)
+                .map(Timestamp::from_unix_nanos),
             forgotten,
             // T-640: measured off the status this function already read, not off the handle.
             ring_can_answer: ring_can_answer(ring.as_ref()),

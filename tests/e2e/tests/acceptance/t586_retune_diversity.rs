@@ -70,6 +70,13 @@ const REQUIRED_EMITTERS: usize = 3;
 /// LO-relative artefact families the fixture manufactures (DC leakage, one internal spur).
 const REQUIRED_ARTEFACTS: usize = 2;
 
+/// IQ-image families the fixture manufactures (T-599: one, mirrored about `2*f_LO`).
+///
+/// T-586 deliberately left the image slope untested end to end — mirroring any of its own
+/// emitters collides with the emitter grid — so this fixture carries an independent virtual
+/// source frequency whose image clears the grid at every centre (see `hkpy.synth.retune`).
+const REQUIRED_IMAGES: usize = 1;
+
 // ---------------------------------------------------------------------------------------------
 // The run.
 // ---------------------------------------------------------------------------------------------
@@ -185,6 +192,23 @@ fn truth_artefact_offsets(fx: &Fixture) -> BTreeMap<i64, usize> {
     out
 }
 
+/// Invariant coordinates (`f − 2·f_LO`) of the truth's IQ-image lines, and how many captures each
+/// is in. T-599.
+fn truth_image_invariants(fx: &Fixture) -> BTreeMap<i64, usize> {
+    let items = fx
+        .truth
+        .iter()
+        .filter(|t| t.role == Role::Artefact && t.kind == "iq-image");
+    let mut out: BTreeMap<i64, usize> = BTreeMap::new();
+    for t in items {
+        let invariant = t
+            .f64("invariant_hz")
+            .unwrap_or_else(|| panic!("[{T586}] iq-image truth has no invariant_hz"));
+        *out.entry(key(invariant)).or_default() += 1;
+    }
+    out
+}
+
 fn group<'a>(items: impl Iterator<Item = &'a TruthItem>) -> BTreeMap<i64, usize> {
     let mut out: BTreeMap<i64, usize> = BTreeMap::new();
     for t in items {
@@ -218,6 +242,7 @@ fn t586_retune_diversity_separates_emitters_from_receiver_artefacts() {
     emitters_and_centres_compared(&s);
     a_real_emitter_keeps_its_absolute_frequency_across_centres(&s);
     an_artefact_moves_with_the_lo_and_is_found_lo_relative(&s);
+    an_iq_image_is_found_at_twice_the_lo_step(&s);
     the_two_classes_are_not_confused(&s);
     the_verdict_is_recorded_on_the_detections_existing_flags(&s);
     the_survey_produced_an_inventory(&s);
@@ -374,6 +399,45 @@ fn an_artefact_moves_with_the_lo_and_is_found_lo_relative(s: &Survey) {
     }
 }
 
+/// **T-599: the third class.** Every IQ image is found under the `Image` slope (`f − 2·f_LO`
+/// constant), the one this end-to-end suite never exercised before (unit-tested only in
+/// `hk_model::retune`, per its docs).
+fn an_iq_image_is_found_at_twice_the_lo_step(s: &Survey) {
+    let images = truth_image_invariants(&s.fixture);
+    assert_eq!(images.len(), REQUIRED_IMAGES, "images: {images:?}");
+    for invariant in images.keys() {
+        let inv_hz = hz(*invariant);
+        let g = s
+            .summary
+            .find(RetuneSlope::Image, inv_hz, MATCH_TOL_HZ)
+            .unwrap_or_else(|| {
+                panic!(
+                    "[T-599] IQ-image invariant {:.1} Hz: no image group within {MATCH_TOL_HZ} \
+                     Hz. Groups: {:?}",
+                    inv_hz, s.summary.groups
+                )
+            });
+        assert_eq!(
+            g.centres(),
+            REQUIRED_CENTRES,
+            "[T-599] IQ image at invariant {:.1} Hz tracked over only {} centres",
+            inv_hz,
+            g.centres()
+        );
+        assert!(g.slope.is_receiver_artefact());
+        eprintln!(
+            "[T-599] IQ image at invariant {:.1} Hz: tracked across {} centres (absolute \
+             frequencies {:?})",
+            inv_hz,
+            g.centres(),
+            g.members
+                .iter()
+                .map(|&i| format!("{:.4} MHz", s.obs[i].f_center_hz / 1e6))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 /// The two classes never swap: no artefact is reported absolute-invariant, and no real emitter is
 /// reported LO-relative.
 ///
@@ -416,6 +480,22 @@ fn the_two_classes_are_not_confused(s: &Survey) {
                 f_hz / 1e6,
                 lo / 1e6,
                 off_hz / 1e3
+            );
+        }
+    }
+    // T-599: nor is the IQ image, at any of the absolute frequencies it visits across centres.
+    for invariant in truth_image_invariants(&s.fixture).keys() {
+        let inv_hz = hz(*invariant);
+        for lo in &s.summary.los_hz {
+            let f_hz = 2.0 * lo + inv_hz;
+            assert!(
+                s.summary
+                    .find(RetuneSlope::Absolute, f_hz, MATCH_TOL_HZ)
+                    .is_none(),
+                "[T-599] the IQ image at {:.4} MHz (LO {:.4} MHz) was reported as a \
+                 fixed-frequency emission",
+                f_hz / 1e6,
+                lo / 1e6
             );
         }
     }
