@@ -192,6 +192,7 @@ impl RecipeRuntime {
             header,
             handle,
             session: Box::new(CloseOnDrop(closed)),
+            end: hk_stream::SessionEndSlot::default(),
         })
     }
 

@@ -139,6 +139,27 @@ process(){
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
   if just gate-merge >>"$LOG" 2>&1; then
+    # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
+    #
+    # `git commit` with no MERGE_HEAD writes an ORDINARY commit of whatever is in the index. On
+    # 2026-09-22 a `git stash` in another session dropped MERGE_HEAD mid-gate, and this line
+    # committed `ea91c27c`: a SINGLE-PARENT commit carrying 4 of the branch's 44 files. It looked
+    # like a merge in the log, the gate had passed, and nothing said otherwise - the branch read as
+    # landed while most of its work was not on main.
+    #
+    # The runner already refuses to START a merge when MERGE_HEAD is present; this is the symmetric
+    # check at the other end, and it fails CLOSED: if the state is not exactly what we gated, do not
+    # commit, leave main untouched, and hand it to a person. A wrong merge is far worse than a
+    # delayed one.
+    local staged_head branch_tip
+    staged_head=$(git -C "$REPO" rev-parse --verify --quiet MERGE_HEAD || true)
+    branch_tip=$(git -C "$REPO" rev-parse --verify --quiet "$branch" || true)
+    if [ -z "$staged_head" ] || [ "$staged_head" != "$branch_tip" ]; then
+      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - NOT committing"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST" >> "$NEEDS"
+      notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
+      return 0
+    fi
     git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
     log "MERGED $branch ✓"
     record_landed "$branch"

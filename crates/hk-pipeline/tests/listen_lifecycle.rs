@@ -4,7 +4,9 @@
 //!   sequence and in parallel batches, each ended one of three ways: a clean close, an abrupt
 //!   hang-up without a close frame, or a half-open client that goes silent (no pong) with its
 //!   socket left open (short test peer timeout). Afterwards no chain runs, no slot or CPU budget
-//!   is held, every chain detached, and `open == sum(closed_*)`, all `closed_client`.
+//!   is held, every chain detached, and `open == sum(closed_*)`. T-633: the reasons are not all
+//!   one - a close frame and a hang-up are `closed_client`, a half-open client the server reaped
+//!   for silence is `closed_unresponsive`.
 //! - **Admission:** the default cap is 8 (the 9th request is refused 503 `busy` with the counts);
 //!   the cap changes at runtime; a CPU-budget refusal names the budget; a chain nobody subscribes
 //!   to closes as `closed_idle`.
@@ -170,6 +172,9 @@ fn assert_drained(lc: &ListenCounters) {
     });
     let closed = [
         &lc.closed_client,
+        &lc.closed_unresponsive,
+        &lc.closed_transport,
+        &lc.closed_unattributed,
         &lc.closed_idle,
         &lc.closed_squelch,
         &lc.closed_retune,
@@ -320,7 +325,28 @@ fn fifty_sessions_closed_cleanly_abruptly_or_half_open_all_detach() {
     assert_eq!(get(&lc.refused_busy), 0);
     // The half-open sockets are still open: their sessions must end by the peer timeout.
     assert_drained(lc);
-    assert_eq!(get(&lc.closed_client), SESSIONS, "{}", lc.to_json());
+    // T-633: the three ways these sessions end are not one reason. A close frame and a hang-up
+    // are the client going away; a half-open client that goes silent is one THIS SERVER reaped,
+    // and counting that as `closed_client` told an operator their own client had dropped.
+    let half_open = silent.len() as u64;
+    assert_eq!(
+        get(&lc.closed_unresponsive),
+        half_open,
+        "every half-open session is counted as the peer the server reaped: {}",
+        lc.to_json()
+    );
+    // A hang-up reaches the server as a FIN or, when the socket is dropped with records still
+    // unread, as an RST - and an RST is the connection being torn down, which is not the same
+    // statement as a close frame. T-633 keeps them apart rather than resolving the unsure one to
+    // the convenient label, so the affirmative ends are asserted as their union.
+    assert_eq!(
+        get(&lc.closed_client) + get(&lc.closed_transport),
+        SESSIONS - half_open,
+        "only the clean closes and the hang-ups are the client's own end: {}",
+        lc.to_json()
+    );
+    assert!(get(&lc.closed_client) > 0, "{}", lc.to_json());
+    assert_eq!(get(&lc.closed_unattributed), 0, "{}", lc.to_json());
     eprintln!(
         "t066: {} sessions ({} half-open) opened and closed in {:.1} s; listen counters: {}",
         SESSIONS,
