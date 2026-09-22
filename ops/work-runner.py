@@ -356,10 +356,15 @@ def reap(claims, dry):
                 record_done(c, "review-pass", res)
                 enqueue(c["branch"])
             else:
-                c["state"] = "review-failed"
                 fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
-                attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
                 record_done(c, "review-fail", res)
+                # A review FAIL names a concrete defect; the worker that wrote the code fixes it with
+                # its context intact, same path as a gate failure, same attempt cap.
+                if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {d}/review.json)")
+                else:
+                    c["state"] = "review-failed"
+                    attention(tid, c["branch"], "REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
             continue
         res = result_of(c.get("out") or f"{d}/out.json")
         text = str(res.get("result", ""))
@@ -399,8 +404,11 @@ def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
-    prompt = f"""Your branch {branch} FAILED its merge gate on main (attempt {n} of {FIX_ATTEMPTS}). The runner's line:
+    kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
+    prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
+If this is a review finding, fix exactly what it names (the reviewer's full text is in the file it cites), then
+re-run the targeted tests and hand back; the branch is reviewed again before it is queued.
 The full gate log is {MERGE_LOG}; find your run with `grep -n 'GATE FAILED {branch}\\|FAIL \\[\\|FAILED just\\|error\\[' {MERGE_LOG} | tail -40`.
 TRIAGE FIRST, in your worktree {wt}: merge main in (`git merge main`), then run the failing test ALONE
 (`cargo nextest run -p <crate> -E 'test(/<name>/)'` or `just test-ui`). Fails alone = a real bug: fix it.
