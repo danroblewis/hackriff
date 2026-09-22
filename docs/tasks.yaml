@@ -665,7 +665,6 @@ tasks:
     title: Attack-map precision follow-ups (steady OFDM false floor-rise anomaly, partial-band extent, letters-only identity tags)
     status: done
     commit: "51c23f1 (merged 86b39a5)"
-    note: "Structured vs NoiseLike via inter-bin power-change anticorrelation (bins 3-8 apart), SK upper tol 1.35, median excess; confusion matrix noise jammers 12/12 NoiseLike, OFDM 18/18 Structured (6/10/15 dB). Per-bin extent refinement: worst 0.3 % of bandwidth (800 kHz jammer was 375 kHz). Withheld emitters accept/show only TAG_VOCABULARY tags (class-dependent refusal, no oracle). Post-merge legal review: MERGE-OK (no leak); hardening nits -> T-040."
     followups:
       - "wideband single-carrier PSK/QAM and dense-QAM OFDM can still read NoiseLike; slow noise-FM (20 kHz mod) reads Structured at >=10 dB; needs IQ-level (cyclostationary/CP) evidence on the dwell path"
       - "anticorrelation feature tuned on Hann window at default FFT size; weakens when FFT >> symbol length (16k bins)"
@@ -3516,6 +3515,10 @@ tasks:
     model: opus
     effort: high
     core_interface: false
+    high_effort_reason: "T-563: GPU-provider integration under the hk-ml conformance suite, mirrored
+      from a Mac provider design nobody has run on this hardware yet - the kind of dropped-samples/
+      throughput judgment call model-selection.md reserves high effort for, not a bounded single-crate
+      change with an obvious test."
     rehomed_2026_09_16: 'Moved from its original milestone to M7 (Device hardening + TX, the hardware
       phase), which is when Jetson work begins. Status, needs: hardware and parallel_group JET are
       unchanged - still blocked on the Jetson purchase. This only stops it reading as a straggler
@@ -4920,9 +4923,15 @@ tasks:
     acceptance: 'tiered against the existing permanent ids, minting none: SIGNAL-027 (Meteor-M LRPT 137.1/137.9 MHz) and SIGNAL-029 (NOAA POES 137 MHz) are NATIVE - a simple V-dipole or QFH, no dish - via SatDump as the reused decoder, not a reimplementation; SIGNAL-025 (GOES HRIT 1694.1 MHz) and SIGNAL-028 (~1.7 GHz AHRPT) need a dish plus LNA; SIGNAL-040 X-band ~8 GHz is ABOVE THE 6 GHz CEILING and must be retagged out-of-band by T-258 rather than reading as needs-accessory. Hardware captures are user-triggered'
     area: plugins/ (SatDump wrapper), crates/hk-context, docs/use-cases.yaml
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This is a SatDump plugin wrap plus hardware_fit/fit_note tiering of four already-permanent
+      use-case ids against an existing taxonomy - model-selection.md names both patterns
+      (\"wrapping existing decoders as plugins\", \"bulk mapping and classification work with a
+      fixed rubric\") as Sonnet/medium explicitly. Escalate one tier if T-258's coordination on
+      the X-band retag proves ambiguous."
   - id: T-276
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
@@ -4937,7 +4946,11 @@ tasks:
     needs: none
     model: opus
     effort: high
-    core_interface: false
+    core_interface: true
+    retiered_2026_09_21: "T-563: was core_interface: false but this ticket changes the C04 attention
+      scheduler's reservation/pre-emption policy, which model-selection.md names explicitly under
+      Fable/Opus-high work and CLAUDE.md marks core_interface. Flagging it true is the accurate
+      record, not a downgrade - opus/high stands."
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
@@ -4949,9 +4962,13 @@ tasks:
     acceptance: 'the HF/VLF cluster behind its accessory (upconverter / VLF receiver + soundcard): SPACE-001 SID flare monitor, SPACE-041 research-grade ELF/VLF, PROP-019 phase and reflection height. Each stays needs-accessory and none is claimed reachable without it'
     area: crates/hk-core (source abstraction), docs/capabilities
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      This ticket's whole acceptance is tagging three already-permanent use-case ids as
+      needs-accessory in hardware_fit/fit_note - the fixed-rubric bulk-classification pattern
+      model-selection.md names for Sonnet/medium, not new capability design."
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -4963,9 +4980,14 @@ tasks:
     acceptance: 'the radiometry cluster gated on a dish (and Ku behind an LNB): state the accessory in hardware_fit and fit_note for every use case it unlocks, and report what the 8-bit front end without preselection costs in radiometric accuracy rather than implying laboratory precision'
     area: crates/hk-dsp (radiometry), docs/capabilities/C33
     needs: none
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     core_interface: false
+    retiered_2026_09_21: "T-563: was opus/high with no core_interface flag and no stated reason.
+      Same bulk-tagging pattern as T-277 (hardware_fit/fit_note gating of existing use-case ids)
+      plus one stated accuracy caveat, not new detection logic. Escalation rule applies as-is if
+      the 8-bit/no-preselection radiometric-accuracy write-up turns out to need real DSP derivation
+      rather than a stated caveat."
   - id: T-279
     milestone: M1
     title: 'rds.recipe.json has no group-4A Clock-Time node, so RDS clock (CT) can
@@ -10252,39 +10274,6 @@ tasks:
       precisely the shape of self-weakening T-396 wrote the fail-closed rule to prevent.
     commit: 6df409c
     result: |
-      DONE, and the reframe is the answer: IT IS NOT "IGNORE SOME FILES", IT IS "CLASSIFY THE RIGHT
-      DIFF". Two subjects, two sources - `just gate` (unchanged) for an AGENT checking its own work,
-      where untracked counts because a file nobody has git-added yet is still about to be committed;
-      and the new `just gate-merge` for the COORDINATOR inside git merge --no-ff --no-commit, where GIT
-      ITSELF built the index as the merge result versus HEAD and `git commit` commits the index. THE
-      INDEX IS THE CHANGE BEING CERTIFIED.
-      THE WEAKENING ARGUMENT, since this IS a narrowing: it classifies a strict subset and classify()
-      is monotone (any full path forces full), so a smaller input can only be cheaper or equal. Three
-      things make it sound:
-        (1) for the merge subject the DEFAULT is the wrong question - untracked files are not in the
-            index and cannot reach main through that merge;
-        (2) THE COUNTEREXAMPLE DOES NOT SURVIVE CONTACT - an untracked fixture can change what a suite
-            sees, but classifying untracked paths as full never protected against that, because the
-            suites read the WORKING TREE. Fail-closed on untracked buys COST, NOT SAFETY, for this
-            subject; contamination is a property of where suites run, not of how the diff is classified;
-        (3) it is GUARDED - it REQUIRES MERGE_HEAD (or SQUASH_MSG) or forces the full gate, which a
-            blanket --staged would not do and is exactly why the recipe is --merge; and every
-            uncommitted path it did not classify is PRINTED with the class it would have had. No ignore
-            list, no exempt path: fixtures/ or tools/ STAGED INTO a merge is still full.
-      MISUSE STATED: gate-merge inside a real merge while the tree holds an unstaged edit to something
-      the suites read means that path is classified out - printed in the `outside` list every time. The
-      residual risk is delayed discovery of a problem existing only in the coordinator's tree, never a
-      change reaching main unverified.
-      DELIBERATELY NOT DONE: generalising T-437's "prove this path inert". A proof argued in a merge
-      commit is categorically different from a list the classifier consults silently, and generalising
-      it would require the classifier to model what each suite reads - itself a weakening surface.
-      Noted in docs/10 as earning its own ticket if it recurs.
-      FIRST PAYOFF, same hour: T-440's merge classified `ui` -> just test-ui instead of the full
-      ~25-minute gate it would have drawn purely because of untracked tools/.
-      Verified live from inside its own merge; it classified ITS OWN diff as full, because it touches
-      justfile and the classifier's source.
-    commit: 6df409c
-    result: |
       DONE. THE REFRAME IS THE ANSWER: it is not "ignore some files", it is "CLASSIFY THE RIGHT DIFF".
       `just gate` (unchanged) asks "what is in my tree that isn't on main?" for an AGENT, where
       untracked counts because a file nobody has git-added is still about to be committed. New
@@ -11501,43 +11490,6 @@ tasks:
       T-437's spike is exploring exactly this. Read its findings before starting - the spike's job
       is to tell you what does NOT work, and a spike that reports only success has de-risked
       nothing.
-    commit: 55fb808
-    result: |
-      DONE - the renderer core, ui/ only, ~2000 lines, no crates/.
-      NOT-RESIDENT IS DISTINGUISHED FROM UNOBSERVED STRUCTURALLY, in three places:
-        1. GREY HAS EXACTLY ONE EXPRESSION IN THE SHADER - cellrule.ts holds CELL_MARKS and GENERATES
-           CELL_RULE_GLSL from it (T-397's pattern applied to the claim that matters most). Grey appears
-           only on the s == CELL.UNOBSERVED branch, from the route's coverage plane. A test counts the
-           literal's occurrences in the fragment source actually handed to shaderSource: exactly one.
-        2. NOT-RESIDENT IS A DIFFERENT TYPE - acquire returns Residency (resident | pending), never a
-           CellState. A miss draws as a resident coarser ancestor upscaled AND MARKED, or a PENDING
-           flat. THE PANE'S GROUND CLEARS TO PENDING, NOT GREY: the spike cleared to grey, and THAT ONE
-           LINE IS F3.
-        3. An unreadable response is not a coverage answer - decodeTile throws rather than decoding to
-           unobserved, so the place stays pending, which is true.
-      PROVED, not asserted: the same nine-tile working set over nine frames at 96 MB and at ONE tile.
-      Evictions 0 -> many, pending+fallbacks rises, grey draw-uniforms and clear-colours stay ZERO in
-      both. The revisit pattern matters - panning somewhere new every frame makes both runs miss
-      equally and proves nothing.
-      FOUR states kept distinct: observed, unobserved (grey), no_level (observed but max_db null), and
-      T-423's unknown.
-      BUDGET IS BYTES, NOT TILES, for a new reason: `cells` is addressable 8..256, so a tile count
-      would be off by up to 1024x between tiles. §5.5's count was only honest while §6 fixed the tile
-      size, and T-438's route reopened that. 192 KB/tile, 96 MB = 512 tiles, chosen so 80 MB of pins
-      never has to fight the budget. Worst case at 48 panes: 290 tiles / 54.4 MB, 427 / 80.1 MB with
-      the parent pin - agreeing with the spike's 208 keys / 220 resident.
-      PREFETCH AGAINST 11.4 ms/TILE: LIFO (the spike's was FIFO despite §5.5 requiring LIFO),
-      least-wanted-first emission, viewport-change cancellation, one request per key however many panes
-      want it, and the 503 as a FIRST-CLASS ANSWER (lower the cap, back off, re-queue; busyRefusals not
-      failures). Coarse-first fill: the parent pin is pushed after the pane's tiles so LIFO fetches it
-      first, and one parent covers four children's worth of screen.
-      WHAT DID NOT SURVIVE THE SPIKE - the value of having run one: the grey clear (F3 in one line);
-      FIFO where §5.5 says LIFO; no 503 path at all; a four-part key that is really seven; a single
-      RGB8 texture packing value+duty+tier per cell, quantising the measurement against an unnamed
-      scale and making tier a per-cell byte when it is per-TILE on the wire; and a ramp that was "an
-      approximation of CMAP_STOPS - the exact stops do not matter to the spike". They matter here.
-      FOR T-442/T-443: §8.5a's "state the level per pane" is served by PaneReport {levelF, levelT,
-      tiles, fallbacks, pending} returned from every render() - the seam exists, nothing draws it yet.
     commit: 55fb808
     result: |
       DONE - renderer core, ui/ only, ~2000 lines, no crates/.
@@ -15129,7 +15081,8 @@ tasks:
   - id: T-501
     milestone: MLIVE
     title: REDO T-484 - the FFT-resolution fidelity fix, gated by the canvas e2e that would have caught its tile breakage
-    status: todo
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15217,10 +15170,20 @@ tasks:
       has NO RECORDED SECOND OBSERVATION behind it. The tile explosion is real and independently
       fatal regardless, but the attribution chain is worth knowing.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 on `task-t505-v2`, on top of T-505. canvas_fidelity 5/5 with
+      T-483's four #[ignore]s deleted; the floor is asserted field for field against real pyramids
+      rather than written down. THE REBASE FOUND A COLLISION THE ORIGINAL COULD NOT HAVE: T-489
+      (landed after this branch was cut) skips the display FFT while nothing is subscribed, on the
+      ground that no STORED product consumes those rows - which this ticket falsifies, because the
+      canvas's finest tier IS that row. Unfixed it leaves a permanent hole in recorded history for
+      every interval nobody watched, indistinguishable from grey. `Output::watched` now counts the
+      view lattice as a watcher, so T-489's saving survives only for a run with no view lattice.
+      That is a REAL CPU COST (T-489 measured ~9 %) and it is accepted here deliberately.
   - id: T-505
     milestone: MLIVE
     title: One lattice cannot be both the display stream's own bin and device-wide over the horizon - give wide-and-long viewports a coarse tier
-    status: in-progress
+    status: done
+    branch: task-t505-v2
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -15273,6 +15236,11 @@ tasks:
       is a gap in the harness, not only in this pipeline, and it generalises: several e2e
       assertions here are implicitly scoped to a young server.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, together with T-501 and T-532 (they share
+      their conflict files, so one resolution). `scheme=overview` and `tierFor` land as written;
+      the client picks by VIEWPORT_TILE_BUDGET, each pane reports its tier, and on the shipped
+      floor nothing moves. The e2e failure both branches died on is GONE on current main and did
+      not need resolving.
   - id: T-506
     milestone: MCANVAS
     title: Remove the Capture panel - but first move the IQ horizon, the retention bound and the capture clock onto the canvas
@@ -15424,7 +15392,7 @@ tasks:
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
-    status: todo
+    status: in-review
     priority: high
     parallel_group: SDR
     core_interface: true
@@ -15453,22 +15421,54 @@ tasks:
       writing the shared stores with correct per-device provenance; N=1 unchanged; measured
       per-row cost at N=1 vs N=2 recorded.
     notes: |
-      PAUSED 2026-09-18 by the user (budget; scan + fog-of-war took priority). Resumes after the weekly
-      reset (Sun 02:00). CHECKPOINT: branch task-t510 @ 96d073a3 builds clean, untested. Handover:
-      the seam was where the survey said for STORAGE (history keys by frame device_id, per-device floor,
-      coverage from ring segments), plus three things it missed - (1) the shared pyramids have ONE
-      forward-only watermark, so all devices in a run must share a clock (live radios do; replays
-      generally don't); (2) the end-of-run seal must happen ONCE after every device drains, not by
-      the first reader to finish; (3) each extra device needs its own Counters or it overwrites the
-      primary's live state. WIP: src/devices.rs (ExtraSource/RunDevice, validate/start/finish),
-      Pipeline::start -> start_multi, Shared.seal_at_end, Common.aux/defer_seal/sealed, per-device
-      iqbuffer dirs, source/history cpu_ns counters. N=1 baseline: ~11.1 ms CPU per Msample on the
-      capture thread, 13.0-13.6 ms per history row, 273-279 MB peak. NEXT: N=2 in
-      tests/multi_source.rs, then two_mock_front_ends_share_the_stores, then targeted tests + the
-      threading/cost note. T-508 also changed run.rs (supervise recovery) - rebase before resuming.
-      Filed 2026-09-18 from /tmp/claude-501/multi-sdr-brief.md (planning log B0.690). Paced to ONE
-      builder slot: the user is near the weekly budget cap and retune/live fixes keep priority.
+      DONE 2026-09-21 on branch task-t510-v2 (fresh from main; the paused task-t510 @ 96d073a3 was
+      read for ideas, not rebased). SHAPE: `Pipeline::start_multi(cfg, source, info, reopen,
+      inventory, extra: Vec<ExtraSource>)`; `Pipeline::start` is it with `extra` empty, so N=1 is
+      unchanged (all 315 hk-pipeline tests pass). New `hk-pipeline/src/devices.rs` owns the seam.
+      Per further front end, never shared: source + capture thread, ring + flow gate, history
+      reader (its STFT and NoiseFloorTracker), detector, IQ ring directory
+      (`iqbuffer-devices/<id>-<source key>`), `Counters`, and an interactive coverage observer
+      under ITS OWN device_id (new `ObservationLog::interactive_for`). Shared: floor product, view
+      pyramid, repository, observation log, attention, compute, Survey. Refused up front by
+      `devices::validate`: no identity, a duplicate device id, unpausable under lossless, or a
+      first-sample time > MAX_START_SKEW (60 s) from the primary - the shared pyramids have ONE
+      forward-only watermark, so the front ends of a run must share a clock. The end-of-run seal is
+      taken ONCE from `devices::finish`, called from `run::end_run` (the run's single end);
+      `Shared::seal_at_end` is false for every front end of a multi-source run and true for a
+      single-device one, so its reader still seals byte for byte. A further front end runs no
+      chains (`chains::MAX_RUNTIME_CHAINS` stays run-wide, T-558), drives no scheduler, does not
+      re-plumb, and refuses a sample-rate change (`FixedRate`) rather than half-applying it.
+      MEASURED (dev profile, 20 s of stream, loadavg ~16, one process per configuration):
+      N=1 primary capture 14.1 ms CPU/Msample, 141 us/block, history 1.82 ms/row, maxrss 372 MB.
+      N=2 primary 12.9 ms/Msample, 1.79 ms/row (UNCHANGED within noise) + second front end
+      11.2 ms/Msample, 2.04 ms/row; maxrss 552 MB (+180 MB), wall unchanged. So N costs one more
+      independent chain - ~13 ms CPU per Msample on its own capture thread (~26 % of a core at
+      20 Msps), ~2 ms per history row, ~180 MB residency, 5 threads - and does NOT regrow the
+      primary's per-row cost. Counters gained `source.cpu_ns` / `history_reader.cpu_ns` (sampled
+      every 64 blocks / 50 rows, so the measurement stays off the path it measures).
+      TESTS: `crates/hk-pipeline/tests/multi_source.rs`, counts not wall-clock, stable over 5 runs
+      - 120/87 history rows, 7 detections judged (4 unit-a, 3 unit-b), 1 dwell record each.
+      Asserts: every Detection's provenance_ref -> device_id AND tune.center_hz (the field T-598
+      reads) names the only front end tuned there; history rows under each device's own source key
+      and ZERO in the other's band; `hk_store::coverage::grid` observed in its own band and
+      unobserved in the other's; two front ends under one device id refused before anything opens.
+      RED WHEN BROKEN (verified): aux sharing the primary IQ ring dir -> 3 of 4 tests fail; aux
+      observer recording `None` for its device -> "a dwell record names no front end"; the two
+      front ends forced under one device id (validate guard disabled) -> "a detection at 433.970
+      MHz (only mock:unit-b was tuned there) is attributed to mock:unit-a".
+      ONE NON-OBVIOUS FIX: the aux coverage observer is driven by CAPTURE PROGRESS (tick when
+      `source.blocks` moves), not by a wall-clock timer. A timer records the dwell between two
+      polls, so a fast replay whose whole stream lands between two ticks recorded a 125 ms dwell -
+      or none at all - for a 3 s observation. Under-claimed coverage greys a band the radio really
+      looked at.
+      LEFT FOR THE SLICE: T-512 serving/CLI (opening N devices, per-device controls, a further
+      front end's recovery and re-plumb, and the primary's own coverage record when it is not
+      live-shaped), T-513 the full two-device e2e, T-514 the RTL-SDR driver. USB: 20 Msps is
+      ~40 MB/s, so concurrent front ends at full rate want separate USB controllers; the module
+      docs say so and the loss shows on each front end's own counters, never as a silent gap.
+      Reviewed by Opus before merge (core_interface).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-511
     milestone: MSDR
     title: The serving layer holds N live controls, and device-control routes take a device selector
@@ -16469,7 +16469,7 @@ tasks:
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
-    status: todo
+    status: done
     priority: high
     parallel_group: FIXTURE
     core_interface: true
@@ -16495,10 +16495,170 @@ tasks:
     notes: |
       Filed 2026-09-20. Depends on T-544's fixture and truth list.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE 2026-09-21 on branch task-t545. `tests/e2e/tests/acceptance_mauto.rs` +
+      `tests/e2e/tests/acceptance/signal_087.rs`: SEVEN tests, FIVE RED (`#[ignore]`d, each
+      naming what T-546 must build) and TWO GREEN CONTROLS. Registered in the justfile as
+      `acceptance-mauto` / `e2e_milestones` (e2e-targets-check passes), so it is a milestone exit
+      gate and not in CI's per-push acceptance job.
+      SYNTHETIC, BY USER DIRECTION, AND THE SUITE SAYS SO. T-544's capture is negative (docs/19
+      section 7: 0 of 16 BART channels above +4 dB on a CFAR local floor) and T-318 owns the
+      hardware half. The scene is `trunk_encrypted_control_channel` (seed 545, 3 s) through the
+      MOCK SDR: continuous C4FM control channel issuing real TSBKs, a continuous unframed 4FSK
+      decoy, bursty analogue FM neighbours on the 12.5 kHz raster (what docs/19 section 7.4
+      actually measured at 800 MHz), and the granted voice channels radiating where the grants say.
+      Truth stripped by `TruthVault`; nothing passes a frequency, modulation or protocol in.
+      T-299'S CIRCULARITY CAVEAT COULD NOT BE AVOIDED AND IS STATED, not papered over: this
+      fixture's framing and this repo's P25 decoder were written from the same references, so a
+      shared misreading passes both. Writing a standards-compliant encoder from memory would only
+      move the unverified reading to the generator. The one non-circular claim in the suite -
+      grant -> IDEN_UP -> frequency -> RF energy actually radiating there (docs/19 section 5.3) -
+      is asserted and passes, and is flagged in the test as the one to believe over the others.
+      A-PRIORI THRESHOLDS (module `apriori`, each citing its source, none read off a run): symbol
+      rate 4800 +/- 48 Bd (1 %: looser cannot separate Phase 1 from Phase 2's 6000 Bd), outer
+      deviation 1800 +/- 360 Hz (+/-20 %: the slicer thresholds are 33 % below outer), centre
+      tolerance 6250 Hz (half a raster channel), OBW +/-60 %, time 50 ms, and the imposed clock
+      error -8200 Hz / -9.6 ppm (MEASURED on this HackRF, docs/19 section 7.6a).
+      THE FIVE RED MESSAGES, i.e. T-546's spec:
+      (B) estimate parameters - the CC has `estimated_params: null` while the ANALOGUE FM
+      neighbours get sessions, and every row written says `mod_order: 2` / `"2fsk"`, so there is
+      no four-level answer available at all. The gap is inverted, not merely undone.
+      (C) auto-select - `POST /api/analyze {emitter_id}` answers 501 not_implemented. No code path
+      in the repo picks a demod+decode chain for a digital emission from measurements. Reuse
+      hk_recipe::matching, classify::seed, AnalogAuto's shape and the M4 P25 decoder per the user.
+      (D) decode - two thirds ALREADY PASS and are asserted as named preconditions (protocol
+      P25Phase1, band plan read, 19 grants resolved: t268_tsbk's ground). The gap: the decoded
+      system is a `trunk_system` row, the blindly-detected emission is an inventory emitter at the
+      same frequency with `family`/`classification`/`estimated_params` all null, and NOTHING links
+      them. "Successful decode confirms it" (vision step 4) does not happen.
+      (E2) explanation quality - the only explanation offered scores `evidence_confidence: 0.0`
+      with flag `allocation-only`; the identical suggestion goes to the analogue FM neighbours.
+      hk_pipeline::family has no mapping from trunked-CC evidence to a service.
+      (F) THE BEST ONE, and it is BART's only surviving measurement: at the -9.6 ppm clock error
+      measured on this HackRF, 0 control channels are confirmed where 1 is with a perfect clock.
+      -8200 Hz is 5.5x RASTER_TOLERANCE_HZ (1500 Hz), so the raster fit rejects every channel and
+      candidacy never happens. A build that only works at 0 ppm works on synthetic IQ and nothing
+      else. Fit the raster offset and record it as receiver provenance (docs/19 section 4.4 step 1).
+      THE TWO GREEN CONTROLS are deliberate and NOT ignored: (A) blind detection with centre,
+      bandwidth and time extent, and (E) a sensible explanation (`public-safety`) in the top 3.
+      Without them a red suite cannot be told from a broken harness (docs/19 section 5.4's
+      argument). Assertion (3)'s server is wired with an audit log so the 501 is the real MAUTO
+      answer and not `503 no audit log` - a harness failure would have taught T-546 nothing.
+      FLAGGED, NOT CHASED: docs/19 section 3.1 asked T-545 to rule on the built-in trunk chain's
+      `[851, 869] MHz` trigger band. Ruling recorded in `signal_087::NO_LOOKUP`: a band gate is not
+      a frequency lookup (ADR-0017 permits band-plan priors as explainers), BUT it is band-gated
+      rather than measurement-driven, so SIGNAL-085's actual claim - find a 100 %-duty narrowband
+      four-level emission ANYWHERE - is not what runs. Worth its own ticket.
+      Also worth a ticket: the estimator calling bursty analogue FM `2fsk` at 2390 Hz deviation.
+      docs/19 section 7.7's blanket "T-545/T-546 should not be started against synthetic material"
+      is amended in place with why the synthetic route was sound for the chain AROUND the decoder.
+      TARGETED TESTS: `cargo test -p hk-e2e --test acceptance_mauto` = 2 passed, 5 ignored (gate
+      safe). `-- --include-ignored` = 2 passed, 5 failed, all for the reasons above. precheck clean.
   - id: T-546
     milestone: MAUTO
     title: "BART 851 MHz, phase 3: make the blind auto-decode tests pass - the first real MAUTO end-to-end"
-    status: todo
+    result: |
+      DONE 2026-09-21 on branch task-t546. ALL SEVEN of T-545's acceptance tests pass and the five
+      `#[ignore]` lines are gone, which was the stated definition of done. Baseline re-measured
+      first: 2 passed, 5 failed, exactly as briefed.
+
+      WHAT WAS BUILT, one piece per red message.
+
+      (F) THE CLOCK ERROR, and it is the one to believe. `hk_detect::trunk::raster::fit_grid_offset`
+      fits the receiver's own offset from a channel grid as the POWER-WEIGHTED CIRCULAR MEAN of the
+      occupied bins modulo the raster - one extra FFT pass per hunt, not one per channel, because
+      every emission in a capture shares the same receiver offset and so reinforces one estimate.
+      The trunking hunt re-origins its grid on the fit (occupancy bins, channel centres and the DDC
+      offset all move together) and records it as `ReceiverFit {grid_hz, offset_hz, concentration,
+      ppm}` on the emitter's analysis: PROVENANCE ABOUT THE RADIO, NOT ABOUT THE SIGNAL. Below
+      `MIN_GRID_CONCENTRATION` (0.25, derived from the geometry of a 12.5 kHz channel's occupancy,
+      not read off a run) the answer is `None` and the grid is left uncorrected - a hint that does
+      not hold up buys nothing. At the measured -9.6 ppm the control channel is now found; test F
+      went green first, before anything else was built.
+
+      (B) PARAMETERS. `crates/hk-demod/src/fsk/structure.rs` is a NEW blind measurement, separate
+      from the demodulator on purpose: `C4fmSymbols::rate_bd` is the rate the demodulator was TOLD,
+      so it is not an input to `EstimatedParams`. It measures (1) the symbol rate as a
+      cyclostationary clock line - the squared first difference of the discriminator is a pulse
+      train at the baud rate - parabolically interpolated and gated on `MIN_CLOCK_BITS` over the
+      band median; (2) the level count; (3) the outer deviation. On the fixture, with no expected
+      value supplied anywhere: 4799.8 Bd (a priori tolerance 4800 +/- 48) and 1709 Hz (1800 +/- 360),
+      `mod_order: 4`, `modulation: "c4fm"`.
+
+      THE LEVEL TEST IS THE PART THAT TOOK THE WORK, and the first two attempts were wrong in a way
+      worth recording. `inner_fraction` alone cannot separate four levels from a CONTINUOUS-valued
+      modulation: both put ~50 % of samples on the inner pair (measured 0.49 vs 0.52). A threshold
+      on the mean distance-to-nearest-level cannot either, because a real pulse-shaped C4FM channel
+      has a half-open eye scoring 0.126 against a continuous spread's 1/6 = 0.167 - and setting a
+      constant between those two would have been reading a threshold off the fixture, which the
+      suite explicitly forbids. The statistic that works asks about the distribution's SHAPE rather
+      than its width: three equal, adjacent windows of width 2/9 over normalised |v|, centred on the
+      inner level, the midpoint and the outer level (they tile [2/9, 10/9] exactly, so no constant
+      chooses them), and the midpoint window's share against the modes'. `MAX_VALLEY_RATIO = 0.5` is
+      the honest halfway point. Measured on the two populations in a unit test that PRINTS them: a
+      clean four-level alphabet 0.00, a clocked continuous-valued modulation at the same rate and
+      deviation 0.96.
+
+      `Levels::Indeterminate` is a variant, not a fallback to 2, and it survives into the data model:
+      an emission whose alphabet cannot be measured gets NO `estimated_params` rather than plausible
+      ones, and the analysis caps at `framed` and says why.
+
+      ALSO A CLOSED LOOP, because it was needed: the caller's channel is deliberately wider than the
+      modulation (the trunking DDC passes 2x the raster so the demodulator can apply its own
+      selectivity), so the measurement re-filters at the Carson bandwidth it just measured - outer
+      deviation + half a symbol rate - and re-reads the levels. Without the first filter the
+      neighbours 12.5 kHz away contributed their own clock line and the measurement refused outright.
+
+      (C) AUTO-SELECTION. `crates/hk-pipeline/src/synth.rs` + `hk_model::repo::synthesis`: the
+      chosen pipeline, its per-stage evidence and an ADR-0021 trace are persisted as an
+      `emitter_synthesis` row (ADR-0015 section 5.4, append-only like `emitter_refined_tuning`), and
+      `POST /api/analyze {emitter_id}` serves it - 200 instead of 501. THE TRACE IS THE POINT and it
+      keeps ADR-0021's load-bearing distinction STRUCTURAL: `tried` is served, never inferred, and
+      `EmitterSynthesis::validate` REFUSES a row where `measured` and `outcome` disagree. So "why not
+      DMR" (tried: 0 frame syncs of the 0 blocks it checked) and "why not PSK" (`unsupported`: no
+      `psk_demod` block exists in this build, ADR-0015 section 1.1's own catalogue gap) read as the
+      different answers they are. Every framing in `CC_FRAMINGS` is re-scanned and recorded, winner
+      and losers alike.
+
+      `not-searched` is NOT `unknown`: an emitter no analysis has run on answers 200 with
+      `resolution.kind: "not-searched"` and a null pipeline. That is the decode-side statement of the
+      canvas's grey rule and it is asserted in `api_contract.rs` against a real, un-analysed
+      (analogue) emitter, not a fabricated one. `docs/api.md`'s Analyze section is rewritten with the
+      full vocabulary.
+
+      (D) CONFIRM BY DECODING - the heart of the ticket. The trunking chain now files its decode
+      against the INVENTORY EMITTER at the same frequency: a Demodulation carrying the measured
+      parameters, the synthesis row, and `family::record_decoder_evidence`, then
+      `Inventory::chain_emitter` to re-rank. ONE FINDING WORTH FLAGGING: the control channel confirms
+      inside the FIRST window, while the detector is still accumulating a track, so
+      `emitter_for_channel` routinely finds nothing - the first implementation dropped the strongest
+      evidence in the run on the floor and D stayed red. `synth::attach` therefore RECORDS THE
+      SIGHTING when detection has not offered a row yet, exactly as the analogue and FSK chain
+      writers do, and the repository's clustering resolves it to the detector's row.
+
+      (E2) EXPLANATION QUALITY. `p25-tsbk` / `dmr-csbk` / `nxdn-cac` map to `public-safety` at 0.97
+      in `hk_pipeline::family`, so the ranking rests on a CRC-valid decode of a trunked control
+      channel - which nothing else transmits - instead of on the allocation row that the analogue
+      neighbours and an empty channel would get equally.
+
+      THE NON-CIRCULAR CLAIM STILL HOLDS AND WAS NOT MADE VACUOUS. Test D's precondition 3 - grant ->
+      IDEN_UP -> frequency -> RF energy actually radiating there - passes unchanged, and nothing in
+      this diff touches the framing, the CRC variant or the five compliance gaps at
+      `confirm.rs:980-1035`. What went green is the PLUMBING; T-299 stays open and `docs/19` section
+      7.7 now says so in as many words.
+
+      TARGETED TESTS: `acceptance_mauto` 7/7 (was 2/7). hk-demod + hk-detect + hk-model 579/579.
+      hk-pipeline + hk-api and `hk-cli::api_contract` green. `just precheck` clean. ONE LOAD-FLAKE,
+      triaged not papered over: `hk-pipeline::data_path::a_live_chain_feeds_a_plugin_that_never_
+      reports_ready_after_its_bounded_wait` failed once under load (33 s) and PASSES ALONE (19 s) -
+      a bounded-wait timing test, unrelated to this diff, for the deflaker.
+
+      FOLLOW-UP FILED, surfaced and deliberately not chased: T-628 - the fitted offset is known only
+      MODULO the raster (+4300 Hz and -8200 Hz name the same grid), which re-origins the grid but
+      cannot reach an ABSOLUTE frequency, so grant FOLLOWING is skipped while the receiver is
+      measurably off-grid rather than down-converting the channel next door and reporting "not
+      radiating". Recorded in `docs/19` section 7.6b.
+    status: done
     priority: high
     parallel_group: PIPE
     core_interface: true
@@ -16712,7 +16872,7 @@ tasks:
   - id: T-563
     milestone: M2-hardening
     title: "Reasoning time (184 h) exceeds all tool and build time (144 h) - the largest untouched cost"
-    status: todo
+    status: done
     priority: high
     parallel_group: CI
     model: opus
@@ -16742,10 +16902,61 @@ tasks:
       and (2): most of today's agents were Opus, and several briefs asked agents to re-measure things
       an earlier ticket had already measured.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      WORKED 2026-09-21 (branch task-t563). Part of lever (1) was already done before this ticket
+      started: `prompts/model-selection.md` already carries the complexity rubric and
+      `test_task_board.py` already stops a core_interface ticket going to a cheap model. What was
+      missing was measurement and the symmetric (over-tiering) check, per the ticket's own framing.
+
+      MEASURED DISTRIBUTION (open tickets, i.e. not done/cancelled/deferred/reverted - 86 before,
+      87 after filing T-620): opus/no-effort 39, opus/medium 18, opus/high 10, sonnet/no-effort 6,
+      sonnet/low 3, sonnet/medium 2->3 (after retiering), opus/xhigh 2, fable/high 1, unset 4. So
+      today's OPEN board is not "almost everything is Opus-high" - that was true of the historical
+      /perf window (184h across ~500 done tickets, mostly before the rubric existed), but the open
+      board is already mostly opus/medium or below when effort is set at all. The real gap in (1)
+      was enforcement, not distribution: nothing stopped a non-core-interface ticket sitting at
+      opus/high by default, and 39 open opus tickets have effort unset entirely (reviewable but not
+      yet enforced - left as a finding, not fixed here, since backfilling 39 judgment calls is not
+      a mechanical task).
+
+      LEVER 1, symmetric check: added `test_high_effort_opus_or_fable_tickets_justify_it` to
+      `py/tests/test_task_board.py`, the mirror of the existing core_interface-vs-cheap-model test.
+      Rule: an open opus/fable ticket at effort high|xhigh must be core_interface: true or carry an
+      explicit reason field. BEFORE CHOOSING IT, checked what it would flag: exactly 5 of 86 open
+      tickets (T-216, T-275, T-276, T-277, T-278) - small enough to inspect each on the honesty
+      requirement rather than write a rule that fails on legitimate work. Outcome: T-277/T-278/T-275
+      were genuinely over-tiered and retiered to sonnet/medium (they match model-selection.md's own
+      "bulk mapping/classification with a fixed rubric" and "wrapping existing decoders as plugins"
+      Sonnet patterns exactly); T-276 turned out to touch the C04 attention scheduler and was
+      correctly reflagged core_interface: true (opus/high stands, now accurately); T-216
+      (Jetson/TensorRT, hardware-blocked) got an explicit `high_effort_reason` since it is real
+      GPU-provider design work. The test now passes cleanly against the whole board (0 tickets
+      flagged) - not "fixed by weakening the rule", fixed by correcting three tickets and truing up
+      one flag.
+
+      LEVER 3, context cost: capability cards are NOT the re-reading cost - all 14 are 107-125
+      lines, already the cheap scoped design CLAUDE.md intends. ADRs are: 23-799 lines, and the
+      large ones are cited constantly (ADR-0016 784 lines / 49 ticket references, ADR-0017 530/28,
+      ADR-0015 681/24, ADR-0013 560/19, ADR-0012 799/16, ADR-0011 558/15). A brief that names
+      "ADR-0016" with no section pointer pays for the whole 784-line document every time a fresh
+      agent is briefed into that area. Filed T-620 rather than editing the ADRs myself - CLAUDE.md
+      requires Fable + the user for any change to a settled ADR, and even a non-decision structural
+      addition (a table of contents) needs that sign-off first per the same rule; T-620 states the
+      three candidate fixes and which one needs that approval before landing.
+
+      LEVER 2 (fewer round-trips): not separately measured this session - it is a per-brief
+      discipline (CLAUDE.md already states it, e.g. "make all of the independent calls in the same
+      block"); no board-level artifact to check it against was found, so nothing filed for it beyond
+      noting it's covered by existing instruction text, not a gap.
+
+      NOT DONE: the DoD's "a measurable drop in model time per landed ticket" needs a day of tickets
+      landing under the corrected board to check against /perf, which this single session cannot
+      produce - that's the honest state to hand back with rather than claiming it.
   - id: T-564
     milestone: M3
     title: "The synthetic grid's delivered analysis geometry is a statistic of the noise - OBW99 moves 2x with SNR on 23 percent of ladders"
-    status: todo
+    status: done
+    branch: task-t564
     priority: high
     parallel_group: M3A
     core_interface: true
@@ -16770,6 +16981,42 @@ tasks:
       measurement of what it buys and what it costs before anyone starts. Likely overlaps T-296's
       unexplained EVM residue and is a plausible cause of psk-qam's weak open set.
       Numbers and tables are in ADR-0016 section 7.3 (written by T-435).
+    result: |
+      DONE 2026-09-21 on task-t564. THE EFFECT STILL REPRODUCED after T-246 and T-589: re-measured
+      over 504 ladders (21 classes x 24 seeds x 7 rungs at gate-5..gate+10 dB), the OBW99 the grid
+      reported for one (class, seed) moved with the SNR by >= 2x on 142 (28.2 %) and >= 3x on 124
+      (24.6 %) - T-435's finding, not a symptom of either of those two.
+      THE FIX, in `synth::generate`: the delivered geometry is settled ONCE, from a reference
+      snippet at the family's own SNR gate (`geometry_reference_snr_db`, an existing a-priori
+      constant), and the channel is capped at the emission's design bandwidth - the same figure the
+      noise is already scaled over. The blind path is untouched: `SynthSignal::obw_hz`, what the
+      classifier is handed, is still measured on the delivered noisy snippet.
+      MEASURED, same 504 ladders: geometry >= 2x 142 -> 0, >= 3x 124 -> 0 (0.0 %). The measured
+      `obw_hz` spread also falls, 142 -> 54 and 124 -> 34, which is now honest measurement noise on
+      a fixed geometry rather than a moving experiment.
+      RED WHEN BROKEN: `tests/synth_geometry_stability.rs` (168 ladders) failed on 168 of 168 before
+      the fix, naming the rung and the geometry; the `#[ignore]`d measurement in the same file
+      reproduces the >= 2x / >= 3x table on demand.
+      COST PAID, as the ticket predicted: both density files refitted (`fit-densities`), and four
+      re-measurements. NOT a relaxation of any a-priori floor - every ADR-0016 section 7 floor holds
+      (overall top-1, per-bin wrong-label, below-gate, open set).
+      TWO ALTERNATIVES WERE BUILT AND MEASURED FIRST, and both cost more than they bought (recorded
+      in the code): OBW99 of the noise-free waveform collapses onto a carrier (686 Hz for a 9 kHz
+      AM emission), taking analog top-1 0.92 -> 0.77 and overall 0.933 -> 0.897, under the 0.90
+      floor; the design bandwidth alone makes the channel class-dependent and had the held-out 8-FSK
+      claimed `analog` 6 times of 8.
+      WHAT IT BOUGHT, beyond the stability: four of the five declared SNR-order exceptions in
+      `feature_length_invariance.rs` - `sigma_af`, `gamma_max` and `c42_norm` on `am` - stopped
+      reproducing and were DELETED with their re-measured ladders. They were `am` being handed a
+      different filter at each rung, not an inherent SNR law. C14 gained locks on bpsk (11/12 ->
+      12/12), pi4-dqpsk and qam64, and LOST them on `dsb-sc` (3+4 -> 0) and `ssb` (1 -> 0), neither
+      of which has a symbol clock to find.
+      ADR-0016 section 7.1's canonical figures re-derived by `acceptance_m3` on this grid: known
+      top-1 0.9365 / top-2 0.9841 at gate+5 dB over 1656 snippets (was 0.9345 / 0.9861), every
+      open-set family 1.000 unknown recall except fsk 0.958. The ADR text still quotes the old
+      numbers and needs updating (follow-up).
+      Targeted: `cargo nextest run -p hk-classify` 111 passed 1 skipped; hk-e2e acceptance_m3 green
+      with HK_E2E_REQUIRE_SYNTH=1.
     notes: |
       Filed 2026-09-20 from T-435's report. T-435 deliberately did NOT write a threshold against
       this - a constant fitted to a harness defect is the thing this project forbids.
@@ -16912,7 +17159,7 @@ tasks:
   - id: T-547
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: does the evidence-bits ladder survive 8-bit quantisation and gain state? Measure the calibrated nulls before any block implements evidence()'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -16963,6 +17210,20 @@ tasks:
       Nothing here needs hk-synth to exist. The metrics are already computed by M1 blocks; this
       is a measurement harness over them plus a write-up.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+      LANDED 2026-09-21 on task-t547: docs/21-evidence-bits-under-quantisation.md, plus the
+      harness crates/hk-pipeline/examples/t547_ladder.rs and pointers from ADR-0015 section 2.2
+      and ADR-0022 section 9. Verdict CONDITIONAL. Conditioning key is ADC FILL LEVEL (sigma in
+      LSB / Provenance.quantisation_limited), not gain and not clip fraction: a control that
+      applies 51 dB of gain but skips the ADC reproduces the float table to 0.02 bits on every
+      metric, and 28% clipping costs <= 0.34 bits while sigma = 0.21 LSB costs 1.0-1.6 bits and
+      breaks eye_open outright. delta = 1.8 bits at a claimed 6 bits, 3.3 at 8; whether the law
+      is additive or saturating is NOT resolvable at n = 820 and is said so. Real captures add a
+      further ~2 bits of spread that cannot be attributed without T-375's terminator capture.
+      Three findings outside the receiver question: snr and evm as FskDemod computes them are one
+      statistic (rho = -0.989) so ADR-0015 section 1.3's sum double-counts; eye_open's quantile
+      table is non-invertible at 4 and 6 bits; a table of N windows cannot express more than
+      log2 N bits, which prices the 12-bit caps. Follow-ups T-616..T-619.
+
   - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
@@ -17140,9 +17401,7 @@ tasks:
   - id: T-551
     milestone: MAUTO
     title: 'MAUTO-DESIGN: the acceptance-fixture corpus spec for the blind synthesis suite - written and frozen BEFORE the engine exists, because thresholds may not be tuned to results'
-    status: done
-    effort: high
-    result: "docs/22-mauto-acceptance-corpus.md, frozen 2026-09-21. A standalone doc, not an ADR amendment (both ADR-0021 and ADR-0022 read it, and the scene table grows per generator); neither ADR's status touched, both given a pointer line. ONE FIXTURE SET, THREE CLAIMS with three trial counts: recall (400 draws/cell, 8 seed bases x 50, bar on the pooled estimate with the Wilson lower bound reported as a PASS-WITH-A-FLAG, never a loosening), the ADR-0021 false-LABEL budget (800/profile, honestly <= 3.7e-3, not 1/1000), and ADR-0022's false-CONFIRM MARGIN. The arithmetic ADR-0022 left out: n negatives resolve a tail only to log2(n) bits, so A2's max<=18 at n=1600 detects optimism above 7.4 bits - 2.3 bits TIGHTER than the 9.7-bit margin it protects, so n=1600 is right for the margin claim while the n~60000 run is needed only for the rate claim; and the 18.0 must track n or it reads green with no power (-> T-576 amended). Eight axes; ADC FILL replaces gain (T-547: 51 dB with the ADC skipped moves the tables 0.02 bits; 28% clipping costs <=0.34 bits; under-fill at 0.21 LSB costs 1.0-1.6). Adds an N5 MISMATCHED-HYPOTHESIS negative population to ADR-0021's four, because T-547 measured the wrong-parameter null 5x fatter than noise. Sufficiency argued per axis with the external gap symptom, four degeneracy detectors (recall control, null-control save count, expected-failure rows, hash-sealed 20% hold-out) and a coverage manifest whose third mark is `unmarked`; FOUR AXES MARKED NOT ARGUED (the unknown case - you cannot sample the catalogue's complement; real IMD; non-FSK calibrated bits; the rate claim itself). Rows resting on calibrated bits in families T-547 did not measure (C4FM, CSS, OOK) are REPORT-ONLY, not bars, until T-619. Follow-ups T-621..T-627."
+    status: todo
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -17883,19 +18142,6 @@ tasks:
       Filed 2026-09-21 with ADR-0022 (T-548). HIGH: it is the only evidence the derived threshold
       actually delivers the budget, and A2 is the only part of it with any statistical power.
       Runs after T-568 builds the populations; do not rebuild them.
-      AMENDED 2026-09-21 by T-551 (docs/22 section 3), which supplies the arithmetic A2's `18.0`
-      needs and ADR-0022 did not state: a sample of n negative decisions resolves an exceedance
-      probability no finer than 1/n, i.e. a tail at log2(n) bits, so the observed max estimates the
-      log2(n)-bit quantile and never the 24-bit gate. At n = 1600 the assertion `max <= 18` fires
-      when the true optimism exceeds 7.4 bits - CONSERVATIVE against the 9.7-bit margin it
-      protects, which is why n = 1600 is the right CI size for A2 while remaining 75x too weak for
-      A1's rate claim. Three consequences: (a) ASSERT AGAINST `log2(n_actual) + 7.4`, not a bare
-      18.0 - at a smaller n the same constant reads green with NO POWER AT ALL; (b) freeze n
-      alongside the constant; (c) REPORT THE UPPER-TAIL SLOPE (fitted log2-exceedance against
-      claimed bits over the top decade, with its interval), because the extrapolation from 10.6
-      bits to 24 is otherwise hidden inside a `max`. The n ~ 60 000 question this ticket owns is
-      needed for the RATE claim, not for the margin claim; docs/22 section 3 says so explicitly so
-      the two are not conflated when it is decided.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-577
     milestone: MAUTO
@@ -18666,31 +18912,10 @@ tasks:
       cell against the on-demand control across all 16 nodes and it agrees exactly. Assert
       residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
       already does, never with a wall-clock budget.
-    depends_on: [T-571, T-572]
-    use_cases: [AWARE-011]
-    acceptance: |
-      Filed 2026-09-21 from the user's tile-perf review (their S6; the review's R3).
-      DO THIS AFTER T-571 AND T-572, NOT BEFORE - the review is explicit that reworking the cap
-      first "just moves contention". This ticket exists so the dependency is recorded, not so it
-      is started now.
-      The history store is behind ONE mutex; concurrent tile reads serialise on it and compete
-      with ingest (`tiles.rs:193-202`). The route caps concurrency at TILE_MAX_IN_FLIGHT = 4 and
-      returns 503 above it; the client HALVES its operating limit on any 503 (AIMD,
-      `tilecache.ts:1243-1263`), so a couple of slow coarse tiles drop the whole fill to 1-2
-      in-flight. T-450 measured the consequence: 26 tiles resident against 17 268 CANCELLED in
-      75 s. (T-539, now landed, fixed the half that never recovered the cap on a still view.)
-      Once reads are cheap, consider a read-mostly snapshot / RwLock or per-scheme locks so the
-      cap can rise above 4. Measure the contention before and after rather than assuming it moved.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): concurrent readers admitted without
-      a 503 for a viewport of N tiles; 503s issued during a steady-state fill is zero; cancelled-
-      to-resident ratio for one screen stays under a stated bound. A test that counts 0 of 0
-      requests is vacuous - report what each run actually exercised.
-      Prove the tests go RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
-    status: done
     status: in-progress
     priority: normal
     parallel_group: OPS
@@ -19200,43 +19425,7 @@ tasks:
       read unobserved is zero, counted over a stated number of rows.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    use_cases: []
-    acceptance: |
-      FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
-      probe binary - nothing in `hk-pipeline` ever populates `Fingerprint.structure` (T-233's
-      `envelope_shape`). So entity resolution compares a field that is always absent in production:
-      the comparison runs, contributes nothing, and nobody is told.
-      This is the same class as T-589 (a verifier that cannot run on the class it claims to handle)
-      and as T-321's own defect (an emitter silently not clustering): a stage that is structurally
-      unable to fire looks exactly like a stage that fired and agreed. It is worth measuring how
-      much of entity resolution is in this state rather than fixing only this one field.
-      Decide, with evidence: wire a producer in the pipeline, or remove the field and its comparison
-      and say so. A dead comparison kept "in case" is worse than an absent one, because its presence
-      implies a discrimination that is not happening.
-      If it is wired, note it also gives T-321's analogue-emitter field supply a fifth field, which
-      is margin rather than a reason to touch the floor.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK: how many real-run fingerprints carry the field before and
-      after, and how many comparisons actually used it. A test that passes because the field was
-      absent on both sides is vacuous.
-      FOUND BY T-254 WHILE BUILDING THE ISM BURST SCENE, measured not inferred: 3 of 3 events read
-      `open: true` beside inventory rows for the same emitter in the same window reading `ended`.
-      `crates/hk-api/src/events.rs:243` hard-codes `IdleGap::conservative()` (60 s), while
-      `crates/hk-api/src/query.rs:1617` uses the RING-MEASURED gap (T-410). Two surfaces over one
-      fact, deriving it two different ways.
-      THIS BREAKS A DOCUMENTED PROMISE: docs/api.md states elsewhere that the two surfaces cannot
-      disagree about one emitter's liveness. It also breaks the signal model itself - an emitter's
-      presence is ONE interval `[start, end?]`, ongoing until an end is affirmatively detected and
-      revocable afterwards. Liveness is a property of the emitter, not of the route you asked.
-      Fix by deriving liveness ONCE and serving it from both routes, rather than by making the two
-      constants match - two independent derivations that happen to agree today will diverge again.
-      The ring-measured gap is the better source: the conservative 60 s constant is a guess where a
-      measurement exists.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): for a scene with a burster that stops,
-      every emitter's liveness is IDENTICAL across /api/events and /api/inventory, asserted over all
-      emitters in the window rather than a sampled one. A test that compares zero emitters is
-      vacuous - report how many it compared.
-      Prove the test goes RED without the fix (T-254's ISM scene reproduces it directly).
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
   - id: T-592
     milestone: M2-hardening
     title: /api/events refuses its own documented limit - 501..2000 is a 400
@@ -19283,95 +19472,7 @@ tasks:
       describes. Restored the fix; the test passes.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
       Ran `just precheck hk-api hk-cli` clean.
-    effort: high
-    depends_on: [T-586]
-    use_cases: [AWARE-011]
-    acceptance: |
-      FOUND BY T-586, and it is the half that actually fixes the user's 2026-09-21 field report.
-      T-586 built the cross-centre classifier and proved it works: `RetuneSlope::apply` resolves a
-      +370 kHz LO-relative spur across three centres and labels it. But the flags are COMPUTED AND
-      NEVER WRITTEN BACK, so the inventory still lists that one spur as THREE separate emitters at
-      three different absolute frequencies - which is exactly what the user saw.
-      T-586 also measured why the single-capture flaggers cannot cover this: they caught the DC
-      family (ref-harmonic, dc, dc) and caught the +370 kHz spur NOT AT ALL. Three detections, three
-      absolute frequencies, each individually indistinguishable from a real emission. Only the
-      cross-centre relationship separates them, which is the whole point of retune diversity.
-      Wire the verdict into the survey/scheduler path so the record is load-bearing: a detection
-      resolved as LO-relative carries that on the stored row, and the inventory merges the three
-      sightings into one artefact rather than minting three emitters.
-      MIND THE SIGNAL MODEL WHILE DOING IT. An artefact is still a time-frequency region with a
-      real extent, and "this is LO-relative" is a claim that can be REVOKED by later evidence, the
-      same way a detected end is provisional and revocable. Do not delete the sightings; relate
-      them. And `Absolute` is the weak claim - "not LO-relative", not "real" - because a reference
-      harmonic is absolute-fixed and still an artefact.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): a scene with one LO-relative spur over
-      N centres yields ONE artefact row, not N emitters; real emitters are unaffected in number and
-      in absolute frequency. T-586's fixture (`py/hkpy/synth/retune.py`, scenario
-      `retune_diversity`) reproduces it directly and its assertions already count what matters.
-      Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    notes: |
-      DONE 2026-09-21 (branch task-t598). The verdict is now written down and load-bearing.
-      WHERE IT IS PERSISTED. Two records, both APPEND-ONLY and both revocable.
-      (a) `detection_retune` (migration 0015, hk-model): one row per claim ABOUT a detection -
-      slope (absolute / lo-locked / image), the invariant coordinate `f - slope*f_LO`, the number
-      of distinct LOs that decided it, the spread, and the flag bits the slope implies. It is a
-      separate table because a detection row is IMMUTABLE by trigger (`detection_immutable`): a
-      measurement is what was measured and an interpretation must never rewrite it. The implied
-      suspect flags are applied on the READ path (`Repository::detection` /
-      `detections_in_region` -> `repo::retune::apply_verdicts`), so a reader sees
-      spur_candidate + lo-relative without the measurement being edited, and a revocation takes
-      them away by construction rather than by guessing which bits to unset.
-      (b) `RelationKind::RetuneSiblingOf` on `emitter_relation`: the N sightings of one LO-relative
-      family are RELATED to the one that represents them, so `/api/inventory` (which already hides
-      deferring rows by default) shows ONE artefact. Nothing is deleted: every sighting keeps its
-      id, detections, time extent and history, and is listed with `relations=all`. It is its own
-      kind, not `duplicate-of` / `artifact-of`, because the T-219 overlap resolver CLAIMS AND
-      REVOKES those two over overlapping bands and these sightings do not overlap at all (that is
-      the whole point) - a shared kind would have the two rules revoking each other every pass.
-      Migration 0015 rebuilds `emitter_relation` to widen its kind CHECK (SQLite cannot relax one
-      in place), copying every row, and adds an expression index on the provenance tune centre.
-      REVOCATION. `Repository::resolve_retune` re-derives the verdict from the stored rows and:
-      appends `active = 0` over any standing verdict whose slope changed (then the new claim);
-      revokes the sibling relation of any row the measurement no longer places in a family. The
-      sweep includes rows that merely DEFER TO an examined row even when they are no longer live,
-      so a claim cannot outlive the evidence. A verdict identical to the one standing writes
-      nothing. An `absolute` verdict is recorded and implies zero flag bits: it is the WEAK claim,
-      "not LO-relative", never "real" (a reference harmonic is absolute-fixed and still an
-      artefact).
-      WIRING AND ITS BOUND. `hk_pipeline::inventory::TrackInventory::touch` calls it after
-      `resolve_overlaps`, i.e. on every seam that reaches an entry. A cross-centre verdict can only
-      change when a NEW CENTRE appears, so the pass runs at most once per row per distinct-centre
-      count (`Repository::tune_centre_count`, answered from the new index) and not at all below
-      two centres - never once per sighting. The neighbourhood is bounded at 64 rows, 32 detections
-      per row and a band derived from the LOs within 100 MHz of the seed's own.
-      MEASURED, on T-586's `retune_diversity` fixture through the mock SDR (15 detections, 3
-      centres, 5 lines): BEFORE 3 emitters + 6 artefact rows = 9 shown; AFTER 3 emitters + 2
-      artefact rows = 5 shown, with all 6 artefact sightings still present under `relations=all`.
-      Stored verdicts 6 lo-locked + 9 absolute over 15 detections. Real emitters unchanged in
-      number and in absolute frequency (99.78 / 100.68 / 101.18 MHz).
-      RED WHEN BROKEN, both halves proven by removing the `touch` call: the verdict check failed
-      with "0 detections were recorded LO-relative" and, with that check skipped, the inventory
-      check failed with "the artefact at LO offset 0.0 kHz is shown as 3 emitters, not one".
-      Neither is vacuous: the scene asserts 3 sightings were kept per family (so there was
-      something to collapse) and 3 distinct centres were compared.
-      TESTS: 5 unit tests in `crates/hk-model/src/repo/retune_tests.rs` (the bug reproduced; the
-      fix; absolute flags nothing; revocation restores the prior single-capture flags exactly;
-      one centre claims nothing) and 2 new checks in the T-586 acceptance scene
-      `tests/e2e/tests/acceptance/t586_retune_diversity.rs`. Targeted runs: hk-model 317/317,
-      hk-model + hk-context 548/548, hk-pipeline 307/307, acceptance_m0 t586 2/2 (and an earlier
-      full acceptance_m0 50/50). `just precheck hk-model hk-pipeline hk-context hk-e2e` clean.
-      API: `docs/api.md` documents the new `relation.kind` value and its `detail`. The ROW SHAPE
-      and every route are unchanged - only a new enum value in an existing field - so
-      `api_contract.rs` (which asserts the `relation` key, not its vocabulary) needed no change.
-      FOLLOW-UPS SURFACED, NOT CHASED: (a) `hk_context::watch::StandingRelation::label` now has a
-      sentence for the new kind, but the SQL rank/trust proxy in `repo/relate.rs` still counts only
-      the MEASURED flag bits, so a resolved artefact does not yet rank below a clean row - joining
-      `detection_retune.flag_bits` into `EMITTER_DETECTION_EVIDENCE_SQL` is a small follow-up;
-      (b) the primary of a family is the row with most sightings, then the earliest - a Confirmed
-      row is never hidden by this rule, which is deliberate but means a wrongly-confirmed artefact
-      stays visible until a person acts; (c) the image slope (2) is still exercised by unit tests
-      only, since T-586's fixture omits images on purpose.
+
   - id: T-599
     milestone: M2-hardening
     title: Two loose ends from T-586 - the DC line is labelled ref-harmonic, and the image slope is unit-tested only
@@ -19549,34 +19650,6 @@ tasks:
     parallel_group: PIPE
     model: opus
     effort: medium
-    depends_on: [T-321]
-    use_cases: []
-    acceptance: |
-      SEEN IN FOUR SEPARATE GATES ON 2026-09-21, INCLUDING ONES THAT PASSED, which is why nobody
-      has chased it:
-        hk-pipeline: analog chain emitter: storage engine: UNIQUE constraint failed: emission_features.features_id
-        hk-pipeline: analog chain shape characterisation: storage engine: UNIQUE constraint failed: ...
-        hk-pipeline: plugin chain emitter: storage engine: UNIQUE constraint failed: ...
-      A storage-engine error is being caught, printed and continued past. The suite stays green, so
-      the only evidence is three lines of log nobody reads - which is the silent-failure shape this
-      project keeps finding (a stage that cannot run looks like a stage that ran and agreed).
-      SUSPECTED CAUSE, NOT CONFIRMED: T-321 wired `write_shape` in as a SECOND `characterise_with`
-      per analogue session, at both `identify` and the full-window path, and its own agent flagged
-      the added call as an unmeasured cost. Two characterisations of one session plausibly insert
-      `emission_features` twice under one `features_id`. "analog chain shape characterisation" is
-      exactly that path. CONFIRM BEFORE FIXING - T-246 and T-589 both refuted the obvious suspect.
-      THEN DECIDE WHAT THE WRITE SHOULD DO, which is the real question: is the second write a
-      duplicate that should be an upsert, or a genuinely new characterisation that should replace
-      the first? T-335 established that a re-characterisation must happen when the evidence changed;
-      if the second write is that, dropping it on a UNIQUE violation silently loses the very
-      re-characterisation T-335 added.
-      AND MAKE IT LOUD EITHER WAY. Whatever the fix, a storage error on this path must not be
-      swallowed: a caught-and-printed constraint violation in a test suite is a test that passed for
-      the wrong reason.
-      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): an analogue session produces exactly
-      one emission_features row per characterisation that should exist, and zero swallowed storage
-      errors over an acceptance run. Prove the test goes RED without the fix.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     depends_on: []
     use_cases: []
     acceptance: |
@@ -19993,7 +20066,8 @@ tasks:
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
-    status: todo
+    status: review
+    branch: task-t605
     priority: high
     parallel_group: PIPE
     model: opus
@@ -20026,37 +20100,347 @@ tasks:
       one emission_features row per characterisation that should exist, and zero swallowed storage
       errors over an acceptance run. Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-  - id: T-621
-    milestone: MAUTO
-    title: 'MAUTO-FIXTURE: the generic OOK/ASK sweep generator - the half of ADR-0015 section 7''s "FSK/OOK sweep" that never existed'
+      RESOLVED 2026-09-21 (task-t605). THE SUSPECT WAS HALF RIGHT AND THE DIAGNOSIS WAS NOT.
+      T-321's second `characterise_with` is the trigger, but two writes per session were never the
+      fault: `observe()` increments `observations` every time, so two writes mint two ids. The
+      fault is in `Repository::emitter_features`, which picked the fold source by largest `t`
+      rather than by insertion order. The second call of a session is stamped from a different
+      emitter row and lands up to ~1 s BEHIND the first (measured: snapshot_t 1789297824379318666
+      vs incoming_t 1789297823378252000). The fold then restarted from the SUPERSEDED snapshot,
+      which (a) dropped the intervening observation, (b) scored the catalogue match against stale
+      features, and (c) re-minted `features:{emitter}:{observations}` with a count already spent -
+      the UNIQUE violation.
+      THE SECOND WRITE IS A GENUINE RE-CHARACTERISATION, NOT A DUPLICATE: it carries the shape
+      flatness, which no fingerprint can hold and which is the fourth field keeping a purely
+      analogue emitter above the clustering floor. So the answer is neither upsert nor replace but
+      APPEND, as the append-only table already intends; dropping it on UNIQUE lost exactly what
+      T-335 added.
+      FIX: `emitter_features`/`emitter_features_history` order by `rowid DESC` (insertion order),
+      which makes `observations` strictly increasing and `features_id` unique by construction.
+      LOUD: new `/chains/storage_errors` counter plus `hk_pipeline::stats::storage_error`, which
+      every chain site that catches a `RepoError` and continues now goes through (analog x7,
+      plugin x3, refine x2); the run summary prints it beside `errors`.
+      TESTS (both proven RED with the ordering reverted):
+        - hk-pipeline lib `t605_a_characterisation_stamped_behind_the_snapshot_on_file_still_appends`
+          - 4 characterisations -> 4 snapshots, 4 distinct ids, observations exactly [1,2,3,4],
+            and each call's match scored against the snapshot that call wrote. RED: match read
+            `:1` where `:2` was written.
+        - hk-pipeline `signal_062_session_writes::t605_an_analogue_run_swallows_no_storage_error`
+          - the real FM capture through the mock SDR: `/chains/storage_errors` == 0, guarded
+            against vacuity by demodulations >= 1 and identifications >= 1. RED: 1.
+      FOLLOW-UP NOT CHASED: `current_signature_match` orders by `t`, so with out-of-order
+      characterisations the "current" match row can be an older one. Separate question from this
+      ticket; not filed.
+
+  - id: T-614
+    milestone: M2-hardening
+    title: The parameter estimator labels bursty analogue FM as 2fsk at 2390 Hz deviation
     status: todo
     priority: normal
-    parallel_group: MAUTOD
-    model: sonnet
+    parallel_group: DETECT
+    model: opus
     effort: medium
     depends_on: []
-    use_cases: [SIGNAL-062, SIGNAL-052]
+    use_cases: []
     acceptance: |
-      FOUND BY T-551 while freezing the acceptance corpus (docs/22 section 4.2, row S2).
-      ADR-0015 section 7 has specified a "Generic FSK/OOK sweep" as the ONLY row that measures real
-      synthesis rather than template lookup since the ADR was written. Only the FSK half is
-      generatable: `py/hkpy/synth` has `fsk_burst_train` and no OOK/ASK scenario at all. The row has
-      been read as covered for as long as it has existed.
-      BUILD a generic OOK/ASK burst generator matching docs/22 section 4.2's S2 parameterisation:
-      log-uniform symbol rate 300 Bd - 50 kBd, random 16-32 bit sync, a check drawn from the
-      RevEng catalogue, SNR stratified at 6/10/20 dB, CFO uniform +/- 0.2 x bandwidth, and the ADC
-      fill distribution of docs/22 section 5.2 (0.75 nominal / 0.15 high-or-clipped / 0.10
-      under-filled). Hidden truth per docs/sigmf-extension.md: rate, sync, check polynomial and
-      width, per-frame payloads.
-      NOTE WHAT IT MAY NOT CLAIM. docs/22 section 7.2 marks S2 REPORT-ONLY, not a pass bar, because
-      T-547 measured the evidence-bits ladder on the FSK path only and explicitly declined to
-      assume it transfers to AM/OOK. This ticket builds the generator; T-619 is what would let the
-      row become a bar, and only the M-12 review may make that conversion.
-      DoD: the scenario registered in `SCENARIOS` with defaults and use cases, truth annotations
-      written, and `just synth` producing it at both `ci8` and `cf32_le`.
+      FOUND BY T-545 while building the BART phase-2 blind suite, and it is the inverse of the gap
+      that ticket was looking for. The estimator gives `estimated_params` to the bursty ANALOGUE FM
+      neighbours - labelling them `"2fsk"`, `mod_order: 2`, deviation 2390 Hz - while the confirmed
+      digital C4FM control channel gets `null`.
+      So the failure is not "no answer for the digital signal". It is a CONFIDENT WRONG ANSWER for
+      an analogue one, in the same run, from the same estimator. An analogue FM burst has no symbol
+      alphabet at all; calling it 2-FSK with a deviation is the confidently-wrong outcome the
+      open-set stance exists to prevent, and it is worse than abstaining because a ranked
+      explanation built on it inherits the error.
+      Establish why the estimator commits rather than abstains here - is it that nothing in the
+      chain can return "analogue, no symbols", or that the abstention exists and is not reached?
+      T-589 found exactly that second shape (a stage structurally unable to fire looked like a
+      stage that fired and agreed), so check before concluding.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): over a scene containing both analogue
+      FM bursts and a digital channel, the analogue emissions do NOT receive a symbol-rate or
+      mod_order claim, and the count of each is reported so the test cannot pass on zero.
+      Prove the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-615
+    milestone: MAUTO
+    title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-545]
+    use_cases: [SIGNAL-085]
+    acceptance: |
+      FOUND BY T-545, which was asked to rule on the `[851, 869] MHz` trigger band and did: a band
+      gate is not a frequency lookup, so it does not break the blind rule. BUT the ruling exposes a
+      gap it correctly did not close: SIGNAL-085's actual claim is to find a 100 %-duty narrowband
+      four-level emission ANYWHERE, and what runs is band-gated, so the use case as written is not
+      what is tested.
+      This matters beyond tidiness. The project's stance is that the known-signal database offers
+      ranked suggestions AFTER blind detection and never starts the search; a band gate is a
+      weaker version of the same shortcut - it does not look a frequency up, but it does decide
+      where to look from a prior rather than from the signal. The 902-928 MHz burst scene (T-254)
+      is the model for what measurement-driven looks like.
+      Decide whether the gate is a permanent engineering constraint (cost, dwell budget) that
+      should be recorded as one, or a scaffold to remove. If it stays, SIGNAL-085's text should say
+      so, because a use case that claims more than the test delivers is the same defect as a UI
+      implying resolution it never captured.
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
+      trigger band is found, or the ticket records why it cannot be.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-620
+    milestone: M2-hardening
+    title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
+    status: todo
+    priority: normal
+    parallel_group: CI
+    model: opus
+    effort: medium
+    core_interface: false
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      FOUND BY T-563's lever-3 measurement: docs/capabilities/*.md cards are NOT the problem - all
+      14 are 107-125 lines, exactly the cheap, scoped-small design CLAUDE.md describes. The cost is
+      ADRs. `docs/adr/*.md` ranges 23-799 lines; the largest are named by open+closed tickets a LOT:
+      ADR-0016 (784 lines) by 49 tickets, ADR-0017 (530 lines) by 28, ADR-0015 (681 lines) by 24,
+      ADR-0013 (560 lines) by 19, ADR-0012 (799 lines) by 16, ADR-0011 (558 lines) by 15. CLAUDE.md
+      tells agents to "read the ADRs a task names", with no per-task pointer to a section, so a task
+      that names ADR-0016 for one contract (say, the taxonomy-versioning rule) has no way to avoid
+      paying for the whole 784-line document, every time a fresh agent is briefed into that area -
+      and a fresh agent is briefed into ADR-0016's area on the order of once every couple of tickets,
+      given 49 references.
+      THE FIX IS NOT TO SHRINK THE ADRs. CLAUDE.md: "changing an ACCEPTED ADR goes to Fable + the
+      user" - this ticket must not edit ADR content, and splitting/summarising one is a change to a
+      settled document, not a formatting nit.
+      WHAT TO DO INSTEAD: (a) add a short "date/agents cite this ADR mostly for: <section>" pointer
+      to each `use_cases`/task-entry citation going forward, OR (b) add a table of contents with
+      line-anchored section names at the top of the 6+ large ADRs (a structural aid, arguably not a
+      decision change - confirm with Fable/the user before landing it, per the ADR-change rule) so a
+      brief can say "ADR-0016 SS3-4" instead of "ADR-0016", OR (c) if neither is cheap, at minimum
+      change the *briefing convention* in CLAUDE.md/coordinator role docs so a task entry that names
+      a >300-line ADR also names the section, going forward - cheapest lever, no ADR content touched.
+      MEASURE, do not assume: before landing anything, get a rough token cost of "read ADR-0016 in
+      full" vs "read the ~80-line section a task actually needs" from a live brief, so the fix is
+      justified by a number rather than the plausible story above.
+    notes: |
+      Filed by T-563 (2026-09-21), which found this while checking lever 3 (context re-reading) and
+      deliberately did not fix it itself - editing ADR content is a Fable+user decision, and the
+      cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
+      nit.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-532
+    milestone: MLIVE
+    title: A kept tile answer may not claim the radio never looked at time it never saw
+    status: done
+    priority: high
+    parallel_group: PIPE
+    core_interface: true
+    model: opus
+    depends_on: [T-501, T-505]
+    use_cases: [AWARE-011, AWARE-042]
+    acceptance: |
+      RECONSTRUCTED 2026-09-21 FROM THE LANDED WORK: this ticket was worked on `task-t532` and
+      never had a board block, which is why `just reconcile` could not see it.
+      THE DEFECT, MEASURED PER HOP. T-501's fidelity floor took the live-edge grey share in
+      canvas-journey test 1 from 0.2 % to 10-38 %. The backend is not the defect: its coverage
+      plane and grid are 30-90 ms AHEAD of the row the client calls the live edge. The defect is
+      the third hop, and it is two things.
+      (1) A TILE'S COVERAGE PLANE IS A POSITIVE `unobserved` CLAIM ABOUT ROWS THAT HAD NOT HAPPENED
+      WHEN IT WAS BUILT. A tune record stops at the newest sample, so every row of a live tile past
+      it is served `unobserved` - true when served, false a moment later, and a tile cache keeps
+      copies. At the old 1 s cell the error hid inside the cell the live edge was already in; at
+      40 ms it is ~32 rows of THE grey over rows the radio recorded.
+      (2) THE REFRESH PERIOD SCALED WITH HOW MANY TILES THE EDGE WAS CUT INTO, because the duty
+      gate was charged per TILE rather than per PASS over the edge.
+      DoD: `coverage.horizon.as_of_s` on the route, the young-end twin of `oldest_record_s`, taken
+      from the same spans the planes are rasterised from; the renderer draws nothing past it and
+      lets the pane's PENDING ground show; a resident tile whose answer stops short counts as
+      `behind the edge`, not as `pending`; and the live-edge grey share is ASSERTED at 5 %, not
+      merely measured.
+    branch: task-t505-v2
+    notes: |
+      DONE and REBASED 2026-09-21 onto `task-t505-v2`, on top of T-501 and T-505 - all three in one
+      worktree, because they share their conflict files.
+      MEASURED IN THE BROWSER over a band the server reports fully observed: live-edge zone grey
+      10-38 % -> 0.0 %; whole-pane grey 33 % -> 0.0 %; residency 11248 ms -> 401 ms; newest rows
+      after a retune 68 distinct / 96 % dominant -> 820 / 23 %. canvas-journey is now 6/6 on this
+      branch (it was 5/6 on both original branches; test 5, the T-529 retune window, since landed).
+      REBASE NOTE: `drawUpToHorizon` now reports the region it actually drew, so T-528's viewport
+      contrast measures what was DRAWN and never the rows the copy does not reach. That interaction
+      did not exist on the original branch - T-528 landed after it was cut.
+  - id: T-616
+    milestone: MAUTO
+    title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      DESIGN / ADR change, no code. T-547 (docs/21 section 5.1) measured the dependence between the
+      seven calibrated metrics on 820 matched windows: snr and evm as hk_demod::fsk::FskDemod
+      computes them are a deterministic monotone map of one another (Spearman rho = -0.989, both
+      derived from the same (a, var) pair), line_violations and bit_structure sit at -0.706 (both
+      statistics of one bit sequence), and timing_var against snr at -0.52.
+      ADR-0015 section 1.3 defines evidence_bits = sum_j min(b_j, cap_j) - L_j. A sum of
+      significances is a log-probability only if the terms are independent under the null. They
+      are not. The 12-bit S0-S3 cap partially hides this, which is worse than it failing loudly.
+      DoD: an ADR-0015 amendment that states the combination rule within a stage - the obvious
+      safe choice is the MAXIMUM over metrics known to be dependent, not the sum - names which
+      MetricIds are in which dependence group for the blocks that exist, and says what a block
+      must declare when it publishes two metrics from one estimate. Also state what this does to
+      the 12-bit caps (they were sized for a sum). Must land before any block implements
+      Block::evidence, because the grouping is part of the contract.
+  - id: T-617
+    milestone: MAUTO
+    title: 'Calibration tables must declare their achievable bit levels and their n (eye_open is non-invertible at 4 and 6 bits)'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-008]
+    acceptance: |
+      DESIGN, then a small schema change. T-547 (docs/21 sections 5.2, 5.3) measured two hard
+      limits on the synth/calibration/<block>.json design of ADR-0015 section 2.2:
+      (a) eye_open takes only 66 distinct values over 4200 noise windows at n = 112 symbols, with
+      an atom exactly at the 4-bit and 6-bit quantiles: asking that table for a 6-bit threshold
+      returns one worth 2.41 bits. The float reference is wrong by 3.6 bits before any ADC is
+      involved, so this is a property of the statistic at that support, not of the receiver.
+      (b) a table sampled with N windows cannot express more than log2 N bits: at N = 4200 the
+      ceiling is 12.04 bits, and bit_structure stops at 9.71 because of a 5-window atom.
+      ADR-0015 section 1.3 caps S0-S3 at 12 bits and S4 at 32.
+      DoD: the calibration-table schema carries, per (metric, n), the levels it can actually
+      express and the N it was sampled with; a block returns an explicit "cannot express b bits
+      here" rather than a silently wrong threshold; and ADR-0015's caps are restated against what
+      calibration can reach (32 bits is unreachable by calibration in principle). A Rust test
+      asserts a table rejects a level above its own ceiling.
+  - id: T-618
+    milestone: MAUTO
+    title: 'M-2: condition calibration tables on ADC FILL (sigma in LSB), not gain; size the sampling budget'
+    status: todo
+    priority: high
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547, T-617]
+    use_cases: [RESEARCH-008, SIGNAL-052]
+    acceptance: |
+      T-547 (docs/21 sections 3, 4) established the conditioning key M-2 must build in rather than
+      retrofit: it is the ADC FILL LEVEL, the per-component noise sigma in LSB, and NOT the
+      LNA/VGA/amp setting and NOT the clip fraction. The control is decisive - applying 51 dB of
+      gain without the ADC reproduces the float table to 0.02 bits on every metric and leaves the
+      demodulator's success rate bit-identical - so "stable across gain states" in ADR-0015 was
+      naming the wrong variable. Clipping is benign (28% clipped costs <= 0.34 bits at a 6-bit
+      claim); under-fill is the hazard (sigma = 0.21 LSB costs 1.0-1.6 bits and collapses
+      eye_open to 0.91 bits realised for a 6-bit claim, while changing the demod success rate from
+      19% to 53%).
+      DoD: (a) the generator writes one table per fill bucket, with the bucket boundaries derived
+      from measurement rather than chosen, and a documented cheap runtime rule for the degenerate
+      end (sigma < 0.5 LSB); (b) the sampling budget is stated per (block, support n, fill
+      bucket) cell against T-617's log2 N ceiling - >= 4096 windows to touch 12 bits once and
+      ~40k for an interval - and is budgeted, not discovered; (c) Provenance already carries
+      quantisation_limited and the clip count, so name which field the runtime reads and whether
+      sigma_LSB needs to join them (docs/07).
+  - id: T-619
+    milestone: MAUTO
+    title: 'Extend the T-547 ladder measurement to the AM/OOK and C4FM paths before either ships an evidence()'
+    status: todo
+    priority: medium
+    parallel_group: MAUTOD
+    model: opus
+    depends_on: [T-547]
+    use_cases: [RESEARCH-001, RESEARCH-008]
+    acceptance: |
+      T-547 measured exactly one path: the M1 2-FSK demodulator plus hk_classify's
+      if_local_bimodality, at one support (112 symbols). docs/21 section 7 says plainly that there
+      is no reason to assume delta transfers. AM/OOK envelope bimodality and the C4FM path
+      (hk_demod::fsk::c4fm) have different statistics and different failure modes under
+      under-fill; PSK EVM has no block at all yet (ADR-0015 section 1.1's Costas gap).
+      DoD: the same harness (crates/hk-pipeline/examples/t547_ladder.rs, extended) run over the
+      AM/OOK and C4FM metrics at two supports, reporting per metric the same four things docs/21
+      reports: whether a fixed table is valid, what it must be conditioned on, the measured
+      spread with its n, and a GO/CONDITIONAL/NO-GO. Append a section to docs/21 rather than
+      starting a new note. Cheap to run (the noise corpus takes ~90 s for 4200 windows x 12
+      conditions on 8 threads); it is the write-up that costs.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
-      Filed 2026-09-21 by T-551 (docs/22 section 9). Fixture work, no engine dependency.
+      Filed 2026-09-21 by T-547. Not urgent, but it is a precondition on those blocks publishing
+      evidence(), the same way T-547 was for the FSK path.
+  - id: T-628
+    milestone: MAUTO
+    title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
+    status: todo
+    priority: normal
+    parallel_group: DETECT
+    model: opus
+    effort: medium
+    depends_on: [T-546]
+    use_cases: [SIGNAL-087]
+    acceptance: |
+      FOUND BY T-546 while making docs/19 section 7.6a's -9.6 ppm measurement a capability, and
+      deliberately not chased there.
+      `hk_detect::trunk::raster::fit_grid_offset` fits the receiver's own offset from the channel
+      grid as the power-weighted circular mean of the occupied bins MODULO the raster. That is
+      genuinely all the spectrum says - +4300 Hz and -8200 Hz name the same 12.5 kHz grid - and it
+      is enough to re-origin the grid, which is what candidacy needs. It is NOT enough to reach an
+      ABSOLUTE frequency, and a trunking grant is exactly that: the announced band plan fixes the
+      granted channel's transmit frequency unambiguously, so down-converting at `f + offset` with
+      the wrong alias measures the channel NEXT DOOR.
+      T-546's holding answer is to SKIP following while the receiver is measurably off-grid, on the
+      rule that a wrong measurement ("granted channel not radiating") is worse than a missing one.
+      That is right and it is also a hole: on every real 800 MHz capture this HackRF will ever make,
+      grant following is off.
+      Resolve the alias. Two constraints are available and neither is a band-plan lookup:
+      (1) the crystal's own ppm bound - a HackRF One is specified to +/-20 ppm, which at 852 MHz is
+      +/-17 kHz and so does NOT on its own pick one 12.5 kHz alias, but does bound the search to a
+      handful; (2) which alias actually has energy - try each candidate alias on a channel the
+      grants name and keep the one that measures power, which is a MEASUREMENT rather than an
+      assumption. Record the resolved offset as receiver provenance with the evidence that chose it,
+      and make the unresolved case visibly distinct from the resolved one (ADR-0021's tried vs
+      not-tried rule applies here too).
+      ASSERT WITH COUNTS, NOT WALL-CLOCK: over the T-545 scene shifted by the measured -8200 Hz, the
+      granted voice channels are followed and their call count matches the unshifted run's. Prove
+      the test goes RED without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+  - id: T-621
+    milestone: M2-hardening
+    title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    acceptance: |
+      `crates/hk-cli/tests/api_contract.rs` -
+      `coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked` (~line 6203)
+      and `coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked`
+      (~line 6651) both assert `sources[iq-ring].available == true` and `spans > 0`.
+      `hk serve` REFUSES the IQ ring below an 8 GiB free-space floor - "needs 134217728 bytes above
+      the 8589934592-byte free-space floor and N are free" - so on a machine near that floor both
+      tests fail for a reason that has nothing to do with the code under test.
+      THIS IS NOT HYPOTHETICAL AND IT IS NOT A FLAKE. On 2026-09-21 it sank at least three merge
+      gates. T-596's agent measured one of them FAILING ALONE on `main` with its own work stashed,
+      which by the standing triage rule makes it a real bug rather than a load-flake. Free disk on
+      the dev machine ranged from 43 GiB to 1.1 GiB across the day because each building worktree
+      costs 8-10 GiB of newly-private APFS blocks after the ld64.lld change.
+      DECIDE WHAT THE TEST SHOULD DO WHEN ITS PRECONDITION IS ABSENT, which is the real question.
+      A silent skip is not acceptable here - "a gate that skips is a gate that passes for the wrong
+      reason" (T-346/T-353) - but neither is a red gate that means "this machine is low on disk".
+      The honest shapes to weigh: fail with a message that NAMES the refusal reason the server
+      already reports, so triage is instant rather than a 20-minute hunt; or assert the honest
+      refused-ring answer as a second documented case, so the refusal itself is under test (T-596
+      made the product survive a refused ring honestly - these tests have not caught up).
+      Note the second shape is more than tidiness: a portable device WILL fill its disk, so
+      "what the coverage record says when the ring was refused" is a real product state that
+      deserves a test, not an environment to be excluded.
+      ASSERT WITH COUNTS AND STATES, NOT WALL-CLOCK (user, 2026-09-21).
+      Prove the test behaves correctly BOTH with a ring and with the ring refused.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
   - id: T-622
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: check and payload parameterisation - arbitrary CRC width, an out-of-catalogue polynomial, and a constant-payload beacon'

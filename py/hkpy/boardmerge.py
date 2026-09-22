@@ -127,6 +127,16 @@ def _validate(text: str, need: set[str]) -> str | None:
         for line in blk.split("\n")[1:]:
             if line and not line.startswith("    "):
                 return f"{tid}: a line escaped its block: {line[:40]!r}"
+        # A key twice in one block is what a LOST `- id:` line looks like: the swallowed ticket's
+        # keys land inside its neighbour. YAML will not object — a duplicate key silently keeps the
+        # last value — so the swallowed body wins and the host's is dead in the parse. This
+        # validator missed it once, on 2026-09-21, and passed a resolution that reintroduced damage
+        # the board test then caught; checking here is what makes the driver's refusal trustworthy.
+        seen: set[str] = set()
+        for key in re.findall(r"^    ([a-z_]+):", blk, re.M):
+            if key in seen:
+                return f"{tid}: declares {key!r} twice, which is a lost `- id:` line"
+            seen.add(key)
     if trailer and not TRAILER_RE.match(trailer.split("\n")[0]):
         return "the tail after the task list is not a top-level key"
     return None
