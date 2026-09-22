@@ -308,6 +308,28 @@ pub struct Prediction {
 | ML | shadow changes no Classification row; each `active` family has enable evidence; zero ring sample drops with ML on |
 | Regression | M0/M1/M2 acceptance unchanged |
 
+**Where each row is asserted.** A gate row nothing checks is satisfied by nothing checking it —
+T-206's two vacuous dimensions, found and paid for once. The **ML row** was in that state until
+T-366: `tests/e2e/tests/acceptance/m3_*.rs` held no ML assertion at all. It is now
+`hk_ml::exit_gate` — the three clauses as a pure predicate over observables (the `(model, consumer)`
+modes in force, the `Classification` rows a run persisted, the run's lost-sample count) — asserted
+over a real run through the mock SDR by `tests/e2e/tests/acceptance/m3_ml.rs`, with the shape of the
+rule being *every ML-attributed `Classification` row must name a model that is `active` with §4.6
+enable evidence behind it*.
+
+The honest part: with the host dormant (T-363) the modes table is empty, so the row holds today
+**because nothing is on**, and that is what the gate prints (`[T-206] ML: off (clause 3 not
+exercised)`) rather than claiming ML was exercised. What makes the assertion worth having is that
+it **fails the day ML becomes active without its evidence** — and that is demonstrated, not argued:
+`m3_ml_exit_gate_catches_the_states_the_adr_row_forbids` constructs each forbidden state on the
+run's own snapshot and shows the gate reporting it, and
+`hk-ml/src/host.rs::a_forced_active_model_without_evidence_fails_the_adr_0016_s7_exit_gate` does the
+same through a live host on the one path that can reach `active` without evidence (a forced
+`set_mode`, which §4.6 audits rather than refuses). The empty-modes premise is itself guarded:
+`m3_ml_the_dormant_premise_of_this_gate_is_still_guarded` fails if `hk-ml`'s no-production-caller
+tripwire is removed, so whoever wires the host must give the gate a real mode enumeration
+(`MlGateSnapshot::from_host`) in the same change.
+
 ### 7.1 Canonical baseline, and how a brief cites it (T-415)
 
 The floors above are fixed a priori. The **numbers a brief quotes as a do-not-regress

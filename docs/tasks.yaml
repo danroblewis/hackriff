@@ -7647,6 +7647,76 @@ tasks:
       Prove non-vacuity the T-287/T-297 way: construct the state the clause forbids and show the assertion
       catching it. If that cannot be done until shadow is real, say so and sequence this behind T-365 rather
       than landing a test that cannot fail'
+    result: |
+      ADR-0016 §7's ML exit-gate row is now asserted, and the assertion is shown to be able to fail.
+
+      WHAT CHANGED
+      - crates/hk-ml/src/exit_gate.rs (new): the §7 ML row as a pure predicate over observables —
+        `MlGateSnapshot { modes, rows, shadow_records, lost_samples }` -> `Vec<GateViolation>`.
+        Rule shape: (1) every ML-attributed `Classification` row must name a model that is `active`
+        for some consumer — which is exactly "shadow changes no Classification row", and is no weaker
+        for an off/unloaded model; (2) every `active` mode must carry §4.6 enable evidence and not have
+        been reached by `force`; (3) lost ring samples are a violation *when ML is on*, and are not this
+        row's business when it is off (the run's own suites own loss-free capture either way).
+        `MlGateSnapshot::from_host` reads the modes and evidence out of a live host — the seam the
+        wiring change takes.
+      - crates/hk-ml/src/host.rs: `a_forced_active_model_without_evidence_fails_the_adr_0016_s7_exit_gate`
+        — the T-287/T-297 non-vacuity proof against a REAL host: the one path that can reach `active`
+        with no evidence today is a forced `set_mode` (§4.6 audits it rather than refusing), so that
+        state is constructed through the real API and the gate is shown catching it; a real shadow
+        `observe()` prediction recorded as a classification is caught as clause 1; the same host with
+        evidence and no force passes.
+      - tests/e2e/tests/acceptance/m3_ml.rs (new, wired into tests/e2e/tests/acceptance_m3.rs):
+        the gate row measured over a real run through the mock SDR. `m3_ml_the_exit_gate_row_holds_...`
+        builds the snapshot from what the run persisted (ML-attributed rows read from the classification
+        history; shadow records counted from `<store>/ml/shadow/` if it exists; lost samples from the run
+        summary) and asserts no violation, printing
+        `[T-206] ML: off (clause 3 not exercised); modes 0, ML-attributed classification rows 0, ...`
+        so a green row is never mistaken for evidence ML ran.
+        `m3_ml_exit_gate_catches_the_states_the_adr_row_forbids` takes THAT run's own snapshot and
+        constructs each forbidden state on it, asserting each is reported — and asserts that sample loss
+        with ML off is NOT reported, so this row does not quietly absorb another suite's assertion.
+        `m3_ml_the_dormant_premise_of_this_gate_is_still_guarded` couples the empty-mode-table premise to
+        hk-ml's no-production-caller tripwire: delete that guard (which is exactly what the wiring change
+        is told to do) and the M3 acceptance suite fails until `modes_in_force` is given a real
+        enumeration via `from_host`.
+      - docs/adr/0016-classification-contracts.md §7: a "where each row is asserted" note after the exit
+        gate table — what now asserts the ML row, that it holds today *because nothing is on* and says so,
+        and where the non-vacuity proofs live.
+      - crates/hk-ml/src/lib.rs + tests/no_production_caller.rs: the dormancy note and its tripwire now
+        say they are the premise of a gate row, so removing them is a gate change and not a cleanup.
+      - tests/e2e/Cargo.toml: hk-ml as a dev-dependency (with the reason).
+
+      WHY THIS FORM, GIVEN THE TICKET'S TRAP
+      The host is dormant (T-363), so any test asserting "ML behaved" would be near-vacuous. What landed
+      instead asserts a predicate over a REAL run, satisfied today by measurement rather than by nothing
+      checking: no mode in force, no ML-attributed row, no loss. It goes red the day an ML-attributed
+      `Classification` row appears without an `active`-with-evidence model behind it, the day `active` is
+      forced without evidence, or the day ML is on and the ring drops samples. T-365 was NOT needed first:
+      the forbidden states are constructible today, two of them through the real model-host API.
+
+      TESTS (targeted, per CLAUDE.md)
+      - `cargo nextest run -p hk-ml` — 38 passed, 0 failed (includes the new host test and the 6 new
+        exit_gate unit tests; the no_production_caller tripwire still passes, i.e. nothing here wired the
+        host).
+      - `cargo nextest run -p hk-e2e -E 'binary(acceptance_m3) and test(m3_ml)'` with
+        HK_E2E_REQUIRE_SYNTH=1 — 3 passed, 0 failed.
+      - `just precheck hk-ml hk-e2e` — fmt clean, clippy clean.
+      The whole M3 milestone suite was NOT run (worker protocol: targeted tests only); the new module is
+      additive to that binary and does not touch m3_grid/m3_scene.
+
+      SURFACED, NOT CHASED
+      - The §7 exit-gate table's other rows were not audited for the same defect. The ML row is the one
+        T-363 named and the only one this ticket scoped; whether e.g. the "Regression: M0/M1/M2 acceptance
+        unchanged" row is asserted anywhere is unexamined here. Worth one sweep ticket over the whole
+        table, given this is the second instance of the shape (T-206, T-366).
+      - Clause 3's antecedent stays unreachable until a host is wired; when T-365's durable sink lands,
+        `shadow_records()` in m3_ml.rs starts counting real records and turns it on with no code change,
+        but nobody has verified the `<store>/ml/shadow/` path it reads against what T-365 will write.
+      - The brief's reporting command (`just task result T-366 --from <file>`) does not exist in this
+        worktree's justfile, nor on main (`git show main:justfile` has no `task` recipe). The report was
+        therefore appended as a `result:` block on docs/tasks.yaml on this branch, which is what
+        ops/work-runner.py's own brief text describes.
   - id: T-367
     milestone: M2-hardening
     title: 'The two edge navigators control the wrong axes: the vertical must be time-for-this-frequency-range,

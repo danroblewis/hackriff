@@ -93,10 +93,15 @@
 //! CI runs it; the host is unwired, not untested. The *claim above* is guarded by
 //! `tests/no_production_caller.rs`, which fails the day a caller appears, so whoever wires it is
 //! told to come back here and delete this section rather than leaving it to mislead the next
-//! reader.
+//! reader. That same tripwire is the premise of ADR-0016 §7's ML exit-gate row as
+//! `tests/e2e/tests/acceptance/m3_ml.rs` measures it (T-366): the gate reports an empty
+//! `(model, consumer)` mode table because nothing here is constructed, so wiring the host means
+//! giving that gate a real enumeration ([`exit_gate::MlGateSnapshot::from_host`]) in the same
+//! change.
 
 #![deny(missing_docs)]
 
+pub mod exit_gate;
 pub mod gate;
 pub mod host;
 #[cfg(feature = "ml-mlp")]
