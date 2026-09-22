@@ -17227,7 +17227,8 @@ tasks:
   - id: T-548
     milestone: MAUTO
     title: 'MAUTO-DESIGN: derive the confirm-by-decode thresholds from a stated false-confirm budget, instead of the guessed 64 bits / 3 frames / width 16'
-    status: todo
+    status: done
+    resolved_by: docs/adr/0022-false-confirm-budget.md
     priority: high
     parallel_group: MAUTOD
     model: opus
@@ -20825,6 +20826,66 @@ tasks:
       range the coordinator reserved; T-631..T-659 were being taken by another agent at the time.
       Blocked on `hk-synth`, i.e. on MAUTO M-1/M-2 actually starting. Not `core_interface` itself -
       the contract it implements is ADR-0015 section 13, which is already written.
+  - id: T-700
+    milestone: MCANVAS
+    title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
+    status: todo
+    priority: high
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: [AWARE-011]
+    found_by: 'the coordinator, 2026-09-21, reconciling branches against the board'
+    acceptance: |
+      THE BOARD NEVER KNEW ABOUT THIS WORK. `task-t533` carries four commits, of which the tip
+      `f80857aa` is finished, measured work that no ticket anywhere in the board's history describes -
+      the id "T-533" appears in exactly ONE place in this repository, that commit's subject line. An
+      agent worked an id that was never filed, the worktree was paused ("machine oversubscribed"),
+      and the branch then sat while `main` moved 286 files past it. Its other three commits (T-505,
+      T-501, T-532) ALREADY LANDED by another route (`96e3cbcc`), so only the tip is new.
+      WHAT IT DID, measured through the route on one address, four spellings back to back:
+        json              1 879 209 B   build_ms 20.0
+        json + gzip         244 012 B
+        f16                 856 178 B
+        f16 + gzip          117 382 B   build_ms 20.4     -> 16x
+      `grid.max_db` was 1 197 118 B (64 %) of that JSON: seventeen significant digits per cell for
+      values whose destination is an R16F texture.
+        - `?planes=f16` (opt-in; `json` stays the default) serves `max_db` as base64 of little-endian
+          IEEE binary16, stating its own type, byte order, transfer, scale and absent-value. ONLY
+          that plane, and the branch establishes WHY: `frames` is 131 073 B as text against 349 528 B
+          as base64 u32, and `occupancy_max`/`coverage` lose likewise, so packing them would have
+          GROWN three planes to shrink one.
+        - `Accept-Encoding: gzip` on every routed JSON answer at or above 4096 B, with
+          `Vary: Accept-Encoding`; `gzip;q=0` honoured. A transfer coding, never a representation -
+          the contract test inflates and compares the JSON.
+        - flate2 on the `zlib-rs` backend DELIBERATELY: `miniz_oxide` builds its ~300 kB compressor
+          BY VALUE on the caller's stack and hk-api answers on a 256 kB connection thread, which
+          ABORTED THE PROCESS on the first compressed answer (measured, in the contract test). Keep
+          that choice and keep the comment explaining it.
+        - The client asks for `planes=f16`, decodes it, and REFUSES an encoding it does not know
+          rather than mis-rendering one it does (`TileDecodeError`, so the place stays pending, never
+          grey) - the honesty-tier rule applied to the wire format.
+      THE BRANCH IS HONEST ABOUT ITS OWN LIMIT AND SO IS THIS TICKET: `cost.build_ms` did NOT move
+      (20.0 -> 20.4 ms). Over loopback one tile's fetch-to-decoded hop is 36 -> 31 ms and a 16-tile
+      pane row at the four-slot cap 182 -> 166 ms, both dominated by tile PRODUCTION, not by bytes.
+      The win is for a tunnel, a phone or a second machine - the real device story - not the dev
+      loop. Do not re-sell it as a latency fix.
+      HOW TO RELAND. Cherry-pick `f80857aa` onto current main; a worktree is parked clean at
+      `task-tilebody`. Measured 2026-09-21: SIX conflict hunks - `crates/hk-api/src/http.rs` (1),
+      `crates/hk-api/src/tiles.rs` (4), `crates/hk-cli/tests/api_contract.rs` (1). `tiles.rs` moved
+      under T-571's live incremental maintenance and T-595's `excluded` state, so resolve by
+      understanding both sides, not by taking one.
+      RE-MEASURE THE FOUR SPELLINGS after relanding rather than quoting the numbers above: they were
+      taken before T-571 changed how a tile is produced.
+      ASSERT WITH COUNTS AND BYTE SIZES, NOT WALL-CLOCK (user, 2026-09-21).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      Filed 2026-09-21 by the coordinator. SERIALISE with T-572 (hot-tile LRU) and T-573 (batch
+      /api/tiles endpoint): all three edit `crates/hk-api/src/tiles.rs`, so they want ONE owner in
+      ONE worktree in sequence, not three agents contending for one file. This one goes first - it
+      is already written and measured.
+      The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
