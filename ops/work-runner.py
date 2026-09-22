@@ -145,8 +145,14 @@ def alive(pid):
 
 # ---------- environment guards ----------
 def disk_free_gb():
-    st = os.statvfs(REPO)
-    return st.f_bavail * st.f_frsize / 1e9
+    """`df`'s number, not statvfs: on APFS they differ by the purgeable space (12 GB on 2026-09-22),
+    and CLAUDE.md's floor is stated in df terms ("only df counts")."""
+    try:
+        out = subprocess.run(["df", "-k", REPO], capture_output=True, text=True, timeout=10).stdout.splitlines()
+        return int(out[-1].split()[3]) * 1024 / 1e9
+    except Exception:
+        st = os.statvfs(REPO)
+        return st.f_bavail * st.f_frsize / 1e9
 
 
 def gate_running():
