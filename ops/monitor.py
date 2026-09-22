@@ -462,6 +462,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 .filters button{border:1px solid var(--line);background:transparent;color:var(--dim);padding:2px 8px;border-radius:5px;cursor:pointer;font-size:12px;margin-left:2px}
 .filters button.on{color:var(--txt);border-color:var(--dim);background:#1E2A33}
 .filters button.rt{font-weight:600;letter-spacing:.04em;font-size:11px}
+.filters button.chipx{color:#FFF0C2;border-color:#FFD98a;background:#3a2c0a;font-weight:600}.filters button.chipx.all{color:var(--mut);border-color:var(--line);background:transparent;font-weight:400}
 .filters button.rt-next.on{color:#C7B8FF;border-color:#C7B8FF;background:#2b2352}.filters button.rt-merging.on{color:#FFC14D;border-color:#FFC14D;background:#4a3608}
 .filters button.rt-queue.on{color:#F0A542;border-color:#F0A542;background:#33280c}.filters button.rt-review.on{color:#5EE0C4;border-color:#5EE0C4;background:#0f3a33}
 .filters button.rt-failed.on{color:#FF6B57;border-color:#FF6B57;background:#5a1a12}
@@ -503,6 +504,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button>
 <button id=f-next class="on rt rt-next">UP NEXT</button><button id=f-merging class="on rt rt-merging">MERGING</button><button id=f-queue class="on rt rt-queue">IN QUEUE</button><button id=f-review class="on rt rt-review">IN REVIEW</button><button id=f-failed class="on rt rt-failed">FAILED</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
+<span class=filters id=openms></span>
 <a href="/">← dashboard</a>
 <span class=legend><span><i class=hex style="background:#FF6B57"></i>FAILED / redo (pulsing)</span><span><i class=stad style="background:#FFC14D"></i>IN THE GATE (moving dashes)</span><span><i class=sub style="background:#F0A542"></i>QUEUED</span><span><i class=asym style="background:#5EE0C4"></i>IN REVIEW</span><span><i class=trap style="background:#C7B8FF"></i>UP NEXT</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
@@ -511,8 +513,16 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
 let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
-let openMs=new Set(); try{ openMs=new Set(JSON.parse(localStorage.getItem('graph.openMs')||'[]')); }catch(e){}
-function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); try{localStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} last=''; draw(); }
+// Open milestones live for THIS TAB only (sessionStorage): a persisted "M2 open" survived a reload
+// on 2026-09-22 and read as "the map always shows everything". The chips in the top bar say what
+// is open and close it.
+let openMs=new Set(); try{ localStorage.removeItem('graph.openMs'); openMs=new Set(JSON.parse(sessionStorage.getItem('graph.openMs')||'[]')); }catch(e){}
+function renderOpenChips(){ const el=document.getElementById('openms'); if(!el) return;
+  el.innerHTML=openMs.size?('open: '+[...openMs].map(m=>`<button class="chipx" data-ms="${m}" title="close ${m}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
+  el.querySelectorAll('button[data-ms]').forEach(b=>b.onclick=()=>toggleMs(b.dataset.ms)); const ca=document.getElementById('closeall'); if(ca) ca.onclick=()=>{openMs.clear(); saveMs(); last=''; draw();}; }
+function saveMs(){ try{sessionStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} renderOpenChips(); }
+function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); saveMs(); last=''; draw(); }
+renderOpenChips();
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
