@@ -132,6 +132,7 @@ mod codec;
 mod config;
 mod export;
 pub mod frame;
+mod live;
 mod query;
 pub mod shape;
 pub mod stats;
@@ -162,7 +163,7 @@ pub use query::{
     Resolution, ShadowFill, ShadowRun, StraddleGuard, burst_histogram,
 };
 pub use shape::NoiseShapeEstimator;
-pub use store::{IngestOutcome, MAX_MATERIALIZE_TILES, Pyramid, PyramidStats};
+pub use store::{IngestOutcome, MAX_MATERIALIZE_TILES, Pyramid, PyramidStats, ResidentBytes};
 pub use tile::{
     FrontEndState, MAX_GAIN_STATES, MAX_ORIGINS, MAX_PROVENANCE_STEPS, Origin, OriginField,
     OriginFilter, OriginMatch, ProvenanceStep, ProvenanceSummary, SHAPE_TOLERANCE,

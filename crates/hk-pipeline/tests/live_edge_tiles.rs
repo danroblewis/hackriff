@@ -401,81 +401,53 @@ fn the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture()
     );
 }
 
-/// **What the floor costs, measured** — T-434's RAM caveat, answered.
-///
-/// `docs/16` §6.2's V(0, 0) keeps a level-0 tile open for **9.1 h per 25.6 MHz block** at ~3 MB of
-/// accumulator: fine for a survey, wrong for a growing edge, because a level-0 tile is an
-/// in-memory accumulator for the whole of its duration. The shipped floor keeps the 1 s time cell
-/// (F1) and shrinks the block's **height** to 64 time cells, so the finest node's tile spans
-/// **64 s** rather than 9.1 h — 512× less residency. Its *width* stays scheme 1's 1024 cells,
-/// because that axis buys file count rather than memory (see [`VIEW_F_CELLS_PER_BLOCK`]).
-///
-/// What a device must be sized for is the whole lattice, though, and this measures it through a
-/// real pyramid. It tracks the **peak** rather than a final snapshot deliberately: which nodes hold
-/// an open tile depends on where the watermark sits modulo each node's tile duration, so one
-/// snapshot varies by 2× and is not a bound.
-///
-/// # What T-439 measured, what T-453 changed, and **what T-571 pays for live tiles**
-///
-/// T-439 measured, and did not predict, that **only the `level_f = 0` column is ever resident**: a
-/// frequency-coarser node has the *same* time cell as its producer, so the fold that fills it runs
-/// inside the producer's seal — after the watermark has already passed that tile's end — and it is
-/// sealed in the same pass instead of being left open. Residency was one tile row per **time**
-/// level, not per node: an eighth of the obvious estimate. The peak came out **one row above** that,
-/// because inside `seal_lag` a node's outgoing tile is still open while its successor has been
-/// created. Measured: **2.28 MB/MHz peak against a 3.65 MB/MHz bound**.
-///
-/// **T-453 collapsed that to one level** — coarse nodes built on demand, so capture opened an
-/// accumulator for node (0, 0) and for nothing else: **0.91 MB/MHz**, and it did not move when the
-/// lattice grew. It bought that by folding a coarse tile out of up to 1024 producer tiles **while
-/// a reader waited**, which is the defect T-571 is about.
-///
-/// **T-571 is the explicit residency decision the ticket asked for, and this test is the number.**
-/// Live maintenance means every node holds an open accumulator for the tile it is filling, because
-/// **the tile is the write unit**: a row committed into a coarse tile has to live somewhere between
-/// its commit and that tile's seal, and the only two places are RAM and a row-granular tile file
-/// that `history::codec` does not have. So the floor goes back up, past T-439's, and the honest
-/// statement is:
+/// **What the view lattice's floor costs in RAM, measured** — the sizing figure the settings doc
+/// quotes, and the standing measurement of every residency decision made about the lattice.
 ///
 /// | | resident floor | what a read of a coarse tile costs |
 /// |---|---|---|
 /// | T-439 eager-at-seal | 2.28 MB/MHz | 1 tile, but up to a whole producer tile stale at the edge |
 /// | T-453 on demand | **0.91 MB/MHz** | up to 1024 producer tiles, ~500 ms, folded in the request |
-/// | T-571 live | ~7.8 MB/MHz at one block, **~4.9 MB/MHz at 20 MHz** | 1 tile, ≤1 producer *cell* stale |
+/// | T-571 live | 73 MB measured / 93.5 MB bound at 20 MHz (3.65 / 4.67 MB/MHz) | 1 tile, ≤1 producer *cell* stale |
+/// | **T-585 live, rows encoded** | **measured below; bound in the tens of MB** | 1 tile, ≤1 producer *cell* stale |
 ///
-/// The per-MHz coefficient **falls** as the span widens, because a frequency-coarser node covers
-/// 2× the spectrum per tile: at one 6.4 MHz block every node needs one block, at 20 MHz the four
-/// frequency levels need 4, 2, 1 and 1. The bound below is computed per node from its own block
-/// width rather than extrapolated, for exactly that reason.
+/// T-571 stated its cost rather than hiding it: 16 nodes, 16 open accumulators (25 at the
+/// measured peak, mid-seal), because the tile is the write unit and a committed row had to live
+/// somewhere until the seal. **T-585 holds a coarse node's committed rows in the codec's stored
+/// form and keeps only the in-progress row as accumulator**, so the coarse nodes' residency is
+/// one row each plus an encoded remainder, and the figure is measured here from the buffers
+/// themselves ([`hk_store::Pyramid::resident_bytes`]) rather than from an open-tile count times
+/// an assumed size.
 ///
-/// **It does grow with node count, and that is the cost this ticket accepted**, stated rather than
-/// hidden: 16 nodes, 16 open accumulators. The knob that would take it back is the one
-/// [`VIEW_T_CELLS_PER_BLOCK`] already names as the **memory** decision — a shorter tile seals
-/// sooner and is resident for less of its life — and the structural fix is holding a coarse tile's
-/// already-committed rows in their encoded form, leaving only the in-progress row as an
-/// accumulator. Both are stored-format changes; neither is this ticket.
+/// The bound is arithmetic over the RAW stored form (no credit for zstd), and every assertion is
+/// a byte or event count — no wall clock. The other lever the ticket named,
+/// [`VIEW_T_CELLS_PER_BLOCK`] (a shorter tile is resident for less of its life), is measured
+/// alongside at 16 rows and printed, so the two can be compared on the same frames.
 #[test]
 fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     use hk_model::PowerUnit;
-    use hk_store::FrameInput;
+    use hk_store::{FrameInput, ResidentBytes, ViewLattice};
 
-    /// Bytes of per-cell accumulator in one `hk_store` tile cell: `count` u32, `max`/`occ_max`/
-    /// `p_lo`/`p_hi` f32, `sum_lin`/`obs_s`/`occ_s` f64.
+    /// Bytes of per-cell accumulator in one full `hk_store` tile cell: `count` u32, `max`/
+    /// `occ_max`/`p_lo`/`p_hi` f32, `sum_lin`/`obs_s`/`occ_s` f64. T-571's unit of residency.
     const BYTES_PER_CELL: usize = 4 + 4 * 4 + 3 * 8;
-    /// Block-aligned, so the coefficient is not inflated by a straddled boundary. Misalignment
-    /// costs up to one extra block per node and is a real cost of wide blocks — it is just not the
-    /// thing this measures.
+    /// Stored-form bytes one committed cell can cost before compression (`max`/`mean` i16,
+    /// three u16 fractions, a varint count of up to 3 B, its bitmap bit).
+    const ENC_RAW_MAX: usize = 2 + 2 + 2 + 2 + 2 + 3 + 1;
+    /// Per-segment bookkeeping, generously; a row commits in at most two footprints.
+    const SEGMENT_OVERHEAD: usize = 64;
+    /// Block-aligned, so the coefficient is not inflated by a straddled boundary.
     const F_LO: f64 = 100.0e6;
     /// Stream seconds to run. Enough for the finest four time levels to open, seal and fold, which
-    /// is what exercises the mechanism; the bound below is arithmetic over all eight, and the peak
-    /// measured here is asserted against it.
+    /// is what exercises the mechanism; the bound below is arithmetic over all sixteen nodes, and
+    /// the peak measured here is asserted against it.
     const SECS: i64 = 700;
     /// Seconds between frames.
     ///
     /// **It has to put more than one row in a level-0 block, and that is not a free parameter.**
     /// Residency is a function of which `(node, frequency block)` the watermark sits in and not of
     /// how densely those cells were filled — the bound below is unchanged by this number — but the
-    /// `ever_coarse` assertion is about the *fold*, and the fold only happens *inside* a block if
+    /// `ever_live` assertion is about the *fold*, and the fold only happens *inside* a block if
     /// two of its rows close while it is open. At the shipped floor a level-0 tile is
     /// `VIEW_T_CELLS_PER_BLOCK` x 40 ms = 2.56 s, so the old 4 s stride gave every block exactly
     /// one row: its single fold coincided with its own seal, and the three frequency-coarser /
@@ -488,134 +460,155 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     /// the thing that was wrong: one second puts two or three rows in each level-0 block, which is
     /// the regime a 25 rows/s live edge is actually in.
     const STRIDE: i64 = 1;
-    /// The span a HackRF's widest practical live window covers, for the extrapolation.
+    /// The span a HackRF's widest practical live window covers.
     const LIVE_EDGE_HZ: f64 = 20.0e6;
 
-    let dir = TempDir::new("view-lattice-cost");
-    // **T-484: measured at the SHIPPED floor, derived rather than named.** Node (0, 0) is now the
+    // **T-484: measured at the SHIPPED floor, derived rather than named.** Node (0, 0) is the
     // display plan's own bin and row, so `f_cell = fs / spectrum_fft_len` and one level-0 frequency
     // block (`VIEW_F_CELLS_PER_BLOCK` = 1024 = the display FFT size) is **exactly the tuned span**,
-    // at any rate. That is the load-bearing consequence for sizing: the number of open blocks stops
-    // being a function of the span, so a 20 MHz live edge holds ONE block where 6.25 kHz cells held
-    // four. Measuring at the live edge itself is therefore the honest case and needs no
-    // extrapolation.
+    // at any rate: a 20 MHz live edge holds ONE block, so measuring at the live edge itself is the
+    // honest case and needs no extrapolation.
     let (f_cell_hz, t_cell) = hk_pipeline::history::view_geometry(
         LIVE_EDGE_HZ,
         &hk_pipeline::PipelineSettings::default(),
-        // The class only enters the row plan above ~45 rows/s (`GATED_SPECTRUM_MAX_ROW_RATE_HZ`),
-        // so at the shipped 25 it is the same geometry either way; the ungated one is the bound.
         hk_model::ContentClass::Unrestricted,
     );
-    let mut cfg = hk_pipeline::history::view_config(f_cell_hz, t_cell);
+    let cfg = hk_pipeline::history::view_config(f_cell_hz, t_cell);
     let span_hz = f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
-    // Uncompressed payloads: this measures RESIDENT accumulator, and zstd on the sealed tiles is a
-    // large share of the run time without touching the number being measured.
-    cfg.compression_level = None;
     let (f_cell, bins) = (cfg.f_cell_hz, usize::from(cfg.histogram.bins));
     let nf = cfg.f_cells_per_block as usize;
-    let mut p = Pyramid::open(&dir.0, cfg).unwrap();
+    assert_eq!(nf, VIEW_F_CELLS_PER_BLOCK as usize);
     let n = (span_hz / f_cell) as usize;
     let psd = vec![1e-9f32; n];
     let t0 = radio::T0_NS;
-    assert_eq!(nf, VIEW_F_CELLS_PER_BLOCK as usize);
-    let per_tile = nf * VIEW_T_CELLS_PER_BLOCK as usize * BYTES_PER_CELL + nf * bins * 4;
 
-    let resident = |p: &Pyramid| -> (usize, usize, usize) {
-        let g = p.geometry();
-        let (mut tiles, mut bytes, mut coarse) = (0usize, 0usize, 0usize);
-        for level in 0..g.n_levels() {
-            let open = p.open_keys(level).len();
-            tiles += open;
-            bytes += open * (nf * g.levels[level].nt * BYTES_PER_CELL + nf * bins * 4);
-            // ANY node above (0, 0), on either axis. T-439 could only count the frequency column,
-            // because the time column was resident by construction.
-            if level > 0 {
-                coarse += open;
+    /// One run: the peak resident set (by total), what T-571's one-full-tile-per-open-tile rule
+    /// would have held at that same sample, the most coarse tiles ever open, and the worst
+    /// accumulator rows per live tile.
+    struct Run {
+        peak: ResidentBytes,
+        peak_t571_coarse: usize,
+        ever_live: usize,
+        worst_rows_per_tile: f64,
+        per_tile: usize,
+        tile_rows: usize,
+    }
+    let measure = |tag: &str, cfg: hk_store::PyramidConfig| -> Run {
+        let dir = TempDir::new(tag);
+        let mut p = Pyramid::open(&dir.0, cfg).unwrap();
+        let g = p.geometry().clone();
+        let tile_rows = g.levels[0].nt;
+        let per_tile = nf * tile_rows * BYTES_PER_CELL + nf * bins * 4;
+        let mut r = Run {
+            peak: ResidentBytes::default(),
+            peak_t571_coarse: 0,
+            ever_live: 0,
+            worst_rows_per_tile: 0.0,
+            per_tile,
+            tile_rows,
+        };
+        for s in (0..SECS).step_by(STRIDE as usize) {
+            p.ingest(&FrameInput::new(
+                Timestamp::from_unix_nanos(t0 + s * 1_000_000_000),
+                1_000_000_000,
+                F_LO,
+                f_cell,
+                PowerUnit::Dbfs,
+                &psd,
+            ))
+            .unwrap();
+            let now = p.resident_bytes();
+            r.ever_live = r.ever_live.max(now.live_tiles);
+            if now.live_tiles > 0 {
+                r.worst_rows_per_tile = r
+                    .worst_rows_per_tile
+                    .max(now.live_acc_rows as f64 / now.live_tiles as f64);
+            }
+            if now.total() > r.peak.total() {
+                r.peak = now;
+                r.peak_t571_coarse = (1..g.n_levels())
+                    .map(|l| p.open_keys(l).len() * per_tile)
+                    .sum();
             }
         }
-        (tiles, bytes, coarse)
+        r
     };
 
-    let (mut peak_tiles, mut peak_bytes, mut ever_coarse) = (0usize, 0usize, 0usize);
-    for s in (0..SECS).step_by(STRIDE as usize) {
-        p.ingest(&FrameInput::new(
-            Timestamp::from_unix_nanos(t0 + s * 1_000_000_000),
-            1_000_000_000,
-            F_LO,
-            f_cell,
-            PowerUnit::Dbfs,
-            &psd,
-        ))
-        .unwrap();
-        let (tiles, bytes, coarse) = resident(&p);
-        ever_coarse = ever_coarse.max(coarse);
-        if bytes > peak_bytes {
-            peak_bytes = bytes;
-            peak_tiles = tiles;
-        }
+    let g = cfg.geometry().unwrap();
+    let shipped = measure("view-lattice-cost", cfg.clone());
+    // The other lever, on the same frames: 16-row tiles (4x the tile files, a scheme bump).
+    let mut cfg16 = cfg.clone();
+    cfg16.scheme = cfg.scheme + 100;
+    cfg16.levels = ViewLattice {
+        cells_per_block: 16,
+        ..hk_pipeline::history::view_lattice(f_cell_hz, t_cell)
     }
+    .levels();
+    let short = measure("view-lattice-cost-16", cfg16);
 
-    let g = p.geometry().clone();
-    // Blocks the span actually covers, counted the way the store tiles them (aligned to the
-    // epoch of frequency, not to the span's own lower edge) — **per node**, because a
-    // frequency-coarser node's block is 2× as wide and it needs half as many of them.
+    // Blocks the span covers, counted the way the store tiles them — per node, because a
+    // frequency-coarser node's block is 2x as wide and it needs half as many of them.
     let level_blocks = |l: usize| -> f64 {
         let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
         ((F_LO + span_hz) / bw).ceil() - (F_LO / bw).floor()
     };
-    let bw = f_cell * f64::from(VIEW_F_CELLS_PER_BLOCK);
-    let blocks = ((F_LO + span_hz) / bw).ceil() - (F_LO / bw).floor();
-    // **T-571: one open tile per node, plus a seal-lag overlap.** Every node is filled as rows
-    // close, so every node holds the tile it is filling; inside `seal_lag` a node's outgoing tile
-    // is still open while its successor has been created, which is the `+ blocks` term (a whole
-    // extra row of the finest node is the worst that overlap can be).
-    let per_node: f64 = (0..g.n_levels())
-        .map(|l| level_blocks(l) * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64)
+    let blocks = level_blocks(0);
+    // **The bound, per node, with a seal-lag overlap on every one of them** (T-571 measured 25
+    // open tiles over 16 nodes at this floor: one level-0 column close cascades through every
+    // level, so several nodes hold an outgoing tile and its successor at once). Level 0 is a
+    // full accumulator; every coarse node is at most three rows of accumulator (one in progress,
+    // one just completed by a gap flush, one spare) plus its rows in RAW stored form.
+    let nt = shipped.tile_rows;
+    let level0_bound = 2.0 * blocks * shipped.per_tile as f64;
+    let coarse_bound: f64 = (1..g.n_levels())
+        .map(|l| {
+            2.0 * level_blocks(l)
+                * (3 * nf * Pyramid::ROW_ACC_BYTES_PER_CELL
+                    + nt * nf * ENC_RAW_MAX
+                    + 2 * nt * SEGMENT_OVERHEAD) as f64
+        })
         .sum();
-    // **The seal-lag overlap is per NODE, and T-501's floor is what made that visible.** T-571
-    // measured this at a 1 s floor, where a level-0 tile is 64 s and a coarse one is minutes, so
-    // at most the finest node was ever mid-seal — the `+ blocks` term. At the display floor a
-    // level-0 tile is `VIEW_T_CELLS_PER_BLOCK` rows of ~40 ms, and one level-0 column close
-    // cascades through `fold_row_live`, so several nodes hold an outgoing tile and its successor
-    // at the same instant (measured here: 25 open tiles over 16 nodes). The honest worst case is
-    // therefore that EVERY node is mid-seal at once, which is twice the steady set.
-    let bound = 2.0 * per_node;
+    let bound = level0_bound + coarse_bound;
     let mb = |b: f64| b / (1 << 20) as f64;
     let per_mhz = |b: f64| mb(b) / (span_hz / 1e6);
-    // What the same bound says at a real live edge, where the coarse nodes need fewer blocks.
-    let edge_bound: f64 = 2.0
-        * (0..g.n_levels())
-            .map(|l| {
-                let bw = g.levels[l].f_cell_hz * f64::from(VIEW_F_CELLS_PER_BLOCK);
-                (LIVE_EDGE_HZ / bw).ceil()
-                    * (nf * g.levels[l].nt * BYTES_PER_CELL + nf * bins * 4) as f64
-            })
-            .sum::<f64>();
+    let pk = &shipped.peak;
     eprintln!(
-        "T-571 view-lattice floor at T-501's shipped geometry ({:.2} kHz x {:.1} ms, \
-         {nf}x{} cells/block, {} nodes), {:.1} MHz \
-         tuned:\n  measured peak {peak_tiles} tiles, {:.1} MB resident, {:.0} KB/tile, \
-         {:.2} MB/MHz\n  bound (one open tile per node, plus a seal-lag overlap on every one of \
-         them; {} nodes, and the count DOES enter — T-571's stated cost): {:.1} MB, \
-         {:.2} MB/MHz -> {:.0} MB at a {:.0} MHz live edge",
+        "T-585 view-lattice floor at T-501's shipped geometry ({:.2} kHz x {:.1} ms, \
+         {nf}x{nt} cells/block, {} nodes), {:.1} MHz tuned = the live edge:\n  measured peak \
+         {:.1} MB resident = {} full tiles {:.1} MB + {} live coarse tiles holding {} accumulator \
+         rows {:.1} MB and {} encoded segments {:.1} MB; {:.2} MB/MHz\n  T-571 held {:.1} MB of \
+         full accumulators for those same coarse tiles ({:.1}%); T-571's bound was 93.5 MB\n  \
+         bound (level 0 {:.1} MB + coarse nodes at three rows of accumulator and RAW stored rows \
+         {:.1} MB, seal-lag overlap on every node): {:.1} MB, {:.2} MB/MHz\n  the other lever, \
+         VIEW_T_CELLS_PER_BLOCK 64 -> 16 on the same frames: peak {:.1} MB ({} full tiles \
+         {:.1} MB, coarse {:.1} MB)",
         f_cell / 1e3,
         t_cell.as_nanos() as f64 / 1e6,
-        VIEW_T_CELLS_PER_BLOCK,
         g.n_levels(),
         span_hz / 1e6,
-        mb(peak_bytes as f64),
-        per_tile as f64 / 1024.0,
-        per_mhz(peak_bytes as f64),
-        VIEW_F_LEVELS * VIEW_T_LEVELS,
+        mb(pk.total() as f64),
+        pk.full_tiles,
+        mb(pk.full_bytes as f64),
+        pk.live_tiles,
+        pk.live_acc_rows,
+        mb(pk.live_acc_bytes as f64),
+        pk.live_segments,
+        mb(pk.live_encoded_bytes as f64),
+        per_mhz(pk.total() as f64),
+        mb(shipped.peak_t571_coarse as f64),
+        100.0 * pk.live_bytes() as f64 / shipped.peak_t571_coarse.max(1) as f64,
+        mb(level0_bound),
+        mb(coarse_bound),
         mb(bound),
         per_mhz(bound),
-        mb(edge_bound),
-        LIVE_EDGE_HZ / 1e6,
+        mb(short.peak.total() as f64),
+        short.peak.full_tiles,
+        mb(short.peak.full_bytes as f64),
+        mb(short.peak.live_bytes() as f64),
     );
 
     // The residency figure, against docs/16 §6.2's 9.1 h. T-484 shortens it further — a tile is
-    // `VIEW_T_CELLS_PER_BLOCK` display rows rather than 64 s — which is the write-frequency half of
-    // the trade this ticket made, and the half that does NOT touch the number measured here.
+    // `VIEW_T_CELLS_PER_BLOCK` display rows rather than 64 s.
     assert!(
         g.levels[0].t_cell_ns * g.levels[0].nt as i64 <= 64 * 1_000_000_000,
         "the finest node's tile must be no longer than the 64 s T-439 shipped, and nothing like \
@@ -628,47 +621,61 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
          ONE level-0 frequency block, so open-block count stops scaling with the span"
     );
     assert!(
-        (2_500_000..3_500_000).contains(&per_tile),
-        "~2.9 MB per tile — scheme 1's own level-0 tile shape, got {per_tile}"
+        (2_500_000..3_500_000).contains(&shipped.per_tile),
+        "~2.9 MB per full tile — scheme 1's own level-0 tile shape, got {}",
+        shipped.per_tile
     );
-    // The mechanism, over the WHOLE run rather than at its end, and the exact inverse of what
-    // T-453 asserted here: coarse nodes DO hold open accumulators, because they are being filled
-    // row by row. If this were 0 again the lattice would be back to folding at read time.
+    assert_eq!(nt, VIEW_T_CELLS_PER_BLOCK as usize);
+    // The mechanism, over the WHOLE run: coarse nodes ARE live-maintained (the inverse of what
+    // T-453 asserted here) ...
     assert!(
-        ever_coarse >= g.n_levels() - 1,
-        "only {ever_coarse} of {} coarse nodes ever held an open accumulator: a live lattice \
-         fills every node as rows close",
+        shipped.ever_live >= g.n_levels() - 1,
+        "only {} of {} coarse nodes ever held an open tile: a live lattice fills every node as \
+         rows close",
+        shipped.ever_live,
         g.n_levels() - 1
     );
-    // The peak must sit inside the bound, and near enough to it that the bound is not vacuous.
+    // ... and what each holds is one row of accumulator, never the tile (T-585).
     assert!(
-        peak_bytes as f64 <= bound,
-        "residency exceeded one open tile per node plus a seal-lag overlap on each: {peak_bytes} \
-         > {bound:.0}"
+        shipped.worst_rows_per_tile <= 2.0,
+        "{:.2} accumulator rows per live coarse tile: committed rows are staying resident as \
+         accumulator",
+        shipped.worst_rows_per_tile
+    );
+    // The peak sits inside the bound, and the finest node's full tile is inside the peak.
+    assert!(
+        pk.total() as f64 <= bound,
+        "residency exceeded its bound: {} > {bound:.0}",
+        pk.total()
     );
     assert!(
-        peak_bytes as f64 >= blocks * per_tile as f64,
-        "the finest node's row should be resident at the peak, got {peak_tiles} tiles \
-         ({peak_bytes} B)"
+        pk.full_bytes >= shipped.per_tile,
+        "the finest node's tile should be resident at the peak ({} full tiles, {} B)",
+        pk.full_tiles,
+        pk.full_bytes
     );
-    // **The order that matters, and BOTH tickets moved it.** T-439/T-453 quoted 0.91 MB/MHz
-    // because only node (0, 0) was ever open — the coarse nodes were folded at READ time, which is
-    // exactly what T-571 deleted. Every node now holds the tile it is filling, so the coefficient
-    // is several MB/MHz by design and T-453's 0.91 is no longer a bound anything should be under;
-    // asserting it here would be asserting the defect. T-501's finer floor then makes the tuned
-    // span exactly one level-0 block, so the per-MHz figure falls again as the edge widens, which
-    // is why the range below is wide and the absolute figure at a 20 MHz edge is asserted too.
+    // **The order that matters, and this ticket moved it back.** T-571's coarse nodes held full
+    // accumulators; the same tiles now hold under a third of that even in RAW stored form (the
+    // bound: 3 rows x 36 B + 64 rows x 14 B against 64 rows x 44 B + histograms), and less with
+    // zstd. Asserted at a half so the figure cannot creep back without this going red.
     assert!(
-        (0.5..12.0).contains(&per_mhz(bound)),
-        "{:.2} MB/MHz is outside the range the settings doc quotes",
-        per_mhz(bound)
+        pk.live_bytes() * 2 < shipped.peak_t571_coarse,
+        "coarse residency {} B is not under half of T-571's {} B for the same open tiles",
+        pk.live_bytes(),
+        shipped.peak_t571_coarse
     );
-    // And the figure that actually sizes a device: a 20 MHz live edge stays in the HUNDREDS of MB,
-    // not GB. This is the number T-571 accepted; if it moves, the ticket's decision has moved.
+    // And the figure that actually sizes a device: a 20 MHz live edge stays in the TENS of MB.
+    // T-571 accepted 94 MB (asserted 40..160); this is the number that replaces it.
     assert!(
-        (40.0..160.0).contains(&mb(edge_bound)),
-        "{:.0} MB at a {:.0} MHz live edge is not what T-571 decided",
-        mb(edge_bound),
+        (5.0..45.0).contains(&mb(bound)),
+        "{:.0} MB at a {:.0} MHz live edge is not what T-585 decided",
+        mb(bound),
+        LIVE_EDGE_HZ / 1e6
+    );
+    assert!(
+        mb(pk.total() as f64) < 45.0,
+        "{:.1} MB measured at a {:.0} MHz live edge",
+        mb(pk.total() as f64),
         LIVE_EDGE_HZ / 1e6
     );
 }
