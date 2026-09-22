@@ -19427,6 +19427,33 @@ tasks:
       `acceptance: |` pair belonging to a ticket whose `- id:` line was lost in an earlier conflict
       resolution (cf. 3591d2fa, d2c51540). Duplicate keys inside one entry - the tail of the block
       below `Never just gate.` is not T-596's.
+      GATE FAILURE AND FIX (second pass, 2026-09-21). The first pass FAILED the merge gate on
+      `hk-cli::api_contract::unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so`:
+      the open dwell was folded in UNCLIPPED, so a dwell that had been open since before the record
+      horizon painted `observed` over rows the same answer's `horizon` declared `"unknown"`
+      (T-413/T-507) - the response contradicted itself, and the fix was pointed backwards into the
+      exact class of lie the ticket exists to remove. Reproduced on the branch: row 4 of 8 came back
+      `observed` where the contract demands `unknown`, with `horizon.unknown_from_row: 4`.
+      ROOT CAUSE of the live-edge lag itself (unchanged): a record reaches the log only when a dwell
+      SEALS - on a retune or after `INTERACTIVE_RECORD_MAX_NS` (60 s) - so between a retune and the
+      seal the log holds no evidence for the band the radio is sitting on, and with the IQ ring
+      refused nothing else does.
+      THE FIX: `open_dwell_spans` now takes `Memory::oldest_record` and CLIPS each open dwell to
+      start at it (dropping it entirely when there is no surviving record anywhere, because the
+      horizon then admits nothing). The in-flight dwell may extend the answer FORWARD to the live
+      edge and never overrule it backward: it is provisional and unsealed, and *we do not know
+      whether we looked* is not *we did*, the same fail-closed reasoning as `Coverage::Unobserved`
+      is not quiet. It costs the ticket nothing - the gap after a retune lies after the last sealed
+      record by construction. docs/api.md says so.
+      PINNED BY: `hk-api` coverage::tests::the_dwell_in_flight_carries_the_live_edge_and_never_
+      overrules_an_unknown_row - T-507 case 2 (recorded since 7100, only surviving record
+      [7200,7260)) plus a dwell open since 7100 and still running at 7280, over ten 20-s rows:
+      1 `unobserved`, 5 `unknown`, 4 `observed`, the last of which is the live edge the open dwell
+      carries (a control without the open dwell reads `unobserved` there). RED without the clip:
+      5 `unknown` rows become `observed`.
+      SECOND-PASS TARGETED RESULTS: hk-api 220/220 + lib 129/129, hk-cli::api_contract 53/53 (the
+      gate's failure now green), hk-pipeline observe 5/5, hk-store+hk-core 359/359. RED proofs run
+      and reverted for all three new tests.
     use_cases: []
     acceptance: |
       FOUND BY T-321. `hk_classify::modulation_structure` is called only by its own tests and a
