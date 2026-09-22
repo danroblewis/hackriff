@@ -187,7 +187,74 @@ def tasks():
                            "title": str(x.get("title", ""))[:80]})
     return {"counts": counts, "active": active, "total": len(t), "status_map": status_map}
 
-def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None):
+def _tk_of_branch(b):
+    m = re.match(r"^task-t0*(\d+)$", b or "", re.I)
+    return f"T-{m.group(1)}" if m else b
+
+
+def runtime_states(smap):
+    """What the runners know that the board does not: per ticket, one of
+    failed (a gate/review/worker failure needing a person), testing (in the current gate),
+    queued (waiting for the merge runner), review (in the reviewer stage), next (the runner's
+    projected next dispatches). Read from $HACKRIFF_OPS files only; never guessed."""
+    st, why = {}, {}
+    def put(tid, state, reason=""):
+        if tid and smap.get(tid) not in ("done", "cancelled") and tid not in st:
+            st[tid] = state; why[tid] = reason
+    try:  # failures first: they win over every other state
+        for l in open(os.path.join(SCRATCH, "merge-needs-attention.txt")):
+            f = l.split()
+            if len(f) >= 4 and f[3].startswith(("GATE_FAIL", "CONFLICT", "GAVE_UP", "UNCHANGED")):
+                put(_tk_of_branch(f[2]) if f[2].startswith("task-") else f[2], "failed", f[3])
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "work-needs-attention.txt")):
+            f = l.split()
+            if len(f) >= 4 and f[3] in ("REVIEW_FAIL", "BLOCKED", "ERROR", "TIMEOUT", "UNCOMMITTED", "NO_WORK", "GATE_FAIL_ESCALATE"):
+                put(f[2], "failed", f[3])
+    except Exception:
+        pass
+    try:
+        bm = dict(l.split("=", 1) for l in open(os.path.join(SCRATCH, "bulk-in-progress")).read().splitlines() if "=" in l)
+        for b in bm.get("branches", "").split():
+            put(_tk_of_branch(b), "testing", "bulk gate")
+    except Exception:
+        pass
+    try:
+        first = open(os.path.join(REPO, ".git", "MERGE_MSG")).read().splitlines()[0]
+        m = re.search(r"task-t\d+", first)
+        if m:
+            put(_tk_of_branch(m.group(0)), "testing", "staged merge")
+    except Exception:
+        pass
+    try:
+        for l in open(os.path.join(SCRATCH, "merge-queue.txt")):
+            put(_tk_of_branch(l.strip()), "queued", "merge queue")
+    except Exception:
+        pass
+    try:
+        claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
+        for tid, c in claims.items():
+            if c.get("state") == "running" and c.get("kind") == "review":
+                put(tid, "review", "reviewer stage")
+            elif c.get("state") == "running" and c.get("kind") == "fix":
+                put(tid, "failed", "fixing a gate failure")
+            elif c.get("state") == "queued":
+                put(tid, "queued", "merge queue")
+    except Exception:
+        pass
+    try:
+        for r in work_queue(smap, [], [])["upcoming"][:8]:
+            if r.get("ready"):
+                put(r["id"], "next", "up next")
+    except Exception:
+        pass
+    return st, why
+
+
+def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
+               keep_merging=True, keep_next=True, keep_failed=True):
     try:
         import yaml
         d = yaml.safe_load(open(f"{REPO}/docs/tasks.yaml"))
@@ -243,7 +310,10 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         if s in ("blocked", "paused"): return show_blocked
         if s == "deferred": return scope == "all"
         return True  # in-progress, review, etc. always anchor
-    anchors = {x["id"] for x in cand if passes(x)} | set(running)
+    rt, rt_why = runtime_states(smap)
+    keep = {tid for tid, s in rt.items() if tid in tasks and (
+        (keep_merging and s in ("testing", "queued", "review")) or (keep_next and s == "next") or (keep_failed and s == "failed"))}
+    anchors = {x["id"] for x in cand if passes(x)} | set(running) | keep
     # ALWAYS keep the dependency chain leading to any anchor, whatever its status/filter
     nodes = {}
     stack = list(anchors)
@@ -261,8 +331,10 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     def label(x):
         done = x.get("status") in ("done", "cancelled")
         t = str(x.get("title", "")).translate(str.maketrans("", "", '"[]<>|`{}')).strip()[:24]
-        tick = "✓ " if done else ""
+        tick = "✓ " if done else {"failed": "✗ ", "testing": "⚙ ", "queued": "⏳ ", "review": "🔍 ", "next": "▶ "}.get(rt.get(x["id"]), "")
         ms = x.get("milestone") or ""
+        if rt.get(x["id"]) and rt_why.get(x["id"]):
+            ms = (ms + " · " if ms else "") + rt_why[x["id"]]
         sub = " · ".join(p for p in (ms, t) if p)
         return f"{tick}{x['id']}<br/><span style='font-size:9px;opacity:.75'>{sub}</span>" if sub else f"{tick}{x['id']}"
     lines = ["graph LR",
@@ -275,7 +347,12 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
              "classDef deferred fill:#15191c,stroke:#5A6973,color:#8595A0;",
              "classDef msdone fill:#123a2c,stroke:#52C2AE,color:#8FD9C9,stroke-width:2px;",
              "classDef mscur fill:#3a2c0a,stroke:#F0A542,color:#FFD98a,stroke-width:3px;",
-             "classDef msnext fill:#181f24,stroke:#5A6973,color:#8595A0,stroke-dasharray:5 4;"]
+             "classDef msnext fill:#181f24,stroke:#5A6973,color:#8595A0,stroke-dasharray:5 4;",
+             "classDef failed fill:#3a1410,stroke:#E47B68,color:#FFB4A6,stroke-width:3px;",
+             "classDef testing fill:#3a2c0a,stroke:#F0A542,color:#FFD98a,stroke-width:3px,stroke-dasharray:6 3;",
+             "classDef queued fill:#2a2410,stroke:#F0A542,color:#F0A542,stroke-dasharray:6 3;",
+             "classDef reviewing fill:#10222a,stroke:#52C2AE,color:#8FD9C9,stroke-width:3px;",
+             "classDef next fill:#241e3e,stroke:#A395E0,color:#D6CCFF,stroke-width:3px;"]
     # milestone backbone: the roadmap chain, coloured by how far along each milestone is
     norm_ms = lambda m: re.sub(r"-(fix|hardening)$", "", m or "")   # fold M2-hardening/M1-fix into their base
     by_ms = {}
@@ -306,7 +383,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         lines.append(f"MS_{a} --> MS_{b}")
     lines.append("MS_M1 --> MS_MUI")
     for nid, x in nodes.items():
-        c = "running" if nid in running else cls.get(x.get("status"), "done")
+        c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next"}.get(rt.get(nid)) \
+            or ("running" if nid in running else cls.get(x.get("status"), "done"))
         lines.append(f'{nid}["{label(x)}"]:::{c}')
     # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
     for nid, x in nodes.items():
@@ -320,8 +398,11 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
             lines.append(f"MS_{ms} -.-> {nid}")
     total = len(tl)
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
+    counts = {}
+    for tid, sname in rt.items():
+        counts[sname] = counts.get(sname, 0) + 1
     return {"mermaid": "\n".join(lines), "active": len(active), "nodes": len(nodes),
-            "total": total, "done": done}
+            "total": total, "done": done, "runtime": counts}
 
 GRAPH_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff task map</title>
@@ -360,9 +441,10 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
 <span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button></span>
+<span class=filters title="always shown, whatever the other filters say">always: <button id=f-merging class=on>merging</button><button id=f-next class=on>up next</button><button id=f-failed class=on>failed</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <a href="/">← dashboard</a>
-<span class=legend><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
+<span class=legend><span><i style="background:#E47B68"></i>✗ failed / redo</span><span><i style="background:#F0A542;border:1px dashed #FFD98a"></i>⚙ in the gate</span><span><i style="background:#2a2410;border:1px dashed #F0A542"></i>⏳ queued</span><span><i style="background:#52C2AE"></i>🔍 in review</span><span><i style="background:#A395E0"></i>▶ up next</span><span><i style="background:#FFD98a"></i>working now</span><span><i style="background:#F0A542"></i>in progress</span><span><i style="background:#A395E0"></i>todo</span><span><i style="background:#E47B68"></i>blocked</span><span><i style="background:#52C2AE"></i>review</span><span><i style="background:#2f5d4e"></i>✓ done</span><span><i style="background:#5A6973"></i>deferred</span></span></div>
 <div class=wrap><div id=g></div></div>
 <div class=hint>scroll = zoom · drag = pan · click a ticket for details · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
@@ -372,13 +454,14 @@ let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter=
 document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
-['done','todo','blocked'].forEach(k=>{document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
+['done','todo','blocked','merging','next','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
 async function draw(){
  try{
-  let q='/graph.json?scope='+scope; ['done','todo','blocked'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  let q='/graph.json?scope='+scope; ['done','todo','blocked','merging','next','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
   const d=await (await fetch(q,{cache:'no-store'})).json();
   const hid=['done','todo','blocked'].filter(k=>!flt[k]);
-  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}`;
+  const rt=d.runtime||{}; const rts=['failed','testing','queued','review','next'].filter(k=>rt[k]).map(k=>`${rt[k]} ${k}`).join(' · ');
+  document.getElementById('sub').textContent=`${d.active} active · ${d.done}/${d.total} done · ${scope==='all'?'all tasks':'frontier'}${hid.length?' · hiding '+hid.join('/'):''}${rts?' · '+rts:''}`;
   if(d.mermaid===last) return; last=d.mermaid;
   const {svg}=await mermaid.render('gg'+Date.now(), d.mermaid);
   document.getElementById('g').innerHTML=svg;
@@ -1899,8 +1982,11 @@ class H(BaseHTTPRequestHandler):
             show_done = "done=0" not in self.path
             show_todo = "todo=0" not in self.path
             show_blocked = "blocked=0" not in self.path
+            keep_merging = "merging=0" not in self.path
+            keep_next = "next=0" not in self.path
+            keep_failed = "failed=0" not in self.path
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
