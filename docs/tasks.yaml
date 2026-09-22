@@ -19012,6 +19012,44 @@ tasks:
       after, and how many comparisons actually used it. A test that passes because the field was
       absent on both sides is vacuous.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DECISION: REMOVED Fingerprint.structure and its comparison; did not wire a producer.
+
+      Evidence (counts, real run - new test crates/hk-pipeline/tests/fingerprint_field_census.rs, which replays the
+      real HackRF FM (fm_100p8M...) and 433 MHz ISM (ism_433p62M...) captures blind through the mock SDR and counts
+      every stored emitter fingerprint's fields):
+      - BEFORE (unmodified tree): 18 stored fingerprints, `structure` on 0 of 18 -> 0 comparisons could use it
+        (a stored row is the fold of its sightings and fold keeps any Some, so 0 on stored = 0 on every comparison).
+      - AFTER: the key does not exist; the test asserts no real-run fingerprint carries any key `compare` does not read
+        (non-vacuous: anti-vacuity asserts >=2 fingerprints, centre on all, family on >=1).
+      - Why not wire: every production producer that holds IQ (analogue chain/RDS writer, FSK chain, trunk CC synth)
+        also writes an exact `family`, and every family they write is constant-envelope (wfm/nfm, 2fsk, 4-level FSK),
+        where envelope_shape reads 1.00 by construction. A wired comparison could only split on multipath fading or
+        noise-correction error - the look, not the emitter. Producers without IQ (tracker, hop-set) cannot compute it.
+        bpsk/qpsk, the pair it was measured on, has no fingerprint producer. So the T-321 "fifth field" margin does not
+        materialise either (and envelope_shape was never in hk_model::CLUSTER_FIELDS anyway).
+
+      Changes:
+      - hk-model cluster.rs: removed ModulationStructure, Fingerprint.structure, the envelope_shape comparison, the
+        fold branch, Tolerances::structure_sigmas + STRUCTURE_SIGMAS_DEFAULT, and the four T-233 structure tests; module
+        docs record the removal and why. New test t594_a_stored_fingerprint_with_the_removed_structure_key_still_parses
+        (old rows with the key still parse; key ignored). lib.rs re-export dropped.
+      - hk-classify: ModulationStructure re-homed locally in structure.rs (statistic + its unit tests kept as a
+        measurement with no inventory consumer; header says so). Deleted tests/structure_rates.rs and
+        src/bin/structure-probe.rs - they measured merge/split rates of the removed comparison.
+      - docs/adr/0016: T-594 paragraph with the counts; C18 row and §5.1 heading amended.
+
+      Tests: cargo nextest -p hk-model -p hk-classify: 435 passed, 1 skipped. fingerprint_field_census: pass (before
+      and after). just precheck hk-model hk-classify hk-pipeline: fmt clean, clippy clean.
+
+      SURFACED, NOT CHASED (observed, same census, per the ticket's "measure how much of entity resolution is in this
+      state"): over those two real runs only f_center_hz, bandwidth_hz, duty_cycle (18/18) and burst_length_s (12/18)
+      are ever present on both sides of a pair. family is on 1 of 18 stored fingerprints (0 usable pairs), and
+      symbol_rate_hz, deviation_hz, period_s, hop_raster_hz, hop_set_hz are on 0 of 18. In particular the 433 MHz ISM
+      run stored 8 fingerprints with no symbol_rate/deviation/family, i.e. the FSK chain's fields never reached the
+      store on that capture. The census prints this table on every run (--no-capture).
+      Note: `just task` is not in this branch's justfile (branch base predates it); the result was recorded with
+      main's py/hkpy/tasks.py run from a temp copy.
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
