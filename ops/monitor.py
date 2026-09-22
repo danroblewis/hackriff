@@ -437,7 +437,7 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     # membership links (dotted) — connect every task to its milestone node
     for nid, x in nodes.items():
         ms = norm_ms(x.get("milestone"))
-        if ms in ORDER:
+        if ms in ORDER and not (ms in set(open_ms) and x.get("status") in ("done", "cancelled")):
             lines.append(f"MS_{ms} -.-> {nid}")
     total = len(tl)
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
@@ -509,7 +509,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 <div class=hint>scroll = zoom · drag = pan · click a ticket for details · <b>click a milestone to open/close all its tickets</b> · solid arrow = prerequisite → task · dotted = milestone → its tasks</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
-mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
+mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'loose',maxEdges:20000,maxTextSize:5000000,flowchart:{curve:'basis',htmlLabels:true,nodeSpacing:34,rankSpacing:70},themeVariables:{fontSize:'13px',lineColor:'#5A6973'}});
 let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter='';
 let openMs=new Set(); try{ openMs=new Set(JSON.parse(localStorage.getItem('graph.openMs')||'[]')); }catch(e){}
 function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); try{localStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} last=''; draw(); }
