@@ -624,6 +624,10 @@ export class TileCache<T> {
     return e;
   }
 
+  /** Is a copy of this place in hand? No scheduling, no pin, no statistics: how the renderer asks
+   * before deciding whether the coverage survey may answer the place instead (T-580). */
+  isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
+
   /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
   prefetch(addr: TileAddr): void {
     if (this.map.has(keyOf(addr))) { this.peek(addr, true); return; }
