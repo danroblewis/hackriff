@@ -29,11 +29,13 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 EXTRA="$*"
-# Create a shell pane, then type the claude command so the shell expands "$(cat ROLE)"
-# into a single --append-system-prompt argument (robust against the role file's newlines/quotes).
+# Create a shell pane, then type the claude command. The role goes in BY FILE
+# (--append-system-prompt-file): typing "$(cat ROLE)" into the shell parsed the role's own text -
+# backticks, quotes, an `if` - and on 2026-09-22 left the pane stuck at zsh's `if>` continuation
+# prompt for three hours, swallowing every merge-runner notice and supervisor relay.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
 tmux send-keys -t "$SESSION" -l \
-  "claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt \"\$(cat '$RF')\" $EXTRA"
+  "claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
 tmux send-keys -t "$SESSION" Enter
 echo "launched '$ROLE' in tmux session '$SESSION' (model=$MODEL effort=$EFFORT)"
 echo "  role prompt: $RF  (+ root CLAUDE.md invariants)"
