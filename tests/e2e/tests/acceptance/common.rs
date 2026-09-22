@@ -22,7 +22,8 @@ use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_model::{InventoryEntry, InventoryQuery, Repository, TimeRange, Timestamp};
 use hk_pipeline::{Counters, PipelineConfig, PipelineHandle, RunSummary};
 use hk_stream::{
-    Declared, Listener, PublisherHandle, Record, StreamHeader, StreamKind, StreamReader,
+    Declared, Listener, OpenRefusal, OpenRequest, OpenedStream, PublisherHandle, Record,
+    StreamHeader, StreamKind, StreamOpener, StreamReader,
 };
 
 /// A scratch directory, removed on drop (kept with `HK_KEEP_DIRS=1`). Short names: Unix socket
@@ -438,4 +439,67 @@ pub fn api_inventory(addr: SocketAddr) -> (Vec<u8>, Vec<serde_json::Value>) {
             None => return (raw, rows),
         }
     }
+}
+
+// --- T-632: which refusal is the test's SUBJECT, and which are the source talking ------------
+//
+// A Listen/tap open against a LIVE, LOOPING run is refused for reasons that say nothing about
+// what a test is asserting: `503 replumbing` between the replay's segments, `409 outside-window`
+// when the window moved under the request, `504 probe-timeout` when the probe was starved of ring
+// samples, `422` when the chunk the probe landed on carries no recognisable analog mode. Every one
+// of them is likelier the busier the box is, and none is a decision anything under test made.
+//
+// So a test re-issues those, and fails immediately on the refusal that IS its subject. T-603
+// established the shape on `acceptance/listen.rs`; this is that shape shared by the five binaries
+// that include this module.
+//
+// THE BOUND IS ON ATTEMPTS, NOT ON WALL CLOCK, and that is the point rather than a detail. A
+// deadline (`Instant::now() < deadline`, which is what these helpers used to carry) shrinks as the
+// machine gets busier — precisely when the transient refusals get likelier — so it converts load
+// into a failure. A count of re-issues does not move with load at all.
+
+/// Re-issues allowed for a step a non-subject refusal can spoil. Eight, as in `listen.rs`.
+pub const OPEN_TRIES: u32 = 8;
+
+/// Is this refusal a CAPACITY VERDICT — the listener cap or the chain/tap budget saying no?
+///
+/// `503 busy` is the only refusal in this family, and it is the one several of these tests exist
+/// to provoke, so it is never re-issued: a budget that refuses while a slot is free is a real bug,
+/// not a slow machine. Everything else (`409`, `422`, `503 replumbing`, `504`) is the source's
+/// transient state.
+pub fn is_capacity_verdict(r: &OpenRefusal) -> bool {
+    r.status == 503 && r.code == "busy"
+}
+
+/// Opens an in-process stream, re-issuing the refusals that are about the source rather than
+/// about anything under test.
+///
+/// Returns `Err` **immediately** for a capacity verdict ([`is_capacity_verdict`]), so a test that
+/// asserts a budget still reads the budget's own answer on the first try. Panics after
+/// [`OPEN_TRIES`] consecutive non-verdict refusals, naming the last one — eight source refusals in
+/// a row is a finding, not something to wait out.
+pub fn open_retrying(
+    tag: &str,
+    opener: &dyn StreamOpener,
+    req: &OpenRequest,
+) -> Result<OpenedStream, OpenRefusal> {
+    let mut last = None;
+    for attempt in 1..=OPEN_TRIES {
+        match opener.open(req) {
+            Ok(s) => return Ok(s),
+            Err(e) if is_capacity_verdict(&e) => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "[{tag}] open attempt {attempt}/{OPEN_TRIES}: refusal that is not a capacity \
+                     verdict, re-requesting: {e}"
+                );
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    panic!(
+        "[{tag}] {OPEN_TRIES} opens in a row were refused for non-capacity reasons; last: {}",
+        last.expect("a refusal")
+    );
 }

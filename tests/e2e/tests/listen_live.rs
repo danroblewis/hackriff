@@ -46,22 +46,21 @@ const FIRST_AUDIO_S: f64 = 5.0;
 const CENTER_TOL_HZ: f64 = 5_000.0;
 const MIN_SNR_DB: f64 = 15.0;
 
+/// Opens a listen stream, re-issuing the refusals that are the SOURCE's transient state.
+///
+/// **T-632.** Was `409 | 503` inside a 60 s deadline, so `422 no-analog-mode` and `504
+/// probe-timeout` — the live *paced* device makes both likelier, since the probe competes with a
+/// real-time producer for ring samples — failed a test that only ever asserts audio, squelch, SNR
+/// and the refined centre. No refusal is this file's subject; a capacity `503 busy` still fails
+/// immediately, since a single listener cannot fill the cap.
 fn open(listen: &dyn StreamOpener, params: &[(&str, String)]) -> OpenedStream {
     let query: Vec<(String, String)> = params
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect();
     let req = OpenRequest::from_query(&query, "t076-test");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        match listen.open(&req) {
-            Ok(s) => return s,
-            Err(e) if matches!(e.status, 409 | 503) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => panic!("[{TAG}] listen {params:?} refused: {e}"),
-        }
-    }
+    open_retrying(TAG, listen, &req)
+        .unwrap_or_else(|e| panic!("[{TAG}] listen {params:?} refused at capacity: {e}"))
 }
 
 /// Streams `params` for [`RUN_S`] and asserts audio, squelch, SNR and the refined centre.

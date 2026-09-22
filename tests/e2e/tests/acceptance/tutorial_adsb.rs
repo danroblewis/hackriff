@@ -164,45 +164,60 @@ impl Served {
 /// A TCP consumer collecting a stream's JSON records until [`Tail::finish`].
 struct Tail {
     sock: TcpStream,
-    join: JoinHandle<Result<Vec<Value>, String>>,
+    join: JoinHandle<Vec<Value>>,
 }
 
+/// Opens a stage/inspector tap and returns it reading, re-issuing a refusal.
+///
+/// **T-632.** The header used to be read on the spawned thread and any failure carried to
+/// `finish()` as a panic, so a refusal frame failed the test at a point that said nothing about
+/// what refused or when. A tap open is refused for reasons that are not this test's subject —
+/// none of these files asserts a refusal at all: the TCP server's connection cap (`503 busy`), a
+/// chain/tap budget, or a `404` in the moment before the recipe pipeline finishes registering.
+/// So the header is read HERE, and a refusal is re-issued on a fresh connection a BOUNDED NUMBER
+/// of times (attempts, never wall clock), printing each. Running out is the failure, and it names
+/// the target.
 fn tail(tcp: SocketAddr, target: &str) -> Tail {
-    let mut s = TcpStream::connect(tcp).unwrap();
-    s.set_read_timeout(Some(LIMIT)).unwrap();
-    let sep = if target.contains('?') { '&' } else { '?' };
-    s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
-        .unwrap();
-    let sock = s.try_clone().unwrap();
-    let target = target.to_owned();
-    let join = std::thread::spawn(move || {
+    for attempt in 1..=OPEN_TRIES {
+        let mut s = TcpStream::connect(tcp).unwrap();
+        s.set_read_timeout(Some(LIMIT)).unwrap();
+        let sep = if target.contains('?') { '&' } else { '?' };
+        s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
+            .unwrap();
+        let sock = s.try_clone().unwrap();
         let mut r = StreamReader::new(s);
-        r.read_header()
-            .map_err(|e| format!("{target}: header: {e:?}"))?;
-        let mut out = Vec::new();
-        while let Ok(Some(rec)) = r.next_record() {
-            match rec {
-                Record::Message(m) => out.push(m.value),
-                Record::Unknown(b) => {
-                    if let Ok(v) = serde_json::from_slice(&b) {
-                        out.push(v);
-                    }
-                }
-                _ => {}
-            }
+        if let Err(e) = r.read_header() {
+            eprintln!(
+                "[{TAG}] tail {target} attempt {attempt}/{OPEN_TRIES}: no stream header ({e:?}), \
+                 re-requesting"
+            );
+            let _ = sock.shutdown(Shutdown::Both);
+            continue;
         }
-        Ok(out)
-    });
-    Tail { sock, join }
+        let join = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            while let Ok(Some(rec)) = r.next_record() {
+                match rec {
+                    Record::Message(m) => out.push(m.value),
+                    Record::Unknown(b) => {
+                        if let Ok(v) = serde_json::from_slice(&b) {
+                            out.push(v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out
+        });
+        return Tail { sock, join };
+    }
+    panic!("[{TAG}] tail {target}: {OPEN_TRIES} opens in a row produced no stream header");
 }
 
 impl Tail {
     fn finish(self) -> Vec<Value> {
         let _ = self.sock.shutdown(Shutdown::Both);
-        self.join
-            .join()
-            .unwrap()
-            .unwrap_or_else(|e| panic!("[{TAG}] {e}"))
+        self.join.join().expect("the tail reader thread")
     }
 }
 

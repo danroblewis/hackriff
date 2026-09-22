@@ -50,24 +50,24 @@ fn station(fx: &hk_e2e::Fixture) -> (hk_e2e::TruthItem, f64, String) {
     (s, centre, pi)
 }
 
-/// Opens a listen stream, retrying while the previous one's slot is still being released (503) or
-/// the run has not published its first tuning yet (409 right after start).
+/// Opens a listen stream, re-issuing the refusals that are the SOURCE's transient state.
+///
+/// **T-632.** This used to retry `409 | 503` inside a 120 s deadline and panic on anything else,
+/// so `422 no-analog-mode` (the probe landed on a chunk with nothing recognisable) and
+/// `504 probe-timeout` (the probe was starved of ring samples) failed the test outright — neither
+/// of which is a statement about refinement, which is all this file asserts. No refusal is this
+/// file's subject, so [`open_retrying`] re-issues everything except a capacity verdict, a bounded
+/// number of times; a `503 busy` from the listener cap still fails here on the first try, because
+/// nothing in this test should ever fill it. The bound is on ATTEMPTS: the old deadline shrank
+/// exactly when the machine got busy enough to provoke those refusals.
 fn open(listen: &dyn StreamOpener, params: &[(&str, String)]) -> OpenedStream {
     let query: Vec<(String, String)> = params
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect();
     let req = OpenRequest::from_query(&query, "t070-test");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        match listen.open(&req) {
-            Ok(s) => return s,
-            Err(e) if matches!(e.status, 409 | 503) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => panic!("[{TAG}] listen {params:?} refused: {e}"),
-        }
-    }
+    open_retrying(TAG, listen, &req)
+        .unwrap_or_else(|e| panic!("[{TAG}] listen {params:?} refused at capacity: {e}"))
 }
 
 #[test]
