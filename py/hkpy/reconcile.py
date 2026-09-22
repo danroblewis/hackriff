@@ -312,6 +312,39 @@ def bulk_warning(now: float | None = None) -> str:
     return "\n".join(lines)
 
 
+
+def landed_but_not_in_progress(text: str) -> list[tuple[str, str]]:
+    """`todo` tickets whose id is named by a merge commit on `main` — (id, subject) pairs.
+
+    `inspect` only looks at tickets the board calls `in-progress`, which assumes every ticket
+    passes through that state. Plenty do not: an agent is briefed, works and hands back while the
+    board still says `todo`, and the coordinator flips it straight to `done` at merge. When that
+    last step is missed the ticket is invisible to this tool FOREVER — it is not in-progress, so
+    nothing checks it, and it is not done, so it looks like open work.
+
+    That happened on 2026-09-22 to T-625 and T-626: both merged via `task-adcfill` and both still
+    read `todo` hours later, with `reconcile` reporting "no in-progress tickets — the board claims
+    nothing is running". The tool designed to catch a stale board said the board was clean.
+
+    So this asks git the other question: which `todo` ids does `main` already name in a merge
+    subject? It is deliberately a WEAKER signal than `inspect`'s — a subject naming an id is not
+    proof the work landed, only that something merged claiming to be it — so it is reported as
+    "worth checking", never asserted as merged. Same discipline as MERGED meaning "a merge commit
+    names this tip", not mere ancestry.
+    """
+    subjects = _git("log", "--merges", "--format=%h %s", "main", "-n", "400").splitlines()
+    todo = {
+        m.group(1)
+        for m in re.finditer(r"(?m)^  - id: (T-\d+[a-z]?)\n(?:    .*\n)*?    status: todo$", text)
+    }
+    out: list[tuple[str, str]] = []
+    for line in subjects:
+        for tid in sorted(todo):
+            if re.search(rf"\b{re.escape(tid)}\b", line):
+                out.append((tid, line.strip()))
+    return sorted(set(out))
+
+
 def render(findings: list[Finding]) -> str:
     if not findings:
         return "reconcile: no in-progress tickets — the board claims nothing is running.\n"
@@ -363,6 +396,14 @@ def main(argv: list[str] | None = None) -> int:
     now = time.time()
     findings = [inspect(t, now) for t in tickets(text) if t.status == "in-progress"]
     sys.stdout.write(bulk_warning(now) + render(findings))
+    landed = landed_but_not_in_progress(text)
+    if landed:
+        sys.stdout.write(
+            "\n  !! These tickets still read `todo`, but a merge commit on main NAMES them —\n"
+            "     they never passed through `in-progress`, so the checks above cannot see them:\n"
+            + "".join(f"       {tid}  {subject}\n" for tid, subject in landed)
+            + "     A subject naming an id is not proof the work landed. Verify by CONTENT, then flip.\n"
+        )
     if args.strict and any(f.needs_attention for f in findings):
         return 1
     return 0

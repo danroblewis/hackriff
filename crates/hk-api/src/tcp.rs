@@ -342,7 +342,7 @@ fn refuse(mut s: TcpStream, refusal: &OpenRefusal) {
 
 type Resolved = (
     PublisherHandle,
-    Option<Box<dyn std::any::Any + Send>>,
+    Option<(Box<dyn std::any::Any + Send>, hk_stream::SessionEndSlot)>,
     String,
 );
 
@@ -368,7 +368,7 @@ fn resolve(s: &mut TcpStream, sh: &Shared, peer: &str) -> Result<Resolved, OpenR
         let opened = opener.open(&OpenRequest::from_query(&query, format!("tcp:{peer}")))?;
         return Ok((
             opened.handle,
-            Some(opened.session),
+            Some((opened.session, opened.end)),
             format!("tcp:open/{name}:{peer}"),
         ));
     }
@@ -436,9 +436,16 @@ fn serve_connection(mut s: TcpStream, sh: &Shared) {
             },
         );
     // Blocks until the client sends anything or hangs up, or the consumer closes (its closer
-    // shuts the socket down).
+    // shuts the socket down). T-633: this loop only ever returns on something the client did
+    // (data, FIN) or on a connection fault, so the attribution is that read's own verdict.
     let mut byte = [0u8; 1];
-    let _ = s.read(&mut byte);
+    let read = s.read(&mut byte);
+    if let Some((_, end)) = session.as_ref() {
+        end.set(match read {
+            Ok(_) => hk_stream::SessionEnd::Client,
+            Err(_) => hk_stream::SessionEnd::Transport,
+        });
+    }
     handle.close(id);
     let _ = s.shutdown(Shutdown::Both);
     {

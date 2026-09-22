@@ -40,7 +40,10 @@ pub mod publisher;
 pub mod record;
 pub mod transport;
 
-pub use ondemand::{OpenRefusal, OpenRequest, OpenedStream, OpenerRegistry, StreamOpener};
+pub use ondemand::{
+    OpenRefusal, OpenRequest, OpenedStream, OpenerRegistry, SessionEnd, SessionEndSlot,
+    StreamOpener,
+};
 
 pub use client::{ClientError, StreamReader};
 pub use frame::{FrameDecoder, FrameError, HEADER_MAX_LEN, LEN_PREFIX, MAX_FRAME_LEN};
