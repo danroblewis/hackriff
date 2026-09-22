@@ -494,6 +494,7 @@ impl BurstTapOpener {
                 counters: Arc::clone(&self.counters),
                 _slot: slot,
             }),
+            end: hk_stream::SessionEndSlot::default(),
         })
     }
 }

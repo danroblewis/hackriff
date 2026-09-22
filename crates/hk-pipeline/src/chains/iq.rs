@@ -287,6 +287,7 @@ impl IqTapOpener {
             header,
             handle,
             session: Box::new(StopOnDrop { stop, slot }),
+            end: hk_stream::SessionEndSlot::default(),
         })
     }
 }

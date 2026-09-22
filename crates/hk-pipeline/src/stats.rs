@@ -526,8 +526,20 @@ counter_group!(
         /// Chain threads running now (`active` counts admitted slots, which are released as soon
         /// as the client goes; the thread ends at its next read).
         running,
-        /// Closed because the client went away: WebSocket close, reset, unresponsive peer, Stop.
+        /// Closed because the client AFFIRMATIVELY went away: a WebSocket close frame, a
+        /// hang-up, or a data message from a consumer. T-633: this counter is what an operator
+        /// reads to blame their own client, so a peer the server reaped and a transport fault
+        /// are counted below instead, and an end nobody attributed is not counted here at all.
         closed_client,
+        /// Closed because the server stopped hearing the peer (no pong for the peer timeout) and
+        /// reaped it. Nobody said the client went away (T-633).
+        closed_unresponsive,
+        /// Closed by a reset or a read/write error on the connection (T-633). The connection was
+        /// torn down; that the client went away is a guess, so it is not counted as one.
+        closed_transport,
+        /// Closed with the session guard dropped and no reason reported by the transport
+        /// (T-633). Unattributed is its own answer, never folded into `closed_client`.
+        closed_unattributed,
         /// Closed with no consumer for the idle timeout.
         closed_idle,
         /// Closed after no audio (squelch closed) for the squelch timeout.

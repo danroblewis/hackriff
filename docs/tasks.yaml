@@ -20886,6 +20886,65 @@ tasks:
       ONE worktree in sequence, not three agents contending for one file. This one goes first - it
       is already written and measured.
       The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
+  - id: T-633
+    milestone: M2-hardening
+    title: A Listen chain's end carries the reason it actually had; a peer the server reaped is no longer counted closed_client
+    status: done
+    priority: medium
+    parallel_group: PIPE
+    model: opus
+    effort: medium
+    depends_on: []
+    use_cases: []
+    branch: task-t633
+    acceptance: |
+      ANSWERED 2026-09-22 (worker, task-t633), reproduced deterministically in hk-pipeline, no
+      28-way run and no e2e needed. The verdict is (b) with an (a)-shaped consequence: THE CLIENT
+      REALLY IS DROPPED, BUT IT IS THIS SERVER THAT DROPS IT, AND THE END WAS MISATTRIBUTED TO THE
+      CLIENT. `/ws/open/listen` pings every `ondemand_ping_interval` and reaps a peer unheard for
+      `ondemand_peer_timeout` (`hk-api/src/ondemand.rs::watch` -> `PeerEnd::Unresponsive`), which
+      drops the session guard; `chains/listen.rs` saw only a dropped guard and broke `End::Client`
+      unconditionally, so a server-side reap, a connection reset and an unattributed drop were all
+      counted under the one counter an operator reads to blame their own client.
+      WHY RANGE DIFFERED FROM EMITTER AT THE SAME STATION: nothing in the pipeline distinguishes
+      them - `resolve` returns the same extent for both and the probe, gate, admission and demod
+      paths are identical. The difference is WHICH SOCKET THE CLIENT IS READING. A WebSocket client
+      answers a ping only from inside a read; T-603's test read the emitter socket between requests
+      (its own fix) and never read the range socket after its header. Starvation is the necessary
+      condition twice over: a starved chain publishes nothing, so the client has nothing to read on
+      that socket, and it stretches the step past the peer timeout. So the surviving listener was
+      the one being read, not the one selected by emitter.
+      THE FIX. `hk_stream::SessionEnd`/`SessionEndSlot` on `OpenedStream`: the transport records
+      how the peer went away BEFORE dropping the guard. `ondemand.rs` maps close-frame/FIN/data ->
+      `Client`, the server's own reap -> `Unresponsive`, reset or I/O error -> `Transport`; the TCP
+      front end attributes its blocking read the same way. `listen.rs` gains `End::Unresponsive`,
+      `End::Transport` and `End::Unattributed` with counters `closed_unresponsive`,
+      `closed_transport`, `closed_unattributed` - an end nobody attributed stays unattributed
+      rather than resolving to the convenient label. `Session::session_end` also gives a SOURCE
+      reason precedence: a chain whose ring has already closed is counted `closed_segment` /
+      `closed_source` whichever thread dropped the guard first.
+      TESTS (counts and ordering, never wall-clock): `crates/hk-pipeline/tests/listen_end_reason.rs`.
+      `a_peer_the_server_reaped_is_not_counted_as_the_client_going_away` - 6 sockets opened and
+      never read must be `closed_unresponsive` 6 / `closed_client` 0, then 3 close frames move
+      `closed_client` to exactly 3 and nothing else. `a_starved_source_reaps_only_the_socket_nobody_
+      is_reading_and_does_not_blame_the_client` - two chains on the IDENTICAL extent under one held
+      radio: the read socket stays `running`, the unread one is reaped `closed_unresponsive` 1 /
+      `closed_client` 0, with `closed_squelch` and `closed_idle` both 0. RED PROOF: restoring
+      `break End::Client` fails both, 6 and 1 under `closed_client`. `listen_lifecycle`'s
+      "all 50 closed_client" assertion was the old behaviour written down and is now split.
+    notes: |
+      Filed 2026-09-21 by T-603. Worked 2026-09-22 on branch `task-t633` from the gated commit
+      a9037506 (the block itself was on `task-t603`, mid-gate, so this entry was appended fresh).
+      MEASURED RESIDUE, NOT CHASED: one of the 50 lifecycle sessions ends `closed_transport`
+      instead of `closed_client` - an abrupt hang-up with records still unread reaches the server
+      as an RST, not a FIN. That is TCP, not a defect, and the two are deliberately kept apart
+      (an RST does not say the client went away), so the lifecycle test asserts the union for the
+      abrupt group. If an operator ever sees `closed_transport` climbing on browser clients, that
+      is the thing to look at.
+      NOT DONE HERE: the source-precedence branch of `session_end` closes a real race (the guard is
+      dropped by the very socket shutdown a finished producer causes) but has no RED test - the
+      window is microseconds and the chain reaches `Next::Closed` on its own first in every
+      scripted ordering tried. Kept as a cheap correctness net, claimed as nothing more.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
