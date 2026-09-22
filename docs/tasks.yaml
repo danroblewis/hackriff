@@ -7575,6 +7575,57 @@ tasks:
       dormant until a durable hk-store-backed ShadowSink exists, because wiring observe now would record
       into a buffer nobody drains. Do not mark anything done that is not; the board''s value is that status
       means something'
+    result: |
+      AMENDED THE ADR; did not build. The ticket's either/or resolves on evidence that was already on
+      the board: T-203's acceptance reads "Mac provider plus CPU reference; conformance suite;
+      batching defaults; inference only on CFAR-surviving detections; shadow mode records predictions
+      without acting", and its scope_audit_2026_09_15 narrows it further to "the model host itself:
+      runtime load/unload, batching, model@version provenance, inference gated to CFAR-surviving
+      detections, and the provider conformance suite". NEITHER MENTIONS A STORE OR A ROUTE. T-203
+      delivered exactly that, including the ShadowSink trait and the in-memory sink its unit tests
+      need. So T-203 did not close early - ADR-0016 section 10's hk-store/hk-api cells were a
+      planning-time allocation that the re-scope left behind, and the ADR was stale. `done` stands.
+      Corroboration that this was the one stale row, not a general drift: every other M3 route in
+      section 9 did land - /api/taxonomy, /api/signatures, /api/signatures/match, /api/clusters,
+      /api/clusters/{id}/promote and /api/datasets are all in docs/api.md - while `grep -n '/api/ml'
+      docs/api.md` returns nothing, `crates/hk-store/src/ml/` and `crates/hk-api/src/ml.rs` do not
+      exist, and MemoryShadowSink is the only ShadowSink in the tree (host.rs:243).
+      WHY NOT BUILD IT. ADR-0016 section 4.6 gates each family off/shadow/active on evidence, and
+      T-204 measured that no family earns even shadow (fsk AUROC 0.326 against classical 0.824,
+      false-known rate 1.000 against 0.325). Nothing produces a shadow record today, so a
+      hk-store writer and three routes over it would be a store nothing writes to and an operator
+      surface over an empty table - the capability-with-no-caller pattern T-363 counted seven prior
+      instances of, and which this ticket's own framing ("wiring observe now would record into a
+      buffer nobody drains") argues against. Building it here would have satisfied the letter of the
+      acceptance by committing the exact defect the acceptance is about.
+      CHANGES. (1) docs/adr/0016-classification-contracts.md: section 9's three /api/ml rows and
+      section 10's ownership cells move from T-203 to the new T-844; a dated "Amendment 2026-09-22
+      (T-365)" subsection under section 10 states the defect, the evidence that the ADR rather than
+      the ticket was stale, and why the cells were reassigned instead of implemented; section 6's
+      shadow-mode bullet gains a "Landed vs. owed" line separating the trait and MemoryShadowSink
+      (landed, T-203) from the NDJSON writer and routes (owed, T-844); the M3 task-graph table gains
+      a T-844 row and T-203's row loses "+ store" and "ml routes"; and the header's "Nothing in this
+      ADR is implemented yet" - materially false since M3 landed and the same reader-cannot-tell
+      defect class - is marked stale with a pointer to the per-task cells. (2)
+      crates/hk-ml/src/lib.rs: reason 3 of the dormancy section said "section 10 assigns all of it to
+      T-203; none of it landed", which left the same ambiguity in the crate docs; it now names T-844
+      and records the finding. (3) docs/tasks.yaml: T-844 filed, scoped so it CANNOT land the sink
+      alone - it requires a real producer and a falsifiable non-vacuity pair (remove the wiring, a
+      test fails; remove the sink, a different test fails), and makes deleting the hk-ml dormancy
+      prose part of the work, since crates/hk-ml/tests/no_production_caller.rs is built to fail the
+      day a caller appears.
+      TESTS. `cargo nextest run -p hk-ml` - 31 passed, 0 failed (conformance.rs and
+      no_production_caller.rs included; the only change to the crate is a doc comment, and
+      no_production_caller still passes, which is the assertion that nothing was silently wired).
+      `python3 -m pytest py/tests/test_task_board.py` - 11 passed, so T-844 satisfies the board's
+      schema invariants. `just precheck hk-ml` clean.
+      NOT CHASED, for the coordinator. docs/api.md has no "planned" section for the /api/ml routes at
+      all, so unlike the other M3 routes there is nothing there to grow - T-844's acceptance says to
+      add the rows and the api_contract.rs tests together per T-079, which is the right place for it,
+      not here. Separately, ADR-0016 remains PROVISIONAL with five open questions for the user
+      (section "Open questions"), including the tract-in-the-default-build one that T-203 answered in
+      practice; nobody has gone back to mark them resolved. That is a broader ADR-hygiene job across
+      the M3 ADR, not this ticket's attribution fix.
   - id: T-366
     milestone: M3
     title: ADR-0016 section 7s ML exit-gate row is asserted nowhere, so it is vacuously satisfiable
@@ -23545,6 +23596,49 @@ tasks:
       to the rule and wants its own review. Until then the guard runs in `just test` and catches
       it on any diff that touches code. The remaining hole is a docs-ONLY diff, which is how this
       one got in.
+  - id: T-844
+    milestone: M3
+    title: C38 durable shadow sink in hk-store plus the three /api/ml routes, landed with a producer
+      so the path is not vacuous
+    status: todo
+    priority: normal
+    deps:
+    - T-203
+    - T-204
+    parallel_group: M3C
+    core_interface: true
+    model: opus
+    effort: high
+    area: crates/hk-store (new src/ml/), crates/hk-api (new ml.rs), docs/api.md
+    found_by: 'T-365 2026-09-22: ADR-0016 section 10 assigned this to T-203, which reads status done
+      and whose acceptance never contained it'
+    acceptance: |
+      ADR-0016 section 6 specifies the durable half of shadow mode and section 9 the operator surface
+      over it; the section 10 amendment of 2026-09-22 (filed by T-365) moves both off T-203 - whose
+      acceptance and scope_audit_2026_09_15 covered only the model host, batching, provenance, CFAR
+      gating and the conformance suite, all of which landed - and onto this ticket. What is owed:
+      hk-store/src/ml/** writing {Prediction, classical decision, snr_bin, subject} to ml/shadow/ as
+      hourly CRC-line NDJSON (256 MiB, 30 days) with per-SNR agreement aggregates; a ShadowSink
+      implementation over it, replacing hk_ml::host::MemoryShadowSink as the production sink;
+      hk-api/src/ml.rs serving GET /api/ml/shadow, GET /api/ml/models and PUT /api/ml/models/{id}/mode
+      (audited, active needs enable evidence or force); and the matching rows in docs/api.md plus
+      contract tests in crates/hk-cli/tests/api_contract.rs, per T-079.
+      DO NOT LAND THE SINK ALONE. crates/hk-ml/src/lib.rs records the model host as dormant BY DESIGN
+      behind three conditions - a model installed in a registry, a family clearing ADR-0016 section
+      4.6, and this durable sink - and T-204 measured that no family earns even shadow on the dev
+      evidence (fsk AUROC 0.326 against classical 0.824, false-known 1.000 against 0.325). A writer
+      with nothing writing to it and routes over an empty table would be the ninth instance of the
+      capability-with-no-caller pattern T-363 counted. So this ticket lands the sink TOGETHER WITH a
+      real producer: ModelHost::observe wired on a path that runs, gated so that a family still only
+      reaches shadow on section 4.6 evidence.
+      NON-VACUITY, as a falsifiable pair in the style of T-287 and T-297: remove the wiring and a test
+      that asserts a shadow record reached hk-store must fail; remove the hk-store sink and a
+      different test must fail. Deleting the dormancy section in crates/hk-ml/src/lib.rs is part of
+      the work - crates/hk-ml/tests/no_production_caller.rs is designed to fail the day a caller
+      appears, precisely so whoever wires it comes back and updates that prose instead of leaving it
+      to mislead the next reader. If the section 4.6 evidence still does not support wiring any
+      producer when this is picked up, do not force it: say so and leave the ticket open rather than
+      landing a vacuous half.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
