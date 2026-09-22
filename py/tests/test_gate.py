@@ -408,6 +408,13 @@ def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tm
     monkeypatch.setattr(gate_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(gate_mod.shutil, "which", lambda name: "/usr/bin/just")
     monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+    # T-763: main() records the run through gatelog, which writes to $HACKRIFF_OPS. Without
+    # this the SUITE'S OWN fake gates land in the production history that `just cycle-time`
+    # and the budget guard read: on 2026-09-22, 31 of the 33 runs in the real
+    # `gate-timings.jsonl` were records written from here (their `root` is a pytest tmpdir),
+    # a 0.0-second `py` run each time. A measurement tool whose own tests pollute the
+    # measurement is worse than one nobody runs.
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "ops"))
 
     rc = gate_mod.main(["--files", "py/hkpy/synth.py", "--root", str(tmp_path)])
 
