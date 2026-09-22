@@ -702,6 +702,17 @@ export interface PaneStatus {
   readonly blank: number;
   /** [[PaneReport.shortNs]]: how far short of this pane's own window top the drawing reached. */
   readonly shortNs: number;
+  /**
+   * **Places the coverage survey settled as never sampled, and so were never requested** (T-580)
+   * — [[PaneReport.surveyed]].
+   *
+   * It is stated for the same reason every other count here is: a pane drawn entirely from the
+   * survey holds no tiles and waits for none, so without it the readout says `0 tiles · 0 coarse
+   * stand-ins · 0 pending` — word for word what a pane that has drawn *nothing at all* says. Grey
+   * is the normal state of a 6 GHz canvas, not an edge case, and "the radio never looked here" and
+   * "this pane has not started" are the two things a coverage readout exists to tell apart.
+   */
+  readonly surveyed: number;
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
@@ -792,6 +803,7 @@ export function paneStatuses(
       behind: r.behind,
       blank: r.blank,
       shortNs: r.shortNs,
+      surveyed: r.surveyed,
       differsFrom,
     });
   }
