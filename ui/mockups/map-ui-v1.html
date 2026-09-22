@@ -1,0 +1,706 @@
+<title>hackriff Map UI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;500;600;700&family=Chivo+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Mockup for docs/23–26 (the map-UI redesign). Same tokens as ui/mockups/explorer-v3.html so it
+     reads as the same product. Deliberately single-theme: it is a waterfall instrument. */
+  :root {
+    --ground: #0D1317; --panel: #131B20; --panel-2: #18222A; --raise: #1E2A33;
+    --line: #243039; --line-soft: #1B252D; --text: #D5DEE2; --muted: #8595A0; --dim: #5A6973;
+    --amber: #F0A542; --amber-soft: rgba(240,165,66,0.14);
+    --teal: #52C2AE; --teal-soft: rgba(82,194,174,0.13);
+    --lav: #A395E0; --lav-soft: rgba(163,149,224,0.14);
+    --coral: #E47B68; --coral-soft: rgba(228,123,104,0.14);
+    --cream: #F3E3BF;
+    --glass: rgba(19,27,32,0.82); --glass-line: rgba(213,222,226,0.14);
+    --ui: "Chivo","Helvetica Neue",Arial,sans-serif; --mono: "Chivo Mono",ui-monospace,Menlo,monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 13px/1.45 var(--ui); overflow: hidden; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* MAP-01: the surface is the whole viewport; everything else floats over it. */
+  #app { position: fixed; inset: 0; }
+  #surface { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #surface.panning { cursor: grabbing; }
+  #surface.measuring { cursor: crosshair; }
+  #pins { position: absolute; inset: 0; pointer-events: none; }
+
+  /* Pins (MAP-09): DOM so they are focusable; positioned every frame from content space. */
+  .pin { position: absolute; transform: translate(-50%, -50%); pointer-events: auto; cursor: pointer;
+         width: 14px; height: 14px; display: grid; place-items: center; background: none; border: 0; padding: 0; }
+  .pin::before { content: ""; display: block; width: 10px; height: 10px; }
+  .pin.candidate::before { width: 9px; height: 9px; transform: rotate(45deg); border: 1.5px solid var(--lav); background: rgba(13,19,23,0.7); }
+  .pin.unknown::before { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--amber); background: rgba(13,19,23,0.7); }
+  .pin.unknown::after { content: "?"; position: absolute; font: 600 9px/1 var(--mono); color: var(--amber); }
+  .pin.mine::before { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 11px solid var(--cream); }
+  .pin.cluster { width: auto; height: 20px; min-width: 20px; padding: 0 6px; border-radius: 10px; background: rgba(163,149,224,0.22);
+                 border: 1.5px solid var(--lav); font: 600 10px/1 var(--mono); color: var(--text); }
+  .pin.cluster::before { display: none; }
+  .pin.selected { filter: drop-shadow(0 0 4px var(--amber)); }
+  .pin:hover, .pin:focus-visible { transform: translate(-50%, -50%) scale(1.25); }
+
+  /* Floating chrome (MAP-02). Screen space. Fades when idle (MAP-24). */
+  .chrome { position: absolute; transition: opacity .5s ease; }
+  body.idle .chrome { opacity: .35; }
+  body.idle .sheet, body.idle .research { opacity: 1; }
+  .glass { background: var(--glass); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+           border: 1px solid var(--glass-line); border-radius: 8px; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+  .ibtn { width: 36px; height: 36px; display: grid; place-items: center; border: 0; background: none; color: var(--text); border-radius: 8px; }
+  .ibtn:hover { background: var(--raise); }
+  .ibtn[aria-pressed="true"] { background: var(--amber-soft); color: var(--amber); }
+  .ibtn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  .goto { top: 14px; left: 14px; display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; width: min(360px, calc(100vw - 28px)); }
+  .goto input { flex: 1; min-width: 0; background: none; border: 0; padding: 6px 2px; font-family: var(--mono); font-size: 13px; }
+  .goto input::placeholder { color: var(--dim); }
+  .goto .hint { color: var(--dim); font-size: 11px; white-space: nowrap; }
+  .retune-offer { position: absolute; top: 60px; left: 14px; display: none; align-items: center; gap: 10px; padding: 8px 10px 8px 12px; border-color: var(--amber); }
+  .retune-offer.show { display: flex; }
+  .retune-offer b { color: var(--amber); font-weight: 600; }
+  .retune-offer button { border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 4px 10px; }
+  .retune-offer .x { border: 0; background: none; color: var(--muted); padding: 4px 6px; }
+
+  .topright { top: 14px; right: 14px; display: flex; gap: 6px; padding: 3px; }
+  .layers-panel { top: 60px; right: 14px; width: 300px; max-width: calc(100vw - 28px); padding: 12px 14px; display: none; }
+  .layers-panel.open { display: block; }
+  .layers-panel h4 { margin: 0 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .layers-panel .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+  .layers-panel .row input { margin: 0; accent-color: var(--amber); }
+  .layers-panel .row .sw { width: 14px; height: 10px; border-radius: 2px; flex: none; }
+  .layers-panel .row small { color: var(--dim); margin-left: auto; font-family: var(--mono); font-size: 10.5px; }
+  .layers-panel .axis { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .layers-panel .note { color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+  .layers-panel .note b { color: var(--amber); font-weight: 500; }
+
+  .rightstack { right: 14px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 3px; }
+  .rightstack .sep { height: 1px; background: var(--line); margin: 3px 4px; }
+  .fab { right: 14px; bottom: 116px; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center;
+         border: 1px solid var(--glass-line); background: var(--glass); color: var(--muted); }
+  .fab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+  .fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px rgba(0,0,0,.35); }
+  .fab.frozen { color: var(--amber); border-color: var(--amber); }
+
+  /* Pane status: the honesty statement (docs/16 §8.3). Sits just above the frequency ruler. */
+  .pane-status { left: 100px; bottom: 60px; max-width: 620px; padding: 7px 10px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; font-size: 11.5px; }
+  .pane-status .tier { display: inline-flex; align-items: center; gap: 6px; }
+  .pane-status .tier i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+  .pane-status .live-iq i { background: var(--teal); }
+  .pane-status .hist i { background: var(--lav); }
+  .pane-status .survey i { background: var(--dim); }
+  .pane-status .frozen { color: var(--amber); }
+
+  /* Bottom sheet (MAP-03): peek / half / full, never modal. */
+  .sheet { position: absolute; left: 50%; transform: translateX(-50%); bottom: 0; width: min(680px, 100vw); height: 52px;
+           background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+           border: 1px solid var(--glass-line); border-bottom: 0; border-radius: 14px 14px 0 0;
+           box-shadow: 0 -6px 30px rgba(0,0,0,.4); display: flex; flex-direction: column; transition: height .28s cubic-bezier(.2,.8,.2,1);
+           padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .sheet.half { height: 42vh; } .sheet.full { height: calc(100vh - 80px); }
+  .sheet.dragging { transition: none; }
+  .sheet .grab { flex: none; height: 22px; display: grid; place-items: center; cursor: ns-resize; touch-action: none; }
+  .sheet .grab i { width: 40px; height: 4px; border-radius: 2px; background: var(--dim); }
+  .sheet .tabs { flex: none; display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .sheet .tabs button { border: 0; background: none; padding: 6px 10px 8px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .sheet .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--amber); }
+  .sheet .tabs .peekline { margin-left: auto; align-self: center; color: var(--muted); font-size: 11.5px; padding-right: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sheet .body { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 16px; }
+  .sheet .body[hidden] { display: none; }
+
+  /* Explore drawer (MAP-14/15) */
+  .poi h4 { margin: 12px 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .poi h4:first-child { margin-top: 0; }
+  .poi ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; }
+  .poi li button { width: 100%; text-align: left; border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 8px 10px; display: grid; gap: 2px; }
+  .poi li button:hover { border-color: var(--muted); }
+  .poi .f { font-family: var(--mono); font-weight: 500; }
+  .poi .why { color: var(--muted); font-size: 11.5px; }
+  .poi .tag { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }
+  .poi .tag.past { color: var(--lav); }
+
+  /* Detail sheet (MAP-04) */
+  .detail .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+  .detail .big { font: 500 30px/1 var(--mono); letter-spacing: -.01em; }
+  .detail .big small { font-size: 14px; color: var(--muted); }
+  .detail .state { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 999px; font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
+  .detail .state.confirmed { background: var(--teal-soft); color: var(--teal); }
+  .detail .state.candidate { background: var(--lav-soft); color: var(--lav); }
+  .detail .state.unknown { background: var(--amber-soft); color: var(--amber); }
+  .detail .state.mine { background: rgba(243,227,191,.14); color: var(--cream); }
+  .detail .live { color: var(--teal); font-size: 12px; }
+  .detail .live::before { content: "●"; margin-right: 5px; }
+  .detail .cols { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; margin-top: 12px; }
+  .detail h4 { margin: 0 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .detail dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 12.5px; }
+  .detail dt { color: var(--muted); } .detail dd { margin: 0; font-family: var(--mono); }
+  .detail .at { color: var(--dim); font-size: 11px; margin-top: 4px; }
+  .detail ol { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; }
+  .detail ol li { display: grid; grid-template-columns: 34px 1fr; gap: 8px; align-items: start; font-size: 12.5px; }
+  .detail ol .p { font-family: var(--mono); color: var(--amber); }
+  .detail ol .src { color: var(--dim); font-size: 11px; }
+  .detail ol li.flag .p { color: var(--coral); }
+  .detail .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .detail .actions button { border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: 6px 10px; }
+  .detail .actions button.primary { border-color: var(--teal); color: var(--teal); background: var(--teal-soft); }
+  .detail .actions button.danger { color: var(--coral); }
+  .detail .empty { color: var(--muted); padding: 14px 0; }
+
+  /* Research panel (MAP-21): the table is the second view of the map. */
+  .research { position: absolute; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); background: var(--glass); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+              border-left: 1px solid var(--glass-line); transform: translateX(100%); transition: transform .28s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; }
+  .research.open { transform: none; }
+  .research .rhead { display: flex; align-items: center; gap: 8px; padding: 14px 14px 8px; }
+  .research .rhead h3 { margin: 0; font: 600 14px/1 var(--ui); }
+  .research .rhead .x { margin-left: auto; }
+  .research .rtabs { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); }
+  .research .rtabs button { border: 0; background: none; padding: 6px 8px 8px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; font-size: 12px; }
+  .research .rtabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--amber); }
+  .research .tools { display: flex; gap: 6px; padding: 8px 14px; font-size: 11.5px; color: var(--muted); align-items: center; }
+  .research .tools label { display: inline-flex; gap: 5px; align-items: center; }
+  .research .tools input { accent-color: var(--amber); margin: 0; }
+  .research .tools .export { margin-left: auto; border: 1px solid var(--line); background: var(--panel-2); border-radius: 6px; padding: 4px 9px; color: var(--text); }
+  .research .twrap { flex: 1; min-height: 0; overflow: auto; }
+  .research table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .research th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 500; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); font-size: 11px; cursor: pointer; white-space: nowrap; }
+  .research th:first-child, .research td:first-child { padding-left: 14px; }
+  .research td { padding: 7px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .research tr.row { cursor: pointer; }
+  .research tr.row:hover { background: var(--raise); }
+  .research tr.row.selected { background: var(--amber-soft); box-shadow: inset 3px 0 var(--amber); }
+  .research .kind { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .research .place { font-family: var(--mono); white-space: nowrap; }
+  .research .val { font-family: var(--mono); }
+  .research .badge { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+  .research .badge.mine { background: rgba(243,227,191,.14); color: var(--cream); }
+  .research .badge.measured { background: var(--teal-soft); color: var(--teal); }
+  .research .badge.suggested { background: var(--lav-soft); color: var(--lav); border: 1px dashed var(--lav); }
+  .research .prov { color: var(--dim); font-size: 10.5px; }
+  .research .foot { padding: 8px 14px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
+
+  /* MapTip (hover) */
+  .maptip { position: absolute; display: none; padding: 6px 9px; font-size: 11.5px; pointer-events: none; z-index: 5; max-width: 240px; }
+  .maptip.show { display: block; }
+  .maptip .f { font-family: var(--mono); font-weight: 500; }
+  .maptip .m { color: var(--muted); }
+
+  /* Measure mode banner + ticket tags */
+  .mode { top: 62px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 12px; display: none; border-color: var(--amber); color: var(--amber); }
+  .mode.show { display: block; }
+  body[data-tags="on"] [data-ticket]::after { content: attr(data-ticket); position: absolute; top: -9px; left: 8px; font: 600 9px/1 var(--mono); color: var(--ground); background: var(--amber); padding: 2px 5px; border-radius: 3px; letter-spacing: .04em; z-index: 6; }
+  body[data-tags="on"] .sheet[data-ticket]::after, body[data-tags="on"] .research[data-ticket]::after { top: 6px; left: 12px; }
+  body[data-tags="on"] .pin[data-ticket]::after { top: -18px; left: -6px; }
+  body[data-tags="on"] .pin.unknown[data-ticket]::after { content: attr(data-ticket); font: 600 9px/1 var(--mono); color: var(--ground); }
+  .kbd { color: var(--dim); font-size: 11px; }
+  .kbd b { font-family: var(--mono); font-weight: 500; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+
+  @media (max-width: 720px) {
+    .goto { width: calc(100vw - 120px); }
+    .topright { top: 14px; right: 14px; }
+    .rightstack { top: auto; bottom: 180px; transform: none; }
+    .fab { bottom: 120px; }
+    .pane-status { bottom: 62px; left: 14px; right: 14px; max-width: none; font-size: 11px; }
+    .detail .cols { grid-template-columns: 1fr; }
+    .poi ul { grid-template-columns: 1fr; }
+    .kbd { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sheet, .research, .chrome { transition: none; } }
+</style>
+
+<div id="app">
+  <canvas id="surface" aria-label="Spectrum canvas: frequency across, time down. Drag to pan, wheel to zoom."></canvas>
+  <div id="pins"></div>
+
+  <!-- MAP-02: floating control cluster -->
+  <form class="chrome glass goto" id="goto" data-ticket="MAP-02" autocomplete="off">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input id="goto-in" placeholder="Go to frequency, e.g. 433.92M or 101.3" aria-label="Go to frequency">
+    <span class="hint">↵</span>
+  </form>
+  <div class="chrome glass retune-offer" id="retune" role="status">
+    <span><b id="retune-f">433.920 MHz</b> is outside the tuned window. Panning can't reach it — retune the radio?</span>
+    <button id="retune-go">Retune</button><button class="x" id="retune-x" aria-label="Dismiss">✕</button>
+  </div>
+  <div class="chrome glass mode" id="mode">Measure: drag on the surface to read Δf · Δt · bandwidth. Release to keep it. <span class="kbd"><b>Esc</b> exits</span></div>
+
+  <div class="chrome glass topright">
+    <button class="ibtn" id="layers-btn" data-ticket="MAP-06" aria-pressed="false" aria-label="Layers" title="Layers"><svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 12l9 5 9-5"/><path d="M3 16l9 5 9-5"/></svg></button>
+    <button class="ibtn" id="measure-btn" data-ticket="MAP-22" aria-pressed="false" aria-label="Measure" title="Measure (Δf · Δt)"><svg viewBox="0 0 24 24"><path d="M3 17l14-14 4 4L7 21H3v-4z"/><path d="M13 7l2 2M10 10l2 2M7 13l2 2"/></svg></button>
+    <button class="ibtn" id="research-btn" data-ticket="MAP-21" aria-pressed="false" aria-label="Research" title="Research: collections, measurements, annotations"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16"/><path d="M8 3v18" opacity=".5"/></svg></button>
+    <button class="ibtn" id="tags-btn" aria-pressed="false" aria-label="Show ticket tags" title="Show which MAP ticket owns each piece"><svg viewBox="0 0 24 24"><path d="M4 10l6-6h10v10l-6 6z"/><circle cx="15" cy="9" r="1.5"/></svg></button>
+  </div>
+
+  <div class="chrome glass layers-panel" id="layers" data-ticket="MAP-06">
+    <div class="axis">
+      <h4>Base style · one at a time</h4>
+      <label class="row"><input type="radio" name="base" value="ramp" checked> Amplitude ramp <small>T-475</small></label>
+      <label class="row"><input type="radio" name="base" value="phosphor"> Phosphor <small>afterglow</small></label>
+    </div>
+    <h4>Overlays · this pane · paint order ↓</h4>
+    <label class="row"><input type="checkbox" data-layer="fog" checked><i class="sw" style="background:#2A3136"></i> Coverage fog <small data-ticket="MAP-07">grey · unknown · excluded</small></label>
+    <label class="row"><input type="checkbox" data-layer="events" checked><i class="sw" style="background:var(--teal)"></i> Detections <small data-ticket="MAP-08">confirmed · candidate · unknown</small></label>
+    <label class="row"><input type="checkbox" data-layer="artifacts" checked><i class="sw" style="background:var(--lav);opacity:.7"></i> Artifacts <small data-ticket="MAP-11">image · harmonic · IMD</small></label>
+    <label class="row"><input type="checkbox" data-layer="tier"><i class="sw" style="background:var(--dim)"></i> Honesty-tier bands <small>per pane</small></label>
+    <label class="row"><input type="checkbox" data-layer="priors"><i class="sw" style="background:repeating-linear-gradient(45deg,var(--lav) 0 2px,transparent 2px 5px)"></i> Band-plan priors <small data-ticket="MAP-12">suggestions</small></label>
+    <label class="row"><input type="checkbox" data-layer="mine" checked><i class="sw" style="background:var(--cream)"></i> FM survey 20 Sep <small data-ticket="MAP-17">my collection</small></label>
+    <div class="note">Unknowns are never hidden by default. <b>Priors</b> are explanations drawn beside measurements, never truth.</div>
+  </div>
+
+  <div class="chrome glass rightstack" data-ticket="MAP-02">
+    <button class="ibtn" id="zoom-in" aria-label="Zoom in"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    <div class="sep"></div>
+    <button class="ibtn" id="zoom-out" aria-label="Zoom out"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+  </div>
+  <button class="chrome fab following" id="fab" data-ticket="MAP-02" aria-label="Follow live" title="Follow the live edge"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="8"/></svg></button>
+
+  <div class="chrome glass pane-status" id="status" data-ticket="MAP-05"></div>
+
+  <div class="chrome glass maptip" id="maptip"></div>
+
+  <!-- MAP-03 bottom sheet: Explore drawer (MAP-14) + detail (MAP-04) -->
+  <section class="sheet" id="sheet" data-ticket="MAP-03" aria-label="Sheet">
+    <div class="grab" id="grab"><i></i></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-explore" aria-selected="true">Explore</button>
+      <button role="tab" id="tab-detail" aria-selected="false">Selected</button>
+      <span class="peekline" id="peekline"></span>
+    </div>
+    <div class="body poi" id="body-explore"></div>
+    <div class="body detail" id="body-detail" hidden></div>
+  </section>
+
+  <aside class="research" id="research" data-ticket="MAP-21" aria-label="Research">
+    <div class="rhead"><h3>Research</h3><span class="kbd">every mark is also a row</span><button class="ibtn x" id="research-x" aria-label="Close">✕</button></div>
+    <div class="rtabs" role="tablist" id="rtabs">
+      <button aria-selected="true" data-kind="all">All</button><button data-kind="marker">Markers</button><button data-kind="measurement">Measurements</button><button data-kind="annotation">Annotations</button><button data-kind="view">Views</button>
+    </div>
+    <div class="tools"><label><input type="checkbox" id="filter-window"> only in this window</label><button class="export" data-ticket="MAP-23">Export ▾</button></div>
+    <div class="twrap"><table><thead><tr><th>Kind</th><th>Name</th><th>Place</th><th>Value</th><th>Tier</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div class="foot">Durable objects only — detections live in Explore and History. Edits go through the backend (PUT) and both surfaces re-render from one store.</div>
+  </aside>
+</div>
+
+<script>
+(() => {
+"use strict";
+const $ = (s) => document.querySelector(s);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const MHz = 1e6, kHz = 1e3;
+const fmtF = (hz, d = 3) => hz >= 1e9 ? (hz / 1e9).toFixed(d) + " GHz" : hz >= 1e6 ? (hz / 1e6).toFixed(d) + " MHz" : (hz / 1e3).toFixed(1) + " kHz";
+const fmtRel = (s) => { const a = Math.abs(s), m = Math.floor(a / 60), ss = Math.floor(a % 60); return (s < 0 ? "−" : "+") + (m >= 60 ? Math.floor(m / 60) + ":" + String(m % 60).padStart(2, "0") + ":" : m + ":") + String(ss).padStart(2, "0"); };
+const wall0 = Date.now();
+const fmtWall = (rel) => new Date(wall0 + rel * 1000).toTimeString().slice(0, 8);
+
+/* ---------- The backend's data, as the routes would serve it (all times are capture time, seconds; 0 = page load) ---------- */
+const RETENTION = 1800, RING_START = -1634;               // /api/timeline window: retention_s and buffered.t0
+const device = { centre: 98.0 * MHz, span: 20 * MHz, step: 1 * kHz, tunable: [1 * MHz, 6000 * MHz] };
+const coverage = [                                         // /api/coverage: which (f,t) was actually sampled
+  { f0: 88 * MHz, f1: 108 * MHz, t0: -7200, t1: null, dev: "hackrf-0" },
+  { f0: 76 * MHz, f1: 88 * MHz, t0: -1500, t1: -1080, dev: "hackrf-0", survey: true },
+  { f0: 108 * MHz, f1: 122 * MHz, t0: -1500, t1: -1080, dev: "hackrf-0", survey: true },
+];
+const UNKNOWN_BAND = [122 * MHz, 124 * MHz];               // log lost: we no longer know whether we looked
+// /api/events. From the 2026-09-20 NooElec survey: measured, not looked up.
+const events = [
+  { id: "e1", f: 88.4995 * MHz, bw: 208 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 13.4, pilot: 36.0, rds: null, amp: 1.0 },
+  { id: "e2", f: 89.5 * MHz, bw: 200 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 11.2, pilot: 22, rds: null, amp: .75 },
+  { id: "e3", f: 93.3012 * MHz, bw: 225 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 9.1, pilot: 24.8, rds: null, amp: .8 },
+  { id: "e4", f: 94.9 * MHz, bw: 190 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 8.4, pilot: 18, rds: null, amp: .6 },
+  { id: "e5", f: 96.4984 * MHz, bw: 214 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 12.0, pilot: 21, rds: null, amp: .85 },
+  { id: "e6", f: 98.9 * MHz, bw: 200 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 10.5, pilot: 20, rds: null, amp: .7 },
+  { id: "e7", f: 99.6951 * MHz, bw: 207 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 13.5, pilot: 22.6, rds: null, amp: .8 },
+  { id: "e8", f: 101.3005 * MHz, bw: 198 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 15.4, pilot: 32.5, rds: null, amp: .95 },
+  { id: "e9", f: 107.9 * MHz, bw: 200 * kHz, t0: -7200, t1: null, state: "confirmed", snr: 9.6, pilot: 16, rds: null, amp: .65 },
+  { id: "e10", f: 91.1 * MHz, bw: 180 * kHz, t0: -520, t1: null, state: "confirmed", snr: 6.1, pilot: 11, rds: null, amp: .45, note: "began 8 min ago" },
+  { id: "e11", f: 97.3 * MHz, bw: 160 * kHz, t0: -7200, t1: null, state: "candidate", snr: 4.2, amp: .35 },
+  { id: "e12", f: 105.59 * MHz, bw: 90 * kHz, t0: -1300, t1: null, state: "unknown", snr: 5.0, amp: .4 },
+  { id: "e13", f: 94.7 * MHz, bw: 198 * kHz, t0: -7200, t1: null, state: "candidate", snr: 2.9, amp: .22, artifactOf: "e8", mech: "image about LO 98.000 MHz", err: 0, supp: 32 },
+  { id: "e14", f: 90.3 * MHz, bw: 120 * kHz, t0: -900, t1: -300, state: "candidate", snr: 3.5, amp: .3, note: "end provisional" },
+  { id: "e15", f: 95.7 * MHz, bw: 150 * kHz, t0: -7200, t1: null, state: "candidate", snr: 5.4, amp: .4, overlap: "e16" },
+  { id: "e16", f: 95.76 * MHz, bw: 120 * kHz, t0: -640, t1: null, state: "candidate", snr: 3.1, amp: .3, overlap: "e15" },
+  // bursts: past, short. Sub-pixel at most zooms → pins/counts, never fattened boxes.
+  ...[-1478, -1461, -1402, -1350, -1288, -1201, -1140, -1102].map((t, i) => ({ id: "b" + i, f: (i % 3 ? 118.1 : 121.5) * MHz, bw: 8 * kHz, t0: t, t1: t + 3 + (i % 4), state: "unknown", snr: 7, amp: .5, burst: true })),
+  ...[-700, -420, -95].map((t, i) => ({ id: "u" + i, f: 92.15 * MHz, bw: 12 * kHz, t0: t, t1: t + 0.4, state: "unknown", snr: 6, amp: .5, burst: true })),
+];
+const priors = [                                          // GET /api/priors — ranked explanations for the viewport
+  { f0: 87.5 * MHz, f1: 108 * MHz, name: "Broadcast FM · 200 kHz raster, odd tenths" },
+  { f0: 108 * MHz, f1: 137 * MHz, name: "Aeronautical (AM voice, 8.33/25 kHz)" },
+  { f0: 76 * MHz, f1: 87.5 * MHz, name: "TV ch. 5–6 (historical) / land mobile" },
+];
+// Durable research objects (docs/25): collections, measurements, annotations, views. Mine, with provenance.
+const research = [
+  { id: "m1", kind: "marker", name: "Strongest — 36 dB pilot", f: 88.5 * MHz, t: -1610, tier: "mine", coll: "FM survey 20 Sep", prov: "hackrf-0 · 98.0/20 MHz · live-iq" },
+  { id: "m2", kind: "marker", name: "Cleanest (15.4 dB SNR)", f: 101.3 * MHz, t: -1590, tier: "mine", coll: "FM survey 20 Sep", prov: "hackrf-0 · 98.0/20 MHz · live-iq" },
+  { id: "x1", kind: "measurement", name: "Mirror spacing 101.3 ↔ 94.7", f: 98.0 * MHz, t: -1500, value: "Δf 6.600 MHz = 2 × (101.3 − LO)", tier: "measured", coll: "FM survey 20 Sep", prov: "view arithmetic · saved via /api/measurements", a: [94.7 * MHz, -1500], b: [101.3 * MHz, -1500] },
+  { id: "x2", kind: "measurement", name: "Airband burst", f: 118.1 * MHz, t: -1402, value: "Δt 3.0 s · bw 8 kHz", tier: "measured", coll: "Airband pass", prov: "hackrf-0 · 115.0/14 MHz · spectrum-history", a: [118.06 * MHz, -1402], b: [118.14 * MHz, -1399] },
+  { id: "a1", kind: "annotation", name: "Off-raster carrier — revisit", f: 105.59 * MHz, t: -1300, tier: "mine", coll: "FM survey 20 Sep", prov: "box 105.54–105.64 MHz · −21:40 → live", box: [105.54 * MHz, 105.64 * MHz, -1300, null], text: "10 kHz below the 105.6 raster; no pilot. Flagged, not snapped." },
+  { id: "v1", kind: "view", name: "FM band, live", f: 98 * MHz, t: 0, value: "88–108 MHz · following", tier: "mine", coll: "—", prov: "extent only, no retune", ext: { f0: 86 * MHz, f1: 110 * MHz, follow: true } },
+  { id: "v2", kind: "view", name: "Airband survey pass", f: 115 * MHz, t: -1290, value: "108–122 MHz · −25:00 → −18:00", tier: "mine", coll: "—", prov: "extent only", ext: { f0: 106 * MHz, f1: 124 * MHz, t0: -1560, t1: -1020 } },
+];
+
+/* ---------- View state: pane 1. Time and frequency are both view arithmetic; only Retune touches the device. ---------- */
+const view = { f0: 73 * MHz, f1: 125 * MHz, tTop: 26 * 60 * 0.09, tSpan: 26 * 60, follow: true, selected: null };
+const headroom = () => view.tSpan * 0.09;                  // seconds of future shown above the live edge, so the edge clears the top chrome
+const layers = { fog: true, events: true, artifacts: true, tier: false, priors: false, mine: true, base: "ramp" };
+let measureMode = false, measuring = null;
+let nowT = 0; const perf0 = performance.now();
+const tick = () => { nowT = (performance.now() - perf0) / 1000; };
+const iqHorizon = () => Math.max(RING_START, nowT - RETENTION);
+const retentionBound = () => nowT - RETENTION;
+
+const canvas = $("#surface"), ctx = canvas.getContext("2d");
+let W = 0, H = 0, dpr = 1;
+const off = document.createElement("canvas"), octx = off.getContext("2d");   // half-res waterfall
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  off.width = Math.ceil(W / 2); off.height = Math.ceil(H / 2);
+  dirty = true;
+}
+window.addEventListener("resize", resize);
+
+// Content ↔ screen. Every overlay goes through these, every frame.
+const fx = (f) => (f - view.f0) / (view.f1 - view.f0) * W;
+const xf = (x) => view.f0 + x / W * (view.f1 - view.f0);
+const ty = (t) => (view.tTop - (t - nowT)) / view.tSpan * H;          // t absolute; view.tTop is seconds ahead of live shown at y=0
+const yt = (y) => nowT + view.tTop - y / H * view.tSpan;
+
+/* ---------- Coverage state machine (docs/16 §8.1 + docs/24 §3b): unobserved | observed | unknown | excluded, plus shadow (carry-forward) ---------- */
+function cov(f, t) {
+  if (t > nowT) return 0;                                              // future: nothing
+  for (const c of coverage) if (f >= c.f0 && f < c.f1 && t >= c.t0 && (c.t1 === null || t < c.t1)) {
+    if (c.t1 === null && Math.abs(f - device.centre) < 60 * kHz) return 5;   // excluded: the receiver's own LO notch
+    return t >= iqHorizon() && c.t1 === null ? 1 : 2;                  // 1 live-iq tier, 2 spectrum-history tier
+  }
+  let last = -Infinity;
+  for (const c of coverage) if (f >= c.f0 && f < c.f1 && c.t1 !== null && c.t1 <= t) last = Math.max(last, c.t1);
+  if (last > -Infinity) return 3;                                       // shadow: last-known, carried forward (fog-of-war)
+  if (f >= UNKNOWN_BAND[0] && f < UNKNOWN_BAND[1]) return 4;             // unknown whether we looked
+  return 0;                                                             // grey: genuinely unobserved
+}
+function lastKnown(f, t) { let last = -Infinity; for (const c of coverage) if (f >= c.f0 && f < c.f1 && c.t1 !== null && c.t1 <= t) last = Math.max(last, c.t1); return last - 0.01; }
+
+/* ---------- Synthetic spectrum: a deterministic function of (f, t), so pan/zoom just re-samples it ---------- */
+function hash(a, b) { let h = (Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663)) >>> 0; h = Math.imul(h ^ (h >>> 13), 2654435761) >>> 0; return (h ^ (h >>> 16)) / 4294967296; }
+const tiersT = [0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64], tiersF = [2400, 4800, 9600, 19200, 38400, 76800, 153600, 307200, 614400, 1228800];
+function tierT(spp) { return tiersT.find((x) => x >= spp) ?? tiersT[tiersT.length - 1]; }
+function tierF(hpp) { return tiersF.find((x) => x >= hpp) ?? tiersF[tiersF.length - 1]; }
+function energy(f, t, fb, tb) {
+  const fi = Math.floor(f / fb), tii = Math.floor(t / tb);
+  let v = 0.17 + 0.12 * hash(fi, tii) + 0.03 * Math.sin(f / 1.7e6);
+  for (const e of events) {
+    if (e.state === "candidate" && e.artifactOf && !layers.artifacts) {}
+    const df = Math.abs(f - e.f); if (df > e.bw) continue;
+    if (t < e.t0 || (e.t1 !== null && t > e.t1)) continue;
+    const prof = df < e.bw * 0.42 ? 1 : Math.max(0, 1 - (df - e.bw * 0.42) / (e.bw * 0.58));
+    v += e.amp * 0.62 * prof * (0.85 + 0.15 * hash(fi + 7, tii + 3));
+  }
+  return clamp(v, 0, 1);
+}
+const RAMP = { ramp: [[11, 16, 20], [22, 50, 58], [47, 106, 102], [143, 174, 138], [232, 220, 188]], phosphor: [[6, 16, 8], [15, 59, 22], [47, 138, 42], [166, 226, 106], [240, 255, 208]] };
+function colour(v, ramp, out) { const s = v * 4, i = Math.min(3, Math.floor(s)), k = s - i, a = ramp[i], b = ramp[i + 1]; out[0] = a[0] + (b[0] - a[0]) * k; out[1] = a[1] + (b[1] - a[1]) * k; out[2] = a[2] + (b[2] - a[2]) * k; }
+
+function drawWaterfall() {
+  const w = off.width, h = off.height, img = octx.createImageData(w, h), d = img.data, ramp = RAMP[layers.base], c = [0, 0, 0];
+  const hpp = (view.f1 - view.f0) / w, spp = view.tSpan / h, fb = tierF(hpp), tb = tierT(spp);
+  const fbH = tierF(hpp * 4), tbH = tierT(spp * 4);                    // spectrum-history rows are coarser: an honest tier, not upscaled detail
+  for (let y = 0; y < h; y++) {
+    const t = nowT + view.tTop - (y + 0.5) / h * view.tSpan;
+    for (let x = 0; x < w; x++) {
+      const f = view.f0 + (x + 0.5) / w * (view.f1 - view.f0), s = cov(f, t), o = (y * w + x) * 4;
+      let r = 42, g = 49, b = 54, a = 255;                              // grey = genuinely unobserved
+      if (t > nowT) { r = 13; g = 19; b = 23; }                          // the future: bare ground, not grey
+      else if (s === 1) { colour(energy(f, t, fb, tb), ramp, c); r = c[0]; g = c[1]; b = c[2]; }
+      else if (s === 2) { colour(energy(f, t, fbH, tbH), ramp, c); r = c[0] * .92; g = c[1] * .92; b = c[2] * .92; }
+      else if (s === 3) { colour(energy(f, lastKnown(f, t), fbH, tbH), ramp, c); r = 22 + c[0] * .42; g = 27 + c[1] * .42; b = 31 + c[2] * .42; }   // shadow: dim last-known
+      else if (s === 4) { const st = ((x >> 1) + (y >> 1)) & 1; r = st ? 52 : 34; g = st ? 58 : 40; b = st ? 64 : 46; }             // unknown: stipple
+      else if (s === 5) { const hz = ((x + y) % 6) < 2; r = hz ? 80 : 30; g = hz ? 70 : 34; b = hz ? 40 : 38; }                       // excluded: hatch
+      else if (!layers.fog && s === 0) { r = 18; g = 24; b = 28; }
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = a;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, 0, 0, W, H);
+  return { fb, tb };
+}
+
+/* ---------- Overlays: all in content space, laid out in the same pass as the rows ---------- */
+function niceStep(range, px, minPx) { const n = px / minPx, raw = range / n, p = Math.pow(10, Math.floor(Math.log10(raw))); for (const m of [1, 2, 5, 10]) if (m * p >= raw) return m * p; return 10 * p; }
+function drawRulers(alpha) {
+  ctx.save(); ctx.globalAlpha = alpha; ctx.font = "11px Chivo Mono, monospace"; ctx.textBaseline = "bottom";
+  // frequency ruler (bottom)
+  const rh = 46; const g = ctx.createLinearGradient(0, H - rh - 30, 0, H); g.addColorStop(0, "rgba(13,19,23,0)"); g.addColorStop(1, "rgba(13,19,23,.9)"); ctx.fillStyle = g; ctx.fillRect(0, H - rh - 30, W, rh + 30);
+  const fs = niceStep(view.f1 - view.f0, W, 90); ctx.strokeStyle = "rgba(213,222,226,.55)"; ctx.fillStyle = "#D5DEE2"; ctx.textAlign = "center";
+  for (let f = Math.ceil(view.f0 / fs) * fs; f <= view.f1; f += fs) { const x = fx(f); ctx.beginPath(); ctx.moveTo(x, H - 26); ctx.lineTo(x, H - 18); ctx.stroke(); ctx.fillText(fmtF(f, fs >= 1e6 ? 1 : 3), x, H - 28); }
+  ctx.strokeStyle = "rgba(213,222,226,.25)"; for (let f = Math.ceil(view.f0 / (fs / 5)) * (fs / 5); f <= view.f1; f += fs / 5) { const x = fx(f); ctx.beginPath(); ctx.moveTo(x, H - 22); ctx.lineTo(x, H - 18); ctx.stroke(); }
+  ctx.fillStyle = "#8595A0"; ctx.textAlign = "right"; ctx.fillText("frequency · " + fmtF(view.f0, 2) + " – " + fmtF(view.f1, 2), W - 10, H - 6);
+  // time ruler (left)
+  const g2 = ctx.createLinearGradient(0, 0, 90, 0); g2.addColorStop(0, "rgba(13,19,23,.85)"); g2.addColorStop(1, "rgba(13,19,23,0)"); ctx.fillStyle = g2; ctx.fillRect(0, 0, 90, H);
+  const ts = niceStep(view.tSpan, H, 70); ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.strokeStyle = "rgba(213,222,226,.55)";
+  const tTopAbs = nowT + view.tTop, tBotAbs = tTopAbs - view.tSpan;
+  for (let t = Math.floor(tTopAbs / ts) * ts; t >= tBotAbs; t -= ts) { const y = ty(t); if (y < 70 || y > H - 50) continue; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(8, y); ctx.stroke(); ctx.fillStyle = "#D5DEE2"; ctx.fillText(fmtRel(t - nowT), 12, y); ctx.fillStyle = "#5A6973"; ctx.fillText(fmtWall(t), 58, y); }
+  ctx.restore();
+}
+function drawRules() {
+  // The two capture-window rules, in words (docs/16 §8 capture window). Distinct from grey and from each other.
+  ctx.save(); ctx.font = "11px Chivo, sans-serif"; ctx.textBaseline = "bottom";
+  const yLive = ty(nowT); ctx.strokeStyle = "#52C2AE"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(0, yLive); ctx.lineTo(W, yLive); ctx.stroke();
+  ctx.fillStyle = "#52C2AE"; ctx.textAlign = "right"; ctx.fillText("live edge · observing now · " + fmtWall(nowT), W - 70, yLive - 3);
+  const yIq = ty(iqHorizon()); if (yIq > 0 && yIq < H) { ctx.strokeStyle = "#F3E3BF"; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(0, yIq); ctx.lineTo(W, yIq); ctx.stroke(); ctx.fillStyle = "#F3E3BF"; ctx.textAlign = "left"; ctx.fillText("IQ horizon " + fmtRel(iqHorizon() - nowT) + " — oldest sample in the ring; below this, playback is waterfall-only (no audio)", 100, yIq - 3); }
+  const yRb = ty(retentionBound()); if (yRb > 0 && yRb < H) { ctx.strokeStyle = "#A395E0"; ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.moveTo(0, yRb); ctx.lineTo(W, yRb); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = "#A395E0"; ctx.textAlign = "left"; ctx.fillText("retention bound " + fmtRel(-RETENTION) + " — configured ring length (30 min); spectrum history continues below", 100, yRb - 3); }
+  ctx.restore();
+}
+function hatch(x, y, w, h, col) { ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); ctx.strokeStyle = col; ctx.lineWidth = 1; for (let i = -h; i < w; i += 7) { ctx.beginPath(); ctx.moveTo(x + i, y + h); ctx.lineTo(x + i + h, y); ctx.stroke(); } ctx.restore(); }
+const pinLayer = $("#pins"); let pinEls = new Map();
+function drawEvents() {
+  const drawn = [];                                            // pins to place (event, x, y)
+  ctx.save(); ctx.font = "11px Chivo Mono, monospace"; ctx.textBaseline = "top";
+  for (const e of events) {
+    if (!layers.events) break;
+    if (e.artifactOf && !layers.artifacts) continue;
+    const x0 = fx(e.f - e.bw / 2), x1 = fx(e.f + e.bw / 2), yTop = ty(e.t1 === null ? nowT : e.t1), yBot = ty(e.t0);   // ongoing → live edge by assumption
+    if (x1 < 0 || x0 > W || yBot < 0 || yTop > H) continue;
+    const w = x1 - x0, h = yBot - yTop, sel = view.selected === e.id;
+    if (w < 5 || h < 6) { drawn.push({ e, x: (x0 + x1) / 2, y: (yTop + yBot) / 2 }); continue; }   // coarse-zoom honesty: marker, never a fattened box
+    if (e.state === "confirmed") { ctx.strokeStyle = sel ? "#F0A542" : "#52C2AE"; ctx.lineWidth = sel ? 2.5 : 1.75; ctx.setLineDash([]); }
+    else if (e.state === "unknown") { ctx.strokeStyle = sel ? "#F0A542" : "#F0A542"; ctx.lineWidth = sel ? 2 : 1.25; ctx.setLineDash([2, 3]); }
+    else { ctx.strokeStyle = sel ? "#F0A542" : "rgba(163,149,224,.85)"; ctx.lineWidth = sel ? 2 : 1; ctx.setLineDash([5, 4]); }
+    ctx.strokeRect(x0, yTop, w, h); ctx.setLineDash([]);
+    if (e.overlap) hatch(Math.max(x0, fx(events.find(o => o.id === e.overlap).f - events.find(o => o.id === e.overlap).bw / 2)), yTop, Math.min(x1, fx(events.find(o => o.id === e.overlap).f + events.find(o => o.id === e.overlap).bw / 2)) - Math.max(x0, fx(events.find(o => o.id === e.overlap).f - events.find(o => o.id === e.overlap).bw / 2)), h, "rgba(228,123,104,.7)");
+    if (e.t1 !== null) { ctx.fillStyle = "rgba(163,149,224,.9)"; ctx.fillRect(x0, yTop, w, 2); }   // detected end: capped, provisional
+    if (w > 40) { ctx.fillStyle = e.state === "confirmed" ? "#52C2AE" : e.state === "unknown" ? "#F0A542" : "#A395E0";
+      let lbl = fmtF(e.f, 3) + (e.state === "unknown" ? " ?" : e.state === "candidate" ? " ◇" : ""); if (e.overlap === "e16") lbl = "overlap → re-analysing"; ctx.fillText(lbl, x0 + 4, Math.max(yTop, 60) + 4); }
+    drawn.push({ e, x: (x0 + x1) / 2, y: clamp(yTop + 10, 60, H - 60), box: true });
+  }
+  // artifacts: linked overlays from the artifact to its source, mechanism disclosed
+  if (layers.artifacts && layers.events) for (const e of events) if (e.artifactOf) {
+    const s = events.find(o => o.id === e.artifactOf); const y = clamp(ty(nowT) + 26 + 40, 90, H - 80); const xa = fx(e.f), xs = fx(s.f);
+    ctx.strokeStyle = "rgba(163,149,224,.7)"; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(xa, y); ctx.lineTo(xs, y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(xs, y, 3, 0, 7); ctx.fillStyle = "#A395E0"; ctx.fill();
+    ctx.fillStyle = "#A395E0"; ctx.textAlign = "center"; ctx.fillText(W / (view.f1 - view.f0) * MHz > 60 ? "image of " + fmtF(s.f, 1) + " · " + e.mech + " · err " + e.err + " Hz · −" + e.supp + " dB" : "image of " + fmtF(s.f, 1) + " · −" + e.supp + " dB", (xa + xs) / 2, y + 4); ctx.textAlign = "left";
+  }
+  ctx.restore();
+  // pins (DOM, focusable), with clustering when markers would collide (docs/24 §6)
+  const clusters = [];
+  for (const p of drawn) { if (p.box) { clusters.push({ items: [p], x: p.x, y: p.y }); continue; } const c = clusters.find(c => !c.items[0].box && Math.hypot(c.x - p.x, c.y - p.y) < 18); if (c) { c.items.push(p); c.x = (c.x * (c.items.length - 1) + p.x) / c.items.length; c.y = (c.y * (c.items.length - 1) + p.y) / c.items.length; } else clusters.push({ items: [p], x: p.x, y: p.y }); }
+  const seen = new Set();
+  for (const c of clusters) {
+    const key = c.items.length > 1 ? "cl:" + c.items.map(i => i.e.id).join(",") : c.items[0].e.id; seen.add(key);
+    let el = pinEls.get(key);
+    if (!el) { el = document.createElement("button"); el.className = "pin"; el.dataset.ticket = c.items.length > 1 ? "MAP-10" : "MAP-09"; pinLayer.appendChild(el); pinEls.set(key, el);
+      if (c.items.length > 1) { el.classList.add("cluster"); el.textContent = c.items.length; el.setAttribute("aria-label", c.items.length + " bursts"); el.cluster = c.items.map(i => i.e); }
+      else { const e = c.items[0].e; el.classList.add(e.state); el.ev = e; el.setAttribute("aria-label", fmtF(e.f) + " " + e.state); if (c.items[0].box) el.style.opacity = ".0"; } }
+    el.style.left = c.x + "px"; el.style.top = c.y + "px"; el.classList.toggle("selected", c.items.some(i => i.e.id === view.selected));
+  }
+  for (const [k, el] of pinEls) if (!seen.has(k)) { el.remove(); pinEls.delete(k); }
+}
+function drawResearch() {
+  if (!layers.mine) return; ctx.save(); ctx.font = "11px Chivo, sans-serif"; ctx.textBaseline = "top";
+  for (const r of research) {
+    const sel = view.selected === r.id; const col = sel ? "#F0A542" : "#F3E3BF";
+    if (r.kind === "annotation") { const [f0, f1, t0, t1] = r.box, x0 = fx(f0), x1 = fx(f1), yT = ty(t1 === null ? nowT : t1), yB = ty(t0); ctx.strokeStyle = col; ctx.lineWidth = sel ? 2 : 1.25; ctx.setLineDash([1, 3]); ctx.strokeRect(x0 - 4, yT - 4, x1 - x0 + 8, yB - yT + 8); ctx.setLineDash([]); ctx.fillStyle = col; ctx.fillText("✎ " + r.name, x1 + 8, Math.max(yT, 90)); }
+    if (r.kind === "measurement") { const [fa, ta] = r.a, [fb, tb] = r.b, xa = fx(fa), xb = fx(fb), ya = ty(ta), yb = ty(tb); if (Math.max(ya, yb) < 0 || Math.min(ya, yb) > H) continue; ctx.strokeStyle = col; ctx.lineWidth = sel ? 2 : 1; ctx.beginPath(); ctx.moveTo(xa, ya); ctx.lineTo(xb, ya); ctx.moveTo(xa, ya - 5); ctx.lineTo(xa, ya + 5); ctx.moveTo(xb, ya - 5); ctx.lineTo(xb, ya + 5); ctx.stroke(); ctx.fillStyle = col; ctx.textAlign = "center"; ctx.fillText(r.value, (xa + xb) / 2, ya + 6); ctx.textAlign = "left"; }
+    if (r.kind === "marker") { const x = fx(r.f), y = ty(r.t); if (y < 0 || y > H) continue; ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(x, y - 6); ctx.lineTo(x + 6, y + 5); ctx.lineTo(x - 6, y + 5); ctx.closePath(); ctx.fill(); ctx.fillText(r.name, x + 9, y - 5); }
+  }
+  if (measuring) { const { x0, y0, x1, y1 } = measuring; ctx.strokeStyle = "#F0A542"; ctx.setLineDash([4, 3]); ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)); ctx.setLineDash([]); ctx.fillStyle = "#F0A542"; ctx.font = "12px Chivo Mono, monospace"; ctx.fillText("Δf " + fmtF(Math.abs(xf(x1) - xf(x0)), 3) + "  Δt " + Math.abs(yt(y1) - yt(y0)).toFixed(2) + " s", Math.min(x0, x1), Math.min(y0, y1) - 16); }
+  ctx.restore();
+}
+function drawPriors() {
+  if (!layers.priors) return; ctx.save(); ctx.font = "italic 11px Chivo, sans-serif"; ctx.textBaseline = "top";
+  for (const p of priors) { const x0 = Math.max(0, fx(p.f0)), x1 = Math.min(W, fx(p.f1)); if (x1 <= x0) continue; hatch(x0, 62, x1 - x0, 18, "rgba(163,149,224,.35)"); ctx.strokeStyle = "rgba(163,149,224,.5)"; ctx.setLineDash([3, 4]); ctx.beginPath(); ctx.moveTo(fx(p.f0), 62); ctx.lineTo(fx(p.f0), H - 46); ctx.moveTo(fx(p.f1), 62); ctx.lineTo(fx(p.f1), H - 46); ctx.stroke(); ctx.setLineDash([]); ctx.fillStyle = "#A395E0"; ctx.fillText("suggested: " + p.name, x0 + 8, 82); }
+  ctx.restore();
+}
+function drawTierBands() {
+  if (!layers.tier) return; ctx.save(); ctx.font = "10px Chivo, sans-serif"; ctx.textBaseline = "middle"; ctx.textAlign = "center";
+  const yIq = clamp(ty(iqHorizon()), 0, H), yLive = clamp(ty(nowT), 0, H);
+  const band = (y0, y1, col, txt) => { if (y1 - y0 < 4) return; ctx.fillStyle = col; ctx.fillRect(W - 10, y0, 6, y1 - y0); if (y1 - y0 > 60) { ctx.save(); ctx.translate(W - 16, (y0 + y1) / 2); ctx.rotate(-Math.PI / 2); ctx.fillStyle = "#D5DEE2"; ctx.fillText(txt, 0, 0); ctx.restore(); } };
+  band(yLive, yIq, "rgba(82,194,174,.8)", "live-IQ detail"); band(yIq, H, "rgba(163,149,224,.8)", "spectrum-history");
+  ctx.restore();
+}
+function drawFrozenBand() { if (view.follow) return; ctx.save(); ctx.strokeStyle = "#F0A542"; ctx.lineWidth = 2; ctx.strokeRect(1, 1, W - 2, H - 2); ctx.restore(); }
+
+let dirty = true, lastFull = 0, idleT = 0;
+function frame() {
+  tick();
+  const needs = dirty || view.follow;
+  if (needs && performance.now() - lastFull > (view.follow && !dirty ? 80 : 0)) {
+    lastFull = performance.now(); dirty = false;
+    const { fb, tb } = drawWaterfall();
+    drawPriors(); drawResearch(); drawEvents(); drawRules(); drawTierBands(); drawFrozenBand();
+    drawRulers(document.body.classList.contains("idle") ? .45 : 1);
+    status(fb, tb); peekline();
+  }
+  requestAnimationFrame(frame);
+}
+function status(fb, tb) {
+  const hpp = (view.f1 - view.f0) / W, tierTop = cov(device.centre + 1 * MHz, nowT - 1) === 1 ? "live-IQ" : "spectrum-history";
+  $("#status").innerHTML = `<span><b>Pane 1</b></span>
+    <span class="${view.follow ? "" : "frozen"}">${view.follow ? "following live" : "frozen at " + fmtRel(view.tTop) + " (pause = the time window; capture continues)"}</span>
+    <span class="tier live-iq"><i></i>drawn at ${tierTop} above the IQ horizon</span><span class="tier hist"><i></i>spectrum-history below it</span><span class="tier survey"><i></i>survey overview outside 88–108</span>
+    <span class="mono">${fmtF(fb, 1)}/px · ${tb} s/row · ${fmtF(hpp, 1)}/px on screen</span>
+    <span class="mono">tuned ${fmtF(device.centre, 3)} ± ${fmtF(device.span / 2, 0)} · hackrf-0</span>`;
+}
+
+/* ---------- Interaction: drag pans, wheel zooms (both axes; modifiers pick one). None of it reaches a device route. ---------- */
+let drag = null;
+canvas.addEventListener("pointerdown", (ev) => { if (ev.button !== 0) return; canvas.setPointerCapture(ev.pointerId); if (measureMode) { measuring = { x0: ev.offsetX, y0: ev.offsetY, x1: ev.offsetX, y1: ev.offsetY }; dirty = true; return; } drag = { x: ev.offsetX, y: ev.offsetY, moved: false }; canvas.classList.add("panning"); });
+canvas.addEventListener("pointermove", (ev) => {
+  activity();
+  if (measuring) { measuring.x1 = ev.offsetX; measuring.y1 = ev.offsetY; dirty = true; return; }
+  if (!drag) { hoverAt(ev.offsetX, ev.offsetY); return; }
+  const dx = ev.offsetX - drag.x, dy = ev.offsetY - drag.y; if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true;
+  const df = -dx / W * (view.f1 - view.f0); view.f0 += df; view.f1 += df;
+  if (Math.abs(dy) > 0) { view.tTop += dy / H * view.tSpan; if (view.follow && dy > 0) setFollow(false); if (!view.follow && view.tTop >= 0 && dy < 0) { setFollow(true); view.tTop = Math.min(view.tTop, headroom()); } }
+  drag.x = ev.offsetX; drag.y = ev.offsetY; dirty = true; hideTip();
+});
+canvas.addEventListener("pointerup", (ev) => {
+  if (measuring) { const m = measuring; measuring = null; if (Math.abs(m.x1 - m.x0) > 4 || Math.abs(m.y1 - m.y0) > 4) persistMeasurement(m); dirty = true; return; }
+  if (drag && !drag.moved) { view.selected = null; showExplore(); dirty = true; }
+  drag = null; canvas.classList.remove("panning");
+});
+canvas.addEventListener("wheel", (ev) => {
+  ev.preventDefault(); activity(); const k = Math.exp(ev.deltaY * 0.0015); const fz = !ev.altKey, tz = !ev.shiftKey;
+  if (fz) { const fa = xf(ev.offsetX); view.f0 = fa + (view.f0 - fa) * k; view.f1 = fa + (view.f1 - fa) * k; const span = view.f1 - view.f0; if (span < 50 * kHz || span > 6000 * MHz) { const c = (view.f0 + view.f1) / 2, s = clamp(span, 50 * kHz, 6000 * MHz); view.f0 = c - s / 2; view.f1 = c + s / 2; } }
+  if (tz) { const ta = yt(ev.offsetY) - nowT; const newSpan = clamp(view.tSpan * k, 5, 4 * 3600); const top = ta + (view.tTop - ta) * (newSpan / view.tSpan); view.tSpan = newSpan; view.tTop = view.follow ? Math.min(top, headroom()) : top; }
+  dirty = true; hideTip();
+}, { passive: false });
+$("#zoom-in").onclick = () => zoomCentre(0.6); $("#zoom-out").onclick = () => zoomCentre(1 / 0.6);
+function zoomCentre(k) { const c = (view.f0 + view.f1) / 2, s = clamp((view.f1 - view.f0) * k, 50 * kHz, 6000 * MHz); view.f0 = c - s / 2; view.f1 = c + s / 2; view.tSpan = clamp(view.tSpan * k, 5, 4 * 3600); dirty = true; }
+function setFollow(on) { view.follow = on; if (on) view.tTop = headroom(); $("#fab").className = "chrome fab " + (on ? "following" : "frozen"); $("#fab").title = on ? "Following the live edge" : "Frozen — click to follow live again"; dirty = true; }
+$("#fab").onclick = () => setFollow(true);
+
+// Go-to: view arithmetic if the frequency is inside the tuned window; otherwise an explicit retune OFFER (the view/device line).
+let pendingF = null;
+$("#goto").addEventListener("submit", (ev) => { ev.preventDefault(); const f = parseF($("#goto-in").value); if (!f) return; goTo(f); });
+function parseF(s) { const m = s.trim().toLowerCase().match(/^([\d.]+)\s*([kmg])?(?:hz)?$/); if (!m) return null; let v = parseFloat(m[1]); const u = m[2]; if (u === "g") v *= 1e9; else if (u === "k") v *= 1e3; else if (u === "m" || v < 6000) v *= 1e6; return v; }
+function goTo(f) {
+  const half = (view.f1 - view.f0) / 2; view.f0 = f - half; view.f1 = f + half; dirty = true;
+  if (Math.abs(f - device.centre) <= device.span / 2) { $("#retune").classList.remove("show"); return; }
+  pendingF = f; $("#retune-f").textContent = fmtF(f); $("#retune").classList.add("show");
+  if (f < device.tunable[0] || f > device.tunable[1]) { $("#retune-f").textContent = fmtF(f) + " — outside 1 MHz–6 GHz, no achievable configuration"; $("#retune-go").disabled = true; } else $("#retune-go").disabled = false;
+}
+$("#retune-x").onclick = () => $("#retune").classList.remove("show");
+$("#retune-go").onclick = () => {          // the one gated DeviceAction: snapped to the tuning step, recorded in the coverage map with device_id
+  const snapped = Math.round(pendingF / device.step) * device.step;
+  const live = coverage.find(c => c.t1 === null); live.t1 = nowT;                      // the old window's coverage ends now → it becomes shadow
+  coverage.push({ f0: snapped - device.span / 2, f1: snapped + device.span / 2, t0: nowT + 0.3, t1: null, dev: "hackrf-0" });   // settle gap
+  device.centre = snapped; $("#retune").classList.remove("show"); dirty = true;
+};
+
+// Hover → MapTip; click → select (detail sheet). Pins are DOM; boxes are hit-tested in content space.
+const tip = $("#maptip");
+function hideTip() { tip.classList.remove("show"); }
+function showTip(x, y, html) { tip.innerHTML = html; tip.style.left = Math.min(x + 14, W - 250) + "px"; tip.style.top = Math.max(8, y - 10) + "px"; tip.classList.add("show"); }
+function hitEvent(x, y) { const f = xf(x), t = yt(y); return events.slice().reverse().find(e => Math.abs(f - e.f) <= e.bw / 2 + (view.f1 - view.f0) / W * 3 && t >= e.t0 && t <= (e.t1 === null ? nowT : e.t1)); }
+function hoverAt(x, y) { const e = hitEvent(x, y); if (!e) { hideTip(); canvas.style.cursor = measureMode ? "crosshair" : "grab"; return; } canvas.style.cursor = "pointer"; showTip(x, y, tipHtml(e)); }
+function tipHtml(e) { return `<div class="f">${fmtF(e.f, 4)}</div><div class="m">${e.state} · bw ${fmtF(e.bw, 0)} · ${e.t1 === null ? "on air, since " + fmtRel(e.t0 - nowT) : "ended " + fmtRel(e.t1 - nowT)}</div><div class="m">${suggest(e)[0]?.what ?? ""}</div>`; }
+pinLayer.addEventListener("pointermove", (ev) => { const el = ev.target.closest(".pin"); if (!el) return; if (el.cluster) showTip(ev.clientX, ev.clientY, `<div class="f">${el.cluster.length} bursts</div><div class="m">${fmtF(el.cluster[0].f, 2)} · ${fmtRel(el.cluster[0].t0 - nowT)} → ${fmtRel(el.cluster[el.cluster.length - 1].t1 - nowT)} · zoom in to resolve</div>`); else showTip(ev.clientX, ev.clientY, tipHtml(el.ev)); });
+pinLayer.addEventListener("pointerleave", hideTip);
+pinLayer.addEventListener("click", (ev) => { const el = ev.target.closest(".pin"); if (!el) return; if (el.cluster) { const es = el.cluster; view.f0 = es[0].f - 0.4 * MHz; view.f1 = es[0].f + 0.4 * MHz; const t0 = Math.min(...es.map(e => e.t0)), t1 = Math.max(...es.map(e => e.t1)); view.tSpan = (t1 - t0) * 1.6; view.tTop = t1 + (t1 - t0) * .3 - nowT; setFollow(false); view.tTop = t1 + (t1 - t0) * .3 - nowT; dirty = true; return; } select(el.ev.id); });
+canvas.addEventListener("click", (ev) => { if (drag?.moved || measureMode) return; const e = hitEvent(ev.offsetX, ev.offsetY); if (e) select(e.id); });
+function select(id) { view.selected = id; dirty = true; showDetail(); const row = document.querySelector(`tr[data-id="${id}"]`); document.querySelectorAll("#rows tr").forEach(r => r.classList.toggle("selected", r.dataset.id === id)); row?.scrollIntoView({ block: "nearest" }); }
+
+/* ---------- Explanations: ranked, reasoned, from what was measured; the band plan only suggests ---------- */
+function suggest(e) {
+  const out = [];
+  const off = e.f - (Math.round((e.f - 100 * kHz) / (200 * kHz)) * 200 * kHz + 100 * kHz);
+  if (e.artifactOf) { const s = events.find(o => o.id === e.artifactOf); out.push({ p: .91, what: `Image of ${fmtF(s.f, 1)} mirrored about the LO (${e.mech}); error ${e.err} Hz, ${e.supp} dB below the source`, src: "relation from /api/inventory · geometric" }); }
+  if (e.pilot) out.push({ p: Math.min(.98, .6 + e.pilot / 100), what: `Wideband FM broadcast — 19.000 kHz stereo pilot at ${e.pilot} dB, ${fmtF(e.bw, 0)} occupied`, src: "measured: pilot lock, bandwidth" });
+  if (e.burst) out.push({ p: .55, what: e.f > 108 * MHz ? "Short AM voice burst, 8 kHz — airband-shaped" : "0.4 s burst, 12 kHz; no symbol rate resolved yet", src: "measured: duration, bandwidth" });
+  if (e.f >= 87.5 * MHz && e.f < 108 * MHz) out.push({ p: .5, what: Math.abs(off) < 2 * kHz ? `On the FM raster (${(off / 1e3).toFixed(1)} kHz off) · Broadcast FM allocation 87.5–108 MHz` : `Broadcast FM allocation — but ${(off / 1e3).toFixed(1)} kHz OFF the 200 kHz raster: flagged, not snapped`, src: "band plan · suggestion, never truth", flag: Math.abs(off) >= 2 * kHz });
+  if (e.f >= 108 * MHz && e.f < 137 * MHz) out.push({ p: .45, what: "Aeronautical band 108–137 MHz (AM voice, 25/8.33 kHz)", src: "band plan · suggestion, never truth" });
+  if (!e.pilot && !e.artifactOf && !e.burst) out.push({ p: .3, what: "Narrow carrier, no pilot, no symbol rate resolved — unknown modulation", src: "measured" });
+  if (e.overlap) out.unshift({ p: 0, what: "Overlaps another candidate — real emissions never overlap; the backend is re-analysing this region", src: "ADR-0019 · overlap is an error signal", flag: true });
+  return out.sort((a, b) => b.p - a.p);
+}
+
+/* ---------- Bottom sheet ---------- */
+const sheet = $("#sheet"); let sheetState = "peek";
+function setSheet(s) { sheetState = s; sheet.className = "sheet " + (s === "peek" ? "" : s); try { localStorage.setItem("sheet", s); } catch {} }
+try { setSheet(localStorage.getItem("sheet") || "peek"); } catch { setSheet("peek"); }
+$("#grab").onclick = () => setSheet(sheetState === "peek" ? "half" : sheetState === "half" ? "full" : "peek");
+{ let g = null; const grab = $("#grab");
+  grab.addEventListener("pointerdown", (ev) => { g = { y: ev.clientY, h: sheet.getBoundingClientRect().height, moved: false }; grab.setPointerCapture(ev.pointerId); sheet.classList.add("dragging"); });
+  grab.addEventListener("pointermove", (ev) => { if (!g) return; const h = clamp(g.h - (ev.clientY - g.y), 52, window.innerHeight - 80); if (Math.abs(ev.clientY - g.y) > 3) g.moved = true; sheet.style.height = h + "px"; });
+  grab.addEventListener("pointerup", () => { if (!g) return; const h = sheet.getBoundingClientRect().height; sheet.classList.remove("dragging"); sheet.style.height = ""; if (g.moved) setSheet(h < window.innerHeight * .25 ? "peek" : h < window.innerHeight * .65 ? "half" : "full"); g = null; }); }
+$("#tab-explore").onclick = showExplore; $("#tab-detail").onclick = showDetail;
+function tabs(which) { $("#tab-explore").setAttribute("aria-selected", which === "explore"); $("#tab-detail").setAttribute("aria-selected", which === "detail"); $("#body-explore").hidden = which !== "explore"; $("#body-detail").hidden = which !== "detail"; }
+function showExplore() { tabs("explore"); renderExplore(); }
+function showDetail() { tabs("detail"); renderDetail(); if (sheetState === "peek") setSheet("half"); }
+function peekline() {
+  const inWin = events.filter(e => e.f >= view.f0 && e.f <= view.f1 && (e.t1 === null ? nowT : e.t1) >= nowT + view.tTop - view.tSpan && e.t0 <= nowT + view.tTop);
+  const c = inWin.filter(e => e.state === "confirmed").length, u = inWin.filter(e => e.state === "unknown").length, k = inWin.length - c - u;
+  $("#peekline").textContent = `in this window: ${c} confirmed · ${k} candidates · ${u} unknown · 1 past survey`;
+}
+function renderExplore() {
+  const strongest = events.filter(e => e.state === "confirmed" && e.t1 === null).sort((a, b) => b.snr - a.snr).slice(0, 3);
+  $("#body-explore").innerHTML = `
+    <h4>Unknown & unexplained — the priority</h4><ul>
+      <li><button data-go="e12"><span class="tag">unknown · on air</span><span class="f">105.590 MHz · 90 kHz</span><span class="why">10 kHz off the FM raster, no pilot — flagged, not snapped</span></button></li>
+      <li><button data-go="u2"><span class="tag">unknown · burst ×3</span><span class="f">92.150 MHz · 0.4 s</span><span class="why">three 12 kHz bursts in the last 12 min</span></button></li>
+      <li><button data-go="e15"><span class="tag" style="color:var(--coral)">overlap · re-analysing</span><span class="f">95.70 / 95.76 MHz</span><span class="why">two candidates overlap — the backend is resolving the region</span></button></li></ul>
+    <h4>Strongest right now</h4><ul>${strongest.map(e => `<li><button data-go="${e.id}"><span class="tag" style="color:var(--teal)">confirmed</span><span class="f">${fmtF(e.f, 3)}</span><span class="why">SNR ${e.snr} dB · pilot ${e.pilot} dB · stereo</span></button></li>`).join("")}</ul>
+    <h4>Quiet but active</h4><ul><li><button data-go="e10"><span class="tag" style="color:var(--teal)">new · 8 min ago</span><span class="f">91.100 MHz</span><span class="why">a confirmed signal that began inside this window</span></button></li></ul>
+    <h4>Past surveys — jump to a coverage window</h4><ul>
+      <li><button data-view="v2"><span class="tag past">survey · −25:00 → −18:00</span><span class="f">108–122 MHz</span><span class="why">observed then; shadow since. 8 airband bursts.</span></button></li>
+      <li><button data-view="v1"><span class="tag past">saved view</span><span class="f">FM band, live</span><span class="why">88–108 MHz, following — an extent, not a retune</span></button></li></ul>`;
+  $("#body-explore").querySelectorAll("[data-go]").forEach(b => b.onclick = () => { const e = events.find(o => o.id === b.dataset.go); view.f0 = e.f - 1.2 * MHz; view.f1 = e.f + 1.2 * MHz; if (e.t1 !== null) { setFollow(false); view.tTop = e.t1 + 20 - nowT; view.tSpan = 90; } select(e.id); });
+  $("#body-explore").querySelectorAll("[data-view]").forEach(b => b.onclick = () => applyView(research.find(r => r.id === b.dataset.view)));
+}
+function applyView(v) { view.f0 = v.ext.f0; view.f1 = v.ext.f1; if (v.ext.follow) setFollow(true); else { setFollow(false); view.tSpan = v.ext.t1 - v.ext.t0; view.tTop = v.ext.t1 - nowT; } dirty = true; }
+function renderDetail() {
+  const e = events.find(o => o.id === view.selected); const r = research.find(o => o.id === view.selected);
+  if (!e && !r) { $("#body-detail").innerHTML = `<div class="empty">Nothing selected. Click a box or a pin on the surface, or a row in Research.</div>`; return; }
+  if (r) { $("#body-detail").innerHTML = `<div class="head"><span class="big">${fmtF(r.f, 4)}</span><span class="state mine">${r.kind} · mine</span></div><div class="cols"><div><h4>${r.name}</h4><dl><dt>Value</dt><dd>${r.value ?? "—"}</dd><dt>Collection</dt><dd>${r.coll}</dd><dt>Provenance</dt><dd>${r.prov}</dd><dt>Authored</dt><dd>${fmtWall(r.t)}</dd></dl>${r.text ? `<p class="why">${r.text}</p>` : ""}</div><div><h4>Actions</h4><div class="actions"><button>Edit note</button><button>Move to collection…</button><button>Export</button><button class="danger">Delete</button></div></div></div>`; return; }
+  const s = suggest(e), mt = fmtWall(nowT - 7.5);
+  $("#body-detail").innerHTML = `
+    <div class="head"><span class="big">${fmtF(e.f, 4).replace(" MHz", "")}<small> MHz</small></span><span class="state ${e.state}">${e.state}</span>${e.t1 === null ? `<span class="live">on air · since ${e.t0 <= -7000 ? "recording began" : fmtRel(e.t0 - nowT)}</span>` : `<span class="why">ended ${fmtRel(e.t1 - nowT)} (provisional — reopens if it resumes)</span>`}</div>
+    <div class="cols"><div><h4>Measured</h4><dl><dt>Centre</dt><dd>${fmtF(e.f, 4)}</dd><dt>Bandwidth (99%)</dt><dd>${fmtF(e.bw, 0)}</dd><dt>SNR</dt><dd>${e.snr} dB</dd>${e.pilot ? `<dt>Pilot 19 kHz</dt><dd>${e.pilot} dB · locked</dd><dt>RDS 57 kHz</dt><dd>not resolved (${e.snr} dB is below the RDS floor)</dd>` : ""}<dt>Extent</dt><dd>${fmtRel(e.t0 - nowT)} → ${e.t1 === null ? "live" : fmtRel(e.t1 - nowT)}</dd><dt>Seen by</dt><dd>hackrf-0 · 98.000/20 MHz · LNA 32 VGA 30</dd></dl><div class="at">measured at ${mt} over 7.5 s · re-measured continuously</div></div>
+    <div><h4>Explanations, ranked — suggestions, never truth</h4><ol>${s.map(x => `<li class="${x.flag ? "flag" : ""}"><span class="p">${x.p ? x.p.toFixed(2) : "!"}</span><span>${x.what}<br><span class="src">${x.src}</span></span></li>`).join("")}</ol></div></div>
+    <div class="actions"><button class="primary">Listen</button><button>Decode / RDS</button><button>Record clip</button><button>Stream out</button><button>Analyze</button>${e.state === "confirmed" ? `<button class="danger">Demote</button>` : `<button>Promote</button><button class="danger">Delete</button>`}<button>＋ Add to collection</button></div>`;
+}
+
+/* ---------- Layers menu ---------- */
+$("#layers-btn").onclick = () => { const o = $("#layers").classList.toggle("open"); $("#layers-btn").setAttribute("aria-pressed", o); };
+$("#layers").addEventListener("change", (ev) => { const t = ev.target; if (t.name === "base") layers.base = t.value; else if (t.dataset.layer) layers[t.dataset.layer] = t.checked; dirty = true; });
+
+/* ---------- Measure mode (MAP-22): the readout stays on the canvas and is saved as an object ---------- */
+$("#measure-btn").onclick = () => setMeasure(!measureMode);
+function setMeasure(on) { measureMode = on; $("#measure-btn").setAttribute("aria-pressed", on); $("#mode").classList.toggle("show", on); canvas.classList.toggle("measuring", on); }
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { setMeasure(false); $("#layers").classList.remove("open"); $("#layers-btn").setAttribute("aria-pressed", "false"); } });
+function persistMeasurement(m) {
+  const fa = xf(Math.min(m.x0, m.x1)), fb = xf(Math.max(m.x0, m.x1)), ta = yt(Math.max(m.y0, m.y1)), tb = yt(Math.min(m.y0, m.y1));
+  research.push({ id: "x" + (research.length + 1), kind: "measurement", name: "Measurement " + fmtWall(nowT), f: (fa + fb) / 2, t: ta, value: `Δf ${fmtF(fb - fa, 3)} · Δt ${(tb - ta).toFixed(2)} s`, tier: "measured", coll: "FM survey 20 Sep", prov: "view arithmetic · POST /api/measurements", a: [fa, ta], b: [fb, ta] });
+  renderRows(); setMeasure(false); dirty = true; if (!$("#research").classList.contains("open")) toggleResearch(true);
+}
+
+/* ---------- Research panel: the table is the second view of the map ---------- */
+let rkind = "all";
+function toggleResearch(on) { $("#research").classList.toggle("open", on); $("#research-btn").setAttribute("aria-pressed", on); }
+$("#research-btn").onclick = () => toggleResearch(!$("#research").classList.contains("open"));
+$("#research-x").onclick = () => toggleResearch(false);
+$("#rtabs").addEventListener("click", (ev) => { const b = ev.target.closest("button"); if (!b) return; rkind = b.dataset.kind; $("#rtabs").querySelectorAll("button").forEach(x => x.setAttribute("aria-selected", x === b)); renderRows(); });
+$("#filter-window").onchange = renderRows;
+function renderRows() {
+  const onlyWin = $("#filter-window").checked;
+  const rows = research.filter(r => (rkind === "all" || r.kind === rkind) && (!onlyWin || (r.f >= view.f0 && r.f <= view.f1)));
+  $("#rows").innerHTML = rows.map(r => `<tr class="row ${view.selected === r.id ? "selected" : ""}" data-id="${r.id}"><td><span class="kind">${r.kind}</span></td><td>${r.name}<div class="prov">${r.coll} · ${r.prov}</div></td><td class="place">${fmtF(r.f, 3)}<br><span class="prov">${fmtRel(r.t - nowT)}</span></td><td class="val">${r.value ?? ""}</td><td><span class="badge ${r.tier}">${r.tier}</span></td></tr>`).join("");
+  $("#rows").querySelectorAll("tr").forEach(tr => tr.onclick = () => { const r = research.find(o => o.id === tr.dataset.id); if (r.kind === "view") { applyView(r); return; } if (r.f < view.f0 || r.f > view.f1) { const half = (view.f1 - view.f0) / 2; view.f0 = r.f - half; view.f1 = r.f + half; } if (r.t - nowT < view.tTop - view.tSpan) { setFollow(false); view.tTop = r.t - nowT + view.tSpan * .3; } select(r.id); });
+}
+
+/* ---------- Chrome fade (MAP-24) + ticket tags ---------- */
+function activity() { idleT = performance.now(); document.body.classList.remove("idle"); }
+document.addEventListener("pointermove", activity); document.addEventListener("keydown", activity);
+setInterval(() => { if (performance.now() - idleT > 4500 && !document.body.classList.contains("idle")) { document.body.classList.add("idle"); dirty = true; } }, 500);
+$("#tags-btn").onclick = () => { const on = document.body.dataset.tags !== "on"; document.body.dataset.tags = on ? "on" : "off"; $("#tags-btn").setAttribute("aria-pressed", on); };
+
+resize(); renderExplore(); renderRows(); activity(); requestAnimationFrame(frame);
+})();
+</script>
