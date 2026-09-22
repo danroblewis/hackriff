@@ -427,7 +427,7 @@ acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check acceptance 
 # have pinned CI red), because m2/m3 are explicitly kept apart for wall time, and because scene
 # simulations with wall-clock dwell budgets already flake under load on a 28-core Mac and would be
 # worse on a 2-vCPU runner. Each also has its own recipe for running one alone.
-acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-mauto
+acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-multipath acceptance-mauto
 
 # Census: every hk-e2e target on disk must appear in exactly one of the three lists above, and
 # every listed target must exist. This is the guard that makes the explicit `--test` lists safe —
@@ -502,6 +502,13 @@ acceptance-chirp *args:
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
     just _e2e-run acceptance_chirp {{args}}
+
+# Multipath acceptance (T-222, AWARE-053, C40 content half): one 2-FSK transmission received twice - a delayed, attenuated copy on another channel - beside an independent station of the same family, through the mock SDR. Only content separates the pair from the decoy. Extra args go to the runner (see `_e2e-run`).
+acceptance-multipath *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_multipath {{args}}
 
 # ISM burst acceptance (T-254, CLAUDE.md invariant 1): the 902-928 MHz short-burst playground through the mock SDR and the IQ ring - bounded time extents, one emitter per burst, ephemera catalogued as past events, plus the 100.3 MHz field case. Extra args go to the runner (see `_e2e-run`).
 acceptance-ism *args:

@@ -26,6 +26,7 @@ pub mod feeds;
 pub mod geo;
 pub mod gnss_service;
 pub mod known_status;
+pub mod multipath; // T-222 (C40): content-correlated multipath, wired to the record
 pub mod priors;
 pub mod utc;
 
@@ -50,6 +51,7 @@ pub use feeds::{
 pub use geo::Site;
 pub use gnss_service::{GnssServiceEvidence, GnssServiceVerdict};
 pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
+pub use multipath::{MULTIPATH_RULE, MultipathConfig, MultipathOutcome};
 pub use priors::BandPlanFamilyPriors;
 pub use watch::{
     StandingRelation, WatchActivity, WatchDecision, WatchRegion, WatchSkip, WatchSkipReason,

@@ -74,6 +74,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use hk_context::multipath::{MULTIPATH_RULE, MultipathConfig};
 use hk_context::{BandTable, Region as BandRegion};
 use hk_detect::TrackEvent;
 use hk_detect::track::TrackSummary;
@@ -671,6 +672,13 @@ pub struct TrackInventory {
     /// never a wrong verdict.
     retune_centres: usize,
     retuned: HashSet<EmitterId>,
+    /// T-222: the sighting count each row's content-multipath review was last run at. The
+    /// correlation is a function of how much content has been measured, so the pass backs off
+    /// **geometrically** — a row is reviewed again only once its evidence has doubled — which is
+    /// `O(log n)` reviews per row over a run rather than one per sighting. Bounded like
+    /// [`Self::run`]: past the cap the map is cleared, which costs a repeat pass, never a wrong
+    /// finding.
+    multipath_reviewed: HashMap<EmitterId, u64>,
     /// Provisional entries retracted because their track's end yielded no sighting (T-109).
     pub retracted: u64,
     /// Sightings recorded.
@@ -694,6 +702,11 @@ pub struct TrackInventory {
     pub retune_siblings: u64,
     /// T-598: retune verdicts recorded on stored detections (`absolute`, `lo-locked`, `image`).
     pub retune_verdicts: u64,
+    /// T-222: rows recorded as the delayed, attenuated copy of another row — one emission over
+    /// two paths, found by correlating their content.
+    pub multipath: u64,
+    /// T-222: standing multipath claims revoked because the content stopped matching.
+    pub multipath_revoked: u64,
     /// T-369: overlapping regions the re-analysis could not resolve. Nothing was merged and
     /// nothing was hidden; the verdict records what blocked it. Bounded per row by
     /// `hk_model::relate::REGION_MAX_ROUNDS`.
@@ -727,6 +740,7 @@ impl TrackInventory {
             awaiting: HashMap::new(),
             retune_centres: 0,
             retuned: HashSet::new(),
+            multipath_reviewed: HashMap::new(),
             retracted: 0,
             sightings: 0,
             created: 0,
@@ -735,6 +749,8 @@ impl TrackInventory {
             merged: 0,
             retune_siblings: 0,
             retune_verdicts: 0,
+            multipath: 0,
+            multipath_revoked: 0,
             suppressed: 0,
             duplicates: 0,
             artifacts: 0,
@@ -903,6 +919,48 @@ impl TrackInventory {
         let out = repo.resolve_retune(id, RETUNE_RULE, t, &RetuneTolerance::default())?;
         self.retune_siblings += out.deferred() as u64;
         self.retune_verdicts += out.detections_marked as u64;
+        Ok(())
+    }
+
+    /// **T-222: one emission arriving over two paths** (`hk_context::multipath`).
+    ///
+    /// Everything above this reasons from *geometry* — an overlap of bands, mixer arithmetic, a
+    /// slope against the local oscillator — and none of it can see two rows that overlap nowhere
+    /// and are nonetheless the same transmission, reaching the antenna twice over paths of
+    /// different length. What says so is what the rows **carry**: the same content, one copy
+    /// delayed and attenuated, with the correlation lag giving the path delay.
+    ///
+    /// **What bounds it.** The correlation is a function of how much content has been measured,
+    /// so a row is reviewed again only once its sighting count has **doubled** — `O(log n)`
+    /// reviews per row over a run, not one per sighting — and each review is itself bounded by
+    /// [`MultipathConfig`] (partners, window, samples, lag range). It runs here, at the inventory
+    /// writer, off the ring and the DSP readers, and touches no samples at all: the content series
+    /// is rasterised from the detection record the repository already holds.
+    fn resolve_multipath(
+        &mut self,
+        repo: &mut Repository,
+        emitter: EmitterId,
+    ) -> Result<(), RepoError> {
+        let id = repo.live_emitter_id(emitter)?;
+        let e = repo.emitter(id)?;
+        let last = self.multipath_reviewed.get(&id).copied();
+        // Geometric back-off: the first review, then at every doubling of the evidence.
+        if last.is_some_and(|n| e.count < n.saturating_mul(2)) {
+            return Ok(());
+        }
+        if self.multipath_reviewed.len() >= RUN_MEMORY && last.is_none() {
+            self.multipath_reviewed.clear();
+        }
+        self.multipath_reviewed.insert(id, e.count.max(1));
+        let out = hk_context::multipath::review(
+            repo,
+            id,
+            MULTIPATH_RULE,
+            e.last_seen,
+            &MultipathConfig::default(),
+        )?;
+        self.multipath += out.related.len() as u64;
+        self.multipath_revoked += out.revoked.len() as u64;
         Ok(())
     }
 
@@ -1227,7 +1285,8 @@ impl TrackInventory {
         self.characterise(repo, id, trust)?;
         self.review(repo, id, trust, None)?;
         self.resolve_overlaps(repo, id)?;
-        self.resolve_retune(repo, id)
+        self.resolve_retune(repo, id)?;
+        self.resolve_multipath(repo, id)
     }
 
     /// T-242: aggregates what this entry has measured and asks the catalogue and the clusterer

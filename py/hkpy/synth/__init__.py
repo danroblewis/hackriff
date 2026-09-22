@@ -14,7 +14,9 @@ T-098), ``acars_message`` (SIGNAL-062, M1 tutorial fixture T-098, synthetic-only
 (SIGNAL-062/AWARE-053, T-255: chirps with no stable frequency in 902-928 MHz US ISM -- see
 :mod:`hkpy.synth.lora_scene`), ``mismatched_hypothesis`` (SIGNAL-052/RESEARCH-002, T-626: the N5 mismatched-hypothesis negative
 population -- see :mod:`hkpy.synth.mismatch`), ``retune_diversity`` (AWARE-011, T-586: one region at several
-centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`). Every scenario also accepts the impairment parameters in
+centres, fixed-frequency emitters beside LO-relative artefacts -- see :mod:`hkpy.synth.retune`),
+``multipath_echo`` (AWARE-053, T-222: one transmission received twice -- a delayed, attenuated
+copy beside an independent station of the same family -- see :mod:`hkpy.synth.multipath`). Every scenario also accepts the impairment parameters in
 :data:`hkpy.synth.impairments.IMPAIRMENT_DEFAULTS`.
 
 Truth conventions (dBFS reference, calibration constant, annotation roles) are documented in
@@ -33,6 +35,7 @@ from hkpy.synth import (
     impairments,
     lora_scene,
     mismatch,
+    multipath,
     occupancy,
     retune,
     scenarios,
@@ -117,6 +120,11 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "modulation index lie OUTSIDE the proposal grid, so every hypothesis the search evaluates "
         "is the wrong one; `population=adjacent_leakage` adds a strong hard-keyed neighbour "
         "outside the analysed box whose skirts land inside it"),
+    "multipath_echo": ScenarioSpec(
+        multipath.multipath_echo, multipath.MULTIPATH_DEFAULTS, ("AWARE-053",),
+        "one 2-FSK transmission received twice (T-222): a delayed, attenuated copy of the same "
+        "bursts on another channel, beside an independent station of the same family, bandwidth "
+        "and modulation -- so only the content separates the pair from the decoy"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
