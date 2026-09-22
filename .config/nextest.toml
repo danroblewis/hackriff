@@ -153,6 +153,61 @@
 
 [profile.default]
 test-threads = 8
+# THE `timing` TIER (user, 2026-09-22): throughput tests do not gate merges.
+#
+# Three tests assert HOW FAST the real-time path keeps up - that N stations demodulate
+# concurrently in real time, that live listen audio streams and detaches within a latency,
+# that the growing edge is not blocked by a competing pyramid writer. Those are properties
+# of the MACHINE'S HEADROOM as much as of the code, and the merge gate runs on a box that
+# by policy carries four bounded workers beside it, so a gate cannot honestly measure them:
+# since 09-21 they were 8 of the 31 red lines in ops/merge-runner.log, every one green
+# alone. They are not deleted and not #[ignore]d - they are the only tests of those
+# properties. They are a tier, like HIL (T5): `just timing` runs them on a quiet box or
+# nightly, and `just gate` never does.
+#
+# HOW: nextest's default-filter. Every run under the default profile (and `ci`, which
+# inherits) skips the set below unless `--ignore-default-filter`; the `timing` profile
+# at the end of this file inverts it. `just nextest-config-check` fails if a name here no
+# longer matches a `fn` in the tree, so a rename cannot silently re-admit a test to the
+# gate - or silently drop it from the tier.
+#
+# THE RULE, which decides what goes here and what does not: a test that reads the wall
+# clock to decide WHAT to assert on (which tile, which row, which window) is a BUG - fix it
+# by reading the instant off the wire and pinning the index (task-deflake-0922's pattern,
+# docs/10 §3.6). A test whose ASSERTION is a latency or throughput bound belongs in this
+# tier. Readiness waits with a measured bound are neither and stay in the gate.
+#
+# FOR NOW (user, 2026-09-22, "mark all of the timing tests as skipped"): the list also holds
+# the eight kind-1 tests (docs/10 §3.6) that were red in gates since 09-21 - the wall-clock
+# tile/coverage/handshake tests - until their deterministic rewrites land (task-deflake-0922,
+# task-deflake-cov). Each one leaves this list WITH its rewrite, not before, and never
+# silently: `just nextest-config-check` holds the two lists equal.
+default-filter = '''
+not (
+  test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
+  or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
+  or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+  or test(tile_shadow_carries_a_departed_band_and_nothing_where_never_observed)
+  or test(tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell)
+  or test(unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so)
+  or test(coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked)
+  or test(a_run_that_really_ended_still_says_so)
+  or test(a_handshake_between_windows_waits_for_the_successor_and_never_says_gone)
+  or test(a_finished_run_still_answers_410)
+)
+'''
+
+# MACHINE-READABLE RESULTS (user, 2026-09-22): every nextest run writes a JUnit report -
+# each `<testcase>` with its `time`, in run order, failures with their output - to
+# target/nextest/<profile>/junit.xml. nextest overwrites it per run, so `just gate` copies
+# it to $HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml after each suite
+# (py/hkpy/gate.py keep_junit) and the dashboard renders the newest. A 36-minute gate is
+# now readable test by test instead of only as a total. (This table must sit AFTER every
+# bare key of [profile.default]: in TOML a key below a table header belongs to that table.)
+[profile.default.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
 
 [test-groups.heavy-serial]
 max-threads = 1
@@ -337,3 +392,22 @@ test-group = 'heavy-serial'
 
 [profile.ci]
 test-threads = "num-cpus"
+
+# The `timing` tier, inverted (see `default-filter` under [profile.default]): `just timing`
+# runs EXACTLY the tests the gate skips, one at a time - they measure headroom, so they must
+# not be measured against each other. Keep the two lists identical but for the `not`;
+# `just nextest-config-check` verifies both name real tests.
+[profile.timing]
+test-threads = 1
+default-filter = '''
+test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
+or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
+or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+or test(tile_shadow_carries_a_departed_band_and_nothing_where_never_observed)
+or test(tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell)
+or test(unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so)
+or test(coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked)
+or test(a_run_that_really_ended_still_says_so)
+or test(a_handshake_between_windows_waits_for_the_successor_and_never_says_gone)
+or test(a_finished_run_still_answers_410)
+'''

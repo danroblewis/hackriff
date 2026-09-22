@@ -271,6 +271,17 @@ test-crate crate:
 test-one name:
     cargo nextest run -E 'test({{name}}) or binary({{name}})'
 
+# The `timing` tier (user, 2026-09-22): the throughput tests `.config/nextest.toml` keeps OUT of
+# every gate run by `default-filter`, run here and nowhere else - one at a time, on a quiet box or
+# nightly, the way HIL (T5) runs. `just gate` never calls this. Not a quarantine: nothing is
+# #[ignore]d, and this is the only recipe that runs them, so a red here is a real finding about
+# the real-time path's headroom on THIS machine. Log the load average with the result.
+timing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "timing tier: load $(uptime | sed 's/.*load averages*: *//')" >&2
+    cargo nextest run --workspace -P timing
+
 # The hk-e2e test targets, split into the three sets the gates are built from and listed by name.
 # `cargo test -p hk-e2e` auto-discovers every tests/e2e/tests/*.rs, which is how CI's acceptance job
 # silently grew from the M0 slice to all fourteen targets: each new acceptance suite enlisted itself
