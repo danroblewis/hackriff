@@ -64,6 +64,10 @@ LANDED = f"{S}/landed.jsonl"
 CAP = int(os.environ.get("WORK_CAP", "8"))
 LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "20"))
 PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
+# Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
+# behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
+# re-merge (the merge runner skips the conflicting branch), so allow a few per group.
+GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -439,7 +443,11 @@ def sync_board(claims, dry):
 def candidates(tasks, claims):
     by_id = {t["id"]: t for t in tasks}
     running = [c for c in claims.values() if c.get("state") == "running"]
-    busy_groups = {c.get("group") for c in running if c.get("group")}
+    per_group = {}
+    for c in running:
+        if c.get("group"):
+            per_group[c["group"]] = per_group.get(c["group"], 0) + 1
+    busy_groups = {g for g, n in per_group.items() if n >= GROUP_CAP}
     out = []
     for t in tasks:
         tid = t["id"]
@@ -485,12 +493,12 @@ def dispatch(claims, dry):
         attention("board", "main", "BOARD_UNREADABLE", str(e)[:200])
         return False
     changed = False
-    taken = set()   # one launch per parallel_group per tick, on top of the running-claim check
+    taken = {}   # launches per parallel_group this tick, on top of the running-claim count
     for t in candidates(tasks, claims):
         if free <= 0:
             break
         g = t.get("parallel_group")
-        if g and g in taken:
+        if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue
         c = launch(t, dry)
         if c or dry:
@@ -498,7 +506,7 @@ def dispatch(claims, dry):
                 claims[t["id"]] = dict(c, state="running")
                 changed = True
             if g:
-                taken.add(g)
+                taken[g] = taken.get(g, 0) + 1
             free -= 1
     return changed
 
@@ -510,6 +518,8 @@ def reap_worktrees(claims, dry):
     is MERGED into main, or when it is clean with NO commits ahead and no live claim; never one
     that is dirty, has unmerged commits, belongs to a running claim, or is younger than
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
+    if os.path.exists(BULKMARK):
+        return   # main is provisional during a bulk gate: "merged" cannot be trusted
     live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
     out = sh(["git", "worktree", "list", "--porcelain"])
     paths = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ") and "/.claude/worktrees/" in l]
@@ -525,9 +535,10 @@ def reap_worktrees(claims, dry):
         if dirty:
             continue
         ahead = int(sh(["git", "rev-list", "--count", f"main..{branch}"]).strip() or 0)
+        if ahead:
+            continue   # unmerged commits, whatever main says: 2026-09-22 a provisional bulk merge on main
+                       # read as "merged" and this reaped a worktree holding 4 newer commits
         merged = bool(sh(["git", "log", "main", "--merges", "--format=%H", "--fixed-strings", "--grep", branch, "-n", "1"]).strip())
-        if ahead and not merged:
-            continue
         if dry:
             log(f"DRY-RUN would reap worktree {wt} ({branch}: {'merged' if merged else 'no commits'})")
             continue
@@ -550,7 +561,30 @@ def tick(dry):
     if changed and not dry:
         save_claims(claims)
     running = [c["ticket"] for c in claims.values() if c.get("state") == "running"]
-    status = {"tick": int(time.time()), "running": running, "cap": CAP - (1 if gate_running() else 0),
+    frontier = {}
+    try:
+        tasks = board(); by = {t["id"]: t for t in tasks}
+        per_group = {}
+        for c in claims.values():
+            if c.get("state") == "running" and c.get("group"):
+                per_group[c["group"]] = per_group.get(c["group"], 0) + 1
+        held = {}
+        for t in tasks:
+            if t.get("status") != "todo" or t["id"] in claims:
+                continue
+            if t.get("needs") in ("user", "hardware") or t.get("blocked_on") or t.get("dispatch") == "manual":
+                frontier["not_for_runner"] = frontier.get("not_for_runner", 0) + 1
+            elif any(by.get(d, {}).get("status") not in ("done", "cancelled") for d in deps_of(t) if d in by):
+                frontier["waiting_on_deps"] = frontier.get("waiting_on_deps", 0) + 1
+            elif per_group.get(t.get("parallel_group"), 0) >= GROUP_CAP:
+                frontier["held_by_group"] = frontier.get("held_by_group", 0) + 1
+                held[t.get("parallel_group")] = held.get(t.get("parallel_group"), 0) + 1
+            else:
+                frontier["dispatchable"] = frontier.get("dispatchable", 0) + 1
+        frontier["held_groups"] = held
+    except Exception:
+        pass
+    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "cap": CAP - (1 if gate_running() else 0),
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
               "load_max": LOAD_MAX, "per_tick": PER_TICK}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
