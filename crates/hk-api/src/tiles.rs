@@ -112,6 +112,29 @@
 //! sampling detail is a **hover** question about one cell and `/api/coverage` still answers it;
 //! `/api/timeline`'s overlay is unchanged.
 //!
+//! # `max_db` is served as binary16, because that is what it becomes (T-533)
+//!
+//! With the coverage plane compacted, what was left of a live tile's body was the measurement
+//! itself, spelled as JSON decimal text: **1 197 118 B of a 1 878 289 B tile — 64 %** — for 65 536
+//! values whose destination is an **R16F texture** (`ui/src/surface/surface.ts`). Seventeen
+//! significant digits are transmitted, then eleven bits of them are kept. So `?planes=f16` serves
+//! that one plane as base64 of little-endian IEEE binary16 ([`f16_bits`]), and the wire states its
+//! own type, byte order, scale and absent-value rather than leaving a reader to infer them.
+//!
+//! **Only that plane.** `occupancy_max`, `coverage` and `frames` stay JSON arrays, because for them
+//! JSON is *smaller*: measured on the same tile, `frames` is 131 073 B as text (two distinct values
+//! over 65 536 cells) against 349 528 B as base64 `u32`, and the other two lose likewise. A "pack
+//! everything" mode would have grown three planes to shrink one. See [`Planes`].
+//!
+//! Measured through the route, one address, four spellings back to back on a full 256 x 256 live
+//! tile: **1 879 209 B** as JSON, **856 178 B** packed, **244 012 B** JSON gzipped and **117 382 B**
+//! packed *and* gzipped (`accept-encoding`, T-533, [`crate::http`]) — **16x**. Both levers pay and
+//! neither subsumes the other: JSON decimal text is high-entropy by construction, so compressing it
+//! is not the same as not sending it. `cost.build_ms` did not move (20.0 -> 20.4 ms), which is the
+//! honest half of the result: the route's own work was never the float formatting, so on a loopback
+//! link the body was not what a refetch was waiting for. It is what a tunnel, a phone or a second
+//! machine waits for, and it is what the browser parses.
+//!
 //! # What a tile never carries
 //!
 //! Emitters (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and
@@ -120,7 +143,7 @@
 //!
 //! | Method | Path | Query | Answers |
 //! |---|---|---|---|
-//! | GET | `/api/tiles` | `?level_f&level_t&f_index&t_index[&scheme][&device][&cells]` | `{key, extent, axes, grid, coverage, resolution, cost}` |
+//! | GET | `/api/tiles` | `?level_f&level_t&f_index&t_index[&scheme][&device][&cells][&planes]` | `{key, extent, axes, grid, coverage, resolution, cost}` |
 //! | GET | `/api/tiles/events` | the same address | `{key, extent, counts, total, rule}` |
 
 use std::sync::Arc;
@@ -1168,6 +1191,10 @@ struct ReadDiagnostics<'a> {
     slot: &'a TileSlot,
 }
 
+// Eight even with the diagnostics grouped: the six the answer is assembled from, the sealed flag
+// T-574 reads from the tile's own time extent, and (T-533) the plane spelling the caller asked
+// for. It is one serialiser of one answer, called once.
+#[allow(clippy::too_many_arguments)]
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
@@ -1176,6 +1203,7 @@ fn unobserved_tile_json(
     max_live: Option<f64>,
     diags: ReadDiagnostics<'_>,
     sealed: bool,
+    planes: Planes,
 ) -> Value {
     let ReadDiagnostics { elapsed_ms, slot } = diags;
     let source = base_tier(key, max_live);
@@ -1193,7 +1221,7 @@ fn unobserved_tile_json(
             "nf": key.cells,
         },
         "axes": axes_json(key, ceiling),
-        "grid": unobserved_grid_json(key),
+        "grid": unobserved_grid_json(key, planes),
         "coverage": coverage,
         "resolution": {
             "source": source.as_str(),
@@ -1265,6 +1293,156 @@ fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usiz
     })
 }
 
+/// How the `max_db` plane is spelled on the wire (T-533, `?planes=`).
+///
+/// **Not a compression setting: a choice of representation, named on the wire.** The value plane's
+/// destination is an R16F texture, so [`Planes::F16`] sends exactly the bits that survive — and
+/// `grid.encoding.planes` says which spelling was used, per answer, so a reader never has to infer
+/// it from whether a field happens to be present. A client that does not recognise the name served
+/// must refuse the tile rather than render it (`ui/src/surface/tile.ts` throws `TileDecodeError`);
+/// a future packing gets a **new name**, never a redefinition of this one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Planes {
+    /// One JSON number (or `null`) per cell. The default, and what every non-canvas reader of this
+    /// route still gets.
+    Json,
+    /// `max_db` as base64 of little-endian IEEE binary16; the other three planes unchanged.
+    ///
+    /// Only `max_db`, because only `max_db` wins: on a full 256 × 256 live tile its JSON text is
+    /// 1 197 118 B against 174 764 B packed, while `frames` is 131 073 B as text against 349 528 B
+    /// as base64 `u32`, and `occupancy_max`/`coverage` lose by a similar factor. Packing them too
+    /// would grow the body by 394 kB to save nothing.
+    F16,
+}
+
+impl Planes {
+    fn as_str(self) -> &'static str {
+        match self {
+            Planes::Json => "json",
+            Planes::F16 => "f16",
+        }
+    }
+}
+
+/// `?planes=`: `json` (the default) or `f16`. An unrecognised spelling is a **400 naming it**,
+/// never a silent fall back to JSON — a client that asked for a representation it can decode and
+/// was quietly given another one would mis-read every cell.
+fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
+    match q
+        .iter()
+        .find(|(k, _)| k == "planes")
+        .map(|(_, v)| v.as_str())
+    {
+        None | Some("json") => Ok(Planes::Json),
+        Some("f16") => Ok(Planes::F16),
+        Some(other) => Err(bad(&format!(
+            "planes={other:?} is not a plane encoding this server serves (json, f16)"
+        ))),
+    }
+}
+
+/// `f32` → IEEE 754 binary16 bits, round-to-nearest-even.
+///
+/// **NaN stays NaN** — on this wire NaN is *not observed*, exactly as `null` is in the JSON
+/// spelling, so a conversion that turned it into an infinity or a zero would invent a measurement.
+/// A magnitude past binary16's range becomes an infinity, which the client reads as non-finite and
+/// therefore as absent too; no finite dB level this route serves is anywhere near 65 504.
+fn f16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let raw_exp = (b >> 23) & 0xff;
+    let mant = b & 0x007f_ffff;
+    if raw_exp == 0xff {
+        // Infinity, or a NaN kept a NaN (a non-zero payload bit set so it cannot become infinity).
+        return sign | 0x7c00 | if mant != 0 { 0x0200 } else { 0 };
+    }
+    let exp = raw_exp as i32 - 127 + 15;
+    if exp >= 31 {
+        return sign | 0x7c00;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign; // below the smallest subnormal: zero, with its sign
+        }
+        // Subnormal binary16: shift the implicit leading 1 back in, then round to nearest even.
+        let m = mant | 0x0080_0000;
+        let shift = (14 - exp) as u32; // 14..=24
+        let keep = m >> shift;
+        let round_bit = (m >> (shift - 1)) & 1;
+        let sticky = (m & ((1 << (shift - 1)) - 1)) != 0;
+        let inc = u32::from(round_bit == 1 && (sticky || (keep & 1) == 1));
+        return sign | (keep + inc) as u16;
+    }
+    let keep = mant >> 13;
+    let round_bit = (mant >> 12) & 1;
+    let sticky = (mant & 0x0fff) != 0;
+    let inc = u32::from(round_bit == 1 && (sticky || (keep & 1) == 1));
+    // A mantissa that rounds up to 0x400 carries into the exponent by construction, which is what
+    // `+` does here; at exp 30 that carries to 31 and the value becomes an infinity, correctly.
+    sign | (((exp as u32) << 10) + keep + inc) as u16
+}
+
+/// One plane, packed: base64 of the little-endian binary16 values, with its own type stated.
+fn f16_plane(values: impl Iterator<Item = f32>, cells: usize, scale: &str) -> Value {
+    let mut bytes = Vec::with_capacity(cells * 2);
+    for v in values {
+        bytes.extend_from_slice(&f16_bits(v).to_le_bytes());
+    }
+    json!({
+        "type": "f16",
+        "byte_order": "little-endian",
+        "transfer": "base64",
+        "cells": cells,
+        "bytes": bytes.len(),
+        "scale": scale,
+        // The same claim `null` makes in the JSON spelling, in the only encoding binary16 has for
+        // it. **Never a zero and never a floor**: C26's rule is unchanged by the representation.
+        "absent": "nan",
+        "data": base64(&bytes),
+    })
+}
+
+/// Standard base64, no line breaks — the alphabet `atob` reads.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// What the answer says about how its per-cell planes are spelled — present in **every** answer,
+/// including the JSON one and the uniform short-circuit, so a reader never infers the encoding from
+/// which fields happen to be present.
+fn encoding_json(planes: Planes) -> Value {
+    json!({
+        "planes": planes.as_str(),
+        "order": "row-major: time then frequency, earliest row and lowest frequency first — the \
+            same cell order in either spelling",
+        "rule": "`planes` names how the per-cell planes are spelled, and it is stated rather than \
+            inferred: `json` is one number or `null` per cell; `f16` moves `max_db` into \
+            `grid.planes.max_db` as base64 of little-endian IEEE binary16 (its destination is an \
+            R16F texture, so nothing that reaches a screen is lost) and leaves `occupancy_max`, \
+            `coverage` and `frames` as JSON arrays, because for those three JSON is the SMALLER \
+            spelling (T-533). A reader that does not know the name served must refuse the tile, \
+            not guess: a plane decoded against the wrong type is a measurement invented.",
+    })
+}
+
 /// A measurement value on the wire: a finite number, or `null`. **`null` is *not observed*, never
 /// quiet** (C26) — there is no zero here for anything to read as a level.
 fn num(x: f32) -> Value {
@@ -1296,7 +1474,7 @@ fn uniform_cell_json(c: &hk_store::OverviewCell) -> Value {
 /// `read_level` falls back to when no level answered. `an_unobserved_tile_read_produces_exactly_the_constants_the_short_circuit_serves`
 /// asserts that equality against a real store read, so this is a *cheaper spelling* of the full
 /// path's answer and not a second answer.
-fn unobserved_grid_json(key: &TileKey) -> Value {
+fn unobserved_grid_json(key: &TileKey, planes: Planes) -> Value {
     let o = Overview {
         unit: hk_model::PowerUnit::Dbfs,
         nt: key.cells,
@@ -1318,6 +1496,10 @@ fn unobserved_grid_json(key: &TileKey) -> Value {
         "t_cell_s": o.t_cell_ns / 1e9,
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
+        // Stated here too (T-533), though this grid carries no plane in either spelling: a reader
+        // that has to look at which fields are present to learn the encoding is the reader that
+        // decodes the wrong one when a field is legitimately missing.
+        "encoding": encoding_json(planes),
         // The four per-cell arrays are ABSENT, not empty: an empty array would read as a grid of
         // no cells, which is a different claim from a grid of cells that hold nothing.
         "uniform": uniform_cell_json(&hk_store::OverviewCell::UNOBSERVED),
@@ -1332,16 +1514,19 @@ fn unobserved_grid_json(key: &TileKey) -> Value {
     })
 }
 
-fn grid_json(o: &Overview) -> Value {
-    json!({
+fn grid_json(o: &Overview, planes: Planes) -> Value {
+    // T-533: `max_db` in the spelling the caller asked for. The two are the same values in the same
+    // order — `the_f16_plane_carries_the_same_values_the_json_array_does` asserts that cell for
+    // cell — and the one that is absent is ABSENT, never an empty array: a grid of no cells is a
+    // different claim from a grid whose cells are spelled elsewhere.
+    let mut v = json!({
         "nt": o.nt,
         "nf": o.nf,
         "t0_s": o.t0_ns as f64 / 1e9,
         "t_cell_s": o.t_cell_ns / 1e9,
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
-        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
-        "max_db": Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+        "encoding": encoding_json(planes),
         "occupancy_max": Value::Array(o.cells.iter().map(|c| num(c.occupancy_max)).collect()),
         "coverage": Value::Array(o.cells.iter().map(|c| json!(c.coverage)).collect()),
         "frames": Value::Array(o.cells.iter().map(|c| json!(c.frames)).collect()),
@@ -1356,7 +1541,33 @@ fn grid_json(o: &Overview) -> Value {
             across parent time cells, so no percentile is carried (T-434). The noise-floor \
             distribution stays a scheme-1 question, asked through /api/history.",
         "semantics": crate::query::overview_semantics_json(o),
-    })
+    });
+    let g = v.as_object_mut().expect("object");
+    match planes {
+        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
+        Planes::Json => {
+            g.insert(
+                "max_db".into(),
+                Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+            );
+        }
+        Planes::F16 => {
+            g.insert(
+                "planes".into(),
+                json!({
+                    "max_db": f16_plane(
+                        o.cells.iter().map(|c| c.max_db),
+                        o.cells.len(),
+                        crate::query::scale_str(o.unit),
+                    ),
+                    "rule": "the typed spelling of the planes it names; every plane NOT named here \
+                        is beside it as a JSON array, and `grid.encoding.planes` says which \
+                        spelling this answer used.",
+                }),
+            );
+        }
+    }
+    v
 }
 
 /// The **shadow** plane (T-519): each column's most-recent-known value, carried down the tile's
@@ -1714,15 +1925,16 @@ fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
 
 /// `GET /api/tiles`.
 pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
-    const ALLOWED: [&str; 8] = [
-        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "token",
+    const ALLOWED: [&str; 9] = [
+        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "planes", "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
             "unknown parameter {k:?} (allowed: device, scheme, level_f, level_t, f_index, \
-             t_index, cells)"
+             t_index, cells, planes)"
         )));
     }
+    let planes = parse_planes(q)?;
     let Some(slot) = TileSlot::acquire(&state.tiles_in_flight) else {
         return Err(too_many_in_flight());
     };
@@ -1781,6 +1993,7 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
                 slot: &slot,
             },
             sealed,
+            planes,
         );
         v["shadow"] = shadow_json(&sh, None);
         return Ok(v);
@@ -1808,7 +2021,7 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
             "nf": key.cells,
         },
         "axes": axes_json(&key, ceiling),
-        "grid": grid_json(&r.grid),
+        "grid": grid_json(&r.grid, planes),
         "coverage": coverage,
         "shadow": shadow_json(&sh, Some(r.level)),
         "resolution": {
@@ -3525,15 +3738,14 @@ mod tests {
             "the full read must be uniformly UNOBSERVED for this comparison to mean anything"
         );
         // …and the short form says the same, field for field.
-        let short = unobserved_grid_json(&key);
-        assert_eq!(short["unit"], grid_json(&r.grid)["unit"]);
-        assert_eq!(short["cells"], grid_json(&r.grid)["cells"]);
-        assert_eq!(
-            short["observed_cells"],
-            grid_json(&r.grid)["observed_cells"]
-        );
-        assert_eq!(short["range_db"], grid_json(&r.grid)["range_db"]);
-        assert_eq!(short["semantics"], grid_json(&r.grid)["semantics"]);
+        let short = unobserved_grid_json(&key, Planes::Json);
+        let full = grid_json(&r.grid, Planes::Json);
+        assert_eq!(short["unit"], full["unit"]);
+        assert_eq!(short["cells"], full["cells"]);
+        assert_eq!(short["observed_cells"], full["observed_cells"]);
+        assert_eq!(short["range_db"], full["range_db"]);
+        assert_eq!(short["semantics"], full["semantics"]);
+        assert_eq!(short["encoding"], full["encoding"]);
         assert_eq!(short["uniform"], uniform_cell_json(&r.grid.cells[0]));
         // The mutation: had the uniform cell been written as zeroes rather than as absences, it
         // would differ — which is what makes the equality above an assertion and not a tautology.
@@ -3955,5 +4167,197 @@ mod tests {
             sh["search"]["source_cells"],
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// **binary16 is a re-spelling of the value, not a new value.** (T-533)
+    ///
+    /// Every assertion here is about a claim the wire makes: that `type: "f16"` means IEEE 754
+    /// binary16 (so the bit patterns are the standard's, not a near-miss of it), that `absent:
+    /// "nan"` is kept (a NaN that became a zero or an infinity would invent a level — C26), and
+    /// that the error introduced is bounded by half an ulp, which for the dB range this route
+    /// serves is well under a tenth of a decibel.
+    #[test]
+    fn f16_is_ieee_binary16_and_keeps_absence_absent() {
+        // The standard's own landmarks, bit for bit.
+        assert_eq!(f16_bits(0.0), 0x0000);
+        assert_eq!(f16_bits(-0.0), 0x8000);
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert_eq!(f16_bits(-2.0), 0xc000);
+        assert_eq!(f16_bits(65504.0), 0x7bff, "the largest finite binary16");
+        assert_eq!(f16_bits(65536.0), 0x7c00, "past the range: infinity");
+        assert_eq!(f16_bits(f32::INFINITY), 0x7c00);
+        assert_eq!(f16_bits(6.103_515_6e-5), 0x0400, "smallest normal");
+        assert_eq!(f16_bits(5.960_464_5e-8), 0x0001, "smallest subnormal");
+        assert_eq!(f16_bits(1e-9), 0x0000, "below the smallest subnormal");
+        // Absence stays absence. The exponent is all ones AND the mantissa is non-zero, which is
+        // what makes it a NaN rather than the infinity next door.
+        for nan in [f32::NAN, -f32::NAN] {
+            let b = f16_bits(nan);
+            assert_eq!(b & 0x7c00, 0x7c00, "{b:#06x} is not a NaN or infinity");
+            assert_ne!(b & 0x03ff, 0, "{b:#06x} became an infinity, not a NaN");
+        }
+        // Round to nearest EVEN at the tie, not away from zero: 2049 sits exactly between two
+        // representable values (2048 and 2050) and must land on the even one.
+        assert_eq!(f16_bits(2049.0), f16_bits(2048.0));
+        assert_eq!(f16_bits(2051.0), f16_bits(2052.0));
+        // The error bound, over the dB range this route actually serves.
+        let back = |b: u16| {
+            let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+            let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+            match e {
+                0 => s * m * 2f32.powi(-24),
+                31 => f32::NAN,
+                _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+            }
+        };
+        let mut worst = 0.0f32;
+        let mut x = -160.0f32;
+        while x <= 0.0 {
+            worst = worst.max((back(f16_bits(x)) - x).abs());
+            x += 0.013;
+        }
+        assert!(
+            worst < 0.07,
+            "binary16 costs {worst} dB over [-160, 0] dBFS, which is more than the R16F texture \
+             this plane is uploaded into would have cost anyway"
+        );
+    }
+
+    #[test]
+    fn base64_is_the_standard_alphabet_with_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    /// **The two spellings are the same grid**, cell for cell, on a real store read — which is the
+    /// only thing that makes `?planes=f16` a representation choice rather than a second answer.
+    #[test]
+    fn the_f16_plane_carries_the_same_values_the_json_array_does() {
+        let dir = temp_dir("planes-f16");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let q = tile_params(F_INDEX, T_INDEX);
+        let plain = tiles_json(&state, &q).unwrap();
+        let mut packed_q = q.clone();
+        packed_q.push(("planes".into(), "f16".into()));
+        let packed = tiles_json(&state, &packed_q).unwrap();
+
+        assert_eq!(plain["grid"]["encoding"]["planes"], json!("json"));
+        assert_eq!(packed["grid"]["encoding"]["planes"], json!("f16"));
+        // Absent, not empty, in each direction.
+        assert!(plain["grid"]["planes"].is_null(), "{}", plain["grid"]);
+        assert!(packed["grid"]["max_db"].is_null(), "{}", packed["grid"]);
+
+        let json_cells = plain["grid"]["max_db"].as_array().expect("max_db array");
+        let plane = &packed["grid"]["planes"]["max_db"];
+        assert_eq!(plane["type"], json!("f16"));
+        assert_eq!(plane["byte_order"], json!("little-endian"));
+        assert_eq!(plane["transfer"], json!("base64"));
+        assert_eq!(plane["absent"], json!("nan"));
+        assert_eq!(plane["cells"], json!(json_cells.len()));
+        assert_eq!(plane["bytes"], json!(json_cells.len() * 2));
+        assert_eq!(
+            plane["scale"],
+            plain["grid"]["semantics"]["series"]["max_db"]["scale"]
+        );
+
+        // Decode the plane the way the client does, and compare.
+        let bytes = decode_base64(plane["data"].as_str().expect("data"));
+        assert_eq!(bytes.len(), json_cells.len() * 2);
+        let mut observed = 0usize;
+        for (i, cell) in json_cells.iter().enumerate() {
+            let bits = u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+            let finite = bits & 0x7c00 != 0x7c00;
+            match cell.as_f64() {
+                None => assert!(
+                    !finite,
+                    "cell {i} is null in JSON and a number in the plane"
+                ),
+                Some(v) => {
+                    assert!(finite, "cell {i} is {v} in JSON and absent in the plane");
+                    let back = f16_to_f32(bits);
+                    assert!(
+                        (back as f64 - v).abs() < 0.07,
+                        "cell {i}: {v} dB became {back} dB"
+                    );
+                    observed += 1;
+                }
+            }
+        }
+        assert!(
+            observed > 0,
+            "the fixture wrote no observed cell, so this comparison would pass on two empty grids"
+        );
+
+        // …and it is SMALLER, which is the whole point, measured on this very answer. The claim is
+        // about the PLANE rather than the whole body, because at this test's 64-cell edge the
+        // per-tile prose dominates; on a rendered 256-cell tile the plane IS the body (64 % of it,
+        // the measurement this ticket started from).
+        let as_text = plain["grid"]["max_db"].to_string().len();
+        let as_plane = plane["data"].as_str().unwrap().len();
+        assert_eq!(
+            as_plane,
+            (json_cells.len() * 2).div_ceil(3) * 4,
+            "the packed plane's size must be a function of the CELL COUNT alone — two bytes a \
+             cell, base64 — which is the property JSON decimal text does not have: the same grid \
+             costs {as_text} B as text here and 1 197 118 B on the 256-cell live tile T-533 \
+             measured, where the same cells packed are 174 764 B"
+        );
+        assert!(
+            as_plane * 2 < as_text,
+            "{as_plane} B packed vs {as_text} B as text"
+        );
+        assert!(
+            packed.to_string().len() < plain.to_string().len(),
+            "the packed body must not be larger than the JSON one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_plane_encoding_is_refused_rather_than_answered_in_another() {
+        let dir = temp_dir("planes-bad");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let mut q = tile_params(F_INDEX, T_INDEX);
+        q.push(("planes".into(), "f8".into()));
+        let e = tiles_json(&state, &q).unwrap_err();
+        assert_eq!(e.status, 400);
+        assert!(e.message.contains("f8"), "{}", e.message);
+        assert!(e.message.contains("json, f16"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn decode_base64(s: &str) -> Vec<u8> {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let val = |c: u8| A.iter().position(|&a| a == c).expect("base64 alphabet") as u32;
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len() / 4 * 3);
+        for c in b.chunks(4) {
+            let pad = c.iter().filter(|&&x| x == b'=').count();
+            let n = (val(c[0]) << 18)
+                | (val(c[1]) << 12)
+                | (if pad < 2 { val(c[2]) } else { 0 } << 6)
+                | (if pad < 1 { val(c[3]) } else { 0 });
+            out.push((n >> 16) as u8);
+            if pad < 2 {
+                out.push((n >> 8) as u8);
+            }
+            if pad < 1 {
+                out.push(n as u8);
+            }
+        }
+        out
+    }
+
+    fn f16_to_f32(b: u16) -> f32 {
+        let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+        let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+        match e {
+            0 => s * m * 2f32.powi(-24),
+            31 => f32::NAN,
+            _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+        }
     }
 }
