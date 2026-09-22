@@ -5539,10 +5539,12 @@ retries existed for exactly two timing tests; the other five known-timing tests 
 2. **Triage before isolating** (`flake_retry` in `ops/merge-runner.sh`): on a red batch, re-run the
    failing tests *alone* first. Pass alone → load flake, appended to `$HACKRIFF_OPS/flaky.jsonl`, and
    the full gate retried **once** with the machine to itself. Fail alone → a real defect → isolate.
-3. **Exclusive gate** — `$HACKRIFF_OPS/gate-exclusive` makes the work runner suspend every worker
-   (resumed afterwards via `claude -p --resume`) and dispatch nothing until the flag clears.
-4. **The gate comes first, always** — workers run at `utility` QoS + nice 10; while any gate runs they
-   drop to background QoS (E-cores only on this M3 Ultra) and admission tightens.
+3. **A fixed resource budget, not heuristics** (user's call, replacing an earlier suspend/resume
+   mechanism that terminated and resumed workers — dumb, and only needed because nothing bounded
+   them). 28 cores: the gate reserved 14; each worker bounded to ~3 by limits its whole process tree
+   inherits — `CARGO_BUILD_JOBS=2`, `NEXTEST_TEST_THREADS=2`, and a permanent `background` QoS clamp
+   (E-cores only) — so the worker count is a known 4 and the gate never competes.
+4. *(folded into 3)*
 5. **One retry** for the five named load-sensitive tests in `.config/nextest.toml`, each with its
    ticket (T-603, T-509, T-430/436/621; two newly observed today need tickets). This is a bridge:
    `flaky.jsonl` is the coordinator's burn-down list, and a retry that keeps firing is a defect.
