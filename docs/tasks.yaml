@@ -23084,6 +23084,14 @@ tasks:
       Filed 2026-09-22 by T-625 (task-adcfill). The dedup interaction is the real design question
       here, not the DSP: a sigma that moves every block would turn a deduplicated provenance table
       into one row per block.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:31).
+      Measured adc_fill_ci8 with new example crates/hk-dsp/examples/adc_fill_cost.rs: ~165 us per 65536-sample block on this machine = ~5% of the 3.28 ms block period at 20 Msps. That is not free on the capture thread (T-453 rule), so it is NOT wired per block. Recommended follow-up: measure on a cadence (~1 per second, ~0.05%) or on tune-state change only, and quantise the recorded sigma so provenance dedup stays stable. fill_flags_disagree still uncalled; it should surface with that wiring (e.g. as a provenance/health warning). Only the benchmark was added; no live path changes.
+      precheck exit 0
+      Commits: 2ecdd754, 08520918
+      Observed, not chased: Live wiring of noise_sigma_lsb (cadence + quantised sigma) and the fill_flags_disagree surface remain undone.
+      Use cases: RESEARCH-008
+      Resources: 38 CPU-s, peak 0.6 GB
   - id: T-800
     milestone: MMAP
     title: 'Design + ADR-0023: map-UI chrome, the layer model, and the research-state stores'
