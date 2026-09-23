@@ -4985,7 +4985,8 @@ tasks:
   - id: T-275
     milestone: M5
     title: 'M5 satellite imagery, tiered by what the receiver can actually reach: 137 MHz APT/LRPT native, L-band accessory, X-band out of reach'
-    status: todo
+    status: in-progress
+    branch: task-t275
     priority: normal
     deps:
     - T-258
@@ -23192,7 +23193,8 @@ tasks:
   - id: T-817
     milestone: MMAP
     title: 'Marker collections: generalize /api/bookmarks to time-frequency markers grouped into named collections'
-    status: todo
+    status: in-progress
+    branch: task-t817
     priority: normal
     parallel_group: MAP-API
     model: opus
