@@ -22537,6 +22537,13 @@ tasks:
       done inside T-632: that ticket's subject was which refusal each test is about, and folding a
       four-file refactor into it would have hidden the behavioural change in a move diff.
 
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:22).
+      Refactored byte-identical Tail struct, tail() function, and impl Tail::finish() from the four tutorial acceptance test files (tutorial_rds.rs, tutorial_adsb.rs, tutorial_pocsag.rs, tutorial_acars.rs) into acceptance/common.rs, with TAG becoming a parameter to tail(). This eliminates the duplication that required T-632 to edit all four copies when adding bounded re-issue. The refactoring is pure: the four tutorials pass unchanged, and the diff deletes 266 lines of duplicates while adding 62 to common.rs, a net reduction of 204 lines.
+      Tests: cargo nextest run -p hk-e2e 'tutorial_rds' -> exit 0 (4 passed (signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_oracle, signal_062_rds_real_air_acceptance_crc_valid_pi_and_complete_ps, signal_062_rds_recipe_synthetic_pi_pty_ps_and_radiotext_exact, signal_062_recipe_match_ranks_rds_top_for_the_blindly_found_station))
+      precheck exit 0
+      Commits: fd1d9c83
+      Resources: 129 CPU-s, peak 1.6 GB
   - id: T-722
     milestone: M2-hardening
     title: heavy-serial's max-threads = 1 has never been measured against a bounded alternative for the crates that are in it

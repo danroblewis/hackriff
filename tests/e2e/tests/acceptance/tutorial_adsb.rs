@@ -48,11 +48,9 @@
 //! the stored `recipe:adsb` rows, their emitters and those emitters' ADS-B explanations.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hk_api::{
@@ -63,7 +61,7 @@ use hk_cli::pipeline::PipelineRecipes;
 use hk_cli::record::http;
 use hk_e2e::{Fixture, SynthRequest, TruthItem};
 use hk_model::{CrcStatus, DecodedIdentity, FreqRange, IdentityScheme, LinkTarget, Region};
-use hk_stream::{OpenerRegistry, Record, StreamReader};
+use hk_stream::OpenerRegistry;
 use serde_json::{Value, json};
 
 use crate::blind::{BlindLive, BlindSource, blind_live_streams};
@@ -158,66 +156,6 @@ impl Served {
         drop(server);
         live.handle.stop();
         finish(live.handle);
-    }
-}
-
-/// A TCP consumer collecting a stream's JSON records until [`Tail::finish`].
-struct Tail {
-    sock: TcpStream,
-    join: JoinHandle<Vec<Value>>,
-}
-
-/// Opens a stage/inspector tap and returns it reading, re-issuing a refusal.
-///
-/// **T-632.** The header used to be read on the spawned thread and any failure carried to
-/// `finish()` as a panic, so a refusal frame failed the test at a point that said nothing about
-/// what refused or when. A tap open is refused for reasons that are not this test's subject —
-/// none of these files asserts a refusal at all: the TCP server's connection cap (`503 busy`), a
-/// chain/tap budget, or a `404` in the moment before the recipe pipeline finishes registering.
-/// So the header is read HERE, and a refusal is re-issued on a fresh connection a BOUNDED NUMBER
-/// of times (attempts, never wall clock), printing each. Running out is the failure, and it names
-/// the target.
-fn tail(tcp: SocketAddr, target: &str) -> Tail {
-    for attempt in 1..=OPEN_TRIES {
-        let mut s = TcpStream::connect(tcp).unwrap();
-        s.set_read_timeout(Some(LIMIT)).unwrap();
-        let sep = if target.contains('?') { '&' } else { '?' };
-        s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
-            .unwrap();
-        let sock = s.try_clone().unwrap();
-        let mut r = StreamReader::new(s);
-        if let Err(e) = r.read_header() {
-            eprintln!(
-                "[{TAG}] tail {target} attempt {attempt}/{OPEN_TRIES}: no stream header ({e:?}), \
-                 re-requesting"
-            );
-            let _ = sock.shutdown(Shutdown::Both);
-            continue;
-        }
-        let join = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            while let Ok(Some(rec)) = r.next_record() {
-                match rec {
-                    Record::Message(m) => out.push(m.value),
-                    Record::Unknown(b) => {
-                        if let Ok(v) = serde_json::from_slice(&b) {
-                            out.push(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out
-        });
-        return Tail { sock, join };
-    }
-    panic!("[{TAG}] tail {target}: {OPEN_TRIES} opens in a row produced no stream header");
-}
-
-impl Tail {
-    fn finish(self) -> Vec<Value> {
-        let _ = self.sock.shutdown(Shutdown::Both);
-        self.join.join().expect("the tail reader thread")
     }
 }
 
@@ -527,7 +465,7 @@ fn tutorial_adsb_recipe_decodes_blind_and_matches_truth() {
     let s = serve(&fx.meta_path, "t097-adsb");
     let band = blind_band(&s.live.dir.0, MIN_BURST_HITS);
     let (id, _) = start_adsb(&s, band);
-    let tap = tail(s.tcp, &format!("inspector/{id}/frames"));
+    let tap = tail(s.tcp, &format!("inspector/{id}/frames"), TAG);
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     // Two loop passes over the 64-squitter scene (16 messages/aircraft): comfortable margin
     // against a squitter split by the loop seam, and enough independent tries per (aircraft,
@@ -709,7 +647,7 @@ fn tutorial_adsb_recipe_agrees_with_readsb() {
     let s = serve(&fx.meta_path, "t097-rb");
     let band = blind_band(&s.live.dir.0, MIN_BURST_HITS);
     let (id, _) = start_adsb(&s, band);
-    let tap = tail(s.tcp, &format!("inspector/{id}/frames"));
+    let tap = tail(s.tcp, &format!("inspector/{id}/frames"), TAG);
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     s.wait_samples(&id, start + 3 * n);
     let status = s.pipeline(&id)["status"].clone();
