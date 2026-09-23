@@ -24499,7 +24499,8 @@ tasks:
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
-    status: todo
+    status: in-progress
+    branch: task-t845
     priority: normal
     deps:
     - T-506
