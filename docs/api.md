@@ -249,6 +249,7 @@ Query parameters (all optional, combined with AND): `f_lo`&`f_hi` (Hz, given tog
       "latest_classification": null,
       "classifications": 3,
       "cluster_id": null,
+      "cluster_status": { "state": "abstained", "reason": "too_few_fields", "distance": null, "t_s": 1789300900.0 },
       "estimated_params": { "modulation": "wfm", "symbol_rate_hz": null, "mod_order": null,
                              "deviation_hz": 75000.2, "cfo_hz": -120.5, "bandwidth_hz": 181400.0,
                              "roll_off": null, "pilot_hz": 19000.05, "t_s": 1789300920.0,
@@ -325,6 +326,15 @@ Detections remain **not** a served record kind (there is still no `/api/detectio
 The full classification (likelihood, prior, provenance, reasons) is not on the row; it is served per emitter by `GET /api/inventory/{id}/classification` (T-247, below). `family` values on M3 rows are `hk-mod@1` families (`analog`, `fsk`, `psk-qam`, …, or `unknown`); pre-M3 rows keep their labels (`wfm`, `2fsk`, decoder and service ids).
 
 **`cluster_id` (T-202, ADR-0016 §5).** The C18 cluster of unknown emissions this row currently belongs to — *"I have seen this before"* — or `null`. It is **evidence, never identity**: a cluster groups emitters that **measure** alike and sets nothing on the row (not identity, not family, not `known_status`, not lifecycle). Two identical sensors share a cluster and stay two inventory rows: a cluster is a *type*, an emitter is an *instance*. Only a *visible* cluster is named (at least three member emitters, or one emitter seen in at least three separated appearances) — below that the group is still a guess and reads `null`. The id is `null` on a withheld-identity row whatever storage holds, exactly as `estimated_params` and `/api/inventory/{id}/decode` are (T-159/T-163), so membership can never confirm a withheld identity indirectly. Details, members and history: `/api/clusters` below.
+
+**`cluster_status` (T-593).** *Why* `cluster_id` reads what it does, so a `null` id is never a silent one: an emitter the clusterer declined because the evidence floor was not met is a different fact from one whose group is still forming, one it declined for another cause, and one it has never looked at. `null` only on a withheld-identity row, exactly as `cluster_id` is; otherwise `{"state", "reason", "distance", "t_s"}`, read from the clusterer's own stored membership row (`emitter_cluster`) and never re-derived:
+
+- **`state: "clustered"`** — `cluster_id` names a visible cluster (this state holds exactly when `cluster_id` is non-null). `reason` is how it got there: `joined`, `seeded`, `reassigned`, `repair`.
+- **`"pending"`** — grouped with something, but the group is below the visibility floor, so its id is not served (a guess with an id reads as a finding). `reason` is `joined`/`seeded`/`reassigned`.
+- **`"abstained"`** — the clusterer looked and declined. `reason` names the cause: **`too_few_fields`** (fewer than 3 comparable clustering fields were measured — the evidence floor), `ambiguous` (between two clusters that are not compatible with each other), `too_far`, `conflict`.
+- **`"unassessed"`** — the clusterer has never decided anything about this row: nothing measured yet, or a `full` catalogue match it leaves alone. `reason`, `distance` and `t_s` are `null`.
+
+`distance` is the tolerance-normalised distance that decided it, when one was computed; `t_s` when the decision was made. An abstention is recorded once and not rewritten while the emitter stays unassigned, so `reason` and `t_s` are those of the *first* decline, not the latest look. Presentation is the client's; the field only carries the fact.
 
 **`cluster_group` (T-320).** The same membership, served as **grouping data** so a list can show *which* rows measure alike instead of only that each one has been seen before. `null` exactly when `cluster_id` is (no cluster, not yet visible, or a withheld-identity row), else `{"cluster_id", "label", "rows_in_view"}`:
 
