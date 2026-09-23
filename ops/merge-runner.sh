@@ -160,7 +160,7 @@ process(){
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
   local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
-  just gate-merge >>"$LOG" 2>&1; rc=$?
+  limited just gate-merge; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
   # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
   # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
@@ -302,6 +302,35 @@ ready_filter(){
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
 FLAKY=$S/flaky.jsonl
+# A HARD TIME LIMIT ON EVERY GATE (user, 2026-09-22: "a time-limit kill after 60 minutes").
+# A gate that runs past GATE_TIMEOUT seconds is killed - its whole process group, so nextest,
+# cargo, hk serve and Chrome go with it - and counts as a failure of kind "timeout", which is
+# re-queued once (like a suite-wide red) rather than isolated. Job control (`set -m`) gives the
+# background job its own process group, which is what makes the kill complete.
+GATE_TIMEOUT=${GATE_TIMEOUT:-3600}
+GATE_TIMED_OUT=0
+limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
+  local pid start now
+  GATE_TIMED_OUT=0
+  set -m
+  ( cd "$REPO" && "$@" ) >>"$LOG" 2>&1 &
+  pid=$!
+  set +m
+  start=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $(( now - start )) -ge "$GATE_TIMEOUT" ]; then
+      log "GATE TIMEOUT: '$*' exceeded ${GATE_TIMEOUT}s - killing its process group"
+      kill -TERM -- "-$pid" 2>/dev/null; sleep 20; kill -KILL -- "-$pid" 2>/dev/null
+      GATE_TIMED_OUT=1
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 10
+  done
+  wait "$pid"; return $?
+}
+
 flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
   # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
@@ -317,11 +346,15 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   # can be re-run alone with `npm run e2e -- <name>...` from ui/.
   local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
   if [ -z "$tests" ] && [ -n "$specs" ]; then
+    TRIAGE_SPECS="$specs"   # try_bulk re-runs these on main alone if this batch is red
     log "TRIAGE: browser specs red: $specs - re-running them alone"
     if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
-      log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+      # The browser tier is the LAST suite; the Rust workspace and acceptance already passed
+      # on this exact tree, so the retry re-runs only the acceptance phase (acceptance-ci +
+      # test-ui-e2e), not the 15-minute workspace suite again.
+      log "TRIAGE: they PASS alone -> load flake; retrying the gate's acceptance phase once"
       printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
-      ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+      limited $retry --phase acceptance; rc=$?
       [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
       return $rc
     fi
@@ -330,6 +363,7 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   fi
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
+  TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
   # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
   # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
@@ -337,7 +371,7 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
     log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
     printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
-    ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+    limited $retry; rc=$?
     [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
     return $rc
   fi
@@ -401,14 +435,19 @@ try_bulk(){
   # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
   # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
   local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
-  ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  limited just gate --base "$base"; rc=$?
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
   # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
   # recorded in flaky.jsonl, and the whole gate is retried ONCE (workers are bounded, so the
   # gate's reserved cores are the gate's - nothing is suspended). Only a test that fails alone,
   # or a second red gate, still isolates.
-  if [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
+  if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
+    # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
+    # re-queue the batch once, hold until the queue changes - and say so where a person looks.
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""
+    echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
+  elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
@@ -437,6 +476,39 @@ try_bulk(){
       notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
       rm -f "$BULKMARK"
       return 0
+    fi
+    # IS MAIN ITSELF RED? A test that fails alone on main+batch and ALSO fails alone on the
+    # rewound main is main's defect, and isolating would only re-prove it once per branch
+    # (15:45 on 2026-09-22: three branches isolated against a lattice test that main had
+    # failed since a hand-landed batch; the fix branch was sitting in the queue). Costs one
+    # scoped nextest run on the clean main; saves a full gate per branch.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -n "${TRIAGE_FILTER:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
+      if ! ( cd "$REPO" && cargo nextest run --workspace -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
+    fi
+    # The same question for browser specs (fog-of-war on 2026-09-22 16:22: red on main since
+    # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
+      if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on browser spec(s): $TRIAGE_SPECS -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - browser spec(s) $TRIAGE_SPECS fail on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails browser spec(s) $TRIAGE_SPECS - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
     fi
     log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
   else
@@ -484,6 +556,40 @@ self_version(){
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 self_version
+# STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
+# happen automatically?"). This runner is the only writer of main, so a staged merge or a
+# bulk marker found at startup can only be a previous runner's, killed mid-gate. Nothing was
+# gated, nothing was committed: abort the staged merge, rewind a provisional bulk to its base,
+# re-queue those branches, and carry on. Waiting for a person to type `git merge --abort`
+# cost an hour of an empty box today. Refuse only if the tree has uncommitted edits that are
+# not the merge's own - that is someone else's work and a person must look.
+# ORPHAN GATES FIRST. A runner killed mid-gate leaves its gate subshell (just gate / cargo /
+# nextest / npm e2e / hk serve) running on this very checkout; at 17:58 on 2026-09-22 a new
+# runner started a second gate beside one such orphan and the two shared the tree, the ports
+# and the CPU for 30 minutes (run ids d1503dd80480 and 4ecba9c10c0a). At startup NO gate
+# process can be legitimate, so every one of them is killed before anything else.
+for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
+  for opid in $(pgrep -f "$pat" 2>/dev/null); do
+    [ "$opid" = "$$" ] && continue
+    log "STARTUP: killing orphan gate process $opid ($pat)"; kill -TERM "$opid" 2>/dev/null
+  done
+done
+sleep 2
+if [ -e "$REPO/.git/MERGE_HEAD" ]; then
+  stale=$(git -C "$REPO" rev-parse --short MERGE_HEAD 2>/dev/null)
+  git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
+    || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
+fi
+if [ -f "$BULKMARK" ]; then
+  sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
+  if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
+    git -C "$REPO" reset --hard "$sbase" >>"$LOG" 2>&1 && rm -f "$BULKMARK" \
+      && log "STARTUP: rewound a provisional bulk to $sbase and re-queued: $sbranches" \
+      && for b in $sbranches; do echo "$b" >> "$QUEUE"; done
+  else
+    log "STARTUP: bulk marker present but the tree is dirty or base unknown - NOT rewinding; a person must look"
+  fi
+fi
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines

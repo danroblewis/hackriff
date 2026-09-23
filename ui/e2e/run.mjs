@@ -17,7 +17,7 @@
 // (canvas-journey.e2e.mjs), that backend too. The kill walks the OS parent-child tree from the spec's
 // pid (`killSpecTree` below) rather than relying on process groups, because that is the one
 // relationship Chrome's own detachment cannot escape.
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,20 @@ const discovered = readdirSync(HERE)
 // to every real run by construction — this is the door the selftest uses to drive it through the real
 // runner instead of a reimplementation of the timeout logic.
 const extraSpecs = (process.env.HK_E2E_EXTRA_SPECS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-const files = [...discovered, ...extraSpecs.map((p) => path.relative(HERE, p))];
+// `ui/e2e/quarantine.json` (user, 2026-09-22, the merge-queue crisis): specs the gate SKIPS, each
+// with the reason and the date, printed loudly on every run so a quarantine can never be quiet. A
+// spec named explicitly on the command line still runs (that is how it is worked on). Not a
+// retry, not a looser assertion: the spec stays in the tree, red, until its entry is removed —
+// and the entry is removed in the same commit that fixes it, never before.
+let quarantined = [];
+try {
+  quarantined = JSON.parse(readFileSync(path.join(HERE, "quarantine.json"), "utf8"));
+} catch (e) {
+  if (e.code !== "ENOENT") throw e;
+}
+const skipped = only.length === 0 ? quarantined.filter((q) => discovered.includes(q.spec)) : [];
+for (const q of skipped) console.log(`e2e: QUARANTINED ${q.spec} since ${q.since} — ${q.reason}`);
+const files = [...discovered.filter((f) => !skipped.some((q) => q.spec === f)), ...extraSpecs.map((p) => path.relative(HERE, p))];
 if (files.length === 0) { console.error("no e2e files matched"); process.exit(1); }
 
 // Well above the slowest file today (canvas-journey, ~95 s) so a healthy run never trips it, and far

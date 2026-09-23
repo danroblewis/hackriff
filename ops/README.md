@@ -119,7 +119,13 @@ file:** `touch $HACKRIFF_OPS/dispatch-paused` stops every dispatch until the fil
 (reaping, results and queueing continue) — the conditional holds each have a window, this has none.
 A batch that goes red **without a test FAIL** (lint, a build error, the UI unit step) is re-queued
 in order and held until the queue changes, never isolated: main+batch is broken as a whole and every
-isolated gate would reproduce it.
+isolated gate would reproduce it. Before isolating a red batch the runner re-runs the failing tests
+(or browser specs) on the rewound `main`; if `main` itself is red it holds the batch (`MAIN_RED`)
+instead of re-proving the defect once per branch. **Every gate has a hard time limit** —
+`GATE_TIMEOUT` (default 3600 s): past it the gate's whole process group is killed, the batch is
+re-queued once and flagged `GATE_TIMEOUT`. **The runner repairs its own leftovers at startup**: a
+staged merge or a provisional bulk that a killed gate left on `main` is aborted / rewound and
+re-queued automatically — nobody types `git merge --abort` any more.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)

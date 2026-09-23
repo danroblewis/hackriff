@@ -1,0 +1,7 @@
+[
+  {
+    "spec": "fog-of-war.e2e.mjs",
+    "since": "2026-09-22",
+    "reason": "T-521 boot readiness: 'band A at boot is not a real render (only 0 distinct colours)' at ~8 s alone on a quiet box - the spec samples the canvas before the first frame lands (the pane already reports 2 tiles drawn). The band-C/T-580 phase was rebuilt on task-gate-fixes and held over ~30 runs; only this boot wait is open. Fix: wait on the surface's own first-render signal (distinct colours > 0 / a drawn frame counter), never on time. Remove this entry in the same commit."
+  }
+]
