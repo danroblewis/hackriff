@@ -76,6 +76,73 @@ export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000, 
 }
 
 /**
+ * **Poll a node-side predicate until it holds, and say what was waited for when it does not.**
+ *
+ * The counterpart to [[Page.waitFor]] for facts that live in THIS process rather than in the page —
+ * a request having come back on `page.requests`, a server route having answered. It exists so that
+ * "wait until the thing happened" never has to be spelled as "wait a while and hope": a readiness
+ * wait that reads the wall clock decides, on how busy the box is, whether a test measures the
+ * product or measures the scheduler.
+ *
+ * `timeoutMs` is a FAILURE BOUND, never the wait itself: on expiry it throws naming `what`, which is
+ * the sentence whoever reads the red line needs.
+ */
+export async function until(what, ok, { timeoutMs = 30000, everyMs = 200 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    if (await ok()) return Date.now() - t0;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
+
+/**
+ * **Wait for a page-derived report to reach `done`, and keep waiting while the page is still
+ * WORKING towards it.**
+ *
+ * The mechanism behind every "wait for the pane to become resident" in this tier, shared because
+ * the *bound* is the thing that was wrong in all of them and the *predicate* is the thing that must
+ * stay each file's own.
+ *
+ * What was wrong: a fixed deadline (25 s, 40 s) is a bet on the tile route's service rate, and this
+ * repo has measured that rate moving more than twenty-fold between a quiet box and a full suite —
+ * 167 ms a tile with one other spec running, 3612 ms a tile in the whole suite. The same pane, the
+ * same product and the same claim then pass or fail on how many other lanes are up, which is the
+ * one thing the test is not about.
+ *
+ * What replaces it is not a longer deadline. It is the difference between a pane that is FILLING
+ * and a pane that is STUCK, which the page states plainly: its report changes, or its requests are
+ * on the wire. While either is true the page is working and the wait continues; when BOTH have been
+ * quiet for `stallMs` the page has finished doing whatever it is going to do, and the caller's
+ * assertion judges that. So the defect these waits exist to catch — a place a refusal made terminal,
+ * which is a *steady* `0 tiles · N coarse stand-ins · 0 pending` with nothing on the wire — is
+ * reported FASTER than the old deadline reported it, not slower.
+ *
+ * `timeoutMs` remains, as the failure bound of last resort for a page that churns forever.
+ */
+export async function waitWhileWorking(page, read, done, {
+  everyMs = 400, stallMs = 12000, timeoutMs = 180000, busy = (u) => u.includes("/api/tiles"),
+} = {}) {
+  const t0 = Date.now();
+  const wire = () => page.requests.filter((r) => busy(r.url))
+    .reduce((n, r) => n + 1 + (r.endedMs !== null ? 1 : 0), 0);
+  let value = await read(), lastSeen = JSON.stringify(value), lastWire = wire(), movedAt = Date.now();
+  for (;;) {
+    if (done(value)) return { ok: true, value, ms: Date.now() - t0, stalledMs: 0 };
+    const elapsed = Date.now() - t0;
+    if (elapsed > timeoutMs) return { ok: false, value, ms: elapsed, stalledMs: Date.now() - movedAt };
+    if (Date.now() - movedAt > stallMs) return { ok: false, value, ms: elapsed, stalledMs: Date.now() - movedAt };
+    await new Promise((r) => setTimeout(r, everyMs));
+    value = await read();
+    const seen = JSON.stringify(value), w = wire();
+    if (seen !== lastSeen || w !== lastWire) movedAt = Date.now();
+    lastSeen = seen; lastWire = w;
+  }
+}
+
+/**
  * Every tile ADDRESS a list of requests asked for, one record per address (T-573).
  *
  * A single `GET /api/tiles` names one address in its query and answers it with its own status. A
@@ -317,6 +384,61 @@ export class Page {
           `  exceptions: ${JSON.stringify(this.exceptions.slice(0, 3))}`);
       }
       await new Promise((r) => setTimeout(r, everyMs));
+    }
+  }
+
+  /**
+   * **Poll an in-page expression for a VALUE until `ok(value)` holds, and report rather than throw.**
+   *
+   * Three properties [[waitFor]] cannot give a test that has to assert on numbers:
+   *
+   *  - **One evaluation per sample.** Reading a rectangle in one `eval` and the drawing buffer that
+   *    is supposed to match it in another is a race against the page's own layout — the chrome's
+   *    height changes when a level label wraps, the canvas moves with it, and the two halves of the
+   *    comparison then come from two different layouts. Whatever must be compared is read together.
+   *  - **It reports the last sample instead of throwing.** The caller keeps its own assertion, with
+   *    its own message and its own number, so a genuine defect still fails as itself rather than as
+   *    "the harness timed out".
+   *  - **`timeoutMs` is a failure bound, not the wait.** A green run returns the moment the page
+   *    agrees with itself; a red one says what it was waiting for and what it last saw.
+   */
+  async waitForValue(what, expression, ok, { timeoutMs = 30000, everyMs = 150 } = {}) {
+    const t0 = Date.now();
+    let value = null, polls = 0;
+    for (;;) {
+      value = await this.eval(expression);
+      polls++;
+      if (ok(value)) return { value, ok: true, what, ms: Date.now() - t0, polls };
+      if (Date.now() - t0 > timeoutMs) return { value, ok: false, what, ms: Date.now() - t0, polls };
+      await new Promise((r) => setTimeout(r, everyMs));
+    }
+  }
+
+  /**
+   * **Wait until an in-page value STOPS changing, across real frames.**
+   *
+   * The readiness a gesture needs. A wheel or a drag is applied by the render loop, not by the
+   * dispatch, and how many frames that takes is a function of how busy the box is — so "dispatch,
+   * sleep 450 ms, read the readout" asks the machine's load whether the gesture happened. This asks
+   * the page: sample the readout across frames until `stable` consecutive samples agree, and hand
+   * back the settled value.
+   *
+   * It settles on **no change**, never on a particular value, so it is equally the right wait before
+   * an assertion that the view moved and before one that it did not — neither can be made true by
+   * waiting, and both stop being decided by when the sample was taken. Reports rather than throws,
+   * for [[waitForValue]]'s reason.
+   */
+  async waitUntilStill(what, expression, { stable = 3, framesEach = 2, timeoutMs = 15000 } = {}) {
+    const t0 = Date.now();
+    let last = await this.eval(expression), same = 1, samples = 1;
+    for (;;) {
+      await this.frames(framesEach);
+      const now = await this.eval(expression);
+      samples++;
+      same = JSON.stringify(now) === JSON.stringify(last) ? same + 1 : 1;
+      last = now;
+      if (same >= stable) return { value: last, still: true, what, ms: Date.now() - t0, samples };
+      if (Date.now() - t0 > timeoutMs) return { value: last, still: false, what, ms: Date.now() - t0, samples };
     }
   }
 

@@ -267,9 +267,17 @@ const CONCURRENCY = Math.max(1, Number(process.env.HK_E2E_CONCURRENCY ?? 2));
  * Lane `i`'s base port. Lane 0 keeps the historical 8791 so a single-lane run is byte-for-byte the
  * old one; the rest are 32 apart (wider than `freePort`'s 24-port sweep, so lanes cannot collide)
  * and chosen to clear the reserved 8788/8789/8899/8900 block that `backend.mjs` refuses outright.
+ *
+ * **Every lane is derived from `HK_E2E_PORT`, not just lane 0.** It used to be `8951 + (i - 1) * 32`
+ * — a constant — so two runs on one box (two worktrees, or an agent beside the gate) put their
+ * lane 1 and lane 2 backends on the same ports however either was configured, and only lane 0 could
+ * be moved out of the way. `backend.mjs`'s `freePort` steps past a port someone else is already
+ * serving, so the symptom is not a crash: it is a run that quietly takes a neighbour's port range
+ * and prints a warning nobody reads. `+160` reproduces today's 8951/8983 exactly at the default
+ * base, so nothing moves unless `HK_E2E_PORT` is set.
  */
 const PORT_BASE = Number(process.env.HK_E2E_PORT ?? 8791);
-const lanePortBase = (i) => (i === 0 ? PORT_BASE : 8951 + (i - 1) * 32);
+const lanePortBase = (i) => (i === 0 ? PORT_BASE : PORT_BASE + 160 + (i - 1) * 32);
 
 /**
  * Rough per-spec seconds, measured from `$HACKRIFF_OPS/merge-runner.log` (2026-09-22 medians).

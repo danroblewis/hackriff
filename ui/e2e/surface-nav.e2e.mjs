@@ -57,7 +57,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, tileAsks } from "./harness.mjs";
+import { Browser, census, tileAsks, until } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -104,8 +104,19 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   await page.waitFor("the first tile textures to be uploaded",
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
 
+  // **The gesture point is re-derived from the canvas's box every time it is used.** The layout
+  // moves under this test: T-505 put the tier inside every viewport row's level cell, so the row
+  // wraps and un-wraps as these gestures change the level, and the canvas slides with it. A point
+  // held in page coordinates from before a gesture can land off the pane — and `input.ts`
+  // `preventDefault`s every wheel over the canvas BEFORE it decides which viewport the point is
+  // over, so a wheel that missed still arrives and still reports `defaultPrevented`. It would read
+  // as a gesture the surface refused rather than one the surface never got.
+  const midAt = async (fx = 0.5, fy = 0.35) => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * fx, y: r.y + r.h * fy, rect: r };
+  };
   const rect = await page.$rect('[data-slot="canvas"]');
-  const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
   const before = await page.eval(`JSON.stringify(${READOUT})`);
 
   // A pan, then zoom on each axis, then a pan of the whole-surface map at the bottom. Between
@@ -125,15 +136,29 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   };
 
   const moved = [], clamped = [], visited = [];
+  /**
+   * One gesture, read once **the surface has applied it** rather than 900 ms later.
+   *
+   * The wait used to be `frames(6)` plus two 450 ms sleeps, and the readout was read at the end of
+   * them — so whether this step saw the gesture depended on how many frames the box had got round
+   * to, which is a measurement of the machine and not of the page. Beside one bounded worker it
+   * lost: *"the drags moved nothing at all, so this proves nothing"*, green alone.
+   *
+   * `waitUntilStill` settles on the readout **not changing** across real frames, which is the right
+   * wait before both shapes of assertion here and cannot manufacture either: a gesture that does
+   * nothing settles immediately on the old value and still fails `mustMove`, and one that moves the
+   * view is still classified by what it moved to. The cap samples stay two real intervals apart,
+   * because the AIMD trace they feed is a sequence and not a snapshot.
+   */
   const step = async (what, fn, { mustMove = true } = {}) => {
     const was = await page.eval(`JSON.stringify(${READOUT})`);
     await fn();
-    await page.frames(6);
-    await new Promise((r) => setTimeout(r, 450));
+    const settled = await page.waitUntilStill(`${what} to be applied and the readout to settle`,
+      `JSON.stringify(${READOUT})`, { stable: 3, framesEach: 4, timeoutMs: 15000 });
     await sampleCap();
-    await new Promise((r) => setTimeout(r, 450));
+    await page.frames(8);
     await sampleCap();
-    const now = await page.eval(`JSON.stringify(${READOUT})`);
+    const now = settled.value;
     if (mustMove) assert.notEqual(now, was, `${what} did not move the view — the gesture missed, so it tested nothing`);
     (now === was ? clamped : moved).push(what);
     visited.push(now);
@@ -159,30 +184,50 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // requests still counted with the rest of the storm, the step still records whether it moved (it
   // is printed either way), and every claim about which axes a wheel moves is made in the T-456 and
   // T-472 tests below, each of which establishes its own premise first rather than assuming one.
-  await step("drag-pan", () => page.drag(mid, { x: mid.x - 260, y: mid.y + 120 }, 12));
+  await step("drag-pan", async () => {
+    const m = await midAt();
+    await page.drag(m, { x: m.x - 260, y: m.y + 120 }, 12);
+  });
   await step("jump to the whole surface", () => page.click(BUTTON("Whole surface")));
-  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); },
+  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), -240); },
     { mustMove: false });
-  await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240, { shift: true }); });
-  await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(mid, 240, { shift: true }); });
-  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); },
+  await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), -240, { shift: true }); });
+  await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(await midAt(), 240, { shift: true }); });
+  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), 240); },
     { mustMove: false });
   // The map along the bottom is a viewport too, and it opens showing the whole surface — so
   // *dragging* it is clamped for the same reason the time wheel is. Double-clicking it is not:
   // that is the page's discrete "send the active pane there", which moves the pane across the
   // spectrum in one step and invalidates its whole working set.
-  const mapAt = (fx) => ({ x: rect.x + rect.w * fx, y: rect.y + rect.h - 18 });
-  await step("drag the whole-surface map", () => page.drag(mapAt(0.5), { x: rect.x + rect.w * 0.5 + 180, y: rect.y + rect.h - 18 }, 10),
-    { mustMove: false });
-  await step("double-click the map to send the pane there", () => page.dblclick(mapAt(0.22)));
+  const mapAt = async (fx) => {
+    const r = (await midAt()).rect;
+    return { x: r.x + r.w * fx, y: r.y + r.h - 18, rect: r };
+  };
+  await step("drag the whole-surface map", async () => {
+    const m = await mapAt(0.5);
+    await page.drag(m, { x: m.rect.x + m.rect.w * 0.5 + 180, y: m.y }, 10);
+  }, { mustMove: false });
+  await step("double-click the map to send the pane there", async () => page.dblclick(await mapAt(0.22)));
   await step("fit back to coverage", () => page.click(BUTTON("Fit to coverage")));
   t.diagnostic(`moved the view: ${moved.join(", ")}`);
   t.diagnostic(`clamped (no movement, expected on this fixture): ${clamped.join(", ") || "none"}`);
 
-  // Let anything still queued drain, so a refusal from the last gesture has every chance to arrive
-  // before the steady-state window opens.
+  // **The boundary is drawn once the gestures' own requests have been ANSWERED, not 1500 ms after
+  // the last one.** Every request still on the wire when the gestures end is one whose `503` would
+  // otherwise land inside the steady window and be counted against a window that did not cause it —
+  // and how long the route takes to answer four in-flight reads is the same twenty-fold-varying
+  // service rate this file already refuses to bet on elsewhere. The route's cap bounds how many
+  // there can be, so this is a short wait on a small, named set: requests that started before the
+  // mark and have neither a status nor an error.
   await page.frames(10);
-  await new Promise((r) => setTimeout(r, 1500));
+  const settlingFrom = Date.now();
+  const unanswered = () => page.requests.filter(
+    (r) => r.startedMs <= settlingFrom && r.status === null && r.error === null);
+  const drained = await until("the gestures' own requests to be answered before the steady window opens",
+    async () => unanswered().length === 0, { timeoutMs: 30000, everyMs: 150 })
+    .then((ms) => ({ ok: true, ms }), () => ({ ok: false, ms: Date.now() - settlingFrom }));
+  t.diagnostic(`the gestures' requests settled after ${drained.ms} ms` +
+    (drained.ok ? "" : ` — ${unanswered().length} never came back; opening the steady window anyway`));
   const navigationEnded = Date.now();
   // **Counted per ADDRESS** (T-573): a `GET /api/tiles/batch` answers 200 and carries each
   // address's own 503 inside, so a status-line count would see none of the refusals the client
@@ -691,8 +736,25 @@ const INSTALL_PROBE = `(() => {
 const ZOOM_NOW = `JSON.stringify({ dpr: window.devicePixelRatio,
   scale: window.visualViewport ? window.visualViewport.scale : null, base: window.__zoomBase })`;
 
-test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach the page", async (t) => {
-  // ——— the premise, measured and waited for ———
+/**
+ * **The premise every gesture test in this file needs, and the one that made two of them fail
+ * ALONE.**
+ *
+ * `SurfacePreview` resolves the surface's bounds ONCE, at load, so how much room the time axis has
+ * is decided by how long the backend has been recording when the page opens — and each of these
+ * tests opens its own page. Measured 2026-09-22: run alone, this file met a ~40 s record against a
+ * 16 s zoom floor (2.5 floors); run after another spec, 120-149 s (7.5-9.3 floors). At 2.5 floors
+ * the axis is close enough to clamped in both directions that a zoom cannot be seen to move it, and
+ * T-472 and T-486 went red **alone** and green in company — the exact inverse of a load flake, and
+ * the reason the merge runner's "re-run the failing spec alone" triage manufactured a red for this
+ * file rather than clearing one.
+ *
+ * T-456 has waited for this since it was written. The wait belongs to all three, so it lives here:
+ * asked of the two routes that state the extent and the floor, bounded generously, and asserted
+ * rather than assumed — a fixture that never grows a usable axis fails as a missing premise instead
+ * of as a welded one.
+ */
+async function waitForTimeRoom(t) {
   let room = await timeRoom();
   const waitedFrom = Date.now();
   while (room.extentS < TIME_ROOM * room.floorS && Date.now() - waitedFrom < 120000) {
@@ -707,6 +769,12 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
     "zoom floor, so the time axis is clamped in both directions and a uniform zoom CANNOT be seen to " +
     "move it. This is the premise, not the claim: without it a green run would prove nothing about " +
     "the time half of the gesture.");
+  return room;
+}
+
+test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach the page", async (t) => {
+  // ——— the premise, measured and waited for ———
+  await waitForTimeRoom(t);
 
   const browser = await Browser.open();
   t.after(() => browser.close());
@@ -717,9 +785,32 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
   assert.equal(await page.eval(INSTALL_PROBE), true);
 
+  /**
+   * The gesture point, **re-derived from the canvas's box every time it is used**.
+   *
+   * A point taken once at the top of a test is in page coordinates of the layout that existed then,
+   * and this page's layout moves: T-505 put the tier inside every viewport row's level cell, so
+   * that row wraps and un-wraps as a gesture changes the level and the canvas slides with it. A
+   * wheel delivered at a stale point can land off the pane entirely — and `input.ts`
+   * `preventDefault`s every wheel over the canvas *before* it decides which viewport the point is
+   * over, so such a wheel still arrives at `window` and still reports `defaultPrevented`. The
+   * delivery checks below therefore cannot see it, and the gesture reads as one the surface refused
+   * rather than one the surface never got.
+   */
+  const midAt = async (fx = 0.5, fy = 0.35) => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * fx, y: r.y + r.h * fy };
+  };
   const rect = await page.$rect('[data-slot="canvas"]');
   const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
   const read = async () => page.eval(PANE_ROW);
+  /** Wait for the surface to APPLY whatever was just dispatched, then read the settled row. */
+  const settled = async (what) => {
+    const r = await page.waitUntilStill(what, `JSON.stringify(${PANE_ROW})`,
+      { stable: 3, framesEach: 4, timeoutMs: 15000 });
+    return JSON.parse(r.value);
+  };
   const levels = (row) => row.level.match(/level (\d+)\/(\d+)/)?.slice(1).map(Number) ?? [NaN, NaN];
 
   /**
@@ -733,9 +824,9 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
    */
   const reset = async (inSteps = 0) => {
     await page.click(BUTTON("Whole surface"));
-    await page.frames(4);
-    for (let i = 0; i < inSteps; i++) await page.wheel(mid, -240);
-    if (inSteps) await page.frames(4);
+    await settled("Whole surface to be applied");
+    for (let i = 0; i < inSteps; i++) await page.wheel(await midAt(), -240);
+    if (inSteps) await settled("the reset zoom to be applied");
     await page.eval("window.__wheels = []");
     return read();
   };
@@ -744,8 +835,10 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   const gesture = async (what, run, { inSteps = 0 } = {}) => {
     const was = await reset(inSteps);
     await run();
-    await page.frames(6);
-    const now = await read();
+    // The readout is read once the surface has applied the gesture, never after a frame count: how
+    // many frames a wheel or a drag takes to reach the view is the box's business, and reading too
+    // early reports a gesture that arrived as one that did nothing.
+    const now = await settled(`${what} to be applied and the readout to settle`);
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     t.diagnostic(`${what}: freq ${was.freq} → ${now.freq} · time ${was.time} → ${now.time} · ${now.level}`);
     t.diagnostic(`${what}: ${wheels.length} wheel event(s) reached the page` +
@@ -758,15 +851,17 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // ——— 1. DRAG PANS BOTH AXES ———
   // Diagonal, so a handler that fed one component to both axes — or measured travel as the sum of
   // the two, which is T-407's defect — would show up as the wrong axis moving.
-  const drag = await gesture("drag (diagonal)", () =>
-    page.drag(mid, { x: mid.x - 240, y: mid.y + 140 }, 12), { inSteps: 2 });
+  const drag = await gesture("drag (diagonal)", async () => {
+    const m = await midAt();
+    await page.drag(m, { x: m.x - 240, y: m.y + 140 }, 12);
+  }, { inSteps: 2 });
   assert.ok(drag.freqMoved, "a drag must pan the FREQUENCY axis");
   assert.ok(drag.timeMoved, "a drag must pan the TIME axis: both axes, in one gesture");
   assert.deepEqual(levels(drag.now), levels(drag.was), "a pan must not change either pyramid level");
 
   // ——— 2. PLAIN WHEEL: UNIFORM ZOOM, BOTH AXES ———
   const plain = await gesture("plain wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240);
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240);
   });
   assert.equal(plain.wheels.length, 2, "the browser did not deliver the plain wheels to the page at all");
   assert.ok(plain.wheels.every((w) => !w.shift && !w.alt && !w.ctrl && !w.meta),
@@ -787,7 +882,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
 
   // ——— 3. SHIFT + WHEEL: FREQUENCY ONLY ———
   const shift = await gesture("shift + wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { shift: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { shift: true });
   });
   assert.ok(shift.wheels.length > 0 && shift.wheels.every((w) => w.shift),
     `the browser did not deliver shiftKey on the wheel: ${JSON.stringify(shift.wheels)}`);
@@ -798,7 +893,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // ——— 4. ALT / OPTION + WHEEL: TIME ONLY ———
   // The binding the whole ticket turns on, and the one a unit test cannot speak for.
   const alt = await gesture("alt + wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { alt: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { alt: true });
   });
   assert.ok(alt.wheels.length > 0, "the browser delivered NO wheel event at all when alt was held — " +
     "alt+wheel is being consumed before the page sees it, and the time axis has no modifier");
@@ -815,7 +910,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // surface. The renderer-level answer below is reported for exactly what it is worth — it says
   // nothing about the window server, which is the reason the binding is alt.
   const ctrl = await gesture("ctrl + wheel (unbound: expected to behave as a plain wheel)", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { ctrl: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { ctrl: true });
   });
   const zoom = JSON.parse(await page.eval(ZOOM_NOW));
   t.diagnostic(`ctrl + wheel: devicePixelRatio ${zoom.base.dpr} → ${zoom.dpr}, ` +
@@ -946,6 +1041,10 @@ const MAX_STEPS = 60;
 const PROBE_STEPS = 4;
 
 test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt each still move one", async (t) => {
+  // **Before the browser, because the page reads the bounds once at load** — see
+  // [[waitForTimeRoom]]. Run alone, this test met a record barely wider than its own zoom floor and
+  // reported the result as a welded axis.
+  await waitForTimeRoom(t);
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -955,10 +1054,45 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
   assert.equal(await page.eval(INSTALL_PROBE), true);
 
-  const rect = await page.$rect('[data-slot="canvas"]');
-  // Off-centre on both axes, so the two anchors differ and a gesture that fed one to both would show.
-  const at = { x: rect.x + rect.w * 0.42, y: rect.y + rect.h * 0.35 };
+  /**
+   * The gesture point, **re-derived from the canvas's box for every wheel**.
+   *
+   * Off-centre on both axes, so the two anchors differ and a gesture that fed one to both would
+   * show. Re-derived rather than taken once, because the layout moves while this test runs: T-505
+   * put the tier inside every viewport row's level cell, and this test drives the level from 11 to
+   * 8 and the frequency span from megahertz to megahertz, so the row wraps and un-wraps and the
+   * canvas slides with it.
+   *
+   * That matters here more than anywhere else in this file, because of what `input.ts` does in what
+   * order: it `preventDefault`s **every** wheel over the canvas before it decides which viewport
+   * the point is over, and `SurfacePreview.wheel` returns silently when the point is over no pane.
+   * So a wheel delivered at a stale point arrives at `window`, is recorded by the probe, reports
+   * `defaultPrevented: true` — and moves nothing. Every "did not move the time axis" check below
+   * would read that as the surface refusing the gesture, which is the opposite finding, and is what
+   * *"4 alt wheels outward did not move the time axis (−21 s): it is welded shut"* looked like in
+   * the gate's pooled run and never looked like alone.
+   */
+  const atNow = async () => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * 0.42, y: r.y + r.h * 0.35 };
+  };
   const read = async () => page.eval(PANE_ROW);
+  /**
+   * Wait for the surface to APPLY what was just dispatched, and hand back the settled row.
+   *
+   * Never a frame count: how many frames a wheel takes to reach the view is a fact about the box.
+   * Settling on "the readout stopped changing" is the right wait before both shapes of assertion in
+   * this test and can manufacture neither — a wheel the surface clamps settles at once on the old
+   * value and still fails a `notEqual`, and one that moves the view is still judged on where it
+   * landed. This preview holds a fixed edge (see the header), so a settled readout here is view
+   * state and not lag.
+   */
+  const settle = async (what) => {
+    const r = await page.waitUntilStill(what, `JSON.stringify(${PANE_ROW})`,
+      { stable: 3, framesEach: 4, timeoutMs: 15000 });
+    return JSON.parse(r.value);
+  };
   const same = (a, b) => a.freq === b.freq && a.time === b.time && a.level === b.level;
   const show = (r) => `${r.freq} · ${r.time} · ${r.level}`;
 
@@ -973,13 +1107,12 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     "that follows a live edge the offset drifts with wall-clock lag, and then neither an equal nor a " +
     "notEqual on it means anything — this preview is supposed to hold a fixed edge.");
 
-  /** One wheel, and everything the readout says. */
+  /** One wheel, and everything the readout says once the surface has applied it. */
   const wheel = async (mods = {}, deltaY = -240) => {
     const was = await read();
     await page.eval("window.__wheels = []");
-    await page.wheel(at, deltaY, mods);
-    await page.frames(4);
-    const now = await read();
+    await page.wheel(await atNow(), deltaY, mods);
+    const now = await settle("the surface to apply the wheel");
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     return { was, now, wheels, moved: !same(was, now) };
   };
@@ -988,9 +1121,8 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
   const probe = async (mods, deltaY) => {
     const was = await read();
     await page.eval("window.__wheels = []");
-    for (let i = 0; i < PROBE_STEPS; i++) await page.wheel(at, deltaY, mods);
-    await page.frames(6);
-    const now = await read();
+    for (let i = 0; i < PROBE_STEPS; i++) await page.wheel(await atNow(), deltaY, mods);
+    const now = await settle(`the surface to apply ${PROBE_STEPS} ${JSON.stringify(mods)} wheels`);
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     assert.equal(wheels.length, PROBE_STEPS,
       `the browser delivered ${wheels.length} of ${PROBE_STEPS} wheels for ${JSON.stringify(mods)} — ` +
@@ -1001,8 +1133,7 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
 
   // ——— out to the whole surface, then wheel IN until the uniform gesture stops ———
   await page.click(BUTTON("Whole surface"));
-  await page.frames(4);
-  t.diagnostic(`whole surface: ${show(await read())}`);
+  t.diagnostic(`whole surface: ${show(await settle("Whole surface to be applied"))}`);
 
   let steps = 0;
   for (let i = 0; i < MAX_STEPS; i++) {
@@ -1113,6 +1244,9 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
 // attribute must go to `false`. A guard that could not observe the pane leaving live would pass
 // step 1 no matter what the client did.
 test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag back to the edge returns it", async (t) => {
+  // The same premise, for the same reason ([[waitForTimeRoom]]): this test zooms the time axis in
+  // and then scrubs 160 px along it, and neither is a gesture on a record with no room in it.
+  await waitForTimeRoom(t);
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -1155,6 +1289,60 @@ test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag 
     return now;
   };
 
+  /** The pane's own offset behind the live edge, in seconds, off the readout it already prints. */
+  const LAG_S = `(() => {
+    const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const where = v?.querySelector('.hk-surface-where')?.textContent ?? '';
+    const label = (where.split(' \u00b7 ')[1] ?? '').trim();
+    if (label === 'LIVE') return 0;
+    // Parsed the way paneSpanBoundS parses the ruler, and deliberately NOT anchored on the sign:
+    // the label's leading minus is a typographic one, and a regex that assumed which codepoint it
+    // was reported every reading as unreadable while the number was right there.
+    const mm = /([\\d.]+) m ([\\d.]+) s/.exec(label);
+    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
+    const m = /([\\d.]+) (ms|s|h)/.exec(label);
+    if (!m) return null;
+    return Number(m[1]) * { ms: 1e-3, s: 1, h: 3600 }[m[2]];
+  })()`;
+
+  /**
+   * **A drag back to the edge whose RELEASE is taken from the pane's own position, not from a step
+   * count** (the deflake, 2026-09-22).
+   *
+   * `settleTime` re-follows only when the release lands inside the snap-back zone — `snapPx` device
+   * pixels of the pane's own height, a fraction of a second of capture time at this zoom. But the
+   * two sides of that comparison come from two different clocks: the window was clamped against the
+   * edge the pane model knew on its **last rendered frame**, and the release is measured against
+   * the edge the **stream** has reached by the time the pointer lifts. The residual lag at release
+   * is therefore exactly "how long since this page last rendered" — microseconds on a quiet box,
+   * hundreds of milliseconds beside three other lanes and a bounded worker, where this failed as
+   * *"a drag released at the live edge left the pane frozen"* and passed alone every time.
+   *
+   * So the pointer is walked a frame at a time, and then nudged a pixel at a time until the pane
+   * says it has come to rest AT the edge — and released immediately after that frame, so what is
+   * released against is what was last drawn. The claim is untouched: a client that does not snap
+   * back never re-follows, whatever the lag at release was, and still fails below with it printed.
+   */
+  const dragBackToEdge = async (dy, steps, { restS = 0.05, nudges = 40 } = {}) => {
+    let y = mid.y;
+    await page.mouse("mousePressed", mid.x, y, { buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= steps; i++) {
+      y = mid.y + (dy * i) / steps;
+      await page.mouse("mouseMoved", mid.x, y, { buttons: 1 });
+      await page.frames(1);
+    }
+    let lag = await page.eval(LAG_S), used = 0;
+    for (; used < nudges && (lag === null || lag > restS); used++) {
+      y += 1;
+      await page.mouse("mouseMoved", mid.x, y, { buttons: 1 });
+      await page.frames(1);
+      lag = await page.eval(LAG_S);
+    }
+    await page.mouse("mouseReleased", mid.x, y, { buttons: 0, clickCount: 1 });
+    await page.frames(6);
+    return { lag, used, following: await follow() };
+  };
+
   // 1. THE REPORTED DEFECT. One pixel, straight up the time axis — a twitch, not a scrub.
   assert.deepEqual(await step("a 1 px time-pan", -1, 1), ["true"],
     "a 1 px time-pan dropped the pane out of live: this is the dead zone the user asked for, twice");
@@ -1165,6 +1353,12 @@ test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag 
 
   // 3. AND BACK. A drag hard toward the edge clamps against it, and the release is a return to live
   //    rather than a pause a few rows short of it — with rows appending under the cursor throughout.
-  assert.deepEqual(await step("a drag back to the live edge", 420, 14), ["true"],
-    "a drag released at the live edge left the pane frozen — the second half of the report");
+  const back = await dragBackToEdge(420, 14);
+  t.diagnostic(`a drag back to the live edge (420 px, then ${back.used} one-pixel nudge(s)): the pane ` +
+    `reported itself ${back.lag === null ? "at an unreadable offset" : `${(back.lag * 1000).toFixed(0)} ms`} ` +
+    `behind the edge at the release · data-following = ${JSON.stringify(back.following)}`);
+  assert.deepEqual(back.following, ["true"],
+    "a drag released at the live edge left the pane frozen — the second half of the report " +
+    `(the pane put itself ${back.lag === null ? "?" : (back.lag * 1000).toFixed(0)} ms behind the edge ` +
+    `when the pointer lifted, after ${back.used} nudge(s))`);
 });

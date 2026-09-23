@@ -25,7 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, tileAsks } from "./harness.mjs";
+import { Browser, census, tileAsks, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -80,21 +80,25 @@ const isRender = (c) => c.distinct >= 32 && c.dominantShare < 0.9;
  *
  * It **reports** rather than throws when the pane will not converge, so the assertion that follows
  * can describe the finding.
+ *
+ * **What it is bounded BY** (the deflake, 2026-09-22). It used to be bounded by a fixed 25 s / 40 s,
+ * and that is a bet on the tile route's service rate — measured in this repo at 167 ms a tile
+ * beside one other spec and 3612 ms a tile in the full suite. Under the gate's pooled lanes it lost
+ * that bet twice with the product working: *"the pane never became resident with a healthy tunnel
+ * (7 tiles · 21 coarse stand-ins · 0 pending)"*, green alone every time, which is a pane that was
+ * still filling being reported as one that had stopped. It is now bounded by whether the page is
+ * still WORKING — its own report changing, or its requests on the wire — which is exactly the
+ * distinction the assertions below turn on, and which makes the T-523 defect (a steady `0 tiles ·
+ * N coarse stand-ins · 0 pending` with nothing asked for again) report FASTER than the deadline did.
  */
-async function waitForResident(page, { timeoutMs = 25000, everyMs = 400 } = {}) {
+async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 12000 } = {}) {
   const COUNTS = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
     return v ? (v.querySelector('.hk-surface-counts')?.textContent ?? '') : ''; })()`;
-  const t0 = Date.now();
-  let last = "";
-  for (;;) {
-    last = await page.eval(COUNTS);
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(last);
-    if (m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0) {
-      return { resident: true, counts: last, ms: Date.now() - t0 };
-    }
-    if (Date.now() - t0 > timeoutMs) return { resident: false, counts: last, ms: Date.now() - t0 };
-    await new Promise((r) => setTimeout(r, everyMs));
-  }
+  const r = await waitWhileWorking(page, () => page.eval(COUNTS), (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
+    return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
+  }, { everyMs, stallMs, timeoutMs });
+  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
 }
 
 test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
@@ -309,7 +313,8 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   // 1. Let the pane become fully resident with the tunnel healthy, so the counts below start from a
   //    known place and the addresses the zoom asks for are genuinely NEW.
   const before = await waitForResident(page);
-  t.diagnostic(`residency before the outage after ${before.ms} ms: ${before.counts}`);
+  t.diagnostic(`residency before the outage after ${before.ms} ms: ${before.counts}` +
+    (before.resident ? "" : ` — the page then made no progress and asked for nothing for ${before.stalledMs} ms`));
   assert.ok(before.resident, `the pane never became resident with a healthy tunnel (${before.counts}); ` +
     "nothing after this would be a claim about 502s");
 
@@ -324,7 +329,17 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   //    nothing below touches the wheel, the window size or the pane again.
   await page.eval("window.__t523.on = true");
   for (let i = 0; i < 3; i++) { await page.wheel(at, 240, { shift: true }); await page.frames(4); }
-  await new Promise((r) => setTimeout(r, 3500));
+  // **The outage lasts as long as the zoom's own enumeration does, not 3500 ms.** The premise below
+  // is that the zoom's addresses were refused, and how long the client takes to put them on the
+  // wire is the route's service rate — the same twenty-fold-varying quantity `waitForResident`
+  // above was bounded wrongly by. So the wedge is held until the injector's own tally stops
+  // growing: every address the gesture wanted has been refused, and none is still to come.
+  const asked = await page.waitForValue("the wedged proxy to be asked for the zoom's new addresses",
+    "window.__t523.injected.length", (n) => n > 0, { timeoutMs: 30000 });
+  const wedge = await waitWhileWorking(page, () => page.eval("window.__t523.injected.length"),
+    () => false, { stallMs: 4000, timeoutMs: 30000 });
+  t.diagnostic(`the wedged proxy was first asked after ${asked.ms} ms and stopped being asked at ` +
+    `${wedge.value} refusal(s), ${wedge.ms} ms into the outage`);
   await page.eval("window.__t523.on = false");
   const injected = [...new Set(await page.eval("window.__t523.injected.slice()"))];
   t.diagnostic(`${injected.length} distinct tile addresses answered 502 by the injected proxy during the zoom`);
@@ -351,8 +366,10 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   //    stand-ins · 0 pending`. That is the defect's own signature, it is what the user saw as a
   //    stalled view, and re-addressing the tiles is exactly what their resize did. Nothing here
   //    resizes, and the counts are read straight off the page.
-  const after = await waitForResident(page, { timeoutMs: 40000 });
-  t.diagnostic(`residency after the outage after ${after.ms} ms: ${after.counts}`);
+  const after = await waitForResident(page);
+  t.diagnostic(`residency after the outage after ${after.ms} ms: ${after.counts}` +
+    (after.resident ? "" : ` — the page then made no progress and asked for nothing for ${after.stalledMs} ms, ` +
+      "which is the terminal-place signature rather than a slow route"));
 
   const samples = [];
   for (let i = 0; i < 5; i++) {
