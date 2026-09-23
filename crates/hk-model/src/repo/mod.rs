@@ -60,6 +60,7 @@
 //! the stored edges, with the same closed-interval rule as [`crate::region`].
 
 pub mod alarms; // T-122
+mod authored; // T-816 MAP-16 human-authored annotations
 mod bookmarks;
 mod classify; // T-211
 #[cfg(test)]
@@ -133,6 +134,10 @@ pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning
 // `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
 // `Resolution` and `Measured` are the decode-search vocabulary and would collide with
 // `classify::Stage` and `cluster::Resolution`, which mean entirely different things.
+pub use authored::{
+    AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
+    AuthoredKind, AuthoredPage, AuthoredProvenance, AuthoredTier, authored_block,
+};
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
 pub use retune::{
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,

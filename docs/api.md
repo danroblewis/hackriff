@@ -1362,6 +1362,27 @@ An armed watch offers every emission the pipeline first sights inside the extent
 
 - **`t` is bare and carries Unix seconds** — the units convention's default, so no `_ns` rename applies here (T-370 audit): `hk_api::selections::WatchAlertView`/`WatchSkipView` declare `t: f64`, and `crates/hk-cli/src/pipeline.rs`'s `PipelineWatch::report` converts each `hk_pipeline::alarms::WatchAlertRecord`/`WatchSkipRecord`'s raw-nanosecond `Timestamp` to seconds (`secs(a.t)`) before it ever reaches this crate — the internal record and the view served here are different types, one nanosecond-native, one already seconds. This route was previously unreachable by `every_serialized_time_declares_its_unit` (no selection existed for it to address on a fresh server), so the value had never been swept and asserted; the sweep now creates one first and covers it.
 
+## Annotations (T-816, MAP-16)
+
+Durable, **human-authored** time–frequency notes — a text note, a box or a marker — that a researcher draws on the canvas ([docs/25 §5](25-spectrum-research-workflow.md), the normative store contract in §10, [ADR-0023](adr/0023-map-ui-and-research-state.md)). Stored in the run's user-metadata database beside bookmarks and selections, so they survive a restart. Errors: `{"error", "code"}` with `invalid`, `not_found`, `conflict`, `unavailable`; `405` with `Allow` for a wrong method; `401` before dispatch.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/annotations` | `f_lo`, `f_hi` (Hz), `t0`, `t1` (capture-clock Unix s) **required**; `limit`? (default 200, max 2000); `cursor`? | `{"window", "annotations": [Annotation, …], "count", "matched", "limit", "next_cursor"}` |
+| POST | `/api/annotations` | `{"kind" ("text"\|"box"\|"marker"), "f_lo_hz", "f_hi_hz", "t0_s", "t1_s", "label", "body"?, "collection_id"?, "id"?, "view"}` | `Annotation` (`201`); `409 conflict` when `id` already exists |
+| GET | `/api/annotations/{id}` | – | `Annotation` |
+| PUT | `/api/annotations/{id}` | any create field but `id` (`null` clears `body`/`collection_id`); a `view` re-stamps provenance | `Annotation` |
+| DELETE | `/api/annotations/{id}` | – | `{"deleted": Annotation}` |
+
+`Annotation`: `{id, collection_id, kind, f_lo_hz, f_hi_hz, t0_s, t1_s, label, body, author, provenance, created_s, updated_s}`, with `provenance` = `{device_id, center_hz, span_hz, sample_rate_hz, t_capture: [t0_s, t1_s], tier ("live-iq"|"spectrum-history"|"survey-overview"), authored_s, actor, authored: true}`.
+
+- **The window is required and the answer is paged** (the `/api/events` contract): an annotation is listed when its box intersects `[f_lo, f_hi] × [t0, t1]` (closed, so a zero-area note on the edge is inside), newest capture time first (`t1_s`, then `t0_s`, then id). `count` is this page, `matched` the whole window, and `next_cursor` (an opaque offset string, `null` on the last page) fetches the next.
+- **Geometry.** `0 <= f_lo_hz <= f_hi_hz`, `t0_s <= t1_s`; a `box` needs a positive extent in both axes, while a `text` note or `marker` may be a zero-area point. `label` is 1–120 characters (trimmed), `body` at most 4000, `collection_id` a UUID (the MAP-17 collection; not yet checked for existence). `t0_s`/`t1_s` are **capture-clock** times and fixed: a human-set extent does not grow to the live edge.
+- **Provenance is stamped by the server; the client sends only `view`** — `{center_hz, span_hz, t_capture: [t0_s, t1_s], tier, device_id?}`, the view context it was on (all but `device_id` required). The server adds `actor` and `author` (the token fingerprint `tok-…`, **never the token**), `authored_s` (wall clock — when the human acted, never compared with `t_capture`, which is when the air was), `authored: true`, and `sample_rate_hz` **only** when this run holds the device `device_id` names (otherwise `null`, never the primary radio standing in). A body carrying `provenance`, `author`, `actor`, `authored`, `authored_s`, `created_s` or `updated_s` — at the top level or inside `view` — is `400 invalid`: provenance is evidence, not input.
+- **Audited** as `annotation_create`, `annotation_update`, `annotation_delete` (token id, peer, request, old/new, status), with **no `device` key**: authoring is a view act and reaches no radio. Without an audit log every mutating route is `503 unavailable`; without a store, every route is.
+- **Never detection input.** An annotation mints no candidate, moves no threshold, confirms no emitter and never pre-populates the inventory; it is a different object from the §2.13 machine annotation and from a Confirmed emitter (docs/25 §5).
+- **SigMF-adjacent export shape** ([docs/sigmf-extension.md](sigmf-extension.md), `hk_model::AuthoredAnnotation::to_sigmf`): a SigMF `annotations` entry with `core:sample_start`/`core:sample_count` (from `t0_s`/`t1_s` against the recording's start and rate), `core:freq_lower_edge`/`core:freq_upper_edge`, `core:label`, `core:comment` (from `body`), plus a `hackriff:annotation` block (`authored: true`, `kind`, `id`, `author`, `collection_id`, `provenance`) — structurally distinct from `hackriff:truth`, so a researcher's notes can never contaminate a fixture's hidden truth list. The export route itself is MAP-23.
+
 ## Output recordings (T-061)
 
 Record a selection's, emitter's or band's bits, symbols, WAV audio and/or IQ to files on the device; stop, list, download.
@@ -2304,9 +2325,9 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 
 | Method | Path | Ticket | Body / query | Answer |
 |---|---|---|---|---|
-| GET | `/api/annotations` | MAP-16 | `f_lo`,`f_hi`,`t0`,`t1` **required**; `limit`? (200, max 2000), `cursor`? | `{annotations, count, matched, next_cursor}` |
-| POST | `/api/annotations` | MAP-16 | `{kind ("text"\|"box"\|"marker"), f_lo_hz, f_hi_hz, t0_s, t1_s, label, body?, collection_id?, view}` | `Annotation` (201, audited) |
-| GET/PUT/DELETE | `/api/annotations/{id}` | MAP-16 | any create field on PUT | `Annotation` / `{deleted}` |
+| GET | `/api/annotations` | MAP-16 | **served (T-816)** — see [Annotations](#annotations-t-816-map-16) | `{annotations, count, matched, next_cursor}` |
+| POST | `/api/annotations` | MAP-16 | **served (T-816)** — `{kind ("text"\|"box"\|"marker"), f_lo_hz, f_hi_hz, t0_s, t1_s, label, body?, collection_id?, view}` | `Annotation` (201, audited) |
+| GET/PUT/DELETE | `/api/annotations/{id}` | MAP-16 | **served (T-816)** — any create field on PUT | `Annotation` / `{deleted}` |
 | GET | `/api/collections` | MAP-17 | `limit`? (500, max 2000), `cursor`? | `{collections, count, matched, next_cursor}` |
 | POST | `/api/collections` | MAP-17 | `{name, note?, color?}` | `Collection` (201, audited) |
 | GET/PUT/DELETE | `/api/collections/{id}` | MAP-17 | any create field; `{visible}` toggles | `Collection` / `{deleted, members_deleted}` |

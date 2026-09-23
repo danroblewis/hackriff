@@ -10,7 +10,7 @@
 //! `state`/`lifecycle`/`recurrence` and T-163 `estimated_params` fields),
 //! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
-//! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
+//! `/api/selections[/<id>[/links]]`, `/api/annotations[/<id>]` (T-816), `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
 //! refusals. `docs/stream-contract.md` covers stream framing in full; this file only checks the
 //! shapes `docs/api.md` promises.
@@ -8829,6 +8829,135 @@ fn mmap_research_routes_are_reserved_and_gated() {
             );
         }
     }
+    stop_server(serving);
+}
+
+/// T-816 (MAP-16): `/api/annotations` as `docs/api.md` documents it — the `Annotation` shape with
+/// its server-stamped provenance, the required window and paging fields, update/delete, and that
+/// an authored note never becomes an inventory row (it is user metadata, never detection input).
+#[test]
+fn annotations_crud_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let body = json!({
+        "kind": "box",
+        "f_lo_hz": f - 1.0e5,
+        "f_hi_hz": f + 1.0e5,
+        "t0_s": 1000.0,
+        "t1_s": 1002.0,
+        "label": "t816-contract-note",
+        "view": {"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"},
+    });
+    let (st, a) = post(addr, "/api/annotations", &body.to_string());
+    assert_eq!(st, 201, "{a}");
+    for field in [
+        "id",
+        "collection_id",
+        "kind",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t0_s",
+        "t1_s",
+        "label",
+        "body",
+        "author",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(a.get(field).is_some(), "annotation missing {field}: {a}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            a["provenance"].get(field).is_some(),
+            "provenance missing {field}: {a}"
+        );
+    }
+    assert_eq!(a["provenance"]["authored"], true);
+    assert!(
+        a["author"].as_str().is_some_and(|s| s.starts_with("tok-")),
+        "{a}"
+    );
+    assert!(
+        !a.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = a["id"].as_str().unwrap().to_owned();
+
+    // Client-supplied provenance is refused.
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, v) = post(addr, "/api/annotations", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    let window = format!(
+        "/api/annotations?f_lo={}&f_hi={}&t0=0&t1=5000",
+        f - 1e6,
+        f + 1e6
+    );
+    let (st, list) = get(addr, &window);
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "annotations",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 200, "documented default page");
+    assert!(list["next_cursor"].is_null());
+    let (st, v) = get(addr, "/api/annotations");
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (400, Some("invalid")),
+        "window required: {v}"
+    );
+
+    let path = format!("/api/annotations/{id}");
+    let (st, got) = get(addr, &path);
+    assert_eq!(
+        (st, got["label"].as_str()),
+        (200, Some("t816-contract-note"))
+    );
+    let (st, upd) = put(addr, &path, r#"{"body": "carrier edge"}"#);
+    assert_eq!(
+        (st, upd["body"].as_str()),
+        (200, Some("carrier edge")),
+        "{upd}"
+    );
+
+    // User metadata only: no inventory row names it.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    assert!(
+        !inv.to_string().contains("t816-contract-note"),
+        "an annotation never reaches the inventory: {inv}"
+    );
+
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
     stop_server(serving);
 }
 

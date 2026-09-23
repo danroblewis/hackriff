@@ -27,6 +27,7 @@
 //! handheld; idle connections cost no CPU.
 
 pub mod analyze; // T-190
+pub mod annotations; // T-816 MAP-16
 pub mod assist;
 pub mod auth;
 pub mod bridge;

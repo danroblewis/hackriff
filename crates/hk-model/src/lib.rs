@@ -137,15 +137,17 @@ pub use relate::{
     present_only_with, rank_score,
 };
 pub use repo::{
-    BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterSynthesis,
-    EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, LatestMeasurement, MAX_FAMILY_CANDIDATES,
+    AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
+    AuthoredKind, AuthoredPage, AuthoredProvenance, AuthoredTier, BOOKMARK_NAME_MAX,
+    BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterSynthesis, EmitterUpsert,
+    HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, LatestMeasurement, MAX_FAMILY_CANDIDATES,
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, ProvenanceChain,
     REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning, RepoBatch,
     RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX,
     SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX,
     SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink,
     SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
-    USER_BAND_MAX_WIDTH_HZ, UserBand,
+    USER_BAND_MAX_WIDTH_HZ, UserBand, authored_block,
 };
 // T-818 MAP-18 saved measurements (docs/25 §4).
 pub use repo::{

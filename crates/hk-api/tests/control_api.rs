@@ -2156,3 +2156,234 @@ fn t818_measurements_are_computed_server_side_stamped_paged_and_reach_no_device(
         (503, Some("unavailable"))
     );
 }
+
+/// T-816 (MAP-16, docs/25 §5 and §10): the annotation store answers as documented, stamps
+/// provenance on the server, refuses client-supplied provenance, pages a required window, is
+/// audited with no `device` key, never reaches the front end, and is `503` without an audit log.
+#[test]
+fn t816_annotations_are_stamped_paged_audited_and_reach_no_device() {
+    let device = Device::new(true);
+    let r = rig(
+        "t816",
+        Token::from_config(TOKEN).unwrap(),
+        Arc::clone(&device),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let view = format!(
+        r#"{{"center_hz": 100.3e6, "span_hz": 2.4e6, "t_capture": [1000.0, 1012.5], "tier": "live-iq", "device_id": "{DEVICE_ID}"}}"#
+    );
+    let created = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "box", "f_lo_hz": 100.2e6, "f_hi_hz": 100.4e6, "t0_s": 1001.0, "t1_s": 1004.0, "label": " pager? ", "body": "two bursts", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(created.status, 201, "{}", created.body);
+    let a = &created.body;
+    assert_eq!(a["label"], "pager?", "trimmed");
+    assert_eq!(a["kind"], "box");
+    let p = &a["provenance"];
+    assert_eq!(p["authored"], true);
+    assert_eq!(p["tier"], "live-iq");
+    assert_eq!(
+        p["t_capture"],
+        json!([1000.0, 1012.5]),
+        "capture clock, as sent"
+    );
+    assert_eq!(p["device_id"], DEVICE_ID);
+    assert!(
+        p["sample_rate_hz"].as_f64().is_some_and(|r| r > 0.0),
+        "the server stamps the named device's rate: {p}"
+    );
+    let token_id = Token::from_config(TOKEN).unwrap().id();
+    assert_eq!(
+        p["actor"],
+        token_id.as_str(),
+        "fingerprint, never the token"
+    );
+    assert_eq!(a["author"], token_id.as_str());
+    assert!(!a.to_string().contains(TOKEN));
+    // Wall clock (authoring) and capture clock (the air) are separate quantities.
+    let authored_s = p["authored_s"].as_f64().unwrap();
+    assert!(authored_s > 1.7e9, "wall clock: {authored_s}");
+    let id = a["id"].as_str().unwrap().to_owned();
+
+    // Provenance is evidence, not input; an incomplete view or bad geometry is refused.
+    for (body, needle) in [
+        (
+            format!(
+                r#"{{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}, "provenance": {{}}}}"#
+            ),
+            "provenance",
+        ),
+        (
+            r#"{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {"center_hz": 1e8, "span_hz": 1e6, "t_capture": [0, 1], "tier": "live-iq", "actor": "me"}}"#.to_owned(),
+            "actor",
+        ),
+        (
+            r#"{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x"}"#.to_owned(),
+            "view",
+        ),
+        (
+            format!(
+                r#"{{"kind": "box", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 2, "label": "x", "view": {view}}}"#
+            ),
+            "box",
+        ),
+        (
+            format!(
+                r#"{{"kind": "ellipse", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+            ),
+            "kind",
+        ),
+    ] {
+        let rep = authed(addr, "POST", "/api/annotations", Some(&body));
+        assert_eq!(rep.status, 400, "{body} -> {}", rep.body);
+        assert!(
+            rep.body["error"].as_str().unwrap().contains(needle),
+            "{needle}: {}",
+            rep.body
+        );
+    }
+    // A client-chosen id that exists is a conflict.
+    let dup = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"id": "{id}", "kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (dup.status, dup.body["code"].as_str()),
+        (409, Some("conflict"))
+    );
+
+    // A second, point-shaped note elsewhere in time; the window pages both, newest first.
+    let note = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "text", "f_lo_hz": 100.3e6, "f_hi_hz": 100.3e6, "t0_s": 1010.0, "t1_s": 1010.0, "label": "quiet here", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(note.status, 201, "{}", note.body);
+    let window = "/api/annotations?f_lo=100e6&f_hi=101e6&t0=900&t1=2000";
+    let list = authed(addr, "GET", &format!("{window}&limit=1"), None);
+    assert_eq!(list.status, 200, "{}", list.body);
+    assert_eq!(list.body["count"], 1);
+    assert_eq!(list.body["matched"], 2);
+    assert_eq!(list.body["annotations"][0]["label"], "quiet here");
+    let cursor = list.body["next_cursor"].as_str().unwrap().to_owned();
+    let page2 = authed(
+        addr,
+        "GET",
+        &format!("{window}&limit=1&cursor={cursor}"),
+        None,
+    );
+    assert_eq!(page2.body["annotations"][0]["id"], id.as_str());
+    assert!(page2.body["next_cursor"].is_null(), "{}", page2.body);
+    // The window is required, and outside it nothing answers.
+    let unbounded = authed(addr, "GET", "/api/annotations", None);
+    assert_eq!(unbounded.status, 400, "{}", unbounded.body);
+    let elsewhere = authed(
+        addr,
+        "GET",
+        "/api/annotations?f_lo=400e6&f_hi=500e6&t0=900&t1=2000",
+        None,
+    );
+    assert_eq!(elsewhere.body["matched"], 0);
+    let too_big = authed(addr, "GET", &format!("{window}&limit=2001"), None);
+    assert_eq!(too_big.status, 400);
+
+    // Update: a label edit keeps the provenance; a new view re-stamps it.
+    let path = format!("/api/annotations/{id}");
+    let upd = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(r#"{"label": "POCSAG pager", "body": null}"#),
+    );
+    assert_eq!(upd.status, 200, "{}", upd.body);
+    assert_eq!(upd.body["label"], "POCSAG pager");
+    assert!(upd.body["body"].is_null());
+    assert_eq!(upd.body["provenance"], a["provenance"]);
+    let restamp = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(
+            r#"{"view": {"center_hz": 100e6, "span_hz": 20e6, "t_capture": [0, 3600], "tier": "survey-overview"}}"#,
+        ),
+    );
+    assert_eq!(restamp.status, 200, "{}", restamp.body);
+    assert_eq!(restamp.body["provenance"]["tier"], "survey-overview");
+    assert!(
+        restamp.body["provenance"]["sample_rate_hz"].is_null(),
+        "no device named, so no rate is claimed"
+    );
+    assert_eq!(
+        authed(addr, "GET", &path, None).body["label"],
+        "POCSAG pager"
+    );
+    let del = authed(addr, "DELETE", &path, None);
+    assert_eq!(del.status, 200, "{}", del.body);
+    assert_eq!(del.body["deleted"]["id"], id.as_str());
+    assert_eq!(authed(addr, "GET", &path, None).status, 404);
+    assert_eq!(authed(addr, "POST", &path, Some("{}")).status, 405);
+
+    // Authoring is a view act: nothing reached the front end, and the audit entries carry no
+    // `device` key.
+    assert!(device.calls().is_empty(), "{:?}", device.calls());
+    let entries: Vec<Value> = audit_entries(&r.audit)
+        .into_iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("annotation_"))
+        })
+        .collect();
+    for action in [
+        "annotation_create",
+        "annotation_update",
+        "annotation_delete",
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["action"] == action && e["result"] == "ok"),
+            "{action} audited: {entries:?}"
+        );
+    }
+    assert!(entries.iter().all(|e| e.get("device").is_none()));
+    assert!(entries.iter().all(|e| e["token_id"] == token_id.as_str()));
+
+    // No audit log: every mutating annotation route is 503.
+    let bare = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        ApiState {
+            bookmarks: Some(Arc::new(Mutex::new(Repository::open_in_memory().unwrap()))),
+            ..ApiState::default()
+        },
+    )
+    .unwrap();
+    let rep = authed(
+        bare.local_addr(),
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (rep.status, rep.body["code"].as_str()),
+        (503, Some("unavailable"))
+    );
+}
