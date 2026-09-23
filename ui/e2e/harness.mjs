@@ -41,9 +41,15 @@ export function modifierBits({ alt = false, ctrl = false, meta = false, shift = 
  * returns `{ ok: false, reason }` and lets `surface-load.e2e.mjs` say what is wrong, in its own
  * words, with the CSP violation and the exception attached.
  */
-export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000 } = {}) {
+export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000, onSpawn } = {}) {
   const t0 = Date.now();
-  const browser = await Browser.open();
+  // T-740: this Chrome is a DIRECT child of the caller (run.mjs), not of any spec — so it is
+  // invisible to `killSpecTree`'s spec-tree walk and to the per-spec timeout. `onSpawn`, if given,
+  // reaches all the way down to `cdp.mjs`'s `spawn()` call and fires the instant the pid exists —
+  // before Chrome forks any of its own helper processes — so a caller that tracks its own children
+  // (for a sweep on SIGINT/SIGTERM/next-run-start) can track this one from the start, rather than
+  // trusting the `finally` below, which a `process.exit()` mid-await never reaches.
+  const browser = await Browser.open({ onSpawn });
   try {
     const page = await browser.page();
     for (;;) {
