@@ -20585,7 +20585,7 @@ tasks:
   - id: T-607
     milestone: MAUTO
     title: 'liquid-dsp is DESIGNATED BUT NOT LINKED: land the FFI binding, or record the refusal and re-price the four block tickets that assume it'
-    status: in-progress
+    status: done
     branch: task-t607
     priority: normal
     parallel_group: MAUTOD
@@ -20636,6 +20636,7 @@ tasks:
       Commits: b87dd808
       Observed, not chased: Board edits for the coordinator (a worker cannot write tasks.yaml). (a) Remove T-607 from T-610's depends_on, and re-price T-610 as native DSP work, not an adapter; its acceptance text 'liquid-dsp ships convolutional FEC. If it is in the build this is an adapter job' is false (docs/18 section 7.1.1). (b) T-611's text 'liquid-dsp ships Reed-Solomon' is likewise false; its estimate stands, since it was already standalone. (c) T-609: keep the T-607 dependency (now satisfied). Its acceptance should note that coarse CFO acquisition (an M-th-power line estimator or FLL) and OQPSK are DSP work; liquid covers the rest. (d) T-606's ADR-0011 amendment, section 1.6 second column: psk_demod and equalise adapt hk-liquid-sys; viterbi and reed_solomon adapt nothing. | Docker Desktop wedged (API 500s) when restarted for a second container run. I had started it and have fully stopped it again, so the machine is back to its prior state. As a result this exact crate's aarch64 test binary was cross-built and linked but not re-executed; the scratch crate with the same build.rs logic was executed. | CLAUDE.md's Engineering 'Layout' crate list does not yet mention hk-liquid-sys (left for the supervisor's CLAUDE.md slim, to avoid a shared-file conflict).
       Use cases: SIGNAL-034, SIGNAL-024, SIGNAL-027
+    commit: e430121d
   - id: T-608
     milestone: MAUTO
     title: 'hk-blocks `descramble`: the LFSR de-whitener - rank 2 on the T-554 gap list, 10 families, and the cheapest block on it'
