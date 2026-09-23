@@ -7318,7 +7318,7 @@ tasks:
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
       been tried'
-    status: todo
+    status: blocked
     priority: normal
     deps:
     - T-343
@@ -7333,6 +7333,10 @@ tasks:
       access explicitly. Do not open the device without that. If the second process does NOT fail cleanly,
       that is a real defect: a half-opened stream would produce frames nobody can attribute, and the provenance
       work (T-302, T-303, T-304, T-305, T-325) all assumes a device is opened once or not at all'
+    needs: hardware
+    blocked_on: "a HIL session with the HackRF free: stop the user demo on :8899 (it holds the radio), run two hk serve --device hackrf processes back to back, then restore the demo. Deferred per the 09-22 directive - schedule after the 09-23 burndown with the user."
+    notes: |
+      2026-09-22 (coordinator): worker handed back BLOCKED - the test needs the real HackRF, which the :8899 demo holds. Not run: T-356 is on the 09-22 defer list (speculative, no observed failure), and taking the demo down is the user's call. needs: hardware so the runner stops dispatching it.
   - id: T-357
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
