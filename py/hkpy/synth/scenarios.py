@@ -754,3 +754,81 @@ def adsb_squitter(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         ac.pop("carrier_phase")
     scene.scenario_truth["aircraft"] = aircraft
     return [scene], {}
+
+
+# ---------------------------------------------------------------------------------------------
+# analog voice negatives (N2 population, ADR-0021 s8.4 / docs/22 s4.3): energy without symbols
+# ---------------------------------------------------------------------------------------------
+
+VOICE_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 250e3,
+    "center_hz": 462.5625e6,
+    "offset_hz": 25e3,
+    "snr_db": 20.0,  # in-channel SNR over the noise in the voice bandwidth
+    "noise_dbfs": -40.0,  # sets ADC fill
+    "deviation_hz": 2500.0,  # NBFM peak deviation
+    "am_depth": 0.8,
+    "duration_s": 0.6,
+    "burst_on_s": 0.15,  # push-to-talk structure: on/off cycle
+    "burst_off_s": 0.05,
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+}
+
+
+def _voice_audio(scene: Scene, n: int, fs: float) -> np.ndarray:
+    """Speech-like audio in [-1, 1]: band-limited noise (300-3000 Hz) with a syllabic envelope."""
+    rng = scene.rng("voice")
+    sos = signal.butter(4, [300.0, 3000.0], btype="band", fs=fs, output="sos")
+    a = signal.sosfilt(sos, rng.standard_normal(n))
+    env = signal.sosfilt(signal.butter(2, 6.0, fs=fs, output="sos"), np.abs(rng.standard_normal(n)))
+    a = a * (0.3 + env / max(float(np.max(np.abs(env))), 1e-12))
+    return a / max(float(np.max(np.abs(a))), 1e-12)
+
+
+def _voice_scene(ctx: Ctx, name: str, modulation: str) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    scene = ctx.scene(name, fs, _n(p), f"hkpy.synth {name}: analog {modulation} voice, no symbols")
+    _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
+    cap = scene.captures[0]
+    off = float(p["offset_hz"])
+    n = scene.n_samples
+    audio = _voice_audio(scene, n, fs)
+    if modulation == "nbfm":
+        bw = 2 * (float(p["deviation_hz"]) + 3000.0)
+        ph = 2 * math.pi * float(p["deviation_hz"]) * np.cumsum(audio) / fs
+        base = np.exp(1j * ph)
+        p_lin = 1.0
+    else:
+        bw = 6000.0
+        depth = float(p["am_depth"])
+        base = 1.0 + depth * audio
+        p_lin = 1.0 + depth * depth * float(np.mean(audio ** 2))
+    noise_in_bw = float(p["noise_dbfs"]) - db(fs) + db(bw)
+    power = noise_in_bw + float(p["snr_db"])
+    amp = math.sqrt(undb(power) / p_lin)
+    t = scene.time(0, n)
+    keyed = np.zeros(n)
+    on, off_s = int(float(p["burst_on_s"]) * fs), int(float(p["burst_off_s"]) * fs)
+    i = 0
+    bursts = []
+    while i < n and on > 0:
+        keyed[i:i + on] = 1.0
+        bursts.append([i, min(i + on, n)])
+        i += on + off_s
+    scene.add_samples(0, amp * base * keyed * np.exp(2j * math.pi * off * t))
+    f = cap.center_hz + off
+    scene.annotate(0, n, f - bw / 2, f + bw / 2, name,
+                   scene.emission_truth(cap, off, bw, power, kind="none", modulation=modulation,
+                                        symbol_alphabet=None, framed=False, burst_samples=bursts,
+                                        snr_db_per_hz=power - cap.floor_dbfs_per_hz - db(bw)))
+    return [scene], {}
+
+
+def nbfm_voice(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    return _voice_scene(ctx, "nbfm_voice", "nbfm")
+
+
+def am_voice(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    return _voice_scene(ctx, "am_voice", "am")
