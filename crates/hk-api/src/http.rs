@@ -131,6 +131,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/tiles/events"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
+    // T-463: the one playhead of historical playback (view state over recorded history; audio at
+    // it is the `playback` on-demand opener)
+    ("GET", "/api/playback"),
+    ("POST", "/api/playback"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -369,6 +373,9 @@ pub struct ApiState {
     /// ([`crate::recordings`]) - the half of the audio horizon the IQ ring is not. `None`
     /// answers 503.
     pub recordings: Option<Arc<dyn crate::recordings::RecordingCatalog>>,
+    /// T-463: the one playhead behind `GET/POST /api/playback` ([`crate::playback`]); `None`
+    /// answers 503.
+    pub playback: Option<Arc<dyn crate::playback::PlaybackControl>>,
     /// T-166: the region watch behind `GET /api/selections/{id}/watch`
     /// ([`crate::selections::WatchControl`]); `None` answers 503.
     pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
@@ -1064,6 +1071,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
         .or_else(|| crate::recordings::route(state, &ctl)) // T-469
+        .or_else(|| crate::playback::route(state, &ctl)) // T-463
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089

@@ -69,7 +69,10 @@ Never returns content, only stream *metadata*: every offered stream's header fie
     { "name": "bits", "ws_path": "/ws/open/bits", "tcp_target": "open/bits", "kind": "bits", "...": "…" },
     { "name": "symbols", "ws_path": "/ws/open/symbols", "tcp_target": "open/symbols", "kind": "symbols", "...": "…" },
     { "name": "iq", "ws_path": "/ws/open/iq", "tcp_target": "open/iq", "kind": "iq", "datatype": "cf32_le",
-      "params": ["emitter", "f_lo", "f_hi"], "records": "…" }
+      "params": ["emitter", "f_lo", "f_hi"], "records": "…" },
+    { "name": "playback", "ws_path": "/ws/open/playback", "tcp_target": "open/playback",
+      "kind": "audio", "datatype": "ri16_le", "params": ["f_lo", "f_hi", "t", "speed"],
+      "playhead": "one (GET/POST /api/playback)" }
   ],
   "tcp": { "addr": "127.0.0.1:8788",
            "handshake": "<tcp_target>?token=<token>[&param=value...]\\n",
@@ -1462,6 +1465,32 @@ A partially written or missing recording **is listed** — hiding it would be it
 
 - **Errors** `{"error", "code"}`: `400 invalid` (unknown query parameter, a non-numeric or negative `t0`/`t1`, `t0 ≥ t1`, an unknown `kind`, a `limit` outside 1..1000), `503 unavailable` (this server has no recording catalogue — no data directory or database), `500 failed` (storage), `405` other methods.
 
+## Historical playback (T-463)
+
+**Play from a chosen past time, with play and pause, and "now" moves forward over recorded history as if it were live** (CLAUDE.md, "Playback"). This is assembly of what already existed, not new machinery: the ring-window extract (the clip route's plan, read into memory instead of a file), the persisted recordings above, `SigmfReplaySource` (so playback reads raw IQ **through the device interface**, like every other front end), and Listen's own probe → plan → demodulator. Code: `hk_pipeline::playback` (the playhead, the IQ archive, the opener), `crates/hk-api/src/playback.rs` (the route).
+
+**The split.** Signal analysis is **never re-run**: detections, emitters, presence, events and history are immutable records, and a client drawing the window around the playhead reads them through the windowed routes it already uses (`/api/inventory?at=`, `/api/events`, `/api/tiles`, `/api/inventory/{id}/decode?t0&t1`, T-384), exactly as they were written. **Demod and decode are re-run**, because they are functions of raw IQ. `hk_pipeline::playback` has no path to a detector and writes nothing to the store (it opens the database read-only, for the recordings catalogue), so a second, disagreeing analysis of the same air cannot be produced.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/playback` | – (no query parameters) | `PlaybackState` |
+| POST | `/api/playback` | any of `{"t"}` (Unix s) **or** `{"t_ns"}` (integer Unix ns), `"playing"` (bool), `"speed"` (> 0, ≤ `max_speed`); at least one | `PlaybackState` after the change (audited `playback`) |
+| GET | `/ws/open/playback?f_lo=&f_hi=[&t=][&speed=]` | – | an `audio` stream at the playhead (below) |
+
+**`PlaybackState`**: `{playhead: {position_ns, position_s, playing, speed, generation}, max_speed, playheads: 1, analysis: "recorded", rerun: ["demod", "decode"], iq_horizon: "iq-ring + recordings", streams: {opened, refused, running, frames, windows, no_iq}}`.
+- `position_ns` is **capture time** (the one shared time axis), `null` until the first seek. While `playing` it advances at `speed` × real elapsed time; paused, it holds. `generation` increases on every seek.
+- A POST applies `speed`, then the position, then `playing`. `t` is converted once to integer ns by `round(s × 10⁹)`; use `t_ns` for an exact position.
+- **The playhead is view state, not a device action.** Moving, playing or pausing it never reaches a front end and never stops or slows capture, the ring or detection; the audit entry carries no `device` key.
+- **One playhead.** The per-pane playhead is deferred by the user; it would be a playhead per pane id, and a `pane=` parameter on the opener choosing which one it follows.
+- Errors `{"error", "code"}`: `400 invalid` (unknown field or query parameter, `t` with `t_ns`, a negative or non-numeric time, `playing` not a bool, a speed outside `(0, max_speed]`, an empty body), `409 no_position` (`playing: true` before any seek), `503 unavailable` (no playback on this server), `405` other methods.
+
+**`/ws/open/playback`** (and TCP `open/playback?…`): the on-demand opener that re-runs demod and decode at the playhead. `f_lo`/`f_hi` (Hz, at most 1 MHz apart) name the extent; **there is no `mode` parameter** — mode, channel, bandwidth, squelch and AGC are estimated from the IQ, exactly as Listen does. `t` (Unix s) seeks the playhead first, and `speed` sets it; the stream then follows the one playhead (a later `POST /api/playback` seek or pause moves the audio with it). A seek through the opener moves the playhead even when the open is then refused: the playhead is where the view is, and beyond the IQ horizon that view is waterfall-only.
+- **The header and records are the `audio` profile** (`docs/stream-contract.md` §12.2): `kind: "audio"`, `ri16_le` at 48 kS/s, 960-sample frames, source `hk-pipeline:playback`. No stream-contract change: this is a new opener name over an existing profile, not a history-window form of an existing opener (T-387's live-edge rule for `listen`, `inspector` and `stage` stands). **Each data record's `t` is the capture time the audio came from**, so the audio lies on the same axis as the rows and boxes it plays under.
+- **Status records** (flat metadata, ~4 Hz): `position_ns`, `playing`, `speed`, `generation`, `analysis: "recorded"`, `iq`, `iq_source` (`ring`, `recording`, or `none`), `iq_until_ns` (end of the raw-IQ window in use), `next_iq_ns` (when `iq` is false and IQ resumes later), `frames`, `squelched_frames`, `windows`, `rds_groups`, `rds_pi` (WFM with RDS decoded), and the demodulator's `level_dbfs`, `squelch_open`, `agc_gain_db`, `snr_db`.
+- **The IQ horizon is decided up front, never discovered when the sound stops.** Raw IQ is asked for from the two places it exists — the ring's own window and complete IQ recordings (`GET /api/recordings`), never spectrum coverage — and nothing about it is cached, because the ring rolls. A position with no raw IQ is refused `409 no-iq` with the reason and, when known, when IQ next exists. A playhead that runs past the IQ it has publishes `iq: false`, `iq_source: "none"` once and carries **no audio** past it, then keeps following the playhead in case IQ resumes (a later ring segment or a recording).
+- **Pacing.** A block is demodulated only once the playhead has reached its end, so audio stops while paused and runs at `speed` × real time. A block captured with the extent outside the tuned window then yields no audio (and a `DISCONTINUITY` on the next record).
+- Refusals (`{"type": "refused", status, code, reason}`): `400 bad-request` (missing or bad `f_lo`/`f_hi`, an extent over 1 MHz, an unknown parameter, a bad `t` or `speed`), `403 restricted-class` (the same pre-attach content gate as Listen, on the extent and on the probed channel, under the class the IQ was captured with), `409 no-playhead` (no `t` and the playhead has no position), `409 no-iq` (beyond the IQ horizon), `409 outside-window` (the extent was not inside the window captured then), `422 no-analog-modulation`/`probe` (the probe found no analog mode), `500` otherwise.
+
 ## Classification taxonomy (T-218, ADR-0016 §1–§2)
 
 | Method | Path | Body / query | Response |
@@ -1680,6 +1709,8 @@ Conventions:
 - `GET /ws/open/inspector?capture=<id>&from_frame=<n>` is a **capture replay**, not a window: it is keyed by capture and frame, paces to the end of the recording, and is capped at 4 concurrent. A scrub wants the paged HTTP route.
 
 Should a future task genuinely need decoder status by time, that is a **store + route** change (an index over `status` records), not a UI one.
+
+**Historical playback (T-463) does not change this.** Audio at a past time is its own opener, [`playback`](#historical-playback-t-463), over the existing `audio` profile: it follows the one playhead forward through recorded raw IQ, rather than giving `listen` a history-window form.
 
 **Streams of a pipeline** (stream contract §14; discovery lists them under `/api/streams`):
 

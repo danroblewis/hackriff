@@ -634,7 +634,7 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         .iter()
         .filter_map(|o| o["name"].as_str())
         .collect();
-    for want in ["listen", "bits", "symbols"] {
+    for want in ["listen", "bits", "symbols", "playback"] {
         assert!(names.contains(&want), "on_demand openers: {names:?}");
     }
     assert!(v["tcp"]["addr"].is_string(), "{v}");
@@ -10211,3 +10211,125 @@ fn a_coarse_sweep_step_is_fewer_windows_at_the_same_bin_width() {
 /// Full-range steps at the fixture's 2.4 Msps: fine 1.8 MHz, coarse 14.4 MHz.
 const FINE_STEPS: u64 = 3334;
 const COARSE_STEPS: u64 = 418;
+
+// --- Historical playback (T-463) -------------------------------------------------------------------
+
+/// T-463 (AWARE-011): `GET/POST /api/playback` move the one playhead, and `/ws/open/playback`
+/// re-runs demod from the IQ ring at it — or refuses `409 no-iq` beyond the IQ horizon, with the
+/// reason, rather than going silent.
+#[test]
+fn playback_route_and_opener_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // Before any seek: no position, paused, one playhead, analysis is the recorded one.
+    let (st, v) = get(addr, "/api/playback");
+    assert_eq!(st, 200, "{v}");
+    assert!(v["playhead"]["position_ns"].is_null(), "{v}");
+    assert_eq!(v["playhead"]["playing"], json!(false), "{v}");
+    assert_eq!(v["playhead"]["speed"], json!(1.0), "{v}");
+    assert_eq!(v["playheads"], json!(1), "{v}");
+    assert_eq!(v["analysis"], json!("recorded"), "{v}");
+    assert_eq!(v["rerun"], json!(["demod", "decode"]), "{v}");
+    assert_eq!(v["iq_horizon"], json!("iq-ring + recordings"), "{v}");
+    assert!(v["max_speed"].is_f64() && v["streams"].is_object(), "{v}");
+    let (st, v) = get(addr, "/api/playback?x=1");
+    assert_eq!(st, 400, "{v}");
+
+    // Refusals: nothing to play from, a bad speed, an unknown field.
+    let (st, v) = post(addr, "/api/playback", r#"{"playing": true}"#);
+    assert_eq!((st, v["code"].as_str()), (409, Some("no_position")), "{v}");
+    for body in [
+        r#"{"speed": 0}"#,
+        r#"{"speed": 99}"#,
+        r#"{"mode": "wfm"}"#,
+        "{}",
+    ] {
+        let (st, v) = post(addr, "/api/playback", body);
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (400, Some("invalid")),
+            "{body}: {v}"
+        );
+    }
+
+    // Wait for 1.5 s of raw IQ in the ring, then play from 0.2 s into it.
+    let mut t0 = 0.0;
+    wait_for("1.5 s of IQ in the ring", Duration::from_secs(60), || {
+        let (_, s) = get(addr, "/api/iqbuffer");
+        t0 = s["t0"].as_f64().unwrap_or(0.0);
+        s["span_s"].as_f64().unwrap_or(0.0) >= 1.5
+    });
+    let start = t0 + 0.2;
+    let (st, v) = post(
+        addr,
+        "/api/playback",
+        &format!(r#"{{"t": {start}, "playing": true}}"#),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["playhead"]["playing"], json!(true), "{v}");
+    assert!(
+        (v["playhead"]["position_s"].as_f64().unwrap() - start).abs() < 0.05,
+        "{v}"
+    );
+
+    // Audio at the playhead: the header is an audio stream whose mode was estimated.
+    let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
+    let mut ws = connect_ws(
+        addr,
+        &format!("/ws/open/playback?f_lo={f_lo}&f_hi={f_hi}&token={TOKEN}"),
+    )
+    .unwrap();
+    let header: Value = match ws.read().unwrap() {
+        Message::Text(t) => serde_json::from_str(t.as_str()).unwrap(),
+        other => panic!("unexpected first message: {other:?}"),
+    };
+    assert_eq!(header["kind"], json!("audio"), "{header}");
+    assert_eq!(header["datatype"], json!("ri16_le"), "{header}");
+    assert!(header["audio"]["mode"].is_string(), "{header}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut saw_data = false;
+    while Instant::now() < deadline && !saw_data {
+        if let Ok(Message::Binary(b)) = ws.read() {
+            saw_data = b[0] == 1 && (b.len() - 32) % 2 == 0;
+        }
+    }
+    assert!(saw_data, "no PCM record at the playhead within 30 s");
+    let _ = ws.close(None);
+
+    // Pause: the view freezes, never the capture.
+    let (st, v) = post(addr, "/api/playback", r#"{"playing": false}"#);
+    assert_eq!(
+        (st, v["playhead"]["playing"].as_bool()),
+        (200, Some(false)),
+        "{v}"
+    );
+
+    // Beyond the IQ horizon: refused up front, with the reason.
+    let mut refused = connect_ws(
+        addr,
+        &format!(
+            "/ws/open/playback?f_lo={f_lo}&f_hi={f_hi}&t={}&token={TOKEN}",
+            t0 - 3600.0
+        ),
+    )
+    .unwrap();
+    let msg = loop {
+        match refused.read().unwrap() {
+            Message::Text(t) => break t,
+            _ => continue,
+        }
+    };
+    let v: Value = serde_json::from_str(msg.as_str()).unwrap();
+    assert_eq!(v["type"], json!("refused"), "{v}");
+    assert_eq!(
+        (v["status"].as_u64(), v["code"].as_str()),
+        (Some(409), Some("no-iq")),
+        "{v}"
+    );
+    assert!(
+        v["reason"].as_str().unwrap().contains("waterfall-only"),
+        "{v}"
+    );
+
+    stop_server(serving);
+}

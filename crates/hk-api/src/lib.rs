@@ -46,6 +46,7 @@ pub mod live_control;
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
+pub mod playback; // T-463: the one playhead of historical playback
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
 pub mod query;
 pub mod recipes;
@@ -84,6 +85,7 @@ pub use live_control::{
     LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
+pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};
 pub use recordings::{RecordingCatalog, RecordingsFailure};
 pub use scan::{Phase as ScanPhase, Prepared as ScanPlan, ScanError, ScanRequest, ScanRunner};
 

@@ -459,3 +459,41 @@ impl hk_api::RecordingCatalog for PipelineRecordings {
             .map_err(|e| fail(500, "failed", format!("listing recordings: {e}")))
     }
 }
+
+/// The one playhead of historical playback (T-463) behind `GET/POST /api/playback`. The same
+/// [`hk_pipeline::playback::PlaybackService`] is the `playback` on-demand opener, so the audio a
+/// client opens follows exactly the playhead this route moves.
+pub struct PipelinePlayback(pub Arc<hk_pipeline::playback::PlaybackService>);
+
+impl hk_api::PlaybackControl for PipelinePlayback {
+    fn state(&self) -> Value {
+        self.0.state_json()
+    }
+
+    fn apply(&self, change: &hk_api::PlaybackChange) -> Result<Value, hk_api::PlaybackFailure> {
+        let fail = |status: u16, code: &str, e: hk_pipeline::playback::PlayheadError| {
+            hk_api::PlaybackFailure {
+                status,
+                code: code.into(),
+                message: e.0,
+            }
+        };
+        let head = self.0.playhead();
+        if let Some(speed) = change.speed {
+            head.set_speed(speed).map_err(|e| fail(400, "invalid", e))?;
+        }
+        if let Some(t) = change.t_ns {
+            head.seek(t).map_err(|e| fail(400, "invalid", e))?;
+        }
+        match change.playing {
+            Some(true) => {
+                head.play().map_err(|e| fail(409, "no_position", e))?;
+            }
+            Some(false) => {
+                head.pause();
+            }
+            None => {}
+        }
+        Ok(self.0.state_json())
+    }
+}
