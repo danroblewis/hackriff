@@ -5276,7 +5276,7 @@ tasks:
     milestone: M2-hardening
     title: 'Four use cases flagged uncertain by the T-258 capability audit: is a
       ham-microwave transverter or an induction-coil front end a realistic accessory?'
-    status: todo
+    status: done
     priority: low
     deps: []
     parallel_group: DOCS
@@ -5299,6 +5299,7 @@ tasks:
     core_interface: false
     result: |
       User decision 2026-09-23 (asked directly): SPACE-042 (Schumann resonances) and SPACE-048 (Ionospheric Alfven resonator) -> out-of-band: the induction-coil magnetometer + low-frequency ADC is a separate non-radio instrument, not an accessory that brings the signal into the HackRF range. PROP-045 (microwave backhaul rain gauge) and PROP-046 (wet-antenna attenuation) -> needs-accessory confirmed: an LNB or ham-microwave transverter plus a directional antenna; relative received-signal-level trends are enough. Applied in docs/use-cases.yaml (SPACE-042/048 hardware_fit + fit_note; accessory cleared) and docs/06-capability-map.md (needs-accessory 104, out-of-band 6 with the ELF/ULF pair named).
+    commit: 896dbac2
   - id: T-283
     milestone: M2-hardening
     title: 'hk-ml conformance fails under concurrency: the shadow-host provenance test
