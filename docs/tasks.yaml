@@ -13416,7 +13416,7 @@ tasks:
   - id: T-463
     milestone: MPLAY
     title: Historical playback - play from a chosen past time, and "now" moves forward over recorded history
-    status: in-progress
+    status: done
     branch: task-t463
     priority: normal
     parallel_group: PIPE
@@ -13458,6 +13458,7 @@ tasks:
       Commits: dbc918bc, d09c3d10, 8af2c9e3
       Observed, not chased: Review item 3, not blockers: POST /api/playback and the opener's t= accept times past the live edge (they then report no-IQ rather than refusing); past the IQ horizon the loop reopens SQLite and retries ring reads every 100 ms of capture time; RunIq::recording_at seeks into a recording by read-and-discard on the open-request thread; a POST with speed and playing:true but no position applies the speed before play is refused with 409.
       Use cases: AWARE-011
+    commit: 960aa8e3
   - id: T-464
     milestone: MPLAY
     title: The raw-IQ horizon is its own visible boundary - beyond it playback is waterfall-only, with no audio
