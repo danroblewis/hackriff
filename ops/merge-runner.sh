@@ -227,7 +227,8 @@ process(){
 WORKER_DRAIN_MAX=${WORKER_DRAIN_MAX:-2700}
 DRAIN_SINCE=""
 workers_running(){
-  python3 - "$S/work-claims.json" <<'PY' 2>/dev/null || echo 0
+  local claimed foreign
+  claimed=$(python3 - "$S/work-claims.json" <<'PY' 2>/dev/null || echo 0
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -235,6 +236,14 @@ try:
 except Exception:
     print(0)
 PY
+)
+  # Browser-spec runs and test servers that are NOT this runner's (a triage or fix agent
+  # reproducing a spec) share the ports and the CPU the gate's own browser tier needs; on
+  # 2026-09-22 they turned three green specs red in two different gates. Count them as
+  # workers: the gate waits for them the same way (and the same 45-min cap applies). This is
+  # only consulted BEFORE a gate starts, when none of these can be the runner's own.
+  foreign=$(pgrep -f 'node e2e/run.mjs|hk serve --bind 127.0.0.1:87' 2>/dev/null | wc -l | tr -d ' ')
+  echo $(( claimed + ${foreign:-0} ))
 }
 # While this waits it holds `$S/gate-wanted`, which the work runner reads as "a gate is
 # pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
