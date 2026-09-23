@@ -55,6 +55,10 @@ class ScenarioSpec:
 
 SCENARIOS: dict[str, ScenarioSpec] = {
     "tone": ScenarioSpec(scenarios.tone, scenarios.TONE_DEFAULTS, (), "CW tone in white noise"),
+    "nbfm_voice": ScenarioSpec(scenarios.nbfm_voice, scenarios.VOICE_DEFAULTS, ("SIGNAL-052",),
+                               "keyed NBFM voice, no symbols (N2 negative)"),
+    "am_voice": ScenarioSpec(scenarios.am_voice, scenarios.VOICE_DEFAULTS, ("SIGNAL-052",),
+                             "keyed AM voice, no symbols (N2 negative)"),
     "fsk_burst_train": ScenarioSpec(scenarios.fsk_burst_train, scenarios.FSK_DEFAULTS, ("AWARE-036",),
                                     "periodic 2-FSK sensor bursts: preamble, sync, payload, CRC-16"),
     "noise_floor_rise": ScenarioSpec(scenarios.noise_floor_rise, scenarios.FLOOR_RISE_DEFAULTS,
