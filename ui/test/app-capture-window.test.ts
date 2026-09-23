@@ -20,10 +20,10 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqBackingAt, iqNote,
-  ringRuleQuads, ringRules, type CaptureWindow,
+  IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqAvailability,
+  iqBackingAt, iqNote, ringRuleQuads, ringRules, type CaptureWindow,
 } from "../src/app/centre/capture-window";
-import { CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST } from "../src/app/centre/capture-clock";
+import { CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST, IQ_AVAILABILITY_REQUEST } from "../src/app/centre/capture-clock";
 import { timeRuleQuads } from "../src/surface/marks";
 import { quadSizePx } from "../src/surface/minimap";
 import { timeExtent } from "../src/navigators";
@@ -88,12 +88,69 @@ test("iqBackingAt: live, in the ring, past the ring, and unknown are four differ
 });
 
 test("iqNote: past the ring promises no audio, and no two situations share a sentence", () => {
-  const notes = (["live", "ring", "outside-ring", "unknown"] as const).map(iqNote);
-  assert.equal(new Set(notes).size, 4);
+  const notes = (["live", "ring", "recording", "outside-ring", "unknown"] as const).map(iqNote);
+  assert.equal(new Set(notes).size, 5);
   assert.match(iqNote("outside-ring"), /no IQ and no audio/, "promising audio that cannot be delivered is the defect");
   assert.match(iqNote("outside-ring"), /spectrum history only/, "the waterfall still answers past the ring");
   assert.match(iqNote("ring"), /demod and decode can re-run/);
+  assert.match(iqNote("recording"), /demod and decode can re-run/, "a recording extends the horizon exactly like the ring");
   assert.match(iqNote("unknown"), /unknown/);
+});
+
+// ---- T-464: the wider horizon — ring AND recordings, never spectrum coverage ----
+
+test("iqAvailability: parses GET /api/recordings' iq_available.spans, dropping anything malformed", () => {
+  const r = {
+    iq_available: {
+      spans: [
+        { t0: 900, t1: 1000, t0_ns: 900e9, t1_ns: 1000e9, span_s: 100, source: "ring", recording: null },
+        { t0: 500, t1: 600, t0_ns: 500e9, t1_ns: 600e9, span_s: 100, source: "recording", recording: "rec-1" },
+        // Dropped: inverted, unknown source, missing fields.
+        { t0: 700, t1: 600, source: "ring", recording: null },
+        { t0: 100, t1: 200, source: "coverage", recording: null },
+        { t0: 100, source: "ring" },
+      ],
+    },
+  };
+  assert.deepEqual(iqAvailability(r), [
+    { t0S: 900, t1S: 1000, source: "ring", recording: null },
+    { t0S: 500, t1S: 600, source: "recording", recording: "rec-1" },
+  ]);
+  assert.deepEqual(iqAvailability(null), [], "no response is no spans, not a guess");
+  assert.deepEqual(iqAvailability({}), [], "an old server with no iq_available at all");
+  assert.deepEqual(iqAvailability({ iq_available: { spans: null } }), []);
+});
+
+test("iqBackingAt: a recording past the ring answers 'recording', never 'outside-ring' (T-464's whole point)", () => {
+  const spans = [
+    { t0S: 900, t1S: 1000, source: "ring" as const, recording: null },
+    { t0S: 300, t1S: 500, source: "recording" as const, recording: "rec-9" },
+  ];
+  assert.equal(iqBackingAt(950, false, null, spans), "ring");
+  assert.equal(iqBackingAt(400, false, null, spans), "recording", "the ring alone would have called this outside-ring");
+  assert.equal(iqBackingAt(600, false, null, spans), "outside-ring", "the genuine hole between the two spans");
+  assert.equal(iqBackingAt(1000, true, null, spans), "live");
+  assert.equal(iqBackingAt(400, false, null, []), "outside-ring", "answered, and nothing extends the horizon there");
+  // No spans poll running yet (`null`): falls back to the ring-only `rules`, the pre-T-464 answer —
+  // never silently claims a recording nobody asked about.
+  const rules = ringRules(winOf(1000, 3600, { t0S: 900, t1S: 1000 }), 1000);
+  assert.equal(iqBackingAt(950, false, rules, null), "ring");
+  assert.equal(iqBackingAt(400, false, rules, null), "outside-ring");
+});
+
+test("T-464 GUARD: the IQ-available horizon comes from GET /api/recordings, never from coverage or tiles", () => {
+  // The trap the ticket names by name: this is a DIFFERENT question from the coverage map's
+  // "was this observed" — conflating them would promise audio the front end cannot deliver.
+  assert.equal(IQ_AVAILABILITY_REQUEST, "/api/recordings");
+  assert.doesNotMatch(IQ_AVAILABILITY_REQUEST, /coverage|tiles/);
+  const noComments = (f: string) =>
+    readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  const src = noComments("src/app/centre/capture-window.ts");
+  assert.doesNotMatch(src, /api\/coverage|api\/tiles|CoverageCell|surveyCells/,
+    "iqAvailability/iqBackingAt must not read the coverage/survey plane");
+  const clock = noComments("src/app/centre/capture-clock.ts");
+  assert.match(readFileSync("src/app/centre/capture-clock.ts", "utf8"), /IQ_AVAILABILITY_REQUEST = "\/api\/recordings"/);
+  assert.doesNotMatch(clock, /api\/coverage|api\/tiles/, "the poll that feeds state.iqAvailability stays off the coverage plane");
 });
 
 test("currentSpan prefers the live geometry, falls back to the tuned device span, else null", () => {
