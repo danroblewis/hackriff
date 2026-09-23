@@ -53,6 +53,9 @@ SMALL: dict[str, dict] = {
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
     "mismatched_hypothesis": {"duration_s": 0.3},
+    "ofdm_nonstandard_cp": {"duration_s": 0.1},
+    "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
+    "qam16_unframed": {"duration_s": 0.1},
 }
 
 
