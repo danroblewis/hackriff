@@ -665,7 +665,7 @@ self_version
 # a restart killed a coordinator's `nextest run -p hk-cli -E binary(api_contract)` this way.
 # The process's cwd decides: under $REPO but not under $REPO/.claude/worktrees/ is the gate's
 # tree; anywhere else is someone else's run and is left alone (and said so).
-for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
+for pat in '^just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
   for opid in $(pgrep -f "$pat" 2>/dev/null); do
     [ "$opid" = "$$" ] && continue
     ocwd=$(lsof -a -p "$opid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)

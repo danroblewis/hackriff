@@ -265,7 +265,9 @@ wait-for-gate:
     mkdir -p "$S/gate-waiters"; m="$S/gate-waiters/$$"; printf '%s\n' "$PWD" > "$m"
     trap 'rm -f "$m"' EXIT
     t0=$SECONDS
-    while [ -e "$S/bulk-in-progress" ] || pgrep -f 'just gate' >/dev/null 2>&1; do
+    # Anchored: a shell whose own argv quotes the pattern (a hand-rolled `pgrep -f "just gate"` loop)
+    # matched itself and never exited - three of them on 2026-09-23. The gate's argv STARTS with it.
+    while [ -e "$S/bulk-in-progress" ] || pgrep -f '^just gate' >/dev/null 2>&1; do
         [ $(( (SECONDS - t0) % 300 )) -lt 15 ] && echo "wait-for-gate: a merge gate is running ($(( (SECONDS - t0) / 60 )) min so far)" >&2
         sleep 15
     done
