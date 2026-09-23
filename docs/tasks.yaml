@@ -23289,7 +23289,7 @@ tasks:
   - id: T-818
     milestone: MMAP
     title: 'Saved measurements store + /api/measurements (value+unit+place+time+provenance)'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-API
     model: opus
@@ -23326,6 +23326,7 @@ tasks:
       Commits: ef48d560
       Observed, not chased: PRE-EXISTING, fails in isolation on clean main c65a3ed2 (checked in a temp worktree), 3/3 runs: hk-api tests/ondemand.rs:365 silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay panics '11 records' (asserts records > 20 in 1.5 s). This is a throughput-bound assertion, so it is a candidate for the `timing` tier or a real regression in /ws/open/listen record rate; `just test-crate hk-api` stops at it (fail-fast). | Duplication with T-816 (task-t816, not yet on main): MeasurementProvenance/MeasurementTier and the view-stamp parser in hk-api/src/measurements.rs mirror AuthoredProvenance/AuthoredTier/stamp() in T-816's authored.rs/annotations.rs. The field set and wire shape are the same on purpose; once both land they should be folded into one shared research-provenance type. Expect small textual merge conflicts with T-816 in http.rs ROUTES/dispatch chain, docs/api.md reserved table, and the api_contract.rs module doc. | docs/25 §4/§10.4 envisage a data-derived -3 dB bandwidth and a signal-derived symbol rate over the IQ/spectrum under the place. This ticket computes every value from the cursors only (basis='cursors', stated on the wire and in docs/api.md). A data-derived basis (reading spectrum history/IQ ring under the place) would be a follow-up (docs/25 R-2 sized it at 4-5 d). | collection_id is checked as a UUID but not for existence (MAP-17/T-817 collections are not on main yet).
       Use cases: RESEARCH-003
+    commit: 446ee53b
   - id: T-819
     milestone: MMAP
     title: 'Saved views: named, restorable (time x frequency) window extents'
