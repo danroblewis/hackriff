@@ -19,7 +19,15 @@ sleep 4; tail -2 $HACKRIFF_OPS/work-runner.log             # VERSION: matches �
 ```
 
 Rules:
-- **Never the merge runner mid-gate** (invariant 21). If a gate is running, wait for `BULK MERGED` / `MERGED` and the `bulk-in-progress` marker to clear, then restart within the seconds before it takes the next batch — or accept that the old code gates one more batch. The skill checks this and refuses.
+- **`pkill -f 'ops/<script>'`, never `kill $(pgrep …)`.** While a gate runs the merge runner has a
+  SUBSHELL with the same command line (`limited()` forks it); `pgrep` returns two pids on two
+  lines, `kill` rejects the pair as one argument, kills neither, and a second runner starts beside
+  the first - which happened at 13:49 on 2026-09-23 and cost a rewound batch and a confused old
+  runner. `pkill -f` signals every match. After a restart, `pgrep -fl 'ops/merge-runner.sh'` must
+  show ONE process (two during a gate: the runner and its subshell, parent and child).
+- **Never the merge runner mid-gate** (invariant 21) — with one exception you must say out loud: a
+  batch that is *certainly* doomed (the runner has already shown the red is in it and will hit it
+  again) may be rewound early, because the rewind is then the cheapest path, not a cost. If a gate is running, wait for `BULK MERGED` / `MERGED` and the `bulk-in-progress` marker to clear, then restart within the seconds before it takes the next batch — or accept that the old code gates one more batch. The skill checks this and refuses.
 - **Say what it interrupts** in the tick line, before doing it.
 - **Two backgrounded commands per shell invocation at most** — the hook blocks more.
 - After a restart, read the first three log lines: `merge-runner up … VERSION: matches <sha>` and, since 2026-09-23, the `STARTUP:` lines listing what it left alone (worktree processes) or killed (orphan gate processes on the main checkout only).

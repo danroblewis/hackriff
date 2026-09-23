@@ -601,6 +601,15 @@ try_bulk(){
     # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
     if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
       log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
+      # REBUILD FIRST. The spec runner serves whatever `target/debug/hk` and `ui/dist` already exist
+      # (ui/e2e/backend.mjs), and those were built from the BATCH tree by the gate that just failed.
+      # At 13:47 on 2026-09-23 this step ran main's spec against the batch's UI bundle - which
+      # carried the very tilecache.ts change surface-nav was red on - and declared MAIN IS RED,
+      # re-queueing eight branches behind a defect that belonged to one of them. `just test-ui-e2e`
+      # rebuilds both before it runs; this path must too, or its verdict is about the wrong tree.
+      log "TRIAGE: rebuilding hk and ui/dist from the rewound main before the spec re-run"
+      ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+        || log "TRIAGE: WARN rebuild failed; the spec re-run below may test the batch's artefacts"
       if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
         for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
         batch_sig "${branches[@]}" > "$S/suite-broken"
