@@ -20322,7 +20322,7 @@ tasks:
   - id: T-606
     milestone: MAUTO
     title: 'ADR-0011 AMENDMENT: absorb the T-554 coverage catalogue delta, and decide what a PSK demodulator puts on its output port'
-    status: in-progress
+    status: done
     branch: task-t606
     priority: normal
     parallel_group: MAUTOD
@@ -20375,6 +20375,7 @@ tasks:
       Filed 2026-09-21 by T-554 (docs/18 sections 6-9). core_interface: this is the block contract.
       The block tickets T-608..T-613 depend on this one for their port shapes.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: f9ae25bf
   - id: T-607
     milestone: MAUTO
     title: 'liquid-dsp is DESIGNATED BUT NOT LINKED: land the FFI binding, or record the refusal and re-price the four block tickets that assume it'
