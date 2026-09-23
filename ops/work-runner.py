@@ -618,6 +618,19 @@ your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 
 def release_stale_claims(claims, tasks_by_id):
     changed = False
+    # A `queued` claim whose branch is already on main is finished: the merge runner landed it
+    # (or a hand-merge did) and nothing flipped the claim. 24 of 39 "queued" claims were such
+    # on 2026-09-23 01:40, inflating the dashboard's IN QUEUE count and every throughput read.
+    for tid, c in list(claims.items()):
+        b = c.get("branch")
+        if c.get("state") == "queued" and b:
+            try:
+                if sh(["git", "rev-parse", "-q", "--verify", b]).strip() and \
+                   int(sh(["git", "rev-list", "--count", f"main..{b}"]).strip() or 0) == 0:
+                    log(f"CLAIM {tid}: {b} is on main - claim closed")
+                    c["state"] = "merged"; c["ended"] = time.time(); changed = True
+            except Exception:
+                pass
     for tid, c in list(claims.items()):
         if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
