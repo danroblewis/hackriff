@@ -1761,7 +1761,8 @@ async function tick(){
   el.style.color=busy?'#E47B68':(((y.load1||0)>(y.cores||28)*0.6)?'#F0A542':'#52C2AE');
   const mg=d.merge||{state:'idle'};
   const mgEl=$('#merge');
-  if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
+  if(mg.state==='merging'&&!mg.gate){ mgEl.textContent='■ staged merge, NO gate running · '+dur(mg.merge_age_s||0)+' — needs `git merge --abort` + runner restart'; mgEl.style.color='#E47B68'; mgEl.title='MERGE_HEAD exists but no gate process: a killed gate left it (user 2026-09-22: read as a 59-minute gate)'; }
+  else if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
   else if(mg.state==='gating'){ mgEl.textContent='⚙ '+mg.gate+' · '+dur(mg.elapsed_s); mgEl.style.color='#F0A542'; mgEl.title='Gate running before merge'; }
   else { mgEl.textContent='idle'+(mg.queue?' · '+mg.queue+' in-progress':''); mgEl.style.color='#5A6973'; mgEl.title='No merge or gate running'; }
   // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
