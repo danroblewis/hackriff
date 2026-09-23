@@ -583,7 +583,7 @@ fn unauthenticated_api_calls_are_rejected() {
             floor: None,
             inventory: None,
             status: None,
-            live_control: None,
+            live_controls: hk_api::LiveControls::none(),
             ..ApiState::default()
         },
         Some(dist.0.clone()),

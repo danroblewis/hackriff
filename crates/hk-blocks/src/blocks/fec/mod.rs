@@ -13,14 +13,20 @@ use crate::schema::{ParamExt, boolean, descriptor, hex, int, list, object, one_o
 mod bch;
 mod checksum;
 mod crc;
+pub mod mauto;
 mod parity;
 #[cfg(test)]
 pub(crate) mod tests;
+mod trellis;
+mod viterbi;
+#[cfg(test)]
+mod viterbi_tests;
 
 pub use bch::Bch;
 pub use checksum::Checksum;
 pub use crc::Crc;
 pub use parity::Parity;
+pub use viterbi::{Viterbi, ViterbiFrames};
 
 fn drop_invalid() -> ParamSchema {
     param(
@@ -243,6 +249,16 @@ pub fn register(r: &mut Registry) {
     ];
     for (name, build) in blocks {
         r.register(Arc::new(FnFactory::new(&pinned, name, build)))
+            .expect("fec block names are unique");
+    }
+    // ADR-0011 §9 rows, pinned by their own descriptors in `mauto` (T-610).
+    let mauto = mauto::planned();
+    let rows: [(&str, BuildFn); 2] = [
+        ("viterbi", viterbi::build_stream),
+        ("viterbi_frames", viterbi::build_frames),
+    ];
+    for (name, build) in rows {
+        r.register(Arc::new(FnFactory::new(&mauto, name, build)))
             .expect("fec block names are unique");
     }
 }

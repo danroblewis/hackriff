@@ -46,8 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelineRecordings, PipelineRetuner,
-    PipelineRunControl,
+    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback, PipelineRecordings,
+    PipelineRetuner, PipelineRunControl,
 };
 use crate::signal;
 
@@ -1064,7 +1064,11 @@ impl hk_api::attention::AttentionControl for PipelineAttention {
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
-/// handle for device settings.
+/// handles for device settings.
+///
+/// `live_controls` is **every** front end this run holds (T-511): none for a replay or a
+/// scheduler-driven run, one for today's single-SDR run, N when N are composed. `Option<Arc<dyn
+/// LiveControl>>` converts into it, so a single-device caller writes what it always did.
 pub fn serve_api(
     bind: SocketAddr,
     ui_dist: Option<PathBuf>,
@@ -1072,8 +1076,9 @@ pub fn serve_api(
     handle: &PipelineHandle,
     token: Token,
     tag: &str,
-    live_control: Option<Arc<dyn LiveControl>>,
+    live_controls: impl Into<hk_api::LiveControls>,
 ) -> anyhow::Result<Server> {
+    let live_controls = live_controls.into();
     let counters = handle.counters();
     // The pipeline writes the inventory (TrackInventory, chain record writers, plugin Ingest)
     // into this database; the API reads it through `query_inventory` only. Bookmarks live in the
@@ -1091,13 +1096,29 @@ pub fn serve_api(
     // On-demand streams (T-043 listen, T-060 burst bits and symbols, T-165 channelised IQ), over
     // WebSocket and TCP.
     let recipes = handle.recipe_runtime();
+    // T-463: historical playback - the one playhead, reading raw IQ from the ring and the
+    // persisted recordings; its opener re-runs demod/decode, never detection.
+    let playback = Arc::new(hk_pipeline::playback::PlaybackService::new(
+        Arc::new(hk_pipeline::playback::RunIq::new(
+            handle.iq_buffer(),
+            Some((
+                handle.data_dir().join("hackriff.db"),
+                handle.data_dir().to_path_buf(),
+            )),
+        )),
+        hk_pipeline::playback::PlaybackConfig::default(),
+    ));
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
         .with("symbols", handle.symbols_service())
         .with("iq", handle.iq_service()) // T-165
         .with("stage", recipes.stage_service()) // T-088
-        .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
+        .with("inspector", recipes.inspector_service()) // T-088 (T-089/T-092 extend it)
+        .with(
+            "playback",
+            Arc::clone(&playback) as Arc<dyn hk_api::stream::StreamOpener>,
+        ); // T-463
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
@@ -1124,14 +1145,17 @@ pub fn serve_api(
         // is a driver over the interactive retune path, not the scheduler this run does not drive.
         // T-517: with the run's own bin width, so a coarse step widens the window only where the
         // detection/history bins stay exactly as wide.
-        scan: live_control.clone().map(|lc| {
+        // T-511: the sweep drives **one** front end — the run's default. A per-device sweep is a
+        // separate decision (`crate::scan`'s arbitration is written for one radio), and the wire
+        // says which one it commissions.
+        scan: live_controls.primary().cloned().map(|lc| {
             let fft = handle.detection_fft_len();
             Arc::new(
                 hk_api::scan::ScanRunner::new(lc)
                     .with_bin_width(Arc::new(move |fs| hk_pipeline::detection_bin_hz(fs, fft))),
             )
         }),
-        live_control,
+        live_controls,
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),
         audit: Some(Arc::new(audit)),
@@ -1168,8 +1192,19 @@ pub fn serve_api(
             handle.data_dir().join("hackriff.db"),
             handle.data_dir().to_path_buf(),
         ))),
+        // T-463: the one playhead of historical playback.
+        playback: Some(Arc::new(PipelinePlayback(playback))),
         // T-438: the tile route's ingest-backpressure cap, per server.
-        tiles_in_flight: Default::default(),
+        tile_admission: Default::default(),
+        // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the
+        // same SEALED tiles every poll, and a sealed tile can never change again. Live tiles at the
+        // growing edge are never cached — see `HotTileCache`.
+        tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
+        row_feeds: Default::default(),
+        // T-579: the tile route's memoised geometry, per server — the readable ceiling per
+        // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
+        ceiling_memo: Default::default(),
+        coverage_raster: Default::default(),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

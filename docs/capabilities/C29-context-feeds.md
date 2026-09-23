@@ -54,7 +54,7 @@ Only RadioReference has documented terms (SOAP API; each end user needs RR Premi
 - **Power:** network radios draw from a 15–38 W Tier B budget (docs/02 §7.2). Sync on external power or on a schedule.
 - **Disk:** cap raw payload retention; parsed events are bytes–kB each (estimate), lightning dominates volume.
 - **Clock:** the device clock must be GNSS-disciplined (C06; docs/02 §1.8), or joins against feeds shift.
-- **TLE age:** accuracy degrades as TLEs age (magnitude unverified), so pass predictions carry the TLE epoch.
+- **TLE age:** accuracy degrades as TLEs age (magnitude unverified), so pass predictions carry the TLE epoch. *Implemented (T-276):* `hk_context::passes` (near-earth SGP4, checked against the published verification vectors; SDP4/deep space is refused, not approximated) predicts AOS/TCA/LOS from the cached `celestrak-tle` snapshot (`feeds::tle`). Every pass carries its TLE epoch and age; the planner widens the timing margin with age, marks sets older than 14 days `Stale` and does not reserve them by default, and reports the feed's cache age and failed refreshes beside the plan.
 
 ## Prior art and reuse
 - **OpenWebRX+:** background decoding that uploads spots to PSKReporter, APRS-IS and WSPRnet; Daylight scheduler (docs/03 §2.4).

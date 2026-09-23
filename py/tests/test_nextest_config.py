@@ -127,6 +127,67 @@ def test_a_workspace_run_sees_every_member(tmp_path):
     assert report.ok, report.problems
 
 
+# --------------------------------------------------------------------------- the timing tier
+
+TIMING_CONFIG = """
+[profile.default]
+default-filter = '''
+not (test(alpha_keeps_up) or test(beta_streams_in_time))
+'''
+
+[test-groups.heavy-serial]
+max-threads = 1
+
+[profile.timing]
+default-filter = '''
+test(alpha_keeps_up) or test(beta_streams_in_time)
+'''
+"""
+
+
+def timing_tree(tmp_path: Path, config: str = TIMING_CONFIG, fns=("alpha_keeps_up", "beta_streams_in_time")) -> Path:
+    root = tree(tmp_path, WORKSPACE_JUST, config)
+    src = root / "crates" / "hk-dsp" / "tests"
+    src.mkdir()
+    (src / "throughput.rs").write_text("".join(f"#[test]\nfn {f}() {{}}\n" for f in fns))
+    return root
+
+
+def test_the_repository_timing_tier_names_real_tests_and_both_lists_agree():
+    from hkpy.nextest_config import timing_tier
+
+    skips, runs = timing_tier(REPO / ".config" / "nextest.toml")
+    assert skips and skips == runs, (skips, runs)
+    assert check(REPO).ok
+
+
+def test_a_consistent_timing_tier_passes(tmp_path):
+    report = check(timing_tree(tmp_path))
+    assert report.ok, report.problems
+
+
+def test_a_renamed_timing_test_silently_re_entering_the_gate_is_caught(tmp_path):
+    """The name in the config no longer matches a `fn`: the gate would run it again."""
+    report = check(timing_tree(tmp_path, fns=("alpha_keeps_up", "beta_streams_in_time_v2")))
+    assert not report.ok
+    assert any("beta_streams_in_time" in p and "matches no `fn`" in p for p in report.problems), report.problems
+
+
+def test_the_two_timing_lists_drifting_apart_is_caught(tmp_path):
+    """A name the gate skips but `just timing` does not run is a test nobody runs."""
+    # Drop beta from the LAST occurrence only: the [profile.timing] list.
+    head, tail = TIMING_CONFIG.rsplit("test(alpha_keeps_up) or test(beta_streams_in_time)", 1)
+    config = head + "test(alpha_keeps_up)" + tail
+    report = check(timing_tree(tmp_path, config))
+    assert not report.ok
+    assert any("two lists differ" in p and "beta_streams_in_time" in p for p in report.problems), report.problems
+
+
+def test_a_config_without_a_timing_tier_is_not_a_problem(tmp_path):
+    report = check(tree(tmp_path, WORKSPACE_JUST, SERIAL_OVERRIDE))
+    assert report.ok, report.problems
+
+
 # --------------------------------------------------------------------------- parsing
 
 

@@ -60,6 +60,7 @@
 //! the stored edges, with the same closed-interval rule as [`crate::region`].
 
 pub mod alarms; // T-122
+mod authored; // T-816 MAP-16 human-authored annotations
 mod bookmarks;
 mod classify; // T-211
 #[cfg(test)]
@@ -68,6 +69,7 @@ mod cluster;
 #[cfg(test)]
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
+mod collections; // T-817 (MAP-17): marker collections; bookmarks are a facade over one
 mod gating;
 mod harmonic; // T-374 (C40): harmonic families
 #[cfg(test)]
@@ -78,6 +80,7 @@ mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
 mod measure;
+mod measurements; // T-818 MAP-18 saved measurements
 mod presence; // T-262 (ADR-0017 TM-5) presence intervals
 #[cfg(test)]
 mod presence_tests;
@@ -90,6 +93,7 @@ mod retune; // T-598 persisted cross-centre retune verdict
 mod retune_tests;
 #[cfg(test)]
 mod same_emission_tests;
+mod saved_views; // T-819 MAP-19 saved views
 mod selections;
 #[cfg(test)]
 mod signature_tests; // T-218
@@ -120,13 +124,34 @@ use crate::region::Region;
 use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
+pub use collections::{
+    AuthoredProvenance, BOOKMARKS_COLLECTION, BOOKMARKS_COLLECTION_COLOR,
+    BOOKMARKS_COLLECTION_NAME, COLLECTION_NAME_MAX, COLLECTION_NOTE_MAX, COLLECTIONS_MAX,
+    Collection, CollectionSummary, MARKERS_PER_COLLECTION_MAX, Marker, MarkerWindow,
+    PROVENANCE_TEXT_MAX, StorePage, ViewTier,
+};
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
+pub use measurements::{
+    Computed as MeasurementComputed, MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX,
+    MEASUREMENT_REF_MAX, Measurement, MeasurementBasis, MeasurementCursor, MeasurementFilter,
+    MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
+};
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
+pub use saved_views::{
+    SAVED_VIEW_LAYOUT_MAX, SAVED_VIEW_NAME_MAX, SAVED_VIEW_NOTE_MAX, SAVED_VIEW_PAGE_MAX,
+    SavedView, SavedViewFilter, SavedViewPage,
+};
 // `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
 // `Resolution` and `Measured` are the decode-search vocabulary and would collide with
 // `classify::Stage` and `cluster::Resolution`, which mean entirely different things.
+// T-816's stamp is the shared docs/25 §2 `MeasurementProvenance` (as T-819's saved views use);
+// `AuthoredProvenance` is T-817's nullable marker stamp (bookmark-facade markers have no view).
+pub use authored::{
+    AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
+    AuthoredKind, AuthoredPage, authored_block,
+};
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
 pub use retune::{
     MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, RETUNE_RULE, RetuneFamily,
@@ -161,6 +186,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
     include_str!("migrations/0014_harmonic_family.sql"), // T-374 C40 harmonic families
     include_str!("migrations/0015_retune_verdict.sql"), // T-598 persisted retune verdict
+    include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
+    include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
+    include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
 ];
 
 /// Schema version this build creates and understands.

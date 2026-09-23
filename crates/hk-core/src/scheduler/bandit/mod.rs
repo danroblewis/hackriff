@@ -39,7 +39,10 @@ pub use poi::{
     CoverageVisit, DEFAULT_POI_TAUS_S, MAX_CELLS, MAX_GAPS, RegionPoi, region_poi,
     visits_from_records,
 };
-pub use tiers::{AttentionStatus, Lease, MAX_LEASES, MAX_SCHEDULED, ScheduledDwell};
+pub use tiers::{
+    AttentionStatus, Lease, MAX_LEASES, MAX_RESERVATIONS, MAX_SCHEDULED, Reservation,
+    ScheduledDwell,
+};
 pub(crate) use window::{Share, ShareNs, TierWindow};
 
 use std::sync::Arc;

@@ -107,7 +107,12 @@ def control_channel_dibits(rng: np.random.Generator, n_frames: int) -> tuple[np.
 #   IDEN_UP args, 64 bits: iden(4) bandwidth(9) offset-sign(1) offset-magnitude(8) spacing(10)
 #                          base(32); base in units of 5 Hz, spacing in units of 125 Hz
 #   GRP_VCH_GRANT args, 64 bits: service options(8) channel(16) group(16) source(24)
-#   A 16-bit channel number is iden(4) then channel(12); f = base + spacing x channel
+#   IDEN_UP_TDMA args, 64 bits: iden(4) channel-type(4) offset-sign(1) offset-magnitude(13)
+#                               spacing(10) base(32); same units, plus a channel type whose slot
+#                               count divides the channel number (T-272)
+#   A 16-bit channel number is iden(4) then channel(12); f = base + spacing x (channel / slots),
+#   and slot = channel % slots -- so on a two-slot TDMA plan, channels 2n and 2n+1 are ONE
+#   frequency on two slots, which is C23's TDMA slot mix-up pitfall
 #
 # STILL NOT STANDARDS-COMPLIANT, deliberately and in the same four ways T-267 recorded: no
 # rate-1/2 trellis code, no interleaving, no status symbols, and CRC-16/CCITT-FALSE where real P25
@@ -117,6 +122,11 @@ def control_channel_dibits(rng: np.random.Generator, n_frames: int) -> tuple[np.
 TSBK_OP_GRP_VCH_GRANT = 0x00
 TSBK_OP_GRP_VCH_GRANT_UPDATE = 0x02
 TSBK_OP_IDEN_UP = 0x3D
+TSBK_OP_IDEN_UP_TDMA = 0x33
+
+#: Slots per carrier for each 4-bit IDEN_UP_TDMA channel type (op25's ``slots_per_carrier``, for
+#: types 0-4; the reserved types are not generated here because the decoder refuses them).
+TDMA_SLOTS_PER_CHANNEL_TYPE = {0: 1, 1: 1, 2: 1, 3: 2, 4: 4}
 
 # --- Service options (T-270) ---------------------------------------------------------------
 #
@@ -175,6 +185,44 @@ def iden_up_args(iden: int, base_hz: float, spacing_hz: float, *, tx_offset_hz: 
     v = ((iden & 0xF) << 60) | (bw << 51) | ((1 if tx_offset_hz >= 0 else 0) << 50) \
         | (mag << 42) | (spacing << 32) | base
     return v.to_bytes(8, "big")
+
+
+def iden_up_tdma_args(iden: int, channel_type: int, base_hz: float, spacing_hz: float,
+                      *, tx_offset_steps: int = 0) -> bytes:
+    """Pack an IDEN_UP_TDMA argument field (T-272). Raises if a value does not encode exactly.
+
+    iden(4) channel-type(4) offset-sign(1) offset-magnitude(13) spacing(10) base(32) = 64 bits.
+    The transmit offset is in units of the channel spacing here, not 250 kHz.
+    """
+    base = round(base_hz / IDEN_BASE_UNIT_HZ)
+    spacing = round(spacing_hz / IDEN_SPACING_UNIT_HZ)
+    if base * IDEN_BASE_UNIT_HZ != base_hz:
+        raise ValueError(f"base {base_hz} Hz is not a whole number of {IDEN_BASE_UNIT_HZ} Hz steps")
+    if spacing * IDEN_SPACING_UNIT_HZ != spacing_hz:
+        raise ValueError(f"spacing {spacing_hz} Hz is not a whole number of "
+                         f"{IDEN_SPACING_UNIT_HZ} Hz steps")
+    if not 0 <= iden <= 0xF or not 0 <= channel_type <= 0xF:
+        raise ValueError("an IDEN_UP_TDMA field is out of range")
+    if not 0 <= spacing <= 0x3FF or not 0 <= base <= 0xFFFF_FFFF or abs(tx_offset_steps) > 0x1FFF:
+        raise ValueError("an IDEN_UP_TDMA field is out of range")
+    v = ((iden & 0xF) << 60) | ((channel_type & 0xF) << 56) \
+        | ((1 if tx_offset_steps >= 0 else 0) << 55) | ((abs(tx_offset_steps) & 0x1FFF) << 42) \
+        | (spacing << 32) | base
+    return v.to_bytes(8, "big")
+
+
+def tdma_channel_number(iden: int, channel: int, slot: int, slots: int) -> int:
+    """The 16-bit channel number naming ``channel`` on ``slot`` of a ``slots``-slot TDMA plan.
+
+    The FREQUENCY and the slot are the truth; this derives the number a grant has to carry to name
+    them, never the other way round -- so a decoder still has to divide by the slot count it read
+    off the air to get back to either.
+    """
+    if slots not in TDMA_SLOTS_PER_CHANNEL_TYPE.values():
+        raise ValueError(f"{slots} is not a slot count any channel type names")
+    if not 0 <= slot < slots:
+        raise ValueError(f"slot {slot} is out of range for {slots} slots")
+    return channel_number(iden, channel * slots + slot)
 
 
 def grant_args(channel: int, talkgroup: int, *, source: int = 0, service_options: int = 0) -> bytes:

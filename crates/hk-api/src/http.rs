@@ -34,7 +34,11 @@
 //! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
+//! | `/api/collections[/<id>[/markers]]`, `/api/markers[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-817 marker collections ([`crate::collections`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
+//! | `/api/measurements[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-818 saved measurements: cursors in, server-computed value+unit+place out, server-stamped provenance ([`crate::measurements`]) |
+//! | `/api/annotations[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-816 human-authored time–frequency annotations with a server-stamped provenance ([`crate::annotations`]) |
+//! | `/api/views[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-819 saved views: named, restorable (time × frequency) window extents; view-arithmetic state, never a device command ([`crate::views`]) |
 //! | `/api/selections/<id>/watch` | GET | token | T-166 the selection's region-watch alerts and the activity it did not alert on, with reasoning ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
@@ -45,6 +49,7 @@
 //! | `/api/clusters[/<id>[/promote]]` | GET, POST | token (header only for mutating) | T-202 C18 clusters of unknown emissions — "the same thing I saw before" ([`crate::clusters`]). A *type* above emitters; evidence, never an identity |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
+//! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -70,6 +75,7 @@
 //!   limited to 16 KiB, bodies to 64 KiB, and both must arrive within `request_timeout`; query
 //!   results are capped.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -131,6 +137,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/tiles/events"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
+    // T-463: the one playhead of historical playback (view state over recorded history; audio at
+    // it is the `playback` on-demand opener)
+    ("GET", "/api/playback"),
+    ("POST", "/api/playback"),
     ("GET", "/api/status"),
     ("GET", "/api/control/state"),
     ("POST", "/api/control/center"),
@@ -162,6 +172,36 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/selections/{id}"),
     ("POST", "/api/selections/{id}/links"),
     ("GET", "/api/selections/{id}/watch"),
+    // T-818 MAP-18 saved measurements
+    ("GET", "/api/measurements"),
+    ("POST", "/api/measurements"),
+    ("GET", "/api/measurements/{id}"),
+    ("PUT", "/api/measurements/{id}"),
+    ("DELETE", "/api/measurements/{id}"),
+    // T-816 MAP-16 human-authored annotations
+    ("GET", "/api/annotations"),
+    ("POST", "/api/annotations"),
+    ("GET", "/api/annotations/{id}"),
+    ("PUT", "/api/annotations/{id}"),
+    ("DELETE", "/api/annotations/{id}"),
+    // T-819 MAP-19 saved views
+    ("GET", "/api/views"),
+    ("POST", "/api/views"),
+    ("GET", "/api/views/{id}"),
+    ("PUT", "/api/views/{id}"),
+    ("DELETE", "/api/views/{id}"),
+    // T-817 (MAP-17): time-frequency marker collections; /api/bookmarks is a facade over one.
+    ("GET", "/api/collections"),
+    ("POST", "/api/collections"),
+    ("GET", "/api/collections/{id}"),
+    ("PUT", "/api/collections/{id}"),
+    ("DELETE", "/api/collections/{id}"),
+    ("GET", "/api/collections/{id}/markers"),
+    ("POST", "/api/collections/{id}/markers"),
+    ("GET", "/api/markers"),
+    ("GET", "/api/markers/{id}"),
+    ("PUT", "/api/markers/{id}"),
+    ("DELETE", "/api/markers/{id}"),
     ("GET", "/api/outputs"),
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
@@ -185,6 +225,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/clusters/{id}/promote"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
+    // T-468 rows pushed to a subscription over an address range of the tile lattice
+    ("GET", "/ws/tiles/rows"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -315,10 +357,17 @@ pub struct ApiState {
     pub inventory: Option<Arc<Mutex<Repository>>>,
     /// Pipeline counters for `/api/status` (T-027): a snapshot builder, called per request.
     pub status: Option<StatusFn>,
-    /// Live front-end control (T-042, [`crate::live_control`]); `None` for replays and
-    /// scheduler-driven runs (device endpoints then answer 409 `not_live`).
-    pub live_control: Option<Arc<dyn crate::live_control::LiveControl>>,
-    /// T-452: the in-app survey sweep over [`Self::live_control`] ([`crate::scan`]). `None` leaves
+    /// Live front-end control (T-042, [`crate::live_control`]): **every** front end this run
+    /// holds, keyed by `device_id`, empty for replays and scheduler-driven runs (device endpoints
+    /// then answer 409 `not_live`).
+    ///
+    /// T-511 made this a collection rather than one `Option`: the length is a fact about the run,
+    /// measured per request, and each handle carries its own [`crate::DeviceGate`], so "one
+    /// capture at a time" is per device rather than per server. Device routes resolve a selector
+    /// through [`crate::LiveControls::select`], which may be omitted only when there is exactly
+    /// one front end.
+    pub live_controls: crate::live_control::LiveControls,
+    /// T-452: the in-app survey sweep over one of [`Self::live_controls`] ([`crate::scan`]). `None` leaves
     /// `/api/control/scan*` answering 503 — the front end is there but nothing can sweep it.
     ///
     /// It is a *driver over the interactive retune path*, not a scheduler: `hk serve` still does
@@ -369,15 +418,38 @@ pub struct ApiState {
     /// ([`crate::recordings`]) - the half of the audio horizon the IQ ring is not. `None`
     /// answers 503.
     pub recordings: Option<Arc<dyn crate::recordings::RecordingCatalog>>,
+    /// T-463: the one playhead behind `GET/POST /api/playback` ([`crate::playback`]); `None`
+    /// answers 503.
+    pub playback: Option<Arc<dyn crate::playback::PlaybackControl>>,
     /// T-166: the region watch behind `GET /api/selections/{id}/watch`
     /// ([`crate::selections::WatchControl`]); `None` answers 503.
     pub watch: Option<Arc<dyn crate::selections::WatchControl>>,
-    /// T-438: tile reads in flight, the ingest-backpressure cap of `docs/16` §5.5 (cap 3).
+    /// T-438/T-630: who may have one of the tile route's in-flight slots — the
+    /// ingest-backpressure cap of `docs/16` §5.5 (cap 3), plus the per-client fair share that
+    /// decides whose request meets it ([`crate::tiles::TileAdmission`]).
     ///
     /// Per **state**, not a `static`: two servers in one process must not share a cap, and a cap
-    /// that leaks across tests is a cap nobody can assert. Cloning the state shares the counter,
+    /// that leaks across tests is a cap nobody can assert. Cloning the state shares the table,
     /// which is what makes it a server-wide cap rather than a per-request one.
-    pub tiles_in_flight: Arc<AtomicUsize>,
+    pub tile_admission: Arc<crate::tiles::TileAdmission>,
+    /// T-572: the hot-tile LRU in front of `GET /api/tiles`.
+    ///
+    /// Per **state** and shared by cloning, exactly like [`Self::tile_admission`] and for the
+    /// same reason: two servers in one process must not share a cache, and a cache that leaks
+    /// across tests is a cache nobody can assert. `None` disables it entirely (the default for a
+    /// state built by hand in a test that is not about caching), so every existing assertion
+    /// about what a tile read costs still measures a real read.
+    pub tile_cache: Option<Arc<crate::tiles::HotTileCache>>,
+    /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
+    /// Per state for the same reason as `tile_admission`.
+    pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
+    /// geometry and config, so it is computed once per lattice rather than probed per request.
+    /// Shared by cloning, like [`Self::tile_admission`].
+    pub ceiling_memo: Arc<crate::tiles::CeilingMemo>,
+    /// T-579: the tile coverage raster, memoised against the tune history it is computed from.
+    /// Always on: its key is the evidence itself, so it cannot serve a stale grey.
+    pub coverage_raster: Arc<crate::coverage::CoverageRasterMemo>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -813,6 +885,13 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, extra: &str,
 
 /// [`respond`] with the `Cache-Control` value the caller chooses, rather than the hard-coded
 /// `no-store` every other route wants (T-574: only a sealed tile response earns anything else).
+///
+/// `Vary` names **both** axes in ONE header (T-700). `Origin` has always been here; T-533 added
+/// content negotiation, and a second `Vary:` line beside the first is a cache-correctness bug
+/// waiting to happen — a shared cache that reads one of them stores the gzipped body under a key
+/// that a client refusing gzip can hit. It is stated on EVERY answer, not only the compressed one,
+/// for the same reason: the response a cache is storing for a sealed tile (`immutable`,
+/// `max-age=1y`) may legitimately be either form, so the key has to say so whichever arrived first.
 fn respond_cached(
     stream: &mut TcpStream,
     status: u16,
@@ -824,7 +903,7 @@ fn respond_cached(
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          Connection: close\r\nCache-Control: {cache_control}\r\nX-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\nVary: Origin\r\n{extra}\r\n",
+         Referrer-Policy: no-referrer\r\nVary: Origin, Accept-Encoding\r\n{extra}\r\n",
         reason(status),
         body.len()
     );
@@ -840,11 +919,18 @@ fn respond_cached(
 /// re-guessed here from age or from a timer — so a LIVE tile (the growing edge, `sealed: false`)
 /// always keeps the existing `no-store` and is never given an ETag at all, which is what stops a
 /// cache from ever answering it with a stale 304.
+///
+/// T-533: this route answers itself, so the generic tail's gzip never reaches it — and it is the
+/// body the compression exists for. The coding is applied HERE, over the same bytes, and the ETag
+/// is deliberately computed over the UNCOMPRESSED JSON: gzip is a transfer coding, so the
+/// representation a cache is validating is the same tag whether or not this hop compressed it.
 fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
     let sealed = body.get("sealed").and_then(Value::as_bool).unwrap_or(false);
     let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
+    let gzip_ok = accepts_gzip(req);
     if !sealed {
-        respond(stream, 200, "application/json", "", &bytes);
+        let (extra, out) = maybe_gzip(gzip_ok, "", &bytes);
+        respond(stream, 200, "application/json", &extra, &out);
         return;
     }
     // Content-derived, not a timestamp — but `build_ms` and `in_flight` (both `cost` and
@@ -866,24 +952,65 @@ fn respond_tile(stream: &mut TcpStream, req: &Request, body: Value) {
         respond_cached(stream, 304, "application/json", cache_control, &extra, &[]);
         return;
     }
-    respond_cached(
-        stream,
-        200,
-        "application/json",
-        cache_control,
-        &extra,
-        &bytes,
-    );
+    let (extra, out) = maybe_gzip(gzip_ok, &extra, &bytes);
+    respond_cached(stream, 200, "application/json", cache_control, &extra, &out);
 }
 
-/// Recursively nulls `build_ms` and `in_flight` wherever they appear (`cost` and
-/// `shadow.search`, T-574) — this read's own timing and concurrency, never the tile's content.
+/// Gzip `bytes` when the caller accepts it and the body is big enough, returning the extra headers
+/// to send with them (T-533). Borrowed body back unchanged when it is not worth it.
+fn maybe_gzip<'a>(gzip_ok: bool, extra: &str, bytes: &'a [u8]) -> (String, Cow<'a, [u8]>) {
+    if gzip_ok
+        && bytes.len() >= GZIP_MIN_BYTES
+        && let Some(z) = gzip(bytes)
+    {
+        // `Vary` is already stated, once, by `respond_cached` — see there.
+        return (format!("{extra}Content-Encoding: gzip\r\n"), Cow::Owned(z));
+    }
+    (extra.to_string(), Cow::Borrowed(bytes))
+}
+
+/// `cost` fields T-630 added that describe the admission of THIS read, not the tile.
+const T630_READ_FIELDS: [&str; 6] = [
+    "in_flight_share",
+    "in_flight_held",
+    "clients",
+    "client",
+    "reserved",
+    "fair_share",
+];
+
+/// Recursively nulls `build_ms`, `in_flight` and `served_from` wherever they appear (`cost` and
+/// `shadow.search`, T-574/T-572) — this read's own timing, concurrency and provenance, never the
+/// tile's content.
+///
+/// `served_from` matters as much as the other two: T-572's hot-tile cache adds it on a HIT and not
+/// on a miss, so leaving it in what the ETag is hashed over would make a sealed tile's first
+/// re-read a 200 instead of the 304 T-574 exists for — the cache would have broken the cache.
+///
+/// And, inside `cost`, T-630's admission fields ([`T630_READ_FIELDS`]): a second client reading
+/// the same sealed tile under a different share must still get its 304.
 fn strip_read_diagnostics(v: &mut Value) {
     match v {
         Value::Object(obj) => {
+            // REMOVED, not nulled: `served_from` is present only on a cache hit, and a key that
+            // is absent on one read and null on the next is still a different byte string — which
+            // is a different ETag, which is a 200 where T-574 promises a 304.
+            obj.remove("served_from");
             for (k, val) in obj.iter_mut() {
                 if k == "build_ms" || k == "in_flight" {
                     *val = Value::Null;
+                } else if k == "cost" {
+                    // T-630's admission facts are this read's too — whose share it was admitted
+                    // under and how busy the route was — and differ between two clients reading
+                    // the same sealed tile. Nulled only inside `cost`, where they are defined.
+                    if let Value::Object(cost) = val {
+                        for f in T630_READ_FIELDS {
+                            if let Some(x) = cost.get_mut(f) {
+                                *x = Value::Null;
+                            }
+                        }
+                    }
+                    strip_read_diagnostics(val);
                 } else {
                     strip_read_diagnostics(val);
                 }
@@ -912,13 +1039,83 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Bodies at or above this are worth compressing (T-533).
+///
+/// Below it the gzip member's own header and trailer are a large share of what is sent and the
+/// round trip is dominated by the request anyway; the bodies this exists for — a `/api/tiles` grid,
+/// an `/api/history` overview — are two orders of magnitude above it.
+const GZIP_MIN_BYTES: usize = 4096;
+
+/// Does this request say it can read gzip?
+///
+/// `Accept-Encoding: gzip;q=0` is a client saying it **cannot**, and is honoured: a coding offered
+/// at zero quality is explicitly refused (RFC 9110 §12.5.3), and sending it anyway would hand that
+/// caller bytes it will not decode.
+fn accepts_gzip(req: &Request) -> bool {
+    req.header("accept-encoding").is_some_and(|v| {
+        v.split(',').any(|part| {
+            let mut it = part.split(';').map(str::trim);
+            let coding = it.next().unwrap_or("");
+            coding.eq_ignore_ascii_case("gzip")
+                && !it.any(|p| {
+                    p.strip_prefix("q=")
+                        .is_some_and(|q| q.parse::<f32>().is_ok_and(|q| q <= 0.0))
+                })
+        })
+    })
+}
+
+/// Gzip, or `None` when it did not help.
+///
+/// **Level 1, measured rather than chosen by taste.** A live 856 178 B `?planes=f16` tile body is
+/// served at 117 382 B here; level 6 takes the same bytes to ~53 kB (measured offline) for several
+/// times the CPU, on the thread the caller is waiting on. The point of the ticket is a body small
+/// enough for the live edge to track, and that is already a 16x cut — spending milliseconds on the
+/// last part of it is the wrong trade.
+fn gzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    e.write_all(bytes).ok()?;
+    let out = e.finish().ok()?;
+    (out.len() < bytes.len()).then_some(out)
+}
+
 fn respond_json_with(stream: &mut TcpStream, status: u16, body: &Value, extra: &str) {
+    respond_json_encoded(stream, status, body, extra, false);
+}
+
+/// [`respond_json_with`], with the caller's `Accept-Encoding` honoured (T-533).
+///
+/// **The body is the same JSON either way** — this chooses a transfer coding, never a
+/// representation. What a client decodes is byte-identical to what it would have received without
+/// the header, which is why the contract tests assert the *decompressed* body against the plain one
+/// rather than treating the two as separate shapes.
+fn respond_json_encoded(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+    extra: &str,
+    gzip_ok: bool,
+) {
     let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let auth = if status == 401 {
         "WWW-Authenticate: Bearer\r\n"
     } else {
         ""
     };
+    if gzip_ok
+        && bytes.len() >= GZIP_MIN_BYTES
+        && let Some(z) = gzip(&bytes)
+    {
+        return respond(
+            stream,
+            status,
+            "application/json",
+            // `Vary` is already stated, once, by `respond_cached` — see there.
+            &format!("{auth}{extra}Content-Encoding: gzip\r\n"),
+            &z,
+        );
+    }
     respond(
         stream,
         status,
@@ -1005,6 +1202,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             return respond_error(&mut stream, 403, "cross-origin control request refused");
         }
     }
+    // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
+    if req.path == "/ws/tiles/rows" && req.method == "GET" {
+        return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
+    }
     if let Some(name) = req.path.strip_prefix("/ws/open/")
         && req.method == "GET"
     {
@@ -1053,6 +1254,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::measurements::route(state, &ctl)) // T-818
+        .or_else(|| crate::annotations::route(state, &ctl)) // T-816
+        .or_else(|| crate::views::route(state, &ctl)) // T-819
+        .or_else(|| crate::collections::route(state, &ctl)) // T-817 (MAP-17)
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
@@ -1064,6 +1269,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
         .or_else(|| crate::recordings::route(state, &ctl)) // T-469
+        .or_else(|| crate::playback::route(state, &ctl)) // T-463
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.
         .or_else(|| crate::recipes::route(state, &ctl)) // T-088
         .or_else(|| crate::inspector::route(state, &ctl)) // T-089
@@ -1155,6 +1361,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                 Err(e) => respond_error(&mut stream, e.status, &e.message),
             };
         }
+        // T-573: one request per viewport, not one per tile. Each entry's `tile` is exactly what
+        // the route above answers for that address alone, so a partial viewport — some data, one
+        // genuinely unobserved, one refused — is expressible in one response. Answered through
+        // the generic tail: a batch is never a single sealed representation, so it gets no ETag
+        // and no immutable cache, but it does get `Accept-Encoding` (T-700) where it matters most.
+        "/api/tiles/batch" => crate::tiles::tiles_batch_json(state, &req.query),
         // docs/16 §5.3: a tile never carries emitters (identity gating is per-caller and a sealed
         // tile is immutable), so the coarse-zoom highlight layer is a count per cell, computed on
         // demand on the same address.
@@ -1175,6 +1387,12 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
                         "t".into(),
                         json!(Timestamp::now().as_unix_nanos() as f64 / 1e9),
                     );
+                    // T-572: the hot-tile cache's bound and its eviction, reported HERE and not in
+                    // a tile body — `cost.cache` would change on every read and so would a sealed
+                    // tile's ETag, which is the one thing T-574's 304 depends on not doing.
+                    if let Some(c) = state.tile_cache.as_ref() {
+                        o.insert("tile_cache".into(), c.stats_json());
+                    }
                 }
                 v
             })
@@ -1194,7 +1412,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         _ => return static_file(&mut stream, shared.config.ui_dist.as_deref(), &req.path),
     };
     match result {
-        Ok(v) => respond_json(&mut stream, 200, &v),
+        // T-533: the one place every routed JSON answer is written, so the transfer coding is
+        // decided once rather than per route. A `/api/tiles` grid is measurement text and
+        // compresses about ninefold; an error body is a sentence and is below the threshold.
+        Ok(v) => respond_json_encoded(&mut stream, 200, &v, "", accepts_gzip(&req)),
         Err(e) => respond_error(&mut stream, e.status, &e.message),
     }
 }
@@ -1256,15 +1477,20 @@ pub(crate) fn with_history<T>(
 /// Two answers, in order of how much they know:
 ///
 /// 1. a live front end's capabilities — its *widest* sample rate, because the span it can deliver
-///    is what the user could retune to, not only what it is set to now;
-/// 2. failing that, the running segment's own sample rate. A replay has no `live_control`, but it
+///    is what the user could retune to, not only what it is set to now. With several front ends
+///    (T-511) it is the widest any of them can deliver: a span is live-detail if **some** window
+///    could have captured it in one piece;
+/// 2. failing that, the running segment's own sample rate. A replay has no live control, but it
 ///    still has exactly one instantaneous bandwidth, and it is this. Nothing wider than it ever
 ///    came from one window.
 pub(crate) fn max_live_span_hz(state: &ApiState) -> Option<f64> {
     state
-        .live_control
-        .as_deref()
-        .and_then(|l| l.capabilities().max_live_span_hz())
+        .live_controls
+        .iter()
+        .filter_map(|l| l.capabilities().max_live_span_hz())
+        .fold(None, |acc: Option<f64>, hz| {
+            Some(acc.map_or(hz, |a| a.max(hz)))
+        })
         .or_else(|| {
             state
                 .run_control

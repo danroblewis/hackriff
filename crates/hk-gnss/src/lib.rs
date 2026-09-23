@@ -66,11 +66,13 @@
 //! ([`acquire`]), observable epochs and the S4 scintillation index ([`observable`]), and blind
 //! jamming plus spoofing tell-tales ([`integrity`]).
 //!
-//! **Not built** (deliberately — see the task report): tracking loops (DLL/PLL), navigation
-//! message decode, ephemeris handling, a PVT solution, SBAS/WAAS, Galileo OSNMA, and the
-//! GNSS-SDR plugin wrapper. Acquisition without tracking cannot produce a fix, and this crate
-//! does not claim one. It is also **not wired into `hk-pipeline`**: nothing schedules an L1
-//! dwell yet, which is a follow-up task.
+//! **Not built here, by design:** tracking loops (DLL/PLL), navigation message decode,
+//! ephemeris handling and PVT. Those come from **GNSS-SDR wrapped as a C22 plugin** (T-323):
+//! [`receiver`] generates its config and reads its RINEX/NMEA output back into this crate's
+//! types, and the `hk-plugin-gnss-sdr` binary (`plugins/gnss-sdr/manifest.json`) runs it as a
+//! subprocess over one recorded dwell — GPL-3.0 behind the process boundary (ADR-0010). The
+//! wrapper consumes a dwell and emits evidence, never a detection or an identity. SBAS/WAAS and
+//! Galileo OSNMA are still not built. Acquisition alone (T-274) still cannot produce a fix.
 //!
 //! Every claim about real-world sensitivity here is **unverified against hardware** — it rests on
 //! synthetic IQ at a stated C/N0. Settling it needs an active GNSS antenna on the bias-tee and a
@@ -80,6 +82,7 @@ pub mod acquire;
 pub mod integrity;
 pub mod observable;
 pub mod prn;
+pub mod receiver;
 
 pub use acquire::{
     AcquireError, AcquisitionConfig, AcquisitionEvidence, AcquisitionResult, AcquisitionThreshold,
@@ -92,4 +95,8 @@ pub use integrity::{
 pub use observable::{Ecef, GnssObservableEpoch, SvObservable, s4_index};
 pub use prn::{
     CHIP_RATE_HZ, CODE_LENGTH, CODE_PERIOD_S, CaCode, L1_HZ, L5_HZ, MAX_PRN, PrnCodebook, PrnError,
+};
+pub use receiver::{
+    DwellSummary, GNSS_SDR_SCHEMA, GnssSdrRun, ReceiverEpochEvidence, RunOutcome,
+    epochs_from_evidence, lock_evidence, s4_by_prn,
 };

@@ -86,7 +86,7 @@ export function findChrome() {
  * its own backend port. Two runs in the SAME directory still share `ui/dist` and will race on the
  * bundle build; that is a separate defect and is not what wedged the gate.
  */
-export async function launch({ port = 0, width = 1440, height = 900, headless = true } = {}) {
+export async function launch({ port = 0, width = 1440, height = 900, headless = true, onSpawn } = {}) {
   const exe = findChrome();
   const profile = mkdtempSync(path.join(tmpdir(), "hk-e2e-chrome-"));
   const args = [
@@ -107,6 +107,15 @@ export async function launch({ port = 0, width = 1440, height = 900, headless = 
   // SIGKILL on the parent alone leaves its ~20 renderer and GPU children reparented and running,
   // and a test tier that leaks twenty processes per run is a test tier people disable.
   const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], detached: true });
+  // T-740: fired the INSTANT the OS has handed back a pid — before any of the waiting below, which
+  // can itself take up to several seconds. A caller that tracks its own children for signal/SIGKILL
+  // cleanup (`ui/e2e/run.mjs`) needs the pid now, not after `launch()` resolves: Chrome forks its
+  // GPU/network/renderer helpers throughout that wait, so tracking only the RESOLVED browser misses
+  // exactly the window a kill landing during startup would hit. `profile` is passed too so a caller
+  // that verifies a recorded child before killing it (pid reuse across runs) has this browser's own
+  // unique `--user-data-dir` to check for, not just the generic `hk-e2e-chrome-` prefix every Chrome
+  // this tier launches shares.
+  onSpawn?.(proc.pid, profile);
   let stderr = "";
   proc.stderr.on("data", (d) => { stderr += d; });
 

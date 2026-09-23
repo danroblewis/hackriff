@@ -30,6 +30,7 @@ Edges (docs/06 §5/§2.1): C23 depends on **C11 (channelizer) + C12 (occupancy)*
   - `IDEN_UP` maps 16-bit channel numbers to frequencies. Use grant updates for late entry.
   - No dedicated CC: Capacity Plus rest channel, NXDN Type-D, LTR subaudible.
 - **Grant following:** allocate a voice demod on the channel or TDMA slot: C4FM/CQPSK/H-DQPSK/4FSK via C20, analog FM via C19 for analog SmartNet/EDACS. End on a silence timeout (docs/03 §3.5).
+  - **A call still keyed when the dwell ends is truncated, never closed at the window edge** (T-308, docs/07 §2.29): `t_end` stays NULL and `observed_until` records where watching stopped, so the duration reads as a lower bound. A later pass continues it only across a gap ≤ the silence timeout (90 ms) — the duty cycle's gap is ~9.5 s, so ordinarily it does not, and the row stays truncated.
 - **Encryption check before the vocoder** (docs/04 §8.3):
   - P25 ALGID 0x80 = clear; 0x81 DES-OFB, 0x84 AES-256, 0xAA ADP/RC4.
   - Grant service-options bit; DMR privacy indicators in LC/PI headers.

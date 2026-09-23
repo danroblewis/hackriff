@@ -473,23 +473,24 @@ fn a_live_edge_coarse_node_is_maintained_as_rows_close_and_never_sealed_early() 
         "reading it must not seal it either"
     );
 
-    // It agrees with level 0 over every producer row that has CLOSED. The newest level-0 time
-    // cell is still open — its own column has not ended — so a coarse node lags it by at most one
-    // producer cell, which is what "commits every N rows" means and is the only honest answer a
-    // streaming fold can give. (Node (0, 0) itself is unaffected: a direct level-0 read stands in
-    // for its open column with `column_preview`.)
+    // It agrees with level 0 over every row, INCLUDING the one still filling. The cascade itself
+    // commits every N rows, so the newest rows are still in flight in the accumulators; T-583
+    // folds them into the answer when a read asks (`Pyramid::live_preview`), exactly as a level-0
+    // read stands in for its own open column with `column_preview`. So no row is skipped here:
+    // "whenever data exists for that window it must be shown" applies at every zoom.
     let psd: Vec<f32> = (0..4).map(|_| lin(-90.0)).collect();
     p.ingest(&frame(T0 + secs * S, S, 0.0, 1000.0, &psd))
         .unwrap();
     let again = read(&mut p, edge, secs + 1);
     let h0 = read(&mut p, sh.index(0, 0), secs + 1);
-    // The producer cell still open, in this coarse node's own row index.
+    // The row this node is still filling: the one holding the level-0 cell whose column is open.
     let open_row = (secs as usize) / 2;
+    assert!(
+        (0..again.nf).any(|f| again.cell(open_row, f).observed()),
+        "the row still filling reads as unobserved over data the store holds"
+    );
     let mut checked = 0;
     for t in 0..again.nt {
-        if t == open_row {
-            continue;
-        }
         for f in 0..again.nf {
             let truth = truth_max_from_level_0(&h0, &again, t, f);
             match truth {

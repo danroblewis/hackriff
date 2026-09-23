@@ -152,6 +152,17 @@ pub enum RelationKind {
     /// claimed *and revoked* by the overlap resolver over overlapping bands, and a shared kind
     /// would have the two rules revoking each other every pass.
     RetuneSiblingOf,
+    /// T-222: the **same emission as the row it names, arriving over a second path** — the same
+    /// content, delayed and attenuated. Claimed by [`crate::multipath`] from the cross-correlation
+    /// of the two rows' content series, never from geometry: like
+    /// [`Self::RetuneSiblingOf`] the two bands need not overlap, and unlike every artefact kind it
+    /// is **not** gated on a receive chain, because a reflection happens in the air rather than in
+    /// one front end's mixer.
+    ///
+    /// Its own kind for the same reason as the retune sibling: the overlap resolver claims and
+    /// revokes [`Self::DuplicateOf`] over overlapping bands, and a shared kind would have the two
+    /// rules revoking each other every pass.
+    MultipathOf,
 }
 
 impl RelationKind {
@@ -162,6 +173,7 @@ impl RelationKind {
             Self::DuplicateOf => "duplicate-of",
             Self::ArtifactOf => "artifact-of",
             Self::RetuneSiblingOf => "retune-sibling-of",
+            Self::MultipathOf => "multipath-of",
         }
     }
 }
