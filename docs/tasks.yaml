@@ -23339,7 +23339,8 @@ tasks:
   - id: T-819
     milestone: MMAP
     title: 'Saved views: named, restorable (time x frequency) window extents'
-    status: todo
+    status: in-progress
+    branch: task-t819
     priority: normal
     parallel_group: MAP-API
     model: opus
@@ -23427,7 +23428,8 @@ tasks:
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
-    status: todo
+    status: in-progress
+    branch: task-t822
     priority: normal
     parallel_group: MAP-RESEARCH
     model: sonnet
