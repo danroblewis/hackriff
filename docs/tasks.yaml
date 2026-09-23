@@ -24504,7 +24504,7 @@ tasks:
   - id: T-847
     milestone: M2-hardening
     title: Verify the app-surface load flake is gone after task-spec-waits lands (flake ledger at loads 12/10.6)
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: UI
@@ -24522,6 +24522,9 @@ tasks:
       Close as done with the ledger evidence. No load experiments. TESTING PROTOCOL: targeted, hand back.
     notes: |
       FOUND BY supervisor 2026-09-23 (flake ledger, task-gate-diag).
+
+      2026-09-23 (coordinator): verified and closed as DONE (worker proposed cancel). flaky.jsonl holds exactly 2 app-surface entries, 2026-09-22T21:26:07 and 21:55:54 - both before task-deflake-appsurface (9e08619d) landed at 23:38; none across the ~12 batch merges logged 2026-09-23 00:00-14:33. commit = the fix that ended it.
+    commit: 9e08619d
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
