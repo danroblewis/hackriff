@@ -73,7 +73,14 @@ import { Browser, census, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
-const PORT = 8807; // not in FORBIDDEN (backend.mjs); startBackend steps past it if another run holds it.
+// This file's own backend, at a fixed offset inside ITS LANE's 32-port band (run.mjs hands every
+// lane its base as HK_E2E_PORT; the lane's shared backend sits at +0). It used to be the constant
+// 8807 - the same constant scan-everything.e2e.mjs used - and at three lanes the two files ran
+// side by side on 2026-09-23 (11:00 gate): `startBackend` stepped one of them past the busy port
+// with a warning nobody reads, and T-521's "shadow plane carries NO run over band A" was a spec
+// asking the OTHER file's server. Never a literal port here again; 8791+8 = 8799 alone, and
+// 8959 / 8991 in lanes 1 and 2 - none of them in backend.mjs's FORBIDDEN set at any lane base.
+const PORT = Number(process.env.HK_E2E_PORT ?? 8791) + 8;
 
 const PANE_ROW = '.hk-surface-viewport[data-viewport="pane"]';
 const PANE_ACTION = `${PANE_ROW} .hk-surface-action:not([hidden])`;
