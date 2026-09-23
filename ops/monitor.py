@@ -1548,9 +1548,11 @@ def _tid_of_cwd(path):
     try:
         with open(path, "rb") as f:
             head = f.read(60000).decode("utf-8", "replace")
+        # The cwd first; else the first worktree path the agent touches (a coordinator subagent
+        # keeps the coordinator's cwd and `cd`s into .claude/worktrees/rl-t740 in its commands).
         m = re.search(r'"cwd"\s*:\s*"([^"]+)"', head)
-        if m:
-            mm = re.search(r"worktrees/[A-Za-z-]*t0*(\d{2,4})(?:/|$)", m.group(1))
+        for text in ([m.group(1)] if m else []) + [head]:
+            mm = re.search(r"worktrees/[A-Za-z-]*t0*(\d{2,4})(?:[/\s\"'&]|$)", text)
             if mm:
                 return f"T-{mm.group(1)}"
     except Exception:
