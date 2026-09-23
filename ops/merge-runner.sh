@@ -522,6 +522,28 @@ self_version(){
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 self_version
+# STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
+# happen automatically?"). This runner is the only writer of main, so a staged merge or a
+# bulk marker found at startup can only be a previous runner's, killed mid-gate. Nothing was
+# gated, nothing was committed: abort the staged merge, rewind a provisional bulk to its base,
+# re-queue those branches, and carry on. Waiting for a person to type `git merge --abort`
+# cost an hour of an empty box today. Refuse only if the tree has uncommitted edits that are
+# not the merge's own - that is someone else's work and a person must look.
+if [ -e "$REPO/.git/MERGE_HEAD" ]; then
+  stale=$(git -C "$REPO" rev-parse --short MERGE_HEAD 2>/dev/null)
+  git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
+    || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
+fi
+if [ -f "$BULKMARK" ]; then
+  sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
+  if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
+    git -C "$REPO" reset --hard "$sbase" >>"$LOG" 2>&1 && rm -f "$BULKMARK" \
+      && log "STARTUP: rewound a provisional bulk to $sbase and re-queued: $sbranches" \
+      && for b in $sbranches; do echo "$b" >> "$QUEUE"; done
+  else
+    log "STARTUP: bulk marker present but the tree is dirty or base unknown - NOT rewinding; a person must look"
+  fi
+fi
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
