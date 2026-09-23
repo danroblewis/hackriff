@@ -1216,6 +1216,8 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
         "cluster_id",
         // T-320: that membership as grouping data (present, possibly null).
         "cluster_group",
+        // T-593: why `cluster_id` reads what it does (present; null only on a withheld row).
+        "cluster_status",
         // T-284 (ADR-0017 TM-2): when this row was on the air, through the request's window.
         "presence",
     ] {
@@ -1392,6 +1394,29 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
             distinct,
             "distinct clusters must read distinct labels: {label_of:?}"
         );
+        // T-593: `cluster_status` explains a null `cluster_id` instead of leaving it silent. Null
+        // only on a withheld row (as `cluster_id` is); otherwise one of four states, `clustered`
+        // exactly when an id is served, and a reason exactly when the clusterer decided something.
+        for r in rows {
+            let s = &r["cluster_status"];
+            if r["withheld"] == true {
+                assert!(s.is_null(), "a withheld row explains nothing: {r}");
+                continue;
+            }
+            let state = s["state"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cluster_status.state: {r}"));
+            assert!(
+                matches!(state, "clustered" | "pending" | "abstained" | "unassessed"),
+                "{r}"
+            );
+            assert_eq!(state == "clustered", r["cluster_id"].is_string(), "{r}");
+            assert_eq!(state == "unassessed", s["reason"].is_null(), "{r}");
+            assert_eq!(state == "unassessed", s["t_s"].is_null(), "{r}");
+            for key in ["reason", "distance", "t_s"] {
+                assert!(s.get(key).is_some(), "cluster_status missing {key}: {r}");
+            }
+        }
     }
     for field in [
         "occurrences",

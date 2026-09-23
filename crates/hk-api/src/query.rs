@@ -1216,6 +1216,38 @@ pub const RECENT_APPEARANCES: usize = 8;
 /// entity resolution; this field makes such duplication **visible**, and de-duplicates nothing.
 /// The grouping is derived from the cluster id alone, so it cannot vary with which front end
 /// reported a row (T-259/T-305: identity and clustering never read the device).
+/// T-593 `cluster_status`: why the row's `cluster_id` reads what it does, from the clusterer's own
+/// stored membership row (`hk_model::EmitterClusterLink`).
+///
+/// `null` only on a withheld-identity row, exactly as `cluster_id` is. Otherwise
+/// `{"state", "reason", "distance", "t_s"}` with `state`:
+/// - `clustered` — `cluster_id` names a visible cluster; `reason` is how it got there
+///   (`joined`, `seeded`, `reassigned`, `repair`).
+/// - `pending` — grouped with something, but the group is still below the visibility floor, so
+///   its id is not served (a guess with an id reads as a finding).
+/// - `abstained` — the clusterer looked and declined; `reason` says why: `too_few_fields` (the
+///   evidence floor was not met), `ambiguous`, `too_far`, `conflict`.
+/// - `unassessed` — the clusterer has never decided anything about this row (nothing measured
+///   yet, or a catalogue identification it leaves alone); `reason`/`distance`/`t_s` are `null`.
+///
+/// The reason is served verbatim, never re-derived here: the clusterer decided it.
+fn cluster_status_json(link: Option<&hk_model::EmitterClusterLink>, visible: bool) -> Value {
+    let Some(link) = link else {
+        return json!({ "state": "unassessed", "reason": null, "distance": null, "t_s": null });
+    };
+    let state = match (&link.cluster_id, visible) {
+        (Some(_), true) => "clustered",
+        (Some(_), false) => "pending",
+        (None, _) => "abstained",
+    };
+    json!({
+        "state": state,
+        "reason": link.reason,
+        "distance": link.distance.filter(|d| d.is_finite()),
+        "t_s": ts_s(link.t),
+    })
+}
+
 fn cluster_group_json(cluster_id: Option<&str>, rows_in_view: usize) -> Value {
     cluster_id.map_or(Value::Null, |id| {
         json!({
@@ -1607,16 +1639,25 @@ pub fn inventory_entry_json_at(
         // to be more than a guess. On a withheld-identity row it reads `null` whatever storage
         // holds, exactly as `estimated_params` and `/api/inventory/{id}/decode` do (T-159/T-163),
         // so cluster membership can never confirm a withheld identity indirectly.
-        let cluster_id = if withheld {
-            None
+        // T-593: the membership row read once, so `cluster_status` below explains the same
+        // decision `cluster_id` reports and cannot drift from it.
+        let (cluster_id, cluster_status) = if withheld {
+            (None, Value::Null)
         } else {
-            match repo.emitter_cluster_id(e.id)? {
+            let link = repo.emitter_cluster(e.id)?;
+            let stored = match link.as_ref().and_then(|l| l.cluster_id.as_deref()) {
+                Some(id) => Some(repo.live_cluster_id(id)?),
+                None => None,
+            };
+            let visible = match stored {
                 Some(id) => repo
                     .cluster_opt(&id)?
                     .filter(|c| c.state.visible())
                     .map(|c| c.id),
                 None => None,
-            }
+            };
+            let status = cluster_status_json(link.as_ref(), visible.is_some());
+            (visible, status)
         };
         let cluster_group = cluster_group_json(cluster_id.as_deref(), 1);
         // ADR-0017 TM-2: when this emitter was on the air, through the request's window. The
@@ -1681,6 +1722,10 @@ pub fn inventory_entry_json_at(
             // a single row is the whole view — and [`inventory_json`] raises it to the number of
             // rows on the page that share the id. It groups; it never merges.
             "cluster_group": cluster_group,
+            // T-593: *why* `cluster_id` reads what it does. A null id is four different facts —
+            // never looked, grouped but not yet visible, declined for too little evidence, declined
+            // for another cause — and this is where they stop reading as one silence.
+            "cluster_status": cluster_status,
             "identity_scheme": scheme,
             "identity_class": class,
             "withheld": withheld,
