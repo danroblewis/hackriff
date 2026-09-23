@@ -1336,18 +1336,48 @@ def ticket_transcript(tid):
     one-liners from the best-matching subagent transcript (largest, then newest)."""
     tid = (tid or "").upper()
     best = None  # (size, mtime, path)
-    for p in glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True):
+    # Three places an agent's transcript can live (user, 2026-09-23: every modal said "no agent
+    # transcript" while workers were busy): (1) a work-runner worker runs `claude -p` with its
+    # WORKTREE as cwd, so its transcript is under the per-worktree project dir; (2) a subagent of
+    # ANY session (coordinator or supervisor), matched by the ticket id in its launch prompt;
+    # (3) the legacy coordinator-only path, now covered by (2).
+    cands = []
+    m = re.match(r"T-0*(\d+)$", tid)
+    if m:
+        cands += [(p, True) for p in glob.glob(f"{PROJ}--claude-worktrees-t{m.group(1)}/*.jsonl")]
+    cands += [(p, False) for p in glob.glob(f"{PROJ}/*/**/*.jsonl", recursive=True)]
+    for p, by_dir in cands:
         try:
             head, _, sz = head_tail(p)
         except Exception:
             continue
-        if _tid_of_label(first_user(head)) != tid:
+        if not by_dir and _tid_of_label(first_user(head)) != tid:
             continue
         mt = os.path.getmtime(p)
         if best is None or (sz, mt) > (best[0], best[1]):
             best = (sz, mt, p)
     if not best:
-        return None
+        # No transcript, but the work runner may still have a record: say what it knows.
+        d = os.path.join(SCRATCH, "work", tid)
+        bits = []
+        try:
+            hb = json.load(open(os.path.join(d, "handback.json")))
+            bits.append(f"**Hand-back** ({hb.get('outcome')}): {str(hb.get('summary', ''))[:1500]}")
+        except Exception:
+            pass
+        try:
+            res = json.load(open(os.path.join(d, "out.json"))).get("result", "")
+            if res:
+                bits.append("**Worker's last words:** " + str(res)[-1500:])
+        except Exception:
+            pass
+        try:
+            c = json.load(open(os.path.join(SCRATCH, "work-claims.json"))).get(tid)
+            if c:
+                bits.append(f"**Runner claim:** state `{c.get('state')}`, branch `{c.get('branch')}`, model {c.get('model')}")
+        except Exception:
+            pass
+        return {"id": tid, "markdown": "\n\n".join(bits), "file": "work-runner record", "size_kb": 0} if bits else None
     PER = 20000          # per tool-call input / tool-result char cap
     TOTAL = 4_000_000    # overall cap (a safety valve for the browser)
     parts, total, truncated = [], [0], [False]
