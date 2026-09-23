@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -27,6 +28,13 @@ CFG = os.path.join(S, "discord.json")
 LOG = os.path.join(S, "alerts.jsonl")
 DEDUPE_S = 30 * 60
 ICON = {"red": "🔴", "amber": "🟠", "green": "🟢", "info": "🔵"}
+
+#: Pipeline alarms also WAKE the pipeline manager (user, 2026-09-23: an incident should reach it at
+#: once, not at its next 30-minute tick): the alert is typed into its tmux session, where it
+#: arrives as a message. Its own dedupe (same key, DEDUPE_S), independent of Discord's, so an
+#: unconfigured or failing Discord never turns a looping condition into a message every tick.
+WAKE_PREFIXES = ("watchdog:", "mr:", "hold:", "timeout:", "contended-gate", "flake:")
+PM_SESSION = os.environ.get("HK_PM_SESSION") or "flow"
 
 
 def _config() -> dict:
@@ -65,6 +73,7 @@ def notify(level: str, title: str, body: str = "", key: str | None = None) -> bo
     rec = {"ts": time.time(), "level": level, "title": title[:200], "key": key, "status": ""}
     if os.environ.get("HK_ALERT_OFF") == "1":
         rec["status"] = "off"; _record(rec); return False
+    rec["woke"] = wake_pipeline_manager(level, title, body, key or "")
     if _recent(key or ""):
         rec["status"] = "deduped"; _record(rec); return False
     cfg = _config()
@@ -88,6 +97,36 @@ def notify(level: str, title: str, body: str = "", key: str | None = None) -> bo
         rec["status"] = "sent"; _record(rec); return True
     except Exception as e:  # rate limit, network, revoked token - all non-fatal
         rec["status"] = f"failed: {str(e)[:120]}"; _record(rec); return False
+
+
+def _woke_recently(key: str) -> bool:
+    try:
+        cut = time.time() - DEDUPE_S
+        with open(LOG) as f:
+            for line in f.readlines()[-500:]:
+                o = json.loads(line)
+                if o.get("key") == key and o.get("woke") and o.get("ts", 0) > cut:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def wake_pipeline_manager(level: str, title: str, body: str, key: str, run=subprocess.run) -> bool:
+    """Type a pipeline alarm into the pipeline manager's tmux session. True when it was sent.
+    Never raises; a missing session (the role is not running) is simply not woken."""
+    if not key.startswith(WAKE_PREFIXES) or _woke_recently(key):
+        return False
+    one = " ".join(f"{title} - {body}".split())[:400]
+    msg = f"[pipeline alarm {level}] {one} (key {key}, via ops/alert.py) - triage it now, then resume your tick."
+    try:
+        if run(["tmux", "has-session", "-t", PM_SESSION], capture_output=True, timeout=5).returncode != 0:
+            return False
+        run(["tmux", "send-keys", "-t", PM_SESSION, "-l", msg], capture_output=True, timeout=5)
+        run(["tmux", "send-keys", "-t", PM_SESSION, "Enter"], capture_output=True, timeout=5)
+        return True
+    except Exception:
+        return False
 
 
 def main(argv: list[str]) -> int:

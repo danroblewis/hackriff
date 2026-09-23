@@ -106,7 +106,7 @@ def test_summary_line_names_the_numbers_a_person_reads(tmp_path):
     assert s["touchpoints_24h"] == 1                     # the CONFLICT line, not the supervisor's note
     assert s["hours_with_dispatch_24h"] == 1
     line = flow.summary_line(s)
-    assert line.startswith("flow: ") and "reds 1/2 (real)" in line and "queue 2" in line
+    assert line.startswith("flow: ") and "reds 1/2 (1 real) · flakes 1" in line and "queue 2" in line
 
 
 def test_touchpoints_count_holds(tmp_path):
@@ -124,3 +124,47 @@ def test_record_appends_one_json_line(tmp_path, capsys):
     lines = (tmp_path / "flow.jsonl").read_text().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["gates_24h"] >= 0
     assert "== hourly" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------- digest (2026-09-23)
+def _s(ts, **kw):
+    base = {"ts": ts, "at": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M"), "landings_per_h_6h": 1.2,
+            "landings_per_h_24h": 0.9, "reds_24h": 3, "gates_24h": 10, "real_reds_24h": 1, "flakes_24h": 1,
+            "touchpoints_24h": 2}
+    base.update(kw)
+    return base
+
+
+def test_the_tick_line_is_invariant_23s_shape(tmp_path):
+    now = datetime(2026, 9, 23, 16)
+    (tmp_path / "hold").write_text(f"until={int(now.timestamp()) + 600}\nsince=0\nowner=pm\nwhy=incident: x\n")
+    line = flow.tick_line(str(tmp_path), _s(now.timestamp()), now)
+    assert line == ("flow: 1.2/h (6h) 0.9/h (24h) · reds 3/10 (1 real) · flakes 1 · touchpoints 2 · "
+                    "no experiment · holding: until 16:10 incident: x")
+    (tmp_path / "hold").write_text(f"until={int(now.timestamp()) - 1}\n")          # expired = none
+    assert line.replace("until 16:10 incident: x", "none") == flow.tick_line(str(tmp_path), _s(now.timestamp()), now)
+
+
+def test_trend_breaks_need_a_real_move_against_two_hours_ago():
+    t = 1_000_000.0
+    hist = [_s(t - 3 * 3600, landings_per_h_6h=2.0, real_reds_24h=1), _s(t - 1800, touchpoints_24h=2)]
+    assert flow.trend_breaks(_s(t, landings_per_h_6h=1.1), hist, False) == []       # 2.0 -> 1.1 is not half
+    kinds = [k for k, _ in flow.trend_breaks(_s(t, landings_per_h_6h=1.0, real_reds_24h=3, touchpoints_24h=3), hist, True)]
+    assert kinds == ["landings", "reds", "touchpoint", "hold"]
+    tiny = [_s(t - 3 * 3600, landings_per_h_6h=0.4, real_reds_24h=0)]
+    assert flow.trend_breaks(_s(t, landings_per_h_6h=0.0, real_reds_24h=1), tiny, False) == []   # small numbers
+
+
+def test_digest_posts_every_two_hours_and_each_break_at_once(tmp_path):
+    ops = str(tmp_path)
+    now = datetime(2026, 9, 23, 16)
+    sent = []
+    send = lambda level, title, body, key: sent.append((level, key))              # noqa: E731
+    assert flow.digest(ops, _s(now.timestamp()), now, send) == ["flow:digest"]
+    assert sent == [("green", "flow:digest")]
+    (tmp_path / "alerts.jsonl").write_text(json.dumps({"ts": now.timestamp() - 3600, "key": "flow:digest", "status": "sent"}) + "\n")
+    sent.clear()
+    assert flow.digest(ops, _s(now.timestamp()), now, send) == []                  # 1 h since the last
+    (tmp_path / "flow.jsonl").write_text(json.dumps(_s(now.timestamp() - 1800, touchpoints_24h=1)) + "\n")
+    assert flow.digest(ops, _s(now.timestamp()), now, send) == ["flow:break:touchpoint"]
+    assert sent == [("amber", "flow:break:touchpoint")]
