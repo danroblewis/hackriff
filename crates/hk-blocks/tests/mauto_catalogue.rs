@@ -441,3 +441,48 @@ fn viterbi_shapes_are_registered_with_pinned_parameters() {
         "{errs:?}"
     );
 }
+
+/// T-611: `reed_solomon` is implemented, so its parameters are pinned: the SIGNAL-034 and
+/// SIGNAL-004 chains above validate against them with no warning, and a recipe missing the
+/// code's `fcr`, or giving `dual_basis` as a string or an interleave depth of 0, is refused
+/// before anything is built.
+#[test]
+fn reed_solomon_is_registered_with_pinned_parameters() {
+    let registry = hk_blocks::Registry::builtin();
+    let d = registry
+        .get("reed_solomon")
+        .expect("reed_solomon is registered")
+        .descriptor()
+        .clone();
+    assert!(d.params_pinned, "reed_solomon parameters are pinned");
+    assert_eq!(catalogue::planned().descriptor("reed_solomon"), Some(&d));
+    let ccsds = json!({ "n": 255, "k": 223, "poly": "0x187", "fcr": 112, "prim": 11 });
+    let mut no_fcr = ccsds.clone();
+    no_fcr.as_object_mut().unwrap().remove("fcr");
+    let mut dual_string = ccsds.clone();
+    dual_string["dual_basis"] = json!("yes");
+    let mut depth_zero = ccsds.clone();
+    depth_zero["depth"] = json!(0);
+    for (id, params) in [
+        ("no-fcr", no_fcr),
+        ("dual-string", dual_string),
+        ("depth-zero", depth_zero),
+    ] {
+        let r = recipe(
+            id,
+            json!([
+                { "id": "fsk", "block": "fsk_demod" },
+                { "id": "clock", "block": "clock_recovery", "params": { "symbol_rate_bd": 4800 } },
+                { "id": "slice", "block": "slicer" },
+                { "id": "asm", "block": "sync_search", "params": sync("0x1ACFFC1D", 32, 2040) },
+                { "id": "rs", "block": "reed_solomon", "params": params }
+            ]),
+            frames_out("rs"),
+        );
+        let errs = errors(&r);
+        assert!(
+            errs.iter().any(|e| e.path.starts_with("nodes[4].params")),
+            "{id}: {errs:?}"
+        );
+    }
+}

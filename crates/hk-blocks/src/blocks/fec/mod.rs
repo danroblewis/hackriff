@@ -15,6 +15,10 @@ mod checksum;
 mod crc;
 pub mod mauto;
 mod parity;
+mod reed_solomon;
+mod rs;
+#[cfg(test)]
+mod rs_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 mod trellis;
@@ -26,6 +30,7 @@ pub use bch::Bch;
 pub use checksum::Checksum;
 pub use crc::Crc;
 pub use parity::Parity;
+pub use reed_solomon::ReedSolomon;
 pub use viterbi::{Viterbi, ViterbiFrames};
 
 fn drop_invalid() -> ParamSchema {
@@ -251,11 +256,12 @@ pub fn register(r: &mut Registry) {
         r.register(Arc::new(FnFactory::new(&pinned, name, build)))
             .expect("fec block names are unique");
     }
-    // ADR-0011 §9 rows, pinned by their own descriptors in `mauto` (T-610).
+    // ADR-0011 §9 rows, pinned by their own descriptors in `mauto` (T-610, T-611).
     let mauto = mauto::planned();
-    let rows: [(&str, BuildFn); 2] = [
+    let rows: [(&str, BuildFn); 3] = [
         ("viterbi", viterbi::build_stream),
         ("viterbi_frames", viterbi::build_frames),
+        ("reed_solomon", reed_solomon::build),
     ];
     for (name, build) in rows {
         r.register(Arc::new(FnFactory::new(&mauto, name, build)))

@@ -1,7 +1,6 @@
 //! ADR-0011 §9 (T-606) catalogue rows for group `fec`: `viterbi`, `viterbi_frames`,
-//! `reed_solomon`. **Ports are pinned; parameters are placeholders** (`params_pinned: false`)
-//! that T-610 (`viterbi`, `viterbi_frames`) and T-611 (`reed_solomon`) pin. T-610 pinned and
-//! implemented both Viterbi shapes (`viterbi.rs` over `trellis.rs`).
+//! `reed_solomon`, pinned and implemented: T-610 both Viterbi shapes (`viterbi.rs` over
+//! `trellis.rs`), T-611 `reed_solomon` (`reed_solomon.rs` over `rs.rs`).
 //!
 //! `fec` has **two shapes** from here on (ADR-0011 §9.3): the hard-decision per-frame codes
 //! (`frames → frames`: `crc`, `bch`, `parity`, `checksum`, `reed_solomon`, `viterbi_frames`) and
@@ -125,29 +124,83 @@ pub fn planned() -> Vec<BlockDescriptor> {
         descriptor(
             "reed_solomon",
             "fec",
-            "Reed–Solomon decoder over a frame, interleaved codewords and dual basis included.",
+            "Reed–Solomon decoding per code block of the frame (errors only, up to (n − k)/2 \
+             symbols per codeword), interleaved codewords and the CCSDS dual basis included; \
+             sets the frame's check status (valid only if every codeword decodes) and adds the \
+             channel bits it changed to corrected_bits.",
             vec![PortSpec::new("in", Frames)],
             vec![PortSpec::new("out", Frames)],
             vec![
                 param(
                     "n",
                     int(3, 65_535),
-                    "Codeword symbols (shortened when < 2^m - 1).",
+                    "Codeword symbols; below 2^symbol_bits − 1 the code is shortened (leading \
+                     data symbols fixed at zero and not sent: DVB RS(204,188), P25 RS(24,12)).",
                 )
                 .required(),
-                param("k", int(1, 65_535), "Data symbols.").required(),
-                param("symbol_bits", int(2, 16), "m.").default_value(8),
-                param("poly", hex(17), "Field generator polynomial.").required(),
-                param("fcr", int(0, 65_535), "First consecutive root.").required(),
-                param("prim", int(1, 65_535), "Primitive element exponent.").default_value(1),
+                param(
+                    "k",
+                    int(1, 65_534),
+                    "Data symbols (first on air; then n − k check symbols).",
+                )
+                .required(),
+                param(
+                    "symbol_bits",
+                    int(2, 16),
+                    "m: bits per symbol, MSB first (8; P25 hexbits 6).",
+                )
+                .default_value(8),
+                param(
+                    "poly",
+                    hex(17),
+                    "Primitive field polynomial of degree symbol_bits, full form (CCSDS 0x187, \
+                     DVB 0x11D, P25 0x43) or without the top term.",
+                )
+                .required(),
+                param(
+                    "fcr",
+                    int(0, 65_535),
+                    "First consecutive root: g(x) = Π (x − α^(prim·(fcr+i))), i < n − k \
+                     (CCSDS 112, DVB 0, P25 1).",
+                )
+                .required(),
+                param(
+                    "prim",
+                    int(1, 65_535),
+                    "Primitive element exponent of the roots, coprime with 2^symbol_bits − 1 \
+                     (CCSDS 11).",
+                )
+                .default_value(1),
                 param(
                     "dual_basis",
                     boolean(),
-                    "Berlekamp (dual) basis symbols, the CCSDS convention.",
+                    "Symbols are in Berlekamp's dual basis on air (CCSDS 131.0-B; field 0x187 \
+                     only). Wrong here, every codeword fails.",
                 )
                 .default_value(false),
-                param("depth", int(1, 16), "Interleaved codewords (CCSDS I).").default_value(1),
-                param("strip", boolean(), "Remove the check symbols.").default_value(true),
+                param(
+                    "depth",
+                    int(1, 255),
+                    "Interleaved codewords per code block (CCSDS I = 1–5 or 8; DAB+ s, the \
+                     subchannel's bitrate / 8): on-air symbol q belongs to codeword q mod depth.",
+                )
+                .default_value(1),
+                param(
+                    "strip",
+                    boolean(),
+                    "Remove each code block's depth × (n − k) check symbols.",
+                )
+                .default_value(true),
+                param(
+                    "span",
+                    object(vec![
+                        param("start_bit", int(0, 1_000_000), "First coded bit.").default_value(0),
+                        param("end_trim_bits", int(0, 1_000_000), "Uncoded trailing bits.")
+                            .default_value(0),
+                    ]),
+                    "The coded part of the frame: consecutive code blocks from start_bit; a \
+                     trailing partial block passes through.",
+                ),
                 param(
                     "drop_invalid",
                     boolean(),
@@ -156,7 +209,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
                 .default_value(false)
                 .hot(),
             ],
-            false,
+            true,
         ),
     ]
 }
