@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -229,22 +229,23 @@ async function waitForCoverage(backend, timeoutMs) {
  * momentarily answering is a pane that has not loaded yet, and returning on it hands the caller a
  * half-drawn frame to measure brightness in — which is exactly how phase 2's live baseline came out
  * dimmer than the shadow it is the baseline for.
+ *
+ * **Bounded by whether the pane is still WORKING, not by 20 s** (the deflake, 2026-09-22). A fixed
+ * deadline here is the same bet `draw()`'s note above already refuses, one layer down: the tile
+ * route's service rate moves more than twenty-fold between a quiet box and the gate's pooled lanes,
+ * so on a busy box this returned `resident: false` on a pane that was simply mid-fill and the
+ * caller then measured a half-drawn frame. `waitWhileWorking` keeps waiting while the pane's own
+ * report changes or its requests are on the wire, and gives up when both have been quiet — which is
+ * the state "it will not converge" actually looks like.
  */
-async function waitForResident(page, { timeoutMs = 20000, everyMs = 400, surveyMayAnswer = false } = {}) {
-  const t0 = Date.now();
-  let last = "";
-  for (;;) {
-    const row = await pane0(page);
-    last = row.counts;
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(row.counts);
+async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 10000, surveyMayAnswer = false } = {}) {
+  const r = await waitWhileWorking(page, async () => (await pane0(page)).counts, (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
     // `· N never sampled` is the pane saying the survey answered the place — see `draw()`.
-    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(row.counts);
-    if (m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0) {
-      return { resident: true, counts: last, ms: Date.now() - t0 };
-    }
-    if (Date.now() - t0 > timeoutMs) return { resident: false, counts: last, ms: Date.now() - t0 };
-    await new Promise((r) => setTimeout(r, everyMs));
-  }
+    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(counts);
+    return !!m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0;
+  }, { everyMs, stallMs, timeoutMs });
+  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
 }
 
 /**
@@ -942,8 +943,25 @@ function splitAtDrawnTop(img, rect, notGround = null, tol = 2) {
  *
  * It reports rather than throws — the caller's assertion is the right place for "the pane never
  * drew", with the counts in it.
+ *
+ * **The rectangle comes back WITH the pixels** (the deflake, 2026-09-22). Every call site used to
+ * read the pane's box with `paneGeometry` *before* this function ran and measure the screenshot in
+ * it afterwards — and this function can sit for twenty-five seconds, during which the chrome's own
+ * height is not constant: T-505 put the tier inside every viewport row's level cell, so that row
+ * wraps and un-wraps as the level resolves and the canvas moves with it. A stale rectangle samples
+ * the page AROUND the pane, which is one flat colour, so `splitAtDrawnTop` reads the whole ROI as
+ * ground and hands back a zero-height "drawn" part — a census of **0 distinct colours**, which is
+ * exactly the shape this file was quarantined for ("band A at boot is not a real render (only 0
+ * distinct colours)") while the pane itself reported tiles drawn. `canvas-journey.e2e.mjs` carries
+ * the same note against the same mistake. So the box is read, the shot taken, and the box read
+ * again; if it moved, the pair is taken again rather than trusted.
+ *
+ * `needsRender` adds the second half of that boot wait: keep re-snapping until the pane has
+ * actually **presented a frame into its own rectangle** — a `drawn` part with height, which is
+ * strictly weaker than any claim the callers make about it, so their assertions still judge the
+ * sample rather than being satisfied by the wait.
  */
-async function draw(page, { settleMs = 600, timeoutMs = 25000 } = {}) {
+async function draw(page, { settleMs = 600, timeoutMs = 25000, needsRender = false, notGround = null } = {}) {
   await page.frames(4);
   const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
   // **A pane over never-swept spectrum holds no tiles and never will** (T-580). The original
@@ -963,10 +981,41 @@ async function draw(page, { settleMs = 600, timeoutMs = 25000 } = {}) {
   // not the same tick. A floor, not a budget — it is not waiting for the route.
   await new Promise((r) => setTimeout(r, settleMs));
   await page.frames(4);
-  const img = await page.shot();
+  let snap = await snapPane(page);
+  if (needsRender) {
+    const t0 = Date.now();
+    while (splitAtDrawnTop(snap.img, snap.roi, notGround).drawn.h <= 0 && Date.now() - t0 < timeoutMs) {
+      await page.frames(6);
+      snap = await snapPane(page);
+    }
+    snap.renderWaitMs = Date.now() - t0;
+  }
+  const img = snap.img;
   img.drew = drew;
+  img.roi = snap.roi;
+  img.pane = snap.g.pane;
+  img.movedWhileShooting = snap.moved;
+  img.renderWaitMs = snap.renderWaitMs ?? 0;
   img.counts = await page.eval(counts);
   return img;
+}
+
+/**
+ * A screenshot and the pane rectangle it is measured in, read as one thing.
+ *
+ * The box is read either side of the shot and the pair retaken if it moved, so the pixels and the
+ * coordinates they are indexed by come from the same layout. See [[draw]] for what a stale one costs.
+ */
+async function snapPane(page, { tries = 4 } = {}) {
+  let before = await paneGeometry(page), img = null, after = before;
+  for (let i = 0; i <= tries; i++) {
+    img = await page.shot();
+    after = await paneGeometry(page);
+    const same = ["x", "y", "w", "h"].every((k) => before.rect[k] === after.rect[k]);
+    if (same) return { img, g: after, roi: roiOf(after.pane), moved: false };
+    before = after;
+  }
+  return { img, g: after, roi: roiOf(after.pane), moved: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,9 +1080,17 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // server does not have yet.
   const res0 = await waitForResident(page);
   t.diagnostic(`pane resident after ${res0.ms} ms: "${res0.counts}"${res0.resident ? "" : " — NEVER became resident, measuring anyway"}`);
-  const gA = await paneGeometry(page);
-  const roiA = roiOf(gA.pane);
-  const imgA0 = await draw(page);
+  // **`needsRender`, and the rectangle read with the pixels.** This is the phase the file was
+  // quarantined on: "band A at boot is not a real render (only 0 distinct colours)" at ~8 s, with
+  // the pane itself reporting tiles drawn. Zero distinct colours is not a flat pane — it is a
+  // `drawn` part of zero height, which is what `splitAtDrawnTop` returns when the rectangle handed
+  // to it is not on the pane any more, or when the pane has not yet presented a frame into it. Both
+  // are readiness, and both are now waited out on the page's own terms (see [[draw]]); the two
+  // assertions below are untouched and still judge the frame that comes back.
+  const imgA0 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
+  const roiA = imgA0.roi;
+  t.diagnostic(`band A's first frame landed in the pane's own rectangle after ${imgA0.renderWaitMs} ms` +
+    (imgA0.movedWhileShooting ? " — the canvas was still moving when it was shot" : ""));
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it
   // compares how far two panes got as much as it compares their pixels (`splitAtDrawnTop`).
@@ -1084,12 +1141,11 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   await gotoFreq(page, at, A_HZ, A_VIEW_SPAN_HZ); // a VIEW pan only, never a device call
   assertNoDeviceCalls(page, sinceMoveIdx, "panning back to look at departed band A");
   await waitForResident(page);
-  const gA2 = await paneGeometry(page);
-  const imgA1 = await draw(page);
+  const imgA1 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it
   // compares how far two panes got as much as it compares their pixels (`splitAtDrawnTop`).
-  const cutA1 = splitAtDrawnTop(imgA1, roiOf(gA2.pane), marks.greyRgb);
+  const cutA1 = splitAtDrawnTop(imgA1, imgA1.roi, marks.greyRgb);
   const shadowA = inspect(imgA1, cutA1.drawn, marks.greyRgb, marks.inkRgb);
   t.diagnostic(`SHADOW A (departed): meanLuma ${shadowA.census.meanLuma.toFixed(1)}, grey ${(shadowA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(shadowA.inkShare * 100).toFixed(1)}%, distinct ${shadowA.census.distinct} · drawn with "${imgA1.counts}"` +
@@ -1136,9 +1192,13 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // is spectrum the radio never visited, so `0 tiles` here is the product working, not a pane that
   // has not loaded.
   await waitForResident(page, { surveyMayAnswer: true });
-  const gCgeom = await paneGeometry(page);
+  // NOT `needsRender`: a band the survey settles as never sampled is drawn flat grey all the way
+  // up, which `splitAtDrawnTop` reports as a zero-height strip and a full-height drawn part only
+  // because `notGround` tells it THE grey is an answer. Waiting for a "drawn" part here would be
+  // waiting for the one thing this phase is asserting is absent. The rectangle still comes back
+  // with the pixels, which is the half of the fix that applies everywhere.
   const imgC = await draw(page);
-  const greyC = inspect(imgC, roiOf(gCgeom.pane), marks.greyRgb, marks.inkRgb);
+  const greyC = inspect(imgC, imgC.roi, marks.greyRgb, marks.inkRgb);
   t.diagnostic(`GREY C (never swept): meanLuma ${greyC.census.meanLuma.toFixed(1)}, grey ${(greyC.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(greyC.inkShare * 100).toFixed(1)}%, distinct ${greyC.census.distinct} · drawn with "${imgC.counts}"` +
     (imgC.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
@@ -1194,7 +1254,7 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // part the surface says it drew. See `splitAtDrawnTop` for why the two halves are measured apart:
   // a following pane always carries the survey's `as_of` strip at the top, and it is the pane's
   // honest "not known yet" ground, not a coverage claim.
-  const cut = splitAtDrawnTop(imgC, roiOf(gCgeom.pane), marks.greyRgb);
+  const cut = splitAtDrawnTop(imgC, imgC.roi, marks.greyRgb);
   const drawnC = inspect(imgC, cut.drawn, marks.greyRgb, marks.inkRgb);
   const stripC = cut.strip.h > 0 ? inspect(imgC, cut.strip, marks.greyRgb, marks.inkRgb) : null;
   t.diagnostic(`GREY C split: drawn ${cut.drawn.h}px grey ${(drawnC.greyShare * 100).toFixed(1)}% ` +
@@ -1242,12 +1302,11 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   t.diagnostic(`band A observed again by the server since the re-sweep, after ${backAgain.ms} ms: ` +
     `${backAgain.observed}/${backAgain.known} known cells` +
     (backAgain.reached ? "" : " — NEVER REACHED the premise, measuring anyway"));
-  const gA3 = await paneGeometry(page);
-  const imgA2 = await draw(page);
+  const imgA2 = await draw(page, { needsRender: true, notGround: marks.greyRgb });
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it
   // compares how far two panes got as much as it compares their pixels (`splitAtDrawnTop`).
-  const cutA2 = splitAtDrawnTop(imgA2, roiOf(gA3.pane), marks.greyRgb);
+  const cutA2 = splitAtDrawnTop(imgA2, imgA2.roi, marks.greyRgb);
   const reswptA = inspect(imgA2, cutA2.drawn, marks.greyRgb, marks.inkRgb);
   t.diagnostic(`RE-SWEPT A: meanLuma ${reswptA.census.meanLuma.toFixed(1)}, grey ${(reswptA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(reswptA.inkShare * 100).toFixed(1)}%, distinct ${reswptA.census.distinct} · drawn with "${imgA2.counts}"` +
