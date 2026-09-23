@@ -365,51 +365,65 @@ fn observation_spans(
 /// mark that vanished for samples that never changed; what *is* new is the third **source**, so a
 /// client can see which evidence carried the live edge.
 ///
-/// # It speaks for the live edge only, and never over the horizon's head (the T-596 regression)
+/// # It is a tune record the server holds, so it counts toward the record horizon (T-680)
 ///
-/// `floor` is [`Memory::oldest_record`], and the open dwell is **clipped to start at it**. The open
-/// dwell is coverage over the interval it has actually run — its own start to the live edge — and
-/// nothing before that; but it is also a *provisional, unsealed* record, and the same answer
-/// publishes `horizon` saying that before `oldest_record_s` **no surviving tune record reaches**,
-/// which is what makes those rows `"unknown"` (T-413/T-507). Letting an unsealed claim paint them
-/// `"observed"` would both contradict the horizon the response states in the same breath and undo
-/// the distinction T-413 exists for: *we do not know whether we looked* is not *we did*, exactly as
-/// `Coverage::Unobserved` is not quiet and `BiasTee::Unknown` is not `Off`. So it fails closed —
-/// the provisional record loses to the horizon, and `None` (no surviving record anywhere, so the
-/// horizon admits nothing) drops it entirely, which is the same answer read the other way.
+/// T-596 first served the open dwell **clipped to** [`Memory::oldest_record`] and computed that
+/// horizon from sealed sources only. T-680 reversed that, on this evidence:
 ///
-/// This costs the ticket nothing: the gap T-588 measured is *after* the last sealed record, so it
-/// lies inside the admitted interval by construction. A retune's first seconds are never
-/// pre-horizon.
+/// - **The clip only ever bound before a seal.** A dwell opens where the previous one closed (the
+///   observers close, then start), so whenever the log holds any sealed record the open dwell
+///   starts after it and the clip was a no-op. It bit in exactly one situation: *no* sealed record
+///   yet — the first ≤ 60 s of a store (or of every dwell a failed write never sealed) — and the
+///   IQ ring refused or already past the dwell's start. That is T-588's situation (the disk is
+///   full), where the clip dropped the only evidence there was.
+/// - **There it broke T-596's own rule.** "A cell's state does not change when the seal catches
+///   up" — yet the clipped rows read `"unknown"` until the seal and `"observed"` after it, for
+///   samples that never changed. The unknown band T-507's contract test asserted on a young
+///   server with a 2 s ring was that artefact: nothing had been forgotten; the record of those
+///   seconds was in memory, under sixty seconds from being written.
+/// - **The feared failure mode cannot happen by construction.** An open dwell reaches back only to
+///   its own start (settle, retune, or the previous seal), never behind it, and `oldest_record` is
+///   a `min`: adding a source only admits rows *that source reaches*. A record that was genuinely
+///   lost (a seal the log never wrote) lies *before* the next open dwell and stays `"unknown"`;
+///   and the open dwell itself is bounded — replaced every tick, closed on retune and after
+///   `INTERACTIVE_RECORD_MAX_NS` of a steady tune.
+///
+/// So it is folded into [`Memory::of`] like the ring and the log: one source among three, read
+/// once per answer so the horizon and the spans come from the same snapshot. The two horizons are
+/// now symmetric — the dwell in flight moves `oldest_record_s` back to its own start exactly as it
+/// moves `as_of_s` forward to the live edge (T-532).
 fn open_dwell_spans(
-    store: &ObservationStore,
+    open: &[hk_model::attention::observation::ObservationRecord],
     freq: FreqRange,
     window: TimeRange,
-    floor: Option<Timestamp>,
 ) -> (Vec<CoverageSpan>, usize) {
-    let Some(floor) = floor else {
-        return (Vec::new(), 0);
-    };
-    let records: Vec<_> = store
-        .open_dwells()
-        .into_iter()
-        .filter_map(|r| match r {
-            hk_model::attention::observation::ObservationRecord::Dwell(mut d) => {
-                let start = d.observed.start.max(floor);
-                if start >= d.observed.end || start >= window.end || d.observed.end <= window.start
-                {
-                    return None;
-                }
-                d.observed = TimeRange::new(start, d.observed.end);
-                Some(hk_model::attention::observation::ObservationRecord::Dwell(
-                    d,
-                ))
+    let records: Vec<_> = open
+        .iter()
+        .filter(|r| match r {
+            hk_model::attention::observation::ObservationRecord::Dwell(d) => {
+                d.observed.start < window.end && d.observed.end > window.start
             }
-            _ => None,
+            _ => false,
         })
+        .cloned()
         .collect();
     let read = hk_store::spans_from_records(&records, &[], freq);
     (read.spans, read.named)
+}
+
+/// The earliest instant any dwell in flight has run from (T-680) — a tune record the server holds
+/// in memory, and so a reach for [`Memory::oldest_record`] and [`Memory::recording_began`].
+fn open_dwells_began(open: &[hk_model::attention::observation::ObservationRecord]) -> Option<i64> {
+    open.iter()
+        .filter_map(|r| match r {
+            hk_model::attention::observation::ObservationRecord::Dwell(d)
+                if d.observed.end > d.observed.start =>
+            {
+                Some(d.observed.start.as_unix_nanos())
+            }
+            _ => None,
+        })
+        .min()
 }
 
 /// The tune history behind one answer, and **how far back it reaches**.
@@ -439,8 +453,9 @@ pub(crate) struct Evidence {
     /// journal opens a segment on every provenance change, so within what the ring still buffers
     /// an absence of segment really is "this front end was not tuned here"; the observation log
     /// drops whole hour segments, so its oldest surviving segment's hour start is exactly the
-    /// instant past which its silence stops being evidence. Before the earlier of the two, neither
-    /// record can speak, and `unobserved` would be a claim nothing supports.
+    /// instant past which its silence stops being evidence; a dwell in flight (T-680) reaches back
+    /// to its own start and no further. Before the earliest of them, no record can speak, and
+    /// `unobserved` would be a claim nothing supports.
     pub oldest_record: Option<Timestamp>,
     /// **When this server's memory of recording begins** (T-507): the earliest instant any source
     /// knows recording happened here — the spectrum history's own record of when it began, the IQ
@@ -492,7 +507,14 @@ impl Evidence {
 
     /// Reads both tune histories over `freq × window`, and each one's reach.
     pub(crate) fn collect(state: &ApiState, freq: FreqRange, window: TimeRange) -> Self {
-        let memory = Memory::of(state);
+        // T-680: the dwells in flight, read ONCE, so the record horizon and the spans rasterised
+        // beside it come from the same snapshot.
+        let open_dwells = state
+            .observations
+            .as_ref()
+            .map(|s| s.open_dwells())
+            .unwrap_or_default();
+        let memory = Memory::of(state, &open_dwells);
         let mut spans = ring_spans(state, freq, window);
         let ring = spans.len();
         let ring_named = spans.iter().filter(|s| s.device.is_named()).count();
@@ -506,23 +528,20 @@ impl Evidence {
         }
         let log = spans.len() - ring;
         // T-596: the live edge, between the last seal and now. Counted as its own source: it is
-        // the one evidence a refused IQ ring leaves standing - and clipped to the record horizon,
-        // so a provisional record can never overrule the `"unknown"` this same answer publishes.
+        // the one evidence a refused IQ ring leaves standing. Since T-680 it is ALSO one of the
+        // reaches `memory.oldest_record` is the min over, so it needs no clip: it cannot start
+        // before the horizon it helped compute.
         //
         // **Folded in BEFORE `newest_record` is taken, and the order is the semantics** (T-596 x
         // T-532). T-532's rule is that the forward horizon comes from the SAME `spans` the planes
         // are rasterised from, so the summary and the body cannot disagree; the open dwell's spans
         // reach the live edge and DO rasterise, so taking `newest_record` first would publish an
         // `as_of_s` at the last SEAL while the plane beside it paints `observed` for seconds after
-        // it - the exact split T-532 exists to close, and on the surface (a held live tile) it was
-        // written for. It also composes with this ticket's own rule rather than fighting it: the
-        // dwell in flight may extend the answer FORWARD to the live edge and never overrule it
-        // backward. The asymmetry is deliberate - an unsealed record may widen how far an answer
-        // reaches into the present, which is a statement about its own freshness, but may not
-        // rewrite this server's statement about what it has forgotten, so `oldest_record` is
-        // computed from sealed sources only and is what the open dwell is clipped to above.
-        if let Some(store) = state.observations.as_ref() {
-            let (open_spans, named) = open_dwell_spans(store, freq, window, memory.oldest_record);
+        // it - the exact split T-532 exists to close. Both horizons now read the dwell in flight
+        // (T-680): it moves `as_of_s` forward to the live edge and `oldest_record` back to its own
+        // start, and neither further.
+        if state.observations.is_some() {
+            let (open_spans, named) = open_dwell_spans(&open_dwells, freq, window);
             open = open_spans.len();
             open_named = named;
             spans.extend(open_spans);
@@ -678,9 +697,9 @@ struct Memory {
 /// from this flag and the log's: with **no** tune history a row's unsampled cells are `"unknown"`,
 /// because "we did not look" is a claim nothing supports. Reporting a refused ring as *available*
 /// made the server answer `"unobserved"` — a positive claim that the radio did not look — over
-/// rows it has no tune record of. It is the same fail-open T-596 closed from the other side: an
-/// unsealed dwell may not paint `observed` over `unknown`, and a refused ring may not paint
-/// `unobserved` over it either. *We cannot say* is neither.
+/// rows it has no tune record of — a positive claim no record supports. (T-680's open dwell is not
+/// the mirror of this: it *is* a record, reaching exactly its own interval.) *We cannot say* is
+/// neither `observed` nor `unobserved`.
 ///
 /// So the predicate is the status's own `enabled` — "the run buffers IQ", which every no-buffer
 /// case (`refused`, `locked`, `incompatible`, disabled by configuration) reports as `false` with a
@@ -698,10 +717,11 @@ impl Memory {
     /// The record horizon, the start of recording, and whether anything that could reach past the
     /// latter has been discarded.
     ///
-    /// **The record horizon** (`oldest_record`): the earliest instant either tune history still
-    /// holds a record for. The IQ ring reports what it actually buffers; the observation log
-    /// retains whole hour segments and drops whole hour segments, so its oldest hour's start is
-    /// the exact boundary. A source that is absent, or holds nothing, contributes no reach.
+    /// **The record horizon** (`oldest_record`): the earliest instant any tune record this server
+    /// holds reaches. The IQ ring reports what it actually buffers; the observation log retains
+    /// whole hour segments and drops whole hour segments, so its oldest hour's start is the exact
+    /// boundary; the dwells in flight (T-680, see [`open_dwell_spans`]) reach their own start. A
+    /// source that is absent, or holds nothing, contributes no reach.
     ///
     /// **The start of recording** (`recording_began`): the earliest of the IQ ring's reach, the
     /// observation log's earliest RECORD ([`hk_store::observation::ObservationStore::earliest_start`]
@@ -715,7 +735,10 @@ impl Memory {
     /// to remember when recording began. The ring's routine eviction on a server *with* history is
     /// not forgetting in this sense: the history was recording over the same span and still knows
     /// when it began.
-    fn of(state: &ApiState) -> Self {
+    fn of(
+        state: &ApiState,
+        open_dwells: &[hk_model::attention::observation::ObservationRecord],
+    ) -> Self {
         let ring = state.iq_buffer.as_deref().map(|c| {
             c.status(&crate::iqbuffer::IqBufferQuery {
                 t0: None,
@@ -765,7 +788,10 @@ impl Memory {
             (Some(a), Some(b)) => Some(a.min(b)),
             (x, y) => x.or(y),
         };
-        let oldest_record = min(ring_t0, log_t0);
+        // T-680: the dwell in flight is a tune record this server holds (in memory, not yet
+        // sealed) - a third reach, bounded to its own start. See [`open_dwell_spans`].
+        let open_t0 = open_dwells_began(open_dwells);
+        let oldest_record = min(min(ring_t0, log_t0), open_t0);
         let forgotten = if log_deleted {
             Some("the observation log has deleted segments by retention")
         } else if ring_discarded && !history_present {
@@ -777,7 +803,8 @@ impl Memory {
         };
         Memory {
             oldest_record: oldest_record.map(Timestamp::from_unix_nanos),
-            recording_began: min(min(ring_t0, log_began), history_began)
+            // `open_t0` too, so `recording_began <= oldest_record` holds whatever reached back.
+            recording_began: min(min(min(ring_t0, log_began), history_began), open_t0)
                 .map(Timestamp::from_unix_nanos),
             forgotten,
             // T-640: measured off the status this function already read, not off the handle.
@@ -2556,110 +2583,117 @@ mod tests {
         assert_eq!(rows, states(&[("unknown", 10)]), "{h}");
     }
 
-    /// **T-596's other half: the dwell in flight covers the live edge and nothing before it.**
+    /// **T-680: the dwell in flight is a tune record, so a cell does not change when it seals.**
     ///
-    /// The open dwell is served as coverage so a refused IQ ring cannot grey rows the radio is
-    /// measuring right now ([`open_dwell_spans`]). It is also *provisional* — unsealed, in memory
-    /// only — and the same answer publishes a `horizon` saying that before `oldest_record_s` no
-    /// surviving tune record reaches, which is what makes those rows `"unknown"` (T-413/T-507).
-    /// Both must hold at once, so the open dwell is clipped to the horizon: it may extend the
-    /// answer forward, never overrule it backward.
+    /// T-596 served the open dwell clipped to a record horizon computed from sealed sources only.
+    /// Before the first seal that horizon is `None`, the clip dropped the open dwell entirely, and
+    /// the rows it covers read `"unknown"` — *we no longer know whether we looked* — until the seal
+    /// landed and turned them `"observed"`, for samples that never changed. T-680 counts the open
+    /// dwell as the tune record it is: one reach among the ring's and the log's, bounded to its own
+    /// start.
     ///
-    /// Case 2 of [`unknown_is_what_was_recorded_and_lost_and_a_young_store_has_lost_nothing`]
-    /// exactly — recorded since 7100, the only surviving record `[7200, 7260)` — plus a dwell that
-    /// has been open since **7100**, before the horizon, and is still running at 7280. Counted by
-    /// row over the same ten:
+    /// Window `[7080, 7280)` in ten 20-s rows; the spectrum history began at 7100 (row 1). The
+    /// radio has been on this band since **7200** (row 6), an hour boundary so a sealed record's
+    /// hour-granular reach is exactly its start. What happened over `[7100, 7200)` has no surviving
+    /// record — a seal the log never wrote. Two servers, identical but for the seal:
     ///
-    /// - row 0 (before recording began): `unobserved`, untouched;
-    /// - rows 1–5 (recorded, record lost): **stay `"unknown"`** — the open dwell overlaps every one
-    ///   of them and must not say `observed` there;
-    /// - rows 6–8: `observed` from the sealed record, as before;
-    /// - row 9 (`[7260, 7280)`, past the last seal): `observed` — this is the live edge the ticket
-    ///   is about, and it is the open dwell that carries it.
+    /// - **A**: the tune `[7200, 7280)` is the dwell in flight, nothing sealed;
+    /// - **B**: the same tune, sealed.
     ///
-    /// RED without the clip: rows 1–5 read `"observed"` (states become 1 unobserved + 9 observed),
-    /// i.e. five rows of "we no longer know whether we looked" rewritten as "we looked" by a record
-    /// that has not sealed — the T-596 fix pointed backwards, which is the same class of lie.
+    /// Both read, row by row: row 0 `unobserved` (before recording began), rows 1–5 `"unknown"`
+    /// (recorded, record lost — the open dwell reaches back to its own start and **no further**,
+    /// so it cannot paper over forgetting before it), rows 6–9 `observed`; `oldest_record_s` 7200,
+    /// `unknown_rows` 5. And both horizons agree with the plane: A's `as_of_s` is 7280, the live
+    /// edge the open dwell reaches (T-532 x T-596), and `oldest_record_s` is 7200, its start.
     ///
-    /// # And it pins the ORDER the two horizons are taken in (T-596 × T-532)
-    ///
-    /// `as_of_s` ([`Evidence::newest_record`]) is how far **forward** this answer's evidence
-    /// reaches, and T-532's rule is that it comes from the *same* `spans` the planes are rasterised
-    /// from so the summary and the body cannot disagree. The open dwell's spans rasterise, so they
-    /// must be folded in **before** `newest_record` is taken: here `as_of_s` is **7280** — the live
-    /// edge the plane's last `observed` row is drawn from — not **7260**, the last seal. Taking the
-    /// forward horizon first would publish "my evidence stops at 7260" beside a plane claiming
-    /// `observed` through 7280, which is exactly the split T-532 closed, and a client honouring
-    /// `as_of_s` would discard the live-edge rows this ticket exists to serve. The control below,
-    /// with no open dwell, reads 7260: the difference is the open dwell and nothing else.
-    ///
-    /// The asymmetry is the invariant, not an accident. An unsealed record may move the horizon
-    /// **forward** (a statement about this answer's own freshness) and may not move `oldest_record`
-    /// **backward** (this server's statement about what it has forgotten) — which is why
-    /// `oldest_record` is computed from sealed sources only, above, and is what the open dwell is
-    /// clipped to.
+    /// RED without T-680 (the clip, sealed-only horizon): A reads 1 `unobserved` + 9 `"unknown"`,
+    /// `oldest_record_s` null — the four live-edge rows the radio is measuring right now, served as
+    /// forgotten, and flipping to `observed` the instant B's seal lands.
     #[test]
-    fn the_dwell_in_flight_carries_the_live_edge_and_never_overrules_an_unknown_row() {
+    fn the_dwell_in_flight_is_a_tune_record_and_a_cell_does_not_change_when_it_seals() {
         let window = TimeRange::new(t(7080), t(7280));
-        let dir = TempDir::new("t596-open-vs-horizon");
-        let store = store_of(&dir, &[dwell_at(7200, 7260)]);
-        let ObservationRecord::Dwell(mut open) = dwell_at(7100, 7280) else {
+        let want = states(&[("unobserved", 1), ("unknown", 5), ("observed", 4)]);
+
+        // A: in flight.
+        let dir = TempDir::new("t680-open");
+        let store = store_of(&dir, &[]);
+        let ObservationRecord::Dwell(open) = dwell_at(7200, 7280) else {
             unreachable!("dwell_at builds a dwell")
         };
-        open.seq = 2;
         store.note_open_dwell(open);
-        let state = ApiState {
+        let open_state = ApiState {
             observations: Some(store),
             history: Some(history_began_at(&dir, 7100)),
             ..ApiState::default()
         };
-
-        let (rows, h) = row_states(&state, window);
+        let (rows, h) = row_states(&open_state, window);
+        assert_eq!(
+            rows, want,
+            "the dwell in flight is a tune record the server holds: its rows are `observed` before \
+             the seal exactly as after it, and it reaches back to its own start and no further \
+             (rows 1-5 stay `unknown`). {h}"
+        );
         assert_eq!(h["oldest_record_s"], json!(7200.0), "{h}");
+        assert_eq!(h["recording_began_s"], json!(7100.0), "{h}");
         assert_eq!(h["unknown_from_row"], json!(1), "{h}");
         assert_eq!(h["unknown_rows"], json!(5), "{h}");
-        assert_eq!(
-            rows,
-            states(&[("unobserved", 1), ("unknown", 5), ("observed", 4)]),
-            "the open dwell must carry row 9 (the live edge, past the last seal) and leave rows \
-             1-5 `unknown`: a provisional record does not overrule the horizon this same answer \
-             publishes. {h}"
-        );
-        // The ORDER: the open dwell is folded into `spans` BEFORE the forward horizon is taken, so
-        // `as_of_s` reaches the same live edge the plane's last `observed` row is drawn from.
+        assert_eq!(h["forgotten"], Value::Null, "{h}");
         assert_eq!(
             h["as_of_s"],
             json!(7280.0),
-            "`as_of_s` must reach the live edge the plane itself claims, not stop at the last seal \
-             (7260): the forward horizon is taken from the same spans the planes are rasterised \
-             from, so the summary and the body cannot disagree (T-532). {h}"
+            "the forward horizon reaches the live edge the plane claims (T-532): {h}"
         );
 
-        // And it is really the open dwell doing the work on row 9, not the sealed record: without
-        // it that row is `unobserved`.
-        let dir2 = TempDir::new("t596-open-vs-horizon-control");
-        let control = ApiState {
-            observations: Some(store_of(&dir2, &[dwell_at(7200, 7260)])),
+        // B: the seal has caught up.
+        let dir2 = TempDir::new("t680-sealed");
+        let sealed = ApiState {
+            observations: Some(store_of(&dir2, &[dwell_at(7200, 7280)])),
             history: Some(history_began_at(&dir2, 7100)),
             ..ApiState::default()
         };
-        let (rows, h) = row_states(&control, window);
+        let (sealed_rows, hs) = row_states(&sealed, window);
         assert_eq!(
-            rows,
-            states(&[
-                ("unobserved", 1),
-                ("unknown", 5),
-                ("observed", 3),
-                ("unobserved", 1)
-            ]),
-            "{h}"
+            sealed_rows, rows,
+            "a cell's state must not change when the seal catches up: {hs} vs {h}"
         );
-        assert_eq!(
-            h["as_of_s"],
-            json!(7260.0),
-            "without the open dwell the forward horizon is the last seal: the 7280 above is the \
-             open dwell's doing and nothing else's. {h}"
-        );
+        for k in [
+            "oldest_record_s",
+            "recording_began_s",
+            "unknown_from_row",
+            "unknown_rows",
+            "as_of_s",
+        ] {
+            assert_eq!(
+                hs[k], h[k],
+                "`{k}` changed when the seal landed: {hs} vs {h}"
+            );
+        }
+    }
+
+    /// **And with no history, no ring and nothing sealed** — a fresh store whose ring was refused,
+    /// the first minute of T-588's full disk — the dwell in flight is the whole of this server's
+    /// memory of recording: `recording_began_s` and `oldest_record_s` are both its start, nothing
+    /// is `"unknown"`, the rows before it are `unobserved` (before this server recorded anything,
+    /// nothing looked) and its own rows `observed`. RED without T-680: the clip drops it (horizon
+    /// `None`) and all ten rows read `unobserved` — the live edge greyed, which is T-588's defect.
+    #[test]
+    fn a_young_store_with_nothing_sealed_is_carried_by_the_dwell_in_flight() {
+        let window = TimeRange::new(t(7080), t(7280));
+        let dir = TempDir::new("t680-young");
+        let store = store_of(&dir, &[]);
+        let ObservationRecord::Dwell(open) = dwell_at(7200, 7280) else {
+            unreachable!("dwell_at builds a dwell")
+        };
+        store.note_open_dwell(open);
+        let state = ApiState {
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        let (rows, h) = row_states(&state, window);
+        assert_eq!(rows, states(&[("unobserved", 6), ("observed", 4)]), "{h}");
+        assert_eq!(h["oldest_record_s"], json!(7200.0), "{h}");
+        assert_eq!(h["recording_began_s"], json!(7200.0), "{h}");
+        assert_eq!(h["unknown_rows"], json!(0), "{h}");
     }
 
     /// A ring handle whose status is whatever the case under test needs (T-640).
@@ -2686,9 +2720,8 @@ mod tests {
     /// `no_tune_history` from that flag, so such a server answered `"unobserved"` — *the radio did
     /// not look* — over rows it has **no tune record of at all**.
     ///
-    /// That is the fail-open T-596 closed pointed the other way: an unsealed dwell may not paint
-    /// `observed` over `unknown`, and a refused ring may not paint `unobserved` over it either.
-    /// *We cannot say* is neither, and it is `"unknown"`.
+    /// A refused ring may not paint `unobserved` over rows no record reaches: *we cannot say* is
+    /// neither `observed` nor `unobserved`, and it is `"unknown"`.
     ///
     /// Counted over ten rows × one cell, no observation log in any case, so the ring is the only
     /// source there could be:

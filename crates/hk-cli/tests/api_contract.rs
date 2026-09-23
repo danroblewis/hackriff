@@ -7071,8 +7071,15 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
     // would enshrine the defect and pinning tomorrow's would fail the gate now.
     let log = src("observation-log");
     assert_eq!(log["available"], json!(true), "{tuned}");
+    // T-680: the surviving tune history is the observation log's sealed records AND the dwell in
+    // flight it holds. Before T-680 the open dwell was clipped to a sealed-only record horizon,
+    // which is `null` on this server until the first seal, so the wait above sat out the whole
+    // first dwell (~60 s) with the tuned band unobserved. Now the dwell in flight answers from
+    // the first poll, and the log's sealed spans may still be zero.
+    let open = src("open-dwell");
+    assert_eq!(open["available"], json!(true), "{tuned}");
     assert!(
-        log["spans"].as_u64().unwrap_or(0) > 0,
+        log["spans"].as_u64().unwrap_or(0) + open["spans"].as_u64().unwrap_or(0) > 0,
         "the surviving tune history is what answered: {tuned}"
     );
 
@@ -7494,23 +7501,32 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
     stop_server(serving);
 }
 
-/// **T-507: `"unknown"` is only what a server recorded and lost, and the plane says exactly that.**
+/// **T-507: `"unknown"` is only what a server recorded and lost, and the plane says exactly that
+/// — and since T-680, a ring evicting its first seconds is not a loss while the dwell that
+/// recorded them is still in flight.**
 ///
-/// A server whose IQ ring keeps two seconds has, a few seconds in, genuinely *lost* the tune
-/// record of its first seconds while its spectrum history still remembers that it was recording
-/// then. That is the fourth state's real case, and the route draws it as a band with a floor:
+/// A server whose IQ ring keeps two seconds has, a few seconds in, evicted the ring's journal of
+/// its first seconds — and, until the first dwell seals (≤ 60 s), the observation log holds no
+/// sealed record either. T-507 asserted those seconds as the fourth state, `"unknown"`: *recorded,
+/// record since lost*. **T-680 changed that contract deliberately** (`docs/api.md`, "The live edge
+/// has a third source"): the dwell in flight is a tune record this server still holds, in memory,
+/// so nothing was lost — the band was the seal's bookkeeping lag, and it flipped to `observed`
+/// the instant the seal landed, for samples that never changed. So on this server:
 ///
-/// - rows wholly **before `recording_began_s`** are `"unobserved"` — nothing this server knows of
-///   was recording, and it has discarded nothing that could say otherwise;
-/// - rows **from it until `oldest_record_s`** are `"unknown"` — recorded, record since lost;
-/// - `forgotten` is null: the history still knows when recording began, so the ring's routine
-///   eviction does not make the past unbounded.
+/// - `oldest_record_s` reaches back past the ring's floor, to the open dwell's own start, and at
+///   least four seconds of rows the ring has discarded lie between the two (the wait's condition —
+///   under T-596's clip `oldest_record_s` WAS the ring's floor, so the wait never succeeds: RED);
+/// - those rows are `"observed"` over the tuned band, `unknown_rows` 0 — counted per cell;
+/// - rows wholly **before `recording_began_s`** are still `"unobserved"`: nothing looked;
+/// - `forgotten` is null.
 ///
-/// And on `/api/tiles` the same band, row for row, derived from the tile's **own** `horizon` — so
-/// the plane cannot be right by accident — with T-461's fail-closed half on a real server: a plane
-/// holding any `"unknown"` never short-circuits. The tile is placed from the route's own
-/// `recording_began_s`, never from wall clock, so unlike the assertion it replaces (T-509) it does
-/// not depend on where a 32 s block boundary falls relative to the request.
+/// And on `/api/tiles` the plane agrees with its **own** `horizon`, row for row, over a band never
+/// tuned — `"unknown"` only between `recording_began_s` and `oldest_record_s` (now at most the
+/// instant between the history's first frame and the observer's first poll), `"unobserved"`
+/// elsewhere — so the plane cannot be right by accident. T-461's fail-closed half (a plane holding
+/// any `"unknown"` never short-circuits) is asserted here whenever that band is non-empty; its
+/// unconditional home is `tiles::tests::the_short_circuit_refuses_an_observed_plane_and_refuses_
+/// unknown_over_data_the_store_holds`.
 #[test]
 fn unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so() {
     const CELLS: usize = 4;
@@ -7519,58 +7535,87 @@ fn unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so() {
         FIXTURE_CENTER_HZ - FIXTURE_RATE_HZ / 2.0,
         FIXTURE_CENTER_HZ + FIXTURE_RATE_HZ / 2.0,
     );
-    let (mut began, mut oldest) = (0.0f64, 0.0f64);
+    let (mut began, mut oldest, mut ring_t0) = (0.0f64, 0.0f64, 0.0f64);
     wait_for(
-        "the ring to discard four seconds of what the server recorded",
+        "the ring to discard four seconds the dwell in flight still records",
         Duration::from_secs(60),
         || {
             let (st, v) = get(addr, &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells=1"));
             let h = &v["horizon"];
+            let ring = get(addr, "/api/iqbuffer?limit=1").1["t0"].as_f64();
             match (
                 st,
                 h["recording_began_s"].as_f64(),
                 h["oldest_record_s"].as_f64(),
+                ring,
             ) {
-                (200, Some(b), Some(o)) if o - b >= 4.0 => {
-                    (began, oldest) = (b, o);
+                (200, Some(b), Some(o), Some(r)) if r - o >= 4.0 => {
+                    (began, oldest, ring_t0) = (b, o, r);
                     true
                 }
                 _ => false,
             }
         },
     );
-
-    // ---- /api/coverage: eight 1 s rows, half a row off `began` so no row edge sits on it ----
-    let (t0, t1) = (began - 4.5, began + 3.5);
     assert!(
-        t1 <= oldest,
-        "every row after `began` is before the oldest record"
+        began <= oldest,
+        "recording began no later than the oldest record"
     );
+
+    // ---- /api/coverage: four 1 s rows the ring has discarded, from the open dwell's start ----
+    let (t0, t1) = (oldest, oldest + 4.0);
+    assert!(t1 <= ring_t0, "every row here is before the ring's floor");
     let (st, v) = get(
         addr,
-        &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=8&t0={t0}&t1={t1}"),
+        &format!("/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=4&t0={t0}&t1={t1}"),
     );
     assert_eq!(st, 200, "{v}");
     let h = &v["horizon"];
     assert_eq!(h["forgotten"], Value::Null, "{h}");
-    assert_eq!(h["recording_began_s"].as_f64(), Some(began), "{h}");
-    assert_eq!(h["unknown_from_row"], json!(4), "{h}");
-    assert_eq!(h["unknown_rows"], json!(4), "{h}");
+    assert_eq!(
+        h["unknown_rows"],
+        json!(0),
+        "the ring's discarded seconds are held by the dwell in flight - nothing was lost: {h}"
+    );
+    assert_eq!(v["any"]["unknown_cells"], json!(0), "{v}");
     let cells = v["any"]["cells"].as_array().expect("cells");
-    assert_eq!(cells.len(), 8 * CELLS, "{v}");
+    assert_eq!(cells.len(), 4 * CELLS, "{v}");
     for (i, c) in cells.iter().enumerate() {
-        // Rows 0..4 end at or before `began - 0.5`; row 4 straddles `began`; rows 5..8 lie
-        // between it and the ring's floor. The tuned band itself: the ring has discarded it.
-        let want = if i / CELLS < 4 {
-            "unobserved"
-        } else {
-            "unknown"
-        };
-        // No measurement keys either way: neither is a level.
-        assert_eq!(*c, json!({ "state": want }), "cell {i}: {v}");
+        assert_ne!(c["state"], json!("unknown"), "cell {i}: {v}");
+        assert_ne!(c["state"], json!("unobserved"), "cell {i}: {v}");
     }
-    assert_eq!(v["any"]["unknown_cells"], json!(4 * CELLS), "{v}");
+    let observed = cells
+        .iter()
+        .filter(|c| c["state"] == json!("observed"))
+        .count();
+    assert!(
+        observed >= 4 * (CELLS / 2),
+        "the tuned band is observed over the discarded seconds ({observed} cells): {v}"
+    );
+
+    // ---- and before recording began: four 1 s rows, unobserved - nothing looked ----
+    // Half a row short of `began`, so no row edge sits on it (a row ending on it to the
+    // nanosecond, after float formatting, may straddle it and count as unknown).
+    let (st, v) = get(
+        addr,
+        &format!(
+            "/api/coverage?f_lo={lo}&f_hi={hi}&cells={CELLS}&rows=4&t0={}&t1={}",
+            began - 4.5,
+            began - 0.5
+        ),
+    );
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["horizon"]["unknown_rows"], json!(0), "{v}");
     assert_eq!(v["any"]["unobserved_cells"], json!(4 * CELLS), "{v}");
+    for (i, c) in v["any"]["cells"]
+        .as_array()
+        .expect("cells")
+        .iter()
+        .enumerate()
+    {
+        // No measurement keys: not a level.
+        assert_eq!(*c, json!({ "state": "unobserved" }), "cell {i}: {v}");
+    }
 
     // ---- /api/tiles: the same band, in the block `began` falls in, over a band never tuned ----
     const N: u64 = 32;
@@ -7632,18 +7677,18 @@ fn unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so() {
         }
     }
     let unknown = want.iter().filter(|w| **w == "unknown").count();
-    assert!(
-        unknown > 0,
-        "the row holding `began` is always unknown here: {th}"
-    );
     assert_eq!(th["unknown_rows"], json!(unknown), "{th}");
-    // T-461, fail-closed, on a real server: any `"unknown"` means the full read.
-    assert_eq!(
-        tile["resolution"]["short_circuit"]["applied"],
-        json!(false),
-        "{tile}"
-    );
-    if unknown < N as usize {
+    // T-461, fail-closed, on a real server: any `"unknown"` means the full read. Since T-680 the
+    // band is only the instant between the history's first frame and the observer's first poll,
+    // so it may be empty here; `tiles::tests` pins the fail-closed half unconditionally.
+    if unknown > 0 {
+        assert_eq!(
+            tile["resolution"]["short_circuit"]["applied"],
+            json!(false),
+            "{tile}"
+        );
+    }
+    if unknown > 0 && unknown < N as usize {
         assert_eq!(
             tile["resolution"]["short_circuit"]["selected_plane_uniform"],
             Value::Null,
