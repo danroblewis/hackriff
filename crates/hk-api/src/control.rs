@@ -25,6 +25,10 @@
 //! | GET, POST | `/api/bookmarks` | create: `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | list / the created bookmark (201) |
 //! | GET, PUT, DELETE | `/api/bookmarks/<id>` | update (rename included): any create field (`null` clears optional ones) | the bookmark / `{"deleted": ...}` |
 //!
+//! Since T-817 the bookmark routes are a **compatibility facade** over the reserved `Bookmarks`
+//! marker collection ([`crate::collections`], docs/25 §10.6): a bookmark is that collection's
+//! frequency-only marker, the same row, so `/api/bookmarks` and `/api/collections` never disagree.
+//!
 //! Device endpoints (centre, rate, gains, bias tee, baseband filter) need a live source
 //! ([`crate::ApiState::live_controls`]); on a replayed recording they answer 409 `not_live`, while
 //! display, recording and bookmarks keep working.
@@ -769,6 +773,11 @@ impl Fail {
         Self::new(400, "invalid", message)
     }
 
+    /// The human-readable message.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn response(&self) -> CtlResponse {
         CtlResponse {
             status: self.status,
@@ -1085,6 +1094,7 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         Reach::Commissions(d) => Some(commissioned_json(state, d)),
         Reach::View => None,
     };
+    let actor = req.caller.token_id.clone();
     Some(dispatch_device(
         state,
         req,
@@ -1092,7 +1102,7 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         action.mutating(),
         device,
         |s| read(s, action, req.query),
-        |s, body| apply(s, action, body),
+        |s, body| apply(s, action, body, actor),
     ))
 }
 
@@ -1697,7 +1707,12 @@ const BOOKMARK_FIELDS: &[&str] = &["kind", "name", "f_center_hz", "bandwidth_hz"
 ///   reaches the device, nothing took the radio, so [`crate::scan::ScanRunner::unyield`] puts the
 ///   sweep back exactly as it was — and only if the yield still standing is the one this request
 ///   caused.
-fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<Applied, Fail> {
+fn apply(
+    state: &ApiState,
+    action: Action,
+    body: &Map<String, Value>,
+    actor: Option<String>,
+) -> Result<Applied, Fail> {
     let yielded = match action.reach() {
         Reach::Device(d) => state
             .scan
@@ -1705,7 +1720,7 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             .and_then(|s| s.note_user_device_action(d)),
         Reach::Commissions(_) | Reach::View => None,
     };
-    let mut result = apply_action(state, action, body);
+    let mut result = apply_action(state, action, body, actor);
     match (&yielded, &mut result) {
         (Some(y), Ok(a)) => {
             if let Some(o) = a.body.as_object_mut() {
@@ -1726,6 +1741,7 @@ fn apply_action(
     state: &ApiState,
     action: Action,
     body: &Map<String, Value>,
+    actor: Option<String>,
 ) -> Result<Applied, Fail> {
     let run_body = |state: &ApiState| state.run_control.as_deref().map(|r| run_json(&r.state()));
     match action {
@@ -1965,7 +1981,11 @@ fn apply_action(
             );
             b.bandwidth_hz = nullable_number(body, "bandwidth_hz")?.flatten();
             b.note = text(body, "note")?.flatten().map(str::to_owned);
-            bookmarks(state)?.insert_bookmark(&b).map_err(repo_fail)?;
+            // T-817: stored as a frequency-only marker of the reserved `Bookmarks` collection, with
+            // the author's token id in its provenance like every other authored mark.
+            bookmarks(state)?
+                .insert_bookmark_authored(&b, actor)
+                .map_err(repo_fail)?;
             let new = bookmark_json(&b);
             Ok(Applied {
                 status: 201,

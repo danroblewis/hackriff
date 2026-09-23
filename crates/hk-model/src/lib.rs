@@ -108,10 +108,10 @@ pub use harmonic::{
 };
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
-    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
-    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, MeasurementId,
-    ProvenanceId, RecordingId, SavedViewId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId,
-    TrunkSystemId,
+    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId,
+    CollectionId, DecodeId, DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId,
+    MarkerId, MeasurementId, ProvenanceId, RecordingId, SavedViewId, ScanPlanId, SelectionId,
+    SpurMaskId, SurveyId, TrackId, TrunkSystemId,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -138,16 +138,18 @@ pub use relate::{
 };
 pub use repo::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
-    AuthoredKind, AuthoredPage, AuthoredProvenance, AuthoredTier, BOOKMARK_NAME_MAX,
-    BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterSynthesis, EmitterUpsert,
-    HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, LatestMeasurement, MAX_FAMILY_CANDIDATES,
-    MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, ProvenanceChain,
-    REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning, RepoBatch,
-    RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX,
-    SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX,
-    SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink,
-    SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
-    USER_BAND_MAX_WIDTH_HZ, UserBand, authored_block,
+    AuthoredKind, AuthoredPage, AuthoredProvenance, BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX,
+    BOOKMARKS_COLLECTION, BOOKMARKS_COLLECTION_COLOR, BOOKMARKS_COLLECTION_NAME, BOOKMARKS_MAX,
+    Bookmark, BookmarkKind, COLLECTION_NAME_MAX, COLLECTION_NOTE_MAX, COLLECTIONS_MAX, Collection,
+    CollectionSummary, EmitterSynthesis, EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX,
+    LatestMeasurement, MARKERS_PER_COLLECTION_MAX, MAX_FAMILY_CANDIDATES, MAX_LO_SPAN_HZ,
+    MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, Marker, MarkerWindow, PROVENANCE_TEXT_MAX,
+    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning,
+    RepoBatch, RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict,
+    SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
+    SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
+    Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
+    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
 };
 // T-818 MAP-18 saved measurements (docs/25 §4).
 pub use repo::{

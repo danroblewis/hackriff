@@ -23,6 +23,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::measurements::MeasurementProvenance;
 use super::{RepoError, Repository, blob};
 use crate::ids::AnnotationId;
 use crate::sigmf;
@@ -73,58 +74,6 @@ impl AuthoredKind {
     }
 }
 
-/// The honesty tier the object was authored over (docs/14 T-341, docs/16 §4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AuthoredTier {
-    /// Live-IQ detail.
-    LiveIq,
-    /// Spectrum history (the tile pyramid).
-    SpectrumHistory,
-    /// Survey overview (reduced, non-live-IQ data).
-    SurveyOverview,
-}
-
-impl AuthoredTier {
-    /// The wire form.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LiveIq => "live-iq",
-            Self::SpectrumHistory => "spectrum-history",
-            Self::SurveyOverview => "survey-overview",
-        }
-    }
-}
-
-/// The docs/25 §2 provenance stamp, written by the **server** at create/edit time: the view context
-/// the client reported plus what the server authoritatively knows (`actor`, `authored_at`,
-/// `sample_rate_hz` of the named device when this run holds it). Shared by every MMAP research
-/// store (docs/25 §10.2).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthoredProvenance {
-    /// Whose coverage the object rests on (the pane's device), or `None`.
-    pub device_id: Option<String>,
-    /// The view's centre frequency when authored, Hz.
-    pub center_hz: f64,
-    /// The view's frequency span when authored, Hz.
-    pub span_hz: f64,
-    /// The named device's sample rate at authoring time, when the server holds that device.
-    pub sample_rate_hz: Option<f64>,
-    /// Capture-clock window the view was showing, `[start, end]`.
-    #[serde(rename = "t_capture_ns")]
-    pub t_capture: [Timestamp; 2],
-    /// Honesty tier the view was drawn at.
-    pub tier: AuthoredTier,
-    /// Wall-clock instant of authoring (audit, never a measurement time).
-    #[serde(rename = "authored_at_ns")]
-    pub authored_at: Timestamp,
-    /// Token fingerprint of who authored it (never the token).
-    pub actor: Option<String>,
-    /// Always `true`: this is a human-authored object.
-    pub authored: bool,
-}
-
 /// A durable, human-authored time–frequency note.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,7 +101,7 @@ pub struct AuthoredAnnotation {
     /// Token fingerprint of the author.
     pub author: Option<String>,
     /// The docs/25 §2 stamp.
-    pub provenance: AuthoredProvenance,
+    pub provenance: MeasurementProvenance,
     /// Wall-clock creation.
     #[serde(rename = "created_at_ns")]
     pub created_at: Timestamp,
@@ -174,41 +123,6 @@ fn short_ref(what: &str, v: Option<&String>) -> Result<(), RepoError> {
         )));
     }
     Ok(())
-}
-
-impl AuthoredProvenance {
-    /// Checks the stamp's own limits.
-    pub fn validate(&self) -> Result<(), RepoError> {
-        short_ref("provenance device_id", self.device_id.as_ref())?;
-        short_ref("provenance actor", self.actor.as_ref())?;
-        if !(self.center_hz.is_finite() && self.center_hz >= 0.0) {
-            return Err(invalid(
-                "provenance center_hz must be a finite, non-negative Hz",
-            ));
-        }
-        if !(self.span_hz.is_finite() && self.span_hz > 0.0) {
-            return Err(invalid("provenance span_hz must be a finite, positive Hz"));
-        }
-        if self
-            .sample_rate_hz
-            .is_some_and(|r| !(r.is_finite() && r > 0.0))
-        {
-            return Err(invalid(
-                "provenance sample_rate_hz must be finite and positive",
-            ));
-        }
-        if self.t_capture[1] < self.t_capture[0] {
-            return Err(invalid(
-                "provenance t_capture must be [start, end] with start <= end",
-            ));
-        }
-        if !self.authored {
-            return Err(invalid(
-                "an authored annotation's provenance has authored: true",
-            ));
-        }
-        Ok(())
-    }
 }
 
 impl AuthoredAnnotation {
@@ -499,13 +413,13 @@ mod tests {
             label: label.to_owned(),
             body: None,
             author: Some("tok-abc".into()),
-            provenance: AuthoredProvenance {
+            provenance: MeasurementProvenance {
                 device_id: Some("hackrf:0001".into()),
                 center_hz: 100.3e6,
                 span_hz: 2.4e6,
                 sample_rate_hz: Some(2e6),
                 t_capture: [ts(t.0 - 5.0), ts(t.1 + 5.0)],
-                tier: AuthoredTier::LiveIq,
+                tier: crate::MeasurementTier::LiveIq,
                 authored_at: now,
                 actor: Some("tok-abc".into()),
                 authored: true,

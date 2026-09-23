@@ -22,10 +22,7 @@
 
 use std::sync::{MutexGuard, PoisonError};
 
-use hk_model::{
-    AnnotationId, AuthoredAnnotation, AuthoredKind, AuthoredProvenance, AuthoredTier, RepoError,
-    Repository, Timestamp,
-};
+use hk_model::{AnnotationId, AuthoredAnnotation, AuthoredKind, RepoError, Repository, Timestamp};
 use serde_json::{Map, Value, json};
 
 use crate::control::{
@@ -263,17 +260,6 @@ const UPDATE_FIELDS: &[&str] = &[
     "collection_id",
     "view",
 ];
-/// Provenance fields only the server may write (docs/25 §10.2).
-const SERVER_OWNED: &[&str] = &[
-    "provenance",
-    "author",
-    "actor",
-    "authored",
-    "authored_s",
-    "created_s",
-    "updated_s",
-];
-const VIEW_FIELDS: &[&str] = &["center_hz", "span_hz", "t_capture", "tier", "device_id"];
 
 /// Refuses a server-owned field by name before the generic unknown-field check, so the error says
 /// why rather than just "unknown".
@@ -301,78 +287,9 @@ fn kind(v: Option<&str>) -> Result<AuthoredKind, Fail> {
         .map_err(|_| Fail::invalid("kind must be \"text\", \"box\" or \"marker\""))
 }
 
-/// Parses `view` and stamps it into provenance: the client's view context plus what the server
-/// knows authoritatively.
-fn stamp(
-    state: &ApiState,
-    view: &Value,
-    actor: Option<String>,
-) -> Result<AuthoredProvenance, Fail> {
-    let m = view.as_object().ok_or_else(|| {
-        Fail::invalid(
-            "view must be an object {center_hz, span_hz, t_capture: [t0, t1], tier, device_id?}",
-        )
-    })?;
-    only(m, VIEW_FIELDS).map_err(|_| {
-        Fail::invalid(format!(
-            "view carries only {} (the server stamps the rest)",
-            VIEW_FIELDS.join(", ")
-        ))
-    })?;
-    let center_hz =
-        required(m, "center_hz").map_err(|_| Fail::invalid("view.center_hz is required"))?;
-    let span_hz = required(m, "span_hz").map_err(|_| Fail::invalid("view.span_hz is required"))?;
-    let t_capture = match m
-        .get("t_capture")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-    {
-        Some([a, b]) => match (a.as_f64(), b.as_f64()) {
-            (Some(a), Some(b)) => [
-                from_secs("view.t_capture", a)?,
-                from_secs("view.t_capture", b)?,
-            ],
-            _ => return Err(Fail::invalid("view.t_capture must be [t0_s, t1_s]")),
-        },
-        _ => {
-            return Err(Fail::invalid(
-                "view.t_capture is required: [t0_s, t1_s] on the capture clock",
-            ));
-        }
-    };
-    let tier: AuthoredTier = m
-        .get("tier")
-        .and_then(|t| serde_json::from_value(t.clone()).ok())
-        .ok_or_else(|| {
-            Fail::invalid(
-                "view.tier must be \"live-iq\", \"spectrum-history\" or \"survey-overview\"",
-            )
-        })?;
-    let device_id = text(m, "device_id")
-        .map_err(|_| Fail::invalid("view.device_id must be a string or null"))?
-        .flatten()
-        .map(str::to_owned);
-    // The named device's rate, only when this run holds it — never a guess for a device we cannot
-    // see, and never the "primary" radio standing in for an unnamed pane.
-    let sample_rate_hz = device_id.as_deref().and_then(|d| {
-        state
-            .live_controls
-            .iter()
-            .find(|l| l.device_id() == Some(d))
-            .map(|l| l.tuning().sample_rate_hz)
-    });
-    Ok(AuthoredProvenance {
-        device_id,
-        center_hz,
-        span_hz,
-        sample_rate_hz,
-        t_capture,
-        tier,
-        authored_at: Timestamp::now(),
-        actor,
-        authored: true,
-    })
-}
+// The view stamp is the shared docs/25 §2 one (`crate::measurements::stamp`), as T-818's
+// measurements and T-819's saved views use.
+use crate::measurements::{SERVER_OWNED, stamp};
 
 /// Applies the geometry/text fields present in `body` (PUT) or all of them (POST).
 fn apply_fields(body: &Map<String, Value>, a: &mut AuthoredAnnotation) -> Result<(), Fail> {

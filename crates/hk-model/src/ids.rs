@@ -110,6 +110,12 @@ define_ids! {
     /// A persisted region selection (T-052): a frequency extent, optionally a time extent, the
     /// user named. User metadata, mutable.
     SelectionId;
+    /// A named, toggleable collection of time-frequency markers (T-817, docs/25 §3). User
+    /// metadata, mutable.
+    CollectionId;
+    /// A time-frequency marker in a [`CollectionId`] collection (T-817, docs/25 §3): a frequency
+    /// place, optionally a time place. User metadata, mutable.
+    MarkerId;
     /// A survey site (ADR-0012 §3.5): a discrete place the device was parked, the key of
     /// occupancy baselines for a moving device. Aggregate, user-renamable.
     SiteId;

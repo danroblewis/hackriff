@@ -69,6 +69,7 @@ mod cluster;
 #[cfg(test)]
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
+mod collections; // T-817 (MAP-17): marker collections; bookmarks are a facade over one
 mod gating;
 mod harmonic; // T-374 (C40): harmonic families
 #[cfg(test)]
@@ -123,6 +124,12 @@ use crate::region::Region;
 use crate::time::Timestamp;
 
 pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind};
+pub use collections::{
+    AuthoredProvenance, BOOKMARKS_COLLECTION, BOOKMARKS_COLLECTION_COLOR,
+    BOOKMARKS_COLLECTION_NAME, COLLECTION_NAME_MAX, COLLECTION_NOTE_MAX, COLLECTIONS_MAX,
+    Collection, CollectionSummary, MARKERS_PER_COLLECTION_MAX, Marker, MarkerWindow,
+    PROVENANCE_TEXT_MAX, StorePage, ViewTier,
+};
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
@@ -139,9 +146,11 @@ pub use saved_views::{
 // `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
 // `Resolution` and `Measured` are the decode-search vocabulary and would collide with
 // `classify::Stage` and `cluster::Resolution`, which mean entirely different things.
+// T-816's stamp is the shared docs/25 §2 `MeasurementProvenance` (as T-819's saved views use);
+// `AuthoredProvenance` is T-817's nullable marker stamp (bookmark-facade markers have no view).
 pub use authored::{
     AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
-    AuthoredKind, AuthoredPage, AuthoredProvenance, AuthoredTier, authored_block,
+    AuthoredKind, AuthoredPage, authored_block,
 };
 pub use relate::{MAX_ARTIFACT_SOURCES, MAX_EVIDENCE_DETECTIONS, MAX_NEIGHBOURS, OverlapOutcome};
 pub use retune::{

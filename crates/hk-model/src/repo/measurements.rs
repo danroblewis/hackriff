@@ -357,7 +357,9 @@ impl MeasurementProvenance {
             ));
         }
         if !self.authored {
-            return Err(invalid("a measurement's provenance has authored: true"));
+            return Err(invalid(
+                "an authored object's provenance has authored: true",
+            ));
         }
         Ok(())
     }

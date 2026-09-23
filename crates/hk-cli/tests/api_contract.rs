@@ -2516,6 +2516,194 @@ fn control_display_and_bookmarks_answer_as_documented() {
     stop_server(serving);
 }
 
+/// T-817 (MAP-17, RESEARCH-003): `/api/collections`, `/api/collections/{id}/markers` and
+/// `/api/markers[/{id}]` as `docs/api.md` "Marker collections" documents them, on a live `hk serve`
+/// over the mock SDR device. A marker is a time-frequency place; its provenance is stamped by the
+/// server (including the named front end's sample rate) and never accepted from the client;
+/// authoring reaches no radio; and `/api/bookmarks` is a facade over the reserved collection.
+#[test]
+fn marker_collections_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let (_, state) = get(addr, "/api/control/state");
+    let device_id = state["device"]["device_id"].as_str().unwrap().to_owned();
+    let tuned = state["tuning"].clone();
+
+    // The reserved `Bookmarks` collection exists on a fresh server, and a bookmark is its marker.
+    let (st, bm) = post(
+        addr,
+        "/api/bookmarks",
+        r#"{"name": "FM", "f_center_hz": 100.8e6}"#,
+    );
+    assert_eq!(st, 201, "{bm}");
+    let (st, list) = get(addr, "/api/collections");
+    assert_eq!(st, 200, "{list}");
+    for key in ["collections", "count", "matched", "limit", "next_cursor"] {
+        assert!(
+            list.get(key).is_some(),
+            "collections list missing {key}: {list}"
+        );
+    }
+    assert_eq!(list["limit"], json!(500));
+    let reserved = list["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["reserved"] == json!(true))
+        .unwrap_or_else(|| panic!("no reserved bookmarks collection: {list}"))
+        .clone();
+    assert_eq!(reserved["name"], json!("Bookmarks"));
+    assert_eq!(reserved["member_count"], json!(1), "{reserved}");
+    let (st, m) = get(
+        addr,
+        &format!("/api/markers/{}", bm["id"].as_str().unwrap()),
+    );
+    assert_eq!((st, &m["collection_id"]), (200, &reserved["id"]), "{m}");
+
+    // A collection and a timed marker on it, authored from a live-IQ pane on this device.
+    let (st, c) = post(addr, "/api/collections", r#"{"name": "bursts"}"#);
+    assert_eq!(st, 201, "{c}");
+    for field in [
+        "id",
+        "name",
+        "note",
+        "color",
+        "visible",
+        "reserved",
+        "member_count",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(c.get(field).is_some(), "collection missing {field}: {c}");
+    }
+    let cid = c["id"].as_str().unwrap().to_owned();
+    let view = json!({
+        "center_hz": FIXTURE_CENTER_HZ,
+        "span_hz": FIXTURE_RATE_HZ,
+        "t_capture": 1_726_480_000.0,
+        "tier": "live-iq",
+        "device_id": device_id,
+    });
+    let body = json!({
+        "name": "burst", "f_center_hz": 100.9e6, "bandwidth_hz": 50e3,
+        "t_center_s": 1_726_480_000.0, "duration_s": 2.0, "view": view,
+    });
+    let (st, mk) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &body.to_string(),
+    );
+    assert_eq!(st, 201, "{mk}");
+    for field in [
+        "id",
+        "collection_id",
+        "name",
+        "note",
+        "f_center_hz",
+        "bandwidth_hz",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t_center_s",
+        "duration_s",
+        "t_start_s",
+        "t_end_s",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(mk.get(field).is_some(), "marker missing {field}: {mk}");
+    }
+    assert_eq!(
+        (&mk["t_start_s"], &mk["t_end_s"]),
+        (&json!(1_726_479_999.0), &json!(1_726_480_001.0)),
+        "{mk}"
+    );
+    let p = &mk["provenance"];
+    assert_eq!(p["device_id"], json!(device_id), "{p}");
+    assert_eq!(
+        p["sample_rate_hz"],
+        json!(FIXTURE_RATE_HZ),
+        "stamped by the server: {p}"
+    );
+    assert_eq!(
+        p["t_capture"],
+        json!([1_726_480_000.0, 1_726_480_000.0]),
+        "{p}"
+    );
+    assert_eq!(p["authored"], json!(true));
+    assert!(p["actor"].is_string() && p["actor"] != json!(TOKEN), "{p}");
+    assert!(
+        mk.get("device").is_none(),
+        "authoring is not a device action: {mk}"
+    );
+
+    // A client cannot supply provenance.
+    let mut forged = body.clone();
+    forged["view"]["actor"] = json!("someone else");
+    let (st, v) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &forged.to_string(),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // Windowed list: the marker's time finds it; a far window does not.
+    let (st, v) = get(
+        addr,
+        &format!("/api/collections/{cid}/markers?t0=1726480000&t1=1726480000.5"),
+    );
+    assert_eq!((st, &v["matched"]), (200, &json!(1)), "{v}");
+    let (_, v) = get(addr, "/api/markers?t0=1&t1=2&f_lo=100e6&f_hi=101e6");
+    assert!(
+        v["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["t_center_s"].is_null()),
+        "only frequency-only pins match a far window: {v}"
+    );
+
+    // Toggle, edit, delete.
+    let (st, v) = put(
+        addr,
+        &format!("/api/collections/{cid}"),
+        r#"{"visible": false}"#,
+    );
+    assert_eq!((st, &v["visible"]), (200, &json!(false)), "{v}");
+    let mid = mk["id"].as_str().unwrap();
+    let (st, v) = put(
+        addr,
+        &format!("/api/markers/{mid}"),
+        r#"{"note": "again at 12:00"}"#,
+    );
+    assert_eq!(
+        (st, v["note"].as_str()),
+        (200, Some("again at 12:00")),
+        "{v}"
+    );
+    let (st, v) = delete(addr, &format!("/api/collections/{cid}"));
+    assert_eq!((st, &v["members_deleted"]), (200, &json!(1)), "{v}");
+    let (st, v) = get(addr, &format!("/api/markers/{mid}"));
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    let (st, v) = delete(
+        addr,
+        &format!("/api/collections/{}", reserved["id"].as_str().unwrap()),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // None of it moved the radio.
+    let (_, after) = get(addr, "/api/control/state");
+    assert_eq!(
+        (
+            &after["tuning"]["center_hz"],
+            &after["tuning"]["sample_rate_hz"]
+        ),
+        (&tuned["center_hz"], &tuned["sample_rate_hz"]),
+        "authoring markers never reaches the device"
+    );
+
+    stop_server(serving);
+}
+
 #[test]
 fn selections_crud_and_links_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();
@@ -9992,6 +10180,9 @@ fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> 
         "/api/inventory",
         "/api/selections",
         "/api/bookmarks",
+        // T-817: marker collections (the reserved bookmarks collection exists on a fresh server)
+        "/api/collections",
+        "/api/markers",
         "/api/blocks",
         "/api/iqbuffer",
         "/api/clusters",
