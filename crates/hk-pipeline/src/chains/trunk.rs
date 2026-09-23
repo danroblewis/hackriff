@@ -116,8 +116,8 @@ use hk_detect::trunk::{
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::repo::synthesis::ReceiverFit;
 use hk_model::{
-    CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
-    TrunkSystemId,
+    CalibrationMethod, CalibrationState, CalibrationStateId, CallRecord, GrantEvent, GrantKind,
+    SampleTime, Timestamp, TrunkProtocol, TrunkSystem, TrunkSystemId,
 };
 use num_complex::{Complex, Complex32};
 use serde_json::json;
@@ -576,7 +576,19 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
     // tolerance. Every emission moves by the same constant, so an uncorrected grid rejects the
     // whole band at once and candidacy never happens. A build that only works at 0 ppm works on
     // synthetic IQ and nothing else.
-    let grid = grid_fit(buf, fs, raster);
+    //
+    // T-560: the estimate is C05 calibration state, not a value re-derived from raw IQ on every
+    // hunt. The first strong fit for this device is recorded via `receiver_grid`; every later hunt
+    // reads that row back instead of paying for the FFT-based fit again.
+    let grid = receiver_grid(
+        &shared.repo,
+        &prov.device_id,
+        tune_center,
+        buf,
+        fs,
+        raster,
+        t_start,
+    );
     let grid_offset = grid.map_or(0.0, |g| g.offset_hz);
     if let Some(g) = grid {
         if g.offset_hz.abs() > RASTER_TOLERANCE_HZ {
@@ -1453,6 +1465,81 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
     }
 }
 
+/// The receiver's own grid offset for `device_id`, as C05 calibration state rather than a value
+/// re-derived from raw IQ on every hunt (T-560).
+///
+/// The first strong raster fit for a device is recorded via
+/// [`hk_model::repo::Repository::insert_calibration_state`] under [`CalibrationMethod::LmrRaster`];
+/// every later call for the same device reads that row back
+/// (`Repository::latest_calibration_state_for_device`) and re-expresses it against *this* hunt's
+/// `raster_hz`/`tune_center_hz`, instead of paying for [`grid_fit`]'s FFT-based fit again. A device
+/// with no stored estimate yet falls through to fitting one from `buf`, and only a fit that already
+/// cleared [`hk_detect::trunk::MIN_GRID_CONCENTRATION`] (i.e. `Some`) is ever recorded — an
+/// unfitted grid is left uncorrected rather than guessed at, the same rule [`fit_grid_offset`]
+/// itself follows.
+fn receiver_grid(
+    repo: &std::sync::Mutex<hk_model::Repository>,
+    device_id: &str,
+    tune_center_hz: f64,
+    buf: &[Complex<i8>],
+    fs: f64,
+    raster_hz: f64,
+    t: Timestamp,
+) -> Option<GridFit> {
+    let stored = repo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .latest_calibration_state_for_device(device_id, &CalibrationMethod::LmrRaster)
+        .unwrap_or_else(|e| {
+            eprintln!("hk-pipeline: trunk-cc calibration lookup: {e}");
+            None
+        });
+    if let Some(cal) = stored {
+        let offset_hz = wrap_to_grid(cal.ppm * 1e-6 * tune_center_hz, raster_hz);
+        return Some(GridFit {
+            spacing_hz: raster_hz,
+            offset_hz,
+            concentration: cal.confidence.unwrap_or(1.0),
+            bins: 0,
+        });
+    }
+    let fit = grid_fit(buf, fs, raster_hz)?;
+    let ppm = 1e6 * fit.offset_hz / tune_center_hz;
+    let cal = CalibrationState {
+        id: CalibrationStateId::new(),
+        supersedes: None,
+        device_id: device_id.to_owned(),
+        ppm,
+        method: CalibrationMethod::LmrRaster,
+        measured_at: t,
+        valid: None,
+        temperature_c: None,
+        power_table: Vec::new(),
+        confidence: Some(fit.concentration),
+    };
+    if let Err(e) = repo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert_calibration_state(&cal)
+    {
+        eprintln!("hk-pipeline: trunk-cc calibration record: {e}");
+    }
+    Some(fit)
+}
+
+/// Wraps `offset_hz` into `(-spacing_hz/2, spacing_hz/2]`, the same convention
+/// [`fit_grid_offset`] reports in: which grid line an emission sits on is a different question
+/// from where the lines are.
+fn wrap_to_grid(offset_hz: f64, spacing_hz: f64) -> f64 {
+    let mut m = offset_hz % spacing_hz;
+    if m <= -spacing_hz / 2.0 {
+        m += spacing_hz;
+    } else if m > spacing_hz / 2.0 {
+        m -= spacing_hz;
+    }
+    m
+}
+
 /// Fits the receiver's own offset from the `raster_hz` channel grid, over `buf` (T-546; docs/19
 /// §7.6a, §4.4 step 1).
 ///
@@ -1465,6 +1552,9 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
 /// **The fit is modulo the raster, and that is all the data says.** It re-aligns the *grid*; it
 /// does not say which grid line an emission is on, so it is applied to the hunt's own channel
 /// arithmetic and never to a frequency that is already unambiguous (see [`follow_grants`]).
+///
+/// Called at most once per device by [`receiver_grid`], the first time no calibration state is on
+/// record for it — every later hunt reads that row back instead.
 fn grid_fit(buf: &[Complex<i8>], fs: f64, raster_hz: f64) -> Option<GridFit> {
     let n = SWEEP_FFT_LEN;
     let frames = buf.len() / n;
@@ -1626,6 +1716,78 @@ mod tests {
             at(-5)
         );
         assert!(at(7) < MIN_CC_FCO, "empty channel: fco {:.3}", at(7));
+    }
+
+    /// T-560: the receiver's clock error is recorded as C05 calibration state and read back on
+    /// the next call instead of being re-fitted from raw IQ.
+    #[test]
+    fn receiver_grid_is_fitted_once_and_then_read_back_as_calibration_state() {
+        let (fs, raster) = (500_000.0, 12_500.0);
+        let n = 1 << 17;
+        let tune_center = 852_000_000.0;
+        // The exact number this project measured on its own HackRF One (docs/19 §7.6a).
+        const ERR_PPM: f64 = -9.6;
+        let err_hz = ERR_PPM * 1e-6 * tune_center;
+        let buf = scene(
+            n,
+            fs,
+            &[
+                (err_hz, 1.0),
+                (3.0 * raster + err_hz, 1.0),
+                (-5.0 * raster + err_hz, 1.0),
+            ],
+        );
+        let repo = std::sync::Mutex::new(hk_model::Repository::open_in_memory().unwrap());
+        let device = "test:t-560-receiver-grid";
+        let t = Timestamp::UNIX_EPOCH;
+
+        // The fit is reported modulo the raster (`wrap_to_grid`), so `-8179 Hz` and `+4321 Hz`
+        // name the same grid line; compare by the shortest distance around the raster, exactly as
+        // `hk_detect::trunk::raster`'s own clock-error test does.
+        let circular_diff = |a: f64, b: f64| {
+            let d = wrap_to_grid(a - b, raster);
+            d.abs()
+        };
+
+        let first = receiver_grid(&repo, device, tune_center, &buf, fs, raster, t)
+            .expect("a strong fit over three on-grid emissions");
+        assert!(
+            circular_diff(first.offset_hz, err_hz) < 300.0,
+            "fitted {:.0} Hz, wanted {err_hz:.0} Hz (mod {raster:.0} Hz)",
+            first.offset_hz
+        );
+
+        let stored = repo
+            .lock()
+            .unwrap()
+            .latest_calibration_state_for_device(device, &CalibrationMethod::LmrRaster)
+            .unwrap()
+            .expect("recorded as a C05 CalibrationState row");
+        assert_eq!(stored.device_id, device);
+        assert_eq!(stored.method, CalibrationMethod::LmrRaster);
+        // `stored.ppm` is derived from the same wrapped `offset_hz`, so it too may land at the
+        // ppm-equivalent grid line 12.5 kHz away rather than exactly ERR_PPM.
+        let raster_ppm = 1e6 * raster / tune_center;
+        let ppm_diff = (stored.ppm - ERR_PPM).rem_euclid(raster_ppm);
+        let ppm_diff = ppm_diff.min(raster_ppm - ppm_diff);
+        assert!(
+            ppm_diff < 0.5,
+            "stored ppm {:.2}, wanted {ERR_PPM} (mod {raster_ppm:.2})",
+            stored.ppm
+        );
+
+        // A second call with an EMPTY buffer: `grid_fit` alone would return `None` on it, so a
+        // non-`None`, unchanged result here can only come from the stored row -- proving the
+        // estimate was read back rather than recomputed.
+        let empty: Vec<Complex<i8>> = Vec::new();
+        let second = receiver_grid(&repo, device, tune_center, &empty, fs, raster, t)
+            .expect("the cached calibration answers without a buffer to refit from");
+        assert!(
+            (second.offset_hz - first.offset_hz).abs() < 1e-6,
+            "cached {:.3} Hz, fitted {:.3} Hz",
+            second.offset_hz,
+            first.offset_hz
+        );
     }
 
     /// The age half of C23's stale-IDEN pitfall, at the row it produces (T-268).

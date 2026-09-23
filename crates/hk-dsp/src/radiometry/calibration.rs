@@ -405,6 +405,7 @@ pub fn synthetic_calibration_state(
         valid: None,
         temperature_c: None,
         power_table,
+        confidence: None,
     }
 }
 
@@ -444,6 +445,7 @@ mod tests {
             valid,
             temperature_c: None,
             power_table: points,
+            confidence: None,
         }
     }
 

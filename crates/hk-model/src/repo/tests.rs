@@ -106,6 +106,7 @@ fn sample_cal() -> CalibrationState {
             gain: None,
             uncertainty_db: None,
         }],
+        confidence: None,
     }
 }
 
@@ -694,6 +695,60 @@ fn db_round_trips_every_persisted_object() {
             ..
         })
     ));
+}
+
+/// T-560: a caller reads back the most recent calibration for its device and method, rather than
+/// re-deriving it, and never sees another device's or another method's row.
+#[test]
+fn latest_calibration_state_for_device_reads_back_the_newest_matching_row() {
+    let mut repo = Repository::open_in_memory().unwrap();
+
+    // A different device, and a different method on the SAME device, must never shadow it.
+    let mut other_device = sample_cal();
+    other_device.id = CalibrationStateId::new();
+    other_device.device_id = "synthetic:other".into();
+    other_device.method = CalibrationMethod::LmrRaster;
+    other_device.ppm = 42.0;
+    repo.insert_calibration_state(&other_device).unwrap();
+
+    let mut older = sample_cal();
+    older.id = CalibrationStateId::new();
+    older.device_id = "synthetic:t-560".into();
+    older.method = CalibrationMethod::LmrRaster;
+    older.measured_at = t(-120);
+    older.ppm = -3.0;
+    repo.insert_calibration_state(&older).unwrap();
+
+    let mut different_method = sample_cal();
+    different_method.id = CalibrationStateId::new();
+    different_method.device_id = "synthetic:t-560".into();
+    different_method.method = CalibrationMethod::FmPilot;
+    different_method.measured_at = t(-10);
+    different_method.ppm = 0.2;
+    repo.insert_calibration_state(&different_method).unwrap();
+
+    let mut newest = sample_cal();
+    newest.id = CalibrationStateId::new();
+    newest.device_id = "synthetic:t-560".into();
+    newest.method = CalibrationMethod::LmrRaster;
+    newest.measured_at = t(-1);
+    newest.ppm = -9.6;
+    newest.confidence = Some(0.6);
+    repo.insert_calibration_state(&newest).unwrap();
+
+    let got = repo
+        .latest_calibration_state_for_device("synthetic:t-560", &CalibrationMethod::LmrRaster)
+        .unwrap()
+        .expect("a stored raster calibration for this device");
+    assert_eq!(got, newest, "the newest LmrRaster row for THIS device");
+    assert_eq!(got.ppm, -9.6);
+
+    assert_eq!(
+        repo.latest_calibration_state_for_device("synthetic:unknown", &CalibrationMethod::LmrRaster)
+            .unwrap(),
+        None,
+        "a device with no calibration history gets None, not a guess"
+    );
 }
 
 #[test]
