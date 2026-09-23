@@ -2270,6 +2270,28 @@ Both errors grow **linearly with age**, so a box drawn from a declared rate walk
 
 **Staging.** The switch is flag-gated (`HK_LISTEN_PIPELINE=1`, default off) before it is defaulted on, and only for the modes that have blocks (WFM/NBFM/AM). USB/LSB/CW have no blocks and keep the existing chain. See ADR-0015 §12.9 for the numbered stages and what is observable after each.
 
+## Saved measurements (T-818, MAP-18)
+
+A measurement a researcher takes on the canvas — Δf, Δt, bandwidth, duration, symbol rate or period — kept as a durable **object with value + unit + place + time + provenance**, not a readout that vanishes on mouse-up ([docs/25 §4](25-spectrum-research-workflow.md), the normative store contract in §10, [ADR-0023](adr/0023-map-ui-and-research-state.md); RESEARCH-003). Stored in the run's user-metadata database beside bookmarks and selections, so they survive a restart. Errors: `{"error", "code"}` with `invalid`, `not_found`, `conflict`, `unavailable`; `405` with `Allow` for a wrong method; `401` before dispatch.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/measurements` | `collection`? (UUID); `f_lo`, `f_hi` (Hz), `t0`, `t1` (capture-clock Unix s) — **all four or none**; `limit`? (default 500, max 2000); `cursor`? | `{"window", "collection", "measurements": [Measurement, …], "count", "matched", "limit", "next_cursor"}` |
+| POST | `/api/measurements` | `{"kind", "cursors": [{"f_hz", "t_s"}, {"f_hz", "t_s"}], "n"?, "note"?, "collection_id"?, "id"?, "view"}` | `Measurement` (`201`); `409 conflict` when `id` already exists |
+| GET | `/api/measurements/{id}` | – | `Measurement` |
+| PUT | `/api/measurements/{id}` | `{"cursors"?, "n"?, "note"?, "collection_id"?, "view"?}` (`null` clears `n`/`note`/`collection_id`); **re-computed server-side** | `Measurement` |
+| DELETE | `/api/measurements/{id}` | – | `{"deleted": Measurement}` |
+
+`Measurement`: `{id, collection_id, kind, value, unit, basis, f_lo_hz, f_hi_hz, t0_s, t1_s, cursors: [{f_hz, t_s}, …], n, note, provenance, created_s, updated_s}`, with `provenance` the same stamp as an annotation's: `{device_id, center_hz, span_hz, sample_rate_hz, t_capture: [t0_s, t1_s], tier ("live-iq"|"spectrum-history"|"survey-overview"), authored_s, actor, authored: true}`.
+
+- **Cursors in, value out** (docs/25 §10.4). The body carries the place — exactly two cursors, each a capture-clock point `(f_hz, t_s)` — and the server computes `value`, `unit` and the place (`f_lo_hz..f_hi_hz` = the cursors' frequency hull, `t0_s..t1_s` their time hull; cursor order does not matter). A body carrying `value`, `unit`, `basis`, `f_lo_hz`, `f_hi_hz`, `t0_s` or `t1_s` is `400 invalid`, on POST and PUT alike, and a PUT that moves a cursor or changes `n` is re-measured. There is no path by which a stored value is one the client computed; the client's live drag readout is ephemeral presentation arithmetic over its own pixel↔(Hz, s) maps.
+- **Kinds and units.** `delta_f` = `f_hi − f_lo` (`Hz`); `delta_t` = `t1 − t0` (`s`); `bandwidth` (`Hz`) and `duration` (`s`) are the same spans but must be **positive**; `symbol_rate` = `n / (t1 − t0)` (`Bd`) and `period` = `(t1 − t0) / n` (`s`), the inspectrum reciprocal pair, where `n` (1–1 000 000, **required** for these two and refused for the others) is the number of cycles/symbols the cursors span.
+- **`basis` says what the value is a function of.** Today it is always `"cursors"`: the span the two cursors mark (for `bandwidth`, the user-marked width docs/25 §4 allows). It is **not** a −3 dB width or an estimated symbol rate over the IQ under the place; a data-derived measurement would carry a different `basis`, never silently replace this one.
+- **The list is durable but bounded.** Unwindowed it returns every measurement, paged (the `/api/events` contract: `count` this page, `matched` the whole filter, `next_cursor` an opaque offset string, `null` on the last page); `f_lo`/`f_hi`/`t0`/`t1` narrow it to places intersecting that closed box, and `collection` to one MAP-17 collection (not checked for existence). Order: newest capture time first (`t1_s`, then `t0_s`, then id).
+- **Provenance is stamped by the server; the client sends only `view`** — `{center_hz, span_hz, t_capture: [t0_s, t1_s], tier, device_id?}`, exactly as for annotations. The server adds `actor` (the token fingerprint `tok-…`, **never the token**), `authored_s` (wall clock — when the human acted, never compared with the capture-clock cursors or `t_capture`), `authored: true`, and `sample_rate_hz` **only** when this run holds the device `device_id` names. `provenance`, `author`, `actor`, `authored`, `authored_s`, `created_s` or `updated_s` in a body (top level or inside `view`) is `400 invalid`. A PUT without `view` keeps the original stamp; one with `view` re-stamps it.
+- **Audited** as `measurement_create`, `measurement_update`, `measurement_delete` (token id, peer, request, old/new, status), with **no `device` key**: measuring is a view act and reaches no radio. Without an audit log every mutating route is `503 unavailable`; without a store, every route is.
+- **Never detection input.** A saved measurement mints no candidate, moves no threshold and never pre-populates the inventory (docs/25 §10.7).
+
 ## Reserved: the map-UI research routes (MMAP, T-800 / ADR-0023)
 
 **These routes are SPECIFIED and RESERVED, not yet served.** T-800 (MAP-00) fixed their shapes so the
@@ -2290,9 +2312,9 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 | GET/PUT/DELETE | `/api/collections/{id}` | MAP-17 | any create field; `{visible}` toggles | `Collection` / `{deleted, members_deleted}` |
 | GET/POST | `/api/collections/{id}/markers` | MAP-17 | `{name, f_center_hz, bandwidth_hz?, t_center_s?, duration_s?, note?, view}` | `{markers, …}` / `Marker` (201, audited) |
 | GET/PUT/DELETE | `/api/markers/{id}` | MAP-17 | any create field (`null` clears optionals) | `Marker` / `{deleted}` |
-| GET | `/api/measurements` | MAP-18 | `collection`?, `f_lo`/`f_hi`/`t0`/`t1`?, `limit`?, `cursor`? | `{measurements, …}` |
-| POST | `/api/measurements` | MAP-18 | `{kind, cursors, n?, note?, collection_id?, view}` — **`value`/`unit` in the body is `400 invalid`** | `Measurement` (201, audited) |
-| GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | `{cursors?, note?, collection_id?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
+| GET | `/api/measurements` | MAP-18 | **served (T-818)** — see [Saved measurements](#saved-measurements-t-818-map-18); `collection`?, `f_lo`/`f_hi`/`t0`/`t1`?, `limit`?, `cursor`? | `{measurements, …}` |
+| POST | `/api/measurements` | MAP-18 | **served (T-818)** — `{kind, cursors, n?, note?, collection_id?, view}` — **`value`/`unit` in the body is `400 invalid`** | `Measurement` (201, audited) |
+| GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | **served (T-818)** — `{cursors?, n?, note?, collection_id?, view?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
 | GET/POST | `/api/views` | MAP-19 | `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
 | GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | any create field | `SavedView` / `{deleted}` |
 | GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |

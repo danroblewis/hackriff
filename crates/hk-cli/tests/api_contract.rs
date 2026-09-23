@@ -11093,3 +11093,147 @@ fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
 
     stop_server(serving);
 }
+
+/// T-818 (MAP-18, RESEARCH-003): `/api/measurements` as `docs/api.md` documents it — the
+/// `Measurement` shape with its server-computed value/unit/place and server-stamped provenance,
+/// cursors in and never a value, the durable-but-paged list, re-measure on PUT, delete, and that a
+/// saved measurement never becomes an inventory row (user metadata, never detection input).
+#[test]
+fn measurements_crud_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let body = json!({
+        "kind": "bandwidth",
+        "cursors": [{"f_hz": f - 1.0e5, "t_s": 1000.0}, {"f_hz": f + 1.0e5, "t_s": 1001.0}],
+        "note": "t818-contract-measurement",
+        "view": view,
+    });
+    let (st, m) = post(addr, "/api/measurements", &body.to_string());
+    assert_eq!(st, 201, "{m}");
+    for field in [
+        "id",
+        "collection_id",
+        "kind",
+        "value",
+        "unit",
+        "basis",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t0_s",
+        "t1_s",
+        "cursors",
+        "n",
+        "note",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(m.get(field).is_some(), "measurement missing {field}: {m}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            m["provenance"].get(field).is_some(),
+            "provenance missing {field}: {m}"
+        );
+    }
+    // The value is the server's: 200 kHz between the cursors, in Hz, on a cursor basis.
+    assert!((m["value"].as_f64().unwrap() - 2.0e5).abs() < 1e-3, "{m}");
+    assert_eq!(
+        (m["unit"].as_str(), m["basis"].as_str()),
+        (Some("Hz"), Some("cursors"))
+    );
+    assert_eq!(
+        (m["t0_s"].as_f64(), m["t1_s"].as_f64()),
+        (Some(1000.0), Some(1001.0))
+    );
+    assert_eq!(m["provenance"]["authored"], true);
+    assert!(
+        m["provenance"]["actor"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("tok-")),
+        "{m}"
+    );
+    assert!(
+        !m.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = m["id"].as_str().unwrap().to_owned();
+
+    // Cursors in, never a value.
+    let mut forged = body.clone();
+    forged["value"] = json!(12_500.0);
+    let (st, v) = post(addr, "/api/measurements", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, v) = post(addr, "/api/measurements", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    let (st, list) = get(addr, "/api/measurements");
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "collection",
+        "measurements",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 500, "documented default page");
+    assert!(list["next_cursor"].is_null() && list["window"].is_null());
+    let (st, v) = get(addr, "/api/measurements?f_lo=1");
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (400, Some("invalid")),
+        "a partial window: {v}"
+    );
+
+    let path = format!("/api/measurements/{id}");
+    let (st, got) = get(addr, &path);
+    assert_eq!(
+        (st, got["note"].as_str()),
+        (200, Some("t818-contract-measurement"))
+    );
+    let moved = json!({"cursors": [{"f_hz": f - 1.0e5, "t_s": 1000.0}, {"f_hz": f + 1.5e5, "t_s": 1001.0}]});
+    let (st, upd) = put(addr, &path, &moved.to_string());
+    assert_eq!(st, 200, "{upd}");
+    assert!(
+        (upd["value"].as_f64().unwrap() - 2.5e5).abs() < 1e-3,
+        "re-measured: {upd}"
+    );
+
+    // User metadata only: no inventory row names it.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    assert!(
+        !inv.to_string().contains("t818-contract-measurement"),
+        "a measurement never reaches the inventory: {inv}"
+    );
+
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
+    stop_server(serving);
+}
