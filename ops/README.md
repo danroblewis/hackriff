@@ -44,6 +44,18 @@ in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — 
 the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
 "source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
 
+**`/flow` — the Flow panel** (linked from the top bar) gives the pipeline manager throughput
+visibility without waiting on `flow.jsonl` to accumulate: landings/h as a rolling 6h/24h line
+chart backfilled hourly from `hkpy.flow.hourly()` (with any real `flow.jsonl` ticks overlaid as
+dots, and the open experiment's opening time + baseline landings/h marked), per-hour dispatch
+and gate occupancy for the last 24h, per-gate durations by class over 48h (red gates marked,
+against the open experiment's — or the window's — full-gate p50), red rate by cause, the last
+24h of touchpoints, and the open experiment's guards and rollback. `/flow.json`
+(`build_flow_panel` in `monitor.py`) reads only through `hkpy.flow`/`hkpy.experiment` — it never
+re-parses the ops logs itself — and is cached ~30 s (`flow_panel_cached`) because
+`hourly()`/`gate_rows()`/`touchpoints()` each re-read `merge-runner.log` in full (~500k lines);
+an uncached build took ~1.2 s in testing, a cached one ~13 ms. Tests: `py/tests/test_monitor_flow.py`.
+
 ### `merge-runner.sh` — automated, no-AI merge runner
 Owns all merges to `main` deterministically. The coordinator appends a **code-complete** branch
 name (one per line, dependency order) to `$HACKRIFF_OPS/merge-queue.txt`; the runner then does
