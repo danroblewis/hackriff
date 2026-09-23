@@ -277,6 +277,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
       d.edgeS = rules ? String(rules.retentionS + rules.spanS) : "";
       d.ringT0S = w?.buffered ? String(w.buffered.t0S) : "";
       d.ringT1S = w?.buffered ? String(w.buffered.t1S) : "";
+      // T-845: the oldest sample the ring's scheduled drops leave, where one is applied this frame.
+      d.dropT0S = rules?.dropT0S != null ? String(rules.dropT0S) : "";
       d.backing = backing;
       d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
       d.paneT1S = String(pane.box.t1Ns / S_TO_NS);

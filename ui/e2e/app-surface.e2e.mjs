@@ -214,6 +214,7 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
 
   const read = () => page.eval(`(() => { const d = document.querySelector('.sf-ring').dataset;
     return { ret: +d.retentionS, iq: +d.iqS, edge: +d.edgeS, ringT0: d.ringT0S ? +d.ringT0S : null,
+      dropT0: d.dropT0S ? +d.dropT0S : null,
       ringT1: d.ringT1S ? +d.ringT1S : null,
       t0: +d.paneT0S, t1: +d.paneT1S, top: +d.paneTopPx, h: +d.paneHPx,
       left: +d.paneLeftPx, w: +d.paneWPx, backing: d.backing, text: document.querySelector('.sf-ring').textContent }; })()`);
@@ -257,8 +258,10 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   assert.ok(st.iq >= st.ringT0 - 1e-6 && st.iq >= st.ret - 1e-6,
     `the IQ horizon ${st.iq} claims IQ the ring does not hold: it drew from a ring holding ${st.ringT0}…${st.ringT1} ` +
     `with a retention bound at ${st.ret}`);
-  assert.ok(Math.abs(st.iq - Math.max(st.ringT0, st.ret)) < 1e-6,
-    `the IQ horizon ${st.iq} is not the newer of the ring's oldest sample ${st.ringT0} and the retention bound ${st.ret}`);
+  // T-845: or the oldest sample a scheduled whole-slot drop the page applied leaves (`data-drop-t0-s`).
+  assert.ok(Math.abs(st.iq - Math.max(st.ringT0, st.ret, st.dropT0 ?? -Infinity)) < 1e-6,
+    `the IQ horizon ${st.iq} is not the newest of the ring's oldest sample ${st.ringT0}, the retention bound ${st.ret} ` +
+    `and the applied ring drop ${st.dropT0}`);
   // …and that ring window is one this server served: its oldest sample only moves forward, and it
   // never holds more than the retention.
   assert.ok(w.buffered && st.ringT0 <= w.buffered.t0_s + 1e-6,
