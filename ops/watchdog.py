@@ -495,7 +495,11 @@ def tick(since: dict, dry: bool = False) -> dict:
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "load": round(load1, 2), "budget": round(budget(agg, os.cpu_count()), 1),
         "cores": os.cpu_count() or 1,
-        "owners": {k: v for k, v in sorted(agg.items(), key=lambda kv: -kv[1]["cpu"])},
+        # `n` then a capped pid list: `system` alone is 600+ processes on this box, and the
+        # dashboard re-reads this file every 5 s. The count is the fact worth having; the pids
+        # are for following one up, and a dozen is enough to start.
+        "owners": {k: {"cpu": v["cpu"], "rss": v["rss"], "n": len(v["pids"]), "pids": v["pids"][:12]}
+                   for k, v in sorted(agg.items(), key=lambda kv: -kv[1]["cpu"])},
         "unowned": [{"pid": r["pid"], "cpu": r["cpu"], "rss_mb": r["rss_mb"],
                      "etime": r["etime"], "cmd": r["cmd"][:200]}
                     for r in sorted(unowned, key=lambda r: -r["cpu"])[:12] if r["cpu"] >= 1.0],

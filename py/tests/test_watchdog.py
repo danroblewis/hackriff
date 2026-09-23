@@ -393,6 +393,10 @@ def test_tick_writes_the_snapshot_the_dashboard_reads(tmp_path):
     assert set(snap) >= {"ts", "load", "owners", "unowned", "alarms", "budget"}
     import json
     assert json.load(open(tmp_path / "watchdog.json"))["owners"] == snap["owners"]
+    # `system` alone is 600+ processes here and the dashboard re-reads this file every 5 s, so
+    # the snapshot carries the COUNT plus a sample - not every pid.
+    for name, o in snap["owners"].items():
+        assert len(o["pids"]) <= 12 and o["n"] >= len(o["pids"]), name
 
 
 def test_hackriff_role_env_wins_over_the_command_line():
