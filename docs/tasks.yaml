@@ -11349,6 +11349,12 @@ tasks:
       number can tell which draw it came from.
       Do not "fix" it by making all the draws agree - they are legitimately different samples,
       and §7.1's answer is that a brief quotes ~0.95 with the draw sd, not a fourth decimal.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:03).
+      The held-out unknown recall eprintln in crates/hk-classify/tests/accuracy_sweep.rs now says it is accuracy_sweep.rs's own-seeds draw, not the acceptance-m3 gate's 396-snippet draw, and points at ADR-0016 §7.2. Draws were not made to agree. Print-only change; no test was run (precheck only, fmt and clippy).
+      precheck exit 0
+      Commits: 0ccf37b1
+      Resources: 20 CPU-s, peak 0.4 GB
   - id: T-433
     milestone: M2-hardening
     title: concurrent_demod asserts dropped == 0 on a real-time chain, a quantity whose range under contended CPU has never been measured
