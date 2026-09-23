@@ -19618,7 +19618,8 @@ tasks:
   - id: T-593
     milestone: M2-hardening
     title: The too_few_fields abstention is recorded but never served, so a sub-floor emitter reads as a bare cluster_id null
-    status: todo
+    status: in-progress
+    branch: task-t593
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -20656,7 +20657,8 @@ tasks:
   - id: T-608
     milestone: MAUTO
     title: 'hk-blocks `descramble`: the LFSR de-whitener - rank 2 on the T-554 gap list, 10 families, and the cheapest block on it'
-    status: todo
+    status: in-progress
+    branch: task-t608
     priority: normal
     parallel_group: MAUTOD
     model: opus
