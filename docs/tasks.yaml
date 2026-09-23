@@ -13626,7 +13626,8 @@ tasks:
   - id: T-464
     milestone: MPLAY
     title: The raw-IQ horizon is its own visible boundary - beyond it playback is waterfall-only, with no audio
-    status: todo
+    status: in-progress
+    branch: task-t464
     priority: normal
     parallel_group: PIPE
     depends_on: [T-463, T-469]
@@ -24297,7 +24298,8 @@ tasks:
   - id: T-846
     milestone: M2-hardening
     title: "ui/e2e selftest attribution holes after T-573 batching: t454 cap/back-off, t523 and t532 faults no longer turn their specs red"
-    status: todo
+    status: in-progress
+    branch: task-t846
     priority: high
     deps:
     - T-573
