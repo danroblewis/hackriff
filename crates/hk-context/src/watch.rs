@@ -181,6 +181,12 @@ impl StandingRelation {
                  tuning centre, so not an emission on the air"
                     .into()
             }
+            // T-222: the same content as another row, arriving later and weaker over a second
+            // path. Already-known activity, not a new emission, so a watch does not alert on it.
+            (RelationKind::MultipathOf, _) => {
+                "the same emission as another row, arriving later and weaker over a second path"
+                    .into()
+            }
         }
     }
 }
