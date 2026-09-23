@@ -13638,7 +13638,7 @@ tasks:
   - id: T-464
     milestone: MPLAY
     title: The raw-IQ horizon is its own visible boundary - beyond it playback is waterfall-only, with no audio
-    status: in-progress
+    status: done
     branch: task-t464
     priority: normal
     parallel_group: PIPE
@@ -13683,6 +13683,7 @@ tasks:
       Observed, not chased: Reviewer items 2-4 (not the FAIL reason, left as noted follow-ups): (2) the ticket's 'drawn on the timeline as a distinct boundary' DoD line is only met by the ring/retention rule lines that already existed pre-T-464; recording spans and the gaps between them are not yet drawn as their own marks, only reflected in the per-pane text readout. (3) the client polls /api/recordings with no window, so the server's default 200-recording page silently truncates the horizon past that many IQ recordings (docs/api.md notes a truncated page carries a truncated horizon). (4) the 'recording' backing answer is judged on time alone, ignoring frequency, so a recording covering the time but a different f_lo..f_hi would still be reported 'recording' here (the pre-existing ring check had the same weakness). No UI surface opens /api/playback yet - per-pane playhead is explicitly deferred by the user and no MPLAY ticket covers even a single playhead control; this boundary is ready for it but nothing calls the route from the client.
       Use cases: AWARE-011
       Resources: 12 CPU-s, peak 0.9 GB
+    commit: 58a445d6
   - id: T-465
     milestone: M2-hardening
     title: drain-timeout discards the recorder's queued records without counting them, so the books do not balance
