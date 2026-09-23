@@ -1296,7 +1296,12 @@ pub(crate) enum Selected {
 /// and [`cell_json`] classify every cell identically.
 pub(crate) struct TileOverlay {
     evidence: Evidence,
+    /// `any`'s grid **shape** (T-579): window, rows, cells and device, with `cells` left empty.
+    /// Everything this overlay serves is the plane codes; the per-cell `Coverage` values are ~4 MB
+    /// a 256 × 256 grid and are dropped as soon as the codes exist, which is what lets the raster
+    /// be memoised at all ([`CoverageRasterMemo`]).
     any: CoverageGrid,
+    /// Each device's grid shape, `cells` empty, as for `any`.
     devices: Vec<CoverageGrid>,
     /// The **distinct** planes, in first-seen order. An identical plane is never repeated: that is
     /// the duplicate `any`/`devices[0]` this ticket was filed about, removed by construction rather
@@ -1313,6 +1318,17 @@ pub(crate) struct TileOverlay {
 impl TileOverlay {
     /// Reads both tune histories over `freq × window` and rasterises the union and every device's
     /// plane onto an `nt × nf` grid.
+    ///
+    /// **The rasterisation is memoised** (T-579) in `state.coverage_raster`, keyed on the tune
+    /// history itself — every span the read returned, clipped to this window — so it is redone
+    /// exactly when what the histories say about this tile changes, and never on a timer. The
+    /// horizon (`"unknown"` rows) is applied per call on top of the cached codes, because it moves
+    /// with the ring's eviction independently of the spans. See [`CoverageRasterMemo`].
+    ///
+    /// This is the path for a **tile address** — `GET /api/tiles` and every member of
+    /// `/api/tiles/batch` (which answers each address through the single-tile route), where the
+    /// same `freq × window` recurs on every poll. A window that never recurs goes through
+    /// [`Self::collect_once`].
     pub(crate) fn collect(
         state: &ApiState,
         freq: FreqRange,
@@ -1320,10 +1336,57 @@ impl TileOverlay {
         nt: usize,
         nf: usize,
     ) -> Self {
+        Self::collect_with(state, freq, window, nt, nf, true)
+    }
+
+    /// [`Self::collect`] without the memo: the same evidence, the same rasterisation, the same
+    /// horizon rule — only the cached raster is neither consulted nor filled.
+    ///
+    /// For windows that are asked about **once**: the `/ws/tiles/rows` feed (T-468) walks a
+    /// cursor forward row block by row block, so each window it rasterises is new and is never
+    /// asked again. Memoising those would be pure cost on the live path — an insertion and, once
+    /// the memo is full, an LRU scan per block — and each would evict a tile raster the next poll
+    /// does reuse (T-579 rebuild).
+    pub(crate) fn collect_once(
+        state: &ApiState,
+        freq: FreqRange,
+        window: TimeRange,
+        nt: usize,
+        nf: usize,
+    ) -> Self {
+        Self::collect_with(state, freq, window, nt, nf, false)
+    }
+
+    fn collect_with(
+        state: &ApiState,
+        freq: FreqRange,
+        window: TimeRange,
+        nt: usize,
+        nf: usize,
+        memo: bool,
+    ) -> Self {
         let evidence = Evidence::collect(state, freq, window);
-        let any = hk_store::coverage::union_grid_over(&evidence.spans, freq, window, nt, nf);
-        let devices =
-            hk_store::coverage::by_device_over(&evidence.spans, freq, window, any.nt, any.nf);
+        let raster = if memo {
+            state
+                .coverage_raster
+                .raster(&evidence.spans, freq, window, nt, nf)
+        } else {
+            std::sync::Arc::new(rasterise(&evidence.spans, freq, window, nt, nf))
+        };
+        let any = raster.any.clone();
+        let devices = raster.devices.clone();
+        let codes_of = |g: &CoverageGrid, runs: &[(u8, u32)]| -> Vec<u8> {
+            let mut codes = expand_runs(runs);
+            // `state_code`'s horizon rule, applied to the cached codes: only an `unobserved` cell
+            // becomes `unknown` past the horizon; an observed or excluded one is its own proof.
+            for r in evidence.unknown_rows(g) {
+                let row = &mut codes[r * g.nf..((r + 1) * g.nf).min(g.nt * g.nf)];
+                for c in row.iter_mut().filter(|c| **c == UNOBSERVED) {
+                    *c = UNKNOWN;
+                }
+            }
+            codes
+        };
         let mut planes: Vec<Vec<u8>> = Vec::new();
         let mut intern = |codes: Vec<u8>| -> usize {
             match planes.iter().position(|p| *p == codes) {
@@ -1334,10 +1397,11 @@ impl TileOverlay {
                 }
             }
         };
-        let any_plane = intern(state_codes(&any, evidence.unknown_rows(&any)));
+        let any_plane = intern(codes_of(&any, &raster.any_runs));
         let device_planes: Vec<usize> = devices
             .iter()
-            .map(|g| intern(state_codes(g, evidence.unknown_rows(g))))
+            .zip(&raster.device_runs)
+            .map(|(g, runs)| intern(codes_of(g, runs)))
             .collect();
         Self {
             evidence,
@@ -1489,6 +1553,244 @@ impl TileOverlay {
                 it per cell, in the same three-state vocabulary.",
         })
     }
+}
+
+/// One rasterised tile's coverage, reduced to what [`TileOverlay`] serves (T-579).
+struct Raster {
+    /// The union grid's shape; `cells` is empty.
+    any: CoverageGrid,
+    /// Each device's grid shape, `cells` empty, in [`hk_store::coverage::by_device_over`]'s order.
+    devices: Vec<CoverageGrid>,
+    /// `any`'s state codes with **no** horizon applied, run-length encoded.
+    any_runs: Vec<(u8, u32)>,
+    /// Each device's codes, parallel to `devices`, likewise.
+    device_runs: Vec<Vec<(u8, u32)>>,
+}
+
+impl Raster {
+    fn runs(&self) -> usize {
+        self.any_runs.len() + self.device_runs.iter().map(Vec::len).sum::<usize>()
+    }
+}
+
+/// Everything a tile's coverage raster is a function of — and nothing else (T-579).
+///
+/// The raster ([`hk_store::coverage::union_grid_over`] / [`by_device_over`]) reads a span only
+/// through its part inside `window`, its frequency extent, its analysis flag, its centre/rate and
+/// its device; a span that does not reach the window still names a device, and so still decides
+/// whether that device gets a plane. So the key carries each span **clipped to the window**, which
+/// is what makes the key stable for a tile the live edge has passed even while the ring's newest
+/// segment keeps growing — and makes it change, for a tile the live edge is inside, on every row.
+///
+/// Equality is on the full value, never a hash of it: a collision here would serve one tile's
+/// grey for another's.
+///
+/// [`by_device_over`]: hk_store::coverage::by_device_over
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RasterKey {
+    freq: (u64, u64),
+    window: (i64, i64),
+    nt: usize,
+    nf: usize,
+    spans: Vec<SpanKey>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SpanKey {
+    device: Device,
+    valid: bool,
+    /// The span's interval clipped to the window; `None` when it does not reach it.
+    time: Option<(i64, i64)>,
+    freq: (u64, u64),
+    analysed: bool,
+    center_hz: u64,
+    sample_rate_hz: u64,
+}
+
+impl RasterKey {
+    fn of(
+        spans: &[CoverageSpan],
+        freq: FreqRange,
+        window: TimeRange,
+        nt: usize,
+        nf: usize,
+    ) -> Self {
+        let (w0, w1) = (window.start.as_unix_nanos(), window.end.as_unix_nanos());
+        Self {
+            freq: (freq.lo_hz.to_bits(), freq.hi_hz.to_bits()),
+            window: (w0, w1),
+            nt,
+            nf,
+            spans: spans
+                .iter()
+                .map(|s| {
+                    let (t0, t1) = (
+                        s.time.start.as_unix_nanos().max(w0),
+                        s.time.end.as_unix_nanos().min(w1),
+                    );
+                    SpanKey {
+                        device: s.device.clone(),
+                        valid: s.is_valid(),
+                        time: (t1 > t0).then_some((t0, t1)),
+                        freq: (s.freq.lo_hz.to_bits(), s.freq.hi_hz.to_bits()),
+                        analysed: s.analysis.is_analysed(),
+                        center_hz: s.center_hz.to_bits(),
+                        sample_rate_hz: s.sample_rate_hz.to_bits(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Rasters held at most. A screen is 135–290 tile requests (the T-579 review), a few panes more.
+const RASTER_MEMO_MAX_ENTRIES: usize = 2048;
+/// Code runs held at most across every entry — 8 B a run, so 8 MiB. A plane is usually one run (a
+/// grey tile) or a handful (a tuned band's edges); this bounds the pathological striped one.
+const RASTER_MEMO_MAX_RUNS: usize = 1 << 20;
+
+/// **The coverage raster, memoised against the tune history** (T-579).
+///
+/// Every `GET /api/tiles` decides grey from [`TileOverlay`], which rasterised a 256 × 256 grid
+/// per plane from scratch on every request — at 135–290 requests a screen, the same pure
+/// computation hundreds of times, for tiles whose tune history had not changed since the last
+/// poll.
+///
+/// # What invalidates an entry, and why it is not a version counter or a timer
+///
+/// The key ([`RasterKey`]) **is** the tune-history evidence the raster is computed from: every
+/// span both histories (and the open dwell) returned for this tile, clipped to its window. So an
+/// entry is reused only when the history says exactly the same thing about this tile, and a
+/// history change that reaches the tile — a new dwell sealed, a segment evicted, the live edge
+/// growing into it — is a different key and is rasterised exactly once. A change that does not
+/// reach the tile (the ring's newest segment growing past the tile's end) leaves its key alone,
+/// which a store-wide version counter could not do: it would invalidate every past tile on every
+/// arriving row. The reads that produce the spans still run per request; that is the price of the
+/// key being the evidence itself rather than a guess about it, and it is what makes a stale grey
+/// impossible by construction rather than improbable by timing.
+///
+/// The `"unknown"` horizon is **not** in the key: it moves with the ring's eviction independently
+/// of the spans, so [`TileOverlay::collect`] applies it to the cached codes on every call.
+#[derive(Default)]
+pub struct CoverageRasterMemo {
+    inner: std::sync::Mutex<RasterMemoInner>,
+}
+
+#[derive(Default)]
+struct RasterMemoInner {
+    map: std::collections::HashMap<RasterKey, (std::sync::Arc<Raster>, u64)>,
+    clock: u64,
+    runs: usize,
+    rasterisations: u64,
+    hits: u64,
+}
+
+impl CoverageRasterMemo {
+    /// Rasterisations actually performed — misses — since this state was built.
+    pub fn rasterisations(&self) -> u64 {
+        self.inner.lock().map_or(0, |g| g.rasterisations)
+    }
+
+    /// Requests answered from a held raster.
+    pub fn hits(&self) -> u64 {
+        self.inner.lock().map_or(0, |g| g.hits)
+    }
+
+    fn raster(
+        &self,
+        spans: &[CoverageSpan],
+        freq: FreqRange,
+        window: TimeRange,
+        nt: usize,
+        nf: usize,
+    ) -> std::sync::Arc<Raster> {
+        let key = RasterKey::of(spans, freq, window, nt, nf);
+        if let Ok(mut g) = self.inner.lock() {
+            g.clock += 1;
+            let clock = g.clock;
+            if let Some((r, used)) = g.map.get_mut(&key) {
+                *used = clock;
+                let r = r.clone();
+                g.hits += 1;
+                return r;
+            }
+        }
+        // Computed outside the lock: two concurrent misses on one key both rasterise, and both
+        // produce the same answer, which is cheaper than serialising every tile behind one.
+        let r = std::sync::Arc::new(rasterise(spans, freq, window, nt, nf));
+        if let Ok(mut g) = self.inner.lock() {
+            g.rasterisations += 1;
+            let runs = r.runs();
+            if runs <= RASTER_MEMO_MAX_RUNS {
+                g.clock += 1;
+                let clock = g.clock;
+                if let Some((old, _)) = g.map.insert(key, (r.clone(), clock)) {
+                    g.runs -= old.runs();
+                }
+                g.runs += runs;
+                while g.map.len() > RASTER_MEMO_MAX_ENTRIES || g.runs > RASTER_MEMO_MAX_RUNS {
+                    let Some(lru) = g
+                        .map
+                        .iter()
+                        .min_by_key(|(_, (_, used))| *used)
+                        .map(|(k, _)| k.clone())
+                    else {
+                        break;
+                    };
+                    if let Some((old, _)) = g.map.remove(&lru) {
+                        g.runs -= old.runs();
+                    }
+                }
+            }
+        }
+        r
+    }
+}
+
+/// The rasterisation itself: the union and every device's grid, reduced to shape + codes.
+fn rasterise(
+    spans: &[CoverageSpan],
+    freq: FreqRange,
+    window: TimeRange,
+    nt: usize,
+    nf: usize,
+) -> Raster {
+    let mut any = hk_store::coverage::union_grid_over(spans, freq, window, nt, nf);
+    let mut devices = hk_store::coverage::by_device_over(spans, freq, window, any.nt, any.nf);
+    let any_runs = run_length(&state_codes(&any, 0..0));
+    let device_runs = devices
+        .iter()
+        .map(|g| run_length(&state_codes(g, 0..0)))
+        .collect();
+    any.cells = Vec::new();
+    for g in &mut devices {
+        g.cells = Vec::new();
+    }
+    Raster {
+        any,
+        devices,
+        any_runs,
+        device_runs,
+    }
+}
+
+fn run_length(codes: &[u8]) -> Vec<(u8, u32)> {
+    let mut out: Vec<(u8, u32)> = Vec::new();
+    for &c in codes {
+        match out.last_mut() {
+            Some((k, n)) if *k == c => *n += 1,
+            _ => out.push((c, 1)),
+        }
+    }
+    out
+}
+
+fn expand_runs(runs: &[(u8, u32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(runs.iter().map(|&(_, n)| n as usize).sum());
+    for &(c, n) in runs {
+        out.extend(std::iter::repeat_n(c, n as usize));
+    }
+    out
 }
 
 /// One grid's per-cell state codes, row-major, in exactly [`grid_json`]'s cell order.
@@ -2046,7 +2348,16 @@ mod tests {
             .len();
         // What the same information cost before: `grid_json`'s per-cell objects, twice, because
         // `any` and the single device's plane were byte-identical.
-        let per_cell = serde_json::to_string(&grid_json(&o.any, None, 0..0))
+        // The overlay keeps only its grid's shape (T-579), so the per-cell form is rasterised here
+        // from the same evidence.
+        let full = hk_store::coverage::union_grid_over(
+            &o.evidence.spans,
+            band(),
+            observation_window(),
+            CELLS,
+            CELLS,
+        );
+        let per_cell = serde_json::to_string(&grid_json(&full, None, 0..0))
             .unwrap()
             .len();
         let before = per_cell * 2;
@@ -2055,7 +2366,7 @@ mod tests {
             before as f64 / compact as f64
         );
         assert!(
-            o.any.observed_cells() == CELLS * CELLS,
+            full.observed_cells() == CELLS * CELLS,
             "the fixture must fill the plane, or the comparison is about a cheaper grid"
         );
         assert!(
