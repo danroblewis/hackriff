@@ -115,6 +115,17 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
+    # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
+    # coordinator's routine and stay in the file only.
+    level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info"}.get(kind)
+    if level:
+        try:
+            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
+                            level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
     # Poke the coordinator's pane the way the merge runner does; the file is the record, this is the wake-up.
     try:
         if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:

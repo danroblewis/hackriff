@@ -61,14 +61,21 @@ touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 # bogus names failed the rev-parse check. Same family as the `tr -d` bug that once glued every
 # queued branch into one unmergeable token: a helper's diagnostics leaking into its data.
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >&2; }
-notify_coordinator(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+# Discord (user, 2026-09-23): every exception the runner hands to a person is also an alert;
+# every landing is a green one-liner. ops/alert.py dedupes by key and never fails the caller.
+alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 || true; }
+notify_coordinator(){
+  alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
+  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 # Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
 # dependent tickets, but nothing else pings the coordinator for it (task-completions and the
 # failure ping above cover their cases). Without this, the coordinator can sit idle after a
 # green merge with startable work undone. It says "reconcile", never a computed to-do list:
 # the coordinator's `just reconcile` is the single source of truth, and any list we pasted here
 # would be stale by the time it acts.
-notify_ok(){ tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+notify_ok(){
+  alert green "landed" "$1"
+  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
   | awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} /^branch /{if(substr($0,8)==b) print p}'; }
@@ -336,6 +343,7 @@ limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
     now=$(date +%s)
     if [ $(( now - start )) -ge "$GATE_TIMEOUT" ]; then
       log "GATE TIMEOUT: '$*' exceeded ${GATE_TIMEOUT}s - killing its process group"
+      alert red "gate killed at ${GATE_TIMEOUT}s" "$* - process group killed; the batch is re-queued once. Load: $(uptime | sed 's/.*load averages*: *//')" --key "timeout:$*"
       kill -TERM -- "-$pid" 2>/dev/null; sleep 20; kill -KILL -- "-$pid" 2>/dev/null
       GATE_TIMED_OUT=1
       wait "$pid" 2>/dev/null
