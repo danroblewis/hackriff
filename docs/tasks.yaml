@@ -22529,7 +22529,7 @@ tasks:
   - id: T-721
     milestone: M2-hardening
     title: tail() is a verbatim fourfold copy across the tutorial acceptance files, and T-632 had to edit all four
-    status: todo
+    status: done
     priority: low
     parallel_group: PIPE
     model: haiku
@@ -22559,6 +22559,7 @@ tasks:
       precheck exit 0
       Commits: fd1d9c83
       Resources: 129 CPU-s, peak 1.6 GB
+    commit: 39cd87e0
   - id: T-722
     milestone: M2-hardening
     title: heavy-serial's max-threads = 1 has never been measured against a bounded alternative for the crates that are in it
