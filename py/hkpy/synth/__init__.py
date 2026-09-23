@@ -36,6 +36,7 @@ from hkpy.synth import (
     occupancy,
     retune,
     scenarios,
+    structures,
     trunk_scene,
 )
 from hkpy.synth.scene import GENERATOR, GENERATOR_VERSION, SUPPORTED_DATATYPES, _jsonable
@@ -111,6 +112,16 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "modulation index lie OUTSIDE the proposal grid, so every hypothesis the search evaluates "
         "is the wrong one; `population=adjacent_leakage` adds a strong hard-keyed neighbour "
         "outside the analysed box whose skirts land inside it"),
+    "ofdm_nonstandard_cp": ScenarioSpec(
+        structures.ofdm_nonstandard_cp, structures.OFDM_DEFAULTS, ("SIGNAL-052", "RESEARCH-002"),
+        "N3 negative (T-623): real OFDM (128-FFT, 64 QPSK carriers) with a 19-sample cyclic prefix "
+        "matching no standard ratio; no catalogue block"),
+    "dsss_m_sequence": ScenarioSpec(
+        structures.dsss_m_sequence, structures.DSSS_DEFAULTS, ("SIGNAL-052", "RESEARCH-002"),
+        "N3 negative (T-623): BPSK data spread by a 31-chip m-sequence; no despreading block"),
+    "qam16_unframed": ScenarioSpec(
+        structures.qam16_unframed, structures.QAM16_DEFAULTS, ("SIGNAL-052", "RESEARCH-002"),
+        "N3 negative (T-623): RRC-shaped Gray 16-QAM with no framing; no 16-QAM block"),
     "lora_ism_burst": ScenarioSpec(
         lora_scene.lora_ism_burst, lora_scene.LORA_DEFAULTS, ("SIGNAL-062", "AWARE-053"),
         "LoRa CSS up-chirp packets in 902-928 MHz US ISM (hidden SF/BW/CR/payload) beside a "
