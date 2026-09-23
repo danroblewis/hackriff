@@ -136,7 +136,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const sampleCap = async () => {
     const st = await page.eval(STATUS);
     const m = st.match(/(\d+)\/(\d+) in flight/);
-    if (m) { caps.push(Number(m[2])); shares.push(Number(st.match(/in flight \(share (\d+)\)/)?.[1] ?? NaN)); }
+    if (m) { caps.push(Number(m[2])); shares.push(Number(st.match(/in flight \(share (\d+)/)?.[1] ?? NaN)); }
   };
 
   const moved = [], clamped = [], visited = [];
@@ -686,7 +686,7 @@ test("a per-address 503 inside a batch answer halves the operating cap: back-off
 
   /** The controller's state as the page prints it: `N+M/L in flight (share C)` and `B backpressure`. */
   const read = (st) => {
-    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)\)/);
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/);
     return f ? { inflight: Number(f[1]), cap: Number(f[3]), share: Number(f[4]),
       busy: Number(st.match(/(\d+) backpressure/)?.[1] ?? NaN), queue: Number(st.match(/queue (\d+)/)?.[1] ?? NaN) } : null;
   };
