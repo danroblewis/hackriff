@@ -183,3 +183,31 @@ test("a batch is abandoned only when EVERY member has been", async () => {
   assert.equal(aborts[0]?.aborted, true, "with nobody waiting, the request is abandoned");
   await p;
 });
+
+test("the live edge rides ALONE: a `solo` ask is its own single-tile request, never batched", async () => {
+  // A batch answers when its slowest member does, so a live-edge revalidation coalesced with cold
+  // tiles would hold the newest rows until those were built — the live edge gated on generation.
+  // `TileCache` marks its refresh lane `solo`; this asserts the request that hint produces.
+  const urls: string[] = [];
+  const fetchFn = async (url: string, _init: RequestInit) => {
+    urls.push(url);
+    const q = new URLSearchParams(url.split("?")[1]);
+    const body = url.startsWith("/api/tiles/batch")
+      ? { requested: 2, returned: 2, truncated: false, remaining: [],
+          tiles: q.get("addresses")!.split(",").map((s) => ({ address: { spelling: s }, status: 200, tile: tileBody() })) }
+      : tileBody();
+    return { ok: true, status: 200, statusText: "OK", json: async () => body };
+  };
+  const source = batchedTileSource("tok", fetchFn);
+  const got = await Promise.all([source(addr(0)), source(addr(1)), source(addr(2), undefined, { solo: true })]);
+  assert.equal(got.length, 3);
+  const batch = urls.filter((u) => u.startsWith("/api/tiles/batch"));
+  const single = urls.filter((u) => u.startsWith("/api/tiles?"));
+  assert.equal(batch.length, 1, `requests: ${urls.join(" ")}`);
+  assert.deepEqual(new URLSearchParams(batch[0].split("?")[1]).get("addresses")!.split(","), ["0.0.0.7", "0.0.1.7"],
+    "the solo address must not ride in the batch");
+  assert.equal(single.length, 1, `requests: ${urls.join(" ")}`);
+  const q = new URLSearchParams(single[0].split("?")[1]);
+  assert.equal(q.get("f_index"), "2");
+  assert.equal(q.get("planes"), "f16");
+});

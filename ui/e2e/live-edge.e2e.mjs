@@ -25,7 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, tileAsks } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -145,9 +145,12 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // BEFORE the assertion, because a diagnostic that only appears when the claim PASSES is useless
   // exactly when it is needed — T-482 had to reorder this to find out which addresses a failing run
   // was asking for. The claim itself is unchanged.
-  const asked = page.requests.filter((r) => r.url.includes("/api/tiles"));
+  // Per ADDRESS (T-573): one batch request names many, and its URL carries no `level_f` of its own —
+  // read per request, every batched ask landed in one "null/null" bucket.
+  await page.settleBodies();
+  const asked = tileAsks(page.requests);
   const repeats = new Map();
-  for (const r of asked) repeats.set(r.url, (repeats.get(r.url) ?? 0) + 1);
+  for (const r of asked) repeats.set(r.key, (repeats.get(r.key) ?? 0) + 1);
   const top = [...repeats.values()].sort((a, b) => b - a)[0] ?? 0;
   t.diagnostic(`${asked.length} tile requests, the most-asked address ${top} times, peak ${tiles.peak} in flight`);
   // **Which addresses, by level, with how long each took on the wire.** A live pane that stopped
@@ -159,14 +162,12 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // level 0 went x68 @69 ms to x14 @183 ms when a coarse viewport came back to life beside it.
   const byLevel = new Map();
   for (const r of asked) {
-    const q = new URL(r.url).searchParams;
-    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    const k = `${r.levelF}/${r.levelT}`;
     byLevel.set(k, (byLevel.get(k) ?? 0) + 1);
   }
   const msByLevel = new Map();
   for (const r of asked) {
-    const q = new URL(r.url).searchParams;
-    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    const k = `${r.levelF}/${r.levelT}`;
     if (r.endedMs && r.startedMs) (msByLevel.get(k) ?? msByLevel.set(k, []).get(k)).push(r.endedMs - r.startedMs);
   }
   const med = (a) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : NaN);
@@ -183,10 +184,10 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // ticket, 1.7 s after.)
   const again = new Map(), gapByLevel = new Map();
   for (const r of asked) {
-    const k = `${new URL(r.url).searchParams.get("level_f")}/${new URL(r.url).searchParams.get("level_t")}`;
-    const prev = again.get(r.url);
+    const k = `${r.levelF}/${r.levelT}`;
+    const prev = again.get(r.key);
     if (prev !== undefined) gapByLevel.set(k, Math.max(gapByLevel.get(k) ?? 0, r.startedMs - prev));
-    again.set(r.url, r.endedMs ?? r.startedMs);
+    again.set(r.key, r.endedMs ?? r.startedMs);
   }
   t.diagnostic(`longest gap between successive answers for ONE address, by level: ${[...gapByLevel]
     .sort((a, b) => b[1] - a[1]).map(([k, g]) => `${k} ${g}ms`).join("   ") || "no address was asked twice"}`);
@@ -236,16 +237,18 @@ test("a refused place is asked for ONCE: a 4xx is terminal, and the console stay
   // every 4xx, plus 500 and 501. 503 is backpressure and retryable; every other 5xx would have come
   // from a proxy, and none can reach this suite, which talks to `hk serve` over loopback.
   const terminal = (s) => s >= 400 && (s < 500 || s === 500 || s === 501);
-  const refused = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status !== null && terminal(r.status));
+  // Per ADDRESS: a batch carries each address's refusal inside its 200 (T-573).
+  await page.settleBodies();
+  const refused = tileAsks(page.requests).filter((r) => r.status !== null && terminal(r.status));
   const per = new Map();
-  for (const r of refused) per.set(r.url, (per.get(r.url) ?? 0) + 1);
+  for (const r of refused) per.set(r.key, (per.get(r.key) ?? 0) + 1);
   t.diagnostic(`${refused.length} permanent refusals over ${per.size} distinct place(s)`);
   for (const [url, n] of per) {
     assert.equal(n, 1, `${url} was refused ${n} times — asking again cannot change the answer, ` +
       "so a status the ROUTE can emit must be terminal (T-479, narrowed by T-523)");
   }
   // And the retryable one still is: a 503 is T-454's backpressure, a statement about *now*.
-  const busy = page.requests.filter((r) => r.status === 503).length;
+  const busy = tileAsks(page.requests).filter((r) => r.status === 503).length;
   t.diagnostic(`${busy} backpressure refusals (503), which stay retryable`);
   assert.deepEqual(page.exceptions, [], "uncaught exception while the surface ran");
 });

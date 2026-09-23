@@ -27,9 +27,10 @@ import {
   type TileAddr,
 } from "./lattice";
 import {
-  TileBusyError, TileDecodeError, capFromRefusal, decodeTile,
+  TileBusyError, TileDecodeError, capFromRefusal, decodeTile, fetchTile,
   type TileData, type TileFetch, type TileResponse,
 } from "./tile";
+import type { TileSourceHint } from "./tilecache";
 
 /** One waiting address. */
 interface Waiter {
@@ -63,7 +64,7 @@ export function batchedTileSource(
   token: string,
   fetchFn: TileFetch,
   opts: { readonly max?: number; readonly schedule?: (fn: () => void) => void } = {},
-): (addr: TileAddr, signal?: AbortSignal) => Promise<TileData> {
+): (addr: TileAddr, signal?: AbortSignal, hint?: TileSourceHint) => Promise<TileData> {
   const max = Math.max(1, Math.min(opts.max ?? TILES_BATCH_MAX_ADDRESSES, TILES_BATCH_MAX_ADDRESSES));
   const schedule = opts.schedule
     ?? ((fn: () => void) => { void Promise.resolve().then(fn); });
@@ -150,10 +151,17 @@ export function batchedTileSource(
     void group;
   }
 
-  return (addr, signal) => new Promise<TileData>((resolve, reject) => {
-    if (signal?.aborted) { reject(abortError()); return; }
-    requeue({ addr, signal, resolve, reject });
-  });
+  return (addr, signal, hint) => {
+    // **The live edge rides alone.** A batch answers when its slowest member does, so a
+    // revalidation coalesced with cold tiles would hold the newest rows until those were built —
+    // the live edge gated on tile generation, which the product forbids. It goes out as the
+    // single-tile request it always was.
+    if (hint?.solo) return fetchTile(addr, token, fetchFn, signal);
+    return new Promise<TileData>((resolve, reject) => {
+      if (signal?.aborted) { reject(abortError()); return; }
+      requeue({ addr, signal, resolve, reject });
+    });
+  };
 }
 
 /** What `fetch` rejects with on an aborted signal, so the cache's own abort test still holds. */

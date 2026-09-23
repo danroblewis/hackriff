@@ -69,6 +69,43 @@ export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000 }
   } finally { browser.close(); }
 }
 
+/**
+ * Every tile ADDRESS a list of requests asked for, one record per address (T-573).
+ *
+ * A single `GET /api/tiles` names one address in its query and answers it with its own status. A
+ * `GET /api/tiles/batch` names many in `addresses=<level_f>.<level_t>.<f_index>.<t_index>,…` and
+ * answers each with its own status inside a 200 (read by [[Page]] off the body); an address it
+ * listed in `remaining` was not answered at all (`status: null`, like a request still in flight).
+ * A batch whose request itself failed passes that status to every address it carried. The events
+ * route is not a tile read and is excluded.
+ */
+export function tileAsks(requests) {
+  const out = [];
+  for (const r of requests) {
+    if (!r.url.includes("/api/tiles") || r.url.includes("/api/tiles/events")) continue;
+    const u = new URL(r.url), q = u.searchParams;
+    const common = { url: r.url, startedMs: r.startedMs, endedMs: r.endedMs, error: r.error,
+      scheme: q.get("scheme") ?? "view", device: q.get("device") ?? "any",
+      cells: q.has("cells") ? Number(q.get("cells")) : 256 };
+    if (u.pathname.endsWith("/api/tiles/batch")) {
+      const byAddr = new Map((r.entries ?? []).map((e) => [e.spelling, e.status]));
+      for (const sp of (q.get("addresses") ?? "").split(",").filter(Boolean)) {
+        const [levelF, levelT, fIndex, tIndex] = sp.split(".").map(Number);
+        const status = r.status !== 200 ? r.status : (byAddr.get(sp) ?? null);
+        out.push({ ...common, batch: true, spelling: sp, levelF, levelT, fIndex, tIndex, status,
+          key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
+      }
+    } else {
+      const n = (k) => (q.has(k) ? Number(q.get(k)) : NaN);
+      const [levelF, levelT, fIndex, tIndex] = ["level_f", "level_t", "f_index", "t_index"].map(n);
+      const sp = `${levelF}.${levelT}.${fIndex}.${tIndex}`;
+      out.push({ ...common, batch: false, spelling: sp, levelF, levelT, fIndex, tIndex, status: r.status,
+        key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
+    }
+  }
+  return out;
+}
+
 export class Browser {
   static async open(opts = {}) {
     const b = await launch(opts);
@@ -190,7 +227,27 @@ export class Page {
     this.#open.delete(id);
     r.error = error; r.endedMs = Date.now();
     this.#release(r);
+    // **A batch's per-address answers live in its BODY** (T-573). `GET /api/tiles/batch` answers
+    // 200 for the request and carries each address's own status — a 503, a 400 — inside it, so
+    // the status line alone would read every refusal as an answer. Read off CDP after the body
+    // landed and reduced to what a test asserts on: which address, and what the route said.
+    if (!error && r.status === 200 && r.url.includes("/api/tiles/batch")) {
+      const got = this.conn.send("Network.getResponseBody", { requestId: id }, this.sessionId)
+        .then(({ body, base64Encoded }) => {
+          const text = base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body;
+          const j = JSON.parse(text);
+          r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null }));
+          r.remaining = j.remaining ?? [];
+        })
+        .catch((e) => { r.bodyError = String(e?.message ?? e); });
+      this.#bodies.add(got);
+      void got.finally(() => this.#bodies.delete(got));
+    }
   }
+
+  #bodies = new Set();
+  /** Wait until every batch body already requested from CDP has been read into its record. */
+  async settleBodies() { await Promise.all([...this.#bodies]); }
 
   /**
    * Start counting how many requests matching `match` are in flight at once, and keep the peak.

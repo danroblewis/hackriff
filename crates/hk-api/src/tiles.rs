@@ -2791,15 +2791,23 @@ fn tiles_batch_json_capped(
         )));
     }
 
-    let mut tiles = Vec::with_capacity(addrs.len());
-    let mut bytes = 0usize;
-    let mut truncated = false;
-    let mut remaining: Vec<String> = Vec::new();
-    for (i, a) in addrs.iter().enumerate() {
-        if truncated {
-            remaining.push(a.spelling.clone());
-            continue;
-        }
+    // **Members are answered CONCURRENTLY, not one after another** (T-573 follow-up). The client
+    // hands the batch exactly the addresses its in-flight budget would have put on the wire as
+    // separate requests, which the route served in parallel on up to [`TILE_MAX_IN_FLIGHT`]
+    // slots. Answering them in sequence made one batch cost the SUM of its members, not the
+    // slowest — measured in `ui/e2e/live-edge.e2e.mjs`: a following pane's newest rows were still
+    // a flat fill 8 s after first draw, because the live-edge tile waited behind every tile beside
+    // it. That is the live edge gated on tile generation, which the product forbids.
+    //
+    // **The asker's share still decides how wide.** Each member takes its own admission slot inside
+    // [`tiles_json`], under the batch's `client`, exactly as a single-tile read does — so a batch
+    // never holds more than that client's share, and never more than the global cap. A worker whose
+    // member is refused `503` while another worker is still running hands the address back and
+    // stops: the refusal said this batch is already as wide as the share allows, and one worker
+    // fewer is the answer to that, not a per-address 503 for every member it would have tried. Only
+    // the LAST worker records a 503, because then nobody in this batch holds a slot and the refusal
+    // is genuinely the route's contention, which the caller re-asks for.
+    let answer = |a: &BatchAddr| -> (Value, u16) {
         let mut params = shared.clone();
         params.push(("level_f".into(), a.level_f.to_string()));
         params.push(("level_t".into(), a.level_t.to_string()));
@@ -2812,20 +2820,101 @@ fn tiles_batch_json_capped(
             "t_index": a.t_index,
             "spelling": a.spelling,
         });
-        let entry = match tiles_json(state, &params) {
+        match tiles_json(state, &params) {
             // Verbatim. The single-tile body IS the per-address answer; nothing is dropped,
             // merged or re-keyed on the way into the array.
-            Ok(v) => json!({ "address": address, "status": 200, "tile": v }),
+            Ok(v) => (json!({ "address": address, "status": 200, "tile": v }), 200),
             // A per-address refusal with its own status — the whole reason this is an array of
             // entries and not an array of tiles.
-            Err(e) => json!({ "address": address, "status": e.status, "error": e.message }),
-        };
-        // The size cap is charged on what this answer will actually put on the wire.
-        bytes += serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
-        tiles.push(entry);
-        // `i > 0`: one oversized address must still be answerable, or it is unfetchable forever.
-        if bytes >= max_bytes && i + 1 < addrs.len() {
-            truncated = true;
+            Err(e) => (
+                json!({ "address": address, "status": e.status, "error": e.message }),
+                e.status,
+            ),
+        }
+    };
+    // Addresses are taken lowest-first, so what has been answered is a prefix plus whatever is
+    // still running; workers stop taking once the answered bytes cross the cap. The cut below is
+    // made in address order, so truncation is as deterministic as it was sequentially.
+    let answered: Vec<Mutex<Option<(Value, usize)>>> =
+        addrs.iter().map(|_| Mutex::new(None)).collect();
+    let todo: Mutex<std::collections::VecDeque<usize>> = Mutex::new((0..addrs.len()).collect());
+    let workers = addrs.len().clamp(1, TILE_MAX_IN_FLIGHT);
+    let active = AtomicUsize::new(workers);
+    let spent = AtomicUsize::new(0);
+    let work = || {
+        loop {
+            if spent.load(Ordering::Acquire) >= max_bytes {
+                break;
+            }
+            let Some(i) = todo.lock().expect("batch queue").pop_front() else {
+                break;
+            };
+            let (entry, status) = answer(&addrs[i]);
+            if status == 503 {
+                // Give the address back and retire, unless this is the last worker standing.
+                let last = active
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n > 1).then(|| n - 1)
+                    })
+                    .is_err();
+                if !last {
+                    todo.lock().expect("batch queue").push_front(i);
+                    return;
+                }
+            }
+            // The size cap is charged on what this answer will actually put on the wire.
+            let n = serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
+            spent.fetch_add(n, Ordering::AcqRel);
+            *answered[i].lock().expect("batch slot") = Some((entry, n));
+        }
+        active.fetch_sub(1, Ordering::AcqRel);
+    };
+    if workers == 1 {
+        work();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 1..workers {
+                s.spawn(work);
+            }
+            work();
+        });
+    }
+    // A worker can retire on a 503 in the instant the last one found the queue empty, leaving its
+    // address handed back with nobody to take it. Answer those here, in order, with whatever the
+    // route says now — a 503 included — so no address is ever left out without a status.
+    let left: Vec<usize> = todo.lock().expect("batch queue").drain(..).collect();
+    for i in left {
+        if spent.load(Ordering::Acquire) >= max_bytes {
+            break;
+        }
+        let (entry, _) = answer(&addrs[i]);
+        let n = serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
+        spent.fetch_add(n, Ordering::AcqRel);
+        *answered[i].lock().expect("batch slot") = Some((entry, n));
+    }
+
+    let mut tiles = Vec::with_capacity(addrs.len());
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    let mut remaining: Vec<String> = Vec::new();
+    for (i, (a, slot)) in addrs.iter().zip(answered).enumerate() {
+        let got = slot.into_inner().expect("batch slot");
+        match got {
+            Some((entry, n)) if !truncated => {
+                bytes += n;
+                tiles.push(entry);
+                // `i > 0`: one oversized address must still be answerable, or it is unfetchable
+                // forever.
+                if bytes >= max_bytes && i + 1 < addrs.len() {
+                    truncated = true;
+                }
+            }
+            // Not reached, or reached by a worker racing past the cap: either way it is not in
+            // this answer, and it is named so the follow-up request is a copy.
+            _ => {
+                truncated = true;
+                remaining.push(a.spelling.clone());
+            }
         }
     }
 
@@ -4734,6 +4823,47 @@ mod tests {
 
     fn batch_params(addresses: &str) -> Vec<(String, String)> {
         params(&[("cells", &N.to_string()), ("addresses", addresses)])
+    }
+
+    /// **A batch is as wide as its asker's share, and no wider** (T-573 follow-up).
+    ///
+    /// Members are answered concurrently — a sequential batch cost the sum of its members and held
+    /// the live edge behind every cold tile beside it — but each still takes its own admission slot
+    /// under the batch's `client`. With three of that client's four slots already held elsewhere,
+    /// the batch has room for exactly one: the extra workers are refused, hand their address back
+    /// and retire, so every member is still ANSWERED (on the one slot there is) rather than the
+    /// batch turning its own width into a 503 per member. With all four held, nobody in the batch
+    /// has a slot, and then the refusal is genuine contention and is reported per address.
+    #[test]
+    fn a_concurrent_batch_narrows_to_its_share_instead_of_refusing_its_own_members() {
+        let dir = temp_dir("batch-share");
+        let (state, _, _) = state_with_history(&dir, 8);
+        let spelling = (0..4)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut named = batch_params(&spelling);
+        named.push(("client".into(), "tab".into()));
+
+        let held: Vec<TileSlot> = (0..3)
+            .map(|_| state.tile_admission.acquire("tab").unwrap())
+            .collect();
+        let v = tiles_batch_json(&state, &named).unwrap();
+        let statuses: Vec<_> = (0..4).map(|i| v["tiles"][i]["status"].clone()).collect();
+        assert_eq!(statuses, vec![json!(200); 4], "{v}");
+        assert_eq!(v["truncated"], json!(false));
+        let order: Vec<_> = (0..4)
+            .map(|i| v["tiles"][i]["address"]["f_index"].as_i64().unwrap())
+            .collect();
+        assert_eq!(order, (0..4).map(|i| F_INDEX + i).collect::<Vec<_>>());
+
+        let fourth = state.tile_admission.acquire("tab").unwrap();
+        let v = tiles_batch_json(&state, &named).unwrap();
+        for i in 0..4 {
+            assert_eq!(v["tiles"][i]["status"], json!(503), "{v}");
+        }
+        drop((held, fourth));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Batching is a way to ask, not a way to summarise.** (T-573.)
