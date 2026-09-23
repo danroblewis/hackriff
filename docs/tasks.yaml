@@ -21768,11 +21768,11 @@ tasks:
       Filed 2026-09-21 by T-551 (docs/22 section 9). Note T-033/T-040 already record that steady
       OFDM reads NoiseLike to the floor tracker - the same fixture serves both.
     result: |
-      DONE (work-runner, from handback.json, 2026-09-23 15:15).
-      Added hkpy/synth/structures.py with three registered N3 scenarios: ofdm_nonstandard_cp (128-FFT, 64 QPSK carriers, 19-sample CP), dsss_m_sequence (31-chip m-sequence BPSK), qam16_unframed (RRC Gray 16-QAM, no framing). Truth carries negative_population N3, structure kind, params, missing_block; just synth produces each. Tests verify the CP repeat, despreading and 16 symbols.
-      Tests: pytest py/tests/test_synth_structures.py -> exit 0 (4 passed)
+      DONE (work-runner, from handback.json, 2026-09-23 15:18).
+      Added N3 scenarios ofdm_nonstandard_cp, dsss_m_sequence, qam16_unframed (hkpy/synth/structures.py, registered, truth annotated). Review fix: added SMALL entries in py/tests/test_synth.py for the three; merged main, resolving the registry conflict with multipath_echo.
+      Tests: pytest py/tests/test_synth.py py/tests/test_synth_structures.py -> exit 0 (79 passed, 2 skipped)
       precheck exit 0
-      Commits: 0963b28d
+      Commits: 13a355c2
       Use cases: SIGNAL-052, RESEARCH-002
       Resources: 23 CPU-s, peak 0.5 GB
   - id: T-624
