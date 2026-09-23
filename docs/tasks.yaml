@@ -21820,7 +21820,7 @@ tasks:
   - id: T-624
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: standalone analog-voice negatives (NBFM voice, AM voice) for the N2 population'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -21854,6 +21854,7 @@ tasks:
       Commits: 12a85164, 5318f688
       Use cases: SIGNAL-052
       Resources: 35 CPU-s, peak 0.6 GB
+    commit: 7d7ba9c2
   - id: T-625
     milestone: MAUTO
     title: 'ADC fill (sigma in LSB) is the corpus stratification key and nothing stores it - record it as provenance and build the fill ladder'
