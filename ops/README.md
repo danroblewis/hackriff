@@ -114,7 +114,9 @@ reviewer and fix/resume runs, and `ops/launch.sh` bounds each role session itsel
 `ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. It
 **attaches** the limiter (`cpulimit -i -p <pane pid>`, detached, named `limiter` by the watchdog) to a session
 `exec`ed into the pane, and never wraps it: a wrapped child runs in its own process group, not the
-pane's foreground one, and stops on SIGTTIN at its first terminal read (2026-09-23: state T, no prompt). Budget of
+pane's foreground one, and stops on SIGTTIN at its first terminal read (2026-09-23: state T, no prompt). It bounds
+the session's descendants (subagent shells and their builds); claude's own node process is resumed by
+tmux whenever the limiter stops it, so its CPU counts against the ceiling without being throttled. Budget of
 28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
 sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
 

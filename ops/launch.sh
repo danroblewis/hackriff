@@ -59,10 +59,15 @@ EXTRA="$*"
 # which is not the pane's foreground group, so claude's first read of the terminal stopped it
 # with SIGTTIN: state T for four minutes, no prompt, and SIGCONT did not hold (every read stops
 # it again). Reproduced with a stdin reader: PGID != TPGID, state T. The session is instead
-# `exec`ed into the pane - it IS the pane's process, in the foreground group, with no job-control
-# shell above it to take the terminal back when the limiter SIGSTOPs it - and the limiter is
-# started below on the pane's pid (verified: foreground `S+`, every line read under a 20 % cap,
-# the limiter exits with its target). The cost: when claude exits, the pane and the session go.
+# `exec`ed into the pane - it IS the pane's process, in the foreground group - and the limiter is
+# started below on the pane's pid (verified: a real session drew its prompt at `Ss+` with the
+# limiter attached, and the limiter exits with its target). What it bounds: the session's
+# DESCENDANTS - every Bash-tool shell runs in its own process group and the fork stops each pid,
+# so subagent cargo/nextest/e2e runs are held to the ceiling. Not claude's own node process: tmux
+# waits on its pane child with WUNTRACED and SIGCONTs a stopped pane group at once (reviewer,
+# measured on tmux 3.6a), so node's CPU counts against the 800 % but is not throttled, and the
+# children are throttled harder to make up for it. `remain-on-exit` keeps the pane readable if
+# the exec fails or claude exits, instead of the session vanishing with its error.
 CPULIMIT_BIN="${HACKRIFF_OPS:-$HOME/.hackriff-ops}/bin/cpulimit"
 [ -x "$CPULIMIT_BIN" ] || CPULIMIT_BIN="$(command -v cpulimit || true)"
 if [ -n "$CPULIMIT_BIN" ] && ! "$CPULIMIT_BIN" --help 2>&1 | grep -q include-children; then
@@ -81,6 +86,7 @@ fi
 # export costs nothing, is what the session says about itself rather than a guess about its
 # command line, and is readable wherever this runs on Linux.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
+tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
 tmux send-keys -t "$SESSION" -l \
   "exec env HACKRIFF_ROLE=$ROLE $KNOBPREFIX claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
 tmux send-keys -t "$SESSION" Enter

@@ -187,7 +187,15 @@ def role_name(cmd: str, env: str = "") -> str:
     return m.group(1) if m else "session"
 
 
-GATE_RE = re.compile(r"\bjust gate\b|hkpy\.gate\b")
+#: A merge gate is a process whose PROGRAM is the gate - `just gate[-merge] …`, or the `uv run … python
+#: -m hkpy.gate` / `python -m hkpy.gate` it execs - never one whose argv merely QUOTES the words.
+#: Unanchored, this matched every agent's wait loop (the Bash tool runs `zsh -c '… eval "until !
+#: pgrep -f 'just gate' …"'`, so the text is in the shell's argv): 567 false double-gate alarms on
+#: 2026-09-23, each window opened within 40 s of such a loop, and the loop's CPU was charged to
+#: `gate`. ops/merge-runner.sh's own detection was anchored the same way (`^just gate`) at 06:44.
+GATE_RE = re.compile(r"^(\S*/)?just gate(-merge)?(\s|$)"
+                     r"|^(\S*/)?uv run\s[^'\"]*-m hkpy\.gate(\s|$)"
+                     r"|^(\S*/)?python[0-9.]*\s+-m hkpy\.gate(\s|$)")
 
 #: Fallback only, applied after ancestry has failed: a process the orchestration did not start
 #: and cannot have started. A `/usr/bin/git` a worker spawned still belongs to the worker,
@@ -244,7 +252,7 @@ def fallback_owner(row: dict) -> str | None:
         return "tunnel"
     # ops/launch.sh attaches a role session's limiter by pid (`cpulimit -i -p <pane pid>`), detached
     # from the pane so it cannot take the terminal: it hangs off launchd, at ~1 % CPU.
-    if re.search(r"(^|/)cpulimit\s.*-p\s*\d+", cmd):
+    if re.search(r"^(\S*/)?cpulimit\s(?!.*\s--\s).*\s-p\s+\d+\s*$", cmd):
         return "limiter"
     # A Claude session this orchestration did not launch - the user's own terminal. Naming it
     # matters for rule (b): its shells have a LIVE parent and reach it by ancestry, so they are
