@@ -20895,7 +20895,7 @@ tasks:
   - id: T-612
     milestone: MAUTO
     title: 'hk-blocks `mlevel_slicer`: M-ary symbol decisions (4-level C4FM, 8-ary) - rank 5 on the T-554 gap list, and the whole trunking/paging unlock'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -20942,6 +20942,7 @@ tasks:
       Observed, not chased: An 8-ary FSK family like 2G ALE is properly demodulated by a tone filter bank, not a discriminator; mlevel_slicer works on a discriminator output (tested with Hz levels) but no recipe/fixture for ALE exists yet | Auto cannot resolve a window that uses only the two INNER levels (it would label them as the outer ones) — inherent to blind fitting; P25/DMR bursts start with outer-level sync, so not hit in practice
       Use cases: SIGNAL-080, SIGNAL-082, SIGNAL-084, SIGNAL-070
       Resources: 48 CPU-s, peak 1.0 GB
+    commit: 3d4f6b59
   - id: T-613
     milestone: MAUTO
     title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
