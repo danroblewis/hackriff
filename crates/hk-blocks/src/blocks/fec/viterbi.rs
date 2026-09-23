@@ -225,11 +225,17 @@ impl Viterbi {
     /// Decides the followed lane's steps `decided..upto` by tracing back from `state`.
     fn emit(&mut self, upto: u64, state: usize, meta: &crate::buffer::ChunkMeta) {
         let lane = &self.lanes[self.sel];
-        let lo = lane.decided;
+        // Never trace back past the survivor window (its oldest slots are overwritten): steps
+        // older than `D + B` can no longer be decided, so they are counted as dropped rather
+        // than read stale. `realign` keeps this from happening; this holds in release too.
+        let win = (self.depth + self.block) as u64;
+        let lo = lane.decided.max(lane.trellis.steps.saturating_sub(win));
+        let stale = lo - lane.decided;
         if upto <= lo {
             return;
         }
         lane.trellis.traceback(state, lo, &mut self.path);
+        self.dropped += stale * self.code.input_bits as u64;
         let n = (upto - lo) as usize;
         let (errs, cmp) = reencode_errors(&self.code, &self.path[..n], lo);
         if cmp > 0 {
@@ -270,9 +276,13 @@ impl Viterbi {
         // than one step is repeated. Its decisions up to here were skipped while not followed.
         let old = &self.lanes[self.sel];
         let resume = old.item0 + self.code.item_of_step(old.decided);
+        // At most `D + B − 1` undecided steps: the next step then leaves exactly `D + B`, which
+        // the emit check decides within the window. Starting at `steps − (D + B)` left a gap the
+        // next step pushed one past the window (T-610 review). If the old lane lags further, the
+        // one oldest step is skipped — a slip loses air time anyway.
         let win = (self.depth + self.block) as u64;
         let new = &mut self.lanes[best];
-        let mut s = new.trellis.steps.saturating_sub(win);
+        let mut s = new.trellis.steps.saturating_sub(win - 1);
         while s + 1 < new.trellis.steps && new.item0 + self.code.item_of_step(s + 1) <= resume {
             s += 1;
         }

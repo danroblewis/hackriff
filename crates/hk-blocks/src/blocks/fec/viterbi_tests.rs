@@ -371,6 +371,39 @@ fn auto_alignment_finds_the_pair_phase_and_fixed_does_not() {
     assert!(wrong > 2.0 * raw, "wrong phase: channel estimate {wrong}");
 }
 
+/// A pair slip (one coded item lost) mid-stream forces a realignment back to the other phase.
+/// Wherever the slip lands relative to the traceback blocks, the switch must leave the new lane
+/// able to decide within its survivor window: the review repro (seed 97, drop at 1241) left a
+/// gap of exactly `D + B` and the next step traced back one step past the window — a debug
+/// panic, and in release a bit read from an overwritten slot. After the slip the output is the
+/// data again.
+#[test]
+fn a_mid_stream_pair_slip_realigns_within_the_survivor_window() {
+    let code = code_of(&ccsds());
+    for shift in 0..80usize {
+        let mut rng = Rng(77 + shift as u64);
+        let data = rng.bits(3000);
+        let mut coded = encode(&code, &data, 0)[1..].to_vec();
+        coded.remove(1201 + 2 * shift);
+        let input = Stream::Soft(awgn(&coded, 0.5, 4.0, &mut rng));
+        let r = run(ccsds(), &input, input.len(), true);
+        assert!(
+            extra(&r.status, "realignments").unwrap() >= 2.0,
+            "shift {shift}: the slip realigned"
+        );
+        // Nothing fell out of the survivor window (the emit guard counts such steps).
+        assert_eq!(extra(&r.status, "dropped_bits"), Some(0.0), "shift {shift}");
+        let tail = r.bits.len() - 300;
+        let at = find(&data, &r.bits[tail..tail + 64])
+            .unwrap_or_else(|| panic!("shift {shift}: output after the slip is the data"));
+        assert_eq!(
+            errors(&r.bits[tail..tail + 200], &data[at..at + 200]),
+            0,
+            "shift {shift}"
+        );
+    }
+}
+
 /// CCSDS 131.0-B §3.5 punctured rates, received from an arbitrary offset in the period.
 #[test]
 fn punctured_ccsds_rates_decode_from_any_phase() {
@@ -759,6 +792,17 @@ fn code_parameters_are_checked() {
             .unwrap_or_else(|| panic!("{params} builds"));
         assert!(e.contains(want), "{params}: {e}");
     }
+    // More states than a 16-bit state index holds is refused (65,537 states × 2 branches).
+    let big = 2 * ((1usize << 16) + 1);
+    let e = try_build(
+        "viterbi",
+        json!({ "trellis": { "input_bits": 1, "output_bits": 2,
+                             "next_state": vec![0u32; big], "output": vec![0u32; big] } }),
+        PortType::Soft,
+    )
+    .err()
+    .unwrap();
+    assert!(e.contains("at most 65536"), "{e}");
     let e = try_build(
         "viterbi_frames",
         json!({ "trellis": { "input_bits": 1, "output_bits": 2, "next_state": [1, 0, 1, 0],

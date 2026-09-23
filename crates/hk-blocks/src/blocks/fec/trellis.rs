@@ -33,6 +33,8 @@ use crate::blocks::framing::common::P;
 
 /// Most coded bits per step (the word is a `u16`).
 pub(crate) const MAX_N: usize = 16;
+/// Most trellis states (next states and survivor predecessors are `u16`).
+pub(crate) const MAX_STATES: usize = 1 << 16;
 /// Most survivor entries (steps × states) one trellis holds, so a large `K` × depth is refused at
 /// build instead of allocating gigabytes (3 bytes each: about 48 MiB).
 pub(crate) const MAX_SURVIVORS: usize = 1 << 24;
@@ -221,6 +223,13 @@ impl Code {
             ));
         }
         let states = next.len() / per_state;
+        // Next states and survivor predecessors are `u16`; refused here, before the per-state
+        // tail walk in `from_params` (O(states²)) ever runs on an oversized table.
+        if states > MAX_STATES {
+            return Err(perr(format!(
+                "trellis: {states} states; at most {MAX_STATES} (state indexes are 16-bit)"
+            )));
+        }
         if next.iter().any(|&s| s as usize >= states) {
             return Err(perr("trellis: a next_state is not a state"));
         }
