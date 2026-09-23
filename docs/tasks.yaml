@@ -20905,6 +20905,19 @@ tasks:
       (T-607) - it is a decision rule, not a kernel.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 14:59).
+      Implemented hk-blocks `mlevel_slicer` (crates/hk-blocks/src/blocks/symbol/mlevel.rs), the ADR-0011 §9.1 M-ary decision: soft -> bits, k = log2(levels) bits per symbol, label MSB first; parameters now pinned (levels, thresholds auto|fixed, fixed_levels, window, mapping gray|natural|table, table, bit_order, invert — the last five hot).
+      `auto` estimates the equally spaced levels (lowest level + spacing) by equal-spacing k-means over the last `window` symbols from three starts (quantiles, extremes, previous fit), re-fitted every window/8 symbols keyed on the symbol count since restart: chunking-invariant, and it tracks C4FM deviation/DC drift instead of a hand-set threshold.
+      The fit doubles as the eye measurement in both modes (quality = 1 - 4σ/s, lock at >= 0.3 over a full window), so input with no M-level structure (constant level, noise) reads quality 0 / searching.
+      `mapping: table` was added because the P25/DMR/NXDN C4FM dibit map (-3->11, -1->10, +1->00, +3->01 = table [3,2,0,1]) is neither Gray nor natural; FLEX 4-level and 2G ALE 8-ary are plain gray.
+      tests/mlevel_slicer.rs (12 tests, all 12 verified RED with the registration removed): label vectors, C4FM table, ALE tribits, levels 2 == slicer, 4-level eye at 4 SNRs with auto converging, drift tracked where fixed thresholds fail, outer-levels-only windows (P25 FS), all-one-level/noise not confident, chunking invariance, restart == fresh, hot/cold params. Alloc-free cases added to blocks_a_alloc_free; ADR-0011 §9.1 row and §9.6 note updated. Vocoder out of scope, as the ticket says.
+      Tests: just test-crate hk-blocks -> exit 0 (134 passed, 1 skipped); cargo nextest run -p hk-blocks -E 'binary(mlevel_slicer)' -> exit 0 (12 passed)
+      precheck exit 0
+      Commits: 622c4215
+      Observed, not chased: An 8-ary FSK family like 2G ALE is properly demodulated by a tone filter bank, not a discriminator; mlevel_slicer works on a discriminator output (tested with Hz levels) but no recipe/fixture for ALE exists yet | Auto cannot resolve a window that uses only the two INNER levels (it would label them as the outer ones) — inherent to blind fitting; P25/DMR bursts start with outer-level sync, so not hit in practice
+      Use cases: SIGNAL-080, SIGNAL-082, SIGNAL-084, SIGNAL-070
+      Resources: 48 CPU-s, peak 1.0 GB
   - id: T-613
     milestone: MAUTO
     title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
