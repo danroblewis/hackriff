@@ -379,3 +379,65 @@ fn psk_symbols_tap_cannot_be_wired_into_a_node() {
         "{errs:?}"
     );
 }
+
+/// T-610: both Viterbi shapes are implemented, so their parameters are pinned and a recipe
+/// naming them is checked against the schema (an unknown `align`, numeric puncturing masks and
+/// a per-frame decoder without its `termination` are all refused before anything is built).
+#[test]
+fn viterbi_shapes_are_registered_with_pinned_parameters() {
+    let registry = hk_blocks::Registry::builtin();
+    let cat = catalogue::planned();
+    for name in ["viterbi", "viterbi_frames"] {
+        let d = registry
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is registered"))
+            .descriptor()
+            .clone();
+        assert!(d.params_pinned, "{name} parameters are pinned");
+        assert_eq!(cat.descriptor(name), Some(&d));
+    }
+    let psk = json!({ "id": "psk", "block": "psk_demod",
+                      "params": { "modulation": "bpsk", "symbol_rate_bd": 9600 } });
+    for (id, node) in [
+        (
+            "align",
+            json!({ "id": "fec", "block": "viterbi",
+                    "params": { "constraint_length": 7, "polys": ["0x4F", "0x6D"],
+                                "align": "sometimes" } }),
+        ),
+        (
+            "puncture",
+            json!({ "id": "fec", "block": "viterbi",
+                    "params": { "constraint_length": 7, "polys": ["0x4F", "0x6D"],
+                                "puncture": [5, 6] } }),
+        ),
+    ] {
+        let r = recipe(
+            id,
+            json!([psk.clone(), node]),
+            json!([{ "id": "bits", "kind": "stage", "from": "fec" }]),
+        );
+        let errs = errors(&r);
+        assert!(
+            errs.iter().any(|e| e.path.starts_with("nodes[1].params")),
+            "{id}: {errs:?}"
+        );
+    }
+    let no_termination = recipe(
+        "frames-no-termination",
+        json!([
+            { "id": "fsk", "block": "fsk_demod" },
+            { "id": "clock", "block": "clock_recovery", "params": { "symbol_rate_bd": 4800 } },
+            { "id": "slice", "block": "slicer" },
+            { "id": "fs", "block": "sync_search", "params": sync("0x5575F5FF77FF", 48, 1568) },
+            { "id": "trellis", "block": "viterbi_frames",
+              "params": { "constraint_length": 7, "polys": ["0x4F", "0x6D"] } }
+        ]),
+        frames_out("trellis"),
+    );
+    let errs = errors(&no_termination);
+    assert!(
+        errs.iter().any(|e| e.path.starts_with("nodes[4].params")),
+        "{errs:?}"
+    );
+}

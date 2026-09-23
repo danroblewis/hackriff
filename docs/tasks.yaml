@@ -20825,6 +20825,8 @@ tasks:
       Filed 2026-09-21 by T-554 (docs/18 sections 6-7, rank 3).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+
+      Review fix e468b99a: realign now starts the new lane at steps - (D+B-1) (was steps - (D+B), which let the next step trace back D+B+1 steps: debug panic trellis.rs:438, stale slot in release). emit clamps lo to steps - (D+B) and counts older steps as dropped_bits (release-safe guard). Regression a_mid_stream_pair_slip_realigns_within_the_survivor_window (80 slip offsets): red without the fix (panic; with guard only, dropped_bits=1 at shift 21), green with it. from_table refuses > 65536 states before the O(states^2) tail walk; tested in code_parameters_are_checked.
   - id: T-611
     milestone: MAUTO
     title: 'hk-blocks `reed_solomon`: RS(255,223) dual-basis and friends - rank 4 on the T-554 gap list, 8 families'
