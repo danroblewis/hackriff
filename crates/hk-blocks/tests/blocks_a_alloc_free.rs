@@ -1,6 +1,7 @@
-//! Blocks A (T-086 iq and symbol groups) allocate nothing in `process` over steady-state
-//! chunks, including chunks flagged `DISCONTINUITY`/`RESET` (ADR-0011 §1.4 rule 1), and a
-//! restart leaves each block exactly as a freshly built one (T-104).
+//! Blocks A (T-086 iq and symbol groups; T-610 adds the streaming `viterbi`) allocate nothing
+//! in `process` over steady-state chunks, including chunks flagged `DISCONTINUITY`/`RESET`
+//! (ADR-0011 §1.4 rule 1), and a restart leaves each block exactly as a freshly built one
+//! (T-104).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -376,6 +377,21 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
         ("nrzi", json!({}), &bits, 2_400.0),
         ("manchester", json!({}), &soft, 2_400.0),
         ("manchester", json!({"convention": "ieee"}), &bits, 2_400.0),
+        // T-610: the streaming Viterbi decoder at symbol rate, soft with the auto phase search
+        // (two lanes), and hard on a punctured code (four lanes).
+        (
+            "viterbi",
+            json!({"constraint_length": 7, "polys": ["0x4F", "0x6D"], "invert": [false, true]}),
+            &soft,
+            2_400.0,
+        ),
+        (
+            "viterbi",
+            json!({"constraint_length": 7, "polys": ["0x4F", "0x6D"], "puncture": ["101", "110"],
+                   "traceback_bits": 128}),
+            &bits,
+            2_400.0,
+        ),
     ];
 
     let mut failures = Vec::new();

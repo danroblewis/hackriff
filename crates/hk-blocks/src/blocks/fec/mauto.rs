@@ -1,7 +1,7 @@
 //! ADR-0011 §9 (T-606) catalogue rows for group `fec`: `viterbi`, `viterbi_frames`,
 //! `reed_solomon`. **Ports are pinned; parameters are placeholders** (`params_pinned: false`)
-//! that T-610 (`viterbi`, `viterbi_frames`) and T-611 (`reed_solomon`) pin. None is implemented
-//! here.
+//! that T-610 (`viterbi`, `viterbi_frames`) and T-611 (`reed_solomon`) pin. T-610 pinned and
+//! implemented both Viterbi shapes (`viterbi.rs` over `trellis.rs`).
 //!
 //! `fec` has **two shapes** from here on (ADR-0011 §9.3): the hard-decision per-frame codes
 //! (`frames → frames`: `crc`, `bch`, `parity`, `checksum`, `reed_solomon`, `viterbi_frames`) and
@@ -10,7 +10,7 @@
 use hk_recipe::PortType::{Bits, Frames, Soft};
 use hk_recipe::{BlockDescriptor, ParamSchema, PortSpec};
 
-use crate::schema::{ParamExt, boolean, descriptor, hex, int, list, object, one_of, param};
+use crate::schema::{ParamExt, boolean, descriptor, hex, int, list, object, one_of, param, string};
 
 /// The convolutional code, shared by both Viterbi shapes (one trellis engine, T-610).
 fn code() -> Vec<ParamSchema> {
@@ -19,8 +19,17 @@ fn code() -> Vec<ParamSchema> {
         param(
             "polys",
             list(hex(16), 2),
-            "Binary feedforward code: generator polynomials, one per coded bit (rate 1/n).",
+            "Binary feedforward code: generator polynomials, one per coded bit (rate 1/n), in \
+             transmission order. CCSDS 131.0-B: [\"0x4F\", \"0x6D\"] newest-lsb (= octal 171, \
+             133 newest-msb) with invert [false, true].",
         ),
+        param(
+            "poly_order",
+            one_of(&["newest-lsb", "newest-msb"]),
+            "Which polynomial bit taps the input bit just shifted in: bit 0 (libfec, GNU \
+             Radio) or bit K-1 (the textbook octal form).",
+        )
+        .default_value("newest-lsb"),
         param(
             "trellis",
             object(vec![
@@ -48,8 +57,10 @@ fn code() -> Vec<ParamSchema> {
         ),
         param(
             "puncture",
-            list(hex(64), 1),
-            "Per generator: keep-mask over one puncturing period; absent: unpunctured.",
+            list(string(64), 1),
+            "Per generator: a string of 0/1 over one puncturing period, character t = whether \
+             that coded bit of step t is sent (CCSDS rate 3/4: [\"101\", \"110\"]); absent: \
+             unpunctured.",
         ),
     ]
 }
@@ -61,7 +72,8 @@ pub fn planned() -> Vec<BlockDescriptor> {
         param(
             "traceback_bits",
             int(8, 4_096),
-            "Decision depth (≥ 5 K is the textbook floor).",
+            "Decision depth: every decided bit has at least this many trellis bits after it \
+             (≥ 5 K is the textbook floor; punctured codes want more).",
         )
         .default_value(64),
         param(
@@ -94,11 +106,12 @@ pub fn planned() -> Vec<BlockDescriptor> {
         descriptor(
             "viterbi",
             "fec",
-            "Streaming convolutional (Viterbi) decoder, soft-decision on `soft` input.",
+            "Streaming convolutional (Viterbi) decoder: soft decision on `soft` input, hard \
+             decision on `bits` (reported as status hard_decision = 1, ~2 dB worse).",
             vec![PortSpec::any_of("in", &[Soft, Bits])],
             vec![PortSpec::new("out", Bits)],
             viterbi,
-            false,
+            true,
         ),
         descriptor(
             "viterbi_frames",
@@ -107,7 +120,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
             vec![PortSpec::new("in", Frames)],
             vec![PortSpec::new("out", Frames)],
             per_frame,
-            false,
+            true,
         ),
         descriptor(
             "reed_solomon",
