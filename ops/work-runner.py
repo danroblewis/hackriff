@@ -792,6 +792,13 @@ def dispatch(claims, dry):
     if depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
         return False
+    # The gate is IMMINENT when something is queued and no worker is running: the merge runner
+    # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
+    # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
+    # dispatch into that window; the gate takes the batch, then dispatch resumes.
+    if depth > 0 and not running:
+        log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
+        return False
     free = min(free, PER_TICK)
     try:
         tasks = board()
