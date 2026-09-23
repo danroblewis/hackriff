@@ -949,7 +949,13 @@ impl Session {
         let mut audio_t0: Option<Timestamp> = None;
         let mut audio_index: u64 = 0;
         let mut gap = false;
+        // Capture time where the last demodulated block ended (the next contiguous sample), and
+        // half a sample period at that rate. Within one playhead generation the next IQ window
+        // opens HERE, never at the playhead: the playhead runs ahead of the demodulator by the
+        // time a block takes to demodulate, and opening at it would skip that IQ while the audio
+        // clock (`audio_t0` + index) kept counting - records stamped earlier than their air.
         let mut last_end_ns: Option<i64> = None;
+        let mut half_sample_ns: i64 = 0;
         let mut last_status = Instant::now()
             .checked_sub(self.status_interval)
             .unwrap_or_else(Instant::now);
@@ -974,7 +980,12 @@ impl Session {
                     thread::sleep(Duration::from_millis(20));
                     continue;
                 };
-                let from = last_end_ns.map_or(pos, |e| e.max(pos));
+                // Continue exactly where the last block ended; the half-sample margin makes the
+                // "first sample at or after" rule land on that very sample despite per-window
+                // rounding of sample times. Only with nothing demodulated yet in this
+                // generation (a seek, a fresh stream, or after the IQ horizon) does the
+                // playhead decide.
+                let from = last_end_ns.map_or(pos, |e| e - half_sample_ns);
                 match self.archive.open_at(from, self.band) {
                     Ok(w) => {
                         st.iq = true;
@@ -1003,10 +1014,14 @@ impl Session {
                         gap = true;
                         demod = None;
                         audio_t0 = None;
+                        pending.clear();
+                        // Nothing continues across the horizon: when IQ resumes, it resumes at
+                        // the playhead, re-anchored.
+                        last_end_ns = None;
                         // Wait for the playhead to move on (100 ms of capture time), then ask
                         // again from wherever it is: the ring may have grown, or a recording
                         // may begin there.
-                        let until = from.saturating_add(100_000_000);
+                        let until = from.max(pos).saturating_add(100_000_000);
                         match self.playhead.wait_until(until, generation, &self.stop) {
                             Wait::Stopped => break 'run,
                             Wait::Seeked | Wait::Reached => continue,
@@ -1024,6 +1039,7 @@ impl Session {
                     // moves on by its whole span, so this cannot spin.
                     if !read_any {
                         last_end_ns = Some(last_end_ns.map_or(w.t1_ns, |e| e.max(w.t1_ns)));
+                        half_sample_ns = 0;
                     }
                     window = None;
                     continue;
@@ -1048,10 +1064,19 @@ impl Session {
                 Wait::Seeked => continue,
                 Wait::Reached => {}
             }
-            last_end_ns = Some(t_end);
-            if !header.discontinuity.is_empty() || header.dropped_before > 0 {
+            // Continuity is judged by capture time, not by a window's first-block flags: each
+            // ring window is its own replay source whose first block says STREAM_START even when
+            // the IQ runs on without a break. A block that does not start where the last one
+            // ended is a real break: re-anchor the audio clock there and drop the partial frame.
+            let contiguous = last_end_ns.is_some_and(|e| (t_start - e).abs() <= half_sample_ns)
+                && header.dropped_before == 0;
+            if !contiguous {
                 gap = true;
+                audio_t0 = None;
+                pending.clear();
             }
+            last_end_ns = Some(t_end);
+            half_sample_ns = (0.5e9 / fs).round() as i64;
             if !self.contains(fc, fs) {
                 // Tuned elsewhere then: no audio for this block, and honestly so.
                 demod = None;

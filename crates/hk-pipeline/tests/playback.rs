@@ -408,3 +408,180 @@ fn aware_011_playback_replays_analysis_unchanged_and_reruns_demod_from_raw_iq() 
         after.0.len()
     );
 }
+
+// ---- Review finding (T-463 fix 1): audio stays on the air's own capture times across windows ----
+
+/// A fake IQ archive over one in-memory NBFM recording, serving it in short windows exactly as
+/// the ring does (first sample at or after the asked time), and logging every `open_at`.
+struct Windows {
+    iq: Vec<u8>,
+    t0_ns: i64,
+    window: usize,
+    opens: Mutex<Vec<i64>>,
+}
+
+const WFS: f64 = 250e3; // 4000 ns a sample: exact integer sample times
+const WPERIOD_NS: i64 = 4_000;
+const WCENTER: f64 = 100e6;
+const WOFFSET: f64 = 50e3;
+
+impl Windows {
+    fn new(secs: f64, window_s: f64) -> Self {
+        let n = (secs * WFS) as usize;
+        let tau = std::f64::consts::TAU;
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut iq = Vec::with_capacity(2 * n);
+        for k in 0..n {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let nz = ((state >> 40) as f64 / (1u64 << 24) as f64 - 0.5) * 4.0;
+            let t = k as f64 / WFS;
+            let ph = tau * WOFFSET * t + DEV_HZ / TONE_HZ * (tau * TONE_HZ * t).sin();
+            iq.push((50.0 * ph.cos() + nz).round() as i8 as u8);
+            iq.push((50.0 * ph.sin() - nz).round() as i8 as u8);
+        }
+        Self {
+            iq,
+            t0_ns: 1_789_300_800_000_000_000, // 2026-09-13T12:00:00Z
+            window: (window_s * WFS) as usize,
+            opens: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl hk_pipeline::playback::IqArchive for Windows {
+    fn open_at(
+        &self,
+        t_ns: i64,
+        _band: (f64, f64),
+    ) -> Result<hk_pipeline::playback::IqWindow, hk_pipeline::playback::NoIq> {
+        self.opens.lock().unwrap().push(t_ns);
+        let n = self.iq.len() / 2;
+        let k0 = ((t_ns - self.t0_ns).max(0) + WPERIOD_NS - 1) / WPERIOD_NS;
+        let k0 = k0 as usize;
+        if k0 >= n {
+            return Err(hk_pipeline::playback::NoIq {
+                reason: "past the end: waterfall-only".into(),
+                next_iq_ns: None,
+            });
+        }
+        let k1 = (k0 + self.window).min(n);
+        let at = k0 as i64 * WPERIOD_NS; // < 60 s after 12:00:00
+        let mut meta = SigmfMeta::new(Datatype::Ci8);
+        meta.global.sample_rate = Some(WFS);
+        meta.captures.push(Capture {
+            sample_start: 0,
+            frequency: Some(WCENTER),
+            datetime: Some(format!(
+                "2026-09-13T12:00:{:02}.{:09}Z",
+                at / 1_000_000_000,
+                at % 1_000_000_000
+            )),
+            provenance: None,
+            clip_count: None,
+            extra: serde_json::Map::new(),
+        });
+        let data = self.iq[2 * k0..2 * k1].to_vec();
+        let source = hk_core::SigmfReplaySource::from_reader(
+            meta,
+            std::io::Cursor::new(data),
+            hk_core::ReplayOptions::default(),
+        )
+        .unwrap();
+        Ok(hk_pipeline::playback::IqWindow {
+            source: Box::new(source),
+            content_class: hk_model::ContentClass::Unrestricted,
+            origin: hk_pipeline::playback::IqOrigin::Ring,
+            t1_ns: self.t0_ns + k1 as i64 * WPERIOD_NS,
+        })
+    }
+}
+
+/// With 50 ms windows at 16x, the playhead runs ahead of the demodulator by a block's demod
+/// time on every window. Each next window must still open where the last block ended (never at
+/// the playhead), and every audio record must sit exactly on the air's own timeline: one
+/// unbroken run of 20 ms records from the chosen start, no false DISCONTINUITY at the window
+/// seams, and exactly as much audio as the IQ between the first and last window.
+#[test]
+fn aware_011_playback_audio_stays_on_capture_time_across_windows() {
+    let archive = Arc::new(Windows::new(3.0, 0.05));
+    let service = PlaybackService::new(
+        Arc::clone(&archive) as Arc<dyn hk_pipeline::playback::IqArchive>,
+        PlaybackConfig::default(),
+    );
+    let t0 = archive.t0_ns;
+    let start = t0 + 200_000_000;
+    let fc = WCENTER + WOFFSET;
+    let opened = service
+        .open(&request(&[
+            ("t", format!("{}", start as f64 / 1e9)),
+            ("speed", "16".into()),
+            ("f_lo", format!("{}", fc - 8e3)),
+            ("f_hi", format!("{}", fc + 8e3)),
+        ]))
+        .expect("open");
+    let got = subscribe(&opened);
+    service.playhead().play().unwrap();
+    // Until the demodulator has crossed the IQ's end (2.8 s of IQ at 16x).
+    wait("the IQ horizon", || {
+        got.read().status.iter().any(|s| s["iq"] == false)
+    });
+    drop(opened);
+    let r = got.read();
+    let opens = archive.opens.lock().unwrap().clone();
+
+    // Every window after the first opens where the last one ended (within half a sample). The
+    // last open, at the IQ's end, is the horizon (answered no-IQ), not a window. `opens[0]` is
+    // the opener's probe; `opens[1]` is where the playhead stood when demod began.
+    let windows: Vec<i64> = opens
+        .iter()
+        .copied()
+        .take_while(|&t| t < t0 + 3_000_000_000 - WPERIOD_NS)
+        .collect();
+    assert!(windows.len() > 40, "{} windows", windows.len());
+    for (k, pair) in windows.windows(2).enumerate().skip(1) {
+        let step = pair[1] - pair[0];
+        assert!(
+            (step - 50_000_000).abs() <= WPERIOD_NS,
+            "[{AWARE_011}] window {k} opened {step} ns after the previous one, not 50 ms on: the \
+             IQ between them was skipped (opens: {:?})",
+            &windows[..windows.len().min(k + 3)]
+        );
+    }
+
+    // One unbroken run of audio from the chosen start, on the air's timeline.
+    let audio = &r.audio;
+    assert!(audio.len() > 100, "{} records", audio.len());
+    // The first record is at or after the chosen start. It may be a little later: at 16x the
+    // thread's first window opens wherever the playhead has reached, and the squelch withholds
+    // frames while its level estimate settles. Its stamp is still the air's own time; the unbroken
+    // 20 ms run and the end check below are what pin that.
+    assert!(
+        (start..start + 100_000_000).contains(&audio[0].0),
+        "first record {} vs start {start}",
+        audio[0].0
+    );
+    let breaks: Vec<usize> = (1..audio.len()).filter(|&i| audio[i].1).collect();
+    assert!(
+        breaks.is_empty(),
+        "[{AWARE_011}] continuous IQ must not be flagged DISCONTINUITY at window seams: {breaks:?}"
+    );
+    for (i, w) in audio.windows(2).enumerate() {
+        let dt = w[1].0 - w[0].0;
+        assert!(
+            (dt - 20_000_000).abs() <= 1,
+            "[{AWARE_011}] record {i}->{} is {dt} ns apart, not 20 ms",
+            i + 1
+        );
+    }
+    // As much audio as IQ: the last record ends within one frame plus filter delay of the IQ end
+    // (2.8 s of IQ after the start). A skipped window seam would leave it short.
+    let end = audio.last().unwrap().0 + 20_000_000;
+    let iq_end = t0 + 3_000_000_000;
+    assert!(
+        (iq_end - 45_000_000..=iq_end).contains(&end),
+        "[{AWARE_011}] audio ends at {} ms before the IQ does",
+        (iq_end - end) / 1_000_000
+    );
+}
