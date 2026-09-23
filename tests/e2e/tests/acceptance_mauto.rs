@@ -84,8 +84,10 @@
 //!
 //! Nothing here passes a frequency, modulation or protocol into the system. The only frequency
 //! anything is given is where the mock device says it is tuned, exactly as a real HackRF reports
-//! it; the built-in chain registry's `[851, 869] MHz` trigger band is a *band gate*, not a
-//! frequency lookup, and [`signal_087::NO_LOOKUP`] records that reading and its limit. Truth is
+//! it; the built-in chain registry's LMR trigger bands are a *dwell-budget gate*, not a
+//! frequency lookup and not a search prior: [`signal_087::NO_LOOKUP`] records that reading, and
+//! [`signal_085`] measures it (T-615) — the hunt finds the control channel at VHF with the
+//! built-in registry and at 300 MHz once a plan widens the budget to the whole device. Truth is
 //! sealed by `TruthVault` and opened only after the run, only to check the answer.
 
 // The shared harness modules carry helpers only the other suites use.
@@ -99,3 +101,6 @@ mod blind;
 
 #[path = "acceptance/signal_087.rs"]
 mod signal_087;
+
+#[path = "acceptance/signal_085.rs"]
+mod signal_085;
