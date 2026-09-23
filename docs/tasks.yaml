@@ -19393,7 +19393,7 @@ tasks:
   - id: T-579
     milestone: MLIVE
     title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
-    status: in-progress
+    status: done
     branch: task-t579
     priority: normal
     parallel_group: PIPE
@@ -19434,6 +19434,7 @@ tasks:
       Use cases: AWARE-011
     notes: |
       rebuilt on main after a code conflict: http.rs ApiState resolved in 3c04b198 (cherry-pick of 8a580dfc) - keeps T-468 row_feeds, T-572 tile_cache, T-630 admission; hk-cli ApiState literal gains both memos; /api/tiles/batch shares both memos via tiles_json; /ws/tiles/rows uses TileOverlay::collect_once (unmemoised, one-shot windows). Invalidation key: the tune-history spans clipped to the tile window (RasterKey); ceiling keyed on lattice+geometry+coarse_on_demand
+    commit: 93927f41
   - id: T-580
     milestone: MLIVE
     title: The client fetches known-grey regions in full - short-circuit unobserved spans before the request, not after
