@@ -42,8 +42,8 @@ import type { RowActionFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
-import { probeAddr, latticeOf, type TileFetch, type TileResponse } from "./tile";
-import { TileCache, type Viewport } from "./tilecache";
+import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
+import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
@@ -709,6 +709,11 @@ export class SurfacePreview {
     this.maybeSurvey();
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
+    // **After the refresh, never before** (T-538): both end up spending the same four slots, and the
+    // live edge must have had its chance at one before a guess is allowed to take it. In practice
+    // [[TileCache.prefetchAhead]] cannot take it anyway — it asks only while the cache holds nothing
+    // at all — but the ordering is the statement of priority and does not depend on that.
+    this.prefetchFrozenPanes(this.lastFrame);
     return this.lastFrame;
   }
 
@@ -789,6 +794,39 @@ export class SurfacePreview {
         this.view.surface.setSurvey(null);
       },
     ).finally(() => { this.surveyInFlight = false; });
+  }
+
+  /**
+   * **The other half of [[refreshLiveEdge]]'s split** (T-538): the viewports that are **not**
+   * following get the look-ahead lane, the ones that are get the refresh lane, and nothing is in
+   * both.
+   *
+   * That split is the point, not bookkeeping. A following pane's box advances with the record on
+   * every frame — it is moving without anyone moving it — so feeding it to a lane whose whole input
+   * is *displacement* would turn "the user is panning" into "time is passing", which is a poll. The
+   * minimap follows whatever the panes do and is excluded for exactly the same reason. What is left
+   * is a frozen pane over recorded data, which moves only when a gesture moves it: a still one is
+   * going nowhere and `prefetchAhead` issues nothing for it, by having no direction rather than by
+   * being silenced.
+   *
+   * Unguarded by `edgeFn`, unlike [[refreshLiveEdge]]: T-450's historical preview freezes every
+   * viewport at open, and a frozen pane is exactly what this lane is for. It still asks for nothing
+   * until one of them is dragged.
+   *
+   * The levels come off the `PaneReport`s the renderer just drew with, for the T-397 reason
+   * [[refreshLiveEdge]] gives: a second derivation of a number this frame already computed.
+   */
+  private prefetchFrozenPanes(f: SurfaceFrame): void {
+    const frozen: MovingViewport[] = [];
+    for (const r of f.reports) {
+      const v = f.views.find((x) => x.id === r.id);
+      if (!v) continue;
+      const live = r.id === this.view.minimap.id
+        ? this.view.minimap.following
+        : this.view.panes.isFollowing(r.id);
+      if (!live) frozen.push({ id: r.id, box: v.box, levelF: r.levelF, levelT: r.levelT });
+    }
+    if (frozen.length) this.view.surface.cache.prefetchAhead(this.view.surface.lat, frozen);
   }
 
   /** Match the drawing buffer to the element's CSS box at the device's pixel ratio. */

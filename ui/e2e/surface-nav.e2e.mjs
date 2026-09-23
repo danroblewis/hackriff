@@ -468,6 +468,15 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `a steady-state slot probe did not get an HTTP answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
     "a probe that errors proves nothing either way, so the assertions above would be vacuous");
 
+  // **T-538 re-landed speculation under this bound, and did not weaken it.** The lane that replaced
+  // T-471's standing ring (`TileCache.prefetchAhead`) is driven by DISPLACEMENT between frames and
+  // asks each address at most once per session, so it cannot produce a re-ask at all and a view
+  // that is not moving has no direction to predict. It also issues only while the client holds
+  // NOTHING — which on this fixture is never, the gestures' backlog still draining right through
+  // the window — so the measured cost of it here is exactly zero: the status line's own
+  // `N guessed (M drawn)` read `0 guessed (0 drawn)` over the whole run, and the steady window's
+  // re-ask count was 0 with 4-7 first-time addresses, which is the backlog and not a decision.
+  //
   // (2c) A FROZEN VIEW THAT NOTHING TOUCHES ASKS FOR NOTHING. The premise is measured at both ends
   // of the window, not assumed: every pane is off the live edge, so nothing new can be wanted, and
   // only then is "it must ask for nothing" the right claim. What this forbids is speculation — and

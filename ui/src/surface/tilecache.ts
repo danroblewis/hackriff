@@ -114,7 +114,54 @@
 // the route's own answer. That test seals a tile exactly once and forever, so the fix costs one extra
 // request per tile per lifetime and cannot become a poll.
 
-import { extentOf, intersects, keyOf, tCellNs, type Box, type Lattice, type TileAddr } from "./lattice";
+//
+// ## T-538: speculation is about where the view is GOING, not about where it is
+//
+// T-471 landed a standing *ring* — the one-tile border around every viewport, refreshed on a 250 ms
+// scan — and was reverted off `main` for two measured reasons, both of which this lane is shaped to
+// make impossible rather than to guard against:
+//
+//  1. **A speculative fetch that gets aborted charges the server a slot it will never use.** An
+//     `abort()` reaches the browser, not `hk-api` (see [[abandon]]), so the route keeps producing a
+//     tile nobody will read. The ring aborted its own requests every time the viewport moved: 46-53
+//     wire aborts against 6-8 for the client without it, and other tenants of the four-slot budget
+//     were refused. **So this lane never aborts.** Not in [[setViewports]], not anywhere but
+//     [[dispose]]. It is issued only when this client holds *nothing at all* ([[idle]]) and the AIMD
+//     cap is at its ceiling, so there is at most **one** speculative read outstanding, it is never
+//     competing with a visible miss, and it is allowed to finish — which is the only way a slot
+//     actually comes back. "Cancellable without charging the server" is answered by not needing to
+//     cancel.
+//  2. **"Backing off means asking nothing" was gated on the BUDGET, not the CAP.** `inflight <
+//     effectiveLimit` is still true at a halved cap, so after a `503` the ring took the one
+//     remaining slot every 250 ms for ever. Here the gate is `limit >= ceiling`: while AIMD is
+//     backed off at all, speculation is silent. T-539's elapsed-quiet recovery is what makes that
+//     free of the self-lock the first fix attempt had — an idle client's cap climbs back on the
+//     clock, with nothing issued to earn it.
+//
+// And the third thing, which is why the ring was *visible* in `surface-nav`'s steady-state window at
+// all: **a standing ring speculates about a view that is not moving.** A frozen pane over recorded
+// data is going nowhere, so there is nothing to predict, and a lane that keeps asking anyway is a
+// poll with a story. [[prefetchAhead]] is therefore driven by **displacement between frames**: the
+// tiles one tile-width along the direction the box actually moved, and nothing at all when it did
+// not move — where "moved" means *by at least one lattice cell*, since the level is chosen so a cell
+// is about a pixel and a sub-cell wobble has not moved anything on screen. A still view issues zero
+// requests **because it has no direction**, not because a threshold was tuned to make it quiet.
+//
+// Two more rules complete it. **Each address is speculated at most once, ever** ([[speculated]]) —
+// so this lane can never produce a re-ask, which is the exact shape `surface-nav` partitions the
+// steady window by (T-564), and it cannot become a poll however long a pan lasts. And **it queues
+// nothing**: candidates live for the one call that computed them, so there is no backlog that can
+// drain into a window after the motion that wanted it has stopped, and the client's queue depth is
+// unaffected by construction.
+//
+// The trade this replaces: T-471 measured ~5 speculative requests to save one blocking miss on a
+// one-tile pan, paid whether or not anyone was panning. This pays **at most one request per frame
+// of actual motion, only while otherwise idle**, for the tile the pan is heading into.
+
+import {
+  extentOf, fCellHz, fTileHz, intersects, keyOf, tCellNs, tTileNs, tilesFor,
+  type Box, type Lattice, type TileAddr,
+} from "./lattice";
 import { TileBusyError, TileDecodeError, type TileData } from "./tile";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
@@ -162,6 +209,15 @@ export interface Viewport {
    * [[TileCache.setViewports]] was handed — which is what a single-tier caller has always passed.
    */
   readonly lat?: Lattice;
+}
+
+/**
+ * A viewport this cache can measure **motion** for between frames (T-538): a [[Viewport]] that says
+ * which pane it is. The id is load-bearing — displacement is per pane, and a set whose order is an
+ * accident of rendering cannot be differenced positionally.
+ */
+export interface MovingViewport extends Viewport {
+  readonly id: string;
 }
 
 /**
@@ -265,6 +321,13 @@ export interface TileCacheStats {
    * from `failures` because they are the only retryable outcome left, and so the only one whose
    * rate is a property of this client's policy rather than of the route's. */
   silentFailures: number;
+  /** Speculative look-ahead reads actually issued (T-538), apart from `requests`, which counts every
+   * visible miss too. This is the number that answers "what did speculation cost" on its own. */
+  speculativeIssued: number;
+  /** Speculative reads that a later frame actually **drew** — the first [[TileCache.acquire]] hit on
+   * a tile this lane fetched. `speculativeIssued - speculativeHits` is what it wasted, measured
+   * rather than argued. */
+  speculativeHits: number;
 }
 
 const MB = 1024 * 1024;
@@ -339,9 +402,21 @@ export const REFRESH_DUTY = 4;
  * right: they cost the same and should share a turn.
  */
 const laneOf = (a: TileAddr): string => `${a.levelF}/${a.levelT}`;
+
+/** Are these two spans the same width, to within float noise? A pan adds the same delta to both
+ * edges, so its width is preserved only up to an ulp; a zoom changes it by a factor. */
+const sameSize = (a: number, b: number): boolean =>
+  Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
 /** How often [[TileCache.refreshEdge]] may walk the resident set, ms. The walk is cheap; doing it
  * at frame rate would still be 60× more often than the finest tile can change. */
 const EDGE_SCAN_MS = 250;
+
+/**
+ * How many speculated addresses [[TileCache.speculated]] remembers (T-538). It only has to be large
+ * enough that a long pan cannot walk off the end of its own history and start asking twice; at
+ * ~208 tiles for a full screen, 4096 is twenty screens' worth, and the set holds keys, not tiles.
+ */
+const SPECULATED_MEMORY = 4096;
 
 /**
  * **The silence backoff** (T-499): after a failure that carried no answer at all, how long before
@@ -494,6 +569,20 @@ export class TileCache<T> {
    * rather than as one sample for the reason spelled out there.
    */
   private refreshCosts = new Map<string, number[]>();
+  /**
+   * Where each pane's box was on the previous frame, by pane id — the whole state of the T-538
+   * look-ahead lane, and the reason it has no queue. See [[prefetchAhead]].
+   */
+  private lastBox = new Map<string, { box: Box; levelF: number; levelT: number; scheme: string }>();
+  /** Keys with a speculative read in flight. At most one, and **never aborted** — [[setViewports]]
+   * skips them, which is what keeps this lane from charging the route a slot it will not use. */
+  private speculating = new Set<string>();
+  /** Every address this lane has ever asked for. Speculation is once per address per session, so it
+   * can never become a poll and can never show up as a re-ask. Bounded by [[SPECULATED_MEMORY]]. */
+  private speculated = new Set<string>();
+  /** Speculative tiles that arrived and have not yet been drawn — drained by [[acquire]] into
+   * `stats.speculativeHits`, so the lane's benefit is counted rather than asserted. */
+  private speculativeResident = new Set<string>();
   private nextEdgeScan = 0;
   /**
    * The newest capture instant the surface has been told about, as of the last [[refreshEdge]] —
@@ -533,7 +622,7 @@ export class TileCache<T> {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
-    silentFailures: 0,
+    silentFailures: 0, speculativeIssued: 0, speculativeHits: 0,
   };
 
   constructor(
@@ -607,6 +696,9 @@ export class TileCache<T> {
       e.lastUsed = ++this.clock;
       if (pin) e.pinnedFrame = this.frame;
       this.stats.hits++;
+      // The first draw of a tile the look-ahead lane guessed at: its benefit, counted where it
+      // happens rather than argued from how a pan ought to behave (T-538).
+      if (this.speculativeResident.delete(key)) this.stats.speculativeHits++;
       return { kind: "resident", entry: e };
     }
     this.stats.misses++;
@@ -699,6 +791,14 @@ export class TileCache<T> {
     }
     this.queue = keep;
     for (const [key, f] of this.inflight) {
+      // **A speculative read is never aborted** (T-538). It is outside every viewport box by
+      // construction — that is what makes it a guess — so this predicate would abort it on the very
+      // next call whether or not the view moved. More importantly, aborting it is the defect that
+      // reverted T-471: the abort reaches the browser and not `hk-api`, so the route goes on
+      // producing a tile nobody will read and holds the slot while it does ([[abandon]]). There is
+      // at most one of these, it was started only while this client held nothing at all, and letting
+      // it finish is the only thing that actually gives the slot back.
+      if (this.speculating.has(key)) continue;
       const a = parseKey(key);
       if (a && !wanted(a) && f.ctrl) { f.ctrl.abort(); this.stats.cancelled++; this.abandon(f); }
     }
@@ -916,6 +1016,92 @@ export class TileCache<T> {
     return !box || (ext.f1Hz > box.f0Hz && ext.f0Hz < box.f1Hz);
   }
 
+  /**
+   * **Ask for the tile the view is panning INTO, and only while it is actually panning** (T-538).
+   *
+   * Call once a frame with the viewports that are **frozen** — the ones a gesture moves. The live
+   * edge's own advance belongs to [[refreshEdge]], which the caller feeds the *following* viewports;
+   * splitting them that way is what keeps a pane that is merely scrolling with the record out of a
+   * lane whose whole subject is user motion, and it is why the minimap (which follows whatever the
+   * panes do) contributes nothing here. See the file header for the two mechanisms that reverted
+   * T-471 and how this shape forecloses each.
+   *
+   * Returns how many reads it issued: **0 or 1**. It queues nothing, so there is no state left
+   * behind for a later frame to drain.
+   */
+  prefetchAhead(lat: Lattice, viewports: readonly MovingViewport[]): number {
+    const candidates: TileAddr[] = [];
+    const seen = new Set<string>();
+    for (const v of viewports) {
+      seen.add(v.id);
+      const l = v.lat ?? lat;
+      const was = this.lastBox.get(v.id);
+      this.lastBox.set(v.id, { box: v.box, levelF: v.levelF, levelT: v.levelT, scheme: l.scheme });
+      // Nothing to difference yet, or the pane changed what it is looking at rather than where: a
+      // zoom (either axis, or the tier) replaces the working set wholesale and the ordinary queue is
+      // already enumerating it, so predicting a *direction* from it would be predicting noise.
+      if (!was || was.scheme !== l.scheme || was.levelF !== v.levelF || was.levelT !== v.levelT) continue;
+      if (!sameSize(v.box.f1Hz - v.box.f0Hz, was.box.f1Hz - was.box.f0Hz)) continue;
+      if (!sameSize(v.box.t1Ns - v.box.t0Ns, was.box.t1Ns - was.box.t0Ns)) continue;
+      // **Moved means moved by at least one cell.** The level is chosen so a cell is about a pixel
+      // ([[levelForHzPerPx]]), so below this nothing on screen moved and there is no gesture to
+      // extrapolate — and no float wobble in an animated box can manufacture one.
+      const df = v.box.f0Hz - was.box.f0Hz, dt = v.box.t0Ns - was.box.t0Ns;
+      const movedF = Math.abs(df) >= fCellHz(l, v.levelF), movedT = Math.abs(dt) >= tCellNs(l, v.levelT);
+      if (!movedF && !movedT) continue;
+      const sf = movedF ? Math.sign(df) * fTileHz(l, v.levelF) : 0;
+      const st = movedT ? Math.sign(dt) * tTileNs(l, v.levelT) : 0;
+      const ahead: Box = {
+        f0Hz: v.box.f0Hz + sf, f1Hz: v.box.f1Hz + sf,
+        t0Ns: v.box.t0Ns + st, t1Ns: v.box.t1Ns + st,
+      };
+      const inner = new Set(tilesFor(l, v.box, v.levelF, v.levelT).map(keyOf));
+      for (const a of tilesFor(l, ahead, v.levelF, v.levelT)) {
+        if (!inner.has(keyOf(a))) candidates.push(a);
+      }
+    }
+    for (const id of [...this.lastBox.keys()]) if (!seen.has(id)) this.lastBox.delete(id);
+    if (!candidates.length) return 0;
+    if (!this.maySpeculate()) return 0;
+    for (const addr of candidates) {
+      const key = keyOf(addr);
+      if (this.speculated.has(key) || this.map.has(key) || this.inflight.has(key) ||
+          this.queued.has(key) || this.terminal.has(key)) continue;
+      this.speculated.add(key);
+      while (this.speculated.size > SPECULATED_MEMORY) {
+        this.speculated.delete(this.speculated.values().next().value as string);
+      }
+      this.speculating.add(key);
+      this.stats.speculativeIssued++;
+      this.issue(addr, -1);
+      return 1; // one at a time, ever
+    }
+    return 0;
+  }
+
+  /**
+   * **May this client spend a slot on a guess right now?** Every clause is a foreclosure of one of
+   * the two mechanisms that reverted T-471, so none of them is a tuning knob.
+   *
+   *  - [[idle]]: nothing in flight, nothing queued, no refresh outstanding, nothing abandoned. This
+   *    is the precondition that makes "never abort" affordable — the one read this lane starts is
+   *    the only thing on the budget, so letting it finish costs nobody anything, and there is by
+   *    definition no visible miss it could be taking a slot from.
+   *  - `limit >= ceiling`: **the CAP, not the budget.** While AIMD is backed off at all, speculation
+   *    is silent. T-471's guard asked `inflight < effectiveLimit`, which is still true at a halved
+   *    cap, so it kept taking the one remaining slot for ever and the cap never climbed back.
+   *  - the `busyUntil` / `silentUntil` / `silences` gates, for the same reason [[pump]] has them: a
+   *    route that has just refused us, or that is not answering at all, is not owed a guess.
+   */
+  private maySpeculate(): boolean {
+    // The clock half of AIMD recovery, so an idle client's cap is current before it is read (T-539).
+    this.recoverElapsed();
+    const t = this.now();
+    return this.speculating.size === 0 && this.silences === 0 &&
+      t >= this.busyUntil && t >= this.silentUntil &&
+      this.limit >= this.ceiling && this.idle;
+  }
+
   /** Drop one tile so the growing edge can rewrite it (T-439's live tiles are not immutable). */
   invalidate(addr: TileAddr): boolean {
     const key = keyOf(addr);
@@ -924,6 +1110,7 @@ export class TileCache<T> {
     this.tex.destroy(e.tex);
     this.map.delete(key);
     this.refreshedAt.delete(key);
+    this.speculativeResident.delete(key);
     this.bytes -= e.data.bytes;
     return true;
   }
@@ -949,6 +1136,10 @@ export class TileCache<T> {
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
+    this.lastBox.clear();
+    this.speculating.clear();
+    this.speculated.clear();
+    this.speculativeResident.clear();
   }
 
   /**
@@ -1165,7 +1356,8 @@ export class TileCache<T> {
     if (this.evicted.has(key)) this.stats.refetchAfterEvict++;
     // The request is off the in-flight list BEFORE anything is re-queued, or `schedule` would see
     // its own request still outstanding and silently drop the retry.
-    const done = (requeue: boolean) => {
+    const done = (wanted: boolean) => {
+      let requeue = wanted;
       this.lastWireAt = Math.max(this.lastWireAt, this.now());
       this.inflight.delete(key);
       if (this.refreshing.delete(key)) {
@@ -1198,6 +1390,13 @@ export class TileCache<T> {
           this.refreshPassLeft.delete(lane);
           this.refreshNextIssue.set(lane, this.now() + (REFRESH_DUTY - 1) * cost);
         }
+      }
+      // **A guess is never re-driven** (T-538). A speculative read that failed, was refused or was
+      // overtaken by a retune has no one waiting for it; the ordinary miss path owns the address the
+      // moment the user actually pans onto it. Requeueing here is how a lane becomes a retry loop.
+      if (this.speculating.delete(key)) {
+        if (this.map.has(key)) this.speculativeResident.add(key);
+        requeue = false;
       }
       if (requeue) this.schedule(addr);
       this.pump();
@@ -1438,6 +1637,7 @@ export class TileCache<T> {
       this.tex.destroy(victim.tex);
       this.map.delete(victim.key);
       this.refreshedAt.delete(victim.key);
+      this.speculativeResident.delete(victim.key);
       this.bytes -= victim.data.bytes;
       this.evicted.add(victim.key);
       this.stats.evictions++;
