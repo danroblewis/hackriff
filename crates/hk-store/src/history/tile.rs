@@ -668,14 +668,42 @@ pub(crate) struct Tile {
     /// [`Tile::add_value`]'s own writes to a closed cell) is already in the cell by then.
     pub folded_through: Option<usize>,
     pub col: Vec<ColEntry>,
-    /// T-571: the **in-progress top row** of a coarse node that downsamples time, as
-    /// `(row, f_lo, f_hi)` — the row producer rows are currently being folded into and the union
-    /// of the frequency footprints folded into it so far.
-    ///
-    /// This is the whole residency of live coarse maintenance: one `(usize, usize, usize)` per
-    /// open tile, not a second copy of the tile. A node that coarsens frequency alone
-    /// (`t_factor == 1`) never sets it — each producer row completes one of its rows outright.
-    pub row_pending: Option<(usize, usize, usize)>,
+}
+
+/// One row of a producer as the live row fold reads it (T-585): the six per-cell quantities the
+/// fold accumulates, over the producer's `nf` cells, with the geometry needed to place them.
+///
+/// A [`Tile`] lends a row of its arrays ([`Tile::row_src`]); a [`super::live::LiveTile`] lends
+/// its in-progress row, or decodes a committed one into scratch. The fold does not know which.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowSrc<'a> {
+    /// Global cell index of the producer tile's frequency cell 0 / time cell 0.
+    pub f_cell0: i64,
+    pub t_cell0: i64,
+    pub nf: usize,
+    pub nt: usize,
+    pub t_cell_s: f64,
+    /// The row's index within its tile.
+    pub ct: usize,
+    pub count: &'a [u32],
+    pub max: &'a [f32],
+    pub sum_lin: &'a [f64],
+    pub obs_s: &'a [f64],
+    pub occ_s: &'a [f64],
+    pub occ_max: &'a [f32],
+}
+
+impl RowSrc<'_> {
+    /// Observed and occupied seconds of cell `f`, clipped exactly as [`Tile::cell_obs`] clips.
+    #[inline]
+    pub fn cell_obs(&self, f: usize) -> (f64, f64) {
+        let raw = self.obs_s[f];
+        if raw <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let o = raw.min(self.t_cell_s);
+        (o, self.occ_s[f].min(raw) * (o / raw))
+    }
 }
 
 impl Tile {
@@ -709,7 +737,6 @@ impl Tile {
             col_done: None,
             folded_through: None,
             col: Vec::new(),
-            row_pending: None,
         };
         t.reset(key, g);
         t
@@ -736,7 +763,52 @@ impl Tile {
         self.col_done = None;
         self.folded_through = None;
         self.col.clear();
-        self.row_pending = None;
+    }
+
+    /// Row `ct` of this tile as a fold source (T-585).
+    pub fn row_src(&self, ct: usize) -> RowSrc<'_> {
+        let r = ct * self.nf..(ct + 1) * self.nf;
+        RowSrc {
+            f_cell0: self.f_cell0,
+            t_cell0: self.t_cell0,
+            nf: self.nf,
+            nt: self.nt,
+            t_cell_s: self.t_cell_s,
+            ct,
+            count: &self.count[r.clone()],
+            max: &self.max[r.clone()],
+            sum_lin: &self.sum_lin[r.clone()],
+            obs_s: &self.obs_s[r.clone()],
+            occ_s: &self.occ_s[r.clone()],
+            occ_max: &self.occ_max[r],
+        }
+    }
+
+    /// Accumulates a committed row's cell into cell `i` by the live fold's own rule (T-585):
+    /// counts, linear power and seconds add, maxima max. Percentiles are untouched — no row fold
+    /// ever writes them.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn accumulate_cell(
+        &mut self,
+        i: usize,
+        count: u32,
+        max: f32,
+        sum_lin: f64,
+        obs_s: f64,
+        occ_s: f64,
+        occ_max: f32,
+    ) {
+        if count == 0 {
+            return;
+        }
+        self.count[i] =
+            (u64::from(self.count[i]) + u64::from(count)).min(u64::from(u32::MAX)) as u32;
+        self.max[i] = self.max[i].max(max);
+        self.sum_lin[i] += sum_lin;
+        self.obs_s[i] += obs_s;
+        self.occ_s[i] += occ_s;
+        self.occ_max[i] = self.occ_max[i].max(occ_max);
     }
 
     /// Clears frequency cell `f` over the whole tile (retention trim, T-126): every time cell of
@@ -766,6 +838,20 @@ impl Tile {
         self.count[t * self.nf..(t + 1) * self.nf]
             .iter()
             .any(|&c| c > 0)
+    }
+
+    /// Bytes this accumulator holds, measured from its buffers (T-585).
+    pub fn resident_bytes(&self) -> usize {
+        self.count.capacity() * 4
+            + self.max.capacity() * 4
+            + self.sum_lin.capacity() * 8
+            + self.obs_s.capacity() * 8
+            + self.occ_s.capacity() * 8
+            + self.occ_max.capacity() * 4
+            + self.p_lo.capacity() * 4
+            + self.p_hi.capacity() * 4
+            + self.hist.capacity() * 4
+            + self.col.capacity() * std::mem::size_of::<ColEntry>()
     }
 
     #[inline]
@@ -865,127 +951,6 @@ impl Tile {
         col.clear();
         self.col = col;
         Some(t)
-    }
-
-    /// T-571: the in-progress coarse row, taken. Called when a coarse tile is about to seal, so
-    /// the rows it has accumulated but not yet declared complete still reach its own consumers.
-    pub fn take_pending_row(&mut self) -> Option<(usize, usize, usize)> {
-        self.row_pending.take()
-    }
-
-    /// **Streaming row fold (T-571).** Folds producer row `ct` of `child`, frequency cells
-    /// `[f_lo, f_hi)` of that row, into this tile's covering row, **accumulating**; pushes onto
-    /// `out` every row of this tile that is complete as a result, with the frequency footprint
-    /// that row covers.
-    ///
-    /// This is [`Tile::fold_child`] one row at a time, and it agrees with it cell for cell, with
-    /// one deliberate restriction: **a node may coarsen time or frequency, not both**
-    /// (`f_factor == 1 || t_factor == 1`), which [`super::PyramidConfig::geometry`] enforces
-    /// wherever live maintenance is on. The reason is the occupancy *ratio*: `fold_child` takes
-    /// the best ratio over the producer's frequency cells **after** summing each one over the
-    /// producer's rows, and that maximum cannot be updated from one row at a time without keeping
-    /// a per-producer-cell running `(obs, occ)` — residency proportional to a producer row, per
-    /// node, for a shape no scheme uses. With one axis per node it is exact:
-    ///
-    /// - `f_factor == 1`: the group is a single producer cell, so the best ratio is that cell's,
-    ///   and `obs_s`/`occ_s` accumulate outright (`occ_s / obs_s` recovers the ratio).
-    /// - `t_factor == 1`: the whole group is inside this one producer row, so the maximum is
-    ///   taken here and the row is final the moment it is folded.
-    ///
-    /// **Exactly once.** Each of this tile's cells is written by exactly one producer tile, and a
-    /// caller must fold each `(producer tile, row, footprint)` once — the footprint is what keeps
-    /// that true down a frequency chain, where a parent row is filled by `f_factor` producer
-    /// tiles and must not be re-folded upwards as a whole each time one of them arrives.
-    ///
-    /// Provenance is **not** merged here; it is merged once, when the producer tile seals (see
-    /// [`super::Pyramid`]), because a summary is not a per-row quantity and merging it per row
-    /// would inflate every count it holds.
-    #[allow(clippy::too_many_arguments)]
-    pub fn fold_row(
-        &mut self,
-        child: &Tile,
-        ct: usize,
-        f_lo: usize,
-        f_hi: usize,
-        f_factor: u32,
-        t_factor: u32,
-        out: &mut Vec<(usize, usize, usize)>,
-    ) {
-        debug_assert!(
-            f_factor <= 1 || t_factor <= 1,
-            "a live-maintained node coarsens one axis"
-        );
-        let m = i64::from(f_factor.max(1));
-        let n = i64::from(t_factor.max(1));
-        let cg_t = child.t_cell0 + ct as i64;
-        let tp = cg_t.div_euclid(n) - self.t_cell0;
-        if tp < 0 || tp >= self.nt as i64 || ct >= child.nt || f_lo >= f_hi {
-            debug_assert!(f_lo >= f_hi, "producer row outside the consumer tile");
-            return;
-        }
-        let tp = tp as usize;
-        // This row's footprint in **this** tile's frequency cells.
-        let p_lo = ((child.f_cell0 + f_lo as i64).div_euclid(m) - self.f_cell0)
-            .clamp(0, self.nf as i64) as usize;
-        let p_hi = ((child.f_cell0 + f_hi as i64 - 1).div_euclid(m) + 1 - self.f_cell0)
-            .clamp(0, self.nf as i64) as usize;
-        // A row earlier than this one can receive nothing further: producer rows close in
-        // increasing order, so a skipped producer row (a gap) still lets its consumer row out.
-        if let Some((prev, lo, hi)) = self.row_pending
-            && prev != tp
-        {
-            out.push((prev, lo, hi));
-            self.row_pending = None;
-        }
-        for fp in p_lo..p_hi {
-            let c0 = (self.f_cell0 + fp as i64) * m - child.f_cell0;
-            let (mut count, mut max, mut sum_lin, mut occ_max) =
-                (0u64, f32::NEG_INFINITY, 0.0f64, 0f32);
-            let (mut sum_obs, mut best) = (0.0f64, 0.0f64);
-            for k in 0..m {
-                let cf = c0 + k;
-                if cf < 0 || cf >= child.nf as i64 {
-                    continue;
-                }
-                let ci = ct * child.nf + cf as usize;
-                let cnt = child.count[ci];
-                if cnt == 0 {
-                    continue;
-                }
-                count += u64::from(cnt);
-                max = max.max(child.max[ci]);
-                sum_lin += child.sum_lin[ci];
-                occ_max = occ_max.max(child.occ_max[ci]);
-                let (o, c) = child.cell_obs(ci);
-                if o > 0.0 {
-                    sum_obs += o;
-                    best = best.max(c / o);
-                }
-            }
-            if count == 0 {
-                continue;
-            }
-            let i = tp * self.nf + fp;
-            self.count[i] = (u64::from(self.count[i]) + count).min(u64::from(u32::MAX)) as u32;
-            self.max[i] = self.max[i].max(max);
-            self.sum_lin[i] += sum_lin;
-            self.occ_max[i] = self.occ_max[i].max(occ_max);
-            // Coverage is the observed fraction of THIS cell's own extent, so a producer cell that
-            // was never observed pulls it below 1 — the same rule as `fold_child`.
-            let obs = sum_obs / m as f64;
-            self.obs_s[i] += obs;
-            self.occ_s[i] += best * obs;
-        }
-        let (lo, hi) = match self.row_pending {
-            Some((_, l, h)) => (l.min(p_lo), h.max(p_hi)),
-            None => (p_lo, p_hi),
-        };
-        if n == 1 || (cg_t + 1).rem_euclid(n) == 0 {
-            self.row_pending = None;
-            out.push((tp, lo, hi));
-        } else {
-            self.row_pending = Some((tp, lo, hi));
-        }
     }
 
     /// The stats the open column would get if closed now: `(t, per-f (p_lo, p_hi, occ_s))`.

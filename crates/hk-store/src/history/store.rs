@@ -12,6 +12,7 @@ use super::StoreError;
 use super::codec;
 use super::config::{Geometry, PyramidConfig, RetentionOverride};
 use super::frame::{FrameInput, NoiseShape, RegridPlan};
+use super::live::{LiveTile, ROW_ACC_BYTES_PER_CELL, RowAcc};
 use super::stats::{db, hist_percentile};
 use super::tile::{ColEntry, FrontEndState, ProvenanceStep, ProvenanceSummary, Tile};
 
@@ -50,6 +51,17 @@ pub struct PyramidStats {
     /// T-571: producer **cells** scanned by live maintenance. This is the per-arriving-row cost
     /// the invariant says must be measured rather than assumed (T-453).
     pub coarse_cells_folded: u64,
+    /// T-585: `(row, footprint)`s a coarse node **committed** — folded into every consumer and
+    /// then held in stored form, releasing the accumulator row. Bounded per arriving row the same
+    /// way `coarse_rows_folded` is.
+    pub coarse_rows_committed: u64,
+    /// T-585: observed cells those commits encoded.
+    pub coarse_cells_committed: u64,
+    /// T-585: bytes those commits produced before compression, and as held. Their ratio is the
+    /// in-memory compression ratio; `coarse_row_bytes_stored / coarse_cells_committed` the bytes
+    /// per committed cell.
+    pub coarse_row_bytes_raw: u64,
+    pub coarse_row_bytes_stored: u64,
     /// Open level-0 tiles checkpointed.
     pub checkpoints_written: u64,
     /// Bytes written (sealed tiles and checkpoints).
@@ -106,6 +118,88 @@ pub enum IngestOutcome {
 /// another chain's floor. The key is therefore `(FrameInput::source, f_block)` — the same
 /// `source_key(device_id)` the occupancy read and `BaselineKey`'s `ChainKey` use (T-314) — so the
 /// threshold, the measurement and the baseline key are one value by construction.
+/// **What the open tiles hold in RAM, measured** (T-585): the number the residency tests assert
+/// against, taken from the buffers themselves rather than from an open-tile count times an
+/// assumed size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResidentBytes {
+    /// Open tiles held in full ([`Tile`]): level 0, and every level of a scheme that is not
+    /// live-maintained.
+    pub full_tiles: usize,
+    pub full_bytes: usize,
+    /// Open coarse tiles of a live scheme ([`LiveTile`]).
+    pub live_tiles: usize,
+    /// Their accumulator rows, in use and spare.
+    pub live_acc_rows: usize,
+    pub live_acc_bytes: usize,
+    /// Their committed rows, in stored form.
+    pub live_segments: usize,
+    pub live_encoded_bytes: usize,
+}
+
+impl ResidentBytes {
+    /// Everything the open tiles hold.
+    pub fn total(&self) -> usize {
+        self.full_bytes + self.live_acc_bytes + self.live_encoded_bytes
+    }
+
+    /// The coarse nodes' share.
+    pub fn live_bytes(&self) -> usize {
+        self.live_acc_bytes + self.live_encoded_bytes
+    }
+}
+
+/// An open tile: a full accumulator, or (T-585) a live-maintained coarse node holding its
+/// committed rows encoded and only its in-progress row as accumulator.
+#[derive(Clone, Debug)]
+pub(super) enum OpenTile {
+    Full(Box<Tile>),
+    Live(Box<LiveTile>),
+}
+
+impl OpenTile {
+    pub(super) fn prov(&self) -> &ProvenanceSummary {
+        match self {
+            OpenTile::Full(t) => &t.prov,
+            OpenTile::Live(t) => &t.prov,
+        }
+    }
+
+    fn prov_mut(&mut self) -> &mut ProvenanceSummary {
+        match self {
+            OpenTile::Full(t) => &mut t.prov,
+            OpenTile::Live(t) => &mut t.prov,
+        }
+    }
+
+    /// The full accumulator, where this is one. Level 0 always is; so is every level of a scheme
+    /// without live coarse maintenance.
+    fn full_mut(&mut self) -> Option<&mut Tile> {
+        match self {
+            OpenTile::Full(t) => Some(t),
+            OpenTile::Live(_) => None,
+        }
+    }
+
+    /// Bytes this open tile holds, measured from its buffers.
+    fn resident_into(&self, r: &mut ResidentBytes) {
+        match self {
+            OpenTile::Full(t) => {
+                r.full_tiles += 1;
+                r.full_bytes += t.resident_bytes();
+            }
+            OpenTile::Live(t) => {
+                let (acc, enc) = t.resident_bytes();
+                r.live_tiles += 1;
+                r.live_acc_rows += t.acc_rows();
+                r.live_acc_bytes += acc;
+                r.live_segments += t.committed_stats().0;
+                r.live_encoded_bytes += enc;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct FloorTrack {
     w: usize,
@@ -141,16 +235,19 @@ impl FloorTrack {
 }
 
 /// T-583: a preview tile at some level of a producer chain, as `(f_block, t_block, tile, rows)` —
-/// the rows being the ones of it that have **not** propagated to the level above.
-type PreviewTile = (i64, i64, Box<Tile>, Vec<(usize, usize, usize)>);
+/// the rows being the ones of it that have **not** propagated to the level above. The tile is a
+/// clone of the node in its own open form (T-585): level 0 a full accumulator, a coarse node a
+/// [`LiveTile`], which is also the cheaper of the two to clone.
+type PreviewTile = (i64, i64, OpenTile, Vec<(usize, usize, usize)>);
 
 /// The spectrum-history pyramid under one data directory (see the [module docs](super)).
 pub struct Pyramid {
     pub(super) cfg: PyramidConfig,
     pub(super) geom: Geometry,
     pub(super) root: PathBuf,
-    /// Open tiles per level, keyed `(f_block, t_block)`.
-    pub(super) open: Vec<HashMap<(i64, i64), Box<Tile>>>,
+    /// Open tiles per level, keyed `(f_block, t_block)`. Level 0 is always [`OpenTile::Full`];
+    /// a live scheme's coarse levels are [`OpenTile::Live`] (T-585).
+    pub(super) open: Vec<HashMap<(i64, i64), OpenTile>>,
     /// T-453: coarse tiles built on demand whose time block has **not** elapsed — the live edge,
     /// which `docs/16` §5.2 says is computed on request precisely because it cannot be
     /// precomputed. Keyed `(level, f_block, t_block)`, never written, and dropped the moment the
@@ -164,9 +261,17 @@ pub struct Pyramid {
     disk_bytes: u64,
     /// Sealed bytes per level.
     level_bytes: Vec<u64>,
-    /// Boxed so tiles move between the open maps and the pool without copying.
+    /// Boxed so tiles move between the open maps and the pool without copying. At a live coarse
+    /// level this holds the scratch a [`LiveTile`] is materialised into for its seal write.
     #[allow(clippy::vec_box)]
     pool: Vec<Vec<Box<Tile>>>,
+    /// T-585: pooled [`LiveTile`]s per level.
+    #[allow(clippy::vec_box)]
+    live_pool: Vec<Vec<Box<LiveTile>>>,
+    /// T-585: one row of accumulator a committed row is decoded into when a fold reads it.
+    row_scratch: RowAcc,
+    /// T-585: encode scratch for a row commit.
+    seg_buf: Vec<u8>,
     plan: RegridPlan,
     /// Default level-0 floor per `(source, f_block)` (T-377): see [`FloorTrack`].
     pub(super) floors: HashMap<(u64, i64), FloorTrack>,
@@ -273,16 +378,18 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError + '_ {
 
 #[allow(clippy::too_many_arguments, clippy::vec_box)]
 fn open_tile<'m>(
-    map: &'m mut HashMap<(i64, i64), Box<Tile>>,
+    map: &'m mut HashMap<(i64, i64), OpenTile>,
     pool: &mut Vec<Box<Tile>>,
+    live_pool: &mut Vec<Box<LiveTile>>,
     geom: &Geometry,
     level: usize,
     scheme: u16,
     bins: usize,
     fb: i64,
     tb: i64,
+    live: bool,
     next_seal: &mut i64,
-) -> &'m mut Tile {
+) -> &'m mut OpenTile {
     map.entry((fb, tb)).or_insert_with(|| {
         let key = TileKey {
             scheme,
@@ -292,12 +399,24 @@ fn open_tile<'m>(
         };
         let g = &geom.levels[level];
         *next_seal = (*next_seal).min(geom.block_end_ns(level, tb));
-        match pool.pop() {
-            Some(mut t) => {
-                t.reset(key, g);
-                t
-            }
-            None => Box::new(Tile::new(key, geom.nf, g, bins)),
+        // T-585: a live scheme's coarse node holds its committed rows encoded; level 0 is
+        // capture's own accumulator and stays full.
+        if live && level > 0 {
+            OpenTile::Live(match live_pool.pop() {
+                Some(mut t) => {
+                    t.reset(key, g);
+                    t
+                }
+                None => Box::new(LiveTile::new(key, geom.nf, g)),
+            })
+        } else {
+            OpenTile::Full(match pool.pop() {
+                Some(mut t) => {
+                    t.reset(key, g);
+                    t
+                }
+                None => Box::new(Tile::new(key, geom.nf, g, bins)),
+            })
         }
     })
 }
@@ -326,6 +445,9 @@ impl Pyramid {
             disk_bytes: 0,
             level_bytes: vec![0; n],
             pool: (0..n).map(|_| Vec::new()).collect(),
+            live_pool: (0..n).map(|_| Vec::new()).collect(),
+            row_scratch: RowAcc::new(geom.nf),
+            seg_buf: Vec::new(),
             plan: RegridPlan::default(),
             floors: HashMap::new(),
             watermark_ns: i64::MIN,
@@ -566,6 +688,22 @@ impl Pyramid {
         })
     }
 
+    /// **What the open tiles hold in RAM, measured from their buffers** (T-585). The residency
+    /// tests assert against this rather than against an open-tile count times an assumed size.
+    pub fn resident_bytes(&self) -> ResidentBytes {
+        let mut r = ResidentBytes::default();
+        for m in &self.open {
+            for t in m.values() {
+                t.resident_into(&mut r);
+            }
+        }
+        r
+    }
+
+    /// Bytes one cell of a live node's accumulator row holds ([`ROW_ACC_BYTES_PER_CELL`]),
+    /// re-exported so a test's bound is arithmetic over the same constant.
+    pub const ROW_ACC_BYTES_PER_CELL: usize = ROW_ACC_BYTES_PER_CELL;
+
     fn key(&self, level: usize, f_block: i64, t_block: i64) -> TileKey {
         TileKey {
             scheme: self.cfg.scheme,
@@ -657,6 +795,7 @@ impl Pyramid {
             plan,
             open,
             pool,
+            live_pool,
             floors,
             scratch,
             geom,
@@ -679,14 +818,18 @@ impl Pyramid {
             let tile = open_tile(
                 &mut open[0],
                 &mut pool[0],
+                &mut live_pool[0],
                 geom,
                 0,
                 scheme,
                 bins,
                 fb,
                 tb,
+                live,
                 next_seal_ns,
-            );
+            )
+            .full_mut()
+            .expect("level 0 is always a full accumulator");
             // T-377: this frame's own chain's floor, never the pyramid's pooled one.
             let floor = floors.get(&(frame.source, fb)).map(|f| &f.floor[..]);
             if tile.col_t.is_some_and(|c| t_in > c) {
@@ -833,17 +976,19 @@ impl Pyramid {
                         // on — and rows held back by `seal_lag` must all go up now.
                         {
                             let Self { open, scratch, .. } = self;
-                            if let Some(t) = open[0].get_mut(&(fb, tb)) {
+                            if let Some(t) = open[0].get_mut(&(fb, tb)).and_then(|t| t.full_mut()) {
                                 t.close_column(margin, pct, scratch);
                             }
                         }
                         self.fold_finished_rows(fb, tb, i64::MAX);
                         continue;
                     }
-                    if let Some((t, lo, hi)) = self.open[level]
-                        .get_mut(&(fb, tb))
-                        .and_then(|t| t.take_pending_row())
-                    {
+                    // T-585: a coarse node's in-progress row lives in its `LiveTile`.
+                    let flushed = match self.open[level].get_mut(&(fb, tb)) {
+                        Some(OpenTile::Live(t)) => t.take_pending_row(),
+                        _ => None,
+                    };
+                    if let Some((t, lo, hi)) = flushed {
                         self.fold_row_live(level, fb, tb, t, lo, hi);
                     }
                 }
@@ -852,8 +997,27 @@ impl Pyramid {
             }
             let mut result = Ok(());
             for &(fb, tb) in &keys {
-                let Some(mut tile) = self.open[level].remove(&(fb, tb)) else {
+                let Some(open) = self.open[level].remove(&(fb, tb)) else {
                     continue;
+                };
+                // T-585: a live coarse node is materialised into pooled scratch for its one
+                // write — the tile is still the write unit — and the scratch goes back below.
+                let (mut tile, live_tile) = match open {
+                    OpenTile::Full(t) => (t, None),
+                    OpenTile::Live(l) => {
+                        let g = &self.geom.levels[level];
+                        let mut t = match self.pool[level].pop() {
+                            Some(t) => t,
+                            None => Box::new(Tile::new(
+                                l.key,
+                                self.geom.nf,
+                                g,
+                                usize::from(self.cfg.histogram.bins),
+                            )),
+                        };
+                        l.materialize_into(&mut t, g);
+                        (t, Some(l))
+                    }
                 };
                 if level == 0 {
                     tile.close_column(margin, pct, &mut self.scratch);
@@ -875,9 +1039,12 @@ impl Pyramid {
                 // sealed producers; inside the current block it carries cells without it, which is
                 // the honest statement of what has been summarised so far.
                 if written.is_ok() && self.cfg.coarse_live {
-                    self.fold_prov_into_consumers(level, &tile);
+                    self.fold_prov_into_consumers(level, &tile.prov, tile.key);
                 }
                 self.pool[level].push(tile);
+                if let Some(l) = live_tile {
+                    self.live_pool[level].push(l);
+                }
                 if let Err(e) = written {
                     result = Err(e);
                     break;
@@ -937,17 +1104,23 @@ impl Pyramid {
             if self.sealed[up].contains_key(&(ptb, pfb)) {
                 continue;
             }
-            let parent = open_tile(
+            let Some(parent) = open_tile(
                 &mut self.open[up],
                 &mut self.pool[up],
+                &mut self.live_pool[up],
                 &self.geom,
                 up,
                 self.cfg.scheme,
                 usize::from(hist_cfg.bins),
                 pfb,
                 ptb,
+                false,
                 &mut self.next_seal_ns,
-            );
+            )
+            .full_mut() else {
+                debug_assert!(false, "a seal-time fold into a live-maintained node");
+                continue;
+            };
             parent.fold_child(
                 child,
                 self.geom.levels[up].f_factor,
@@ -962,31 +1135,31 @@ impl Pyramid {
 
     /// T-571: merges a sealed tile's provenance into every coarser level folded from it, leaving
     /// the cells alone — live maintenance has already folded those, one row at a time.
-    fn fold_prov_into_consumers(&mut self, level: usize, child: &Tile) {
+    fn fold_prov_into_consumers(&mut self, level: usize, prov: &ProvenanceSummary, key: TileKey) {
         let mut ups = std::mem::take(&mut self.consumers);
         ups.clear();
         ups.extend_from_slice(self.geom.consumers(level));
         let bins = usize::from(self.cfg.histogram.bins);
-        let scheme = self.cfg.scheme;
+        let (scheme, live) = (self.cfg.scheme, self.cfg.coarse_live);
         for &up in &ups {
-            let (pfb, ptb) = self
-                .geom
-                .fold_target(level, up, child.key.f_block, child.key.t_block);
+            let (pfb, ptb) = self.geom.fold_target(level, up, key.f_block, key.t_block);
             if self.sealed[up].contains_key(&(ptb, pfb)) {
                 continue;
             }
             let parent = open_tile(
                 &mut self.open[up],
                 &mut self.pool[up],
+                &mut self.live_pool[up],
                 &self.geom,
                 up,
                 scheme,
                 bins,
                 pfb,
                 ptb,
+                live,
                 &mut self.next_seal_ns,
             );
-            parent.prov.merge(&child.prov);
+            parent.prov_mut().merge(prov);
         }
         self.consumers = ups;
     }
@@ -1039,7 +1212,7 @@ impl Pyramid {
     fn fold_finished_rows(&mut self, fb: i64, tb: i64, through_ns: i64) {
         let (nf, t_cell_ns) = (self.geom.nf, self.geom.levels[0].t_cell_ns);
         loop {
-            let Some(tile) = self.open[0].get_mut(&(fb, tb)) else {
+            let Some(tile) = self.open[0].get_mut(&(fb, tb)).and_then(|t| t.full_mut()) else {
                 return;
             };
             let t = tile.folded_through.map_or(0, |t| t + 1);
@@ -1071,9 +1244,14 @@ impl Pyramid {
     /// whatever the node count — the measurement is
     /// [`PyramidStats::coarse_cells_folded`] and `tests/live_coarse.rs` asserts it.
     ///
-    /// Residency is one `(row, f_lo, f_hi)` per open tile ([`Tile::row_pending`]), not an
-    /// accumulator per node, and **no tile is written per row**: a coarse tile is written when it
-    /// seals, exactly as before, which is why the commit-every-N rule costs zero extra writes.
+    /// **Residency (T-585).** A coarse node holds its committed rows in stored form and only its
+    /// in-progress row as accumulator ([`LiveTile`]): a completed row is folded into every
+    /// consumer at full precision and *then* committed — encoded, its accumulator row released —
+    /// so the node is one row of accumulator plus an encoded remainder, not a whole tile.
+    /// Measured at the shipped geometry: 0.8 MB over 18 open coarse tiles where T-571 held
+    /// 52.6 MB (`hk-pipeline/tests/live_edge_tiles.rs`). **No tile is written per row**: a coarse
+    /// tile is written once, when it seals, exactly as before, which is why the commit-every-N
+    /// rule costs zero extra writes.
     ///
     /// # How far a coarse node trails the live edge (T-583)
     ///
@@ -1133,52 +1311,96 @@ impl Pyramid {
             return;
         }
         let (scheme, bins) = (self.cfg.scheme, usize::from(self.cfg.histogram.bins));
+        let (live, compression) = (self.cfg.coarse_live, self.cfg.compression_level);
         let mut q = std::mem::take(&mut self.row_queue);
         let mut out = std::mem::take(&mut self.row_out);
+        let mut row_scratch = std::mem::replace(&mut self.row_scratch, RowAcc::new(0));
+        let mut seg_buf = std::mem::take(&mut self.seg_buf);
         q.clear();
         q.push_back((level, fb, tb, t, f_lo, f_hi));
         while let Some((l, fb, tb, t, f_lo, f_hi)) = q.pop_front() {
             // Taken out so the consumer's accumulator may be borrowed mutably; put back below.
             // A consumer always has a higher level index than its producer (the geometry enforces
             // it), so nothing here can alias.
-            let Some(child) = self.open[l].remove(&(fb, tb)) else {
+            let Some(mut child) = self.open[l].remove(&(fb, tb)) else {
                 continue;
             };
             let mut ups = std::mem::take(&mut self.consumers);
             ups.clear();
             ups.extend_from_slice(self.geom.consumers(l));
-            for &up in &ups {
-                let (pfb, ptb) = self.geom.fold_target(l, up, fb, tb);
-                if self.sealed[up].contains_key(&(ptb, pfb)) {
-                    continue;
-                }
-                let (ff, tf) = (self.geom.levels[up].f_factor, self.geom.levels[up].t_factor);
-                out.clear();
-                let parent = open_tile(
-                    &mut self.open[up],
-                    &mut self.pool[up],
-                    &self.geom,
-                    up,
-                    scheme,
-                    bins,
-                    pfb,
-                    ptb,
-                    &mut self.next_seal_ns,
-                );
-                parent.fold_row(&child, t, f_lo, f_hi, ff, tf, &mut out);
-                self.stats.coarse_rows_folded += 1;
-                self.stats.coarse_cells_folded += (f_hi - f_lo) as u64;
-                if cascade {
-                    for &(pt, pl, ph) in &out {
-                        q.push_back((up, pfb, ptb, pt, pl, ph));
+            // T-585: the producer row as a fold source — a full tile's row, a live node's
+            // in-progress row, or a committed one decoded into scratch (the reopen replay).
+            let src = match &child {
+                OpenTile::Full(c) => (t < c.nt).then(|| c.row_src(t)),
+                OpenTile::Live(c) => c.row_src(t, &mut row_scratch),
+            };
+            if let Some(src) = src {
+                for &up in &ups {
+                    let (pfb, ptb) = self.geom.fold_target(l, up, fb, tb);
+                    if self.sealed[up].contains_key(&(ptb, pfb)) {
+                        continue;
+                    }
+                    let (ff, tf) = (self.geom.levels[up].f_factor, self.geom.levels[up].t_factor);
+                    out.clear();
+                    let Some(parent) = (match open_tile(
+                        &mut self.open[up],
+                        &mut self.pool[up],
+                        &mut self.live_pool[up],
+                        &self.geom,
+                        up,
+                        scheme,
+                        bins,
+                        pfb,
+                        ptb,
+                        live,
+                        &mut self.next_seal_ns,
+                    ) {
+                        OpenTile::Live(p) => Some(p),
+                        OpenTile::Full(_) => None,
+                    }) else {
+                        debug_assert!(false, "a live row fold into a full-accumulator node");
+                        continue;
+                    };
+                    parent.fold_row(&src, f_lo, f_hi, ff, tf, &mut out);
+                    self.stats.coarse_rows_folded += 1;
+                    self.stats.coarse_cells_folded += (f_hi - f_lo) as u64;
+                    if cascade {
+                        for &(pt, pl, ph) in &out {
+                            q.push_back((up, pfb, ptb, pt, pl, ph));
+                        }
+                    } else {
+                        // Nothing reads these before the level above gets its own replay turn,
+                        // which decodes them: commit at once.
+                        for &(pt, pl, ph) in &out {
+                            if let Some((raw, stored)) =
+                                parent.commit(pt, pl, ph, compression, &mut seg_buf)
+                            {
+                                self.stats.coarse_rows_committed += 1;
+                                self.stats.coarse_cells_committed += (ph - pl) as u64;
+                                self.stats.coarse_row_bytes_raw += raw as u64;
+                                self.stats.coarse_row_bytes_stored += stored as u64;
+                            }
+                        }
                     }
                 }
+            }
+            // T-585: every consumer has now folded this completed row, so it is COMMITTED — held
+            // in stored form from here to the seal, and its accumulator row released.
+            if let OpenTile::Live(c) = &mut child
+                && let Some((raw, stored)) = c.commit(t, f_lo, f_hi, compression, &mut seg_buf)
+            {
+                self.stats.coarse_rows_committed += 1;
+                self.stats.coarse_cells_committed += (f_hi - f_lo) as u64;
+                self.stats.coarse_row_bytes_raw += raw as u64;
+                self.stats.coarse_row_bytes_stored += stored as u64;
             }
             self.consumers = ups;
             self.open[l].insert((fb, tb), child);
         }
         self.row_queue = q;
         self.row_out = out;
+        self.row_scratch = row_scratch;
+        self.seg_buf = seg_buf;
     }
 
     /// The `(f_block, t_block)` at the end of `chain` that block `(fb, tb)` of `chain[0]` folds
@@ -1218,7 +1440,7 @@ impl Pyramid {
     /// **Why it cannot double-count.** It never touches the pyramid: it folds into *clones*,
     /// which are discarded with the answer. What it folds is only what has **not** propagated —
     /// level 0's open column (which folds upward when it closes) and each node's
-    /// [`Tile::row_pending`] (which folds upward when it commits) — so the committed cells it
+    /// [`LiveTile::row_pending`] (which folds upward when it commits) — so the committed cells it
     /// starts from are each still written exactly once by the live cascade.
     ///
     /// Returns `None` when nothing is in flight below this address, which is every read of
@@ -1246,6 +1468,8 @@ impl Pyramid {
         let bins = usize::from(self.cfg.histogram.bins);
         let mut scratch = Vec::new();
         let mut out = Vec::new();
+        // T-585: a committed producer row is decoded into this to be read.
+        let mut row_scratch = RowAcc::new(self.geom.nf);
         // Preview tiles at the current level, each with the rows of it that have not propagated.
         let mut cur: Vec<PreviewTile> = Vec::new();
         for (k, &l) in chain.iter().enumerate() {
@@ -1262,23 +1486,28 @@ impl Pyramid {
                 .collect();
             keys.sort_unstable();
             for key in keys {
-                let src = &self.open[l][&key];
-                let (tile, rows) = if l == 0 {
-                    if src.col_t.is_none() {
-                        continue;
+                let (tile, rows) = match &self.open[l][&key] {
+                    OpenTile::Full(src) if l == 0 => {
+                        if src.col_t.is_none() {
+                            continue;
+                        }
+                        // The column as it would stand if it ended now: `column_preview`'s
+                        // statement, taken on a clone so the occupancy and percentiles it decides
+                        // fold upward too.
+                        let mut t = Box::new((**src).clone());
+                        let Some(row) = t.close_column(margin, pct, &mut scratch) else {
+                            continue;
+                        };
+                        (OpenTile::Full(t), vec![(row, 0, self.geom.nf)])
                     }
-                    // The column as it would stand if it ended now: `column_preview`'s statement,
-                    // taken on a clone so the occupancy and percentiles it decides fold upward too.
-                    let mut t = Box::new((**src).clone());
-                    let Some(row) = t.close_column(margin, pct, &mut scratch) else {
-                        continue;
-                    };
-                    (t, vec![(row, 0, self.geom.nf)])
-                } else {
-                    let Some(r) = src.row_pending else {
-                        continue;
-                    };
-                    (Box::new((**src).clone()), vec![r])
+                    // T-585: a coarse node's in-progress row lives in its `LiveTile`.
+                    OpenTile::Live(src) if l > 0 => {
+                        let Some(r) = src.row_pending else {
+                            continue;
+                        };
+                        (OpenTile::Live(src.clone()), vec![r])
+                    }
+                    _ => continue,
                 };
                 self.count_source_tile();
                 cur.push((key.0, key.1, tile, rows));
@@ -1296,12 +1525,17 @@ impl Pyramid {
                     Some(i) => i,
                     None => {
                         let t = match self.open[up].get(&(pfb, ptb)) {
-                            Some(t) => {
+                            Some(OpenTile::Live(t)) => {
                                 self.count_source_tile();
-                                Box::new((**t).clone())
+                                t.clone()
+                            }
+                            // Every coarse node of a live scheme is a `LiveTile` (T-585).
+                            Some(OpenTile::Full(_)) => {
+                                debug_assert!(false, "a live-maintained node held in full");
+                                continue;
                             }
                             // Its first producer row is still in flight, so it does not exist yet.
-                            None => Box::new(Tile::new(
+                            None => Box::new(LiveTile::new(
                                 TileKey {
                                     scheme: self.cfg.scheme,
                                     level: up as u8,
@@ -1310,26 +1544,38 @@ impl Pyramid {
                                 },
                                 self.geom.nf,
                                 &self.geom.levels[up],
-                                bins,
                             )),
                         };
-                        next.push((pfb, ptb, t, Vec::new()));
+                        next.push((pfb, ptb, OpenTile::Live(t), Vec::new()));
                         next.len() - 1
                     }
                 };
+                let e = &mut next[i];
+                let OpenTile::Live(parent) = &mut e.2 else {
+                    unreachable!("a preview parent is always a LiveTile");
+                };
                 for (t, lo, hi) in rows {
+                    // T-585: the producer row as a fold source — a full tile's row, a live node's
+                    // in-progress row, or a committed one decoded into scratch.
+                    let src = match &child {
+                        OpenTile::Full(c) => (t < c.nt).then(|| c.row_src(t)),
+                        OpenTile::Live(c) => c.row_src(t, &mut row_scratch),
+                    };
+                    let Some(src) = src else { continue };
                     out.clear();
-                    next[i].2.fold_row(&child, t, lo, hi, ff, tf, &mut out);
+                    parent.fold_row(&src, lo, hi, ff, tf, &mut out);
                     self.preview_rows
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    next[i].3.extend(out.iter().copied());
+                    e.3.extend(out.iter().copied());
                 }
             }
             if up != level {
                 // The row each of these is still accumulating has not propagated either — that is
                 // the whole lag — so it carries on up with the rows this step completed.
                 for e in &mut next {
-                    if let Some(r) = e.2.row_pending {
+                    if let OpenTile::Live(t) = &e.2
+                        && let Some(r) = t.row_pending
+                    {
                         e.3.push(r);
                     }
                 }
@@ -1339,7 +1585,16 @@ impl Pyramid {
         }
         cur.into_iter()
             .find(|e| (e.0, e.1) == (fb, tb))
-            .map(|e| e.2)
+            .map(|e| match e.2 {
+                OpenTile::Full(t) => t,
+                // T-585: served materialised, exactly as an open live node is read.
+                OpenTile::Live(l) => {
+                    let g = &self.geom.levels[level];
+                    let mut t = Box::new(Tile::new(l.key, self.geom.nf, g, bins));
+                    l.materialize_into(&mut t, g);
+                    t
+                }
+            })
     }
 
     /// Drops every transient live-edge summary. Called wherever the data a derived tile was folded
@@ -1416,7 +1671,18 @@ impl Pyramid {
                 // derived for a coarser read, or sealed on disk.
                 let owned;
                 let child: Option<&Tile> = if let Some(t) = self.open[from].get(&(cfb, ctb)) {
-                    Some(t)
+                    match t {
+                        OpenTile::Full(t) => Some(t),
+                        // T-585: an open live node is read materialised, like a sealed one.
+                        OpenTile::Live(l) => {
+                            let g = &self.geom.levels[from];
+                            let mut t =
+                                Tile::new(l.key, self.geom.nf, g, usize::from(hist_cfg.bins));
+                            l.materialize_into(&mut t, g);
+                            owned = Some(t);
+                            owned.as_ref()
+                        }
+                    }
                 } else if let Some(t) = self.derived.get(&(from, cfb, ctb)) {
                     Some(t)
                 } else {
@@ -2132,12 +2398,12 @@ impl Pyramid {
         keys.extend(self.open[0].keys().copied());
         let mut result = Ok(());
         for &k in &keys {
-            let Some(mut tile) = self.open[0].remove(&k) else {
+            let Some(OpenTile::Full(mut tile)) = self.open[0].remove(&k) else {
                 continue;
             };
             tile.close_column(margin, pct, &mut self.scratch);
             let written = self.write_tile(0, &tile, false);
-            self.open[0].insert(k, tile);
+            self.open[0].insert(k, OpenTile::Full(tile));
             if self.cfg.coarse_live {
                 // T-584: the column this closed is on disk, but it is NOT finished — frames may
                 // still arrive in that cell, and they did. It folds upwards when the ingest
@@ -2280,7 +2546,7 @@ impl Pyramid {
         tb: i64,
     ) -> Result<Option<ProvenanceSummary>, StoreError> {
         if let Some(t) = self.open[level].get(&(fb, tb)) {
-            return Ok(Some(t.prov.clone()));
+            return Ok(Some(t.prov().clone()));
         }
         if !self.sealed[level].contains_key(&(tb, fb)) {
             return Ok(None);
@@ -2330,7 +2596,7 @@ impl Pyramid {
             match codec::decode(&path, &self.geom.levels[0], bins).map_err(io_err(&path))? {
                 Some(tile) => {
                     self.next_seal_ns = self.next_seal_ns.min(self.geom.block_end_ns(0, tb));
-                    self.open[0].insert((fb, tb), Box::new(tile));
+                    self.open[0].insert((fb, tb), OpenTile::Full(Box::new(tile)));
                 }
                 None => {
                     let _ = fs::remove_file(&path);
@@ -2402,20 +2668,28 @@ impl Pyramid {
                         let Some(t) = self.read_sealed(level, fb, tb)? else {
                             continue;
                         };
-                        self.open[level].insert((fb, tb), Box::new(t));
+                        self.open[level].insert((fb, tb), OpenTile::Full(Box::new(t)));
                     }
                     // Ascending time within a tile: the cascade's in-progress row is flushed by a
                     // later row arriving, so out-of-order rows would strand it.
-                    let rows: Vec<usize> = {
-                        let tile = &self.open[level][&(fb, tb)];
-                        (0..tile.nt)
+                    //
+                    // T-585: a live node replays exactly its COMMITTED footprints — the same
+                    // `(row, f_lo, f_hi)` its consumers were fed live — and never its pending
+                    // row. That row is still being adjusted: it is emitted upwards when it
+                    // completes (or at its tile's seal), and replaying it here as well would fold
+                    // its partial contents into the level above twice.
+                    let rows: Vec<(usize, usize, usize)> = match &self.open[level][&(fb, tb)] {
+                        OpenTile::Full(tile) => (0..tile.nt)
                             .filter(|&t| (0..tile.nf).any(|f| tile.count[t * tile.nf + f] > 0))
-                            .collect()
+                            .map(|t| (t, 0, nf))
+                            .collect(),
+                        OpenTile::Live(l) => l.committed_footprints(),
                     };
-                    for t in rows {
-                        self.fold_row_from(level, fb, tb, t, 0, nf, false);
+                    for (t, lo, hi) in rows {
+                        self.fold_row_from(level, fb, tb, t, lo, hi, false);
                     }
-                    if !was_open && let Some(t) = self.open[level].remove(&(fb, tb)) {
+                    if !was_open && let Some(OpenTile::Full(t)) = self.open[level].remove(&(fb, tb))
+                    {
                         self.pool[level].push(t);
                     }
                 }
