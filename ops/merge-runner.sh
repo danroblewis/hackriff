@@ -660,6 +660,10 @@ while true; do
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
+    # Dedupe, first occurrence wins: a branch appended more than once (each new tip re-queues the
+    # same name) took one BULK_MAX slot per copy - `task-alerts` x4 pushed gate-diag, spec-waits
+    # and watchdog out of the 03:12 batch on 2026-09-23.
+    ready=$(printf '%s\n' $ready | awk '!seen[$0]++' | tr '\n' ' ')
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
