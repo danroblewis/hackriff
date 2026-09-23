@@ -21045,7 +21045,7 @@ tasks:
   - id: T-615
     milestone: MAUTO
     title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
-    status: in-progress
+    status: done
     branch: task-t615
     priority: normal
     parallel_group: DETECT
@@ -21081,6 +21081,7 @@ tasks:
       Use cases: SIGNAL-085
     notes: |
       2026-09-23 (coordinator): rebuilt on main after a board-only conflict; code commits cherry-picked unchanged, result re-applied. Old tip kept as old/task-t615.
+    commit: e6de721c
   - id: T-620
     milestone: M2-hardening
     title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
