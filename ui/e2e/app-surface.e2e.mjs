@@ -66,12 +66,35 @@ test("GET / mounts the unified surface in the app, under the product CSP", async
 
   // (5) It drew. A drawing buffer equal to the element's CSS box at this dpr first — a canvas sized
   // 0, or sized to the wrong box, renders "successfully" into nothing.
-  const rect0 = await page.$rect(".sf-canvas");
-  assert.ok(rect0 && rect0.w > 200 && rect0.h > 100, `the app's canvas has no box: ${JSON.stringify(rect0)}`);
-  const buf = await page.eval(`(() => { const c = document.querySelector('.sf-canvas');
-    return { w: c.width, h: c.height, dpr: window.devicePixelRatio }; })()`);
-  assert.equal(buf.w, Math.round(rect0.w * buf.dpr), "drawing-buffer width is not the CSS box at this dpr");
-  assert.equal(buf.h, Math.round(rect0.h * buf.dpr), "drawing-buffer height is not the CSS box at this dpr");
+  //
+  // **Waited for, then asserted — never one read** (the 09-22 gate red, `680 !== 560`). The buffer
+  // follows the box through a ResizeObserver, which the browser delivers at its next rendering
+  // step; the box itself changes whenever the chrome above the stage re-wraps (in the gate red the
+  // box was 120 px shorter than the buffer, on a run whose orientation sentence — just waited for —
+  // carried an extra clause). A read taken between the layout and that rendering step sees the new
+  // box and the old buffer. Under load that gap is long enough to land
+  // in, so the claim is made the only way it is true: the buffer SETTLES on the box, within a bound.
+  // A canvas that never tracks its box (the defect) still times out here and fails, naming both.
+  // Box and buffer are read in ONE evaluation, so every reading compares a box with the buffer of
+  // the same instant; the loop keeps the last reading, and the assertions judge that one.
+  const BUF = `(() => { const c = document.querySelector('.sf-canvas'); const r = c.getBoundingClientRect();
+    return { w: c.width, h: c.height, cssW: r.width, cssH: r.height, dpr: window.devicePixelRatio }; })()`;
+  const fits = (b) => b.w === Math.round(b.cssW * b.dpr) && b.h === Math.round(b.cssH * b.dpr);
+  const SETTLE_MS = 10000;
+  const settleFrom = Date.now();
+  let buf = await page.eval(BUF), readings = 1;
+  while (!fits(buf) && Date.now() - settleFrom < SETTLE_MS) {
+    await page.frames(1);
+    buf = await page.eval(BUF);
+    readings++;
+  }
+  assert.ok(buf.cssW > 200 && buf.cssH > 100, `the app's canvas has no box: ${JSON.stringify(buf)}`);
+  t.diagnostic(`drawing buffer ${buf.w}×${buf.h} for a ${buf.cssW}×${buf.cssH} box at dpr ${buf.dpr}, ` +
+    `after ${readings} reading(s) over ${Date.now() - settleFrom} ms`);
+  assert.equal(buf.w, Math.round(buf.cssW * buf.dpr),
+    `drawing-buffer width is not the CSS box at this dpr, ${SETTLE_MS} ms after the surface addressed`);
+  assert.equal(buf.h, Math.round(buf.cssH * buf.dpr),
+    `drawing-buffer height is not the CSS box at this dpr, ${SETTLE_MS} ms after the surface addressed`);
 
   // Then the histogram, the same shape of claim `surface-load` makes: enough distinct colours that
   // this is a ramp and not a clear, no single colour owning the frame, and not black. The black
@@ -190,7 +213,9 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
   await page.frames(3);
 
   const read = () => page.eval(`(() => { const d = document.querySelector('.sf-ring').dataset;
-    return { ret: +d.retentionS, iq: +d.iqS, t0: +d.paneT0S, t1: +d.paneT1S, top: +d.paneTopPx, h: +d.paneHPx,
+    return { ret: +d.retentionS, iq: +d.iqS, edge: +d.edgeS, ringT0: d.ringT0S ? +d.ringT0S : null,
+      ringT1: d.ringT1S ? +d.ringT1S : null,
+      t0: +d.paneT0S, t1: +d.paneT1S, top: +d.paneTopPx, h: +d.paneHPx,
       left: +d.paneLeftPx, w: +d.paneWPx, backing: d.backing, text: document.querySelector('.sf-ring').textContent }; })()`);
   const st = await read();
   t.diagnostic(`readout: ${st.text}`);
@@ -199,11 +224,47 @@ test("T-506: the canvas draws the IQ horizon and the retention bound where the r
 
   // The instants are the server's: retention bound = the live edge − retention_s, IQ horizon =
   // buffered.t0_s (or later, once the ring is full).
+  //
+  // **Judged against the snapshot the page drew from, not against a later question** (the 09-22
+  // gate red). The page draws both rules from the edge it has and the ring window it last polled
+  // (`CAPTURE_CLOCK_MS`, 5 s); the server's ring moves on after that. Once the ring has been up
+  // longer than its retention, its oldest sample advances — with the retention bound, and in
+  // eviction steps (7.5 s measured on this fixture) — so a `GET /api/timeline` asked after the page
+  // drew can report a newer `buffered.t0_s` than the horizon a correct page drew, and the old
+  // `st.iq >= buffered.t0_s` then failed; the longer the gap between drawing and asking (load), the
+  // likelier. Alone, this spec runs first against a ring seconds old whose oldest sample never
+  // moves, which is why it only ever failed in a lane that ran it late. So the page states what it
+  // derived the rules from (`data-edge-s`, `data-ring-t0-s`/`-t1-s`), the derivation is checked
+  // exactly against those, and those inputs are checked against the server for what can hold
+  // across the gap: the ring's oldest never moves backwards and never holds more than retention.
   const tl = await (await fetch(`${ORIGIN}/api/timeline?columns=1&rows=1`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
   const w = tl.window;
   t.diagnostic(`server window: retention_s ${w.retention_s}, t0 ${w.t0_s}, t1 ${w.t1_s}, buffered ${JSON.stringify(w.buffered)}`);
+  if (w.buffered && st.ringT1 !== null) {
+    t.diagnostic(`page drew from: edge ${st.edge}, ring ${st.ringT0}…${st.ringT1} (poll ${(w.t1_s - st.ringT1).toFixed(2)} s ` +
+      `older than the server's answer); horizon ${st.iq} is ${(st.iq - w.buffered.t0_s).toFixed(3)} s from the server's ` +
+      "later buffered.t0_s — the cross-snapshot gap the old assertion judged");
+  }
   assert.ok(Math.abs((w.t1_s - w.retention_s) - st.ret) < 15, `retention bound ${st.ret} is not t1 − retention_s ${w.t1_s - w.retention_s}`);
-  assert.ok(w.buffered && st.iq >= w.buffered.t0_s - 1e-3, "the IQ horizon never claims IQ the ring does not hold");
+  assert.ok(Number.isFinite(st.edge) && st.ringT0 !== null && st.ringT1 !== null,
+    `the ring readout does not state the edge and ring window it drew from: ${JSON.stringify(st)}`);
+  // The retention bound is the page's own edge − the server's retention, exactly.
+  assert.ok(Math.abs(st.edge - w.retention_s - st.ret) < 1e-6,
+    `retention bound ${st.ret} is not the drawn edge ${st.edge} − retention_s ${w.retention_s}`);
+  // THE CLAIM: the horizon never claims IQ the ring (as the page last heard it) does not hold — it is
+  // never older than the ring's oldest sample nor than the retention bound — and it is not newer
+  // than both either, which would hide IQ that IS held.
+  assert.ok(st.iq >= st.ringT0 - 1e-6 && st.iq >= st.ret - 1e-6,
+    `the IQ horizon ${st.iq} claims IQ the ring does not hold: it drew from a ring holding ${st.ringT0}…${st.ringT1} ` +
+    `with a retention bound at ${st.ret}`);
+  assert.ok(Math.abs(st.iq - Math.max(st.ringT0, st.ret)) < 1e-6,
+    `the IQ horizon ${st.iq} is not the newer of the ring's oldest sample ${st.ringT0} and the retention bound ${st.ret}`);
+  // …and that ring window is one this server served: its oldest sample only moves forward, and it
+  // never holds more than the retention.
+  assert.ok(w.buffered && st.ringT0 <= w.buffered.t0_s + 1e-6,
+    `the page drew from a ring whose oldest sample ${st.ringT0} is NEWER than the server's later ${w.buffered?.t0_s}`);
+  assert.ok(st.ringT1 - st.ringT0 <= w.retention_s + 1e-3,
+    `the page drew from a ring holding ${st.ringT1 - st.ringT0} s, more than the ${w.retention_s} s retention`);
 
   // The pixels. Opaque inks (capture-window.ts): IQ horizon rgb(51,242,89), retention rgb(255,64,217).
   const canvas = await page.$rect(".sf-canvas");

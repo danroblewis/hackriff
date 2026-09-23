@@ -1,0 +1,42 @@
+{
+ "plugin": [
+  "./hk-gr-lora"
+ ],
+ "realtime": false,
+ "record_samples": 8192,
+ "repeat": 3,
+ "drop_every": 7,
+ "fixture_s": 9.605136,
+ "ready_s": 0.3001141249551438,
+ "first_decode_s": 0.30310641700634733,
+ "feed_s": 0.065,
+ "exit_s": 0.4,
+ "rc": 0,
+ "truth_frames": 36,
+ "expected_frames": 21,
+ "found": 21,
+ "decodes": 24,
+ "false_or_garbled": 3,
+ "crc_invalid": 3,
+ "sample_index_err": {
+  "min": -2,
+  "max": 0,
+  "tol": 128
+ },
+ "rss_mib_peak": 5.9,
+ "rss_mib_last": 5.9,
+ "maxrss_mib_rusage": 44.7,
+ "cpu_s": 0.421,
+ "cpu_pct_of_core_over_feed": 649.4,
+ "malformed_stdout": 0,
+ "stdin_broken": false,
+ "stderr_lines": 3,
+ "stderr_tail": [
+  "[hk-gr-lora +0.218s] ready: import 0.202s, ready 0.218s (sf=7 bw=125000 rate=250000)",
+  "[hk-gr-lora +0.221s] first decode at +0.221s",
+  "[hk-gr-lora +0.284s] eof: 2064384 samples, 24 decodes, 41 discontinuities, 42 markers"
+ ],
+ "plugin_log": [
+  "{\"t556_stats\": {\"decodes\": 24, \"markers\": 42, \"samples_in\": 2064384, \"first_sample_t\": 0.21838329103775322, \"first_decode_t\": 0.22083987505175173, \"header\": {\"sample_rate_hz\": 250000, \"center_hz\": 868100000.0, \"datatype\": \"cf32_le\"}}, \"import_s\": 0.20212108304258436, \"ready_s\": 0.21772325003985316}"
+ ]
+}

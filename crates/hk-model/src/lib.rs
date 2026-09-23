@@ -109,8 +109,9 @@ pub use harmonic::{
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
-    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId,
-    RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId, TrunkSystemId,
+    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, MeasurementId,
+    ProvenanceId, RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId,
+    TrunkSystemId,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -146,6 +147,12 @@ pub use repo::{
     SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
     USER_BAND_MAX_WIDTH_HZ, UserBand,
 };
+// T-818 MAP-18 saved measurements (docs/25 §4).
+pub use repo::{
+    MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX, MEASUREMENT_REF_MAX,
+    Measurement, MeasurementBasis, MeasurementComputed, MeasurementCursor, MeasurementFilter,
+    MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
+};
 pub use retune::{
     RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,
     RetuneObservation, RetuneSlope, RetuneSummary, RetuneTolerance, SLOPES, classify,
@@ -163,6 +170,6 @@ pub use signature::{
 pub use time::{SampleTime, Timestamp, TimestampMethod};
 pub use trunking::{
     CALL_REASONS_MAX, CallRecord, ChannelPlanEntry, Encryption, EncryptionEvidence, GrantEvent,
-    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, NeighbourSite, P25_ALGID_CLEAR,
-    TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
+    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, MAX_TDMA_SLOTS, NeighbourSite,
+    P25_ALGID_CLEAR, TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
 };

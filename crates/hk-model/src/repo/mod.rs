@@ -78,6 +78,7 @@ mod lifecycle;
 #[cfg(test)]
 mod lifecycle_tests;
 mod measure;
+mod measurements; // T-818 MAP-18 saved measurements
 mod presence; // T-262 (ADR-0017 TM-5) presence intervals
 #[cfg(test)]
 mod presence_tests;
@@ -123,6 +124,11 @@ pub use bookmarks::{BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmar
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
+pub use measurements::{
+    Computed as MeasurementComputed, MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX,
+    MEASUREMENT_REF_MAX, Measurement, MeasurementBasis, MeasurementCursor, MeasurementFilter,
+    MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
+};
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
 // `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
 // `Resolution` and `Measured` are the decode-search vocabulary and would collide with
@@ -161,6 +167,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_observation_time_index.sql"), // T-262 ADR-0017 TM-5 (index only)
     include_str!("migrations/0014_harmonic_family.sql"), // T-374 C40 harmonic families
     include_str!("migrations/0015_retune_verdict.sql"), // T-598 persisted retune verdict
+    include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
 ];
 
 /// Schema version this build creates and understands.

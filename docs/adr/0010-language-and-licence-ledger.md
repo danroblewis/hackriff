@@ -26,7 +26,7 @@ CLAUDE.md: no language preference, choose robust support; the real-time path mus
 | Dependency | Role | Licence | Placement / constraint |
 |---|---|---|---|
 | liquid-dsp | Core DSP kernels | MIT | **In-core** — licence-clean |
-| VOLK | SIMD kernels | **GPLv3** | **Plugin/subprocess only**, never in a non-GPL core |
+| VOLK | SIMD kernels | **LGPL-3.0-or-later** from VOLK 3.0 (Homebrew `volk` 3.3.0 metadata, checked T-556); GPLv3 before 3.0 | **Plugin/subprocess only**: it only ever reaches hackriff through GNU Radio, which is GPLv3, so the placement does not change with VOLK's own relicence |
 | GNU Radio 3.10 / GR4-ported blocks | Optional decode chains | **GPLv3** (GR4 core MIT) | **Subprocess plugin only** ([ADR-0003](0003-process-plugin-model.md)) |
 | FutureSDR | Candidate runtime | Apache-2.0 (verify) | In-core if adopted — permissive |
 | SoapySDR | Device abstraction (later SDRs) | Boost (verify) | In-core — permissive |
@@ -41,6 +41,7 @@ CLAUDE.md: no language preference, choose robust support; the real-time path mus
 | dsd-fme | Digital voice | GPLv2 | Subprocess plugin; **vocoder (AMBE/IMBE) IP is separate** — licensing reviewed before trunking voice ships ([docs/04 §8.4](../04-radio-engineering-and-signals-analysis.md)) |
 | SatDump | Satellite pipelines | GPLv3 | Subprocess plugin |
 | gr-satellites | Sat telemetry | GPLv3 | Subprocess plugin |
+| gr-lora_sdr (EPFL, tapparelj) | LoRa PHY RX/TX | GPL-3.0 (repo `LICENSE`, checked T-556) | Subprocess plugin only. T-556 wrapped it in a **spike** with an 8-line patch (a fork) to carry input sample offsets; not a product plugin |
 | GNSS-SDR / galmon | GNSS observables | GPLv3 (verify) | Subprocess plugin (licences flagged unchecked in docs/06 §5) |
 | TorchSig | Synthetic data/models | MIT | Python tooling / GPU plugin |
 
@@ -133,3 +134,9 @@ append-only (`merge=union` in `.gitattributes`).
 | Apple Accelerate framework (vDSP) | macOS system framework (dev Mac: macOS 15.5 / Darwin 24.5) | Apple SDK / macOS licence (proprietary OS component) | hk-dsp `accelerate` (feature `accelerate`, macOS only: `vDSP_DFT_zop_*` declared with `extern "C"` and `#[link(kind = "framework")]`; no bindings crate) | Linked dynamically against the OS; nothing redistributed. Absent from Linux/Jetson builds. Measured and conformant, but not auto-selected (ADR-0007) |
 | libc (added to hk-dsp as a dev-dependency) | 0.2.189 | MIT OR Apache-2.0 | hk-dsp `benches/compute_providers.rs` (`getloadavg` for the load column) | Bench only, permissive (row above) |
 | *(T-085: no new third-party crate)* new crates hk-recipe (hk-model, hk-stream, serde, serde_json) and hk-blocks (hk-recipe, hk-dsp, hk-estimate, hk-demod, hk-model, hk-stream, num-complex, serde, serde_json) | workspace; per rows above | project crates; MIT OR Apache-2.0 | hk-recipe (ADR-0011 recipe/field-map/parameter schemas), hk-blocks (block contract and M1 catalogue), `hk-stream::inspector` | In-core, permissive. JSON Schema generation (`schemars`) and TOML (`toml`) were considered and not adopted (ADR-0011 §2.1) |
+| GNSS-SDR (executable, adopted as the product's GNSS receiver plugin, T-323) | not installed (no Homebrew formula; the dev Mac has no build) | **GPL-3.0-or-later** per the upstream project's licence statement and per-file SPDX headers — **stated from the upstream docs, not re-verified against an installed copy**; re-check when a build is first installed (the Jetson or a Linux bench) | `plugins/gnss-sdr/manifest.json` + `hk-plugin-gnss-sdr` (new bin target of `hk-gnss`; `hk-fake-gnss-sdr` is its test double); hk-stream and serde_json added to hk-gnss, hk-plugins as its dev-dependency (all project crates / rows above) | Subprocess only: the wrapper execs `gnss-sdr --config_file=…` and reads the RINEX/NMEA files it writes. Never linked, no FFI, no build script — `crates/hk-gnss/tests/gnss_sdr_boundary.rs` fails if that changes. Output is evidence only (no identity, no annotation) |
+| *(T-556 spike, not product: `spikes/t556-gnuradio-wrap/`)* GNU Radio (executable runtime + Python bindings) | 3.10.12.0 (Homebrew bottle) | GPL-3.0-or-later (Homebrew metadata) | spike adapters `hk_gr_lora.py`, `hk_gr_satellites.py` | Subprocess only, never linked into hackriff; the spike's `host-check` crate links only hk-plugins/hk-stream/hk-model |
+| *(T-556 spike)* gr-lora_sdr | commit 862746dd (2026-09-22) + `patches/lora-sample-offset.patch` | GPL-3.0 | spike adapter | Subprocess only; built into a private prefix outside the repo |
+| *(T-556 spike)* gr-satellites | commit 4210dc45 (2026-09-22) | GPL-3.0 | spike adapter | Subprocess only; private prefix |
+| *(T-556 spike)* pybind11 (headers, private build dependency matching the GR bottle's ABI) | 3.1.0 | BSD-3-Clause | building the two OOTs | Build tooling only, outside the repo |
+| *(T-556 spike)* Python deps of gr-satellites: construct 2.10.70, requests 2.34.2, websocket-client 1.9.2, pyzmq 27.2.0 (bundles libzmq), urllib3 2.8.0, idna 3.20, charset-normalizer 3.5.1, certifi 2026.7.22 | as listed | MIT; Apache-2.0; Apache-2.0; BSD-3-Clause (libzmq itself MPL-2.0); MIT; BSD-3-Clause; MIT; MPL-2.0 (from each `METADATA`) | gr-satellites inside the spike subprocess | Private `--target` dir outside the repo; subprocess only |

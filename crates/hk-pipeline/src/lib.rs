@@ -51,6 +51,10 @@ pub mod gnss; // T-322 (ADR-0018): the C36 L1-dwell caller
 pub mod inventory;
 pub mod recipes;
 pub mod refine;
+/// T-265 (ADR-0017 TM-10, ADR-0015 §14): the **incremental region-decode contract** — Rule I's
+/// bounded-region reader, Rule L's live-edge reader, and the named handover between them.
+/// Contract only: no engine until MAUTO is scheduled.
+pub mod region;
 pub mod stats;
 pub mod survey; // T-399
 pub mod synth; // T-546 (ADR-0015 / ADR-0021): why a decode pipeline was chosen

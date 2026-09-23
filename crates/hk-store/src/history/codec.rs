@@ -1032,6 +1032,9 @@ pub(crate) fn decode_bytes(bytes: &[u8], g: &LevelGeometry, bins: usize) -> Opti
         tile.col_done = (0..g.nt)
             .rev()
             .find(|&t| (0..nf).any(|f| tile.count[t * nf + f] > 0));
+        // T-584: every row this tile carries is folded upwards by the reopen rebuild (see
+        // `Pyramid::open`), so live maintenance must not fold them a second time.
+        tile.folded_through = tile.col_done;
     }
     Some(tile)
 }

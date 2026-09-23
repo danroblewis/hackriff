@@ -382,6 +382,16 @@ interface InFlight {
   readonly owner: number;
 }
 
+/**
+ * What [[TileCache]] tells its source about one request, beyond the address.
+ *
+ * `solo`: this request must not wait on any other — it is the live edge's revalidation, which the
+ * product never gates on generating other tiles (T-460, T-573). A source that batches sends it alone.
+ */
+export interface TileSourceHint {
+  readonly solo?: boolean;
+}
+
 export class TileCache<T> {
   readonly budgetBytes: number;
   private readonly maxQueue: number;
@@ -528,7 +538,7 @@ export class TileCache<T> {
 
   constructor(
     private readonly tex: TileTextures<T>,
-    private readonly source: (addr: TileAddr, signal?: AbortSignal) => Promise<TileData>,
+    private readonly source: (addr: TileAddr, signal?: AbortSignal, hint?: TileSourceHint) => Promise<TileData>,
     opts: TileCacheOptions = {},
   ) {
     this.budgetBytes = opts.budgetBytes ?? 96 * MB;
@@ -544,6 +554,13 @@ export class TileCache<T> {
   /** The AIMD cap as of **now** — the elapsed-quiet recovery is folded in on read (T-539), so a
    * readout and a test see the same number the next pump would use. */
   get inFlightLimit(): number { this.recoverElapsed(); return this.limit; }
+  /**
+   * The cap this client may recover to: the server's own number, and since T-630 **its share** of
+   * it when the route states one. Shown beside the operating cap because "why is this tab only
+   * running two at a time" has two different answers — backing off, or another client is here —
+   * and they are not the same finding.
+   */
+  get inFlightCeiling(): number { return this.ceiling; }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
   /** Live-edge revalidations queued but not yet issued (T-460). Its own lane, never [[queue]]. */
@@ -616,6 +633,10 @@ export class TileCache<T> {
     if (pin) e.pinnedFrame = this.frame;
     return e;
   }
+
+  /** Is a copy of this place in hand? No scheduling, no pin, no statistics: how the renderer asks
+   * before deciding whether the coverage survey may answer the place instead (T-580). */
+  isResident(addr: TileAddr): boolean { return this.map.has(keyOf(addr)); }
 
   /** Want this tile soon, but do not draw it: the parent-level pin, and pan prefetch. */
   prefetch(addr: TileAddr): void {
@@ -1181,7 +1202,10 @@ export class TileCache<T> {
       if (requeue) this.schedule(addr);
       this.pump();
     };
-    void this.source(addr, ctrl?.signal).then(
+    // A live-edge revalidation (`owner === -1`, [[refreshEdge]]) is asked for ON ITS OWN: the lane's
+    // cadence is a share of what ITS request costs, and a source that coalesces requests (T-573's
+    // batch) would otherwise charge it — and hold its rows — for every cold tile it rode beside.
+    void this.source(addr, ctrl?.signal, { solo: owner === -1 }).then(
       (data) => {
         this.observe(started);
         this.succeeded();
@@ -1306,13 +1330,22 @@ export class TileCache<T> {
     if (err instanceof TileBusyError) {
       // Not an error: the route is telling the client it is asking for too many at once.
       //
-      // **The number it names is the whole server's budget, not this client's allowance** — every
-      // pane, every other tab and the bootstrap probe draw on the same four slots, and an abandoned
-      // read holds one until it finishes. So the number is kept as a *ceiling* and the operating
-      // cap is halved: the share that belongs to this cache is not something either side knows, it
-      // is something backing off finds. Recovery is [[succeeded]]; together they are AIMD.
+      // **`limit` is the whole server's budget, not this client's allowance** — every pane and the
+      // bootstrap probe draw on the same four slots, and an abandoned read holds one until it
+      // finishes. So it is kept as a *ceiling* and the operating cap is halved: the share that
+      // belongs to this cache is not something either side knows, it is something backing off
+      // finds. Recovery is [[succeeded]]; together they are AIMD.
+      //
+      // **`share` is different** (T-630): it IS this client's allowance, stated by the route,
+      // because the route now divides its slots between the clients that are asking. It replaces
+      // the ceiling rather than only lowering it — a share that went *up* because another tab
+      // closed is as true as one that went down, and a monotonically-falling ceiling would keep
+      // this cache at one slot for the rest of the session over a tab that is long gone (the
+      // stuck-at-1 shape T-455 measured). The halving is untouched: T-455 conditions permission on
+      // the MECHANISM — a refusal must be SEEN — and a refusal is exactly what this is.
       this.stats.busyRefusals++;
       if (err.limit && err.limit > 0) this.ceiling = Math.min(this.ceiling, err.limit);
+      if (err.share && err.share > 0) this.ceiling = Math.max(1, err.share);
       this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
@@ -1359,11 +1392,18 @@ export class TileCache<T> {
     // a resident key is a duplicate, and the same tile is never uploaded twice.
     if (prev && !this.refreshing.has(key)) return true;
     // `cost.in_flight_limit` is the same server-wide number the refusal names, so it sets the
-    // ceiling — it is not permission to run at it.
+    // ceiling — it is not permission to run at it. `cost.in_flight_share` (T-630) is this client's
+    // own allowance of that budget and is authoritative in both directions: it is how a tab that is
+    // already drawn learns, on its very next answer, that another tab has arrived and half the
+    // slots are no longer its to take. The operating cap only ever falls on a seen refusal (T-455);
+    // what moves here is the ceiling it recovers toward.
     if (data.serverInFlightLimit && data.serverInFlightLimit > 0) {
       this.ceiling = Math.min(this.ceiling, data.serverInFlightLimit);
-      this.limit = Math.min(this.limit, this.ceiling);
     }
+    if (data.serverInFlightShare && data.serverInFlightShare > 0) {
+      this.ceiling = Math.max(1, data.serverInFlightShare);
+    }
+    this.limit = Math.min(this.limit, this.ceiling);
     const tex = this.tex.upload(data);
     this.stats.uploads++;
     // The replaced texture is destroyed and its bytes returned: a refresh that leaked one would turn

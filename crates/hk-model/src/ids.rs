@@ -119,6 +119,9 @@ define_ids! {
     TrunkSystemId;
     /// A followed call (§2.29, T-266). Metadata only — a call record never holds audio.
     CallRecordId;
+    /// A saved measurement (T-818, docs/25 §4): Δf/Δt/bandwidth/duration/symbol-rate/period with
+    /// its place and provenance. User metadata, mutable.
+    MeasurementId;
 }
 
 #[cfg(test)]

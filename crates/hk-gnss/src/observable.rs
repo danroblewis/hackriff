@@ -1,11 +1,10 @@
 //! Observable epochs — what a GNSS receiver reports once per second, and the science derived
 //! from it.
 //!
-//! These are the C36 card's `GnssObservableEpoch` in concrete form, reduced to the fields this
-//! milestone can actually produce or mock. Pseudorange and carrier phase are **absent on
-//! purpose**: they require tracking loops and a decoded navigation message, neither of which is
-//! built (crate docs). Adding empty fields for them would imply a capability that does not
-//! exist.
+//! These are the C36 card's `GnssObservableEpoch` in concrete form. Pseudorange and carrier
+//! phase need tracking loops and a decoded navigation message, which this crate does not build:
+//! they are `Option`s filled only by the wrapped GNSS-SDR receiver ([`crate::receiver`], T-323)
+//! and `None` from acquisition alone, so their absence never reads as a zero measurement.
 
 use hk_model::Timestamp;
 
@@ -42,6 +41,12 @@ pub struct SvObservable {
     pub elevation_deg: Option<f32>,
     /// Whether the receiver holds lock on this satellite.
     pub locked: bool,
+    /// Pseudorange, metres — only from a tracking receiver (GNSS-SDR, T-323).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pseudorange_m: Option<f64>,
+    /// Accumulated carrier phase, cycles — only from a tracking receiver (GNSS-SDR, T-323).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier_phase_cycles: Option<f64>,
 }
 
 /// Everything observed at one epoch.
@@ -51,8 +56,8 @@ pub struct GnssObservableEpoch {
     pub t: Timestamp,
     /// Per-satellite state.
     pub svs: Vec<SvObservable>,
-    /// Receiver position, when a solution exists. `None` here is normal: this milestone has no
-    /// PVT solver.
+    /// Receiver position, when a solution exists: from GNSS-SDR's PVT (T-323), never from
+    /// acquisition alone.
     pub position: Option<Ecef>,
     /// Receiver clock bias against system time, seconds, when known.
     pub clock_bias_s: Option<f64>,
@@ -125,6 +130,8 @@ mod tests {
             doppler_hz: 0.0,
             elevation_deg: None,
             locked,
+            pseudorange_m: None,
+            carrier_phase_cycles: None,
         }
     }
 

@@ -470,9 +470,24 @@ fn the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs() {
     /// is what exercises the mechanism; the bound below is arithmetic over all eight, and the peak
     /// measured here is asserted against it.
     const SECS: i64 = 700;
-    /// Seconds between frames. Residency is a function of which `(node, frequency block)` the
-    /// watermark sits in, not of how densely those cells were filled, so a stride costs nothing.
-    const STRIDE: i64 = 4;
+    /// Seconds between frames.
+    ///
+    /// **It has to put more than one row in a level-0 block, and that is not a free parameter.**
+    /// Residency is a function of which `(node, frequency block)` the watermark sits in and not of
+    /// how densely those cells were filled — the bound below is unchanged by this number — but the
+    /// `ever_coarse` assertion is about the *fold*, and the fold only happens *inside* a block if
+    /// two of its rows close while it is open. At the shipped floor a level-0 tile is
+    /// `VIEW_T_CELLS_PER_BLOCK` x 40 ms = 2.56 s, so the old 4 s stride gave every block exactly
+    /// one row: its single fold coincided with its own seal, and the three frequency-coarser /
+    /// time-finest nodes — whose blocks end at the same instant as their producer's — were opened
+    /// and sealed inside one `ingest`, never resident between frames. That read as "only 12 of 15
+    /// coarse nodes ever held an open accumulator" while the lattice was in fact being filled row
+    /// by row, and until T-584 it was masked by `Pyramid::checkpoint` folding its still-OPEN
+    /// column upward every 60 s — which T-584 deliberately stopped doing, because that column is
+    /// not a finished row and late frames were being lost from every coarse node. So the stride is
+    /// the thing that was wrong: one second puts two or three rows in each level-0 block, which is
+    /// the regime a 25 rows/s live edge is actually in.
+    const STRIDE: i64 = 1;
     /// The span a HackRF's widest practical live window covers, for the extrapolation.
     const LIVE_EDGE_HZ: f64 = 20.0e6;
 

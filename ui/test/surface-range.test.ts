@@ -55,7 +55,7 @@ function data(a: TileAddr): TileData {
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
     measured: { nf: 2, nt: 2 },
     rangeDb: loud ? { lo: -40, hi: -5 } : { lo: -130, hi: -105 },
-    bytes: 4096, serverInFlightLimit: null,
+    bytes: 4096, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

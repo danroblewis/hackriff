@@ -1,7 +1,13 @@
 # 23 — Map-UI design philosophy
 
-**Status: design philosophy, not built.** Proposed by the user on 2026-09-21 as the design brief for
-turning the MCANVAS surface into a full-bleed, Google-Maps-grammar research instrument. This document
+**Status: SPEC (T-800 / MAP-00, 2026-09-22).** The normative half is §10 (the layout contract) and
+§11 (the panel → state → route map); §1–§9 are the argument behind them, and **§9 is the invariant
+checklist every MMAP line must hold**. Proposed by the user on 2026-09-21 as the design brief for
+turning the MCANVAS surface into a full-bleed, Google-Maps-grammar research instrument, and approved
+2026-09-22 together with the layout reference [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html)
+— which stands to this design as `explorer-v3.html` did to MUI: the **layout and interaction
+reference**, not a shipping artefact. The decision record is
+[ADR-0023](adr/0023-map-ui-and-research-state.md). This document
 **extends** [`docs/14`](14-ui-rewrite.md) (the MUI thin-client rewrite) and
 [`docs/16 §8`](16-coverage-tile-pyramid.md) (the unified full-spectrum canvas). **It contradicts
 none of their invariants** — §9 is the explicit checklist against them — and where it adds a control,
@@ -133,9 +139,10 @@ hackriff already has this vocabulary, specified in [`ui/CONTROLS.md`](../ui/CONT
 
 The one authoring gesture the research tooling needs — drag-to-select a region — is already
 reconciled with pan by the `Shift + drag` binding (T-458), so adding markers and measurements does
-**not** introduce a second, conflicting gesture grammar. §8 keeps that discipline: every new
-authoring action either reuses `Shift + drag` or lives behind an explicit tool/mode toggle, so the
-canvas keeps one gesture vocabulary.
+**not** introduce a second, conflicting gesture grammar. §8 keeps that discipline, and
+[§10.4](#104-gestures-and-the-tool-mode) settles which of the two alternatives it is: `Shift + drag`
+keeps **one meaning in every mode**, and an explicit, visible **tool mode** re-binds only the *bare*
+drag — so the canvas keeps one gesture vocabulary and authoring adds no gesture to it.
 
 ---
 
@@ -404,6 +411,143 @@ The four durable stores and the band-plan-priors route are the backend surface t
 authoring gestures reuse `Shift + drag` (T-458) so the canvas keeps one gesture vocabulary; and every
 new control passes the spy-client empty-call-list test (§4). The rest is presentation over data the
 backend already serves.
+
+---
+
+## 10. The layout spec (normative)
+
+*This section is the contract MAP-01…MAP-05, MAP-13 and MAP-24 build to. The mockup
+[`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html) is the visual reference; where the two
+disagree, this section wins and the mockup is a bug report. Rationale is
+[ADR-0023](adr/0023-map-ui-and-research-state.md) §1 and §7.*
+
+### 10.1 Four z-bands, and the band decides the coordinate system
+
+The canvas is `position: fixed; inset: 0` — **100 vw x 100 vh** — and no chrome subtracts from it.
+Everything else sits in exactly one band:
+
+| Band | z | Space | Members | Laid out |
+|---|---|---|---|---|
+| **0** | `0` | **content** | the one `<canvas>`: tiles, traces, coverage plane, every overlay stroke, HUD ticks | **every render frame** |
+| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz) | **every render frame, in the same pass as band 0** |
+| **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, follow-live FAB, pane-status readout, HUD axis *labels* | on interaction |
+| **3** | `30` | screen | the bottom sheet; the Research slide-in | on interaction |
+| **4** | `40` | screen | transients: MapTip, retune offer, mode banner, error toasts | on interaction |
+
+Two rules make the table load-bearing rather than decorative:
+
+- **Band 1 is the only content-anchored DOM, and it is laid out inside the render frame.** Positioning
+  a band-1 element from a data poll, a timer or a `MutationObserver` re-creates T-388 (per-poll boxes
+  against a per-frame scroll) and is a defect, not a style choice.
+- **HUD ticks are band 0; HUD labels are band 2.** A tick is data geometry and belongs in the stroke
+  pass; a label is text that must stay crisp at any device-pixel ratio and selectable. Both are placed
+  from the *same* per-frame capture-time mapping, so they cannot drift apart.
+
+### 10.2 Chrome docking, fade, and what fade may never hide
+
+Chrome docks to viewport edges as floating translucent panels: Go-to top-left; layers / tools /
+Research top-right; zoom right; follow-live FAB bottom-right above the sheet; pane status bottom-left.
+Chrome **fades to ~35 % opacity after ~6 s idle** and returns on any pointer, key or focus event.
+
+**Fade never applies to:** the bottom sheet, the Research slide-in, an open menu, a focused control,
+the retune offer, the mode banner, or any honesty statement (the per-pane tier/level readout, the
+retention-bound and IQ-horizon rules and the words beside them). A statement about what the data *is*
+may not be made less legible to make the picture prettier.
+
+### 10.3 The sheet at every width; Research as a right slide-in
+
+Settled 2026-09-22 (ADR-0023 §7); these were the mockup's two open choices.
+
+- **Bottom sheet, every width.** Three snap states - `peek` (a title strip, ~56 px), `half` (~45 vh),
+  `full` (~90 vh) - draggable by its grab handle and by flick, with keyboard equivalents. It is
+  **never modal**: the canvas beneath stays live, pannable and zoomable, and a pointer event that
+  starts outside the sheet reaches the canvas. On viewports wider than ~900 px the sheet is
+  width-capped (~520 px) and docked bottom-left, so the centre of the surface is never covered. It
+  hosts two tabs: **Explore** (MAP-14/15) and **Selected** (MAP-04).
+- **Research is a right slide-in** (MAP-21), not a sheet state. The sheet is *selection-scoped and
+  ephemeral*; Research is *durable and cross-window* - docs/25 §1 requires that difference to be
+  visible, and "click a row -> the mark selects -> the detail sheet fills" requires both to be open at
+  once. Width ~460 px, full height, dismissible; at phone width it becomes a full-height panel and the
+  sheet drops to `peek`.
+- **Per-viewer state only.** Sheet snap state, Research open/closed and tab, layer visibility and base
+  style live in `localStorage` behind `try/catch`, and every surface must render correctly with
+  storage unavailable.
+
+### 10.4 Gestures and the tool mode
+
+`ui/CONTROLS.md` (T-456/T-458) is unchanged and remains the one vocabulary. MMAP adds **tool modes**,
+which re-bind only the **bare** drag/click and are always visible (a pressed button, a cursor change,
+and a banner naming what a drag will do):
+
+| Gesture | Navigate (default) | Measure | Annotate | Pin |
+|---|---|---|---|---|
+| bare drag | pan both axes | lay measurement cursors | draw an annotation box | - |
+| bare click | select / deselect a mark | - | drop a text note | drop a marker |
+| `Shift + drag` | **mark a region** | **mark a region** | **mark a region** | **mark a region** |
+| wheel, `Shift`/`Alt`/`Ctrl` + wheel, pinch | zoom, per `ui/CONTROLS.md` | unchanged | unchanged | unchanged |
+| `Esc` | - | -> Navigate | -> Navigate | -> Navigate |
+
+`Shift + drag` therefore **never changes meaning**, and a region it marks is the input to every action
+that needs an extent - the retune offer (T-444), "measure this", "annotate this" - so authoring is
+reachable without ever entering a mode. This closes T-445's open capability #2.
+
+**Nothing in this section reaches a device route.** Pan, wheel, pinch, pause, scrub, split, follow,
+every layer toggle, every sheet and menu, every tool mode, every authoring action and every research
+write must leave the spy-client call list **empty** (MAP-25). The single exception is unchanged: a pan
+to un-tuned *frequency* **offers** a retune, and an explicit press commits one through the one gated
+`DeviceAction` path.
+
+### 10.5 Responsive, touch and accessibility floors
+
+- Usable to **400 px** wide with **no horizontal page scroll**; one-handed reach for the sheet, the
+  FAB and the tool buttons.
+- **Touch:** pinch = zoom (view), two-finger drag = pan (view), long-press = MapTip, region select =
+  the retune *offer*. Touch never crosses the view/device line by accident.
+- **Hit targets >= 24 px**; pin glyphs >= 11 px with a >= 24 px hit area.
+- Every hover behaviour has a keyboard equivalent (focus = MapTip, `Enter` = select), every floating
+  panel is reachable by tab order, and focus is visible (`:focus-visible`).
+- **State is never encoded in hue alone** (§7; docs/24 §8): candidate/confirmed/unknown and
+  observed/unobserved/unknown/excluded each carry a shape or pattern; red-green pairings are avoided.
+
+---
+
+## 11. Panel -> state -> route: the frontend/API map (normative)
+
+*This is the ADR-0013 frontend-to-API-map discipline applied to every new MMAP surface. A panel not in
+this table has no home; a route in the **Reads/Writes** columns that does not exist yet is named with
+its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices are specified in
+[docs/24 §15](24-canvas-as-data-surface.md).*
+
+| Panel / surface | Ticket | Client slice | Reads | Writes |
+|---|---|---|---|---|
+| Full-bleed shell, z-bands | MAP-01 | `map.chrome` | - | - |
+| Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
+| Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
+| Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
+| Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/history` | - |
+| Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` |
+| HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
+| Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
+| Detections layer | MAP-08 | `explore` (existing rows) | `GET /api/events` | - |
+| Pins + clusters | MAP-09/10 | `map.pins` (ephemeral) | `GET /api/events`, `GET /api/tiles/events` | - |
+| Artifacts layer | MAP-11 | `explore` (existing rows) | `GET /api/inventory` (`relation`) | - |
+| Band-plan priors layer | MAP-12 | `priors` | **`GET /api/priors`** *(reserved - MAP-12)* | - |
+| Research slide-in - Markers | MAP-21 | `research.collections`, `research.markers` | **`GET /api/collections`, `/api/collections/{id}/markers`** *(reserved - MAP-17)* | **`POST`/`PUT`/`DELETE`** in the same family |
+| Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST`/`PUT`/`DELETE /api/measurements`** - cursors only, never a `value` |
+| Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST`/`PUT`/`DELETE /api/annotations`** |
+| Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST`/`PUT`/`DELETE /api/views`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
+| Export menu | MAP-23 | `research` | the four `GET`s above | - (client-composed file; a share link is a later addition) |
+
+**Three rules this table encodes.**
+
+1. **Only two rows in the whole table reach a device route**, and both need an explicit press: Go-to,
+   and the Selected tab's actions. Everything else is a view change or a durable-state write.
+2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client
+   exists.** The client is thin because the route is the contract, not because the panel is small.
+3. **The guard is the request the client *builds*.** Contract tests prove the server serves a route
+   correctly; they cannot catch a client asking for the wrong thing (T-367 requested `/api/timeline`
+   with no band and drew an empty canvas while every suite stayed green). Every row above owes a
+   `ui/test` assertion on the request it constructs (MAP-25).
 
 ---
 

@@ -453,8 +453,10 @@ A GNU Radio OOT is a different animal, and the difference is worth stating preci
 usually stated imprecisely.
 
 **Its runtime.** `gnuradio-runtime` (GPLv3), the block libraries it depends on (`gr-blocks`,
-`gr-filter`, `gr-digital`, … all GPLv3) and **VOLK** — which ADR-0010's ledger already flags as
-GPLv3 and **plugin/subprocess only, never in a non-GPL core**. All of that lives inside the child
+`gr-filter`, `gr-digital`, … all GPLv3) and **VOLK**, which ADR-0010's ledger places
+**plugin/subprocess only, never in a non-GPL core**. (VOLK itself is LGPL-3.0-or-later from 3.0,
+T-556 found. The placement is unchanged because VOLK only reaches us through GPLv3 GNU Radio.)
+All of that lives inside the child
 process. That is fine, and it is exactly what the boundary is for. It is also a dependency closure
 of hundreds of megabytes that must exist on the **Jetson** as well as the Mac, and a handheld
 device's disk and image size are real constraints (CLAUDE.md: portable, one self-contained unit).
@@ -486,23 +488,48 @@ the line is dropped and counted.
 a GR OOT that means pinning GNU Radio itself, because an OOT built against 3.10 does not load under
 3.9 or 4.0 — which is the mechanism behind the bitrot §1 describes.
 
-### 2.4 The per-decoder cost, and the shape of the curve
+### 2.4 The per-decoder cost, and the shape of the curve (measured: T-556)
 
-The honest answer is that **nobody has measured it for a GNU Radio decoder**, which is why
-**T-556** is a spike and not an estimate. What can be said about the shape:
+**T-556 measured it**, on gr-lora_sdr (C++ blocks) and gr-satellites (Python flowgraph), both
+wrapped behind the §9 plugin contract and run under the real `hk_plugins::PluginInstance`. The
+write-up is
+[`spikes/t556-gnuradio-wrap/README.md`](../spikes/t556-gnuradio-wrap/README.md).
 
-- The **first** one pays the runtime integration cost: getting GNU Radio to build and run on the
-  Mac and on aarch64/JetPack, establishing the adapter pattern, deciding how a flowgraph is
-  parameterised from the manifest.
-- The **second and later** ones pay manifest + adapter + fixture + ledger row + contract test —
-  broadly the readsb job, which is a known quantity.
-- There is a **structural question that changes the slope**: whether one shared
-  `hk-plugin-gnuradio` host that loads a named flowgraph can amortise the runtime across decoders,
-  or whether per-decoder processes are unavoidable. If a shared host works, the marginal decoder is
-  a flowgraph file; if it does not, each one is a full process with a full runtime. T-556 answers
-  this, and the roadmap's slope depends on the answer.
+- **Runtime is cheap.**
+  - Private memory is 27 MB (LoRa) and 55 MB (gr-satellites).
+  - CPU at real time is 2.4–3 % and 11.5 % of one M3 core. On the Orin's A78AE expect several
+    times that (**unverified**).
+  - Warm start-up to ready is 0.3 s and 1.6 s. The first launch after a relink is 4–12 s, which
+    fits T-629's first-byte rule only because the adapter writes no byte before ready.
+- **The intercept is the runtime install.**
+  - On JetPack 6's Ubuntu 22.04, `apt install gnuradio` is 375 packages and ~1.1 GB, 60 of them
+    GUI/GL. It ships GR 3.10.1 and pybind11 2.9, against the Mac's 3.10.12 and pybind11 3.1:
+    two build matrices.
+  - On the Mac, two of three first builds failed on ABI skew (a leaked conda `fmt`, and the
+    Homebrew bottle's pybind11 internals version).
+  - Estimate: 0.5–1 day on the Mac, 1–2 days on the Jetson (**unverified**), repeated at every
+    GR upgrade.
+- **The slope, per decoder after the first:**
+  - **2–4 developer-hours** to "decoding, arrival-stamped, parity-checked against the stock
+    tool". The second wrapper took an agent 14 minutes, 5.5 of them compiling.
+  - **1.5–3 days** for product grade with exact host sample-index stamps, *when the OOT has a
+    single framing point to carry the input offset through*. gr-lora_sdr did, at the price of an
+    8-line fork patch.
+  - **Not feasible without forking dozens of files** when it has none. gr-satellites' ~60
+    deframers emit bit-domain PDUs after variable-ratio clock recovery, so its decodes can only
+    be arrival-stamped. That is the C22 pitfall, accepted rather than fixed.
+- **A shared `hk-plugin-gnuradio` host does not change the slope.**
+  - One process running both graphs saves about one runtime floor per extra decoder (~38 MiB
+    RSS, 0.2–0.5 s of start-up).
+  - It costs fault isolation, one GIL for Python deframers and adapters, ABI coupling between
+    OOTs, and a change to the one-manifest-one-process contract.
+  - Per-decoder processes are affordable and preferable. The slope is per-decoder engineering
+    (stamping, parity fixtures, CRC semantics), which no host amortises.
 
-Until that number exists, **§3 ranks by disposition, and prefers dispositions that do not need it.**
+**Consequence for §3:** a wrapped GNU Radio decoder is a narrow, opt-in disposition, used only
+when no native recipe is planned, the OOT can carry host sample offsets, and parity is under test.
+The reference set's main use is as a **specification source** for native recipes, which is what
+§3 already prefers.
 
 ---
 
@@ -540,7 +567,7 @@ SIGNAL-051 (wM-Bus), SIGNAL-052 (rtl_433 long tail), SIGNAL-057 (ALERT gauges), 
 growth), RESEARCH-001/002/012.
 Why it is first: it converts "support many more decode types" from an engineering cost into a
 template-authoring cost, **and** every template is a MAUTO search seed, so it improves the synthesis
-engine at the same time. T-557 designs the bridge.
+engine at the same time. T-557 designs the bridge: [ADR-0015 §15](adr/0015-decoder-synthesis-contracts.md).
 
 **2. VHF/UHF data and paging beyond what is already built.**
 *Disposition: **native recipes**, existing blocks.* AFSK/AX.25 (APRS), railroad EOT and ATCS,
@@ -724,7 +751,7 @@ The coverage direction is not a separate programme. It lands in three places tha
 |---|---|
 | **ADR-0015 §4 templates** | The bulk of tier-1 coverage. Every imported protocol is a search seed as well as a decoder. T-557 designs the provenance and the fact/implementation line; T-554 says which families are template-shaped. |
 | **ADR-0011 §1.5 block catalogue** | The tier-2 and tier-3 families. T-554 produces the delta (PSK/Costas, Viterbi, Reed–Solomon, CSS, OFDM, DSSS, scramblers, SSB/CW) with an ordering. ADR-0015's M-14 covers only `psk_demod` and is too narrow on its own. Note the pattern ADR-0011 §1.6 already sets: **blocks are adapters over existing kernels, not rewrites** — today over hk-dsp, hk-demod and hk-estimate, and tomorrow over liquid-dsp (MIT), which already carries much of what tier 2 wants. A new block is often an adapter job, not a DSP job, and that is the first thing T-554 should check per family. |
-| **ADR-0003 / `plugins/`** | The handful of genuinely active, genuinely hard decoders where wrapping beats rebuilding — SatDump, op25, gr-satellites. T-556 measures whether that is true at all. |
+| **ADR-0003 / `plugins/`** | The handful of genuinely active, genuinely hard decoders where wrapping beats rebuilding — SatDump, op25, gr-satellites. T-556 measured it (§2.4): wrapping is cheap to run, but gr-satellites' decodes can only be arrival-stamped, so wrapping it beats rebuilding only where its time placement doesn't matter. |
 
 And it changes one thing about how the engine tickets should be read: **a block-catalogue gap is a
 product-visible state, not a silent absence.** ADR-0015 §8 already says an unsupported structure is
@@ -871,7 +898,7 @@ delta. Families already shipped are marked ✓.
 |---|---|---|
 | HFDL | The FEC, interleaver and frame geometry. There is **no GNU Radio OOT** (§1.4); `dumphfdl` is the living tool and is non-GR | A public HFDL PHY description, or a `dumphfdl` plugin spike |
 | Iridium bursts | The burst structure, LCW handling and the demod's acquisition strategy. The modulation is DQPSK and native-shaped, but whether the framing is expressible as a block DAG is not knowable from the outside | Reading the published Iridium RE write-ups, or a `gr-iridium` plugin spike |
-| P25 Phase 2 | H-DQPSK / H-CPM TDMA burst structure. The TIA standard is paywalled and the only public implementation is op25 | Access to the standard, or a scoped op25 plugin |
+| P25 Phase 2 **voice/traffic** | H-DQPSK / H-CPM TDMA burst structure. The TIA standard is paywalled and the only public implementation is op25. The *control* side is not unknown: a Phase 2 system trunks on a Phase 1 FDMA control channel this build decodes, and T-272 attributes a grant's frequency **and slot** from its `IDEN_UP_TDMA` band plan — what is missing is demodulating the two slots | Access to the standard, or a scoped op25 plugin |
 | DJI DroneID / OcuSync | Proprietary OFDM; public RE exists but the scrambler/frame detail was not verified here | Reading the published DroneID papers |
 | TETRA voice | The ACELP codec's availability and licensing; `osmo-tetra` is **AGPL-3.0**, whose network clause is stricter than GPL's | A licence read, if voice is ever wanted. The control channel is unaffected |
 | GSM native partial | Whether a BCCH-only native recipe is expressible without the TDMA burst scheduler living outside the block DAG | A read of the GSM 05.03 channel coding spec against the catalogue |

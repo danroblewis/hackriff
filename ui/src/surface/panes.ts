@@ -690,6 +690,11 @@ export interface PaneStatus {
   readonly tierLabel: string;
   /** `LIVE`, or how far behind the live edge the frozen window's newest row sits. */
   readonly timeLabel: string;
+  /** **The pane's actual time window**, absolute capture ns, exactly as the frame drew it — the
+   * state `timeLabel` rounds for a reader. Stated so a caller that must decide "did the time axis
+   * move?" reads the axis itself, not a label that rounds a sub-second move to the same `−23 s`. */
+  readonly t0Ns: number;
+  readonly t1Ns: number;
   readonly freqLabel: string;
   readonly tiles: number;
   readonly fallbacks: number;
@@ -702,6 +707,17 @@ export interface PaneStatus {
   readonly blank: number;
   /** [[PaneReport.shortNs]]: how far short of this pane's own window top the drawing reached. */
   readonly shortNs: number;
+  /**
+   * **Places the coverage survey settled as never sampled, and so were never requested** (T-580)
+   * — [[PaneReport.surveyed]].
+   *
+   * It is stated for the same reason every other count here is: a pane drawn entirely from the
+   * survey holds no tiles and waits for none, so without it the readout says `0 tiles · 0 coarse
+   * stand-ins · 0 pending` — word for word what a pane that has drawn *nothing at all* says. Grey
+   * is the normal state of a 6 GHz canvas, not an edge case, and "the radio never looked here" and
+   * "this pane has not started" are the two things a coverage readout exists to tell apart.
+   */
+  readonly surveyed: number;
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
@@ -785,6 +801,8 @@ export function paneStatuses(
       tier: r.tier,
       tierLabel: tierStatement(r),
       timeLabel: live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
+      t0Ns: t.t0Ns,
+      t1Ns: t.t1Ns,
       freqLabel: `${(p.freq.centerHz / 1e6).toFixed(3)} MHz ± ${fmtBandwidth(p.freq.spanHz / 2)}`,
       tiles: r.tiles,
       fallbacks: r.fallbacks,
@@ -792,6 +810,7 @@ export function paneStatuses(
       behind: r.behind,
       blank: r.blank,
       shortNs: r.shortNs,
+      surveyed: r.surveyed,
       differsFrom,
     });
   }

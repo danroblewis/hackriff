@@ -85,7 +85,47 @@ merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-a
 time, user-requested first, then priority, then number — into a fresh worktree + branch
 (`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
 `model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
-Builder cap is CLAUDE.md's 4 *including* a running gate (`WORK_CAP`), disk floor 20 GB.
+**The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
+(`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
+`precheck`, `blocked.needs`, `cancel.evidence`, `observed_but_not_chased`, `use_cases`). The runner
+validates it, refuses `done` over a failing test, writes the ticket's `result:` (and a cancel's
+status) on the worker's branch through `just task`, routes on `outcome` (cancel → an Opus review
+confirms the evidence), and only then queues the branch. Workers never edit `docs/tasks.yaml`.
+**The resource model is a fixed budget (user, 2026-09-22).** 28 cores: the merge gate is reserved
+14 (`WORK_GATE_RESERVE`), each worker is bounded to ~3 (`WORK_WORKER_CORES`) by limits its whole
+process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a
+permanent `taskpolicy -c background` QoS clamp (efficiency cores only on Apple Silicon) — so the count
+is `WORK_CAP` = (28 − 14) / 3 = 4 and the gate always has its reserve. No load heuristics, no gate-time
+throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` from the HiGarfield fork**
+(`$HACKRIFF_OPS/bin/cpulimit`; source kept at `$HACKRIFF_OPS/src/cpulimit`; rebuild with
+`cd $HACKRIFF_OPS/src/cpulimit && make install DESTDIR=$HOME/.local/bin && cp src/cpulimit $HACKRIFF_OPS/bin/` —
+no sudo needed; do NOT `brew install cpulimit`, that is the inert opsengine build) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
+the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. The same bound wraps the
+reviewer and fix/resume runs, and `ops/launch.sh` wraps the coordinator/supervisor session itself at
+`ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. Budget of
+28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
+sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
+
+**The gate runs alone (user, 2026-09-22).** The bounded budget was not enough: the SDET review
+measured untouched crates of small unit tests running 18–79× dearer during shared gates. So the two
+runners now cycle: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
+in `merge-queue.txt`, and while a gate runs; running workers finish and join the queue (nothing is
+suspended); the merge runner **starts a gate only when the claims file shows no running worker**
+(`workers_drained`, capped at `WORKER_DRAIN_MAX` = 45 min so a stuck worker cannot hold every merge);
+when the batch lands the queue drops below the threshold and dispatch resumes. `just gate` therefore
+measures the code, not the neighbours. While the merge runner waits for that drain it holds
+`$HACKRIFF_OPS/gate-wanted`, which the work runner reads as a running gate. **A full stop is a
+file:** `touch $HACKRIFF_OPS/dispatch-paused` stops every dispatch until the file is removed
+(reaping, results and queueing continue) — the conditional holds each have a window, this has none.
+A batch that goes red **without a test FAIL** (lint, a build error, the UI unit step) is re-queued
+in order and held until the queue changes, never isolated: main+batch is broken as a whole and every
+isolated gate would reproduce it. Before isolating a red batch the runner re-runs the failing tests
+(or browser specs) on the rewound `main`; if `main` itself is red it holds the batch (`MAIN_RED`)
+instead of re-proving the defect once per branch. **Every gate has a hard time limit** —
+`GATE_TIMEOUT` (default 3600 s): past it the gate's whole process group is killed, the batch is
+re-queued once and flagged `GATE_TIMEOUT`. **The runner repairs its own leftovers at startup**: a
+staged merge or a provisional bulk that a killed gate left on `main` is aborted / rewound and
+re-queued automatically — nobody types `git merge --abort` any more.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)

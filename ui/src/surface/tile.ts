@@ -15,6 +15,13 @@
 // `observed` and `unknown` are separate codes in an alphabet the answer serves beside the runs, and
 // a plane that does not decode exactly throws rather than resolving to any of them.
 //
+// **The measurement plane arrives as binary16, not as decimal text** (T-533). `grid.max_db` was
+// 1 197 118 B of a 1 878 289 B live tile — seventeen significant digits per cell, for values this
+// file writes straight into an R16F texture. Every tile request carries `planes=f16`
+// ([[TILE_PLANES]]) and the answer states what it sent (`grid.encoding.planes`, and the plane's own
+// type, byte order and transfer); an encoding this client does not know throws rather than being
+// decoded as one it does.
+//
 // **A response we cannot read is not a coverage answer.** A malformed or truncated tile throws
 // rather than decoding to `unobserved`: the place then stays *pending*, which is true, instead of
 // claiming the radio never looked. The same reasoning as `BiasTee::Unknown` is not `Off`.
@@ -103,6 +110,13 @@ export interface TileData {
   readonly bytes: number;
   /** `cost.in_flight_limit`: the server's cap, so the client can adopt it rather than guess. */
   readonly serverInFlightLimit: number | null;
+  /**
+   * `cost.in_flight_share`: **this client's** cap (T-630). The server-wide limit is what protects
+   * ingest; the share is what this client may hold of it while other clients are asking, and it is
+   * the number to operate at. Null from a server that states none (pre-T-630), where the limit is
+   * the only number there is.
+   */
+  readonly serverInFlightShare: number | null;
 }
 
 /** The shape this client reads. Structural, and only the fields it actually uses. */
@@ -115,6 +129,17 @@ export interface TileResponse {
   };
   grid: {
     nt: number; nf: number; max_db?: (number | null)[]; range_db?: { lo: number; hi: number } | null;
+    /**
+     * **How the per-cell planes are spelled** (T-533). Stated on every answer, including the JSON
+     * one, so the encoding is read rather than inferred from which fields happen to be present.
+     * `json` is the arrays below; `f16` moves `max_db` into [[grid.planes]].
+     */
+    encoding?: { planes?: string };
+    /**
+     * The typed spelling of the planes it names — `max_db` as base64 of little-endian IEEE
+     * binary16. Every plane NOT named here is a JSON array beside it.
+     */
+    planes?: { max_db?: { type?: string; byte_order?: string; transfer?: string; cells?: number; data?: string } };
     /** Per-cell folded frame count. The evidence that separates [[CELL.AWAITING]] from
      * [[CELL.NO_LEVEL]] — see [[decodeTile]]. */
     frames?: (number | null)[];
@@ -145,7 +170,7 @@ export interface TileResponse {
       time?: { direction: string; source_cells?: number; served?: number };
     };
   };
-  cost?: { in_flight_limit?: number };
+  cost?: { in_flight_limit?: number; in_flight_share?: number; clients?: number };
   /**
    * **The last-known tier** (T-519/T-520, ADR-0020): column runs, each carrying a band's newest
    * known max-hold down rows the radio was not looking at. Parallel arrays of `runs` entries; run
@@ -175,15 +200,30 @@ export class TileDecodeError extends Error {
  * at a time*, and the cap it names is the number to obey.
  */
 export class TileBusyError extends Error {
-  constructor(readonly limit: number | null, message: string) {
+  /**
+   * @param limit the server-wide cap the refusal named, or null.
+   * @param share **this client's** cap (T-630), or null from a server that named none. A refusal
+   * is how a client learns its share shrank because another client arrived, so the number is
+   * carried here and not only on the answers it is no longer getting.
+   */
+  constructor(readonly limit: number | null, message: string, readonly share: number | null = null) {
     super(message);
     this.name = "TileBusyError";
   }
 }
 
-/** The cap a `503` names ("too many tile reads in flight (limit 4)"), or null if it named none. */
+/** The cap a `503` names ("too many tile reads in flight (limit 4, share 2)"), or null if it named none. */
 export function capFromRefusal(message: string): number | null {
-  const m = /limit\s+(\d+)/.exec(message);
+  return numberNamed(message, "limit");
+}
+
+/** This client's share, as a `503` names it (T-630), or null from a server that named none. */
+export function shareFromRefusal(message: string): number | null {
+  return numberNamed(message, "share");
+}
+
+function numberNamed(message: string, word: string): number | null {
+  const m = new RegExp(`${word}\\s+(\\d+)`).exec(message);
   const n = m ? Number(m[1]) : NaN;
   return Number.isFinite(n) && n > 0 ? n : null;
 }
@@ -227,7 +267,12 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
   // stated uniform cell is unreadable, and unreadable is not an answer.
   let levelAt: (i: number) => number | null | undefined;
   let framesAt: (i: number) => number | null | undefined;
-  if (Array.isArray(db) && db.length === n) {
+  const packed = packedLevels(addr, resp, n);
+  if (packed) {
+    const counted = Array.isArray(frames) && frames.length === n ? frames : null;
+    levelAt = (i) => packed[i];
+    framesAt = counted ? (i) => counted[i] : () => undefined;
+  } else if (Array.isArray(db) && db.length === n) {
     const counted = Array.isArray(frames) && frames.length === n ? frames : null;
     levelAt = (i) => db[i];
     framesAt = counted ? (i) => counted[i] : () => undefined;
@@ -235,7 +280,7 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     levelAt = () => uni.max_db;
     framesAt = () => uni.frames;
   } else {
-    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells and no grid.uniform, expected ${n}`);
+    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.max_db has ${db?.length ?? "no"} cells, no grid.planes.max_db and no grid.uniform, expected ${n}`);
   }
   const cov = coverageCells(addr, resp);
   const shade = shadowCells(addr, resp, nf, nt, levelAt);
@@ -304,7 +349,60 @@ export function decodeTile(addr: TileAddr, resp: TileResponse): TileData {
     rangeDb: resp.grid?.range_db ?? null,
     bytes: n * BYTES_PER_CELL,
     serverInFlightLimit: typeof resp.cost?.in_flight_limit === "number" ? resp.cost.in_flight_limit : null,
+    serverInFlightShare: typeof resp.cost?.in_flight_share === "number" ? resp.cost.in_flight_share : null,
   };
+}
+
+/** Plane spellings this client can read. Anything else is refused, never guessed at (T-533). */
+const PLANE_ENCODINGS: readonly string[] = ["json", "f16"];
+
+/**
+ * The `max_db` plane out of `grid.planes`, decoded — or `null` when this answer spells it as a
+ * JSON array (or as a uniform cell) instead (T-533).
+ *
+ * **The encoding is read from the answer, and an unrecognised one throws.** A plane decoded against
+ * the wrong type is not a degraded measurement, it is a different number entirely, so the rule here
+ * is the same one `coverage` follows: a response we cannot read is not an answer, and the place
+ * stays *pending* rather than being painted with whatever the bytes happened to mean. Everything
+ * checked rather than trusted: the declared type, byte order and transfer, and a `data` string that
+ * decodes to exactly `2 · cells` bytes for this tile's own grid.
+ *
+ * `NaN` is *not observed*, the same claim `null` makes in the JSON spelling — never a level.
+ */
+function packedLevels(addr: TileAddr, resp: TileResponse, n: number): Float32Array | null {
+  const named = resp.grid?.encoding?.planes;
+  if (named !== undefined && !PLANE_ENCODINGS.includes(String(named))) {
+    throw new TileDecodeError(`tile ${keyOf(addr)}: grid.encoding.planes is ${String(named)}, which this client cannot decode`);
+  }
+  const p = resp.grid?.planes?.max_db;
+  if (p === undefined || p === null) return null;
+  const bad = (why: string) => new TileDecodeError(`tile ${keyOf(addr)}: grid.planes.max_db ${why}`);
+  if (named !== "f16") throw bad(`is present but grid.encoding.planes says ${String(named)}`);
+  if (p.type !== "f16") throw bad(`has type ${String(p.type)}, not f16`);
+  if (p.byte_order !== "little-endian") throw bad(`has byte order ${String(p.byte_order)}`);
+  if (p.transfer !== "base64") throw bad(`has transfer ${String(p.transfer)}`);
+  if (p.cells !== n) throw bad(`covers ${String(p.cells)} cells, expected ${n}`);
+  if (typeof p.data !== "string") throw bad("carries no data");
+  let bin: string;
+  try {
+    bin = atob(p.data);
+  } catch {
+    throw bad("is not base64");
+  }
+  if (bin.length !== n * 2) throw bad(`decodes to ${bin.length} bytes, expected ${n * 2}`);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = f16ToF32(bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8));
+  }
+  return out;
+}
+
+/** One IEEE 754 binary16, as the sixteen bits the wire sent. NaN and infinities stay non-finite. */
+function f16ToF32(bits: number): number {
+  const sign = bits & 0x8000 ? -1 : 1, exp = (bits >> 10) & 0x1f, mant = bits & 0x3ff;
+  if (exp === 0) return sign * mant * 2 ** -24;          // zero and subnormals
+  if (exp === 31) return mant ? NaN : sign * Infinity;   // absent, or out of range
+  return sign * (mant + 1024) * 2 ** (exp - 25);
 }
 
 /**
@@ -449,7 +547,7 @@ export async function fetchTile(addr: TileAddr, token: string, fetchFn: TileFetc
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = errorFrom(r.status, body, r.statusText);
-    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message);
+    if (r.status === 503) throw new TileBusyError(capFromRefusal(e.message), e.message, shareFromRefusal(e.message));
     throw e;
   }
   return decodeTile(addr, body as TileResponse);

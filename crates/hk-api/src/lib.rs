@@ -43,6 +43,7 @@ pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
 pub mod live_control;
+pub mod measurements; // T-818 MAP-18
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
@@ -82,7 +83,8 @@ pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
     DEVICE_GATE_WAIT, DeviceAction, DeviceGate, DeviceGuard, LiveControl, LiveControlError,
-    LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
+    LiveControls, LiveControlsError, LiveTuning, SelectError, SourceLiveControl, WindowPolicy,
+    WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};

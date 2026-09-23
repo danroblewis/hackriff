@@ -48,6 +48,8 @@ BULKMARK=$S/bulk-in-progress
 # this script already keeps rather than counted a second way.
 LANDED=$S/landed.jsonl
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
+# Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
+BULK_MAX=${BULK_MAX:-15}
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
@@ -103,6 +105,25 @@ record_landed(){ # branch
   if [ -n "${first:-}" ]; then land=$(( (now - first) / 60 )); else first=null; land=null; fi
   printf '{"ticket":"%s","branch":"%s","first_commit_ts":%s,"merge_ts":%s,"land_minutes":%s,"gate_attempts":%s,"merge":"%s"}\n' \
     "$t" "$b" "$first" "$now" "$land" "$(( $(attempts_of "$b") + 1 ))" "$merge_sha" >> "$LANDED"
+  flip_done "$t" "$merge_sha"
+}
+
+# The board flip belongs HERE, at the instant of landing, because this runner is the one process
+# allowed to commit to main right now. A bystander waiting for a "safe" moment never finds one: on
+# 2026-09-22 the work runner's board sync committed ZERO times in four hours of back-to-back gates,
+# so the burndown showed six landed branches as still open. Uses the task CLI when main has it
+# (py/hkpy/tasks.py, T-taskcli); a ticket-less branch (task-guards) has nothing to flip.
+flip_done(){ # ticket merge_sha
+  local t=$1 sha=$2
+  case "$t" in T-*) ;; *) return 0 ;; esac
+  [ -f "$REPO/py/hkpy/tasks.py" ] || { log "flip_done $t: no task CLI on main yet - the board keeps todo until reconcile"; return 0; }
+  if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks set "$t" status=done commit="${sha:0:8}" >>"$LOG" 2>&1 \
+      && git add docs/tasks.yaml && git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
+    log "BOARD $t -> done (${sha:0:8})"
+  else
+    (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
+    log "flip_done $t FAILED - board left as is; needs reconcile"
+  fi
 }
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
@@ -138,7 +159,13 @@ process(){
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
-  if just gate-merge >>"$LOG" 2>&1; then
+  local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
+  limited just gate-merge; rc=$?
+  # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
+  # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
+  # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
+  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge"; rc=$?; fi
+  if [ "$rc" -eq 0 ]; then
     # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
     #
     # `git commit` with no MERGE_HEAD writes an ORDINARY commit of whatever is in the index. On
@@ -155,12 +182,28 @@ process(){
     staged_head=$(git -C "$REPO" rev-parse --verify --quiet MERGE_HEAD || true)
     branch_tip=$(git -C "$REPO" rev-parse --verify --quiet "$branch" || true)
     if [ -z "$staged_head" ] || [ "$staged_head" != "$branch_tip" ]; then
-      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - NOT committing"
-      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST" >> "$NEEDS"
-      notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
+      # Two cases, neither a person's job. (a) The branch moved while its old tip was gated
+      # (a fix pushed mid-gate, 2026-09-22 22:02): the staged merge is of a tip nobody wants
+      # any more - abort it and re-queue the branch, which gates the new tip. (b) MERGE_HEAD is
+      # gone (someone stashed/reset in main): nothing to commit; re-queue. Leaving the staged
+      # merge in place parked the runner on "a merge is already in progress" for 95 minutes.
+      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - aborting the stale merge and re-queueing the branch"
+      git merge --abort >>"$LOG" 2>&1 || true
+      echo "$branch" >> "$QUEUE"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST (branch moved mid-gate; stale merge aborted, branch re-queued)" >> "$NEEDS"
       return 0
     fi
-    git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1
+    # T-764: the commit can now be REFUSED — `.githooks/pre-commit` validates docs/tasks.yaml
+    # before any commit that touches it, and a merge commit is one of the two writers that can
+    # put a malformed board on main. An unchecked `git commit` here would log "MERGED ✓" for a
+    # merge that never happened, which is the same false-success shape as T-840's lost MERGE_HEAD.
+    if ! git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
+      log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
+      git merge --abort 2>/dev/null || true
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"
+      notify_coordinator "$ticket ($branch) gated GREEN but its merge COMMIT was refused (see the log; usually a malformed docs/tasks.yaml). main is untouched."
+      return 0
+    fi
     log "MERGED $branch ✓"
     record_landed "$branch"
     clear_attempts "$branch"
@@ -178,6 +221,52 @@ process(){
   fi
   return 0
 }
+
+# THE GATE RUNS ALONE (user, 2026-09-22): no gate starts while a worker is running. The work
+# runner stops dispatching once WORK_QUEUE_PAUSE branches wait here (and while a gate runs), so
+# the running workers finish and the box empties; this is the other half. The SDET review of
+# 2026-09-22 measured why: during shared gates, untouched crates of small unit tests ran 18-79x
+# dearer (hk-recipe 79x) - contention, not code. Workers are counted from the work runner's
+# claims (state=running), not from ps, so a wrapper process or a reviewer is not mistaken for
+# one. After WORKER_DRAIN_MAX seconds of waiting the gate runs anyway and says so: a stuck
+# worker must not hold every merge (the work runner releases stale claims after 4 h).
+WORKER_DRAIN_MAX=${WORKER_DRAIN_MAX:-2700}
+DRAIN_SINCE=""
+workers_running(){
+  local claimed foreign
+  claimed=$(python3 - "$S/work-claims.json" <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(sum(1 for c in d.values() if c.get("state") == "running"))
+except Exception:
+    print(0)
+PY
+)
+  # Browser-spec runs and test servers that are NOT this runner's (a triage or fix agent
+  # reproducing a spec) share the ports and the CPU the gate's own browser tier needs; on
+  # 2026-09-22 they turned three green specs red in two different gates. Count them as
+  # workers: the gate waits for them the same way (and the same 45-min cap applies). This is
+  # only consulted BEFORE a gate starts, when none of these can be the runner's own.
+  foreign=$(pgrep -f 'node e2e/run.mjs|hk serve --bind 127.0.0.1:87' 2>/dev/null | wc -l | tr -d ' ')
+  echo $(( claimed + ${foreign:-0} ))
+}
+# While this waits it holds `$S/gate-wanted`, which the work runner reads as "a gate is
+# pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
+# the box and the drain would never complete (observed 14:12: T-565 started during the wait).
+GATEWANT=$S/gate-wanted
+workers_drained(){ # 0 = no worker running (or waited long enough), 1 = wait
+  local n; n=$(workers_running)
+  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0; fi
+  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $n worker(s) running - the gate runs alone, dispatch is paused, waiting for them to hand back"; }
+  printf 'since=%s\nworkers=%s\n' "$DRAIN_SINCE" "$n" > "$GATEWANT"
+  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
+    log "WAIT over: $n worker(s) still running after $WORKER_DRAIN_MAX s - gating anyway (a stuck worker must not hold every merge)"
+    DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0
+  fi
+  return 1
+}
+rm -f "$GATEWANT"   # a marker from a previous run must not outlive it
 
 # preconditions for touching main; 0 = OK to proceed, 1 = wait
 main_ready(){
@@ -227,6 +316,84 @@ ready_filter(){
 # merger to main, nothing has been pushed, and the batch is reconstructible from the
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
+FLAKY=$S/flaky.jsonl
+# A HARD TIME LIMIT ON EVERY GATE (user, 2026-09-22: "a time-limit kill after 60 minutes").
+# A gate that runs past GATE_TIMEOUT seconds is killed - its whole process group, so nextest,
+# cargo, hk serve and Chrome go with it - and counts as a failure of kind "timeout", which is
+# re-queued once (like a suite-wide red) rather than isolated. Job control (`set -m`) gives the
+# background job its own process group, which is what makes the kill complete.
+GATE_TIMEOUT=${GATE_TIMEOUT:-3600}
+GATE_TIMED_OUT=0
+limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
+  local pid start now
+  GATE_TIMED_OUT=0
+  set -m
+  ( cd "$REPO" && "$@" ) >>"$LOG" 2>&1 &
+  pid=$!
+  set +m
+  start=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $(( now - start )) -ge "$GATE_TIMEOUT" ]; then
+      log "GATE TIMEOUT: '$*' exceeded ${GATE_TIMEOUT}s - killing its process group"
+      kill -TERM -- "-$pid" 2>/dev/null; sleep 20; kill -KILL -- "-$pid" 2>/dev/null
+      GATE_TIMED_OUT=1
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 10
+  done
+  wait "$pid"; return $?
+}
+
+flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
+  # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
+  # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
+  # `--base` gate would diff the wrong thing.
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t rc
+  # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
+  # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
+  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
+  TRIAGE_KIND="test"
+  # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
+  # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
+  # Those are TEST failures too (2026-09-22 14:49 they were read as "suite broken"), and a spec
+  # can be re-run alone with `npm run e2e -- <name>...` from ui/.
+  local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
+  if [ -z "$tests" ] && [ -n "$specs" ]; then
+    TRIAGE_SPECS="$specs"   # try_bulk re-runs these on main alone if this batch is red
+    log "TRIAGE: browser specs red: $specs - re-running them alone"
+    if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
+      # The browser tier is the LAST suite; the Rust workspace and acceptance already passed
+      # on this exact tree, so the retry re-runs only the acceptance phase (acceptance-ci +
+      # test-ui-e2e), not the 15-minute workspace suite again.
+      log "TRIAGE: they PASS alone -> load flake; retrying the gate's acceptance phase once"
+      printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
+      limited $retry --phase acceptance; rc=$?
+      [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
+      return $rc
+    fi
+    log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
+    return 1
+  fi
+  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
+  filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
+  TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
+  log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
+  # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
+  # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
+  # the reserve the gate always has.
+  if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+    log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    limited $retry; rc=$?
+    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
+    return $rc
+  fi
+  log "TRIAGE: a test FAILS alone -> a real defect in this merge"
+  return 1
+}
+
 try_bulk(){
   local branches=("$@") tickets="" b wt base after rc
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
@@ -279,7 +446,23 @@ try_bulk(){
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
-  ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
+  # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
+  # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
+  local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
+  limited just gate --base "$base"; rc=$?
+  # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
+  # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
+  # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
+  # recorded in flaky.jsonl, and the whole gate is retried ONCE (workers are bounded, so the
+  # gate's reserved cores are the gate's - nothing is suspended). Only a test that fails alone,
+  # or a second red gate, still isolates.
+  if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
+    # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
+    # re-queue the batch once, hold until the queue changes - and say so where a person looks.
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""
+    echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
+  elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
@@ -295,6 +478,53 @@ try_bulk(){
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then
     git -C "$REPO" reset --hard "$base" >>"$LOG" 2>&1
+    # A red with NO test FAIL line is lint, a build error or the UI unit step - a property of
+    # main+batch as a whole that every isolated gate would reproduce (2026-09-22 14:34: a
+    # TypeScript type error on main itself; isolating 6 branches would have been 6 identical
+    # reds, 6 attempt-ledger strikes and ~90 min). So: rewind, put the batch BACK in the queue
+    # in order, flag it once, and wait for a fix to be queued - never isolate.
+    if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
+      for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+      printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+      log "BULK gate FAILED without a test FAIL (lint/build/ui-unit) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; lint/build/ui-unit red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
+      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
+      rm -f "$BULKMARK"
+      return 0
+    fi
+    # IS MAIN ITSELF RED? A test that fails alone on main+batch and ALSO fails alone on the
+    # rewound main is main's defect, and isolating would only re-prove it once per branch
+    # (15:45 on 2026-09-22: three branches isolated against a lattice test that main had
+    # failed since a hand-landed batch; the fix branch was sitting in the queue). Costs one
+    # scoped nextest run on the clean main; saves a full gate per branch.
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -n "${TRIAGE_FILTER:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
+      if ! ( cd "$REPO" && cargo nextest run --workspace -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
+    fi
+    # The same question for browser specs (fog-of-war on 2026-09-22 16:22: red on main since
+    # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
+    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
+      log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
+      if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
+        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        log "TRIAGE: MAIN IS RED on browser spec(s): $TRIAGE_SPECS -> batch re-queued in order, NOT isolated; queue the fix"
+        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - browser spec(s) $TRIAGE_SPECS fail on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+        notify_coordinator "main itself fails browser spec(s) $TRIAGE_SPECS - the batch ($tickets) is re-queued and held; queue a fix for main."
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
+    fi
     log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
   else
     log "BULK gate FAILED but HEAD moved since the batch - NOT rewinding; needs a person"
@@ -341,6 +571,40 @@ self_version(){
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 self_version
+# STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
+# happen automatically?"). This runner is the only writer of main, so a staged merge or a
+# bulk marker found at startup can only be a previous runner's, killed mid-gate. Nothing was
+# gated, nothing was committed: abort the staged merge, rewind a provisional bulk to its base,
+# re-queue those branches, and carry on. Waiting for a person to type `git merge --abort`
+# cost an hour of an empty box today. Refuse only if the tree has uncommitted edits that are
+# not the merge's own - that is someone else's work and a person must look.
+# ORPHAN GATES FIRST. A runner killed mid-gate leaves its gate subshell (just gate / cargo /
+# nextest / npm e2e / hk serve) running on this very checkout; at 17:58 on 2026-09-22 a new
+# runner started a second gate beside one such orphan and the two shared the tree, the ports
+# and the CPU for 30 minutes (run ids d1503dd80480 and 4ecba9c10c0a). At startup NO gate
+# process can be legitimate, so every one of them is killed before anything else.
+for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
+  for opid in $(pgrep -f "$pat" 2>/dev/null); do
+    [ "$opid" = "$$" ] && continue
+    log "STARTUP: killing orphan gate process $opid ($pat)"; kill -TERM "$opid" 2>/dev/null
+  done
+done
+sleep 2
+if [ -e "$REPO/.git/MERGE_HEAD" ]; then
+  stale=$(git -C "$REPO" rev-parse --short MERGE_HEAD 2>/dev/null)
+  git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
+    || log "STARTUP: could not abort the staged merge ($stale) - a person must look"
+fi
+if [ -f "$BULKMARK" ]; then
+  sbase=$(sed -n 's/^base=//p' "$BULKMARK"); sbranches=$(sed -n 's/^branches=//p' "$BULKMARK")
+  if [ -n "$sbase" ] && git -C "$REPO" diff --quiet && git -C "$REPO" diff --cached --quiet; then
+    git -C "$REPO" reset --hard "$sbase" >>"$LOG" 2>&1 && rm -f "$BULKMARK" \
+      && log "STARTUP: rewound a provisional bulk to $sbase and re-queued: $sbranches" \
+      && for b in $sbranches; do echo "$b" >> "$QUEUE"; done
+  else
+    log "STARTUP: bulk marker present but the tree is dirty or base unknown - NOT rewinding; a person must look"
+  fi
+fi
 while true; do
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
@@ -354,12 +618,28 @@ while true; do
   for qb in $queued; do
     case " $SEEN_QUEUED " in *" $qb "*) ;; *) SEEN_QUEUED="$SEEN_QUEUED $qb"; log "QUEUED $qb";; esac
   done
-  if [ -n "$queued" ] && main_ready; then
+  if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
+    # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
+    # hold it until the queue changes (a fix branch appears, or a branch is withdrawn).
+    if [ -f "$S/suite-broken" ] && [ "$(echo $ready | tr ' ' '\n' | sort | tr '\n' ' ')" = "$(cat "$S/suite-broken")" ]; then
+      for b in $ready; do echo "$b" >> "$QUEUE"; done
+      [ -z "${SUITE_HOLD_SAID:-}" ] && { log "HOLD: the same batch failed without a test FAIL; waiting for the queue to change (a fix)"; SUITE_HOLD_SAID=1; }
+      sleep 8; continue
+    fi
+    rm -f "$S/suite-broken"; SUITE_HOLD_SAID=""
     set -- $ready
+    # BATCH CAP (user, 2026-09-22: "reduce batch size to 15"). A 20-branch batch that goes red
+    # is 20 branches' worth of isolation; the rest of the queue keeps its order and goes in the
+    # next batch, so nothing is dropped - the tail is written back BEFORE anything runs.
+    if [ "$#" -gt "$BULK_MAX" ]; then
+      log "BULK cap: $# ready, taking the first $BULK_MAX; the other $(( $# - BULK_MAX )) stay queued in order"
+      i=0; for b in "$@"; do i=$((i+1)); [ "$i" -gt "$BULK_MAX" ] && echo "$b" >> "$QUEUE"; done
+      set -- "${@:1:$BULK_MAX}"
+    fi
     if [ "$#" -eq 1 ]; then
       process "$1" || echo "$1" >> "$QUEUE"
     elif [ "$#" -ge 2 ]; then

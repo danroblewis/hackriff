@@ -40,6 +40,7 @@
 // `applyDeviceAction`, T-343's one gate, on an explicit button press.
 import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
+import { newClientId, setTileClientId } from "../../surface/clientid";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
   markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
@@ -241,6 +242,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const d = ringEl.dataset;
       d.retentionS = rules ? String(rules.retentionS) : "";
       d.iqS = rules?.iqS != null ? String(rules.iqS) : "";
+      // What those two rules were derived FROM, this frame: the edge the panes are drawn to and the
+      // ring window as last polled. The server's ring moves on between that poll and any later
+      // question, so a claim about the rules is only checkable against the snapshot they came from.
+      d.edgeS = rules ? String(rules.retentionS + rules.spanS) : "";
+      d.ringT0S = w?.buffered ? String(w.buffered.t0S) : "";
+      d.ringT1S = w?.buffered ? String(w.buffered.t1S) : "";
       d.backing = backing;
       d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
       d.paneT1S = String(pane.box.t1Ns / S_TO_NS);
@@ -610,6 +617,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
 
   // ---- boot ----
   void (async () => {
+    // **Name this page before it asks for its first tile** (T-630): `GET /api/tiles` splits its
+    // four in-flight slots between the clients asking for them, and an unnamed page shares the
+    // anonymous bucket with every other unnamed caller. See `ui/src/surface/clientid.ts`.
+    setTileClientId(newClientId());
     let probe;
     try {
       probe = await probeSurface((path) => client.get(path));
@@ -629,6 +640,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
+        // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
+        survey: (path) => client.get(path),
         windows: () => windows,
         // The ring rules first, so a signal box or selection that crosses one is drawn over it.
         marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],

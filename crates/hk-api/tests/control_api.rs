@@ -48,15 +48,24 @@ impl Drop for TempDir {
 /// A device that records every receive-side command.
 struct Device {
     caps: SourceCapabilities,
+    /// The front end's own provenance identity (T-343); [`DEVICE_ID`] unless a test composes a
+    /// second radio (T-511).
+    id: String,
     calls: Mutex<Vec<String>>,
 }
 
 impl Device {
     fn new(bias_tee: bool) -> Arc<Self> {
+        Self::with_id(bias_tee, DEVICE_ID)
+    }
+
+    /// A second front end, with its own identity — what a two-SDR run holds (T-511).
+    fn with_id(bias_tee: bool, id: &str) -> Arc<Self> {
         let mut caps = SourceCapabilities::hackrf_one();
         caps.bias_tee = bias_tee;
         Arc::new(Self {
             caps,
+            id: id.to_owned(),
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -81,7 +90,7 @@ impl SourceControl for Device {
     fn device_info(&self) -> Option<hk_core::source::DeviceInfo> {
         Some(hk_core::source::DeviceInfo {
             driver: "hackrf-one".into(),
-            device_id: DEVICE_ID.into(),
+            device_id: self.id.clone(),
             hw: "HackRF One (test), r4, fw 2026.01.3".into(),
         })
     }
@@ -238,7 +247,7 @@ fn rig(tag: &str, token: Token, device: Arc<Device>, live_device: bool) -> Rig {
     let repo = Repository::open(dir.0.join("hackriff.db")).unwrap();
     let audit_log = Arc::new(AuditLog::open(&audit).unwrap());
     let state = ApiState {
-        live_control: live_device.then(|| live(&device)),
+        live_controls: live_device.then(|| live(&device)).into(),
         run_control: Some(FakeRun::new(ContentClass::Unrestricted) as Arc<dyn RunControl>),
         bookmarks: Some(Arc::new(Mutex::new(repo))),
         audit: Some(Arc::clone(&audit_log)),
@@ -1043,7 +1052,7 @@ fn the_audit_log_refuses_symlinks() {
 fn without_an_audit_log_control_is_disabled() {
     let device = Device::new(true);
     let state = ApiState {
-        live_control: Some(live(&device)),
+        live_controls: live(&device).into(),
         ..ApiState::default()
     };
     let server = Server::start(
@@ -1519,4 +1528,631 @@ fn t343_a_second_device_action_is_refused_while_the_front_end_is_held() {
     assert_eq!(e.code(), "device_busy");
     drop(holder);
     assert!(gate.enter(DeviceAction::Retune).is_ok(), "released on drop");
+}
+
+/// A run holding **two** front ends (T-511), each with its own identity and its own gate — what
+/// `hk serve --device X --device Y` composes.
+struct TwoDevices {
+    server: Server,
+    a: Arc<Device>,
+    b: Arc<Device>,
+    /// A's live control, kept concretely so a test can hold **A's own** gate.
+    lc_a: Arc<SourceLiveControl>,
+    audit: PathBuf,
+    _dir: TempDir,
+}
+
+const DEVICE_ID_B: &str = "rtlsdr:7673444264";
+
+fn two_device_rig(tag: &str) -> TwoDevices {
+    let dir = TempDir::new(tag);
+    let audit = dir.0.join("control-audit.jsonl");
+    let repo = Repository::open(dir.0.join("hackriff.db")).unwrap();
+    let a = Device::new(true);
+    let b = Device::with_id(false, DEVICE_ID_B);
+    let mk = |d: &Arc<Device>| {
+        Arc::new(SourceLiveControl::new(
+            Arc::clone(d) as Arc<dyn SourceControl>,
+            LiveTuning {
+                center_hz: 100.8e6,
+                sample_rate_hz: 2.4e6,
+                gains: vec![NamedGain::new("lna", 16.0), NamedGain::new("vga", 20.0)],
+                bias_tee: if d.caps.bias_tee {
+                    hk_model::BiasTee::Off
+                } else {
+                    hk_model::BiasTee::Unknown
+                },
+                baseband_filter_hz: None,
+            },
+        ))
+    };
+    let lc_a = mk(&a);
+    let lc_b = mk(&b);
+    let state = ApiState {
+        live_controls: hk_api::LiveControls::new(vec![
+            Arc::clone(&lc_a) as Arc<dyn LiveControl>,
+            lc_b as Arc<dyn LiveControl>,
+        ])
+        .expect("two distinct device ids"),
+        run_control: Some(FakeRun::new(ContentClass::Unrestricted) as Arc<dyn RunControl>),
+        bookmarks: Some(Arc::new(Mutex::new(repo))),
+        audit: Some(Arc::new(AuditLog::open(&audit).unwrap())),
+        ..ApiState::default()
+    };
+    let server = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        state,
+    )
+    .unwrap();
+    TwoDevices {
+        server,
+        a,
+        b,
+        lc_a,
+        audit,
+        _dir: dir,
+    }
+}
+
+/// **T-511: a device route moves the radio the selector names, and refuses to guess.**
+///
+/// The user's multi-SDR direction is several front ends collecting at once. The serving layer
+/// therefore holds a collection keyed by `device_id`, and the routes that reach a radio take a
+/// selector. The three answers asserted here are the whole contract:
+///
+/// 1. a named device is moved, and **only** it — the other radio sees no command at all;
+/// 2. an **omitted** selector on a multi-device run is 400 `device_required`, not a silent move of
+///    whichever was composed first (a defensible default is still a fabricated answer to a
+///    question the caller never asked — the `BiasTee::Unknown` rule for device identity);
+/// 3. an **unknown** id is 404 `unknown_device`, listing what this run does hold.
+#[test]
+fn t511_a_device_route_moves_the_radio_the_selector_names() {
+    let r = two_device_rig("select");
+    let addr = r.server.local_addr();
+
+    // 1. Named: B retunes, A is not touched.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(&format!(
+            r#"{{"center_hz": 433.9e6, "device_id": "{DEVICE_ID_B}"}}"#
+        )),
+    );
+    assert_eq!(rep.status, 200, "{:?}", rep.body);
+    assert_eq!(
+        rep.body["device"]["id"],
+        json!(DEVICE_ID_B),
+        "{:?}",
+        rep.body
+    );
+    assert_eq!(rep.body["tuning"]["center_hz"], json!(433.9e6));
+    assert!(
+        r.b.calls().iter().any(|c| c.starts_with("tune ")),
+        "the named device retunes: {:?}",
+        r.b.calls()
+    );
+    assert!(
+        r.a.calls().is_empty(),
+        "the other radio saw a command it was never asked for: {:?}",
+        r.a.calls()
+    );
+    // The audit says which front end moved, resolved from the request rather than from "the"
+    // device: with two radios there is no such thing.
+    let e = audit_entries(&r.audit)
+        .into_iter()
+        .find(|e| e["path"] == "/api/control/center")
+        .expect("audited");
+    assert_eq!(e["device"]["id"], json!(DEVICE_ID_B), "{e}");
+
+    // And the other one is still addressable, on its own gate — two radios, two resources.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/gains",
+        Some(&format!(
+            r#"{{"gains": {{"lna": 8}}, "device_id": "{DEVICE_ID}"}}"#
+        )),
+    );
+    assert_eq!(rep.status, 200, "{:?}", rep.body);
+    assert_eq!(rep.body["device"]["id"], json!(DEVICE_ID));
+    assert!(r.a.calls().iter().any(|c| c.starts_with("gain ")));
+
+    // 2. Omitted: refused, naming both ids, with nothing commanded.
+    let before = (r.a.calls().len(), r.b.calls().len());
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 88.1e6}"#),
+    );
+    assert_eq!(rep.status, 400, "{:?}", rep.body);
+    assert_eq!(rep.body["code"], json!("device_required"));
+    let msg = rep.body["error"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        msg.contains(DEVICE_ID) && msg.contains(DEVICE_ID_B),
+        "{msg}"
+    );
+    assert_eq!(
+        (r.a.calls().len(), r.b.calls().len()),
+        before,
+        "a refused selector must reach no device"
+    );
+
+    // 3. Unknown: refused, and again nothing is commanded.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/window",
+        Some(r#"{"center_hz": 88.1e6, "sample_rate_hz": 2.4e6, "device_id": "hackrf:nosuch"}"#),
+    );
+    assert_eq!(rep.status, 404, "{:?}", rep.body);
+    assert_eq!(rep.body["code"], json!("unknown_device"));
+    assert!(
+        rep.body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(DEVICE_ID_B),
+        "{:?}",
+        rep.body
+    );
+    assert_eq!(
+        (r.a.calls().len(), r.b.calls().len()),
+        before,
+        "an unknown selector must reach no device"
+    );
+}
+
+/// **T-511: `GET /api/control/state` enumerates the front ends, and says "the device" only when
+/// there is one.**
+///
+/// With two radios the singular `device`/`tuning` are `null`: a client that must name a device to
+/// move one must not be handed one radio's capabilities as if they described the server. `devices`
+/// is the list the selector is picked from.
+#[test]
+fn t511_control_state_enumerates_the_front_ends() {
+    let r = two_device_rig("state");
+    let v = authed(r.server.local_addr(), "GET", "/api/control/state", None).body;
+    assert_eq!(v["live"], json!(true), "{v}");
+    assert_eq!(v["device"], Value::Null, "{v}");
+    assert_eq!(v["tuning"], Value::Null, "{v}");
+    let devices = v["devices"].as_array().expect("devices list");
+    assert_eq!(devices.len(), 2, "{v}");
+    assert_eq!(devices[0]["device_id"], json!(DEVICE_ID), "{v}");
+    assert_eq!(devices[1]["device_id"], json!(DEVICE_ID_B), "{v}");
+    assert_eq!(devices[1]["tuning"]["center_hz"], json!(100.8e6), "{v}");
+    assert!(devices[0]["device"]["gain_stages"].is_array(), "{v}");
+
+    // One front end: the selector is optional, `device`/`tuning` mean it, and `devices` holds
+    // exactly it — the single-SDR wire is unchanged plus one additive field.
+    let one = rig(
+        "state-one",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        true,
+    );
+    let v = authed(one.server.local_addr(), "GET", "/api/control/state", None).body;
+    assert_eq!(v["device"]["device_id"], json!(DEVICE_ID), "{v}");
+    let devices = v["devices"].as_array().expect("devices list");
+    assert_eq!(devices.len(), 1, "{v}");
+    assert_eq!(devices[0]["device_id"], json!(DEVICE_ID), "{v}");
+    assert_eq!(v["tuning"], devices[0]["tuning"], "{v}");
+
+    // A replay enumerates none — and still refuses device settings with `not_live`, not with a
+    // selector error.
+    let replay = rig(
+        "state-replay",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        false,
+    );
+    let addr = replay.server.local_addr();
+    let v = authed(addr, "GET", "/api/control/state", None).body;
+    assert_eq!(v["live"], json!(false), "{v}");
+    assert_eq!(v["devices"], json!([]), "{v}");
+    for body in [
+        r#"{"center_hz": 99e6}"#,
+        r#"{"center_hz": 99e6, "device_id": "hackrf:anything"}"#,
+    ] {
+        let rep = authed(addr, "POST", "/api/control/center", Some(body));
+        assert_eq!(rep.status, 409, "{:?}", rep.body);
+        assert_eq!(rep.body["code"], json!("not_live"), "{:?}", rep.body);
+    }
+}
+
+/// **T-511: one capture at a time is PER DEVICE.** The gate exists because a front end is one
+/// shared resource that must not be raced (T-343). Two radios are two resources: holding A's gate
+/// refuses A and leaves B free. A server-wide gate would have failed the second half.
+#[test]
+fn t511_the_device_gate_is_per_device_not_per_server() {
+    use hk_api::DeviceAction;
+
+    let r = two_device_rig("gate");
+    let addr = r.server.local_addr();
+    assert_ne!(
+        r.lc_a.gate().device_id(),
+        Some(DEVICE_ID_B),
+        "each handle carries its own gate, identified by its own device"
+    );
+
+    let held = r.lc_a.gate().enter(DeviceAction::Retune).expect("free");
+
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(&format!(
+            r#"{{"center_hz": 99e6, "device_id": "{DEVICE_ID}"}}"#
+        )),
+    );
+    assert_eq!(rep.status, 409, "A is held: {:?}", rep.body);
+    assert_eq!(rep.body["code"], json!("device_busy"), "{:?}", rep.body);
+
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(&format!(
+            r#"{{"center_hz": 99e6, "device_id": "{DEVICE_ID_B}"}}"#
+        )),
+    );
+    assert_eq!(
+        rep.status, 200,
+        "B is a different radio and must not wait on A: {:?}",
+        rep.body
+    );
+    assert_eq!(rep.body["device"]["id"], json!(DEVICE_ID_B));
+
+    drop(held);
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(&format!(
+            r#"{{"center_hz": 99e6, "device_id": "{DEVICE_ID}"}}"#
+        )),
+    );
+    assert_eq!(rep.status, 200, "released on drop: {:?}", rep.body);
+}
+
+/// **T-511: with exactly one front end, behaviour is unchanged.** The selector may be omitted (as
+/// every existing client does), may be given correctly, and a wrong one is still refused rather
+/// than treated as "the only device, so it must be this one".
+#[test]
+fn t511_one_device_may_omit_the_selector() {
+    let r = rig(
+        "one-device-selector",
+        Token::from_config(TOKEN).unwrap(),
+        Device::new(true),
+        true,
+    );
+    let addr = r.server.local_addr();
+
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 99e6}"#),
+    );
+    assert_eq!(rep.status, 200, "{:?}", rep.body);
+    assert_eq!(rep.body["device"]["id"], json!(DEVICE_ID));
+
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(&format!(
+            r#"{{"center_hz": 98e6, "device_id": "{DEVICE_ID}"}}"#
+        )),
+    );
+    assert_eq!(rep.status, 200, "{:?}", rep.body);
+
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 97e6, "device_id": "hackrf:someone-elses"}"#),
+    );
+    assert_eq!(rep.status, 404, "{:?}", rep.body);
+    assert_eq!(rep.body["code"], json!("unknown_device"));
+
+    // A selector that is not a string is a validation error, not a device error.
+    let rep = authed(
+        addr,
+        "POST",
+        "/api/control/center",
+        Some(r#"{"center_hz": 97e6, "device_id": 7}"#),
+    );
+    assert_eq!(rep.status, 400, "{:?}", rep.body);
+    assert_eq!(rep.body["code"], json!("invalid"));
+}
+
+/// T-818 (MAP-18, docs/25 §4 and §10.4, RESEARCH-003): a saved measurement is cursors in, a
+/// server-computed value+unit+place out, with a server-stamped provenance. A supplied `value`/`unit`
+/// is refused, a moved cursor is re-measured, the list pages with an optional window and collection
+/// filter, every mutation is audited with no `device` key, nothing reaches the front end, and
+/// without an audit log the store is `503`.
+#[test]
+fn t818_measurements_are_computed_server_side_stamped_paged_and_reach_no_device() {
+    let device = Device::new(true);
+    let r = rig(
+        "t818",
+        Token::from_config(TOKEN).unwrap(),
+        Arc::clone(&device),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let view = format!(
+        r#"{{"center_hz": 433.92e6, "span_hz": 2e6, "t_capture": [1000.0, 1012.5], "tier": "live-iq", "device_id": "{DEVICE_ID}"}}"#
+    );
+    let post = |body: &str| authed(addr, "POST", "/api/measurements", Some(body));
+
+    // Symbol rate: 10 symbols over 2 ms is 5 kBd. The cursors are sent out of order; the place is
+    // still lo..hi, first..last.
+    let rate = post(&format!(
+        r#"{{"kind": "symbol_rate", "cursors": [{{"f_hz": 433.93e6, "t_s": 1001.002}}, {{"f_hz": 433.91e6, "t_s": 1001.0}}], "n": 10, "note": "OOK preamble", "view": {view}}}"#
+    ));
+    assert_eq!(rate.status, 201, "{}", rate.body);
+    let m = &rate.body;
+    assert_eq!(m["kind"], "symbol_rate");
+    assert_eq!(m["unit"], "Bd");
+    assert_eq!(m["basis"], "cursors");
+    assert!(
+        (m["value"].as_f64().unwrap() - 5000.0).abs() < 1e-3,
+        "{}",
+        m["value"]
+    );
+    assert_eq!(
+        (m["f_lo_hz"].as_f64(), m["f_hi_hz"].as_f64()),
+        (Some(433.91e6), Some(433.93e6))
+    );
+    assert_eq!(m["t0_s"].as_f64(), Some(1001.0));
+    assert!((m["t1_s"].as_f64().unwrap() - 1001.002).abs() < 1e-6);
+    assert_eq!(m["n"], 10);
+    assert_eq!(m["cursors"].as_array().unwrap().len(), 2);
+    let p = &m["provenance"];
+    assert_eq!(p["authored"], true);
+    assert_eq!(p["tier"], "live-iq");
+    assert_eq!(
+        p["t_capture"],
+        json!([1000.0, 1012.5]),
+        "capture clock, as sent"
+    );
+    assert_eq!(p["device_id"], DEVICE_ID);
+    assert!(p["sample_rate_hz"].as_f64().is_some_and(|r| r > 0.0), "{p}");
+    let token_id = Token::from_config(TOKEN).unwrap().id();
+    assert_eq!(
+        p["actor"],
+        token_id.as_str(),
+        "fingerprint, never the token"
+    );
+    assert!(!m.to_string().contains(TOKEN));
+    assert!(p["authored_s"].as_f64().unwrap() > 1.7e9, "wall clock");
+    let rate_id = m["id"].as_str().unwrap().to_owned();
+
+    // Δf in a collection, taken over history.
+    let coll = "01890000-0000-7000-8000-000000000818";
+    let hist_view = r#"{"center_hz": 100e6, "span_hz": 20e6, "t_capture": [0, 3600], "tier": "spectrum-history"}"#;
+    let df = post(&format!(
+        r#"{{"kind": "delta_f", "cursors": [{{"f_hz": 100.1e6, "t_s": 2000}}, {{"f_hz": 100.3e6, "t_s": 2000}}], "collection_id": "{coll}", "view": {hist_view}}}"#
+    ));
+    assert_eq!(df.status, 201, "{}", df.body);
+    assert_eq!(
+        (df.body["unit"].as_str(), df.body["collection_id"].as_str()),
+        (Some("Hz"), Some(coll))
+    );
+    assert!((df.body["value"].as_f64().unwrap() - 200e3).abs() < 1e-3);
+    assert!(
+        df.body["provenance"]["sample_rate_hz"].is_null(),
+        "no device named, no rate claimed"
+    );
+    let df_id = df.body["id"].as_str().unwrap().to_owned();
+
+    // Cursors in, never a value: a supplied value/unit/place or provenance is refused by name, as
+    // are bad cursors and a missing view.
+    let two = r#"[{"f_hz": 1e8, "t_s": 1}, {"f_hz": 2e8, "t_s": 2}]"#;
+    for (body, needle) in [
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "value": 12.5, "view": {view}}}"#),
+            "value",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "unit": "Hz", "view": {view}}}"#),
+            "unit",
+        ),
+        (
+            format!(
+                r#"{{"kind": "delta_f", "cursors": {two}, "view": {view}, "provenance": {{}}}}"#
+            ),
+            "provenance",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}}}"#),
+            "view",
+        ),
+        (
+            format!(r#"{{"kind": "area", "cursors": {two}, "view": {view}}}"#),
+            "kind",
+        ),
+        (
+            format!(
+                r#"{{"kind": "delta_f", "cursors": [{{"f_hz": 1e8, "t_s": 1}}], "view": {view}}}"#
+            ),
+            "cursors",
+        ),
+        (
+            format!(r#"{{"kind": "period", "cursors": {two}, "view": {view}}}"#),
+            "n",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "n": 3, "view": {view}}}"#),
+            "n",
+        ),
+        (
+            format!(
+                r#"{{"kind": "bandwidth", "cursors": [{{"f_hz": 1e8, "t_s": 1}}, {{"f_hz": 1e8, "t_s": 2}}], "view": {view}}}"#
+            ),
+            "bandwidth",
+        ),
+    ] {
+        let rep = post(&body);
+        assert_eq!(rep.status, 400, "{body} -> {}", rep.body);
+        assert!(
+            rep.body["error"].as_str().unwrap().contains(needle),
+            "{needle}: {}",
+            rep.body
+        );
+    }
+    let dup = post(&format!(
+        r#"{{"id": "{rate_id}", "kind": "delta_t", "cursors": {two}, "view": {view}}}"#
+    ));
+    assert_eq!(
+        (dup.status, dup.body["code"].as_str()),
+        (409, Some("conflict"))
+    );
+
+    // The list: unwindowed returns all (durable), newest capture time first; a window, a
+    // collection and paging narrow it.
+    let all = authed(addr, "GET", "/api/measurements", None);
+    assert_eq!(all.status, 200, "{}", all.body);
+    assert_eq!(
+        (all.body["matched"].as_u64(), all.body["limit"].as_u64()),
+        (Some(2), Some(500))
+    );
+    assert_eq!(all.body["measurements"][0]["id"], df_id.as_str());
+    let page = authed(addr, "GET", "/api/measurements?limit=1", None);
+    assert_eq!(page.body["count"], 1);
+    let cursor = page.body["next_cursor"].as_str().unwrap().to_owned();
+    let page2 = authed(
+        addr,
+        "GET",
+        &format!("/api/measurements?limit=1&cursor={cursor}"),
+        None,
+    );
+    assert_eq!(page2.body["measurements"][0]["id"], rate_id.as_str());
+    assert!(page2.body["next_cursor"].is_null());
+    let win = authed(
+        addr,
+        "GET",
+        "/api/measurements?f_lo=433e6&f_hi=435e6&t0=900&t1=1100",
+        None,
+    );
+    assert_eq!(
+        (
+            win.body["matched"].as_u64(),
+            win.body["measurements"][0]["id"].as_str()
+        ),
+        (Some(1), Some(rate_id.as_str()))
+    );
+    let in_coll = authed(
+        addr,
+        "GET",
+        &format!("/api/measurements?collection={coll}"),
+        None,
+    );
+    assert_eq!(
+        (
+            in_coll.body["matched"].as_u64(),
+            in_coll.body["measurements"][0]["id"].as_str()
+        ),
+        (Some(1), Some(df_id.as_str()))
+    );
+    for bad in [
+        "/api/measurements?f_lo=1",
+        "/api/measurements?limit=2001",
+        "/api/measurements?collection=x",
+    ] {
+        assert_eq!(authed(addr, "GET", bad, None).status, 400, "{bad}");
+    }
+
+    // Moving a cursor re-measures server-side; a value in a PUT is refused; the provenance stays
+    // until a new view re-stamps it.
+    let path = format!("/api/measurements/{rate_id}");
+    let moved = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(
+            r#"{"cursors": [{"f_hz": 433.91e6, "t_s": 1001.0}, {"f_hz": 433.93e6, "t_s": 1001.004}], "note": null}"#,
+        ),
+    );
+    assert_eq!(moved.status, 200, "{}", moved.body);
+    assert!(
+        (moved.body["value"].as_f64().unwrap() - 2500.0).abs() < 1e-3,
+        "{}",
+        moved.body
+    );
+    assert!(moved.body["note"].is_null());
+    assert_eq!(moved.body["provenance"], m["provenance"]);
+    assert_eq!(moved.body["created_s"], m["created_s"]);
+    let forged = authed(addr, "PUT", &path, Some(r#"{"value": 9600}"#));
+    assert_eq!(forged.status, 400, "{}", forged.body);
+    let as_n = authed(addr, "PUT", &path, Some(r#"{"n": 20}"#));
+    assert!(
+        (as_n.body["value"].as_f64().unwrap() - 5000.0).abs() < 1e-3,
+        "{}",
+        as_n.body
+    );
+    assert_eq!(authed(addr, "GET", &path, None).body["n"], 20);
+
+    let del = authed(addr, "DELETE", &path, None);
+    assert_eq!(
+        (del.status, del.body["deleted"]["id"].as_str()),
+        (200, Some(rate_id.as_str()))
+    );
+    assert_eq!(authed(addr, "GET", &path, None).status, 404);
+    assert_eq!(authed(addr, "POST", &path, Some("{}")).status, 405);
+
+    // A view act: nothing reached the front end, and no audit entry carries a `device` key.
+    assert!(device.calls().is_empty(), "{:?}", device.calls());
+    let entries: Vec<Value> = audit_entries(&r.audit)
+        .into_iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("measurement_"))
+        })
+        .collect();
+    for action in [
+        "measurement_create",
+        "measurement_update",
+        "measurement_delete",
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["action"] == action && e["result"] == "ok"),
+            "{action} audited: {entries:?}"
+        );
+    }
+    assert!(entries.iter().all(|e| e.get("device").is_none()));
+    assert!(entries.iter().all(|e| e["token_id"] == token_id.as_str()));
+
+    // No audit log: every mutating measurement route is 503.
+    let bare = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        ApiState {
+            bookmarks: Some(Arc::new(Mutex::new(Repository::open_in_memory().unwrap()))),
+            ..ApiState::default()
+        },
+    )
+    .unwrap();
+    let rep = authed(
+        bare.local_addr(),
+        "POST",
+        "/api/measurements",
+        Some(&format!(
+            r#"{{"kind": "delta_t", "cursors": {two}, "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (rep.status, rep.body["code"].as_str()),
+        (503, Some("unavailable"))
+    );
 }

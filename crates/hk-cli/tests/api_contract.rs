@@ -808,6 +808,29 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     // frozen clock).
     let t = v["t"].as_f64().expect("t (server clock, s): {v}");
     assert!((before - 1.0..=after + 1.0).contains(&t), "t={t}: {v}");
+    // T-572: the hot-tile cache's bound and its eviction, reported HERE — not in a tile body,
+    // where a per-read counter would change a sealed tile's ETag and turn T-574's 304 back into a
+    // 200. The BOUND is the assertion, not a rate: entries and bytes both inside the cap the same
+    // object states.
+    let tc = &v["tile_cache"];
+    assert!(is_object(tc), "tile_cache: {v}");
+    for field in [
+        "entries",
+        "bytes",
+        "max_entries",
+        "max_bytes",
+        "hits",
+        "misses",
+        "evictions",
+        "invalidations",
+    ] {
+        assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
+    }
+    assert_eq!(tc["max_entries"], json!(256), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [
         "memory_bytes",
@@ -7496,6 +7519,25 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     assert_eq!(probe["extent"]["nf"], json!(N), "{probe}");
     assert_eq!(probe["grid"]["cells"], json!(N * N), "{probe}");
     assert_eq!(probe["cost"]["in_flight_limit"], json!(4), "{probe}");
+    // T-630: the cap is server-wide, the SHARE is this client's, and an undeclared caller shares
+    // the anonymous bucket — so `curl` and the CLI meet exactly the route they met before.
+    assert_eq!(probe["cost"]["in_flight_share"], json!(4), "{probe}");
+    assert_eq!(probe["cost"]["clients"], json!(1), "{probe}");
+    assert_eq!(probe["cost"]["client"], json!("-"), "{probe}");
+    assert_eq!(probe["cost"]["reserved"], json!(0), "{probe}");
+    assert_eq!(probe["cost"]["fair_share"], json!(true), "{probe}");
+    // A client that names itself is a client of its own, and two of them halve the share. The
+    // second client here has never been served, so it is also what arms the bootstrap reserve.
+    let (st, mine) = get(addr, &format!("{}&client=tab-one", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{mine}");
+    assert_eq!(mine["cost"]["client"], json!("tab-one"), "{mine}");
+    assert_eq!(mine["cost"]["clients"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_share"], json!(2), "{mine}");
+    assert_eq!(mine["cost"]["in_flight_limit"], json!(4), "{mine}");
+    // An id that is not one is not an error: it shares the anonymous bucket.
+    let (st, odd) = get(addr, &format!("{}&client=not%20an%20id", tile(0, 0, 0, 0)));
+    assert_eq!(st, 200, "{odd}");
+    assert_eq!(odd["cost"]["client"], json!("-"), "{odd}");
     // Tile (0, 0, 0, 0) is 0 Hz in 1970: genuinely unobserved, and that is a coverage answer.
     assert_eq!(probe["grid"]["observed_cells"], json!(0), "{probe}");
     assert_eq!(probe["grid"]["range_db"], Value::Null, "{probe}");
@@ -7524,17 +7566,57 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
     let t_index_of = |lt: u32| (unix_now() / (t_cell * (1u64 << lt) as f64 * N as f64)) as u64;
 
-    // Wait for the pyramid to hold frames under the station.
+    // Wait for the pyramid to hold frames under the station, and **PIN the tile that proved it.**
+    //
+    // A level-0 tile here is `N` display rows — about 1.3 s — so re-reading the wall clock for the
+    // next request names the NEXT tile whenever a boundary passes between the two calls, and that
+    // tile is empty whenever capture's data edge lags the wall clock by more than the gap. Under a
+    // gate's load it does (measured, task-t299's gate: the tile asked for began at +4.78 s after
+    // `recording_began`, one full second past the store's newest frame at +3.77 s), so the
+    // coverage map answered it on its own — uniformly `unobserved`, `answered: null` — and every
+    // assertion below about the tile the wait had just seen observed was made about a different
+    // one. A tile is a fixed region of capture time: once observed it stays observed, so every
+    // read below that needs data addresses THIS index, never `unix_now()` again. (T-509's cause
+    // was the same wall-clock re-derivation, one tile further down this test.)
+    //
+    // **And the tile is found from the DATA EDGE, not the wall clock** — the store's newest frame,
+    // `shadow.edge_s`, which every tile answer carries. Polling the wall-clock tile instead waits
+    // for capture to catch up with a clock it trails: under enough load it never does within the
+    // budget (deflake-0922 measured the sibling shadow test timing out exactly that way).
+    //
+    // **And a tune record must exist** (`horizon.oldest_record_s` non-null) before the young-server
+    // claims below. For the first moments of a server the history has a frame (so
+    // `recording_began_s` is set) but the IQ ring's journal has no span yet, and T-507's
+    // `oldest_record == None` branch serves every row after `recording_began_s` as `"unknown"`.
+    // T-507 measured that window at ~30 ms; under a gate's load deflake-0922 caught `now_tile` in
+    // it (0.37 s into a run: 9 rows `"unknown"`, `oldest_record_s: null`).
+    let mut t_pin = 0u64;
     wait_for(
-        "the station's tile to be observed",
+        "the station's tile at the data edge to be observed, with a tune record behind it",
         Duration::from_secs(60),
         || {
-            get(addr, &tile(0, 0, f_index, t_index_of(0))).1["grid"]["observed_cells"]
-                .as_u64()
-                .is_some_and(|n| n > 0)
+            let Some(edge) =
+                get(addr, &tile(0, 0, f_index, t_index_of(0))).1["shadow"]["edge_s"].as_f64()
+            else {
+                return false;
+            };
+            let ti = ((edge - 0.5 * t_cell) / (t_cell * N as f64)) as u64;
+            let v = get(addr, &tile(0, 0, f_index, ti)).1;
+            let seen = v["grid"]["observed_cells"].as_u64().is_some_and(|n| n > 0)
+                && v["coverage"]["horizon"]["oldest_record_s"].is_f64();
+            if seen {
+                t_pin = ti;
+            }
+            seen
         },
     );
-    let (st, fine) = get(addr, &tile(0, 0, f_index, t_index_of(0)));
+    let (st, fine) = get(addr, &tile(0, 0, f_index, t_pin));
+    eprintln!(
+        "tile route: pinned t_index {t_pin} ({} tile(s) behind the wall clock's now), {} of {} cells observed",
+        t_index_of(0).saturating_sub(t_pin),
+        fine["grid"]["observed_cells"],
+        N * N
+    );
     assert_eq!(st, 200, "{fine}");
     // The level that ANSWERED, not the one the address implies (T-426). At the store's own floor
     // the tile sits on scheme 1's diagonal, so the node is exact and nothing was folded.
@@ -7800,7 +7882,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     );
 
     // ---- the de-welding, on the wire: one axis's level moves only its own axis's cell ----
-    let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_index_of(0)));
+    let (st, coarse_f) = get(addr, &tile(2, 0, f_index / 4, t_pin));
     assert_eq!(st, 200, "{coarse_f}");
     assert_eq!(
         coarse_f["extent"]["f_cell_hz"],
@@ -7818,7 +7900,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
         "the coarser frequency address greyed a band the finer one holds: {coarse_f}"
     );
 
-    let (st, coarse_t) = get(addr, &tile(0, 2, f_index, t_index_of(2)));
+    let (st, coarse_t) = get(addr, &tile(0, 2, f_index, t_pin / 4));
     assert_eq!(st, 200, "{coarse_t}");
     assert_eq!(
         coarse_t["extent"]["t_cell_s"],
@@ -7982,8 +8064,7 @@ fn tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell(
     let (st, ev) = get(
         addr,
         &format!(
-            "/api/tiles/events?level_f=0&level_t=0&f_index={f_index}&t_index={}&cells={N}",
-            t_index_of(0)
+            "/api/tiles/events?level_f=0&level_t=0&f_index={f_index}&t_index={t_pin}&cells={N}"
         ),
     );
     assert_eq!(st, 200, "{ev}");
@@ -8047,11 +8128,19 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     let tile_s = t_cell * N as f64;
     let t_index = |t: f64| (t / tile_s) as u64;
     let t_now = || t_index(unix_now());
+    // Readiness, found from the DATA EDGE (the store's newest frame, which every tile answer
+    // carries), never from the wall clock: under load capture trails the clock, and a wait on the
+    // wall-clock tile then waits for data that is always one tile in the future (deflake-0922: it
+    // timed out that way once in ten under a concurrent hk-store suite).
     wait_for(
-        "the station's tile to be observed",
+        "the station's tile at the data edge to be observed",
         Duration::from_secs(60),
         || {
-            get(addr, &tile(f_index, t_now())).1["grid"]["observed_cells"]
+            let Some(edge) = get(addr, &tile(f_index, t_now())).1["shadow"]["edge_s"].as_f64()
+            else {
+                return false;
+            };
+            get(addr, &tile(f_index, t_index(edge - 0.5 * t_cell))).1["grid"]["observed_cells"]
                 .as_u64()
                 .is_some_and(|c| c > 0)
         },
@@ -8068,77 +8157,157 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
     assert_eq!(never["shadow"]["search"]["columns_found"], json!(0));
     assert_eq!(never["shadow"]["f"], json!([]), "{}", never["shadow"]);
 
-    // **Retune with room left in a tile the grid already holds, and then PIN that tile.**
+    // **Depart from the station, and PIN the tile the departure happened in — found from the
+    // DATA, never from a clock.**
     //
     // The subject of this test is one tile that carries both halves of the story: rows the grid
-    // measured while the station was swept, and rows it does not measure after the radio left. Two
-    // wall-clock alignments used to decide whether the tile this test looked at was that tile, and
-    // both were unmeasured:
+    // measured while the station was swept, and rows it does not measure after the radio left.
+    // A tile that *begins* after the departure has neither half — it is honestly unobserved end to
+    // end, so the coverage map short-circuits it and its grid carries `uniform` in place of the
+    // per-cell arrays (`tiles::unobserved_grid_json`) while still carrying a shadow. That answer is
+    // right; asking for it here is not.
     //
-    //  1. A tile that *begins* after the retune has neither half. It is honestly unobserved end to
-    //     end, so the coverage map short-circuits it and its grid carries the `uniform` cell in
-    //     place of the four per-cell arrays (`tiles::unobserved_grid_json`) while STILL carrying a
-    //     shadow — a departed band's last-known value is exactly what such a tile is for. That
-    //     answer is right; asking for it here was not. Following `t_now()` rolled onto one whenever
-    //     the retune landed near a tile boundary (reproduced 1 run in 30, panicking on a
-    //     `grid.max_db` the honest answer does not have). So: retune with room left in the tile,
-    //     and then PIN that tile's index. A tile is a fixed region of time and the route answers it
-    //     just as well once it is past, which also puts every row of it safely below the data edge
-    //     rather than racing it.
-    //  2. The run below the last measured row begins at the first row the grid does *not* hold, so
-    //     "a run that starts after the retune" used to need the row CONTAINING the retune to be a
-    //     measured one. It is a live, partial row, and it enters the grid only once a frame has
-    //     been folded into it — so a retune in the first fraction of a row left that row
-    //     unmeasured, the run began AT it, and `t0 + row * t_cell > retuned_at` was false for ever
-    //     (the runs below it merge into that one, so no later run rescues the condition).
+    // Which tile the departure landed in used to be computed from `unix_now()` taken after the
+    // retune POST returned (T-505 and T-519's rewrite of this block): the wall clock, three times
+    // over — the phase in the tile to retune at, the instant of the retune, and the tile to pin.
+    // But rows are stamped with CAPTURE time, and under a gate's load capture's data edge trails
+    // the wall clock by as much as the POST takes. Measured, task-t800's gate: the pinned tile
+    // spanned ..11.35–..12.63 s and the store's newest frame was at ..11.70 s, inside it, yet the
+    // tile held not one station row — the departure had reached the data before the tile began.
+    // The wall clock named the tile after the departure, and the test then read a tile that could
+    // never hold the half it asserts on.
     //
-    //     T-505 bought the room for that with a lead time: retune only in the first 70 % of a row,
-    //     leaving >= 0.3 s of it for the POST to complete in. THAT IS STILL A WALL CLOCK — 0.3 s
-    //     for an HTTP round trip on a box where four agents build by design — so the second
-    //     wait below no longer uses one. It asks the question in ROW INDICES instead: which row
-    //     the retune fell in is arithmetic on the pinned tile, and a run that COVERS any row
-    //     strictly below that one is unambiguously after the radio left, whether or not the
-    //     partial row the retune landed in had reached the grid. Nothing then depends on how long
-    //     the POST took, and the phase window this waits for widens from ~9.1 s of every tile to
-    //     ~13 s.
-    wait_for(
-        "a moment to retune at: inside a tile whose grid already holds the station's column",
-        Duration::from_secs(120),
-        || {
-            let into = unix_now().rem_euclid(tile_s);
-            // Room in the tile for both halves of the story. No sub-row condition: the assertion
-            // below is now indexed by row, so where in a row the POST lands does not matter.
-            if into < 3.0 * t_cell || into > 0.5 * tile_s {
-                return false;
-            }
-            // And the grid really holds this tile: a measured cell in the station's own column,
-            // read off the route rather than assumed from elapsed time.
-            get(addr, &tile(f_index, t_index(unix_now()))).1["grid"]["max_db"]
-                .as_array()
-                .is_some_and(|cells| (0..n).any(|r| !cells[r * n + station_col].is_null()))
-        },
-    );
-
-    // Depart: retune 3 MHz up, so 102.6-105.0 MHz is watched and the station at 101.3 MHz is not.
+    // So every instant here is read off the wire, in capture time:
+    //
+    //  - `armed` — the newest measured row of the station's column, seen at the data edge BEFORE
+    //    the retune is sent. The departure is after it.
+    //  - `arrived` — the first measured row of the band the radio moved TO, at or after `armed`.
+    //    The departure is before it, and it is measured data in the same store as the grid, so it
+    //    is there only once every older row is — the station rows before it are final.
+    //  - the last station row before `arrived`: the tile holding it is the pinned tile, and the
+    //    row itself is `last_row`. Every row after it in that tile is after the radio left.
+    //
+    // The one case with no such tile is a departure exactly at a tile boundary (the last station
+    // row is the tile's last row). That is a measured fact, not a timeout, and the test answers it
+    // by going back to the station and departing again — a bounded number of times, each named in
+    // the panic if they run out.
     let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
     let moved = step * (((FIXTURE_CENTER_HZ + 3.0e6) / step).round());
-    let (st, r) = post(
-        addr,
-        "/api/control/center",
-        &format!("{{\"center_hz\":{moved:?}}}"),
+    // A column of the band moved to, half a MHz off its centre so the DC notch is not the probe.
+    let arrived_f_index = ((moved + 0.5e6) / (f_cell * N as f64)).floor() as u64;
+    let edge_now = || {
+        get(addr, &tile(f_index, t_now())).1["shadow"]["edge_s"]
+            .as_f64()
+            .expect("a server with frames has an edge")
+    };
+    // `(t0_s, max_db)` of a tile, or `None` for a tile short-circuited from the coverage map.
+    let grid_of = |ti: u64, fi: u64| {
+        let v = get(addr, &tile(fi, ti)).1;
+        let t0 = v["extent"]["t0_s"].as_f64().unwrap();
+        v["grid"]["max_db"].as_array().cloned().map(|g| (t0, g))
+    };
+    const ATTEMPTS: usize = 4;
+    let mut not_before = 0.0f64;
+    let mut boundary_departures = Vec::new();
+    let (t_pinned, last_row) = 'depart: {
+        for _attempt in 0..ATTEMPTS {
+            // Armed: the station's column is being measured at the data edge, after `not_before`
+            // (after a previous attempt's departure, that means the station is back).
+            let mut armed = 0.0f64;
+            wait_for(
+                "the station's column to be measured at the data edge",
+                Duration::from_secs(60),
+                || {
+                    let e = edge_now();
+                    let Some((t0, g)) = grid_of(t_index(e), f_index) else {
+                        return false;
+                    };
+                    let last = (0..n).rev().find(|&r| !g[r * n + station_col].is_null());
+                    match last.map(|r| t0 + r as f64 * t_cell) {
+                        Some(at) if at > not_before => {
+                            armed = at;
+                            true
+                        }
+                        _ => false,
+                    }
+                },
+            );
+            let (st, r) = post(
+                addr,
+                "/api/control/center",
+                &format!("{{\"center_hz\":{moved:?}}}"),
+            );
+            assert_eq!(st, 200, "{r}");
+            // Arrived: the first measured row of the new band at or after `armed`.
+            let mut arrived = 0.0f64;
+            wait_for(
+                "the band the radio moved to, to reach the grid",
+                Duration::from_secs(60),
+                || {
+                    let e = edge_now();
+                    (t_index(armed)..=t_index(e)).any(|ti| {
+                        let Some((t0, g)) = grid_of(ti, arrived_f_index) else {
+                            return false;
+                        };
+                        // Strictly after the armed row: a band measured before it is a previous
+                        // attempt's, not this departure's.
+                        let first = (0..n).find(|&r| {
+                            t0 + r as f64 * t_cell > armed + 0.5 * t_cell
+                                && (0..n).any(|c| !g[r * n + c].is_null())
+                        });
+                        first.is_some_and(|r| {
+                            arrived = t0 + r as f64 * t_cell;
+                            true
+                        })
+                    })
+                },
+            );
+            // The last station row that begins before `arrived`, searched back from its tile.
+            let mut found = None;
+            for ti in (t_index(armed)..=t_index(arrived)).rev() {
+                // A tile with no station row at all (the departure preceded it) is short-circuited
+                // from the coverage map; the row sought is in an older one.
+                let Some((t0, g)) = grid_of(ti, f_index) else {
+                    continue;
+                };
+                if let Some(r) = (0..n).rev().find(|&r| {
+                    t0 + r as f64 * t_cell <= arrived && !g[r * n + station_col].is_null()
+                }) {
+                    found = Some((ti, r, t0));
+                    break;
+                }
+            }
+            let (ti, row, t0) = found.unwrap_or_else(|| {
+                panic!("no station row between armed {armed} and arrived {arrived}")
+            });
+            if row + 1 < n {
+                break 'depart (ti, row as i64);
+            }
+            // The departure fell on the tile's own last row: no tile holds both halves. Go back.
+            boundary_departures.push(t0 + row as f64 * t_cell);
+            not_before = arrived;
+            let (st, r) = post(
+                addr,
+                "/api/control/center",
+                &format!("{{\"center_hz\":{FIXTURE_CENTER_HZ:?}}}"),
+            );
+            assert_eq!(st, 200, "{r}");
+        }
+        panic!(
+            "{ATTEMPTS} departures in a row landed on a tile's last row ({boundary_departures:?}), \
+             so no tile held both halves of the story"
+        );
+    };
+
+    eprintln!(
+        "tile shadow: departed on attempt {} (earlier ones on a tile's last row: {boundary_departures:?}); \
+         pinned t_index {t_pinned}, last station row {last_row} of {n}",
+        boundary_departures.len() + 1
     );
-    assert_eq!(st, 200, "{r}");
-    let retuned_at = unix_now();
-    let t_pinned = t_index(retuned_at);
 
-    // The retune's own row within the pinned tile, by arithmetic. Every row strictly below it
-    // begins after the radio left, so a run that covers one is a post-retune shadow — no matter
-    // how long the POST above took, and no matter whether the partial row it landed in had been
-    // folded into the grid yet.
-    let retune_row = ((retuned_at - t_pinned as f64 * tile_s) / t_cell).floor() as i64;
-
-    // Wait for a station-tile row after the retune that the grid does not measure and a shadow
-    // covers — in the PINNED tile, the one the retune happened in.
+    // Wait for a station-tile row after the departure that the grid does not measure and a shadow
+    // covers — in the PINNED tile. Rows after `last_row` are after the radio left by construction,
+    // so this asks only that the shadow has reached one, never how long anything took.
     let mut v = Value::Null;
     wait_for(
         "the departed station to carry a shadow",
@@ -8150,7 +8319,7 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
             f.as_array().is_some_and(|fs| {
                 fs.iter().enumerate().any(|(i, c)| {
                     let (r0, k) = (row[i].as_i64().unwrap_or(0), rows[i].as_i64().unwrap_or(0));
-                    c.as_u64() == Some(station_col as u64) && r0 + k > retune_row + 1
+                    c.as_u64() == Some(station_col as u64) && r0 + k > last_row + 1
                 })
             })
         },
@@ -8313,6 +8482,84 @@ fn tile_shadow_carries_a_departed_band_and_nothing_where_never_observed() {
         sh["rule"]
             .as_str()
             .is_some_and(|s| s.contains("GREY IS UNCHANGED"))
+    );
+    stop_server(serving);
+}
+
+/// deflake-0922: **`horizon.recording_began_s` is when THIS server began sampling, and a retune
+/// does not move it into the past.**
+///
+/// A retune seals the dwell in flight into the observation log, and the log files a record under
+/// the hour it falls in. Until this test, `/api/coverage` took the log's reach for
+/// `recording_began` from that HOUR (`hours()[0] * HOUR_NS`) — so the first retune on any server
+/// moved its stated start back to the top of the hour: measured, 923 s before a 15 s old server
+/// existed. Cell states survived it (time before the server is unobserved either way), but every
+/// reader that waits on the horizon — the browser tier's `waitForRecordToCover` among them — was
+/// told the record reached back a quarter of an hour further than it did, and returned at once.
+#[test]
+fn a_retune_does_not_move_recording_began_back_to_the_hour_the_log_files_it_under() {
+    let started = unix_now();
+    let (_dir_guard, serving, addr) = start_server();
+    // Both windows: the one the mock opens on and the one it is retuned to. An explicit window
+    // from a minute before the server to now, so the answer does not wait on a capture window.
+    let horizon = || {
+        let (st, v) = get(
+            addr,
+            &format!(
+                "/api/coverage?f_lo=99000000&f_hi=105200000&cells=4&t0={}&t1={}",
+                (started - 60.0).floor(),
+                (unix_now() + 1.0).ceil()
+            ),
+        );
+        assert_eq!(st, 200, "{v}");
+        v
+    };
+    wait_for("the server to record", Duration::from_secs(60), || {
+        horizon()["horizon"]["recording_began_s"].is_f64()
+    });
+    let before = horizon()["horizon"]["recording_began_s"].as_f64().unwrap();
+    assert!(
+        before >= started - 1.0,
+        "a server cannot have begun sampling {:.1} s before the test started it",
+        started - before
+    );
+
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 3.0e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(st, 200, "{r}");
+    // Non-vacuity: the subject is a log that HOLDS the sealed dwell. Before it does, the log has no
+    // hour to misreport and this test would pass about nothing.
+    let mut v = Value::Null;
+    wait_for(
+        "the observation log to hold the sealed dwell",
+        Duration::from_secs(60),
+        || {
+            v = horizon();
+            v["sources"].as_array().is_some_and(|ss| {
+                ss.iter().any(|s| {
+                    s["kind"] == "observation-log" && s["spans"].as_u64().is_some_and(|n| n > 0)
+                })
+            })
+        },
+    );
+    let after = v["horizon"]["recording_began_s"].as_f64().unwrap();
+    eprintln!(
+        "recording_began: {before:.3} before the retune, {after:.3} after it, test started at {started:.3}; \
+         sources {}",
+        v["sources"]
+    );
+    assert!(
+        after >= started - 1.0 && after > before - 1.0,
+        "the retune moved recording_began_s {:.1} s into the past ({before} -> {after}), {:.1} s \
+         before this server was started — the observation log's filing hour, not a sample: {}",
+        before - after,
+        started - after,
+        v["horizon"]
     );
     stop_server(serving);
 }
@@ -8507,6 +8754,82 @@ fn every_route_in_the_route_table_is_documented() {
         missing.is_empty(),
         "routes missing from docs/api.md: {missing:#?}"
     );
+}
+
+/// T-800 (MAP-00, ADR-0023): the MMAP research routes are **reserved, not yet served**, and they
+/// stay token-gated the day they are.
+///
+/// `docs/api.md` "Reserved: the map-UI research routes" fixes the four durable stores' shapes
+/// (annotations, collections/markers, measurements, views) and the band-plan-priors query before
+/// any of them has code, so MAP-12 and MAP-16..MAP-19 are five instances of one contract rather
+/// than five designs. This test is the half of that pairing (T-079) which can be asserted today,
+/// and it is written so it does **not** have to be deleted as the routes land:
+///
+/// - **Without a token, every reserved path answers `401`** — auth runs *before* dispatch
+///   (`http.rs`), so this holds whether or not the route exists, and it is exactly the property a
+///   reserved name must keep once it does exist. A store of a researcher's notes that answered an
+///   unauthenticated caller would be a real defect, and this is what would catch it.
+/// - **With a token, a reserved path either 404s (not landed yet) or answers its own contract.**
+///   It may never answer `401` with a valid token, and it may never 404 *without* one, which is
+///   what pins the ordering.
+/// - **Every reserved path is documented**, so the table cannot quietly drift out of `docs/api.md`
+///   while the tickets are open.
+#[test]
+fn mmap_research_routes_are_reserved_and_gated() {
+    // (method, path) exactly as docs/api.md reserves them. Paths with an `{id}` are probed with a
+    // concrete id: a served route answers 404 `not_found` for it, which is indistinguishable from
+    // "not served" on purpose — the shape is the owning ticket's test to assert, not this one's.
+    const RESERVED: &[(&str, &str)] = &[
+        ("GET", "/api/annotations"),
+        ("POST", "/api/annotations"),
+        ("GET", "/api/collections"),
+        ("POST", "/api/collections"),
+        ("GET", "/api/markers"),
+        ("GET", "/api/measurements"),
+        ("POST", "/api/measurements"),
+        ("GET", "/api/views"),
+        ("POST", "/api/views"),
+        ("GET", "/api/priors"),
+    ];
+
+    let doc_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/api.md");
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", doc_path.display()));
+    assert!(
+        doc.contains("## Reserved: the map-UI research routes"),
+        "docs/api.md must carry the reserved MMAP route table (T-800)"
+    );
+    for (_, path) in RESERVED {
+        assert!(
+            doc.lines().any(|l| l.contains(path)),
+            "{path} is reserved in the contract test but not in docs/api.md"
+        );
+    }
+
+    let (_dir_guard, serving, addr) = start_server();
+    let bearer = format!("Bearer {TOKEN}");
+    for (method, path) in RESERVED {
+        let body = (*method == "POST").then_some("{}");
+
+        // Unauthenticated: 401, before anything about whether the endpoint exists.
+        let (st, v) = call(addr, method, path, None, body);
+        assert_eq!(st, 401, "{method} {path} unauthenticated: {v}");
+        let (st, v) = call(addr, method, path, Some("Bearer nope"), body);
+        assert_eq!(st, 401, "{method} {path} with a wrong token: {v}");
+
+        // Authenticated: not yet served (404 `no such endpoint`), or the route's own answer —
+        // never a 401, which would mean the gate and the dispatch had swapped order.
+        let (st, v) = call(addr, method, path, Some(&bearer), body);
+        assert_ne!(st, 401, "{method} {path} refused a valid token: {v}");
+        if st == 404 {
+            assert_eq!(
+                v.get("error").and_then(|e| e.as_str()),
+                Some("no such endpoint"),
+                "{method} {path} is not served yet, so it must 404 as an unknown endpoint: {v}"
+            );
+        }
+    }
+    stop_server(serving);
 }
 
 /// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
@@ -10331,5 +10654,708 @@ fn playback_route_and_opener_answer_as_documented() {
         "{v}"
     );
 
+    stop_server(serving);
+}
+
+/// T-573 — **a viewport's worth of tile addresses in ONE request.**
+///
+/// The assertions are COUNTS and the per-address marks, never a wall clock: eight addresses cost
+/// one HTTP request instead of eight; each entry carries its own address, level pair, coverage
+/// plane and `cost`, and equals what `GET /api/tiles` answers for that address alone; a tile
+/// nothing ever sampled is still answered from the coverage map without reaching the generation
+/// path; and both caps are enforced with the answer documented in `docs/api.md`.
+#[test]
+fn tiles_batch_answers_a_viewport_in_one_request_without_flattening_its_marks() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let one = |fi: u64, ti: u64| {
+        format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}")
+    };
+    let batch = |spelling: &str| format!("/api/tiles/batch?cells={N}&addresses={spelling}");
+
+    let (st, probe) = get(addr, &one(0, 0));
+    assert_eq!(st, 200, "{probe}");
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    let t_now = || (unix_now() / (t_cell * N as f64)) as u64;
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &one(f_index, t_now())).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|c| c > 0)
+        },
+    );
+
+    // Eight addresses across the station's band — a pane row — at an address **two tile-heights
+    // behind the live edge**, whose extent is entirely in the past. A tile at the edge grows
+    // between two HTTP requests, and the comparison below is between a batch read and eight
+    // single reads: across a growing tile that compares two different grids. Waited for rather
+    // than assumed, because "it has data by now" is the premise of everything after it.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let ti = loop {
+        let ti = t_now().saturating_sub(2);
+        if get(addr, &one(f_index, ti)).1["grid"]["observed_cells"]
+            .as_u64()
+            .is_some_and(|c| c > 0)
+        {
+            break ti;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no settled observed tile behind the live edge"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    let bases: Vec<u64> = (0..8).map(|i| f_index + i).collect();
+    let spelling = bases
+        .iter()
+        .map(|f| format!("0.0.{f}.{ti}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // ONE request. Eight tiles.
+    let (st, v) = get(addr, &batch(&spelling));
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["requested"], json!(8), "{v}");
+    assert_eq!(v["returned"], json!(8), "{v}");
+    assert_eq!(v["truncated"], json!(false));
+    assert_eq!(v["remaining"], json!([]));
+    assert_eq!(v["tiles"].as_array().map(Vec::len), Some(8), "{v}");
+
+    let mut observed = 0;
+    let mut unobserved = 0;
+    for (i, f) in bases.iter().enumerate() {
+        let e = &v["tiles"][i];
+        assert_eq!(e["status"], json!(200), "{e}");
+        assert_eq!(e["address"]["f_index"], json!(*f), "{}", e["address"]);
+        assert_eq!(e["address"]["t_index"], json!(ti), "{}", e["address"]);
+        assert_eq!(e["address"]["spelling"], json!(format!("0.0.{f}.{ti}")));
+        // Byte-identical to the single-tile answer, bar this read's own diagnostics.
+        let (st, alone) = get(addr, &one(*f, ti));
+        assert_eq!(st, 200, "{alone}");
+        for field in ["key", "extent", "axes", "grid", "coverage", "sealed"] {
+            assert_eq!(
+                e["tile"][field], alone[field],
+                "{field} differs between the batch and the single-tile route at {f}"
+            );
+        }
+        // The three marks, per address, where they already were.
+        if e["tile"]["grid"]["observed_cells"].as_u64().unwrap_or(0) > 0 {
+            observed += 1;
+        }
+        if e["tile"]["resolution"]["short_circuit"]["applied"] == json!(true) {
+            unobserved += 1;
+            // The standing invariant: a tile with no data is answered from the coverage map and
+            // never runs the generation path — batching must not make empty tiles expensive again.
+            assert_eq!(e["tile"]["cost"]["source_cells"], json!(0), "{e}");
+            assert_eq!(e["tile"]["cost"]["chunks"], json!(0), "{e}");
+        }
+    }
+    assert!(observed > 0, "the station's own band must carry data: {v}");
+
+    // A tile nothing ever sampled, asked for in the same request as one that did. If the fixture's
+    // own row did not already contain one, reach for a band 2000 tiles away.
+    if unobserved == 0 {
+        let far = f_index + 2_000;
+        let mixed = format!("0.0.{f_index}.{ti},0.0.{far}.{ti}");
+        let (st, m) = get(addr, &batch(&mixed));
+        assert_eq!(st, 200, "{m}");
+        assert_eq!(m["returned"], json!(2), "{m}");
+        let e = &m["tiles"][1];
+        assert_eq!(e["status"], json!(200), "{e}");
+        assert_eq!(e["tile"]["cost"]["source_cells"], json!(0), "{e}");
+        assert_ne!(
+            m["tiles"][0]["tile"]["coverage"], e["tile"]["coverage"],
+            "two different marks must stay two different marks inside one response"
+        );
+    }
+
+    // **Caps.** Over `max_addresses` is refused, naming the cap — nothing produced, and the
+    // caller knows exactly what still needs asking for.
+    let cap = v["limits"]["max_addresses"].as_u64().unwrap();
+    assert_eq!(cap, 64, "docs/api.md documents 64");
+    assert_eq!(v["limits"]["max_response_bytes"], json!(8 * 1024 * 1024));
+    let too_many = (0..=cap)
+        .map(|i| format!("0.0.{}.{ti}", f_index + i))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (st, e) = get(addr, &batch(&too_many));
+    assert_eq!(st, 400, "{e}");
+    assert!(
+        e["error"].as_str().unwrap_or_default().contains("64"),
+        "{e}"
+    );
+
+    // A malformed address refuses the WHOLE request rather than being dropped silently.
+    for bad in ["0.0.1", "0.0.1.2.3", "x.0.1.2"] {
+        let (st, e) = get(addr, &batch(bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // …and no addresses at all is not a cheaper spelling of anything.
+    let (st, e) = get(addr, &format!("/api/tiles/batch?cells={N}"));
+    assert_eq!(st, 400, "{e}");
+
+    // The per-address parameters do not belong beside the batch.
+    let (st, e) = get(
+        addr,
+        &format!("{}&f_index=3", batch(&format!("0.0.{f_index}.{ti}"))),
+    );
+    assert_eq!(st, 400, "{e}");
+
+    eprintln!(
+        "T-573: 8 tiles in 1 request ({} B) against 8 requests; batch cap {} addresses / {} B",
+        serde_json::to_vec(&v).unwrap().len(),
+        cap,
+        v["limits"]["max_response_bytes"],
+    );
+    stop_server(serving);
+}
+
+/// T-533 — **the measurement plane on the wire, and the transfer coding under it.**
+///
+/// A live tile's body was 1 878 289 B, of which `grid.max_db` was 1 197 118 B: JSON decimal text,
+/// seventeen significant digits a cell, for values whose destination is an R16F texture. Two
+/// levers, asserted here because `docs/api.md` now promises both:
+///
+///  1. **`?planes=f16`** spells that one plane as base64 little-endian binary16. This checks the
+///     two spellings are the SAME grid — cell for cell, absence for absence — because that is what
+///     makes it a representation and not a second answer; that the wire STATES its type, byte order,
+///     transfer and absent-value rather than leaving them to be inferred; and that an encoding this
+///     server does not serve is a `400` naming it, never a quiet fall back to the other one.
+///  2. **`Accept-Encoding: gzip`** compresses the response. The decompressed bytes must be
+///     byte-identical to the plain answer: a transfer coding may never change what was said.
+#[test]
+fn tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding() {
+    let (_dir_guard, serving, addr) = start_server();
+    const N: u64 = 32;
+    let tile = |fi: u64, ti: u64, extra: &str| {
+        format!("/api/tiles?level_f=0&level_t=0&f_index={fi}&t_index={ti}&cells={N}{extra}")
+    };
+    let (st, probe) = get(addr, &tile(0, 0, ""));
+    assert_eq!(st, 200, "{probe}");
+    // Even the tile the coverage map answers on its own states its encoding: a reader that has to
+    // look at which fields are present to learn the spelling reads the wrong one when a field is
+    // legitimately missing.
+    assert_eq!(
+        probe["grid"]["encoding"]["planes"],
+        json!("json"),
+        "{probe}"
+    );
+    let f_cell = probe["axes"]["frequency"]["cell_hz"].as_f64().unwrap();
+    let t_cell = probe["axes"]["time"]["cell_s"].as_f64().unwrap();
+    let f_index = (STATION_HZ / (f_cell * N as f64)).floor() as u64;
+    let t_now = || (unix_now() / (t_cell * N as f64)) as u64;
+    wait_for(
+        "the station's tile to be observed",
+        Duration::from_secs(60),
+        || {
+            get(addr, &tile(f_index, t_now(), "")).1["grid"]["observed_cells"]
+                .as_u64()
+                .is_some_and(|c| c > 0)
+        },
+    );
+
+    // **Two reads of one grid, and it has to BE one grid.** A tile at the live edge grows between
+    // two HTTP requests — measured: a cell that was `null` in the first read carried a level in
+    // the second, milliseconds later — and a comparison across that is a comparison of two
+    // different tiles. So the address used here is **two tile-heights behind the edge**, whose
+    // extent is entirely in the past and whose rows are folded, and the pair is re-read until both
+    // spellings report the same `observed_cells`. That equality is the premise of everything below
+    // it, so it is checked rather than assumed.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let (settled, plain, packed) = loop {
+        let ti = t_now().saturating_sub(2);
+        let (st_a, a) = get(addr, &tile(f_index, ti, "&planes=json"));
+        let (st_b, b) = get(addr, &tile(f_index, ti, "&planes=f16"));
+        let cells = |v: &Value| v["grid"]["observed_cells"].as_u64().unwrap_or(0);
+        if st_a == 200 && st_b == 200 && cells(&a) > 0 && cells(&a) == cells(&b) {
+            break (ti, a, b);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never got one settled grid in both spellings: {st_a}/{st_b}, \
+             observed {}/{}",
+            cells(&a),
+            cells(&b)
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+
+    assert_eq!(plain["grid"]["encoding"]["planes"], json!("json"));
+    assert_eq!(packed["grid"]["encoding"]["planes"], json!("f16"));
+    // Absent, not empty, in each direction: an empty array would read as a grid of no cells.
+    assert!(plain["grid"]["planes"].is_null(), "{}", plain["grid"]);
+    assert!(packed["grid"]["max_db"].is_null(), "{}", packed["grid"]);
+    // The three planes JSON spells more cheaply than binary16 does are untouched by `f16` — the
+    // mode packs the plane that wins and no other (measured: `frames` is 131 073 B as text against
+    // 349 528 B as base64 `u32`).
+    for k in ["occupancy_max", "coverage", "frames"] {
+        assert!(packed["grid"][k].is_array(), "{k}: {}", packed["grid"]);
+    }
+
+    let plane = &packed["grid"]["planes"]["max_db"];
+    assert_eq!(plane["type"], json!("f16"), "{plane}");
+    assert_eq!(plane["byte_order"], json!("little-endian"), "{plane}");
+    assert_eq!(plane["transfer"], json!("base64"), "{plane}");
+    assert_eq!(plane["absent"], json!("nan"), "{plane}");
+    assert_eq!(plane["cells"], json!(N * N), "{plane}");
+    assert_eq!(plane["bytes"], json!(N * N * 2), "{plane}");
+    assert_eq!(
+        plane["scale"], plain["grid"]["semantics"]["series"]["max_db"]["scale"],
+        "the packed plane must name the SAME scale the JSON one is served in"
+    );
+
+    // The values, cell for cell. Equal to within binary16's own precision — which is the precision
+    // the R16F texture keeps either way — and `null` matched by a non-finite, never by a zero.
+    let cells = plain["grid"]["max_db"].as_array().unwrap();
+    let bytes = b64_decode(plane["data"].as_str().unwrap());
+    assert_eq!(bytes.len(), cells.len() * 2, "{plane}");
+    let mut observed = 0usize;
+    for (i, cell) in cells.iter().enumerate() {
+        let bits = u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+        let v = f16_to_f32(bits);
+        match cell.as_f64() {
+            None => assert!(!v.is_finite(), "cell {i}: null in JSON, {v} packed"),
+            Some(want) => {
+                assert!(
+                    (v as f64 - want).abs() < 0.07,
+                    "cell {i}: {want} dB in JSON, {v} dB packed"
+                );
+                observed += 1;
+            }
+        }
+    }
+    assert!(
+        observed > 0,
+        "no cell carried a level, so the comparison above would pass on two empty grids"
+    );
+    // Smaller, stated as a value: the plane is two bytes a cell however loud the band is, which is
+    // the property decimal text does not have.
+    let as_text = plain["grid"]["max_db"].to_string().len();
+    let as_plane = plane["data"].as_str().unwrap().len();
+    assert_eq!(as_plane, (cells.len() * 2).div_ceil(3) * 4, "{plane}");
+    assert!(as_plane * 2 < as_text, "{as_plane} B packed vs {as_text} B");
+
+    // An encoding this server does not serve: refused, and the refusal names it and the choices.
+    let (st, e) = get(addr, &tile(f_index, settled, "&planes=f8"));
+    assert_eq!(st, 400, "{e}");
+    let msg = e["error"].as_str().unwrap_or_default();
+    assert!(msg.contains("f8") && msg.contains("json, f16"), "{msg}");
+
+    // ---- the transfer coding ------------------------------------------------------------------
+    let path = tile(f_index, settled, "&planes=f16");
+    let (st, _, plainb) = get_encoded(addr, &path, None);
+    assert_eq!(st, 200);
+    let (st, enc, gz) = get_encoded(addr, &path, Some("gzip"));
+    assert_eq!(st, 200);
+    assert_eq!(
+        enc.as_deref(),
+        Some("gzip"),
+        "the route ignored accept-encoding"
+    );
+    assert!(
+        gz.len() * 2 < plainb.len(),
+        "gzip returned {} B against {} B — measured on a live tile it is about ninefold",
+        gz.len(),
+        plainb.len()
+    );
+    // **A transfer coding may not change what was said.** Same JSON, byte for byte after inflating.
+    let mut inflated = Vec::new();
+    flate2::read::GzDecoder::new(&gz[..])
+        .read_to_end(&mut inflated)
+        .expect("the body must be a gzip member");
+    let (a, b): (Value, Value) = (
+        serde_json::from_slice(&inflated).unwrap(),
+        serde_json::from_slice(&plainb).unwrap(),
+    );
+    assert_eq!(a["grid"]["planes"], b["grid"]["planes"]);
+    assert_eq!(a["key"], b["key"]);
+    // A caller that says it cannot read gzip is not sent gzip.
+    let (_, enc, _) = get_encoded(addr, &path, Some("gzip;q=0"));
+    assert_eq!(enc, None, "`gzip;q=0` is a refusal and must be honoured");
+    // And a short body is not worth a gzip member's own header and trailer. The premise — that
+    // this route's answer IS short — is read from the uncompressed answer rather than assumed, so
+    // the day it grows past the threshold this reads as the premise changing and not as the rule
+    // breaking.
+    let (_, _, uncompressed) = get_encoded(addr, "/api/status", None);
+    let (_, enc, _) = get_encoded(addr, "/api/status", Some("gzip"));
+    assert_eq!(
+        enc,
+        (uncompressed.len() >= 4096).then(|| "gzip".to_owned()),
+        "a {} B body was {}compressed",
+        uncompressed.len(),
+        if enc.is_some() { "" } else { "not " }
+    );
+
+    // ---- the four spellings, RE-MEASURED on the tile size the canvas actually renders ----------
+    //
+    // T-700 relands this onto a `tiles.rs` that T-571 (live incremental maintenance) and T-595
+    // (`excluded`) rewrote, so the 2026-09-20 figures are quoted nowhere: the four bodies are read
+    // back to back HERE, from ONE address, and the ordering between them is asserted. Byte counts,
+    // never wall clock (the ticket's own rule) — `cost.build_ms` is printed because the honest
+    // half of this result is that it does NOT move, and a future read of this log should see that.
+    let big = format!(
+        "/api/tiles?level_f=0&level_t=0&f_index={}&t_index={}&cells=256",
+        (STATION_HZ / (f_cell * N as f64 * 8.0)).floor() as u64,
+        (settled as f64 / 8.0) as u64,
+    );
+    let read = |extra: &str, ae: Option<&str>| {
+        let (st, enc, body) = get_encoded(addr, &format!("{big}{extra}"), ae);
+        assert_eq!(st, 200, "{}{extra}", big);
+        (enc, body.len())
+    };
+    let (_, json_b) = read("&planes=json", None);
+    let (gz_enc, json_gz_b) = read("&planes=json", Some("gzip"));
+    let (_, f16_b) = read("&planes=f16", None);
+    let (f16_gz_enc, f16_gz_b) = read("&planes=f16", Some("gzip"));
+    let build_ms = |extra: &str| {
+        get(addr, &format!("{big}{extra}")).1["cost"]["build_ms"]
+            .as_f64()
+            .unwrap_or(f64::NAN)
+    };
+    eprintln!(
+        "T-700 / T-533 re-measured (256x256 tile, one address, four spellings):\n           json              {json_b} B   build_ms {:.1}\n           json + gzip       {json_gz_b} B\n           f16               {f16_b} B\n           f16 + gzip        {f16_gz_b} B   build_ms {:.1}   -> {:.1}x",
+        build_ms("&planes=json"),
+        build_ms("&planes=f16"),
+        json_b as f64 / f16_gz_b as f64,
+    );
+    assert_eq!(gz_enc.as_deref(), Some("gzip"));
+    assert_eq!(f16_gz_enc.as_deref(), Some("gzip"));
+    // **Both levers pay and neither subsumes the other.** JSON decimal text is high-entropy by
+    // construction, so compressing it is not the same as not sending it: the packed body must beat
+    // the JSON one, the gzipped packed body must beat the gzipped JSON one, and the two together
+    // must beat either alone. Ordering, not magic numbers — the magnitudes move with the fixture.
+    assert!(f16_b < json_b, "{f16_b} B packed vs {json_b} B as JSON");
+    assert!(
+        json_gz_b < json_b && f16_gz_b < f16_b,
+        "gzip did not shrink"
+    );
+    assert!(
+        f16_gz_b < json_gz_b && f16_gz_b < f16_b,
+        "packed+gzipped {f16_gz_b} B must beat gzip alone ({json_gz_b} B) and f16 alone ({f16_b} B)"
+    );
+    // The headline claim, asserted rather than quoted: an order of magnitude off the wire.
+    assert!(
+        f16_gz_b * 8 < json_b,
+        "the two levers together were {}x, not the order of magnitude this ticket exists for \
+         ({json_b} B -> {f16_gz_b} B)",
+        json_b / f16_gz_b.max(1)
+    );
+
+    stop_server(serving);
+}
+
+/// A GET with an explicit `Accept-Encoding`: `(status, Content-Encoding, raw body bytes)`.
+///
+/// Raw, because the point is what came off the socket — a helper that transparently inflated would
+/// make the assertion about itself.
+fn get_encoded(
+    addr: SocketAddr,
+    path: &str,
+    accept: Option<&str>,
+) -> (u16, Option<String>, Vec<u8>) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let ae = accept.map_or(String::new(), |a| format!("Accept-Encoding: {a}\r\n"));
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n{ae}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head");
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let status = head[9..12].parse().unwrap();
+    let enc = head
+        .lines()
+        .find_map(|l| l.strip_prefix("Content-Encoding: "))
+        .map(str::to_owned);
+    (status, enc, raw[split + 4..].to_vec())
+}
+
+/// Standard base64 decode, for reading a packed plane back (T-533).
+fn b64_decode(s: &str) -> Vec<u8> {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let val = |c: u8| A.iter().position(|&a| a == c).expect("base64 alphabet") as u32;
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    for c in b.chunks(4) {
+        let pad = c.iter().filter(|&&x| x == b'=').count();
+        let n = (val(c[0]) << 18)
+            | (val(c[1]) << 12)
+            | (if pad < 2 { val(c[2]) } else { 0 } << 6)
+            | (if pad < 1 { val(c[3]) } else { 0 });
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    out
+}
+
+/// One IEEE 754 binary16, as the sixteen bits the wire sent (T-533).
+fn f16_to_f32(b: u16) -> f32 {
+    let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+    let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+    match e {
+        0 => s * m * 2f32.powi(-24),
+        31 => f32::NAN,
+        _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+    }
+}
+
+/// **T-511 — the device selector on the wire, against a real server.**
+///
+/// The serving layer holds N live controls keyed by `device_id`, and the routes that reach a radio
+/// take a `device_id` selector. This run holds exactly one front end (the mock SDR), which is the
+/// case the invariant protects: **with one device the selector may be omitted and behaviour is
+/// unchanged.** Asserted here rather than in a unit test because "the client's existing bodies
+/// still work" is a statement about the wire.
+///
+/// Four things, all by value:
+///
+/// 1. `GET /api/control/state` enumerates the front ends in `devices`, and with one it agrees with
+///    the singular `device`/`tuning` — so a client can discover the selector it would pass;
+/// 2. the ids in `devices` are the same ids `GET /api/navigation`'s `windows` lights segments
+///    from: one enumeration of the run's radios, not two;
+/// 3. a device route with **no** selector still retunes, and answers `device.id` naming the radio
+///    it moved;
+/// 4. a selector naming another radio is refused `404 unknown_device` and **the front end does not
+///    move** — a wrong name is not "the only device, so they must have meant it".
+#[test]
+fn t511_a_device_route_takes_a_device_selector_and_one_device_may_omit_it() {
+    let (_dir_guard, serving, addr) = start_server();
+
+    // (1) the enumeration, and its agreement with the singular default.
+    let (st, v) = get(addr, "/api/control/state");
+    assert_eq!(st, 200, "{v}");
+    let devices = v["devices"]
+        .as_array()
+        .unwrap_or_else(|| panic!("control/state must enumerate its front ends: {v}"));
+    assert_eq!(devices.len(), 1, "this run holds one front end: {v}");
+    let device_id = devices[0]["device_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the live source must report its device_id: {v}"))
+        .to_owned();
+    assert!(device_id.starts_with("mock:"), "{v}");
+    assert_eq!(devices[0]["device_id"], v["device"]["device_id"], "{v}");
+    assert_eq!(devices[0]["tuning"], v["tuning"], "{v}");
+
+    // (2) the same radio, seen as a capture window.
+    let (st, nav) = get(addr, "/api/navigation");
+    assert_eq!(st, 200, "{nav}");
+    let windows = nav["windows"].as_array().expect("windows");
+    assert_eq!(windows.len(), 1, "{nav}");
+    assert_eq!(windows[0]["device_id"], json!(device_id), "{nav}");
+
+    // (3) no selector: unchanged, and the answer names the radio that moved.
+    let step = hk_core::source::HACKRF_ONE_TUNING_STEP_HZ;
+    let moved = step * (((FIXTURE_CENTER_HZ + 2e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!("{{\"center_hz\":{moved:?}}}"),
+    );
+    assert_eq!(
+        st, 200,
+        "an omitted selector is correct with one device: {r}"
+    );
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_default = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+
+    // The selector given explicitly names the same radio and is accepted.
+    let moved2 = step * (((FIXTURE_CENTER_HZ + 3e6) / step).round());
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{moved2:?},\"device_id\":{}}}",
+            json!(device_id)
+        ),
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["device"]["id"], json!(device_id), "{r}");
+    let after_named = r["tuning"]["center_hz"].as_f64().expect("center_hz");
+    assert!(
+        (after_named - after_default).abs() > 1.0,
+        "the named selector moved the radio: {r}"
+    );
+
+    // (4) a selector naming a radio this run does not hold: refused, and nothing moved.
+    let (st, r) = post(
+        addr,
+        "/api/control/center",
+        &format!(
+            "{{\"center_hz\":{:?},\"device_id\":\"mock:not-this-radio\"}}",
+            FIXTURE_CENTER_HZ
+        ),
+    );
+    assert_eq!(st, 404, "{r}");
+    assert_eq!(r["code"], json!("unknown_device"), "{r}");
+    assert!(
+        r["error"].as_str().unwrap_or_default().contains(&device_id),
+        "the refusal names what this run does hold: {r}"
+    );
+    let (_, v) = get(addr, "/api/control/state");
+    assert_eq!(
+        v["tuning"]["center_hz"].as_f64(),
+        Some(after_named),
+        "a refused selector must not move the front end: {v}"
+    );
+
+    stop_server(serving);
+}
+
+/// T-818 (MAP-18, RESEARCH-003): `/api/measurements` as `docs/api.md` documents it — the
+/// `Measurement` shape with its server-computed value/unit/place and server-stamped provenance,
+/// cursors in and never a value, the durable-but-paged list, re-measure on PUT, delete, and that a
+/// saved measurement never becomes an inventory row (user metadata, never detection input).
+#[test]
+fn measurements_crud_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let body = json!({
+        "kind": "bandwidth",
+        "cursors": [{"f_hz": f - 1.0e5, "t_s": 1000.0}, {"f_hz": f + 1.0e5, "t_s": 1001.0}],
+        "note": "t818-contract-measurement",
+        "view": view,
+    });
+    let (st, m) = post(addr, "/api/measurements", &body.to_string());
+    assert_eq!(st, 201, "{m}");
+    for field in [
+        "id",
+        "collection_id",
+        "kind",
+        "value",
+        "unit",
+        "basis",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t0_s",
+        "t1_s",
+        "cursors",
+        "n",
+        "note",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(m.get(field).is_some(), "measurement missing {field}: {m}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            m["provenance"].get(field).is_some(),
+            "provenance missing {field}: {m}"
+        );
+    }
+    // The value is the server's: 200 kHz between the cursors, in Hz, on a cursor basis.
+    assert!((m["value"].as_f64().unwrap() - 2.0e5).abs() < 1e-3, "{m}");
+    assert_eq!(
+        (m["unit"].as_str(), m["basis"].as_str()),
+        (Some("Hz"), Some("cursors"))
+    );
+    assert_eq!(
+        (m["t0_s"].as_f64(), m["t1_s"].as_f64()),
+        (Some(1000.0), Some(1001.0))
+    );
+    assert_eq!(m["provenance"]["authored"], true);
+    assert!(
+        m["provenance"]["actor"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("tok-")),
+        "{m}"
+    );
+    assert!(
+        !m.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = m["id"].as_str().unwrap().to_owned();
+
+    // Cursors in, never a value.
+    let mut forged = body.clone();
+    forged["value"] = json!(12_500.0);
+    let (st, v) = post(addr, "/api/measurements", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, v) = post(addr, "/api/measurements", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    let (st, list) = get(addr, "/api/measurements");
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "collection",
+        "measurements",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 500, "documented default page");
+    assert!(list["next_cursor"].is_null() && list["window"].is_null());
+    let (st, v) = get(addr, "/api/measurements?f_lo=1");
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (400, Some("invalid")),
+        "a partial window: {v}"
+    );
+
+    let path = format!("/api/measurements/{id}");
+    let (st, got) = get(addr, &path);
+    assert_eq!(
+        (st, got["note"].as_str()),
+        (200, Some("t818-contract-measurement"))
+    );
+    let moved = json!({"cursors": [{"f_hz": f - 1.0e5, "t_s": 1000.0}, {"f_hz": f + 1.5e5, "t_s": 1001.0}]});
+    let (st, upd) = put(addr, &path, &moved.to_string());
+    assert_eq!(st, 200, "{upd}");
+    assert!(
+        (upd["value"].as_f64().unwrap() - 2.5e5).abs() < 1e-3,
+        "re-measured: {upd}"
+    );
+
+    // User metadata only: no inventory row names it.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    assert!(
+        !inv.to_string().contains("t818-contract-measurement"),
+        "a measurement never reaches the inventory: {inv}"
+    );
+
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
     stop_server(serving);
 }

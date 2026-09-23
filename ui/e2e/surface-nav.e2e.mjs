@@ -57,7 +57,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, tileAsks } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -184,7 +184,13 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   await page.frames(10);
   await new Promise((r) => setTimeout(r, 1500));
   const navigationEnded = Date.now();
-  const navigationRefusals = page.requests.filter((r) => r.status === 503).length;
+  // **Counted per ADDRESS** (T-573): a `GET /api/tiles/batch` answers 200 and carries each
+  // address's own 503 inside, so a status-line count would see none of the refusals the client
+  // backs off from. [[tileAsks]] expands every request into the addresses it named, each with the
+  // status the route gave THAT address; everything below that reasons about refusals, re-asks or
+  // turnover is per address for the same reason.
+  await page.settleBodies();
+  const navigationRefusals = tileAsks(page.requests).filter((a) => a.status === 503).length;
 
   // ——— STEADY STATE: the page keeps rendering, nothing moves the view ———
   //
@@ -293,13 +299,14 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const mapFollowing = await page.eval(
     `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="minimap"]')]` +
     `.map((v) => v.getAttribute('data-following')).join(",")`);
-  const schemeOf = (r) => new URL(r.url).searchParams.get("scheme") ?? "view";
+  const schemeOf = (a) => a.scheme;
 
   // ——— the evidence, gathered and PRINTED before anything is asserted ———
   // A failing guard whose first assertion hides the rest of the picture is a guard people bisect by
   // hand. Everything below is reported, then judged.
-  const tileReqs = page.requests.filter((r) => r.url.includes("/api/tiles"));
-  const refused = page.requests.filter((r) => r.status === 503);
+  await page.settleBodies();
+  const tileReqs = tileAsks(page.requests);
+  const refused = tileReqs.filter((a) => a.status === 503);
   const steadyRefusals = refused.filter((r) => r.startedMs >= navigationEnded);
   const steady = tileReqs.filter((r) => r.startedMs >= navigationEnded);
   const steadyRequests = steady.length;
@@ -329,10 +336,10 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // leaked. So the set is the addresses that came back `200`.
   const askedBefore = new Set(tileReqs
     .filter((r) => r.startedMs < navigationEnded && r.status === 200)
-    .map((r) => r.url));
+    .map((a) => a.key));
   const steadyDetailReqs = steady.filter((r) => schemeOf(r) === "view");
   const steadyDetail = steadyDetailReqs.length;
-  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.url));
+  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.key));
   const steadyFirstTime = steadyDetail - steadyReasks.length;
   const status = await page.eval(STATUS);
   const backpressure = Number(status.match(/(\d+) backpressure/)?.[1] ?? -1);
@@ -359,7 +366,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // Tile reads the route COMPLETED for the page during the probe window, counted from CDP's own
   // network log rather than from anything the client says about itself: a `200` whose body
   // finished inside the window. This is the budget turning over, measured from outside.
-  const served = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200 &&
+  const served = tileReqs.filter((r) => r.status === 200 &&
     r.endedMs !== null && r.endedMs >= probeFrom && r.endedMs <= probeTo).length;
   t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
     `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
@@ -467,7 +474,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // speculation is not free: every speculative read that a later gesture aborts leaves the server
   // producing a tile nobody will read, holding the slot (2) and (2b) are about.
   if (frozen(followingBefore) && frozen(followingAfter)) {
-    assert.deepEqual(steadyReasks.map((r) => new URL(r.url).search).slice(0, 5), [],
+    assert.deepEqual(steadyReasks.map((r) => r.key).slice(0, 5), [],
       `the page RE-ASKED ${steadyReasks.length} DETAIL-tier addresses it had already been ANSWERED ` +
       "for, " +
       `during ${(STEADY_STATE_MS / 1000).toFixed(0)} s in which nothing moved the view and no pane ` +
@@ -638,13 +645,17 @@ async function timeRoom() {
   return { extentS: latestS - oldestS, floorS: MIN_CELLS * cellS };
 }
 
-/** The pane row of the chrome — not the map, which is a viewport too and moves for other reasons. */
+/** The pane row of the chrome — not the map, which is a viewport too and moves for other reasons.
+ * `time` is the chrome's offset-from-the-edge LABEL, which rounds to whole seconds past 10 s and
+ * states only the top edge; `t0Ns`/`t1Ns` are the pane's time window itself, unrounded, from the
+ * row's `data-t0-ns` / `data-t1-ns`. */
 const PANE_ROW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
   if (!v) return null;
   const where = v.querySelector('.hk-surface-where')?.textContent ?? '';
   const level = v.querySelector('.hk-surface-level')?.textContent ?? '';
   const parts = where.split(' · ');
-  return { freq: parts[0] ?? '', time: parts[1] ?? '', level };
+  return { freq: parts[0] ?? '', time: parts[1] ?? '', level,
+           t0Ns: Number(v.getAttribute('data-t0-ns')), t1Ns: Number(v.getAttribute('data-t1-ns')) };
 })()`;
 
 /**
@@ -1027,6 +1038,8 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     "the plain wheel above did not stop because TIME ran out. This run reached some other bound, and " +
     "(c) below would be measuring the wrong thing.");
   assert.equal(altIn.now.freq, held.freq, "alt + wheel moved the FREQUENCY axis: the axes are welded");
+  t.diagnostic(`alt + wheel inward at the lock: time window [${held.t0Ns}, ${held.t1Ns}] → ` +
+    `[${altIn.now.t0Ns}, ${altIn.now.t1Ns}] ns`);
 
   // ——— (c) FREQUENCY HAD ROOM: shift inward still moves it, and only it ———
   // The assertion that makes (a) mean something. Without it, "a plain wheel moved neither axis" is
@@ -1049,11 +1062,23 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
   // still INDEPENDENT: alt moves time and leaves the frequency window exactly where it was. The fix
   // that would quietly undo T-434/T-438/T-440 — keeping the pixels square by welding the two axes
   // together — cannot produce either (c) or (d).
+  //
+  // **Judged on the time WINDOW, not on the label** (the 09-22 gate red). The label is the pane's top
+  // edge as an offset from the live edge, rounded to whole seconds past 10 s — and an outward zoom
+  // anchored 35 % down a pane at the time floor moves that top by about a second, so the same real
+  // move read `−24 s → −23 s` on one run and `−21 s → −21 s` on another, depending only on where the
+  // fraction fell. What alt+wheel outward must do is WIDEN the time span; that is read from the
+  // pane's own window, exactly, and a welded axis leaves it bit-for-bit unchanged.
   const base = await read();
   const altOut = await probe({ alt: true }, 240);
-  t.diagnostic(`alt + wheel outward: time ${base.time} → ${altOut.now.time}, frequency ${altOut.now.freq}`);
-  assert.notEqual(altOut.now.time, base.time,
-    `${PROBE_STEPS} alt wheels outward did not move the time axis (${base.time}): it is welded shut`);
+  const spanS = (r) => (r.t1Ns - r.t0Ns) / 1e9;
+  assert.ok(Number.isFinite(spanS(base)) && spanS(base) > 0 && Number.isFinite(spanS(altOut.now)),
+    `the pane row does not state its time window (data-t0-ns/data-t1-ns): ${JSON.stringify(base)}`);
+  t.diagnostic(`alt + wheel outward: time span ${spanS(base).toFixed(3)} s → ${spanS(altOut.now).toFixed(3)} s ` +
+    `(x${(spanS(altOut.now) / spanS(base)).toFixed(2)}), label ${base.time} → ${altOut.now.time}, frequency ${altOut.now.freq}`);
+  assert.ok(spanS(altOut.now) > spanS(base),
+    `${PROBE_STEPS} alt wheels outward did not widen the time axis (span ${spanS(base)} s → ` +
+    `${spanS(altOut.now)} s, label ${base.time}): it is welded shut`);
   assert.equal(altOut.now.freq, base.freq,
     `alt + wheel outward moved the FREQUENCY axis (${base.freq} → ${altOut.now.freq})`);
 

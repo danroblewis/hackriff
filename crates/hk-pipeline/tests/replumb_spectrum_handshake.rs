@@ -65,21 +65,79 @@ fn handshake(addr: SocketAddr) -> (u16, String) {
          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
     )
     .unwrap();
+    read_response(s)
+}
+
+/// One **complete** HTTP response: the head, and the whole body its `Content-Length` promises.
+///
+/// **The head is not the answer** (deflake-0922). Every assertion here that reads a reason —
+/// `"stream finished"`, `"replumbing"` — reads it out of the JSON body, and `respond_cached`
+/// writes the head and the body in two separate `write_all` calls. Stopping at the `\r\n\r\n` that
+/// ends the head therefore returned whatever of the body happened to land in the same TCP read:
+/// on a quiet machine all of it, under a loaded merge gate none of it. That is the whole flake —
+/// measured twice on `main`, `a_finished_run_still_answers_410` (2026-09-22 05:40) and the sibling
+/// `a_run_that_really_ended_still_says_so` (2026-09-22 10:41), each printing a head with
+/// `Content-Length: 27` and an empty body under an assertion about what that body said. The status
+/// was right both times; only the evidence for it had not arrived yet. T-602 fixed the same defect
+/// in `hk-api`'s own bridge test; these two copies were left with it.
+///
+/// So the body is read to its stated length, and *that* is the readiness condition — not a timeout
+/// and not a retry. A `101` upgrade carries no body and is complete at the head, which matters:
+/// the re-plumb probe upgrades many times and must not sit on the socket waiting for bytes the
+/// protocol says will never come.
+fn read_response(mut s: TcpStream) -> (u16, String) {
     let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
-    while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+    let mut head_end = None;
+    loop {
+        if head_end.is_none() {
+            head_end = got.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+        }
+        if let Some(h) = head_end {
+            let head = String::from_utf8_lossy(&got[..h]).into_owned();
+            let status: u16 = head
+                .split_whitespace()
+                .nth(1)
+                .and_then(|c| c.parse().ok())
+                .unwrap_or_else(|| panic!("no status line in {head:?} ({} bytes)", got.len()));
+            // An upgrade has no body; anything else says how long its body is, and a response with
+            // neither is complete as it stands.
+            let want = content_length(&head).unwrap_or(0);
+            if status == 101 || got.len() - h >= want {
+                return (status, String::from_utf8_lossy(&got).into_owned());
+            }
+        }
         match s.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => got.extend_from_slice(&buf[..n]),
             Err(e) => panic!("reading the handshake response: {e}"),
         }
     }
+    // EOF before the promised body: name what was missing rather than asserting about it.
     let text = String::from_utf8_lossy(&got).into_owned();
-    let status = text
+    let head = text.split_once("\r\n\r\n").map(|(h, _)| h).unwrap_or(&text);
+    let status = head
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
         .unwrap_or_else(|| panic!("no status line in {text:?} ({} bytes)", got.len()));
+    if let Some(want) = content_length(head) {
+        let have = text.split_once("\r\n\r\n").map_or(0, |(_, b)| b.len());
+        assert!(
+            have >= want,
+            "the connection closed after {have} of the {want} body bytes it promised:\n{text}"
+        );
+    }
     (status, text)
+}
+
+/// `Content-Length`, if the head states one.
+fn content_length(head: &str) -> Option<usize> {
+    head.lines()
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+        })
+        .and_then(|(_, v)| v.trim().parse().ok())
 }
 
 /// The answer must never be "this stream is gone" while the run is still capturing.
@@ -306,6 +364,7 @@ fn a_finished_run_still_answers_410() {
     let Run {
         handle,
         ctl,
+        streams,
         server,
         _dir,
         ..
@@ -322,7 +381,14 @@ fn a_finished_run_still_answers_410() {
 
     // The source ended: nothing will be offered under this id again, and the honest answer is the
     // one T-508 made visible on the canvas — this run is over.
-    let started = Instant::now();
+    //
+    // *Why* it is known at once and not waited out, stated as ordering rather than as elapsed
+    // time (T-602's pattern, `hk-api/tests/bridge.rs`): the between-windows wait is only reachable
+    // through a park in `StreamRegistry::wait_for_offer_after`, counted by `successor_waits_entered`
+    // before the park. A 410 that had been mistaken for a gap first would have entered that wait
+    // (and, on this run, waited the settle gap out to its bound); a real end never enters it. Timing
+    // the response instead made the answer a function of the machine.
+    let waits_before = streams.successor_waits_entered();
     let (status, text) = handshake(addr);
     assert_eq!(
         status, 410,
@@ -333,12 +399,10 @@ fn a_finished_run_still_answers_410() {
         text.contains("stream finished"),
         "the 410 must still name the reason:\n{text}"
     );
-    // Promptly: a real end is known, not waited out. Anything near the handshake's between-windows
-    // bound would mean the end had been mistaken for a gap first.
-    assert!(
-        started.elapsed() < Duration::from_millis(1500),
-        "the 410 took {:?} — the end was treated as a gap and waited out",
-        started.elapsed()
+    assert_eq!(
+        streams.successor_waits_entered(),
+        waits_before,
+        "the end was treated as a gap and waited out for a successor that was never promised"
     );
     drop(server);
 }
