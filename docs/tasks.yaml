@@ -21780,7 +21780,7 @@ tasks:
   - id: T-623
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: out-of-catalogue structure generators for the N3 negative population - OFDM with a non-standard CP, DSSS, 16-QAM'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -21816,6 +21816,7 @@ tasks:
       Commits: 13a355c2
       Use cases: SIGNAL-052, RESEARCH-002
       Resources: 23 CPU-s, peak 0.5 GB
+    commit: da36903c
   - id: T-624
     milestone: MAUTO
     title: 'MAUTO-FIXTURE: standalone analog-voice negatives (NBFM voice, AM voice) for the N2 population'
