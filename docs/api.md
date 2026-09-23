@@ -861,7 +861,7 @@ A record that names no device — every record written before T-378, and any sou
 
 ### `GET /api/tiles` — one tile of the unified surface, at independent `(level_f, level_t)` (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5 / §8)
 
-Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)).
+Query parameters: `level_f`&`level_t`&`f_index`&`t_index` (**required**, integers ≥ 0), `scheme` (`view` — the default — `overview`, or a store scheme id), `device` (`any` by default, or a device id), `cells` (8…256, default 256), `planes` (`json` — the default — or `f16`; see [below](#the-measurement-plane-is-served-as-binary16-on-request-t-533)), `client` (optional; who is asking, for the per-client share of the in-flight cap — see [Cost, and the two caps](#cost-and-the-two-caps)).
 
 One route serves every viewport — the panes, the zoomable minimap and the live edge — because they are **projections of the same pyramid**, and one route is what stops them ever disagreeing on one screen ([docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §7 step 5, strengthened by §8: there is no live-versus-history split left to keep consistent).
 
@@ -880,6 +880,11 @@ One route serves every viewport — the panes, the zoomable minimap and the live
             "independent": "level_f and level_t are independent coordinates: …",
             "readable": "`max_level` is a CEILING ON READING, per axis, and it is a BOX: …" },
   "grid": { "nt": 256, "nf": 256, "t0_s": …, "t_cell_s": 32.0, "f_lo_hz": …, "f_cell_hz": 50000.0,
+            "encoding": { "planes": "json", "order": "row-major: time then frequency, …", "rule": "…" },
+            // …or, with `?planes=f16`, `max_db` is ABSENT and this stands in its place:
+            //  "planes": { "max_db": { "type": "f16", "byte_order": "little-endian",
+            //                          "transfer": "base64", "cells": 65536, "bytes": 131072,
+            //                          "scale": "dbfs-per-hz", "absent": "nan", "data": "…" } },
             "max_db": [-102.4, null, "…"], "occupancy_max": ["…"], "coverage": ["…"], "frames": ["…"],
             "cells": 65536, "observed_cells": 4096, "range_db": { "lo": -138.2, "hi": -91.0 },
             "unit": "dbfs", "percentiles": "unknown: a de-welded fold cannot split …",
@@ -1015,6 +1020,28 @@ A band swept and then departed is not grey: it was observed, and the newest thin
 
 Two consequences a client can see. **The lattice stays 4 × 4, and zooming out costs more tiles for it.** The work budget bounds `level_f + level_t` by *level index* while a viewport's demand is set by the floor's absolute cell size, so a 25× finer time cell spends ~4.6 levels of reach; since [`axes.*.max_level`](#axesmax_level--how-far-up-each-axis-can-actually-be-read-t-482) a client **clamps** rather than being refused, the cost is fan-out, not a `400`. Measured on a 1600 × 800 pane at the ceiling `(9, 1)`: the tuned window 8 tiles against 2, a 20 MHz × 10 min sweep 150 against 21, the whole device × 10 min 600 against 24 — bounded in practice because across 6 GHz nearly every tile is unobserved and answered from the coverage map. A deeper time axis would repair it (4 × 6 costs 8 / 20 / 316) but is blocked on `servable` admitting a level it cannot build; see `hk_pipeline::history::VIEW_T_LEVELS`. And **a cell's own tier is readable from `resolution`**: `answered.level` `0` with `fold.*.direction` `exact` is a published row, and anything coarser is a fold of those, declared per axis.
 
+#### The measurement plane is served as binary16 on request (T-533)
+
+`grid.max_db` is 65 536 JSON decimal numbers on a rendered tile — **1 197 118 B of a 1 878 289 B live body, 64 %** — and its destination in the one client that reads it is an **R16F texture**: seventeen significant digits sent, eleven bits kept. `?planes=f16` spells that plane as base64 of little-endian IEEE 754 binary16 instead.
+
+| | `?planes=json` (default) | `?planes=f16` |
+|---|---|---|
+| `grid.max_db` | the array | **absent** |
+| `grid.planes.max_db` | **absent** | `{type, byte_order, transfer, cells, bytes, scale, absent, data}` |
+| `occupancy_max`, `coverage`, `frames` | arrays | arrays, unchanged |
+| `grid.encoding.planes` | `"json"` | `"f16"` |
+
+- **Same values, one spelling.** The packed plane is the same cells in the same row-major order, equal to within binary16's own precision — which is the precision the texture keeps either way. `NaN` is what `null` is: **not observed**, never a level of zero (C26). `crates/hk-cli/tests/api_contract.rs` asserts the two cell for cell on one live tile.
+- **The wire states its own type**, and a reader that does not recognise `encoding.planes` must **refuse the tile** rather than decode it as the spelling it does know — a plane read against the wrong type is a measurement invented, not a degraded one. `ui/src/surface/tile.ts` throws `TileDecodeError`, which leaves the place *pending*, never grey. A different packing in future gets a **new name**, never a redefinition of `f16`. An unrecognised `planes=` value is a `400` naming it and the accepted set, never a quiet fall back to the other spelling.
+- **Only `max_db`, because only `max_db` wins.** For the other three planes JSON is the *smaller* spelling: measured on the same tile, `frames` is 131 073 B as text (two distinct values over 65 536 cells) against 349 528 B as base64 `u32`, and `occupancy_max`/`coverage` lose likewise. A "pack everything" mode would have grown three planes by 394 kB to shrink one.
+- **The absent one is ABSENT, not empty or null**, in both directions — an empty array would read as a grid of no cells, which is a different claim from a grid whose cells are spelled elsewhere. The uniform short-circuit grid (below) carries no plane in either spelling and still states its `encoding`.
+- **Measured through the route, one address, four spellings back to back** on a 256 × 256 tile. Originally (2026-09-20, a fully-populated live tile): **1 879 209 B** as JSON, **856 178 B** packed, **244 012 B** JSON gzipped, **117 382 B** packed *and* gzipped — **16×**. **Re-measured on relanding** (T-700, 2026-09-22, after T-571 changed how a tile is produced and T-595 added `excluded`; the acceptance fixture's tile, which carries more absence and therefore compresses further): **1 202 453 B** → **912 435 B** packed → **71 005 B** JSON gzipped → **43 090 B** packed *and* gzipped, **27.9×**. The magnitudes move with the tile; the *ordering* is what the contract test asserts, because both levers pay and neither subsumes the other — JSON decimal text is high-entropy by construction, so compressing it is not the same as not sending it.
+- **Where the win lands, stated honestly.** `cost.build_ms` did not move (20.0 → 20.4 ms originally; 16.7 → 17.8 ms on the reland, inside the run-to-run spread): the route's own work was never the float formatting. Measured in Chrome over **loopback**, one tile's fetch-to-decoded hop is 36 → 31 ms and a 16-tile pane row at the four-slot cap is 182 → 166 ms — both dominated by tile *production*, not by the bytes. The body is what a tunnel, a phone or a second machine waits for, and what the browser parses. Making a tile produce faster is a different ticket from making it smaller, and this is the second.
+
+#### `Accept-Encoding: gzip` (T-533)
+
+Every routed JSON response is gzipped when the request asks for it and the body is at least 4096 bytes; the answer then carries `Content-Encoding: gzip`. **`Vary: Origin, Accept-Encoding` is stated on every answer, in ONE header** (T-700) — both on the compressed one and on the identity one, since either form may be the one a cache stores; two separate `Vary:` lines is the bug this shape exists to prevent, because a cache reading only the first keys on `Origin` alone and can then serve the gzipped body to a client that refused gzip. [`/api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) answers itself rather than through that tail (T-574 gives a *sealed* tile an `ETag` and `Cache-Control: immutable`), so it applies the coding itself, over the same bytes — and its **`ETag` is computed over the uncompressed JSON**, since gzip is a transfer coding and the representation a cache validates is the same either way. A `304` carries no body and so no coding. **It is a transfer coding and never a representation**: the bytes a client decodes are identical to what it would have received without the header, which is what the contract test asserts (inflate, then compare the JSON). `gzip;q=0` is a caller saying it *cannot* read gzip and is honoured. The threshold exists because below it a gzip member's own header and trailer are a large share of what is sent; a live `/api/tiles` body is two orders of magnitude above it and compresses by an order of magnitude or more (re-measured on relanding, T-700: a 256-cell tile 1 063 213 B → 20 280 B, and the acceptance fixture's 1 202 453 B → 71 005 B; the factor moves with how much of the tile is absence).
+
 #### The budget is a fold target, never a level selector (T-437 finding F2)
 
 T-437 measured the defect on [`/api/history`](#get-apihistory--region-over-time-grid-t-017-aware-042): same window, same band, only `max_f` changed — `max_f=384` served 38 784/38 784 cells observed, `max_f=256` served 384/576 (**67 %**). Tightening the *frequency* budget 1.5× cost **34× of time resolution and greyed a third of the window**, because `max_f` picks a *level*. That is a grey-honesty violation caused by level choice, which [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §4 does not name: §4 guards the fold, and the fold is fine — here a cell reads *unobserved* while level 0 holds the measurement.
@@ -1074,6 +1101,42 @@ So when the **selected** coverage plane — the one `coverage.selected.plane` na
 - **`cost.chunks: 0`** is literal for the grid: no history lock was taken for it. The last-known search behind `shadow` (T-519) is separate and states its own holds in `shadow.search.chunks`; over spectrum no tile holds, it answers from the pyramid's tile index without reading a cell.
 
 Measured on the same fixture, before and after (`crates/hk-api/tests/tile_cost.rs`, a test-profile binary; `body_bytes` is the uncompressed bytes the HTTP layer would write): **2 561 726 B → 7 568 B** (338×), `cost.build_ms` **92.1 ms → 3.1 ms** (29×), `source_cells` **65 536 → 0**. The body is a *constant*: 7 549 B at 64 × 64 and 7 563 B at 256 × 256 — sixteen times the cells for fourteen more bytes. The remaining ~3 ms is the coverage rasterisation itself, which is the answer rather than overhead: reading the same plane the renderer greys from is the point.
+
+#### The hot-tile cache (T-572)
+
+A viewport that has not moved re-reads the same tiles every poll, so a bounded in-memory LRU sits in front of this route.
+
+- **Sealed tiles only, and that is the whole correctness argument.** A sealed tile's own time extent has fully passed the pyramid's watermark, so a frame landing inside it is by definition late and dropped: it can never change again (the same fact that earns it an ETag and `immutable`, T-574). A **live** tile at the growing edge changes on every arriving row and is never looked up, never inserted and always re-read — a stale live tile breaks *"rows append in real time"* exactly as badly as a missing one. The distinction is structural, in the insert path, never a timer.
+- **`cost.served_from: "hot-tile-cache"`** appears on a cached answer and is absent otherwise. It is a diagnostic of the READ, not of the tile: it is removed before the body is hashed into an ETag, so a hit and a miss validate identically and a re-read is still the 304 T-574 promises.
+- **Bounded in bytes AND in entries** — 32 MiB / 256 entries, whichever binds first — so residency does not grow with node count (T-453). Least-recently-*used*, not least-recently-inserted. A body larger than the whole cache is never held.
+- **The coverage plane beside a sealed grid can still move**, being derived from the observation log, so every entry is dropped whenever that log's `written` or `segments_deleted` counters move. The cache reads those two atomics and writes nothing: the capture thread is not on this path at all.
+- **Counters are on `GET /api/status` as `tile_cache`** (`entries`, `bytes`, `max_entries`, `max_bytes`, `hits`, `misses`, `evictions`, `invalidations`) — never in a tile body, where they would change on every read and with them the ETag.
+
+### `GET /api/tiles/batch` — a viewport's worth of tile addresses in one request (T-573)
+
+A viewport needs tens of tiles and used to ask for them one HTTP request at a time. This route takes the addresses together and answers them together. **It is a transport change, never an analysis one:** each entry's `tile` is byte-identical to what `GET /api/tiles` answers for that address alone — the same `key`, the same independent `(level_f, level_t)` pair, the same `coverage` plane, the same `resolution` block, the same per-tile `cost`.
+
+Query: `device`, `scheme`, `cells`, `planes` and `client` are shared by the batch (they are properties of the viewport, and one request is one asker); `addresses` carries the per-tile part.
+
+```
+GET /api/tiles/batch?addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…]&cells=256&planes=f16
+{ "requested": 5, "returned": 5, "truncated": false, "remaining": [],
+  "limits": { "max_addresses": 64, "max_response_bytes": 8388608,
+              "over_addresses": "refused (400), naming the cap",
+              "over_bytes": "truncated, with every unanswered address listed in `remaining`" },
+  "tiles": [ { "address": { "level_f": 0, "level_t": 0, "f_index": 12, "t_index": 3,
+                            "spelling": "0.0.12.3" },
+               "status": 200, "tile": { "key": "…", "grid": "…", "coverage": "…", "cost": "…" } },
+             { "address": { "…": "…" }, "status": 503, "error": "too many tile reads in flight …" } ],
+  "statement": "…" }
+```
+
+- **A partial answer is expressible, and that is the point.** A viewport where three tiles have data, one is genuinely unobserved and one was refused is ONE response carrying three 200s, a 200 whose own `coverage` plane says `unobserved`, and a 503. There is no status for the set beyond the transport's own 200, because collapsing a missing tile into an empty one is exactly the defect the coverage map exists to prevent. The three marks the canvas depends on — data, genuinely-unobserved, observed-but-not-yet-measured — are per address, where they already were.
+- **The coverage short-circuit is untouched.** Each address goes through the same code path as `GET /api/tiles`, so a uniformly-unobserved tile is still answered from the coverage map with `cost.source_cells: 0` and `chunks: 0`, never reaching the generation path. A batch endpoint that made empty tiles expensive again would be a regression, not a win.
+- **The in-flight cap is per address, still — and a batch is answered as wide as that cap allows, not one address at a time.** One producer slot is taken and released per address, under the named `client`'s share (T-630), exactly as a single-tile read takes it. The route answers a batch's addresses concurrently on up to `cost.in_flight_limit` (4) of them at once, so a batch costs its slowest member rather than the sum of all of them: answered one at a time, a live-edge tile waited behind every cold tile in the same batch, and a following pane's newest rows were still flat 8 s after first draw (`ui/e2e/live-edge.e2e.mjs`). The share still bounds the width. A worker whose address is refused while another worker is still running hands the address back and stops, so a batch narrows to the slots its client actually has instead of refusing its own members. Only when no worker in the batch holds a slot is an address answered 503, and then the caller re-asks for exactly those.
+- **Two caps, two different answers, because they have two different causes.** `max_addresses` (64) is the caller's own doing, so it is **refused** with a 400 naming the cap — the caller knows precisely what still needs asking for. `max_response_bytes` (8 MiB) is a property of the grid rather than of the request, so it **truncates**: `truncated: true` and every unanswered address listed in `remaining`, in the spelling it was asked in, so the follow-up is a copy and not a re-derivation. At least one tile is always returned, so a single oversized address is never unfetchable.
+- **A malformed address refuses the whole request**, rather than being skipped. A silently-dropped address is a tile the canvas leaves pending forever with nothing saying why.
+- **No ETag, no immutable cache.** A batch is not a single representation and a mix of sealed and live tiles has no single validator; `GET /api/tiles` is where a sealed tile earns its ETag (T-574). The batch answer does honour `Accept-Encoding: gzip` like every other routed JSON answer (T-700).
 
 ### `GET /api/tiles/events` — the coarse-zoom event aggregate (T-438, [docs/16](16-coverage-tile-pyramid-and-full-spectrum-view.md) §5.3)
 

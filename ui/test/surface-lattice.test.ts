@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ancestor, ancestorsOf, extentOf, fCellHz, fTileHz, intersects, keyOf, latticeFrom,
-  levelForHzPerPx, levelForNsPerPx, levelsFor, tCellNs, tierFor, tilesFor, tileUrl,
+  levelForHzPerPx, levelForNsPerPx, levelsFor, tCellNs, tierFor, tilesFor, TILE_PLANES, tileUrl,
   VIEWPORT_TILE_BUDGET, type Lattice, type LatticeSet,
 } from "../src/surface/lattice";
 
@@ -108,11 +108,20 @@ test("the key carries device, scheme and cells — the parts §8.3 left out", ()
 test("the request the client builds is the route's own spelling", () => {
   assert.equal(
     tileUrl({ device: "any", scheme: "view", levelF: 3, levelT: 5, fIndex: 139, tIndex: 218427, cells: 256 }),
-    "/api/tiles?level_f=3&level_t=5&f_index=139&t_index=218427",
+    "/api/tiles?level_f=3&level_t=5&f_index=139&t_index=218427&planes=f16",
   );
   assert.equal(
     tileUrl({ device: "hackrf:abc", scheme: "1", levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 64 }),
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=1&device=hackrf%3Aabc&cells=64",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=1&device=hackrf%3Aabc&cells=64&planes=f16",
+  );
+  // T-533: the request names the plane encoding it will decode, and it names THE one `tile.ts`
+  // implements — asking for a spelling this client cannot read would be worse than not asking.
+  assert.equal(TILE_PLANES, "f16");
+  // …and `/api/tiles/events` answers counts, not planes; the route takes no `planes` parameter, so
+  // sending one there would be a 400 on a route that works today.
+  assert.equal(
+    tileUrl({ device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 1, tIndex: 2, cells: 256 }, "/api/tiles/events"),
+    "/api/tiles/events?level_f=0&level_t=0&f_index=1&t_index=2",
   );
 });
 

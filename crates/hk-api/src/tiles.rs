@@ -112,6 +112,29 @@
 //! sampling detail is a **hover** question about one cell and `/api/coverage` still answers it;
 //! `/api/timeline`'s overlay is unchanged.
 //!
+//! # `max_db` is served as binary16, because that is what it becomes (T-533)
+//!
+//! With the coverage plane compacted, what was left of a live tile's body was the measurement
+//! itself, spelled as JSON decimal text: **1 197 118 B of a 1 878 289 B tile — 64 %** — for 65 536
+//! values whose destination is an **R16F texture** (`ui/src/surface/surface.ts`). Seventeen
+//! significant digits are transmitted, then eleven bits of them are kept. So `?planes=f16` serves
+//! that one plane as base64 of little-endian IEEE binary16 ([`f16_bits`]), and the wire states its
+//! own type, byte order, scale and absent-value rather than leaving a reader to infer them.
+//!
+//! **Only that plane.** `occupancy_max`, `coverage` and `frames` stay JSON arrays, because for them
+//! JSON is *smaller*: measured on the same tile, `frames` is 131 073 B as text (two distinct values
+//! over 65 536 cells) against 349 528 B as base64 `u32`, and the other two lose likewise. A "pack
+//! everything" mode would have grown three planes to shrink one. See [`Planes`].
+//!
+//! Measured through the route, one address, four spellings back to back on a full 256 x 256 live
+//! tile: **1 879 209 B** as JSON, **856 178 B** packed, **244 012 B** JSON gzipped and **117 382 B**
+//! packed *and* gzipped (`accept-encoding`, T-533, [`crate::http`]) — **16x**. Both levers pay and
+//! neither subsumes the other: JSON decimal text is high-entropy by construction, so compressing it
+//! is not the same as not sending it. `cost.build_ms` did not move (20.0 -> 20.4 ms), which is the
+//! honest half of the result: the route's own work was never the float formatting, so on a loopback
+//! link the body was not what a refetch was waiting for. It is what a tunnel, a phone or a second
+//! machine waits for, and it is what the browser parses.
+//!
 //! # What a tile never carries
 //!
 //! Emitters (§5.3). Identity gating is per-caller and a tile is not; a sealed tile is immutable and
@@ -120,7 +143,7 @@
 //!
 //! | Method | Path | Query | Answers |
 //! |---|---|---|---|
-//! | GET | `/api/tiles` | `?level_f&level_t&f_index&t_index[&scheme][&device][&cells]` | `{key, extent, axes, grid, coverage, resolution, cost}` |
+//! | GET | `/api/tiles` | `?level_f&level_t&f_index&t_index[&scheme][&device][&cells][&planes]` | `{key, extent, axes, grid, coverage, resolution, cost}` |
 //! | GET | `/api/tiles/events` | the same address | `{key, extent, counts, total, rule}` |
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1466,6 +1489,10 @@ struct ReadDiagnostics<'a> {
     slot: &'a TileSlot,
 }
 
+// Eight even with the diagnostics grouped: the six the answer is assembled from, the sealed flag
+// T-574 reads from the tile's own time extent, and (T-533) the plane spelling the caller asked
+// for. It is one serialiser of one answer, called once.
+#[allow(clippy::too_many_arguments)]
 fn unobserved_tile_json(
     key: &TileKey,
     store: TileStore,
@@ -1474,6 +1501,7 @@ fn unobserved_tile_json(
     max_live: Option<f64>,
     diags: ReadDiagnostics<'_>,
     sealed: bool,
+    planes: Planes,
 ) -> Value {
     let ReadDiagnostics { elapsed_ms, slot } = diags;
     let source = base_tier(key, max_live);
@@ -1491,7 +1519,7 @@ fn unobserved_tile_json(
             "nf": key.cells,
         },
         "axes": axes_json(key, ceiling),
-        "grid": unobserved_grid_json(key),
+        "grid": unobserved_grid_json(key, planes),
         "coverage": coverage,
         "resolution": {
             "source": source.as_str(),
@@ -1572,6 +1600,156 @@ fn axis_fold(source_cell: f64, tile_cell: f64, source_cells: usize, served: usiz
     })
 }
 
+/// How the `max_db` plane is spelled on the wire (T-533, `?planes=`).
+///
+/// **Not a compression setting: a choice of representation, named on the wire.** The value plane's
+/// destination is an R16F texture, so [`Planes::F16`] sends exactly the bits that survive — and
+/// `grid.encoding.planes` says which spelling was used, per answer, so a reader never has to infer
+/// it from whether a field happens to be present. A client that does not recognise the name served
+/// must refuse the tile rather than render it (`ui/src/surface/tile.ts` throws `TileDecodeError`);
+/// a future packing gets a **new name**, never a redefinition of this one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Planes {
+    /// One JSON number (or `null`) per cell. The default, and what every non-canvas reader of this
+    /// route still gets.
+    Json,
+    /// `max_db` as base64 of little-endian IEEE binary16; the other three planes unchanged.
+    ///
+    /// Only `max_db`, because only `max_db` wins: on a full 256 × 256 live tile its JSON text is
+    /// 1 197 118 B against 174 764 B packed, while `frames` is 131 073 B as text against 349 528 B
+    /// as base64 `u32`, and `occupancy_max`/`coverage` lose by a similar factor. Packing them too
+    /// would grow the body by 394 kB to save nothing.
+    F16,
+}
+
+impl Planes {
+    fn as_str(self) -> &'static str {
+        match self {
+            Planes::Json => "json",
+            Planes::F16 => "f16",
+        }
+    }
+}
+
+/// `?planes=`: `json` (the default) or `f16`. An unrecognised spelling is a **400 naming it**,
+/// never a silent fall back to JSON — a client that asked for a representation it can decode and
+/// was quietly given another one would mis-read every cell.
+fn parse_planes(q: &Params) -> Result<Planes, ApiError> {
+    match q
+        .iter()
+        .find(|(k, _)| k == "planes")
+        .map(|(_, v)| v.as_str())
+    {
+        None | Some("json") => Ok(Planes::Json),
+        Some("f16") => Ok(Planes::F16),
+        Some(other) => Err(bad(&format!(
+            "planes={other:?} is not a plane encoding this server serves (json, f16)"
+        ))),
+    }
+}
+
+/// `f32` → IEEE 754 binary16 bits, round-to-nearest-even.
+///
+/// **NaN stays NaN** — on this wire NaN is *not observed*, exactly as `null` is in the JSON
+/// spelling, so a conversion that turned it into an infinity or a zero would invent a measurement.
+/// A magnitude past binary16's range becomes an infinity, which the client reads as non-finite and
+/// therefore as absent too; no finite dB level this route serves is anywhere near 65 504.
+fn f16_bits(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let raw_exp = (b >> 23) & 0xff;
+    let mant = b & 0x007f_ffff;
+    if raw_exp == 0xff {
+        // Infinity, or a NaN kept a NaN (a non-zero payload bit set so it cannot become infinity).
+        return sign | 0x7c00 | if mant != 0 { 0x0200 } else { 0 };
+    }
+    let exp = raw_exp as i32 - 127 + 15;
+    if exp >= 31 {
+        return sign | 0x7c00;
+    }
+    if exp <= 0 {
+        if exp < -10 {
+            return sign; // below the smallest subnormal: zero, with its sign
+        }
+        // Subnormal binary16: shift the implicit leading 1 back in, then round to nearest even.
+        let m = mant | 0x0080_0000;
+        let shift = (14 - exp) as u32; // 14..=24
+        let keep = m >> shift;
+        let round_bit = (m >> (shift - 1)) & 1;
+        let sticky = (m & ((1 << (shift - 1)) - 1)) != 0;
+        let inc = u32::from(round_bit == 1 && (sticky || (keep & 1) == 1));
+        return sign | (keep + inc) as u16;
+    }
+    let keep = mant >> 13;
+    let round_bit = (mant >> 12) & 1;
+    let sticky = (mant & 0x0fff) != 0;
+    let inc = u32::from(round_bit == 1 && (sticky || (keep & 1) == 1));
+    // A mantissa that rounds up to 0x400 carries into the exponent by construction, which is what
+    // `+` does here; at exp 30 that carries to 31 and the value becomes an infinity, correctly.
+    sign | (((exp as u32) << 10) + keep + inc) as u16
+}
+
+/// One plane, packed: base64 of the little-endian binary16 values, with its own type stated.
+fn f16_plane(values: impl Iterator<Item = f32>, cells: usize, scale: &str) -> Value {
+    let mut bytes = Vec::with_capacity(cells * 2);
+    for v in values {
+        bytes.extend_from_slice(&f16_bits(v).to_le_bytes());
+    }
+    json!({
+        "type": "f16",
+        "byte_order": "little-endian",
+        "transfer": "base64",
+        "cells": cells,
+        "bytes": bytes.len(),
+        "scale": scale,
+        // The same claim `null` makes in the JSON spelling, in the only encoding binary16 has for
+        // it. **Never a zero and never a floor**: C26's rule is unchanged by the representation.
+        "absent": "nan",
+        "data": base64(&bytes),
+    })
+}
+
+/// Standard base64, no line breaks — the alphabet `atob` reads.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(A[(n >> 18) as usize & 63] as char);
+        out.push(A[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// What the answer says about how its per-cell planes are spelled — present in **every** answer,
+/// including the JSON one and the uniform short-circuit, so a reader never infers the encoding from
+/// which fields happen to be present.
+fn encoding_json(planes: Planes) -> Value {
+    json!({
+        "planes": planes.as_str(),
+        "order": "row-major: time then frequency, earliest row and lowest frequency first — the \
+            same cell order in either spelling",
+        "rule": "`planes` names how the per-cell planes are spelled, and it is stated rather than \
+            inferred: `json` is one number or `null` per cell; `f16` moves `max_db` into \
+            `grid.planes.max_db` as base64 of little-endian IEEE binary16 (its destination is an \
+            R16F texture, so nothing that reaches a screen is lost) and leaves `occupancy_max`, \
+            `coverage` and `frames` as JSON arrays, because for those three JSON is the SMALLER \
+            spelling (T-533). A reader that does not know the name served must refuse the tile, \
+            not guess: a plane decoded against the wrong type is a measurement invented.",
+    })
+}
+
 /// A measurement value on the wire: a finite number, or `null`. **`null` is *not observed*, never
 /// quiet** (C26) — there is no zero here for anything to read as a level.
 fn num(x: f32) -> Value {
@@ -1603,7 +1781,7 @@ fn uniform_cell_json(c: &hk_store::OverviewCell) -> Value {
 /// `read_level` falls back to when no level answered. `an_unobserved_tile_read_produces_exactly_the_constants_the_short_circuit_serves`
 /// asserts that equality against a real store read, so this is a *cheaper spelling* of the full
 /// path's answer and not a second answer.
-fn unobserved_grid_json(key: &TileKey) -> Value {
+fn unobserved_grid_json(key: &TileKey, planes: Planes) -> Value {
     let o = Overview {
         unit: hk_model::PowerUnit::Dbfs,
         nt: key.cells,
@@ -1625,6 +1803,10 @@ fn unobserved_grid_json(key: &TileKey) -> Value {
         "t_cell_s": o.t_cell_ns / 1e9,
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
+        // Stated here too (T-533), though this grid carries no plane in either spelling: a reader
+        // that has to look at which fields are present to learn the encoding is the reader that
+        // decodes the wrong one when a field is legitimately missing.
+        "encoding": encoding_json(planes),
         // The four per-cell arrays are ABSENT, not empty: an empty array would read as a grid of
         // no cells, which is a different claim from a grid of cells that hold nothing.
         "uniform": uniform_cell_json(&hk_store::OverviewCell::UNOBSERVED),
@@ -1639,16 +1821,19 @@ fn unobserved_grid_json(key: &TileKey) -> Value {
     })
 }
 
-fn grid_json(o: &Overview) -> Value {
-    json!({
+fn grid_json(o: &Overview, planes: Planes) -> Value {
+    // T-533: `max_db` in the spelling the caller asked for. The two are the same values in the same
+    // order — `the_f16_plane_carries_the_same_values_the_json_array_does` asserts that cell for
+    // cell — and the one that is absent is ABSENT, never an empty array: a grid of no cells is a
+    // different claim from a grid whose cells are spelled elsewhere.
+    let mut v = json!({
         "nt": o.nt,
         "nf": o.nf,
         "t0_s": o.t0_ns as f64 / 1e9,
         "t_cell_s": o.t_cell_ns / 1e9,
         "f_lo_hz": o.f_lo_hz,
         "f_cell_hz": o.f_cell_hz,
-        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
-        "max_db": Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+        "encoding": encoding_json(planes),
         "occupancy_max": Value::Array(o.cells.iter().map(|c| num(c.occupancy_max)).collect()),
         "coverage": Value::Array(o.cells.iter().map(|c| json!(c.coverage)).collect()),
         "frames": Value::Array(o.cells.iter().map(|c| json!(c.frames)).collect()),
@@ -1663,7 +1848,33 @@ fn grid_json(o: &Overview) -> Value {
             across parent time cells, so no percentile is carried (T-434). The noise-floor \
             distribution stays a scheme-1 question, asked through /api/history.",
         "semantics": crate::query::overview_semantics_json(o),
-    })
+    });
+    let g = v.as_object_mut().expect("object");
+    match planes {
+        // Row-major, time then frequency. `null` is **not observed**, never quiet (C26).
+        Planes::Json => {
+            g.insert(
+                "max_db".into(),
+                Value::Array(o.cells.iter().map(|c| num(c.max_db)).collect()),
+            );
+        }
+        Planes::F16 => {
+            g.insert(
+                "planes".into(),
+                json!({
+                    "max_db": f16_plane(
+                        o.cells.iter().map(|c| c.max_db),
+                        o.cells.len(),
+                        crate::query::scale_str(o.unit),
+                    ),
+                    "rule": "the typed spelling of the planes it names; every plane NOT named here \
+                        is beside it as a JSON array, and `grid.encoding.planes` says which \
+                        spelling this answer used.",
+                }),
+            );
+        }
+    }
+    v
 }
 
 /// The **shadow** plane (T-519): each column's most-recent-known value, carried down the tile's
@@ -2025,20 +2236,24 @@ fn axes_json(key: &TileKey, ceiling: (usize, usize)) -> Value {
 /// answer marks that client as drawn. See [`TileAdmission`] for why a slot is not
 /// first-come-first-served.
 pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
-    const ALLOWED: [&str; 9] = [
-        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "client", "token",
+    const ALLOWED: [&str; 10] = [
+        "device", "scheme", "level_f", "level_t", "f_index", "t_index", "cells", "planes",
+        "client", "token",
     ];
     if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
         return Err(bad(&format!(
             "unknown parameter {k:?} (allowed: device, scheme, level_f, level_t, f_index, \
-             t_index, cells, client)"
+             t_index, cells, planes, client)"
         )));
     }
+    // T-700: the plane selection is validated BEFORE admission, so a misspelled `planes` is a 400
+    // that never takes a slot from the client's share.
+    let planes = parse_planes(q)?;
     let slot = state
         .tile_admission
         .acquire(&client_id(q))
         .map_err(too_many_in_flight)?;
-    let answer = tile_body(state, q, &slot);
+    let answer = tile_body(state, q, &slot, planes);
     // Served means *drawn*: only an answer disarms this client's bootstrap reserve.
     if answer.is_ok() {
         slot.mark_served();
@@ -2046,7 +2261,12 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     answer
 }
 
-fn tile_body(state: &ApiState, q: &Params, slot: &TileSlot) -> Result<Value, ApiError> {
+fn tile_body(
+    state: &ApiState,
+    q: &Params,
+    slot: &TileSlot,
+    planes: Planes,
+) -> Result<Value, ApiError> {
     let store = tile_store(state, q);
     let (key, ceiling, readable, sealed) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
@@ -2064,6 +2284,27 @@ fn tile_body(state: &ApiState, q: &Params, slot: &TileSlot) -> Result<Value, Api
     })?;
     let started = std::time::Instant::now();
     let max_live = crate::http::max_live_span_hz(state);
+    // T-572: SEALED ONLY. A sealed tile's whole extent has passed the watermark and can never
+    // change again; a live tile at the growing edge changes on every arriving row, so it is never
+    // looked up here and never inserted below — it is always re-read, which is what keeps the
+    // live view appending rows in real time. The slot is already held (T-630 admission ran in
+    // `tiles_json`), so a hit costs a lock and a clone and no history hold at all.
+    let cache_key = state
+        .tile_cache
+        .as_ref()
+        .filter(|_| sealed)
+        .map(|_| hot_tile_key(&key, store, planes, max_live));
+    let epoch = coverage_epoch(state);
+    if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), cache_key.as_ref())
+        && let Some(mut v) = c.get(k, epoch)
+    {
+        // The answer is the cached one, but the measurement of what THIS read cost, and whose
+        // share it was admitted under (T-630), is this read's — `http.rs` strips exactly these
+        // before hashing a response into an ETag, so a hit and a miss still validate identically.
+        stamp_read_cost(&mut v["cost"], started.elapsed().as_secs_f64() * 1e3, slot);
+        v["cost"]["served_from"] = json!("hot-tile-cache");
+        return Ok(v);
+    }
     let window = key.window();
     // T-467: the compact plane-table form. The per-cell form this route used to serve was 99 % of a
     // live tile's 19.34 MB body, duplicated between `any` and `devices[0]`, for a `state` field the
@@ -2099,16 +2340,17 @@ fn tile_body(state: &ApiState, q: &Params, slot: &TileSlot) -> Result<Value, Api
             max_live,
             ReadDiagnostics { elapsed_ms, slot },
             sealed,
+            planes,
         );
         v["shadow"] = shadow_json(&sh, None);
-        return Ok(v);
+        return Ok(cache_put(state, &cache_key, epoch, v));
     }
     let r = tile_read(state, store, &key)?;
     let sh = shadow(state, store, &key, Some(&r.grid))?;
     let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
-    Ok(json!({
+    let v = json!({
         // T-574: whether this tile's own time extent has fully passed the watermark, so it can
         // never change again — `http.rs` reads this to decide the ETag / Cache-Control, never a
         // timestamp or an age. false at the live edge (or anywhere still inside the retained
@@ -2126,7 +2368,7 @@ fn tile_body(state: &ApiState, q: &Params, slot: &TileSlot) -> Result<Value, Api
             "nf": key.cells,
         },
         "axes": axes_json(&key, ceiling),
-        "grid": grid_json(&r.grid),
+        "grid": grid_json(&r.grid, planes),
         "coverage": coverage,
         "shadow": shadow_json(&sh, Some(r.level)),
         "resolution": {
@@ -2203,7 +2445,545 @@ fn tile_body(state: &ApiState, q: &Params, slot: &TileSlot) -> Result<Value, Api
                 rendering: T-437 measured 48 panes at p95 2.2 ms against ~500 ms per tile. \
                 `chunks` is the number of history lock holds this tile took.",
         },
+    });
+    Ok(cache_put(state, &cache_key, epoch, v))
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-572: the hot-tile LRU.
+// ---------------------------------------------------------------------------------------------
+
+/// The cache's byte bound.
+///
+/// **Bounded is the point, and the bound is in bytes** (T-453): residency must not grow with node
+/// count, and a cache sized in *tiles* would, because a tile's size is a property of the grid.
+/// Thirty-two mebibytes is a few viewports' worth of `planes=f16` tiles and a small fraction of
+/// what one `/api/history` query already allocates; it does not move when the pyramid deepens,
+/// when a pane zooms, or when a second client connects.
+pub const TILE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// The cache's entry bound.
+///
+/// The byte bound alone would admit an unbounded number of tiny answers — a 7.5 kB
+/// coverage-short-circuit tile is 4300 of them inside 32 MiB — and each entry costs a key and a
+/// `Value` tree beyond its serialized size. Whichever bound binds first evicts.
+pub const TILE_CACHE_MAX_ENTRIES: usize = 256;
+
+/// One cached answer.
+struct HotTile {
+    body: Value,
+    bytes: usize,
+    /// Monotonic use stamp; the smallest is the least recently used.
+    used: u64,
+}
+
+/// An in-memory LRU of **sealed** tile answers, in front of the filesystem (T-572).
+///
+/// **Only sealed tiles, and that is the whole correctness argument.** A sealed tile's own time
+/// extent has fully passed the pyramid's watermark, so a frame landing inside it is by definition
+/// late and dropped (the same rule T-574 gives its ETag and its `immutable` cache-control): it can
+/// never change again. A LIVE tile at the growing edge changes on every arriving row, and serving
+/// a stale one would violate *"the live view renders like a classic SDR waterfall, rows append in
+/// real time"* exactly as badly as not serving it at all — so a live tile is never inserted, never
+/// looked up, and always re-read. The distinction is in the insert path, not in a timer.
+///
+/// **What can still change about a sealed tile, and how that is caught.** The grid cannot, but the
+/// `coverage` plane beside it is derived from the observation log, which is appended to as capture
+/// proceeds and pruned by retention — so the cache carries an **epoch** taken from that log's own
+/// counters (`written`, `segments_deleted`), and any movement in either drops every entry. The
+/// epoch is read, never written, by this path: those two atomics are already incremented on the
+/// capture thread, so reading them costs the reader and nothing costs the writer.
+///
+/// **The capture thread is not on this path at all.** The cache lives entirely in the HTTP read
+/// path: no lock it holds is taken by ingest, and nothing it does runs per arriving row. That is
+/// why there is no per-row measurement here — there is no per-row work to measure (T-453).
+#[derive(Default)]
+pub struct HotTileCache {
+    inner: Mutex<HotTileCacheInner>,
+}
+
+#[derive(Default)]
+struct HotTileCacheInner {
+    map: std::collections::HashMap<String, HotTile>,
+    bytes: usize,
+    clock: u64,
+    epoch: (u64, u64),
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    invalidations: u64,
+}
+
+impl HotTileCache {
+    /// A cached answer for `key`, if one is held at `epoch`.
+    fn get(&self, key: &str, epoch: (u64, u64)) -> Option<Value> {
+        let mut g = self.inner.lock().ok()?;
+        g.reset_if_stale(epoch);
+        g.clock += 1;
+        let clock = g.clock;
+        let Some(e) = g.map.get_mut(key) else {
+            g.misses += 1;
+            return None;
+        };
+        e.used = clock;
+        let body = e.body.clone();
+        g.hits += 1;
+        Some(body)
+    }
+
+    /// Hold `body` for `key`, evicting the least recently used until both bounds hold.
+    fn put(&self, key: String, body: &Value, epoch: (u64, u64)) {
+        let Ok(mut g) = self.inner.lock() else { return };
+        g.reset_if_stale(epoch);
+        let bytes = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
+        // A single answer larger than the whole cache is not cached: holding it would evict
+        // everything else to no purpose, and the bound must hold unconditionally.
+        if bytes > TILE_CACHE_MAX_BYTES {
+            return;
+        }
+        g.clock += 1;
+        let clock = g.clock;
+        if let Some(old) = g.map.remove(&key) {
+            g.bytes -= old.bytes;
+        }
+        g.map.insert(
+            key,
+            HotTile {
+                body: body.clone(),
+                bytes,
+                used: clock,
+            },
+        );
+        g.bytes += bytes;
+        while g.bytes > TILE_CACHE_MAX_BYTES || g.map.len() > TILE_CACHE_MAX_ENTRIES {
+            let Some(victim) = g
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(e) = g.map.remove(&victim) {
+                g.bytes -= e.bytes;
+            }
+            g.evictions += 1;
+        }
+    }
+
+    /// The counters, for `/api/status` and for the tests that assert the bound holds.
+    pub fn stats_json(&self) -> Value {
+        let Ok(g) = self.inner.lock() else {
+            return Value::Null;
+        };
+        json!({
+            "entries": g.map.len(),
+            "bytes": g.bytes,
+            "max_entries": TILE_CACHE_MAX_ENTRIES,
+            "max_bytes": TILE_CACHE_MAX_BYTES,
+            "hits": g.hits,
+            "misses": g.misses,
+            "evictions": g.evictions,
+            "invalidations": g.invalidations,
+            "rule": "SEALED TILES ONLY. A sealed tile's time extent has fully passed the \
+                pyramid's watermark, so it can never change again; a live tile at the growing \
+                edge changes on every arriving row and is never cached, never looked up and \
+                always re-read. `invalidations` counts the times the observation log moved \
+                (records written or segments deleted) and every entry was dropped, because the \
+                coverage plane beside a sealed grid is derived from that log.",
+        })
+    }
+}
+
+impl HotTileCacheInner {
+    fn reset_if_stale(&mut self, epoch: (u64, u64)) {
+        if self.epoch != epoch {
+            if !self.map.is_empty() {
+                self.invalidations += 1;
+            }
+            self.map.clear();
+            self.bytes = 0;
+            self.epoch = epoch;
+        }
+    }
+}
+
+/// The observation log's own counters, as the cache's invalidation epoch.
+///
+/// `written` moves when a record is appended and `segments_deleted` when retention removes one:
+/// between them, every way the coverage plane over a past extent can change. With no observation
+/// log at all the epoch is constant, which is correct — there is nothing to change.
+fn coverage_epoch(state: &ApiState) -> (u64, u64) {
+    let Some(obs) = state.observations.as_ref() else {
+        return (0, 0);
+    };
+    let s = obs.stats();
+    (
+        s.written.load(Ordering::Relaxed),
+        s.segments_deleted.load(Ordering::Relaxed),
+    )
+}
+
+/// Everything that decides a tile's body, as one string.
+///
+/// The address, the device, the store, the plane spelling, and `max_live` (which chooses the
+/// honesty tier this answer states). Anything not in here would be a way for two different answers
+/// to share one entry.
+fn hot_tile_key(key: &TileKey, store: TileStore, planes: Planes, max_live: Option<f64>) -> String {
+    format!(
+        "{}|{}|{}|{}|{:?}",
+        key_json(key),
+        key.device,
+        match store {
+            TileStore::View => "view",
+            TileStore::Main => "main",
+        },
+        planes.as_str(),
+        max_live.map(f64::to_bits),
+    )
+}
+
+/// Overwrite `cost`'s per-read fields with THIS read's (T-572 over T-630).
+///
+/// A cached body was built by an earlier read: its wall clock, its in-flight count and — since
+/// T-630 — the share, holdings and client name it was admitted under all belong to that read.
+/// Serving them on a hit would tell this client someone else's share. Every field set here is one
+/// `http.rs` strips before hashing a sealed tile into its ETag.
+fn stamp_read_cost(cost: &mut Value, elapsed_ms: f64, slot: &TileSlot) {
+    let share = slot.share();
+    cost["build_ms"] = json!((elapsed_ms * 1000.0).round() / 1000.0);
+    cost["in_flight"] = json!(slot.in_flight());
+    cost["in_flight_share"] = json!(share.share);
+    cost["in_flight_held"] = json!(slot.held());
+    cost["clients"] = json!(share.clients);
+    cost["client"] = json!(slot.client());
+    cost["reserved"] = json!(share.reserved);
+    cost["fair_share"] = json!(share.fair);
+}
+
+/// Hold `v` in the hot-tile cache when this address earned one (T-572), and hand it back.
+///
+/// `key` is `None` for a LIVE tile — the insert path is where the sealed/live distinction lives,
+/// so there is no way to reach this with a growing tile's body.
+fn cache_put(state: &ApiState, key: &Option<String>, epoch: (u64, u64), v: Value) -> Value {
+    if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), key.as_ref()) {
+        c.put(k.clone(), &v, epoch);
+    }
+    v
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-573: one request per viewport, not one per tile.
+// ---------------------------------------------------------------------------------------------
+
+/// The most addresses one `GET /api/tiles/batch` may name.
+///
+/// A viewport is tens of tiles, not hundreds — a 6 GHz-wide pane at the overview lattice was
+/// measured at 1780 addresses across the WHOLE canvas (T-484), and no single pane asks for its
+/// whole canvas at once. Sixty-four is comfortably above a pane row and far below anything that
+/// could turn one request into a long occupation of a connection thread. Over it the route
+/// **refuses**, naming the cap, rather than silently answering a prefix: a caller that asked for
+/// more than it may have needs to know which addresses it must re-ask for, and the cheapest
+/// honest answer is "split it".
+pub const TILES_BATCH_MAX_ADDRESSES: usize = 64;
+
+/// The most bytes one batch answer may carry.
+///
+/// Unlike the address cap this one **truncates** rather than refuses, because its trigger is not
+/// the caller's fault: a tile's size is a property of the grid, not of the request, so a legal
+/// 64-address batch can be cheap over unobserved spectrum and enormous over a full one. The
+/// answer says `truncated: true` and lists every address it did not reach in `remaining`, so the
+/// remainder is addressable — the caller asks again for exactly those and makes progress.
+///
+/// At least one tile is always returned even when it alone exceeds the cap; otherwise a single
+/// oversized address would be unfetchable through this route forever.
+pub const TILES_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// `GET /api/tiles/batch` — a viewport's worth of tile addresses in one request (T-573).
+///
+/// **This is a transport change, never an analysis one.** Each entry's `tile` is byte-identical to
+/// what `GET /api/tiles` would have answered for that address on its own: the same `key`, the same
+/// independent `(level_f, level_t)` pair, the same `coverage` plane, the same `resolution` block
+/// and the same per-tile `cost`. Batching is a way to ask, not a way to summarise, and every
+/// per-address fact the canvas depends on survives it.
+///
+/// **A partial answer is expressible, and that is the point.** A viewport where three tiles have
+/// data, one is genuinely unobserved and one was refused is ONE response carrying three 200s, a
+/// 200 whose own `coverage` says unobserved, and a 503 — never one status for the set. Collapsing
+/// a missing tile into an empty one is precisely the defect the coverage map exists to prevent, so
+/// there is no "status" for the batch as a whole beyond the transport's own 200.
+///
+/// **The coverage short-circuit is untouched.** Each address goes through [`tiles_json`], which
+/// answers a uniformly-unobserved tile from the coverage map without ever reaching the generation
+/// path (T-461). A batch endpoint that made empty tiles expensive again would be a regression and
+/// not a win, so the cheap path is reached by construction: this route adds a loop, not a
+/// different tile builder.
+///
+/// **The in-flight cap is per address, still.** `tiles_json` takes and releases one
+/// [`TileSlot`] per address, so a batch of sixty-four holds ONE producer slot at a time, never
+/// sixty-four; under contention its later addresses come back as per-address 503s and the caller
+/// re-asks for exactly those. It does not widen the cap and it does not queue behind it.
+pub fn tiles_batch_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
+    tiles_batch_json_capped(state, q, TILES_BATCH_MAX_BYTES)
+}
+
+/// [`tiles_batch_json`] with the response-size cap as an argument.
+///
+/// The seam exists so the truncation path is tested **through the route**, at a cap small enough
+/// for a fixture to cross, rather than by a separate pure function that could drift from what the
+/// route does. The public entry point is the only caller outside tests, and it passes the
+/// documented constant.
+fn tiles_batch_json_capped(
+    state: &ApiState,
+    q: &Params,
+    max_bytes: usize,
+) -> Result<Value, ApiError> {
+    const ALLOWED: [&str; 7] = [
+        "device",
+        "scheme",
+        "cells",
+        "planes",
+        "client",
+        "addresses",
+        "token",
+    ];
+    if let Some((k, _)) = q.iter().find(|(k, _)| !ALLOWED.contains(&k.as_str())) {
+        return Err(bad(&format!(
+            "unknown parameter {k:?} (allowed: device, scheme, cells, planes, client, \
+             addresses). \
+             `level_f`, `level_t`, `f_index` and `t_index` are per-address and belong in \
+             `addresses`, not beside it"
+        )));
+    }
+    // Shared across the batch, because a viewport is drawn from ONE lattice at ONE cell count for
+    // ONE device: these are properties of the viewport, and the addresses are what vary within it.
+    // A client mixing schemes or devices (a pane and the minimap) issues one batch per group,
+    // which is still a small constant per render and keeps every request self-describing.
+    // `client` (T-630) is shared for the same reason: one request is one asker, and each address
+    // takes its admission slot under that asker's share exactly as a single-tile read would.
+    let shared: Vec<(String, String)> = q
+        .iter()
+        .filter(|(k, _)| {
+            matches!(
+                k.as_str(),
+                "device" | "scheme" | "cells" | "planes" | "client"
+            )
+        })
+        .cloned()
+        .collect();
+    let raw = q
+        .iter()
+        .find(|(k, _)| k == "addresses")
+        .map(|(_, v)| v.as_str())
+        .ok_or_else(|| {
+            bad(
+                "addresses=<level_f>.<level_t>.<f_index>.<t_index>[,…] names the tiles to answer; \
+                 a batch with no addresses is not a cheaper spelling of anything",
+            )
+        })?;
+    let addrs = parse_batch_addresses(raw)?;
+    if addrs.len() > TILES_BATCH_MAX_ADDRESSES {
+        return Err(bad(&format!(
+            "{} addresses is over this route's cap of {TILES_BATCH_MAX_ADDRESSES} per request \
+             (refused rather than truncated, so you know exactly which addresses still need \
+             asking for): split the viewport and ask again",
+            addrs.len()
+        )));
+    }
+
+    // **Members are answered CONCURRENTLY, not one after another** (T-573 follow-up). The client
+    // hands the batch exactly the addresses its in-flight budget would have put on the wire as
+    // separate requests, which the route served in parallel on up to [`TILE_MAX_IN_FLIGHT`]
+    // slots. Answering them in sequence made one batch cost the SUM of its members, not the
+    // slowest — measured in `ui/e2e/live-edge.e2e.mjs`: a following pane's newest rows were still
+    // a flat fill 8 s after first draw, because the live-edge tile waited behind every tile beside
+    // it. That is the live edge gated on tile generation, which the product forbids.
+    //
+    // **The asker's share still decides how wide.** Each member takes its own admission slot inside
+    // [`tiles_json`], under the batch's `client`, exactly as a single-tile read does — so a batch
+    // never holds more than that client's share, and never more than the global cap. A worker whose
+    // member is refused `503` while another worker is still running hands the address back and
+    // stops: the refusal said this batch is already as wide as the share allows, and one worker
+    // fewer is the answer to that, not a per-address 503 for every member it would have tried. Only
+    // the LAST worker records a 503, because then nobody in this batch holds a slot and the refusal
+    // is genuinely the route's contention, which the caller re-asks for.
+    let answer = |a: &BatchAddr| -> (Value, u16) {
+        let mut params = shared.clone();
+        params.push(("level_f".into(), a.level_f.to_string()));
+        params.push(("level_t".into(), a.level_t.to_string()));
+        params.push(("f_index".into(), a.f_index.to_string()));
+        params.push(("t_index".into(), a.t_index.to_string()));
+        let address = json!({
+            "level_f": a.level_f,
+            "level_t": a.level_t,
+            "f_index": a.f_index,
+            "t_index": a.t_index,
+            "spelling": a.spelling,
+        });
+        match tiles_json(state, &params) {
+            // Verbatim. The single-tile body IS the per-address answer; nothing is dropped,
+            // merged or re-keyed on the way into the array.
+            Ok(v) => (json!({ "address": address, "status": 200, "tile": v }), 200),
+            // A per-address refusal with its own status — the whole reason this is an array of
+            // entries and not an array of tiles.
+            Err(e) => (
+                json!({ "address": address, "status": e.status, "error": e.message }),
+                e.status,
+            ),
+        }
+    };
+    // Addresses are taken lowest-first, so what has been answered is a prefix plus whatever is
+    // still running; workers stop taking once the answered bytes cross the cap. The cut below is
+    // made in address order, so truncation is as deterministic as it was sequentially.
+    let answered: Vec<Mutex<Option<(Value, usize)>>> =
+        addrs.iter().map(|_| Mutex::new(None)).collect();
+    let todo: Mutex<std::collections::VecDeque<usize>> = Mutex::new((0..addrs.len()).collect());
+    let workers = addrs.len().clamp(1, TILE_MAX_IN_FLIGHT);
+    let active = AtomicUsize::new(workers);
+    let spent = AtomicUsize::new(0);
+    let work = || {
+        loop {
+            if spent.load(Ordering::Acquire) >= max_bytes {
+                break;
+            }
+            let Some(i) = todo.lock().expect("batch queue").pop_front() else {
+                break;
+            };
+            let (entry, status) = answer(&addrs[i]);
+            if status == 503 {
+                // Give the address back and retire, unless this is the last worker standing.
+                let last = active
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        (n > 1).then(|| n - 1)
+                    })
+                    .is_err();
+                if !last {
+                    todo.lock().expect("batch queue").push_front(i);
+                    return;
+                }
+            }
+            // The size cap is charged on what this answer will actually put on the wire.
+            let n = serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
+            spent.fetch_add(n, Ordering::AcqRel);
+            *answered[i].lock().expect("batch slot") = Some((entry, n));
+        }
+        active.fetch_sub(1, Ordering::AcqRel);
+    };
+    if workers == 1 {
+        work();
+    } else {
+        std::thread::scope(|s| {
+            for _ in 1..workers {
+                s.spawn(work);
+            }
+            work();
+        });
+    }
+    // A worker can retire on a 503 in the instant the last one found the queue empty, leaving its
+    // address handed back with nobody to take it. Answer those here, in order, with whatever the
+    // route says now — a 503 included — so no address is ever left out without a status.
+    let left: Vec<usize> = todo.lock().expect("batch queue").drain(..).collect();
+    for i in left {
+        if spent.load(Ordering::Acquire) >= max_bytes {
+            break;
+        }
+        let (entry, _) = answer(&addrs[i]);
+        let n = serde_json::to_vec(&entry).map(|b| b.len()).unwrap_or(0);
+        spent.fetch_add(n, Ordering::AcqRel);
+        *answered[i].lock().expect("batch slot") = Some((entry, n));
+    }
+
+    let mut tiles = Vec::with_capacity(addrs.len());
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    let mut remaining: Vec<String> = Vec::new();
+    for (i, (a, slot)) in addrs.iter().zip(answered).enumerate() {
+        let got = slot.into_inner().expect("batch slot");
+        match got {
+            Some((entry, n)) if !truncated => {
+                bytes += n;
+                tiles.push(entry);
+                // `i > 0`: one oversized address must still be answerable, or it is unfetchable
+                // forever.
+                if bytes >= max_bytes && i + 1 < addrs.len() {
+                    truncated = true;
+                }
+            }
+            // Not reached, or reached by a worker racing past the cap: either way it is not in
+            // this answer, and it is named so the follow-up request is a copy.
+            _ => {
+                truncated = true;
+                remaining.push(a.spelling.clone());
+            }
+        }
+    }
+
+    Ok(json!({
+        "requested": addrs.len(),
+        "returned": tiles.len(),
+        "truncated": truncated,
+        // Exactly the addresses that were not answered, in the spelling they were asked in, so the
+        // follow-up request is a copy rather than a re-derivation.
+        "remaining": remaining,
+        "limits": {
+            "max_addresses": TILES_BATCH_MAX_ADDRESSES,
+            "max_response_bytes": max_bytes,
+            "over_addresses": "refused (400), naming the cap",
+            "over_bytes": "truncated, with every unanswered address listed in `remaining`",
+        },
+        "tiles": tiles,
+        "statement": "each entry's `tile` is exactly what GET /api/tiles answers for that address \
+            alone — same key, same level pair, same coverage plane, same cost. Batching changes \
+            how many requests a viewport costs, never what a tile says. A tile with no data is \
+            still answered from the coverage map without reaching the generation path.",
     }))
+}
+
+/// One address in a batch, plus the exact text it was asked in.
+struct BatchAddr {
+    level_f: u32,
+    level_t: u32,
+    f_index: i64,
+    t_index: i64,
+    spelling: String,
+}
+
+/// `<level_f>.<level_t>.<f_index>.<t_index>`, comma-separated.
+///
+/// Dotted and comma-separated rather than repeated query parameters: it keeps a sixty-four-address
+/// viewport around a kilobyte, well inside the 16 KiB request-head limit, and it keeps ONE
+/// parameter to validate. A malformed address refuses the whole request rather than being skipped
+/// — a silently-dropped address is a tile the canvas would leave pending forever with nothing
+/// saying why.
+fn parse_batch_addresses(raw: &str) -> Result<Vec<BatchAddr>, ApiError> {
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let f: Vec<&str> = part.split('.').collect();
+        let malformed = || {
+            bad(&format!(
+                "address {part:?} is not <level_f>.<level_t>.<f_index>.<t_index>: a batch refuses \
+                 a malformed address rather than dropping it, because a dropped address is a tile \
+                 left pending with nothing saying why"
+            ))
+        };
+        if f.len() != 4 {
+            return Err(malformed());
+        }
+        out.push(BatchAddr {
+            level_f: f[0].parse().map_err(|_| malformed())?,
+            level_t: f[1].parse().map_err(|_| malformed())?,
+            f_index: f[2].parse().map_err(|_| malformed())?,
+            t_index: f[3].parse().map_err(|_| malformed())?,
+            spelling: part.to_owned(),
+        });
+    }
+    if out.is_empty() {
+        return Err(bad(
+            "addresses= named no address: a batch with no addresses is not a cheaper spelling of \
+             anything",
+        ));
+    }
+    Ok(out)
 }
 
 /// `GET /api/tiles/events` — the coarse-zoom aggregate form (`docs/16` §5.3).
@@ -3811,6 +4591,480 @@ mod tests {
         ])
     }
 
+    // -----------------------------------------------------------------------------------------
+    // T-572: the hot-tile LRU.
+    // -----------------------------------------------------------------------------------------
+
+    /// Filesystem reads the pyramid has done, and a way to zero it — the COUNT this ticket is
+    /// asserted with, rather than a wall clock.
+    fn source_reads(state: &ApiState) -> u64 {
+        state
+            .history
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .source_tiles_read()
+    }
+    fn reset_source_reads(state: &ApiState) {
+        state
+            .history
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .reset_source_tiles_read();
+    }
+
+    /// **A repeated viewport poll of a SEALED tile reads the filesystem zero times** (T-572).
+    ///
+    /// And the answer is the same answer: a cache that served a different tile cheaply would be
+    /// worse than no cache. Counts, not wall clock — `source_tiles_read` is the pyramid's own
+    /// count of source tiles pulled off disk.
+    #[test]
+    fn a_repeated_read_of_a_sealed_tile_touches_the_filesystem_zero_times() {
+        let dir = temp_dir("cache-sealed");
+        // Past the tile's own 64 s extent, so the watermark has sealed it.
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let first = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        assert_eq!(
+            first["sealed"],
+            json!(true),
+            "the fixture must seal this tile"
+        );
+        assert!(
+            first["cost"]["served_from"].is_null(),
+            "the first read is a real read"
+        );
+        reset_source_reads(&state);
+
+        for poll in 0..5 {
+            let again = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+            assert_eq!(
+                source_reads(&state),
+                0,
+                "poll {poll} went to the filesystem for a sealed tile"
+            );
+            assert_eq!(again["cost"]["served_from"], json!("hot-tile-cache"));
+            // The SAME answer, not a cheaper one.
+            for f in [
+                "key", "extent", "axes", "grid", "coverage", "sealed", "shadow",
+            ] {
+                assert_eq!(again[f], first[f], "{f} changed across a cache hit");
+            }
+            // …except this read's own diagnostics, which are this read's.
+            assert!(again["cost"]["in_flight"].is_number());
+        }
+
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(stats["hits"], json!(5), "{stats}");
+        assert_eq!(stats["entries"], json!(1), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A LIVE tile is re-read every time, and that is the correctness half of the ticket.**
+    ///
+    /// The growing edge changes on every arriving row: serving a stale copy would break *"the live
+    /// view renders like a classic SDR waterfall, rows append in real time"* exactly as badly as
+    /// serving nothing. The distinction is structural — a live tile is never looked up and never
+    /// inserted — so this asserts the filesystem is reached on EVERY poll, and that the cache
+    /// never grew an entry for it.
+    #[test]
+    fn a_live_tile_is_never_cached_and_is_re_read_on_every_poll() {
+        let dir = temp_dir("cache-live");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        // The tile the watermark is INSIDE: its extent reaches past the newest frame.
+        let live = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(
+            live["sealed"],
+            json!(false),
+            "the fixture must leave this tile growing"
+        );
+
+        for poll in 0..3 {
+            reset_source_reads(&state);
+            let v = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+            assert!(
+                v["cost"]["served_from"].is_null(),
+                "poll {poll} was served from cache at the live edge"
+            );
+            assert!(
+                source_reads(&state) > 0,
+                "poll {poll} did not re-read the growing tile"
+            );
+        }
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(
+            stats["entries"],
+            json!(0),
+            "a live tile was cached: {stats}"
+        );
+        assert_eq!(stats["hits"], json!(0), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The bound is in BYTES and in ENTRIES, and it holds under sustained scrolling** (T-453).
+    ///
+    /// Residency must not grow with node count, so neither bound is a function of the pyramid: the
+    /// cache is asserted against a cap it is driven far past, with eviction counted rather than
+    /// inferred. Driven directly, because driving it through the route would need hundreds of real
+    /// tiles to say the same thing.
+    #[test]
+    fn the_cache_stays_inside_its_stated_bound_however_long_the_scroll_is() {
+        let c = HotTileCache::default();
+        let epoch = (7, 3);
+        // ~4 kB an entry, four times the entry cap: the entry bound binds first and evicts.
+        let body = json!({ "grid": vec![-80.0f64; 400] });
+        for i in 0..TILE_CACHE_MAX_ENTRIES * 4 {
+            c.put(format!("tile-{i}"), &body, epoch);
+        }
+        let s = c.stats_json();
+        assert_eq!(s["entries"], json!(TILE_CACHE_MAX_ENTRIES), "{s}");
+        assert!(
+            s["bytes"].as_u64().unwrap() <= TILE_CACHE_MAX_BYTES as u64,
+            "{s}"
+        );
+        assert_eq!(
+            s["evictions"],
+            json!(TILE_CACHE_MAX_ENTRIES as u64 * 3),
+            "eviction is counted, not inferred: {s}"
+        );
+        // Least-recently-USED, not least-recently-inserted: touching an old key keeps it.
+        let c = HotTileCache::default();
+        for i in 0..TILE_CACHE_MAX_ENTRIES {
+            c.put(format!("k{i}"), &body, epoch);
+        }
+        assert!(c.get("k0", epoch).is_some());
+        c.put("fresh".into(), &body, epoch);
+        assert!(
+            c.get("k0", epoch).is_some(),
+            "the touched entry was evicted"
+        );
+        assert!(c.get("k1", epoch).is_none(), "the coldest entry survived");
+
+        // And a body larger than the whole cache is never held: the bound is unconditional.
+        let c = HotTileCache::default();
+        let huge = json!({ "grid": vec![-80.0f64; TILE_CACHE_MAX_BYTES / 4] });
+        c.put("huge".into(), &huge, epoch);
+        let s = c.stats_json();
+        assert_eq!(s["entries"], json!(0), "{s}");
+        assert_eq!(s["bytes"], json!(0), "{s}");
+    }
+
+    /// **The coverage plane beside a sealed grid can still move, and the epoch catches it.**
+    ///
+    /// A sealed tile's grid can never change again, but its `coverage` is derived from the
+    /// observation log — appended to as capture proceeds, pruned by retention. Any movement in
+    /// either counter drops every entry, so a cached answer can never outlive the coverage it
+    /// states. Invalidation is counted, so it is observable rather than argued.
+    #[test]
+    fn the_cache_is_dropped_whenever_the_observation_log_moves() {
+        let c = HotTileCache::default();
+        let body = json!({ "coverage": "observed" });
+        c.put("t".into(), &body, (1, 0));
+        assert!(c.get("t", (1, 0)).is_some());
+        // A record appended.
+        assert!(
+            c.get("t", (2, 0)).is_none(),
+            "a new record left a stale coverage answer"
+        );
+        c.put("t".into(), &body, (2, 0));
+        // A segment pruned.
+        assert!(
+            c.get("t", (2, 1)).is_none(),
+            "retention left a stale coverage answer"
+        );
+        let s = c.stats_json();
+        assert_eq!(s["invalidations"], json!(2), "{s}");
+        assert_eq!(s["entries"], json!(0), "{s}");
+    }
+
+    /// Two answers that differ may never share one entry: the key carries everything that decides
+    /// a body. The plane spelling is the one that would be easiest to leave out and the one that
+    /// would corrupt a render — a client that asked for `f16` and got JSON decodes neither.
+    #[test]
+    fn the_cache_key_separates_every_answer_that_differs() {
+        let dir = temp_dir("cache-key");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let mut packed = tile_params(F_INDEX, T_INDEX);
+        packed.push(("planes".into(), "f16".into()));
+        let a = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let b = tiles_json(&state, &packed).unwrap();
+        assert_eq!(a["grid"]["encoding"]["planes"], json!("json"));
+        assert_eq!(
+            b["grid"]["encoding"]["planes"],
+            json!("f16"),
+            "{}",
+            b["grid"]
+        );
+        // Both again, from cache this time, and still their own spelling.
+        assert_eq!(
+            tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap()["grid"]["encoding"]["planes"],
+            json!("json")
+        );
+        assert_eq!(
+            tiles_json(&state, &packed).unwrap()["grid"]["encoding"]["planes"],
+            json!("f16")
+        );
+        let s = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(s["entries"], json!(2), "two spellings, two entries: {s}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-573: the batch route.
+    // -----------------------------------------------------------------------------------------
+
+    fn batch_params(addresses: &str) -> Vec<(String, String)> {
+        params(&[("cells", &N.to_string()), ("addresses", addresses)])
+    }
+
+    /// **A batch is as wide as its asker's share, and no wider** (T-573 follow-up).
+    ///
+    /// Members are answered concurrently — a sequential batch cost the sum of its members and held
+    /// the live edge behind every cold tile beside it — but each still takes its own admission slot
+    /// under the batch's `client`. With three of that client's four slots already held elsewhere,
+    /// the batch has room for exactly one: the extra workers are refused, hand their address back
+    /// and retire, so every member is still ANSWERED (on the one slot there is) rather than the
+    /// batch turning its own width into a 503 per member. With all four held, nobody in the batch
+    /// has a slot, and then the refusal is genuine contention and is reported per address.
+    #[test]
+    fn a_concurrent_batch_narrows_to_its_share_instead_of_refusing_its_own_members() {
+        let dir = temp_dir("batch-share");
+        let (state, _, _) = state_with_history(&dir, 8);
+        let spelling = (0..4)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut named = batch_params(&spelling);
+        named.push(("client".into(), "tab".into()));
+
+        let held: Vec<TileSlot> = (0..3)
+            .map(|_| state.tile_admission.acquire("tab").unwrap())
+            .collect();
+        let v = tiles_batch_json(&state, &named).unwrap();
+        let statuses: Vec<_> = (0..4).map(|i| v["tiles"][i]["status"].clone()).collect();
+        assert_eq!(statuses, vec![json!(200); 4], "{v}");
+        assert_eq!(v["truncated"], json!(false));
+        let order: Vec<_> = (0..4)
+            .map(|i| v["tiles"][i]["address"]["f_index"].as_i64().unwrap())
+            .collect();
+        assert_eq!(order, (0..4).map(|i| F_INDEX + i).collect::<Vec<_>>());
+
+        let fourth = state.tile_admission.acquire("tab").unwrap();
+        let v = tiles_batch_json(&state, &named).unwrap();
+        for i in 0..4 {
+            assert_eq!(v["tiles"][i]["status"], json!(503), "{v}");
+        }
+        drop((held, fourth));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Batching is a way to ask, not a way to summarise.** (T-573.)
+    ///
+    /// Every per-address fact the canvas depends on has to survive the round trip: the address
+    /// itself, its independent level pair, its own coverage plane and its own `cost`. Asserted by
+    /// comparing each entry against what `GET /api/tiles` answers for that address ALONE — the
+    /// only difference permitted is this read's own diagnostics (`build_ms`, `in_flight`), which
+    /// T-574 already had to strip before hashing a tile into an ETag for exactly this reason.
+    #[test]
+    fn a_batch_entry_is_what_the_single_tile_route_answers_for_that_address_alone() {
+        let dir = temp_dir("batch-identity");
+        let (state, _, _) = state_with_history(&dir, 8);
+        // One observed address, one that nothing ever sampled, one two tiles away.
+        let addrs = [F_INDEX, F_INDEX + 1, F_INDEX + 3];
+        let spelling = addrs
+            .iter()
+            .map(|f| format!("0.0.{f}.{T_INDEX}"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let batch = tiles_batch_json(&state, &batch_params(&spelling)).unwrap();
+        assert_eq!(batch["requested"], json!(3));
+        assert_eq!(batch["returned"], json!(3));
+        assert_eq!(batch["truncated"], json!(false));
+        assert_eq!(batch["remaining"], json!([]));
+
+        for (i, f) in addrs.iter().enumerate() {
+            let e = &batch["tiles"][i];
+            assert_eq!(e["status"], json!(200), "{e}");
+            assert_eq!(e["address"]["f_index"], json!(*f), "{}", e["address"]);
+            assert_eq!(e["address"]["t_index"], json!(T_INDEX), "{}", e["address"]);
+            assert_eq!(e["address"]["level_f"], json!(0));
+            assert_eq!(e["address"]["level_t"], json!(0));
+            assert_eq!(
+                e["address"]["spelling"],
+                json!(format!("0.0.{f}.{T_INDEX}")),
+                "the spelling is echoed so a follow-up request is a copy, not a re-derivation"
+            );
+            let alone = tiles_json(&state, &tile_params(*f, T_INDEX)).unwrap();
+            let got = &e["tile"];
+            for field in ["key", "extent", "axes", "grid", "coverage", "sealed"] {
+                assert_eq!(
+                    got[field], alone[field],
+                    "{field} differs between the batch and the single-tile route at f_index {f}"
+                );
+            }
+            // The level pair that ANSWERED, not the one addressed — the honesty tier survives.
+            assert_eq!(
+                got["resolution"]["answered"],
+                alone["resolution"]["answered"]
+            );
+            assert_eq!(got["resolution"]["source"], alone["resolution"]["source"]);
+            // Its own cost, per address, not one number for the set.
+            assert!(got["cost"]["source_cells"].is_number(), "{}", got["cost"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A partial viewport is expressible, and the coverage short-circuit still short-circuits.**
+    ///
+    /// Three marks in one response: a tile with data, a tile nothing ever sampled, and a refusal.
+    /// The unobserved one must still be answered from the coverage map — `source_cells: 0`,
+    /// `chunks: 0`, `short_circuit.applied` — because a batch that made empty tiles expensive
+    /// again would be a regression and not a win. There is no status for the SET: collapsing a
+    /// missing tile into an empty one is the defect the coverage map exists to prevent.
+    #[test]
+    fn one_batch_carries_data_genuinely_unobserved_and_a_refusal_without_flattening_them() {
+        let dir = temp_dir("batch-partial");
+        // With an observation log: only then does the coverage map distinguish "nothing ever
+        // sampled here" from "we no longer know whether we looked", and the short-circuit needs
+        // the former. Without one every cell is `unknown`, which fails closed into the full read.
+        let (state, _, _) = state_with_records(&dir, 8, 0);
+        // The third address is above the readable ceiling, so the route refuses THAT ADDRESS with
+        // its own status while the two beside it answer.
+        let spelling = format!(
+            "0.0.{F_INDEX}.{T_INDEX},0.0.{}.{T_INDEX},99.0.0.0",
+            F_INDEX + 1
+        );
+        let batch = tiles_batch_json(&state, &batch_params(&spelling)).unwrap();
+        assert_eq!(batch["returned"], json!(3), "{batch}");
+
+        let (data, unobserved, refused) =
+            (&batch["tiles"][0], &batch["tiles"][1], &batch["tiles"][2]);
+        assert_eq!(data["status"], json!(200));
+        assert!(
+            data["tile"]["grid"]["observed_cells"].as_u64().unwrap() > 0,
+            "the fixture's own band must carry data: {}",
+            data["tile"]["grid"]
+        );
+
+        assert_eq!(unobserved["status"], json!(200), "{unobserved}");
+        let u = &unobserved["tile"];
+        assert_eq!(
+            u["resolution"]["short_circuit"]["applied"],
+            json!(true),
+            "a batch must not cost an unobserved tile the generation path: {}",
+            u["resolution"]["short_circuit"]
+        );
+        assert_eq!(u["cost"]["source_cells"], json!(0), "{}", u["cost"]);
+        assert_eq!(u["cost"]["chunks"], json!(0), "{}", u["cost"]);
+
+        assert_ne!(
+            refused["status"],
+            json!(200),
+            "an unreadable address keeps its OWN status: {refused}"
+        );
+        assert!(refused["tile"].is_null(), "{refused}");
+        assert!(
+            refused["error"].as_str().is_some_and(|m| !m.is_empty()),
+            "a refusal says why, per address: {refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two caps, two answers, because they have two different causes** (T-573).
+    ///
+    /// Over `max_addresses` is the CALLER's doing, so it is refused with a 400 naming the cap —
+    /// nothing is produced and the caller knows exactly what still needs asking for. A malformed
+    /// address refuses the whole request too, rather than being skipped: a silently-dropped
+    /// address is a tile left pending forever with nothing saying why.
+    #[test]
+    fn the_address_cap_and_a_malformed_address_are_refused_rather_than_partly_answered() {
+        let dir = temp_dir("batch-caps");
+        let (state, _, _) = state_with_history(&dir, 2);
+
+        let many = (0..=TILES_BATCH_MAX_ADDRESSES)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i as i64))
+            .collect::<Vec<_>>()
+            .join(",");
+        let e = tiles_batch_json(&state, &batch_params(&many)).unwrap_err();
+        assert_eq!(e.status, 400);
+        assert!(
+            e.message.contains(&TILES_BATCH_MAX_ADDRESSES.to_string()) && e.message.contains("65"),
+            "the refusal names the cap and what was asked: {}",
+            e.message
+        );
+
+        for bad_addr in ["0.0.1", "0.0.1.2.3", "a.0.1.2", ""] {
+            let e = tiles_batch_json(&state, &batch_params(bad_addr)).unwrap_err();
+            assert_eq!(e.status, 400, "{bad_addr:?} was not refused");
+        }
+        // The per-address parameters do not belong beside the batch; saying so beats ignoring them.
+        let mut mixed = batch_params(&format!("0.0.{F_INDEX}.{T_INDEX}"));
+        mixed.push(("f_index".into(), "3".into()));
+        assert_eq!(tiles_batch_json(&state, &mixed).unwrap_err().status, 400);
+        // T-630: `client` is a per-request fact (one request is one asker), so it rides beside the
+        // addresses and every address is admitted under it, as a single-tile read would be.
+        let mut named = batch_params(&format!("0.0.{F_INDEX}.{T_INDEX}"));
+        named.push(("client".into(), "tab-one".into()));
+        let v = tiles_batch_json(&state, &named).expect("a named batch is answered");
+        assert_eq!(v["tiles"][0]["status"], json!(200), "{v}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Over the byte cap it truncates, and the remainder stays addressable.**
+    ///
+    /// The size cap's trigger is a property of the GRID, not of the request — a legal batch is
+    /// cheap over unobserved spectrum and large over a full one — so refusing it would punish a
+    /// caller for something it cannot predict. Instead the answer stops, says `truncated: true`,
+    /// and lists every address it did not reach in the spelling it was asked in. And a single
+    /// address over the cap on its own is still answered, or it would be unfetchable forever.
+    #[test]
+    fn over_the_byte_cap_the_batch_truncates_and_names_every_address_it_did_not_reach() {
+        let dir = temp_dir("batch-truncate");
+        let (state, _, _) = state_with_history(&dir, 8);
+        let spellings: Vec<String> = (0..5)
+            .map(|i| format!("0.0.{}.{T_INDEX}", F_INDEX + i))
+            .collect();
+        let joined = spellings.join(",");
+
+        // A cap of one byte: the first entry alone crosses it, so exactly one tile comes back and
+        // the other four are named.
+        let v = tiles_batch_json_capped(&state, &batch_params(&joined), 1).unwrap();
+        assert_eq!(v["requested"], json!(5));
+        assert_eq!(v["returned"], json!(1), "{}", v["tiles"]);
+        assert_eq!(v["truncated"], json!(true));
+        assert_eq!(v["remaining"], json!(spellings[1..]), "{v}");
+        assert_eq!(v["limits"]["max_response_bytes"], json!(1));
+        assert_eq!(
+            v["tiles"][0]["status"],
+            json!(200),
+            "a lone oversized address is still answered"
+        );
+
+        // Asking again for exactly what `remaining` named makes progress rather than looping.
+        let again =
+            tiles_batch_json_capped(&state, &batch_params(&spellings[1..].join(",")), 1).unwrap();
+        assert_eq!(
+            again["tiles"][0]["address"]["spelling"],
+            json!(spellings[1])
+        );
+
+        // And under the real cap this same viewport is one whole answer.
+        let whole = tiles_batch_json(&state, &batch_params(&joined)).unwrap();
+        assert_eq!(whole["returned"], json!(5));
+        assert_eq!(whole["truncated"], json!(false));
+        assert_eq!(whole["remaining"], json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **The ticket.** A tile whose selected coverage plane is `unobserved` end to end is answered
     /// from that plane: no pyramid query, no level walk, no grid enumeration, and a body that
     /// states its one cell instead of enumerating `cells × cells` of it.
@@ -3987,15 +5241,14 @@ mod tests {
             "the full read must be uniformly UNOBSERVED for this comparison to mean anything"
         );
         // …and the short form says the same, field for field.
-        let short = unobserved_grid_json(&key);
-        assert_eq!(short["unit"], grid_json(&r.grid)["unit"]);
-        assert_eq!(short["cells"], grid_json(&r.grid)["cells"]);
-        assert_eq!(
-            short["observed_cells"],
-            grid_json(&r.grid)["observed_cells"]
-        );
-        assert_eq!(short["range_db"], grid_json(&r.grid)["range_db"]);
-        assert_eq!(short["semantics"], grid_json(&r.grid)["semantics"]);
+        let short = unobserved_grid_json(&key, Planes::Json);
+        let full = grid_json(&r.grid, Planes::Json);
+        assert_eq!(short["unit"], full["unit"]);
+        assert_eq!(short["cells"], full["cells"]);
+        assert_eq!(short["observed_cells"], full["observed_cells"]);
+        assert_eq!(short["range_db"], full["range_db"]);
+        assert_eq!(short["semantics"], full["semantics"]);
+        assert_eq!(short["encoding"], full["encoding"]);
         assert_eq!(short["uniform"], uniform_cell_json(&r.grid.cells[0]));
         // The mutation: had the uniform cell been written as zeroes rather than as absences, it
         // would differ — which is what makes the equality above an assertion and not a tautology.
@@ -4417,5 +5670,197 @@ mod tests {
             sh["search"]["source_cells"],
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// **binary16 is a re-spelling of the value, not a new value.** (T-533)
+    ///
+    /// Every assertion here is about a claim the wire makes: that `type: "f16"` means IEEE 754
+    /// binary16 (so the bit patterns are the standard's, not a near-miss of it), that `absent:
+    /// "nan"` is kept (a NaN that became a zero or an infinity would invent a level — C26), and
+    /// that the error introduced is bounded by half an ulp, which for the dB range this route
+    /// serves is well under a tenth of a decibel.
+    #[test]
+    fn f16_is_ieee_binary16_and_keeps_absence_absent() {
+        // The standard's own landmarks, bit for bit.
+        assert_eq!(f16_bits(0.0), 0x0000);
+        assert_eq!(f16_bits(-0.0), 0x8000);
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert_eq!(f16_bits(-2.0), 0xc000);
+        assert_eq!(f16_bits(65504.0), 0x7bff, "the largest finite binary16");
+        assert_eq!(f16_bits(65536.0), 0x7c00, "past the range: infinity");
+        assert_eq!(f16_bits(f32::INFINITY), 0x7c00);
+        assert_eq!(f16_bits(6.103_515_6e-5), 0x0400, "smallest normal");
+        assert_eq!(f16_bits(5.960_464_5e-8), 0x0001, "smallest subnormal");
+        assert_eq!(f16_bits(1e-9), 0x0000, "below the smallest subnormal");
+        // Absence stays absence. The exponent is all ones AND the mantissa is non-zero, which is
+        // what makes it a NaN rather than the infinity next door.
+        for nan in [f32::NAN, -f32::NAN] {
+            let b = f16_bits(nan);
+            assert_eq!(b & 0x7c00, 0x7c00, "{b:#06x} is not a NaN or infinity");
+            assert_ne!(b & 0x03ff, 0, "{b:#06x} became an infinity, not a NaN");
+        }
+        // Round to nearest EVEN at the tie, not away from zero: 2049 sits exactly between two
+        // representable values (2048 and 2050) and must land on the even one.
+        assert_eq!(f16_bits(2049.0), f16_bits(2048.0));
+        assert_eq!(f16_bits(2051.0), f16_bits(2052.0));
+        // The error bound, over the dB range this route actually serves.
+        let back = |b: u16| {
+            let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+            let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+            match e {
+                0 => s * m * 2f32.powi(-24),
+                31 => f32::NAN,
+                _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+            }
+        };
+        let mut worst = 0.0f32;
+        let mut x = -160.0f32;
+        while x <= 0.0 {
+            worst = worst.max((back(f16_bits(x)) - x).abs());
+            x += 0.013;
+        }
+        assert!(
+            worst < 0.07,
+            "binary16 costs {worst} dB over [-160, 0] dBFS, which is more than the R16F texture \
+             this plane is uploaded into would have cost anyway"
+        );
+    }
+
+    #[test]
+    fn base64_is_the_standard_alphabet_with_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64(&[0xff, 0xfe, 0xfd]), "//79");
+    }
+
+    /// **The two spellings are the same grid**, cell for cell, on a real store read — which is the
+    /// only thing that makes `?planes=f16` a representation choice rather than a second answer.
+    #[test]
+    fn the_f16_plane_carries_the_same_values_the_json_array_does() {
+        let dir = temp_dir("planes-f16");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let q = tile_params(F_INDEX, T_INDEX);
+        let plain = tiles_json(&state, &q).unwrap();
+        let mut packed_q = q.clone();
+        packed_q.push(("planes".into(), "f16".into()));
+        let packed = tiles_json(&state, &packed_q).unwrap();
+
+        assert_eq!(plain["grid"]["encoding"]["planes"], json!("json"));
+        assert_eq!(packed["grid"]["encoding"]["planes"], json!("f16"));
+        // Absent, not empty, in each direction.
+        assert!(plain["grid"]["planes"].is_null(), "{}", plain["grid"]);
+        assert!(packed["grid"]["max_db"].is_null(), "{}", packed["grid"]);
+
+        let json_cells = plain["grid"]["max_db"].as_array().expect("max_db array");
+        let plane = &packed["grid"]["planes"]["max_db"];
+        assert_eq!(plane["type"], json!("f16"));
+        assert_eq!(plane["byte_order"], json!("little-endian"));
+        assert_eq!(plane["transfer"], json!("base64"));
+        assert_eq!(plane["absent"], json!("nan"));
+        assert_eq!(plane["cells"], json!(json_cells.len()));
+        assert_eq!(plane["bytes"], json!(json_cells.len() * 2));
+        assert_eq!(
+            plane["scale"],
+            plain["grid"]["semantics"]["series"]["max_db"]["scale"]
+        );
+
+        // Decode the plane the way the client does, and compare.
+        let bytes = decode_base64(plane["data"].as_str().expect("data"));
+        assert_eq!(bytes.len(), json_cells.len() * 2);
+        let mut observed = 0usize;
+        for (i, cell) in json_cells.iter().enumerate() {
+            let bits = u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+            let finite = bits & 0x7c00 != 0x7c00;
+            match cell.as_f64() {
+                None => assert!(
+                    !finite,
+                    "cell {i} is null in JSON and a number in the plane"
+                ),
+                Some(v) => {
+                    assert!(finite, "cell {i} is {v} in JSON and absent in the plane");
+                    let back = f16_to_f32(bits);
+                    assert!(
+                        (back as f64 - v).abs() < 0.07,
+                        "cell {i}: {v} dB became {back} dB"
+                    );
+                    observed += 1;
+                }
+            }
+        }
+        assert!(
+            observed > 0,
+            "the fixture wrote no observed cell, so this comparison would pass on two empty grids"
+        );
+
+        // …and it is SMALLER, which is the whole point, measured on this very answer. The claim is
+        // about the PLANE rather than the whole body, because at this test's 64-cell edge the
+        // per-tile prose dominates; on a rendered 256-cell tile the plane IS the body (64 % of it,
+        // the measurement this ticket started from).
+        let as_text = plain["grid"]["max_db"].to_string().len();
+        let as_plane = plane["data"].as_str().unwrap().len();
+        assert_eq!(
+            as_plane,
+            (json_cells.len() * 2).div_ceil(3) * 4,
+            "the packed plane's size must be a function of the CELL COUNT alone — two bytes a \
+             cell, base64 — which is the property JSON decimal text does not have: the same grid \
+             costs {as_text} B as text here and 1 197 118 B on the 256-cell live tile T-533 \
+             measured, where the same cells packed are 174 764 B"
+        );
+        assert!(
+            as_plane * 2 < as_text,
+            "{as_plane} B packed vs {as_text} B as text"
+        );
+        assert!(
+            packed.to_string().len() < plain.to_string().len(),
+            "the packed body must not be larger than the JSON one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_plane_encoding_is_refused_rather_than_answered_in_another() {
+        let dir = temp_dir("planes-bad");
+        let (state, _, _) = state_with_records(&dir, N as i64, 0);
+        let mut q = tile_params(F_INDEX, T_INDEX);
+        q.push(("planes".into(), "f8".into()));
+        let e = tiles_json(&state, &q).unwrap_err();
+        assert_eq!(e.status, 400);
+        assert!(e.message.contains("f8"), "{}", e.message);
+        assert!(e.message.contains("json, f16"), "{}", e.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn decode_base64(s: &str) -> Vec<u8> {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let val = |c: u8| A.iter().position(|&a| a == c).expect("base64 alphabet") as u32;
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len() / 4 * 3);
+        for c in b.chunks(4) {
+            let pad = c.iter().filter(|&&x| x == b'=').count();
+            let n = (val(c[0]) << 18)
+                | (val(c[1]) << 12)
+                | (if pad < 2 { val(c[2]) } else { 0 } << 6)
+                | (if pad < 1 { val(c[3]) } else { 0 });
+            out.push((n >> 16) as u8);
+            if pad < 2 {
+                out.push((n >> 8) as u8);
+            }
+            if pad < 1 {
+                out.push(n as u8);
+            }
+        }
+        out
+    }
+
+    fn f16_to_f32(b: u16) -> f32 {
+        let s = if b >> 15 == 1 { -1.0f32 } else { 1.0 };
+        let (e, m) = ((b >> 10) & 0x1f, (b & 0x3ff) as f32);
+        match e {
+            0 => s * m * 2f32.powi(-24),
+            31 => f32::NAN,
+            _ => s * (m + 1024.0) * 2f32.powi(e as i32 - 25),
+        }
     }
 }

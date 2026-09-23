@@ -56,6 +56,15 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 # T-020: H3 cell → boundary for the gpsjam adapter. No default features (drops ahash).
 h3o = { version = "0.11", default-features = false }
+# T-533: `Content-Encoding: gzip` for hk-api's JSON responses. A live `/api/tiles` body is
+# measurement text that compresses ~9x, and the route answering 200 kB instead of 1.9 MB is the
+# cheap half of making the live edge trackable. Already in the lock file (a tract/ort dependency).
+# `zlib-rs` rather than the default `miniz_oxide` backend, and that is load-bearing, not taste:
+# `miniz_oxide`'s `CompressorOxide` is built BY VALUE on the caller's stack (~300 kB of Huffman
+# tables) and `hk-api` answers every request on a 256 kB connection thread, so the default backend
+# aborts the process with a stack overflow on the first compressed answer — measured, in the
+# contract test. `zlib-rs` keeps its state on the heap. Pure Rust either way, no C toolchain.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # T-022a: HTTP request-head parsing for the hk-api server (already a tungstenite dependency).
 httparse = "1.10"
 libc = "0.2"

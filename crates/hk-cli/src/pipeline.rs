@@ -1178,6 +1178,10 @@ pub fn serve_api(
         ))),
         // T-438: the tile route's ingest-backpressure cap, per server.
         tile_admission: Default::default(),
+        // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the
+        // same SEALED tiles every poll, and a sealed tile can never change again. Live tiles at the
+        // growing edge are never cached — see `HotTileCache`.
+        tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

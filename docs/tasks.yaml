@@ -21942,6 +21942,56 @@ tasks:
       ONE worktree in sequence, not three agents contending for one file. This one goes first - it
       is already written and measured.
       The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
+    result: |
+      RELANDED. `f80857aa` cherry-picked onto main (0f6bbf17) with the six predicted conflict hunks
+      resolved by keeping BOTH sides, not one: `http.rs` (T-574's `respond_tile`/ETag/`crc32` next
+      to T-533's `accepts_gzip`/`gzip`), `tiles.rs` x4 (T-574's `ReadDiagnostics` + `sealed` PLUS
+      T-533's `planes`, and both test tails), `api_contract.rs` (both test tails). T-595's
+      `excluded` needed no change: it lives in the coverage plane, not in `max_db`.
+
+      TWO THINGS THE RELAND HAD TO ADD, both caused by main having moved:
+      1. `/api/tiles` no longer falls into the generic JSON tail (T-574 made it answer itself for
+         the ETag), so T-533's gzip never reached the one body it was written for. Added `maybe_gzip`
+         on `respond_tile`'s own path. The ETag is deliberately still computed over the UNCOMPRESSED
+         JSON - gzip is a transfer coding, so the representation a cache validates is the same tag
+         either way - and a 304 carries no body and so no coding.
+      2. OBSERVED BUG, fixed: `respond_cached` already emitted `Vary: Origin` and T-533 appended a
+         second `Vary: Accept-Encoding` line. Two `Vary:` headers is a cache-correctness bug (a cache
+         reading only the first keys on `Origin` alone and can then serve the gzipped body to a
+         client that refused gzip). Now ONE header, `Vary: Origin, Accept-Encoding`, on every answer
+         - compressed or not, since either form may be the one a cache stored. New test
+         `gzip_does_not_change_a_tiles_validator_and_vary_is_one_header` fails on exactly that shape.
+
+      RE-MEASURED rather than quoted (the ticket's own instruction; the old figures predate T-571).
+      One address, four spellings back to back, 256x256 tile, through the route, asserted as an
+      ORDERING in `tile_planes_are_typed_on_request_and_the_route_honours_accept_encoding`:
+        json              1 202 453 B   build_ms 16.7
+        json + gzip          71 005 B
+        f16                 912 435 B
+        f16 + gzip           43 090 B   build_ms 17.8   -> 27.9x
+      And on hk-api's own sealed-tile fixture: 1 063 213 B -> 20 280 B gzipped. The factor is larger
+      than the original 16x because these fixtures' tiles carry more absence, which gzip eats; the
+      contract test therefore asserts the ordering (both levers pay, neither subsumes the other) and
+      prints the magnitudes, rather than pinning numbers that move with the fixture.
+
+      THE HONEST HALF STILL HOLDS AND IS NOT RE-SOLD: `cost.build_ms` did not move (16.7 -> 17.8 ms,
+      inside the run-to-run spread). This is a bytes-on-the-wire win for a tunnel, a phone or a
+      second machine, NOT a latency fix for the dev loop - docs/api.md says so in those words.
+
+      Tests (targeted): hk-api 229/229. hk-cli api_contract 55/55. ui 50/50 test files.
+      `just precheck hk-api hk-cli` clean.
+
+      SURFACED, NOT CHASED (for the coordinator):
+      - LOAD-FLAKE: `api_contract::tile_shadow_carries_a_departed_band_and_nothing_where_never_observed`
+        failed once in a full-binary parallel run, then PASSED in isolation (19.3 s) and PASSED in a
+        second full-binary run (55/55). Nothing in this diff touches the shadow plane. -> deflaker.
+      - ENVIRONMENTAL, not a code defect: this machine has 4.3 GiB free, below the IQ ring's 8 GiB
+        floor, so `coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked`
+        aborts with the ring's own "allocation refused" message until `HK_IQ_BUFFER_MIN_FREE` is
+        lowered (which is what the test's panic text tells you to do, and what I ran with). CI will
+        hit this on any agent box that has drifted below the floor. Disk needs freeing.
+      - `task-t533` can be deleted once this merges; its other three commits already landed as
+        96e3cbcc and only `f80857aa` was new.
   - id: T-640
     milestone: M2-hardening
     title: 'A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got'

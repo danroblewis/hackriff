@@ -28,7 +28,7 @@
 // exactly the "sound proof of the adjacent question" this repo keeps catching.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Browser } from "./harness.mjs";
+import { Browser, tileAsks } from "./harness.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 
@@ -54,12 +54,14 @@ async function ask(path, { tries = 40, waitMs = 150 } = {}) {
   }
 }
 
-/** Pull the address out of a request the client built — the request, not the response (T-367). */
-function addrOf(url) {
-  const q = new URL(url).searchParams;
-  const n = (k, d) => (q.has(k) ? Number(q.get(k)) : d);
-  return { scheme: q.get("scheme") ?? "view", levelF: n("level_f"), levelT: n("level_t"), fIndex: n("f_index"), tIndex: n("t_index"), cells: n("cells", 256) };
-}
+/**
+ * The address one tile ASK named — the request, not the response (T-367). Since T-573 a viewport's
+ * tiles go out as ONE `GET /api/tiles/batch` naming many addresses, so every claim below is made
+ * per address ([[tileAsks]] expands a batch into its members, each with the status the route gave
+ * THAT address), never per request: a batch URL has no `level_f` of its own, and reading one as if
+ * it did is how this file came to report "level_f NaN".
+ */
+const addrOf = (a) => ({ scheme: a.scheme, levelF: a.levelF, levelT: a.levelT, fIndex: a.fIndex, tIndex: a.tIndex, cells: a.cells });
 
 /**
  * Open the surface, zoom out as hard as the gestures allow, pan to every corner at that zoom, and
@@ -140,8 +142,10 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   assert.notEqual(after, before, "the gestures must have actually moved the view, or this proves nothing");
   t.diagnostic(`level readout: "${before}" -> "${after}"`);
 
-  const tiles = page.requests.slice(firstIdx).filter((r) => r.url.includes("/api/tiles"));
-  const everyTile = page.requests.filter((r) => r.url.includes("/api/tiles"));
+  // Per ADDRESS, batch members included, each with its own answer (see [[addrOf]]).
+  await page.settleBodies();
+  const tiles = tileAsks(page.requests.slice(firstIdx));
+  const everyTile = tileAsks(page.requests);
   // Non-vacuity, twice over: the gestures must have moved the view (asserted above, from the
   // chrome) and put addresses on the wire, and the page's addressing must have reached the COARSE
   // end of the frequency axis — which is where the reported defect lives. A run that stopped short
@@ -155,9 +159,18 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // that tests nothing, so the premise is stated as what it is actually for — the gesture must have
   // put addresses on the wire ACROSS THE SCHEMES THE PAGE USES — and the movement claim above
   // (from the chrome, cache-independent) carries the rest.
-  const schemesUsed = new Set(everyTile.map((r) => addrOf(r.url).scheme));
-  assert.ok(tiles.length >= 1,
-    `the zoom-out produced no tile requests at all (got ${tiles.length}); the page cannot be ` +
+  //
+  // **And since T-573 the gesture window may legitimately carry NO address at all**, so the count
+  // is taken over the page's life. One batch now carries what several single-tile requests did, and
+  // an address the cache abandons before its turn ends never reaches the wire at all, so the
+  // gesture's own window is thinner and more timing-dependent than it was. Measured on this
+  // fixture: 3 gesture requests per-tile against 0 or 1 batched, while the pane's own residency
+  // readout was the same in both a second later (2 tiles, 0 pending). So the lattice and refusal
+  // claims below are judged over EVERY address the page named, which is a superset of the
+  // gesture's, and cannot be emptied by timing.
+  const schemesUsed = new Set(everyTile.map((r) => addrOf(r).scheme));
+  assert.ok(everyTile.length >= 1,
+    `the page asked for no tile addresses at all (got ${everyTile.length}); it cannot be ` +
     "addressing anything, so nothing below is a measurement");
   assert.ok(schemesUsed.has("view") && schemesUsed.has("overview"),
     `the page only ever addressed ${[...schemesUsed].join(", ")}. Both tiers must be exercised or ` +
@@ -189,7 +202,7 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // `capF` read 11 against 9 and said "the addressing must reach the top", when what it had found
   // was a level 11 that is perfectly on-lattice for the scheme that named it.
   const coarsestOf = (scheme) => {
-    const xs = everyTile.map((r) => addrOf(r.url)).filter((a) => a.scheme === scheme);
+    const xs = everyTile.map((r) => addrOf(r)).filter((a) => a.scheme === scheme);
     return xs.length ? Math.max(...xs.map((a) => a.levelF)) : null;
   };
   const reach = Object.fromEntries(Object.keys(lattices).map((k) => [k, coarsestOf(k)]));
@@ -209,19 +222,19 @@ async function zoomOutHard(t, browser, { initScript = null, caps = null } = {}) 
   // red in the full suite). "The gestures moved the view" is asserted above, from the chrome, and
   // that is the cache-independent form of the same claim.
   const perScheme = (rs) => Object.entries(
-    rs.map((r) => addrOf(r.url)).reduce((m, a) => {
+    rs.map((r) => addrOf(r)).reduce((m, a) => {
       m[a.scheme] = Math.max(m[a.scheme] ?? -1, a.levelF); return m;
     }, {})).map(([k, v]) => `${k}:${v}`).join(" ") || "none";
   t.diagnostic(`${tiles.length} gesture tile requests (coarsest level_f by scheme ${perScheme(tiles)}); ` +
     `${everyTile.length} over the page's life, coarsest by scheme ${perScheme(everyTile)}`);
-  return { tiles, lat, capF, capT, lattices };
+  return { tiles: everyTile, gestureTiles: tiles, lat, capF, capT, lattices };
 }
 
 /** Every request that named a node outside the lattice the page was handed. */
 function offLattice({ tiles, lattices }) {
   const out = [];
   for (const r of tiles) {
-    const a = addrOf(r.url);
+    const a = addrOf(r);
     // **Judged against the lattice the request NAMES.** A `scheme=overview` address expressed in
     // the detail lattice's cells is a different tile and a different ceiling (T-505), and reading
     // one against the other is how a legitimate level 11 came to look off-lattice.
@@ -246,7 +259,7 @@ test("an aggressive zoom-out never addresses a node outside the lattice the page
 
   const off = offLattice(run);
   assert.deepEqual(off.slice(0, 5), [],
-    `${off.length}/${run.tiles.length} requests named a node outside the declared lattice`);
+    `${off.length}/${run.tiles.length} addresses named a node outside the declared lattice`);
 
   // **And no request inside that lattice was refused** (T-482). Before the route declared its
   // readable ceiling this was a diagnostic rather than an assertion, because the flood was the
@@ -256,13 +269,18 @@ test("an aggressive zoom-out never addresses a node outside the lattice the page
   const refused = run.tiles.filter((r) => r.status >= 400 && r.status < 500);
   if (refused.length) {
     const first = refused[0];
-    const body = await (await ask(new URL(first.url).pathname + new URL(first.url).search)).json().catch(() => ({}));
-    t.diagnostic(`  first refused address: ${JSON.stringify(addrOf(first.url))}`);
+    // Re-asked as the SINGLE-tile read of that one address, so the reason is its own even when it
+    // was refused inside a batch.
+    const q = new URLSearchParams({ level_f: first.levelF, level_t: first.levelT, f_index: first.fIndex, t_index: first.tIndex });
+    if (first.scheme !== "view") q.set("scheme", first.scheme);
+    if (first.cells !== 256) q.set("cells", String(first.cells));
+    const body = await (await ask(`/api/tiles?${q}`)).json().catch(() => ({}));
+    t.diagnostic(`  first refused address: ${JSON.stringify(addrOf(first))}`);
     t.diagnostic(`  the route's own reason: ${body.error ?? "(no body)"}`);
   }
-  assert.deepEqual(refused.map((r) => `${r.status} ${JSON.stringify(addrOf(r.url))}`).slice(0, 5), [],
-    `${refused.length}/${run.tiles.length} ON-LATTICE tile requests were refused`);
-  t.diagnostic(`0/${run.tiles.length} gesture tile requests refused across the whole zoom-out`);
+  assert.deepEqual(refused.map((r) => `${r.status} ${JSON.stringify(addrOf(r))}`).slice(0, 5), [],
+    `${refused.length}/${run.tiles.length} ON-LATTICE tile addresses were refused`);
+  t.diagnostic(`0/${run.tiles.length} tile addresses refused over the page's life (${run.gestureTiles.length} of them in the zoom-out)`);
 });
 
 test("the route DECLARES the ceiling, and every address inside it answers", async (t) => {

@@ -382,6 +382,16 @@ interface InFlight {
   readonly owner: number;
 }
 
+/**
+ * What [[TileCache]] tells its source about one request, beyond the address.
+ *
+ * `solo`: this request must not wait on any other — it is the live edge's revalidation, which the
+ * product never gates on generating other tiles (T-460, T-573). A source that batches sends it alone.
+ */
+export interface TileSourceHint {
+  readonly solo?: boolean;
+}
+
 export class TileCache<T> {
   readonly budgetBytes: number;
   private readonly maxQueue: number;
@@ -528,7 +538,7 @@ export class TileCache<T> {
 
   constructor(
     private readonly tex: TileTextures<T>,
-    private readonly source: (addr: TileAddr, signal?: AbortSignal) => Promise<TileData>,
+    private readonly source: (addr: TileAddr, signal?: AbortSignal, hint?: TileSourceHint) => Promise<TileData>,
     opts: TileCacheOptions = {},
   ) {
     this.budgetBytes = opts.budgetBytes ?? 96 * MB;
@@ -1192,7 +1202,10 @@ export class TileCache<T> {
       if (requeue) this.schedule(addr);
       this.pump();
     };
-    void this.source(addr, ctrl?.signal).then(
+    // A live-edge revalidation (`owner === -1`, [[refreshEdge]]) is asked for ON ITS OWN: the lane's
+    // cadence is a share of what ITS request costs, and a source that coalesces requests (T-573's
+    // batch) would otherwise charge it — and hold its rows — for every cold tile it rode beside.
+    void this.source(addr, ctrl?.signal, { solo: owner === -1 }).then(
       (data) => {
         this.observe(started);
         this.succeeded();
