@@ -18815,7 +18815,7 @@ tasks:
   - id: T-572
     milestone: MLIVE
     title: An in-memory hot-tile LRU - a viewport re-read goes to RAM, not to the filesystem
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -18840,10 +18840,13 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       2026-09-22 (coordinator): implemented (a53c6fac, rebuilt as 0fec97ea onto T-630 admission); carried by branch hold-tilebody2 with T-573/T-700. BOUND 32 MiB AND 256 entries, LRU, SEALED tiles only (live never cached), no capture-thread cost. Found + fixed the per-read-field ETag trap (cost.served_from; and T-630 share fields excluded from the sealed ETag in http.rs). NOT LANDED: hold-tilebody2 turned live-edge / surface-address / surface-nav browser specs red in the 09-22 18:34 gate; fix in progress on task-tilebody3.
+
+      2026-09-23 (coordinator): landed GATED in the 23:38 batch of 8 (tilebody3 = T-700 via task-t700 + T-630 + T-573 + T-572, b6ed03f9 on hold-tilebody2 03dc290b). The follow-up b6ed03f9 fixed the batch route answering its addresses serially (the live-edge tile waited behind cold tiles in its batch) and made the specs read batches per address. Commit = the main-line merge that first carried it (6335455b).
+    commit: 6335455b
   - id: T-573
     milestone: MLIVE
     title: HTTP keep-alive and a BATCH /api/tiles endpoint - one request per viewport, not one per tile
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -18877,6 +18880,9 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       2026-09-22 (coordinator): implemented (2df0ba8b, rebuilt as cd2ed16f): GET /api/tiles/batch - 8 addresses in 1 request, pane+minimap in 2; the batch carries client (T-630) and each address is admitted under that share. HTTP keep-alive NOT done (proposed as a follow-up, not filed under the 09-22 observed-defects-only rule). NOT LANDED: see T-572 note - browser specs red with hold-tilebody2; fix on task-tilebody3.
+
+      2026-09-23 (coordinator): landed GATED in the 23:38 batch of 8 (tilebody3 = T-700 via task-t700 + T-630 + T-573 + T-572, b6ed03f9 on hold-tilebody2 03dc290b). The follow-up b6ed03f9 fixed the batch route answering its addresses serially (the live-edge tile waited behind cold tiles in its batch) and made the specs read batches per address. Commit = the main-line merge that first carried it (6335455b).
+    commit: 6335455b
   - id: T-574
     milestone: MLIVE
     title: Sealed tiles are immutable - serve them with an ETag and a long immutable cache, so a re-read is a 304
@@ -21889,7 +21895,7 @@ tasks:
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
-    status: todo
+    status: done
     priority: high
     parallel_group: PIPE
     model: opus
@@ -21946,6 +21952,8 @@ tasks:
       ONE worktree in sequence, not three agents contending for one file. This one goes first - it
       is already written and measured.
       The branch `task-t533` MUST NOT be deleted until this lands; its tip is `f80857aa`.
+
+      2026-09-23 (coordinator): landed GATED in the 23:38 batch of 8 (tilebody3 = T-700 via task-t700 + T-630 + T-573 + T-572, b6ed03f9 on hold-tilebody2 03dc290b). The follow-up b6ed03f9 fixed the batch route answering its addresses serially (the live-edge tile waited behind cold tiles in its batch) and made the specs read batches per address. Commit = the main-line merge that first carried it (6335455b).
     result: |
       RELANDED. `f80857aa` cherry-picked onto main (0f6bbf17) with the six predicted conflict hunks
       resolved by keeping BOTH sides, not one: `http.rs` (T-574's `respond_tile`/ETag/`crc32` next
@@ -21996,6 +22004,7 @@ tasks:
         hit this on any agent box that has drifted below the floor. Disk needs freeing.
       - `task-t533` can be deleted once this merges; its other three commits already landed as
         96e3cbcc and only `f80857aa` was new.
+    commit: 6335455b
   - id: T-640
     milestone: M2-hardening
     title: 'A refused IQ ring still reports `sources[iq-ring].available: true`, so the server believes it holds a tune history it has not got'
