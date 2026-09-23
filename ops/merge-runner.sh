@@ -64,6 +64,10 @@ log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >&2; }
 # Discord (user, 2026-09-23): every exception the runner hands to a person is also an alert;
 # every landing is a green one-liner. ops/alert.py dedupes by key and never fails the caller.
 alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 || true; }
+# The identity of a batch for the suite-broken hold: branch NAMES AND TIPS, sorted. A hold keyed
+# on names alone never released on a fix pushed to a queued branch - at 04:06 on 2026-09-23 the
+# fixed branch sat behind "waiting for the queue to change" until a person deleted the marker.
+batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse --short "$b" 2>/dev/null)"; done | sort | tr '\n' ' '; }
 notify_coordinator(){
   alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
   tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
@@ -546,7 +550,7 @@ try_bulk(){
     # in order, flag it once, and wait for a fix to be queued - never isolate.
     if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-      printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+      batch_sig "${branches[@]}" > "$S/suite-broken"
       log "BULK gate FAILED without a test FAIL (lint/build/ui-unit) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
       echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; lint/build/ui-unit red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
       notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
@@ -562,7 +566,7 @@ try_bulk(){
       log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
       if ! ( cd "$REPO" && cargo nextest run --workspace -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
         for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        batch_sig "${branches[@]}" > "$S/suite-broken"
         log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
         echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
         notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
@@ -577,7 +581,7 @@ try_bulk(){
       log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
       if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
         for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-        printf '%s\n' "${branches[@]}" | sort | tr '\n' ' ' > "$S/suite-broken"
+        batch_sig "${branches[@]}" > "$S/suite-broken"
         log "TRIAGE: MAIN IS RED on browser spec(s): $TRIAGE_SPECS -> batch re-queued in order, NOT isolated; queue the fix"
         echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - browser spec(s) $TRIAGE_SPECS fail on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
         notify_coordinator "main itself fails browser spec(s) $TRIAGE_SPECS - the batch ($tickets) is re-queued and held; queue a fix for main."
@@ -644,9 +648,20 @@ self_version
 # runner started a second gate beside one such orphan and the two shared the tree, the ports
 # and the CPU for 30 minutes (run ids d1503dd80480 and 4ecba9c10c0a). At startup NO gate
 # process can be legitimate, so every one of them is killed before anything else.
+# ONLY ON THIS CHECKOUT, though. The gate runs in $REPO; a worker's targeted `cargo nextest run`
+# in its own worktree matches the same pattern and is not ours to kill - at 05:13 on 2026-09-23
+# a restart killed a coordinator's `nextest run -p hk-cli -E binary(api_contract)` this way.
+# The process's cwd decides: under $REPO but not under $REPO/.claude/worktrees/ is the gate's
+# tree; anywhere else is someone else's run and is left alone (and said so).
 for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
   for opid in $(pgrep -f "$pat" 2>/dev/null); do
     [ "$opid" = "$$" ] && continue
+    ocwd=$(lsof -a -p "$opid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    case "$ocwd" in
+      "$REPO"/.claude/worktrees/*) log "STARTUP: leaving $opid ($pat) alone - it runs in a worktree ($ocwd)"; continue ;;
+      "$REPO"|"$REPO"/*) ;;
+      *) log "STARTUP: leaving $opid ($pat) alone - not on this checkout (cwd ${ocwd:-unknown})"; continue ;;
+    esac
     log "STARTUP: killing orphan gate process $opid ($pat)"; kill -TERM "$opid" 2>/dev/null
   done
 done
@@ -689,8 +704,9 @@ while true; do
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
-    # hold it until the queue changes (a fix branch appears, or a branch is withdrawn).
-    if [ -f "$S/suite-broken" ] && [ "$(echo $ready | tr ' ' '\n' | sort | tr '\n' ' ')" = "$(cat "$S/suite-broken")" ]; then
+    # hold it until the queue changes (a fix branch appears, a branch is withdrawn, or a queued
+    # branch's tip moves - a fix pushed to the branch itself releases the hold too).
+    if [ -f "$S/suite-broken" ] && [ "$(batch_sig $ready)" = "$(cat "$S/suite-broken")" ]; then
       for b in $ready; do echo "$b" >> "$QUEUE"; done
       [ -z "${SUITE_HOLD_SAID:-}" ] && { log "HOLD: the same batch failed without a test FAIL; waiting for the queue to change (a fix)"; SUITE_HOLD_SAID=1; }
       sleep 8; continue
