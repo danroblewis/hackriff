@@ -1024,6 +1024,11 @@ yet", not "yes".
 Not written here — ADR-0011 is untouched by this audit and its status is unchanged. This is the
 delta an amendment (T-606) would carry, in the style of §8's audio amendment.
 
+**Absorbed 2026-09-23 by [ADR-0011 §9](adr/0011-decoder-workbench-contracts.md) (T-606).** It took
+option (a) for item 2, added a per-frame `viterbi_frames` row that item 3's family count needs,
+widened `descramble`/`bitstuff`/`codeword_map` to `bits|frames`, and found that what OFDM/DAB+ is
+really missing is soft values carrying frame boundaries rather than complex points.
+
 1. **Catalogue rows.** §7's ranks 1–13 as additive §1.5 entries, each pinning a descriptor in
    `planned()` and enforced by the existing `implemented_blocks_match_their_pinned_descriptors`
    drift test. Groups: `iq` (`psk_demod`, `css_demod`, `ssb_demod`, `cw_demod`, `ofdm_demod`),

@@ -11,6 +11,7 @@ use crate::schema::{ParamExt, descriptor, float, frame_length, hex, int, object,
 pub(crate) mod common;
 mod demod;
 mod filter;
+pub mod mauto;
 mod ppm;
 mod subcarrier;
 #[cfg(test)]

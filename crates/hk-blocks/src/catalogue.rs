@@ -10,6 +10,17 @@ use hk_recipe::BlockDescriptor;
 
 use crate::blocks;
 
+/// The ADR-0011 §9 (T-606) rows: ports pinned, parameters placeholders until each block's
+/// implementing ticket pins them. `ofdm_demod` is reserved and deliberately absent (§9.2).
+pub fn mauto_rows() -> Vec<BlockDescriptor> {
+    [
+        blocks::iq::mauto::planned(),
+        blocks::symbol::mauto::planned(),
+        blocks::fec::mauto::planned(),
+    ]
+    .concat()
+}
+
 /// Every M1 block's descriptor, implemented or not (implemented blocks' own descriptors win
 /// for unpinned entries).
 pub fn planned() -> Vec<BlockDescriptor> {
@@ -21,6 +32,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
     all.extend(blocks::fec::planned());
     all.extend(blocks::parse::planned());
     all.extend(blocks::multi::planned());
+    all.extend(mauto_rows());
     for d in &mut all {
         if !d.params_pinned
             && let Some(f) = registry.get(&d.name)
@@ -103,6 +115,7 @@ mod tests {
             blocks::fec::planned(),
             blocks::parse::planned(),
             blocks::multi::planned(),
+            mauto_rows(),
         ]
         .concat();
         for d in crate::Registry::builtin().descriptors() {
