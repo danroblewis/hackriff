@@ -123,9 +123,22 @@ BLOCKED/ERROR/REVIEW_FAIL), red for a `GATE_TIMEOUT` kill, green for each landin
 "mention_user_id"}`. Same `--key` within 30 min is deduped; every attempt is recorded in
 `$HACKRIFF_OPS/alerts.jsonl`; a failed post never fails the caller. `HK_ALERT_OFF=1` silences it.
 
-**The gate runs alone (user, 2026-09-22).** The bounded budget was not enough: the SDET review
+**The gate shares the box (default since 2026-09-23 13:30; user).** Workers keep dispatching while a
+gate runs, capped at the gate's reserve (`(WORK_CORES − WORK_GATE_RESERVE) / WORK_WORKER_CORES` = 4)
+instead of `WORK_CAP`; the merge runner gates whatever is queued the moment the previous gate ends
+(`WORKER_DRAIN_MAX=0`) and never waits for a claimed worker — only for a foreign spec run / `hk serve`
+(they share its lane ports) or watchdog contention, at most `FOREIGN_DRAIN_MAX`. `WORK_QUEUE_PAUSE`
+is inert in this mode. Why: the alone-mode cycle below alternated 45-min gates with 45-min drains;
+on 2026-09-23 dispatch was zero in 10 of 13 hours and landings fell to ~1/hour once the crisis backlog
+drained, while the three flake causes the rule was bought for had been fixed at the root (a hidden
+tab's stopped rAF in `surface-contention`, a spec port shared by `fog-of-war`/`scan-everything`, a
+self-matching `pgrep` wait loop). Every gate in this mode is honestly marked contended in its timing
+record. `WORK_GATE_ALONE=1` on the work runner plus `WORKER_DRAIN_MAX=2700` on the merge runner
+restore the cycle wholesale.
+
+**The gate runs alone (user, 2026-09-22; now opt-in, above).** The bounded budget was not enough: the SDET review
 measured untouched crates of small unit tests running 18–79× dearer during shared gates. So the two
-runners now cycle: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
+runners cycled: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
 in `merge-queue.txt`, and while a gate runs; running workers finish and join the queue (nothing is
 suspended); the merge runner **starts a gate only when the claims file shows no running worker**
 (`workers_drained`, capped at `WORKER_DRAIN_MAX` = 45 min so a stuck worker cannot hold every merge);

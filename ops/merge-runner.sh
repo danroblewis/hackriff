@@ -251,7 +251,15 @@ process(){
 # claims (state=running), not from ps, so a wrapper process or a reviewer is not mistaken for
 # one. After WORKER_DRAIN_MAX seconds of waiting the gate runs anyway and says so: a stuck
 # worker must not hold every merge (the work runner releases stale claims after 4 h).
-WORKER_DRAIN_MAX=${WORKER_DRAIN_MAX:-2700}
+# RETIRED AS THE DEFAULT (user, 2026-09-23 13:30): WORKER_DRAIN_MAX=0 is OVERLAP mode - claimed
+# workers no longer hold a gate at all; the work runner caps dispatch at the gate's reserve while
+# one runs (ops/work-runner.py, WORK_GATE_ALONE). Measured 2026-09-23: with the gate alone the box
+# alternated 45-min gates and 45-min drains, dispatch was zero in 10 of 13 hours, and landings
+# fell to ~1/hour once the crisis backlog drained. The flake causes the rule was bought for are
+# fixed at the root. What STILL holds a gate in overlap mode: a foreign spec run or `hk serve`
+# (they share the gate's lane ports) and watchdog contention (unowned busy processes), both for
+# at most FOREIGN_DRAIN_MAX. Set WORKER_DRAIN_MAX=2700 (with WORK_GATE_ALONE=1) for the old cycle.
+WORKER_DRAIN_MAX=${WORKER_DRAIN_MAX:-0}
 DRAIN_SINCE=""
 workers_running(){
   local claimed foreign
@@ -312,14 +320,21 @@ workers_drained(){ # 0 = no worker running and the box is clear (or waited long 
   if [ "${n:-0}" -eq 0 ] && [ -z "$c" ]; then
     DRAIN_SINCE=""; rm -f "$GATEWANT"; HK_GATE_CONTENDED=""; return 0
   fi
+  # OVERLAP MODE (WORKER_DRAIN_MAX=0): claimed workers share the box with the gate. Only a
+  # foreign spec run / hk serve (the gate's own lane ports) or watchdog contention still waits.
+  if [ "$WORKER_DRAIN_MAX" -eq 0 ] && [ "${FOREIGN_RUNNING:-0}" -eq 0 ] && [ -z "$c" ]; then
+    HK_GATE_CONTENDED="$n worker(s) running (overlap mode)"
+    log "OVERLAP: $n worker(s) running - gating beside them; the work runner caps dispatch at the gate's reserve"
+    DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0
+  fi
   why=""
   [ "${n:-0}" -gt 0 ] && why="$n worker(s) running"
   [ -n "$c" ] && why="${why:+$why; }contention: $c"
-  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $why - the gate runs alone, dispatch is paused"; }
+  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); if [ "$WORKER_DRAIN_MAX" -eq 0 ]; then log "WAIT: $why - a foreign spec run or contention holds the gate (at most ${FOREIGN_DRAIN_MAX}s)"; else log "WAIT: $why - the gate runs alone, dispatch is paused"; fi; }
   printf 'since=%s\nworkers=%s\ncontention=%s\n' "$DRAIN_SINCE" "$n" "$c" > "$GATEWANT"
-  # Only foreign spec runs / contention left (no claimed worker): the short cap applies.
+  # Only foreign spec runs / contention left (no claimed worker), or overlap mode: the short cap.
   local cap="$WORKER_DRAIN_MAX"
-  [ $(( ${n:-0} - ${FOREIGN_RUNNING:-0} )) -le 0 ] && cap="$FOREIGN_DRAIN_MAX"
+  if [ "$WORKER_DRAIN_MAX" -eq 0 ] || [ $(( ${n:-0} - ${FOREIGN_RUNNING:-0} )) -le 0 ]; then cap="$FOREIGN_DRAIN_MAX"; fi
   if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$cap" ]; then
     log "WAIT over: $why still, after $cap s - gating anyway (nothing stuck must hold every merge)"
     # The gate runs, but it is not a clean measurement of the code, and the gate log is the only
