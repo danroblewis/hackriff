@@ -122,20 +122,39 @@ test("iqAvailability: parses GET /api/recordings' iq_available.spans, dropping a
 });
 
 test("iqBackingAt: a recording past the ring answers 'recording', never 'outside-ring' (T-464's whole point)", () => {
-  const spans = [
-    { t0S: 900, t1S: 1000, source: "ring" as const, recording: null },
-    { t0S: 300, t1S: 500, source: "recording" as const, recording: "rec-9" },
-  ];
-  assert.equal(iqBackingAt(950, false, null, spans), "ring");
-  assert.equal(iqBackingAt(400, false, null, spans), "recording", "the ring alone would have called this outside-ring");
-  assert.equal(iqBackingAt(600, false, null, spans), "outside-ring", "the genuine hole between the two spans");
-  assert.equal(iqBackingAt(1000, true, null, spans), "live");
-  assert.equal(iqBackingAt(400, false, null, []), "outside-ring", "answered, and nothing extends the horizon there");
-  // No spans poll running yet (`null`): falls back to the ring-only `rules`, the pre-T-464 answer —
-  // never silently claims a recording nobody asked about.
   const rules = ringRules(winOf(1000, 3600, { t0S: 900, t1S: 1000 }), 1000);
+  const spans = [{ t0S: 300, t1S: 500, source: "recording" as const, recording: "rec-9" }];
+  assert.equal(iqBackingAt(950, false, rules, spans), "ring");
+  assert.equal(iqBackingAt(400, false, rules, spans), "recording", "the ring alone would have called this outside-ring");
+  assert.equal(iqBackingAt(600, false, rules, spans), "outside-ring", "the genuine hole between the ring and the recording");
+  assert.equal(iqBackingAt(1000, true, rules, spans), "live");
+  assert.equal(iqBackingAt(400, false, rules, []), "outside-ring", "answered, and nothing extends the horizon there");
+  // No recordings poll running yet (`null`): falls back to the ring-only answer — never silently
+  // claims a recording nobody asked about.
   assert.equal(iqBackingAt(950, false, rules, null), "ring");
   assert.equal(iqBackingAt(400, false, rules, null), "outside-ring");
+});
+
+test("REVIEW FIX: the ring answer is the FRESH per-frame `rules`, never the polled `spans` snapshot", () => {
+  // Case 1 (review finding): a pane paused right at the live edge, a moment after a 5 s-old poll,
+  // must not read "outside-ring" just because the polled ring span's upper bound is now stale — the
+  // ring has no upper bound short of live, and `rules` (recomputed this frame from the edge the
+  // panes are actually drawn to) already knows that.
+  const rulesAtEdge = ringRules(winOf(1000, 3600, { t0S: 900, t1S: 1000 }), 1004)!;
+  const staleRingSpan = [{ t0S: 900, t1S: 1000, source: "ring" as const, recording: null }];
+  const staleCoveredByAlone = staleRingSpan.some((s) => 1004 >= s.t0S && 1004 <= s.t1S);
+  assert.equal(staleCoveredByAlone, false, "the stale span's own upper bound would have rejected this instant");
+  assert.equal(iqBackingAt(1004, false, rulesAtEdge, staleRingSpan), "ring",
+    "the fresh rules cover it even though a spans-only check would not");
+
+  // Case 2 (review finding): the ring has rolled forward since the last poll (a FULL ring's horizon
+  // moves with the edge), so a position the stale poll still claimed must not be answered "ring" —
+  // that promises audio `/api/playback` has already stopped being able to deliver.
+  const rolledRules = ringRules(winOf(1000, 100, { t0S: 900, t1S: 1000 }), 1010)!; // full ring, 10 s later: iqS = 910
+  assert.equal(rolledRules.iqS, 910);
+  const stillStaleSpan = [{ t0S: 900, t1S: 1000, source: "ring" as const, recording: null }]; // polled before it rolled
+  assert.equal(iqBackingAt(905, false, rolledRules, stillStaleSpan), "outside-ring",
+    "the stale span still claims 900..1000; the fresh rules know the true horizon moved to 910");
 });
 
 test("T-464 GUARD: the IQ-available horizon comes from GET /api/recordings, never from coverage or tiles", () => {

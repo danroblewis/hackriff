@@ -124,13 +124,20 @@ export function ringRules(w: CaptureWindow | null, edgeS: number | null): RingRu
 export type IqBacking = "live" | "ring" | "recording" | "outside-ring" | "unknown";
 
 /**
- * `spans`, from `GET /api/recordings`'s `iq_available` (T-469), is the authority: ring **and**
- * recordings, so a position past the ring but inside a recording answers `"recording"` rather than
- * the false `"outside-ring"` a ring-only check would give. `null` means "not asked yet" and falls
- * back to `rules` (the ring-only answer `ringRules` already gives from `GET /api/timeline`) so a
- * caller with no recordings poll running still gets the ring's own honest boundary; an empty answered
- * array (`[]`) is trusted as-is — the server looked and found nothing extending the horizon, which is
- * different from not having asked.
+ * The ring's own boundary is judged from `rules` alone — worked out fresh every frame from the live
+ * edge *this frame* is drawn to (`ringRules`), open at the live end — **never** from `spans`, which
+ * is polled at most every `CAPTURE_CLOCK_MS` (5 s). A rolling ring moves both its edges: a snapshot
+ * that old can already be behind the live edge (a just-paused pane reads a false `"outside-ring"`
+ * until the next poll) or behind the ring's true, newer oldest-sample boundary (an old position
+ * reads a false `"ring"` that `/api/playback` would then refuse). CLAUDE.md, "Playback": *"the
+ * boundary is not a constant and must not be cached as one."*
+ *
+ * `spans`, from `GET /api/recordings`'s `iq_available` (T-469), only extends the answer past the
+ * ring: a **recording** is immutable once written, so its polled span cannot go stale the way the
+ * ring's can, and a position older than the ring but inside one answers `"recording"` rather than
+ * the false `"outside-ring"` a ring-only check would give. `null` means "not asked yet"; `[]` is
+ * trusted as-is — the server looked and named no recording there, which is different from not having
+ * asked.
  */
 export function iqBackingAt(
   tS: number,
@@ -139,13 +146,15 @@ export function iqBackingAt(
   spans: readonly IqSpan[] | null = null,
 ): IqBacking {
   if (live) return "live";
-  if (spans !== null) {
-    if (coveredBy(spans, tS, "ring")) return "ring";
-    if (coveredBy(spans, tS, "recording")) return "recording";
+  if (rules && rules.iqS !== null) {
+    if (tS >= rules.iqS) return "ring";
+    if (spans !== null && coveredBy(spans, tS, "recording")) return "recording";
     return "outside-ring";
   }
-  if (!rules || rules.iqS === null) return "unknown";
-  return tS >= rules.iqS ? "ring" : "outside-ring";
+  // No ring answer yet (unanswered window, or a ring holding nothing so far): a recording, answered
+  // separately, can still say so.
+  if (spans !== null && coveredBy(spans, tS, "recording")) return "recording";
+  return "unknown";
 }
 
 /**
@@ -193,14 +202,22 @@ export function ringRuleQuads(rules: RingRules | null, paneBox: Box, rect: PaneR
 
 // ---- the full IQ-available extent: ring PLUS recordings (T-464) ----
 //
-// `ringRules`/`iqS` above answers a narrower question — where the *ring's own* window starts — from
-// `GET /api/timeline`. Raw IQ also survives in persisted recordings well past the ring (CLAUDE.md,
-// "Playback"), and `GET /api/recordings`'s `iq_available` (T-469) already answers the wider question
-// exactly: the ring's window and every complete IQ recording, as spans on the one shared time axis,
-// **deliberately not merged into one envelope** — an envelope over a hole between two spans would
-// promise audio that does not exist there. This module trusts that answer rather than computing a
-// second opinion from spectrum coverage (a different question, over a much longer horizon: "was this
-// observed", not "does raw IQ still back it").
+// `ringRules`/`iqS` above answers where the *ring's own* window starts, from `GET /api/timeline`,
+// recomputed every frame from the live edge that frame is drawn to. Raw IQ also survives in
+// persisted recordings well past the ring (CLAUDE.md, "Playback"), and `GET /api/recordings`'s
+// `iq_available` (T-469) already answers that wider question exactly: the ring's window and every
+// complete IQ recording, as spans on the one shared time axis, **deliberately not merged into one
+// envelope** — an envelope over a hole between two spans would promise audio that does not exist
+// there. This module trusts that answer rather than computing a second opinion from spectrum
+// coverage (a different question, over a much longer horizon: "was this observed", not "does raw IQ
+// still back it").
+//
+// `iqBackingAt` below reads this poll's spans for the `"recording"` half only, never for the ring:
+// a recording is immutable once written, so its polled span cannot go stale, but the ring's own span
+// here is at most `CAPTURE_CLOCK_MS` (5 s) old and a rolling ring moves both its edges in that time —
+// using it for the ring answer let a just-paused pane read "no audio" it still had, and let an old
+// position keep reading "ring" after the true horizon had already rolled past it (review fix). The
+// ring answer stays `rules`-only, open at the live end, exactly as it was before this poll existed.
 
 /** One span of raw IQ, exactly as `GET /api/recordings`'s `iq_available.spans` reports it. */
 export interface IqSpan {
