@@ -2727,14 +2727,14 @@ FLOW_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 :root{--bg:#0D1317;--panel:#131B20;--line:#243039;--txt:#D5DEE2;--mut:#8595A0;--dim:#5A6973;--teal:#52C2AE;--amber:#F0A542;--lav:#A395E0;--coral:#E47B68;--blue:#3a6ea5;--mono:"SFMono-Regular",Menlo,monospace}
 *{box-sizing:border-box}html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--txt);font:13px/1.5 -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
-.top{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
 .top span.nm b{color:var(--amber)}
 a{color:var(--mut);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font-size:12px}
 a:hover{color:var(--txt)}
 .sub{color:var(--dim);font:12px var(--mono);margin-left:auto}
 .wrap{flex:1;min-height:0;overflow:auto;padding:14px}
-.grid{display:grid;grid-template-columns:1.6fr 1fr;gap:14px;align-items:start}
-@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;align-items:start}   /* minmax(0,..): a chart's width attr must not set the column's minimum */
+@media(max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.wrap{padding:10px}}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0}
 .card.wide{grid-column:1/-1}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 10px;display:flex;justify-content:space-between;gap:8px}
@@ -2815,7 +2815,7 @@ function drawLandings(el, d){
 // 2. per-hour, last 24h: dispatch-hours + gate occupancy as bars, landed count, red count.
 function drawHourly(el, rows){
   if(!rows||!rows.length){ el.innerHTML='<div class=empty>no hourly data</div>'; return; }
-  const W=el.clientWidth||700, rh=16, lblW=54, barX=lblW+6, barW=Math.max(20,W-barX-70);
+  const W=el.clientWidth||700, rh=16, lblW=54, barX=lblW+12, barW=Math.max(20,W-barX-122);   // 122: room for '0 landed · 3 red' beside a full bar
   const H=8+rows.length*rh;
   let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
   rows.forEach((r,i)=>{
@@ -2824,7 +2824,7 @@ function drawHourly(el, rows){
     const gateFrac=Math.max(0,Math.min(1,(r.gate_min||0)/60));
     s+=rect(barX,by,barW,bh,'#0a0f12');
     if(gateFrac>0) s+=rect(barX,by,barW*gateFrac,bh,C.amber);
-    if(r.dispatch>0) s+=rect(barX,by,3,bh,C.teal);
+    if(r.dispatch>0) s+=rect(lblW+4,by,5,bh,C.teal);   // its own mark left of the bar, not hidden under a full one
     const meta=`${r.landed||0} landed${r.red?` · ${r.red} red`:''}`;
     s+=`<text x="${W-2}" y="${by+9}" text-anchor="end" fill="${r.red?C.coral:C.mut}" font-size="10" font-family="${FM}">${esc(meta)}</text>`;
   });
