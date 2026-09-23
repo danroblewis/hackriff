@@ -20698,7 +20698,8 @@ tasks:
   - id: T-609
     milestone: MAUTO
     title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
-    status: todo
+    status: in-progress
+    branch: task-t609
     priority: normal
     parallel_group: MAUTOD
     model: opus
