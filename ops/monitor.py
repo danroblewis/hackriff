@@ -1428,18 +1428,41 @@ def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
     mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
-    coord_path = f"{PROJ}/{COORD}.jsonl"
-    if os.path.exists(coord_path):
-        s = session_summary(coord_path, "coordinator")
-        if s: s["status"] = None; s["running"] = s["age_s"] < 180; out.append(s)
-    subs = glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True)
-    subs = [p for p in subs if os.path.getmtime(p) > time.time() - 1800]
-    subs.sort(key=os.path.getmtime, reverse=True)
-    ACTIVE = 210   # a subagent quiet longer than this is treated as no longer running
+    # EVERY live session and its subagents, not only the coordinator's (user, 2026-09-22: the
+    # supervisor's triage/fix/merge/SDET agents were invisible here). A session is a top-level
+    # transcript under PROJ; its subagents live in <session>/subagents/. The coordinator is the
+    # id in $HACKRIFF_OPS/coordinator-session when that file exists (the COORD constant went
+    # stale the first time the coordinator was relaunched), else the COORD constant; the
+    # session whose subagent dir this monitor's own launcher used is the supervisor.
+    coord_id = COORD
+    try:
+        coord_id = open(os.path.join(SCRATCH, "coordinator-session")).read().strip() or COORD
+    except Exception:
+        pass
+    sessions = [p for p in glob.glob(f"{PROJ}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+    role_of = {}
+    for p in sorted(sessions, key=os.path.getmtime, reverse=True):
+        sid = os.path.basename(p)[:-6]
+        role = "coordinator" if sid == coord_id else ("supervisor" if os.path.isdir(f"{PROJ}/{sid}/subagents") else "session")
+        role_of[sid] = role
+        s = session_summary(p, role)
+        if s: s["status"] = None; s["running"] = s["age_s"] < 180; s["session"] = sid[:8]; out.append(s)
+    subs = [p for sid in role_of for p in glob.glob(f"{PROJ}/{sid}/subagents/*.jsonl") + glob.glob(f"{PROJ}/{sid}/**/*.jsonl", recursive=True)]
+    subs = sorted({p for p in subs if os.path.getmtime(p) > time.time() - 1800}, key=os.path.getmtime, reverse=True)
+    # A subagent quiet longer than this is treated as no longer running. 900 s, not 210: a
+    # triage agent running one browser spec or a scoped nextest binary writes nothing to its
+    # transcript for 5-10 minutes, and 210 s hid the supervisor's fix agent mid-run (2026-09-22).
+    # Work-runner workers have pid liveness from the claims file and do not depend on this.
+    ACTIVE = 900
     best = {}       # dedupe by task id, keep the freshest transcript
     for p in subs:
         s = session_summary(p, "agent")
         if not s: continue
+        parent = p[len(PROJ) + 1:].split("/", 1)[0]
+        s["parent"] = role_of.get(parent, "session")
+        # No ticket in the label: name the agent by what it was asked to do.
+        kw = re.search(r"\b(deflak\w*|SDET|hand-merge|merge|fix|review|audit|triage|capture)\b", s["label"], re.IGNORECASE)
+        s["kind"] = (kw.group(1).lower() if kw else "agent")
         m = re.search(r"(?:task|fixing task|implementing task)\s+(T-\d+)", s["label"], re.IGNORECASE)
         if m:
             tid = m.group(1).upper()
@@ -1453,7 +1476,9 @@ def agents(status_map):
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
         key = tid or p
         if key not in best or s["age_s"] < best[key]["age_s"]:
-            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            s["name"] = tid or f"{s['parent']} · {s['kind']}"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            if not tid:
+                s["label"] = f"{s['parent']}'s agent · " + str(s.get("label", ""))[:100]
             best[key] = s
     # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
     # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
@@ -1560,13 +1585,24 @@ def gather():
     # A gate with no end line and no gate process is one that was killed (a stopped runner, a
     # reboot): say so rather than "running" for ever.
     if gates and gates[0]["outcome"] == "running" and not mg.get("gate"):
-        gates[0]["outcome"] = "killed"
+        # merge_status's ps scan can time out under load; ask once more before saying "killed".
+        try:
+            alive = subprocess.run(["pgrep", "-f", "just gate"], capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            alive = "?"
+        if not alive:
+            gates[0]["outcome"] = "killed"
+    # The JUnit record belongs to the newest gate that RAN nextest; a later docs/board-only gate
+    # writes none. Say which gate it came from so a passed gate is not read as still failing.
+    junit = latest_junit()
+    if junit and gates:
+        junit["stale"] = gates[0]["outcome"] in ("passed", "running") and junit["age_s"] > gates[0].get("seconds", 0) + 120
     return {
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
-        "gates": gates, "junit": latest_junit(),
+        "gates": gates, "junit": junit,
         "budget": budget_status(),
     }
 
@@ -1738,13 +1774,17 @@ async function tick(){
       const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
       return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
     };
-    const gates=G.length?G.map(gateRow).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
+    // Only the NEWEST gate is shown in full; earlier ones collapse to one line each, their
+    // failures behind a toggle - a failure that was fixed must not keep reading as current.
+    const oneLine=g=>{const col=g.outcome==='passed'?'#52C2AE':g.outcome==='failed'?'#E47B68':'#8595A0'; const who=g.bulk?`bulk · ${g.branches.length}`:esc(g.branches[0]||'?'); const nf=(g.fails||[]).length; return `<details style="padding:2px 0;border-top:1px solid #1e2830"><summary style="cursor:pointer;color:#8595A0"><span style="color:${col}">${g.outcome}</span> ${esc(g.started)} · ${dur(g.seconds)} · ${who}${nf?` · ${nf} failed`:''}${(!nf&&g.error)?' · suite error':''}</summary>${gateRow(g)}</details>`;};
+    const gates=G.length?gateRow(G[0])+G.slice(1).map(oneLine).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
     const J=d.junit; let ju='';
     if(J){
       const fl=J.files||[]; const nf=fl.reduce((a,f)=>a+f.failures.length,0), nt=fl.reduce((a,f)=>a+f.tests,0);
       const slow=fl.flatMap(f=>f.slowest.map(c=>({...c,file:f.file}))).sort((a,b)=>b.s-a.s).slice(0,8);
-      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)
-        +fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('')
+      const stale=J.stale?` <span style="color:#F0A542">· from an EARLIER gate (the newest ran no nextest)</span>`:'';
+      const fails=J.stale?'':fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('');
+      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)+(J.stale?`<div style="color:#F0A542">${stale}</div>`:'')+fails
         +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
     }
     // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),

@@ -137,7 +137,14 @@ export function readoutOf(
       // newest rows are not yet in hand HAS arrived, and a readout that called that pending would
       // report the fetch as outstanding. It is also, on a following pane, the one number that says
       // the live edge has stopped keeping up.
-      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
+      // The fifth count is T-580's, and it is the one that makes a fully-grey pane readable: a
+      // place the coverage survey settled as never sampled is drawn without a tile and without a
+      // request, so a pane over never-swept spectrum otherwise reports `0 tiles · 0 coarse
+      // stand-ins · 0 pending` — identical to a pane that has drawn nothing at all. It is
+      // appended rather than folded into any of the others for the same reason `behind` was:
+      // "never looked" is not "not arrived yet", and a readout that cannot say which is which is
+      // the grey-vs-pending confusion one level up.
+      counts: `${s.tiles} tiles · ${s.fallbacks} coarse stand-in${s.fallbacks === 1 ? "" : "s"} · ${s.pending} pending · ${s.behind} behind the edge${s.surveyed ? ` · ${s.surveyed} never sampled` : ""}${s.blank ? ` · ${s.blank} drew nothing` : ""}${s.shortNs > 0 ? ` · drawn to ${(s.shortNs / 1e9).toFixed(1)} s short of the top` : ""}`,
       differsFrom: s.differsFrom,
       // The map is a viewport, but it is not one you *look* through — it is the thing that says
       // where the panes are — so a control that acts on "this viewport's window" has no meaning on
