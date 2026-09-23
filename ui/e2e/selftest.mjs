@@ -161,6 +161,13 @@ export const __selftestMark = __selftestPredicate(1);
     // drawn from a plane that cannot speak about them — as UNOBSERVED, i.e. THE grey. That is the
     // pre-T-532 behaviour verbatim: measured 10-38 % of the live-edge zone grey before the fix and
     // 0.0 % after, over a band the server reports fully observed.
+    //
+    // **Its margin, since T-846.** Fresher tiles (T-573's batches) shrank the fault's grey band into
+    // the newest 6 % of the pane, which the zone then excluded, and the zone was judged on a mean:
+    // 4.2 % against a 5 % bound in one run, 0.4 % in another — a coin flip. The zone now starts at
+    // the top of the pane and is judged on its worst of eight frames: measured 10.5 % and 11.3 %
+    // worst frame with this fault (frames 0.0 / 6.9 / 10.5 and 1.6 / 1.5 / 4.1 / 8.0 / 11.3 %),
+    // 0.0 % in every frame without it — over 2x the 5 % bound on one side, zero on the other.
     name: "t532-draw-past-the-coverage-horizon",
     expect: "canvas-journey.e2e.mjs",
     what: "T-532: a tile is drawn beyond how far forward its own coverage evidence reaches, so the " +

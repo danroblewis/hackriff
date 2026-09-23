@@ -452,6 +452,26 @@ const LIVE_EDGE_ZONE = 0.40;
  * every frame of every run; before it, 10–38 %.
  */
 const EDGE_GREY_MAX = 0.05;
+// ——— T-846: WHERE the zone starts, and why the claim is on the WORST frame ———
+//
+// The zone used to start 6 % below the top of the pane — `bodyRect`'s default, "rows legitimately
+// not yet folded" — and to be judged on the MEAN of three frames. Both were inherited from before
+// T-532, and both hid the defect once tiles got fresher. T-532's fault paints grey exactly between a
+// tile's `as_of` and the live edge, so its height is the tile's STALENESS; since T-573's batches and
+// the refresh lane made that a second or two, the band sits almost entirely inside the top 6 % that
+// was cut off. Measured with `t532-draw-past-the-coverage-horizon` injected: the old 6-40 % zone read
+// 0.4 / 0.0 / 0.0 % (and 4.2 % in the supervisor's run — a coin flip against 5 %), while the same
+// frames from the top read 0.0 / 6.9 / 10.5 %, 71 % and 38 % of the zone's two newest tenths grey.
+// Without the fault the zone from the top is **0.0 % in every frame**: after T-532 an unfolded row
+// is drawn as the PENDING ground, never grey, so the reason for the 6 % margin is gone.
+//
+// And the claim is "none, in EVERY frame", so it is judged on the worst of eight, 700 ms apart: the
+// staleness saw-tooths as each revalidation lands (the 0.0 % frame above is one just after a
+// refresh), and a mean averages the defect away. A second run with the fault read 1.6 / 1.5 / 4.1 /
+// 8.0 / 11.3 % — its first three frames all under 5 %, so three frames would have missed it and a
+// mean of five (5.3 %) was the same coin flip as before; eight frames span more than one refresh
+// cycle. Margin, stated: fault worst frame 10.5-11.3 % against 5 % (over 2x); baseline 0.0 % in
+// every one of 3 + 5 frames across two runs.
 
 /** The pane's data rect minus the newest few per cent, which are legitimately not yet folded. */
 function bodyRect(pane, from = 0.06, to = 1.0) {
@@ -1000,7 +1020,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     if (movedBy > 0) t.diagnostic(`the canvas moved ${movedBy} px while the waits above ran — ` +
       "the rectangle sampled below is re-read for exactly this reason");
     const insideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE));
-    const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0.06, LIVE_EDGE_ZONE), { n: 3, gapMs: 700 });
+    // **From the very top of the pane, and eight frames** (T-846) — see the note under [[EDGE_GREY_MAX]].
+    const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0, LIVE_EDGE_ZONE), { n: 8, gapMs: 700 });
     const insidePix = insideG.last;
     const { cov: insideCov, cellHz: insideCellHz, n: insideN } = await atPaneLevel(zi.view);
     t.diagnostic(`pane level: ${insideN} cells of ${(insideCellHz / 1e3).toFixed(1)} kHz across the viewport`);
@@ -1013,7 +1034,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     t.diagnostic(`INSIDE grey by vertical tenth over the WHOLE pane (newest first): ` +
       `${insideG.all[insideG.all.length - 1].bandsText}`);
     t.diagnostic(`INSIDE the live-edge zone (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of the pane): ` +
-      `${(insideEdge.mean * 100).toFixed(1)} % THE grey (${insideEdge.text}) over spectrum the server ` +
+      `worst frame ${(insideEdge.max * 100).toFixed(1)} % THE grey (${insideEdge.text}; by tenth of the zone, ` +
+      `newest first, last frame: ${insideEdge.last.bandsText}) over spectrum the server ` +
       "reports fully observed");
 
     // State B: zoomed OUT until the tuned window is a minority of the pane, so most of what is on
@@ -1081,8 +1103,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     // what it cost to leave this as a diagnostic. Its premise is the same `insideCov` the assertion
     // above already checked: the server says this band is >90 % observed, so any grey in the newest
     // rows is the surface claiming the radio never looked at rows it recorded.
-    assert.ok(insideEdge.mean < EDGE_GREY_MAX,
-      `${(insideEdge.mean * 100).toFixed(1)} % of the LIVE-EDGE ZONE (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of ` +
+    assert.ok(insideEdge.max < EDGE_GREY_MAX,
+      `${(insideEdge.max * 100).toFixed(1)} % of the LIVE-EDGE ZONE in its worst frame (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of ` +
       `a pane over a band the server reports ${(insideCov.observedShare * 100).toFixed(1)} % OBSERVED) is drawn as ` +
       `THE grey (${insideEdge.text}; by vertical tenth over the whole pane, newest first: ${insidePix.bandsText}). ` +
       "The newest rows were recorded, folded and served — a resident tile's coverage plane is evidence only up to " +
