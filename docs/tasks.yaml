@@ -16005,7 +16005,7 @@ tasks:
   - id: T-513
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
-    status: in-progress
+    status: done
     branch: task-t513
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
@@ -16032,6 +16032,7 @@ tasks:
       Commits: 997965ed, 9acc8aad, 9e295e59
       Observed, not chased: The wider overlap band needed for the review-1 fix roughly tripled this test's runtime (from ~65s to ~126-238s across runs); still within nextest's heavy-serial group with no config change, but a noticeably heavier member of it. | docs/tasks.yaml's `hkboard` merge driver correctly refuses to auto-merge when board churn is not append-only (observed here between task-t513 and main); that conflict needs the coordinator's own gate-merge (same driver, run as a person/tooling with the authority to touch docs/tasks.yaml) at actual merge time -- a worker branch does not need main pre-merged in to fix an uncommitted-file finding, and forcing that merge would have required a worker to hand-resolve a file it is barred from touching.
       Use cases: AWARE-011
+    commit: 8b3b64f2
   - id: T-514
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
