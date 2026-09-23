@@ -13,6 +13,7 @@ use crate::schema::{ParamExt, boolean, descriptor, hex, int, list, object, one_o
 mod bch;
 mod checksum;
 mod crc;
+pub mod mauto;
 mod parity;
 #[cfg(test)]
 pub(crate) mod tests;

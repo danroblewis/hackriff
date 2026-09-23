@@ -556,3 +556,130 @@ An audio-output pipeline is admitted as a **listener**, not merely as a `recipe`
 `input` `iq` 240 kS/s → `fm` `fm_demod` (75 kHz deviation, 75 µs de-emphasis) → `sq` `squelch` (`fm-noise`) → `gain` `agc` → `out` `audio_out`; `refine.objective = {builtin: "wfm-pilot"}`; `outputs`: `audio` from `out` — **and**, hanging off the same `fm` node, §5's RDS chain with its `messages` outputs.
 
 That one document is the whole point of the amendment: **one pipeline, two outputs, audio and RDS as siblings**, where today they are a Listen chain and an unrelated `analog-auto` decode path that the UI reconciles by hand.
+
+## 9. Amendment: the coverage catalogue, what a PSK demodulator emits, and two-shape FEC (T-606, 2026-09-23)
+
+**Status:** PROVISIONAL, contract only. No block is implemented, and no ADR status changes. Source: the T-554 disposition audit, [docs/18 §§6–8](../18-decoder-coverage.md) (§7 is the ranking behind every row here; §8 is the delta this section absorbs). §§1–8 stand unchanged. §8 added the audio sink; this section adds the blocks that 25 of the audit's 36 native families are waiting on, and answers the one real contract question they raise.
+
+**Code:** port shapes are pinned in `hk_blocks::catalogue::mauto_rows()` (`crates/hk-blocks/src/blocks/{iq,symbol,fec}/mauto.rs`), which `planned()` includes, so the existing drift test (`implemented_blocks_match_their_pinned_descriptors`) holds every implementation to its row. Parameters are **placeholders** (`params_pinned: false`: accepted unchecked, with a warning) until each block's ticket pins them. `crates/hk-blocks/tests/mauto_catalogue.rs` asserts every row's ports, asserts that `fec` has exactly the two shapes §9.3 names, and type-checks one chain per use case (SIGNAL-034, SIGNAL-004, SIGNAL-080, SIGNAL-053, SIGNAL-054) against the catalogue.
+
+### 9.1 Catalogue rows (additive to §1.5)
+
+| Group | Block | Ports | Parameter sketch (placeholder; the ticket pins it) | Ticket |
+|---|---|---|---|---|
+| iq | `psk_demod` | iq → soft (+ diagnostic `symbols` iq, `timing_error` real) | `modulation` (`bpsk`/`dbpsk`/`qpsk`/`oqpsk`/`dqpsk`/`pi4-dqpsk`/`8psk`/`d8psk`), `symbol_rate_bd`, `pulse` (`rrc`/`rect`/`half-sine`), `rolloff`, `mapping` (`gray`/`natural`), `rotation_deg` (hot), `iq_swap` (hot), `carrier_loop_bandwidth` (hot), `timing_loop_bandwidth` (hot), `max_offset_hz` | T-609 |
+| iq | `css_demod` | iq → soft | `spreading_factor`, `bandwidth_hz`, `ldro`, `sync_word`, `header` (`explicit`/`implicit`) | unfiled |
+| iq | `ssb_demod` | iq → real | `sideband`, `carrier` (`estimate`/`raster`/`fixed`), `raster_hz`, `clarifier_hz` (hot), `bandwidth_hz`, `output_rate_hz` | unfiled |
+| iq | `cw_demod` | iq → real | `output` (`tone`/`envelope`), `tone_hz` (hot), `bandwidth_hz` (hot), `output_rate_hz` | unfiled |
+| iq | `ofdm_demod` | **reserved name, no descriptor** (§9.2) | — | unfiled (DAB+) |
+| symbol | `mlevel_slicer` | soft → bits (k bits per symbol) | `levels`, `thresholds` (`auto`/`fixed`), `fixed_levels` (hot), `mapping` (`gray`/`natural`), `invert` (hot) | T-612 |
+| symbol | `descramble` | bits\|frames → same | `mode` (`additive`/`multiplicative`), `poly`, `init`, `offset_bits` (frames: the sync word is not scrambled), `output` (`serial`/`byte-lsb`) | T-608 |
+| symbol | `bitstuff` | bits\|frames → same | `flag` (0x7E), `stuff_after` (5), `direction` (`destuff`/`stuff`), `abort_ones` (7) | T-613 |
+| symbol | `codeword_map` | bits\|frames → same | `word_bits`, `value_bits`, `table[]` (index = value), `align` (`auto`/`fixed`), `on_invalid` (`drop`/`substitute`) | unfiled |
+| symbol | `despread` | soft\|bits → bits | `chips_per_symbol`, `sequences[]` (index = value), `bit_order`, `max_chip_errors` (hot) | unfiled |
+| symbol | `equalise` | iq → iq | `algorithm` (`cma`/`lms-dd`), `taps`, `samples_per_symbol`, `step` (hot), `constellation` | unfiled |
+| fec | `viterbi` | soft\|bits → bits (streaming) | code: `constraint_length` + `polys[]` + `invert[]` + `puncture[]`, **or** `trellis {input_bits, output_bits, next_state[], output[]}`; `traceback_bits`, `align` (`auto`/`fixed`) | T-610 |
+| fec | `viterbi_frames` | frames → frames (one code block per frame) | the same code keys; `termination` (`terminated`/`tail-biting`/`truncated`), `span` | T-610 |
+| fec | `reed_solomon` | frames → frames | `n`, `k`, `symbol_bits`, `poly`, `fcr`, `prim`, `dual_basis`, `depth` (interleaved codewords), `strip`, `drop_invalid` (hot) | T-611 |
+
+These are docs/18 §7's rows, with four deliberate differences:
+- **`viterbi_frames` is a fourteenth row** that docs/18 does not have. It is the per-frame shape of T-610's trellis engine (§9.3), and without it `viterbi` unlocks about half of the ten families it was counted against.
+- **`descramble`, `bitstuff` and `codeword_map` take `bits|frames`**, where T-608 and T-613 said `bits → bits`. A `bits` port carries no frame boundary, and the reset these blocks need is per frame:
+  - CCSDS de-randomisation restarts after each ASM;
+  - BLE and LoRa whitening restart each packet;
+  - VDL2's AVLC stuffing sits inside RS-decoded frames (SIGNAL-004).
+
+  Frames mode applies the same rule to a frame body, starting at `offset_bits`. This is the minimum shape that serves those families, not gold-plating. Streaming mode stays for self-synchronising scramblers (V.35) and for AIS/AX.25, whose flags pass through `bitstuff` intact so that `sync_search` still frames on them.
+- **`equalise` is `iq → iq`,** placed ahead of the demodulator, not on symbols (§9.2).
+- **`ofdm_demod` is named but not pinned** (§9.2).
+
+`viterbi` also takes an explicit **`trellis`** table because the P25 Phase 1 1/2-rate and 3/4-rate trellises are finite-state codes defined by table, not binary feedforward polynomials. Without the table, SIGNAL-080 would sit on a block that cannot express its code.
+
+### 9.2 Decision: `psk_demod` de-maps inside the block and emits one `soft` item per bit (option a)
+
+§1.1's `soft` is "`f32` soft symbol/bit, positive = 1", one value per item. **Decision: (a).** `psk_demod`, and every de-mapping demodulator after it (`css_demod`), resolves the constellation inside the block and emits **one `soft` item per bit**, k items per symbol. **No port type is added; §1.1's table is unchanged.**
+
+**Why (a).**
+1. **It works today, and every consumer stays as it is.** `slicer`, `descramble`, `despread`, `viterbi` and everything downstream code against `soft`/`bits` as they already exist. The five use-case chains in `mauto_catalogue.rs` type-check against the catalogue with no new type.
+2. **For most of the families served, the "discarded joint information" is zero.**
+   - Gray-mapped QPSK/OQPSK is two independent BPSK channels on I and Q, so per-bit LLRs are *exact*, not an approximation. Coherent BPSK/QPSK/OQPSK is what CCSDS, LRPT, HRIT, HRPT, Inmarsat and Zigbee use.
+   - The loss is real only where bits share a symbol non-separably: 8PSK, D8PSK and π/4-DQPSK (VDL2, TETRA). Even there, per-bit max-log LLRs are the standard BICM receiver. What they give up is the gain from iterative demapping, and nothing in this catalogue iterates: LDPC and turbo are deliberately off docs/18 §7's list.
+3. **The consumers that do want the joint symbol are placed where they don't need it.** A blind equaliser runs on `iq` ahead of the demodulator (`equalise`, CMA or decision-directed on a declared constellation). A symbol-domain soft-decision equaliser, and iterative decoding, are exactly what (a) does not serve, and exactly what the future type below is for.
+
+**The sequencing argument, and a finding it adds.** `ofdm_demod` forces the port-type question and can't take (a) as it stands. So the change is **OFDM's cost, not PSK's**, and OFDM buys exactly one native family, DAB+ (docs/18 §7, finding 2). The decision should be argued as "for DAB+". But on inspection, DAB+ does not mainly need *complex constellation points*:
+- DAB's DQPSK is differential per carrier, so de-mapping is local to each cell.
+- What cannot be expressed today is **soft values carrying frame boundaries**. The FIC/MSC split and the CIF structure must survive time de-interleaving and the Viterbi decoder while the values are still soft, but `soft` carries no boundaries and `frames` carries no soft values.
+- The same gap is behind the ~2 dB that the burst-structured soft chains give up today by going hard-decision through `viterbi_frames` (§9.3): TETRA's per-burst descramble and de-interleave ahead of RCPC Viterbi, and P25's per-frame trellis.
+
+So the candidates for the new type are:
+- **`soft_frames`:** an f32 vector plus `FrameInfo`. It would also carry an LLR vector per symbol as a degenerate frame.
+- **Complex points:** these serve coherent OFDM (DVB-T, which is a plugin) and a symbol-domain equaliser.
+
+The DAB+ ticket decides between them, as a contract change reviewed like this ADR. It should not name the type `symbols`, which already names a wire stream kind (stream contract §5.2, §13.3) that carries the output of `soft` ports.
+
+**The de-mapped `soft` output contract** (normative for `psk_demod`, `css_demod` and any later de-mapping demodulator):
+- **Order.** k items per symbol, emitting the symbol label **MSB first**. That matches §1.1's frame packing and `mlevel_slicer`.
+- **Value.** Positive = 1. Magnitude is a reliability proportional to the max-log bit LLR, **up to a common positive scale**, and consumers must not depend on that scale:
+  - `slicer` at threshold 0 doesn't;
+  - Viterbi's additive branch metrics don't;
+  - correlation in `despread` doesn't.
+
+  A consumer that needs calibrated LLRs is out of this contract and belongs to the future type.
+- **Differential modes** (`dbpsk`, `dqpsk`, `pi4-dqpsk`, `d8psk`) are resolved inside the block, so the output is data bits, not phase changes, and it keeps soft differential detection. `bpsk` followed by the existing `diff_decode` stays expressible, as the hard-decision equivalent (Orbcomm).
+- **Time map.** `rate_hz` is the **item** rate (k × symbol rate), and `source_per_item` is samples per symbol ÷ k. The physical `symbol_rate_bd` and `bits_per_symbol` go out as status `extra`s so they aren't lost. A tap on the port states `bits_per_symbol: 1` in its docs/07 `Framing`, which is literally true, since each item is one bit's decision variable. `css_demod`'s reduced-rate header symbols (SF−2 bits) make the item rate non-uniform over at most 8 symbols. The block keeps `source_per_item` at the payload rate, and the packet's first item (below) is exact.
+- **Phase ambiguity.** This is a cost of (a) that the T-554 framing did not name. Coherent M-PSK locks with an M-fold ambiguity, and de-mapping inside the block turns it into a bit mapping that no downstream `bits` block can undo in general. It is resolved by the **hot** parameters `rotation_deg` and `iq_swap`, so the §1.3 refinement loop (`{node, metric}`, e.g. the ASM `sync_search` lock or `reed_solomon.error_rate`) or the MAUTO search can try the ≤ 4 rotations without losing loop state. BPSK's 180° case is also absorbed by `sync_search` `polarity: either`, and the differential modes have none.
+- **Burst boundaries.** A demodulator that finds a burst or packet start in its own domain marks the **first item of each burst `DISCONTINUITY`**, the existing §1.1 flag. Examples: `css_demod` on the LoRa preamble, and `psk_demod` in burst mode. `deframe` (bits) already starts a frame after a discontinuity, so packet framing needs no new type (SIGNAL-053's chain).
+- **The `symbols` diagnostic port is a presentation tap, not a data path.** It carries complex points at the symbol rate after carrier and timing recovery, for the workbench's constellation view (a `stage` output, gated as content like any `iq` stream). **A recipe must not wire it into a node input.** Otherwise option (b) arrives by the back door, unreviewed. §2.2 validation does not refuse that today, because a diagnostic port is addressable as `node.port`. **T-609 adds the refusal to `Recipe::validate`, with a test, before `psk_demod` registers.**
+
+### 9.3 `fec` is a group with two shapes
+
+| Shape | Blocks | Where it sits |
+|---|---|---|
+| **per-frame, hard decision**, `frames → frames` | `crc`, `bch`, `parity`, `checksum`, `reed_solomon`, `viterbi_frames` | after frame sync |
+| **streaming, soft decision**, `soft\|bits → bits` | `viterbi` | before frame sync: the code runs continuously and the sync word is found in its output |
+
+The test `fec_is_a_group_with_exactly_two_shapes` fails on a third, so a new shape has to be named here rather than discovered. The shapes fix the order. CCSDS is `psk_demod → viterbi → sync_search (ASM) → descramble → reed_solomon`. Putting RS straight after the streaming decoder is refused by type (`mis_ordered_fec_chains_are_refused_by_type`).
+
+**Why `viterbi_frames` exists.** Of the ten families docs/18 counted against `viterbi`, only the continuously coded CCSDS four (telemetry, LRPT, HRIT/LRIT, HRPT) are known to decode as a stream; Inmarsat Aero is unverified either way. The others decode **one code block per frame**, after frame sync and de-interleaving:
+- TETRA, P25 Phase 1 and NXDN;
+- Inmarsat STD-C;
+- MIL-STD-188-110, whose block interleaver is this catalogue's `deinterleave`, on frames;
+- DAB+.
+
+A `bits` port can't say where a code block starts. So:
+- one trellis engine gets two descriptors, both T-610's;
+- `viterbi_frames` is hard-decision (~2 dB) until the framed-soft type of §9.2 exists;
+- **whichever shape is fed hard bits reports it** (a status `extra`), so hard-decision performance is never presented as soft-decision.
+
+### 9.4 §1.6 gains a second column: what a block adapts, and whether that kernel is in the build
+
+§1.6's rule, that blocks are adapters over existing kernels, stands. From here on, a row states **what it adapts** *and* **whether that kernel is linked into the workspace today**. That keeps a "designated" kernel (ADR-0010 names liquid-dsp) from being priced as a present one: T-554 found that `grep liquid crates/*/Cargo.toml` is empty (docs/18 §7.1). A block whose kernel reads **not linked** carries the cost of the binding in its own estimate, until T-607 lands or refuses it.
+
+| Block | Adapts | In the build? |
+|---|---|---|
+| every §1.5 and §8.4 block | hk-dsp, hk-demod, hk-estimate kernels (§1.6 list) | **yes**, in-repo |
+| `psk_demod` | liquid-dsp modem / symsync / NCO; in-repo fallback: hk-dsp `filter::Nco`, hk-demod `pilot::PilotPll`, `clock_recovery`'s timing loops | **not linked** (T-607); fallback partial |
+| `viterbi`, `viterbi_frames` | liquid-dsp convolutional FEC | **not linked** (T-607) |
+| `reed_solomon` | liquid-dsp Reed–Solomon | **not linked** (T-607) |
+| `equalise` | liquid-dsp `eqlms`/`eqrls` | **not linked** (T-607) |
+| `descramble` | hk-estimate `framing::whitening` (PN9 serial/CC1101, the 7-bit LFSR both ways), generalised additively | **yes**, in-repo |
+| `css_demod`, `ofdm_demod` | hk-dsp's rustfft; de-chirp, de-map and channel estimation are new DSP | **FFT yes**; the rest is new code |
+| `ssb_demod`, `cw_demod` | hk-demod `audio` (Listen's `usb`/`lsb`/`cw` path); carrier estimate, raster snap and clarifier are new DSP (§8.4) | **partly** |
+| `mlevel_slicer`, `bitstuff`, `codeword_map`, `despread` | new code; no kernel needed | **n/a** |
+
+**Unverified; T-607 must check it before pricing T-610 and T-611.** liquid-dsp's convolutional and Reed–Solomon codecs are reported to be available only when Phil Karn's `libfec` is present when liquid-dsp is built. If so, linking liquid-dsp alone does not deliver them, and `libfec` is a second C dependency with its own licence to read.
+
+### 9.5 A `raster` output kind: not taken, and the rules if it is
+
+It is not taken here. No ticket funds it (docs/18 §9: rank 13, one row of families), and it is not needed to answer §9.2. If a later ticket takes it (HF fax, SSTV, APT), it binds to §8's pattern:
+- a `raster` `outputs[]` kind beside `audio`, fed by a sink block;
+- the same **double gating**: content at egress, plus the `content_class` ceiling and `output_policy` clamp at pipeline start. Declaring a raster output together with a class that forbids content is a validation error;
+- the same **schema-version rule**: it joins §8.6's version 3 if it lands before version 3 is released (the code is still at 2), and bumps to 4 otherwise.
+
+Its wire form is that ticket's question. §4's reasoning applies: a new stream `kind` is a **major** stream-contract change, so reusing an existing kind comes first.
+
+### 9.6 What does not change
+
+- No port type is added (§1.1 is unchanged), and `schema_version` is not bumped. New blocks are catalogue data: a recipe naming one validates against the catalogue, and a placeholder only warns.
+- The M1 catalogue and the §8 audio rows are untouched. ADR-0015 §10's M-14 ("optional `psk_demod`") is superseded by T-609, as filed.
+- **A catalogue gap is a product-visible state** (ADR-0015 §8, T-550). "This build has no `css_demod`" must never read like "this is not LoRa". `hk_pipeline::synth` already says so for `psk_demod`, and each new row inherits the obligation until its block registers.

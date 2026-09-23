@@ -11,6 +11,7 @@ use crate::schema::{ParamExt, boolean, descriptor, float, one_of, param};
 
 mod clock;
 mod line;
+pub mod mauto;
 
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
