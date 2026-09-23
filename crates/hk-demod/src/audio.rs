@@ -425,6 +425,28 @@ impl AudioDemod {
         Ok(())
     }
 
+    /// Also decodes RDS on a WFM channel (T-463: playback re-runs decode, not only demod, from
+    /// raw IQ). Other modes are unchanged. Call before the first [`Self::process`]; the audio is
+    /// the same either way (RDS only taps the MPX the audio path already computes).
+    pub fn with_rds(mut self) -> Result<Self, DemodError> {
+        if matches!(self.kind, Kind::Wfm(_)) {
+            let wc = WfmConfig {
+                rds: Some(crate::rds::RdsConfig::default()),
+                ..WfmConfig::default()
+            };
+            self.kind = Kind::Wfm(Box::new(WfmDemod::new(wc, MPX_RATE_HZ)?));
+        }
+        Ok(self)
+    }
+
+    /// RDS groups decoded since the last call (empty unless [`Self::with_rds`] on a WFM channel).
+    pub fn take_rds_groups(&mut self) -> Vec<crate::rds::RdsGroup> {
+        match &mut self.kind {
+            Kind::Wfm(w) => w.take_rds_groups(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Audio produced since the last call (48 kS/s mono, ±1).
     pub fn take_audio(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.out)

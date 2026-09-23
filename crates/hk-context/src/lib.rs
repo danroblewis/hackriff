@@ -11,6 +11,9 @@
 //!   prior, built from [`band_table`] (T-212).
 //! - [`feeds`]: the feed cache (state + raw snapshots on disk, events in the repository), the
 //!   [`feeds::FeedFetcher`] seam and the [`feeds::gpsjam`] adapter (T-020).
+//! - [`passes`]: satellite passes computed from cached TLEs (SGP4, look angles, AOS/TCA/LOS), their
+//!   TLE-age verdicts, and the pass reservations they hand the C04 scheduler (T-276); the cached
+//!   feed is [`feeds::tle`].
 //! - [`anomaly`]: noise-floor episodes → `Anomaly(noise-floor-rise)` lifecycle (T-020).
 //! - [`correlate`]: Anomaly × cached events → ranked Explanations (T-020).
 //! - [`gnss_service`]: C36's measured GNSS-service statement reaching C30 as evidence on
@@ -26,6 +29,8 @@ pub mod feeds;
 pub mod geo;
 pub mod gnss_service;
 pub mod known_status;
+pub mod multipath; // T-222 (C40): content-correlated multipath, wired to the record
+pub mod passes; // T-276 (C29 → C04): TLE pass prediction and reservations
 pub mod priors;
 pub mod utc;
 
@@ -50,6 +55,7 @@ pub use feeds::{
 pub use geo::Site;
 pub use gnss_service::{GnssServiceEvidence, GnssServiceVerdict};
 pub use known_status::{PART15_FAMILIES, PriorMatch, is_service_family, match_known_status};
+pub use multipath::{MULTIPATH_RULE, MultipathConfig, MultipathOutcome};
 pub use priors::BandPlanFamilyPriors;
 pub use watch::{
     StandingRelation, WatchActivity, WatchDecision, WatchRegion, WatchSkip, WatchSkipReason,

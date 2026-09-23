@@ -209,7 +209,7 @@ The user's **fifth** time/waterfall invariant: *time runs down the waterfall and
 - **Size the time bar from the wrong horizon.** Its extent is `GET /api/timeline`'s `window` — the IQ ring's configured retention — so every position on it has capture behind it. The control reconfigures the retention and watches the extent follow, and a source assertion holds that `ui/src/navigators.ts` never reads `latest_s`, `max_age_s` or the pyramid's cell bounds: those describe the *spectrum-history* horizon, which is longer, lossy, and not this bar.
 - **Assume one capture window.** The lit segments come from the reported `windows` list and nothing else. The control feeds a body carrying `frequency.current` but **no** list and asserts **nothing** lights: a one-element list derived from the tuned state would be a window count nobody measured. Two reported windows draw two segments, in the order given, unmerged.
 
-**The backend half: `windows` (T-340).** `GET /api/navigation` now reports every currently-active capture window as a list — `device_id`, `driver`, centre, span and the window's edges per entry — empty on a replay, one entry on a live run. The count is measured per request, not a constant: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305), and multiple simultaneous front ends are an explicit product direction. **What would have to change to report N:** `ApiState::live_control` is one `Option<Arc<dyn LiveControl>>`; it becomes a collection built one handle per `ReceiveChain` where the pipeline composes the run. Neither the route's shape nor its clients change, because both already speak in lists. Multi-device capture is *not* built and the field never claims it is. The contract test asserts the array by value and then **retunes the mock and watches the window move with it**, so a constant entry — or one copied from the run's configuration — fails.
+**The backend half: `windows` (T-340).** `GET /api/navigation` now reports every currently-active capture window as a list — `device_id`, `driver`, centre, span and the window's edges per entry — empty on a replay, one entry on a live run. The count is measured per request, not a constant: the source layer is already N-shaped (T-259's audit; T-302/T-303/T-304/T-305), and multiple simultaneous front ends are an explicit product direction. **T-511 made that literal:** `ApiState::live_controls` is a collection keyed by `device_id`, built one handle per front end where the pipeline composes the run, and — as predicted — neither the route's shape nor its clients changed, because both already speak in lists. Which radio a *device route* moves is now an optional `device_id` selector on those routes (`docs/api.md`, "Which radio"), omitted whenever the run holds exactly one front end. The contract test asserts the array by value and then **retunes the mock and watches the window move with it**, so a constant entry — or one copied from the run's configuration — fails.
 
 **Time zoom became real state.** "A dragged region zooms the main view to it" needs somewhere for a time span to live, and the review cursor had only an instant. `TimeCursor` gained `spanS`, which `historyWindow` uses when it is set; with none asked for the window is still the rows on screen at their own period. It is never defaulted to a duration — that is the 48 h constant T-338 removed, in another costume.
 
@@ -507,3 +507,33 @@ quietly, and they need the user's decision:
    surface; the band override is not settable anywhere.
 3. **Axis ticks with labels.** The `.axis` strip is gone; each viewport states its window and level
    in the chrome line, which is a readout rather than a ruler.
+
+## The map-UI reframe (MMAP, T-800 / ADR-0023, 2026-09-22)
+
+MUI's app shell — the left inventory sidebar, the right focus panel and the bottom outputs dock
+framing the canvas — is **retired as a frame** by the MMAP milestone. Nothing above is contradicted;
+the panels are rehomed into floating overlays over a full-bleed surface, and every invariant this
+document records keeps the renderer that holds it (see the T-445 table above, which is unchanged).
+
+| MUI surface | Where it goes | Ticket |
+|---|---|---|
+| Explore left sidebar (Candidate/Confirmed lists) | the bottom sheet's **Explore** tab, plus the `pins` and `detections` layers on the canvas | MAP-14, MAP-08/09 |
+| Explore right focus panel | the bottom sheet's **Selected** tab (peek → half → full), content unchanged: big frequency, `measured` with its measured-at time, ranked explanations, the action row | MAP-04 |
+| App-shell chrome (header, tabs) | floating, edge-docked, idle-fading chrome in screen space | MAP-01, MAP-02, MAP-24 |
+| Outputs dock | unchanged in content; opened from the Selected tab | MAP-04 |
+| History surface (workflow #3) | already the canvas's older time (docs/16 §8); past **surveys** become an Explore-drawer list | MAP-15 |
+
+**The three capabilities T-445 recorded as homeless are now placed:**
+
+1. **The instantaneous spectrum trace** — landed by T-457 (viewport-wide, time-addressable, per-pane).
+2. **Drag-to-select a region** — `Shift + drag` marks a region in *every* mode (T-458), and an
+   explicit, visible **tool mode** re-binds only the *bare* drag for authoring
+   ([`docs/23 §10.4`](23-map-ui-philosophy.md)). That is the modifier-or-mode question, answered.
+3. **Axis ticks with labels** — real HUD rulers, ticks as band-0 strokes and labels as band-2 chrome,
+   both placed from the same per-frame mapping. Supersedes T-459 (MAP-05).
+
+Specs: [ADR-0023](adr/0023-map-ui-and-research-state.md), [`docs/23 §10–§11`](23-map-ui-philosophy.md)
+(layout + the panel→state→route map), [`docs/24 §13–§15`](24-canvas-as-data-surface.md) (layers, pins,
+client slices), [`docs/25 §10`](25-spectrum-research-workflow.md) (the four research stores),
+[`docs/26`](26-map-ui-redesign-tickets.md) (the ticket set). Layout reference:
+[`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html).

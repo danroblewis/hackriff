@@ -1,5 +1,5 @@
 ---
-description: Start, stop, restart or check the orchestration environment (staging demo, merge runner, work runner, dashboard, coordinator). The supervisor runs `/dev-env start` at the start of a session; `/dev-env stop` before a reboot or when things must halt; `/dev-env status` any time.
+description: Start, stop, restart or check the orchestration environment (staging demo, merge runner, work runner, dashboard, watchdog, coordinator). The supervisor runs `/dev-env start` at the start of a session; `/dev-env stop` before a reboot or when things must halt; `/dev-env status` any time.
 disable-model-invocation: false
 allowed-tools: Bash(*), Read
 ---
@@ -16,12 +16,16 @@ Constants: `REPO=/Users/daniellewis/hackriff`, `HACKRIFF_OPS=~/.hackriff-ops` (t
 ### status
 ```bash
 export HACKRIFF_OPS=~/.hackriff-ops; cd /Users/daniellewis/hackriff
-ps -axo pid,etime,command | grep -E 'Role: Coo|merge-runner.sh|work-runner.py|stage.sh|monitor.py|just gate|claude -p' | grep -v grep | cut -c1-110
+ps -axo pid,etime,command | grep -E 'Role: Coo|merge-runner.sh|work-runner.py|stage.sh|monitor.py|watchdog.py|just gate|claude -p' | grep -v grep | cut -c1-110
 git branch --show-current; git log -1 --format='%h %s'; ls .git/MERGE_HEAD $HACKRIFF_OPS/bulk-in-progress 2>/dev/null
 cat $HACKRIFF_OPS/merge-queue.txt; tail -3 $HACKRIFF_OPS/merge-needs-attention.txt $HACKRIFF_OPS/work-needs-attention.txt
 cat $HACKRIFF_OPS/work-runner-status.json; df -h / | tail -1
+cat $HACKRIFF_OPS/watchdog.json | head -c 400; echo; tail -5 $HACKRIFF_OPS/watchdog.log
 ```
-Report: which of the five are up, whether a gate is running, what is queued, what needs attention.
+Report: which of the six are up, whether a gate is running, what is queued, what needs attention,
+and **the watchdog's last tick** — its `load` against `budget`, any `unowned` entry, any `alarms`.
+A `watchdog.json` older than two minutes means the watchdog is dead, and nothing is watching the
+box: that is how sixteen orphaned busy loops ran through every gate for 2 h 18 m on 2026-09-22.
 
 ### stop
 1. `tmux kill-session -t dev` — the coordinator and every subagent it spawned.
@@ -31,19 +35,17 @@ Report: which of the five are up, whether a gate is running, what is queued, wha
 3. The merge runner: **between gates only** if you can wait (`pgrep -f 'just gate'` empty and no
    `bulk-in-progress`). If you cannot wait, kill it (`pkill -f merge-runner.sh; pkill -f 'just gate';
    pkill -f 'cargo-nextest nextest run'`) and then repair `main` — see "a killed gate" below.
-4. `pkill -f stage.sh; pkill -f 'hk serve --bind 127.0.0.1:8899'; pkill -f monitor.py`
+4. `pkill -f stage.sh; pkill -f 'hk serve --bind 127.0.0.1:8899'; pkill -f monitor.py; pkill -f 'ops/watchdog.py'`
 5. Verify nothing is left: the `ps` line from **status** must print nothing.
 
-**A killed gate leaves `main` provisional.** A bulk batch commits each merge before gating; the
-marker `$HACKRIFF_OPS/bulk-in-progress` names `base=<sha>` and `branches=…`. Rewind and re-queue:
-```bash
-cat $HACKRIFF_OPS/bulk-in-progress
-git -C /Users/daniellewis/hackriff status --porcelain | grep -v '^??'   # must be empty (else: git merge --abort)
-git -C /Users/daniellewis/hackriff reset --hard <base>                  # use -C: never rely on cwd
-rm -f $HACKRIFF_OPS/bulk-in-progress
-printf '%s\n' <the branches> >> $HACKRIFF_OPS/merge-queue.txt
-```
-A staged single merge is `.git/MERGE_HEAD`: `git merge --abort`, re-queue the branch.
+**A killed gate leaves `main` provisional — and the runner repairs it itself at its next start.**
+A bulk batch commits each merge before gating (marker `$HACKRIFF_OPS/bulk-in-progress`, with
+`base=<sha>` and `branches=…`); a single merge stages `.git/MERGE_HEAD`. On startup
+`ops/merge-runner.sh` aborts a staged merge, rewinds a provisional bulk to its base and re-queues
+its branches, and logs `STARTUP: …` for each. So the repair is: **start the runner.** Only if it
+logs "a person must look" (the tree has edits that are not the merge's own) do the manual steps
+apply — `git -C /Users/daniellewis/hackriff merge --abort` / `reset --hard <base>` — and then
+find whose edits those were before touching them.
 
 ### start
 0. **Pre-flight.** `git -C $REPO branch --show-current` is `main`; no `MERGE_HEAD`, no
@@ -52,7 +54,7 @@ A staged single merge is `.git/MERGE_HEAD`: `git merge --abort`, re-queue the br
    `git worktree remove <path>` for any with no commits ahead of main and a clean tree).
 1. **State home.** `cp -Rn "$(cat ~/.hackriff-ops/active-ops-dir)/." ~/.hackriff-ops/ 2>/dev/null;
    export HACKRIFF_OPS=~/.hackriff-ops`.
-2. **The four scripts, from the repo, never copies:**
+2. **The five scripts, from the repo, never copies:**
    ```bash
    cd /Users/daniellewis/hackriff && export HACKRIFF_OPS=~/.hackriff-ops
    nohup bash ops/stage.sh          >/dev/null 2>&1 & disown
@@ -60,6 +62,7 @@ A staged single merge is `.git/MERGE_HEAD`: `git merge --abort`, re-queue the br
    python3 ops/work-runner.py --once --dry-run        # read what it would dispatch; stop here if it looks wrong
    nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
    MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &
+   nohup python3 ops/watchdog.py    >/dev/null 2>&1 & disown   # contention watchdog; see ops/README.md
    ```
    If a script's newest version is only on an unmerged branch, start it from that worktree
    (`.claude/worktrees/<name>/ops/<script>`) and restart from `main` once it lands.
@@ -69,6 +72,7 @@ A staged single merge is `.git/MERGE_HEAD`: `git merge --abort`, re-queue the br
    tail -3 $HACKRIFF_OPS/work-runner.log                      # "VERSION: matches", then DISPATCH/tick lines
    tail -2 $HACKRIFF_OPS/stage.log                            # "started (live)" or "(replay …)"
    curl -s http://127.0.0.1:8901/burndown.json | head -c 60   # dashboard answers
+   head -c 200 $HACKRIFF_OPS/watchdog.json                    # a tick with owners + load/budget
    ```
    The work runner's first tick can take minutes: each dispatch clones `target/` (large tree).
 4. **The coordinator, last:** `ops/launch.sh coordinator`. Its role file must be the one on

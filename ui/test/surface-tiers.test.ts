@@ -64,7 +64,7 @@ function tile(a: TileAddr, s: Spec = {}): TileData {
     answeredLevel: 1,
     fold: { frequency: "exact", time: "exact" },
     measured: s.measured ?? { nf, nt },
-    rangeDb: null, bytes: 4096, serverInFlightLimit: null,
+    rangeDb: null, bytes: 4096, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

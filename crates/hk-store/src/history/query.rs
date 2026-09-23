@@ -1035,6 +1035,9 @@ pub fn burst_histogram(durations: &[f64], edges: &[f64]) -> Vec<usize> {
 
 enum Source<'a> {
     Mem(&'a Tile, Option<ColumnPreview>),
+    /// T-583: an open coarse tile **plus the rows still in flight below it**, folded for this
+    /// read into a clone ([`Pyramid::live_preview`]). Owned, and discarded with the answer.
+    Preview(Box<Tile>),
     Disk(Box<Tile>),
 }
 
@@ -1042,7 +1045,7 @@ impl Source<'_> {
     fn tile(&self) -> &Tile {
         match self {
             Source::Mem(t, _) => t,
-            Source::Disk(t) => t,
+            Source::Preview(t) | Source::Disk(t) => t,
         }
     }
 }
@@ -1576,13 +1579,33 @@ impl Pyramid {
         // lattice costs ONE of these; the read-time fold it replaced cost one per producer tile,
         // up to `MAX_MATERIALIZE_TILES` of them for a single address.
         self.count_source_tile();
+        // T-583: a coarse node's in-progress row, which the live cascade only propagates on
+        // commit. Folded here, on the read, so the capture thread pays nothing for it; `None`
+        // whenever nothing is in flight below this address, which is every read of elapsed time.
+        if let Some(t) = self.live_preview(level, fb, tb, margin, pct) {
+            return Ok(Some(Source::Preview(t)));
+        }
         if let Some(t) = self.open[level].get(&(fb, tb)) {
-            let preview = if level == 0 {
-                t.column_preview(margin, pct)
-            } else {
-                None
-            };
-            return Ok(Some(Source::Mem(t, preview)));
+            return Ok(Some(match t {
+                super::store::OpenTile::Full(t) => {
+                    let preview = if level == 0 {
+                        t.column_preview(margin, pct)
+                    } else {
+                        None
+                    };
+                    Source::Mem(t, preview)
+                }
+                // T-585: a live coarse node holds its committed rows encoded and its in-progress
+                // row as accumulator; a read materialises both into one owned tile — still ONE
+                // source tile — so the in-progress row (T-583) is visible exactly as before.
+                super::store::OpenTile::Live(l) => {
+                    let g = &self.geom.levels[level];
+                    let mut tile =
+                        Tile::new(l.key, self.geom.nf, g, usize::from(self.cfg.histogram.bins));
+                    l.materialize_into(&mut tile, g);
+                    Source::Disk(Box::new(tile))
+                }
+            }));
         }
         // T-453: a live-edge coarse summary built on demand by `Pyramid::materialize`. Level 0 is
         // never derived — it is capture's own product — and a derived tile carries no open column,

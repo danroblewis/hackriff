@@ -57,24 +57,31 @@ MERGE_QUEUE = f"{S}/merge-queue.txt"
 BULKMARK = f"{S}/bulk-in-progress"
 LANDED = f"{S}/landed.jsonl"
 
-# Agents are cheap while they think (~1% CPU each, measured 2026-09-22); builds are what saturate
-# the 28 cores. So the ceiling is on AGENTS (8), and admission per tick is dynamic: the 1-minute
-# load average must be under WORK_LOAD_MAX, disk over the floor, and a running gate counts as one
-# builder. At most WORK_PER_TICK launches per tick so the load ramps instead of bursting.
-CAP = int(os.environ.get("WORK_CAP", "8"))
-LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "20"))
+# THE RESOURCE MODEL IS A FIXED BUDGET, NOT A HEURISTIC (user, 2026-09-22). This box has 28 cores
+# (M3 Ultra: 20 performance + 8 efficiency). The merge gate is reserved 14 (its 6 build jobs + 8 test
+# threads, on P-cores, never contended). Each worker is BOUNDED, and the bound is inherited by its
+# whole process tree: CARGO_BUILD_JOBS and NEXTEST_TEST_THREADS (environment - every rustc and test
+# runner it spawns obeys them) plus a `taskpolicy -c background` QoS clamp at launch, which on Apple
+# Silicon confines the tree to the efficiency cores. So a worker costs ~WORKER_CORES, the count is
+# CAP, and the gate always has its reserve. A cpulimit FORK (see launch()) is the hard ceiling on
+# top. No load-average admission, no gate-time throttling, no suspend/resume: a known bound per
+# worker is the whole mechanism.
+CORES = int(os.environ.get("WORK_CORES", "28"))
+GATE_RESERVE = int(os.environ.get("WORK_GATE_RESERVE", "14"))
+WORKER_JOBS = os.environ.get("WORK_WORKER_JOBS", "2")            # cargo build jobs per worker
+WORKER_TEST_THREADS = os.environ.get("WORK_WORKER_TEST_THREADS", "2")
+WORKER_CORES = int(os.environ.get("WORK_WORKER_CORES", "3"))    # what one worker may occupy at peak
+CAP = int(os.environ.get("WORK_CAP", str(max(1, (CORES - GATE_RESERVE) // WORKER_CORES))))
+CPULIMIT = os.environ.get("WORK_CPULIMIT", f"{S}/bin/cpulimit")   # the HiGarfield fork; see launch()
 PER_TICK = int(os.environ.get("WORK_PER_TICK", "2"))
+LOAD_MAX = float(os.environ.get("WORK_LOAD_MAX", "40"))   # a tripwire only; the budget is the mechanism
+# Dispatch pauses once this many branches wait in merge-queue.txt (user, 2026-09-22): the
+# running workers drain, the box empties, and the merge gate runs the batch alone.
+QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 # Tickets in one parallel_group share a crate, not necessarily a file. Serialising a whole group
 # behind one ticket held 18 hk-pipeline tickets idle on 2026-09-22; a real conflict costs one
 # re-merge (the merge runner skips the conflicting branch), so allow a few per group.
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
-# THE GATE COMES FIRST. 2026-09-22 08:06-09:55: three docs-only branches (t800, t763, t299) each failed
-# an individual gate on a different load-sensitive test while 6-8 workers built beside it at load ~17,
-# and every failure costs a 50-minute isolation pass. So while a gate runs, admission drops to
-# GATE_CAP workers and GATE_LOAD_MAX load; the original CLAUDE.md rule (4 builders INCLUDING the
-# gate) was this, and raising the cap to 8 without it was the mistake.
-GATE_CAP = int(os.environ.get("WORK_GATE_CAP", "5"))
-GATE_LOAD_MAX = float(os.environ.get("WORK_GATE_LOAD_MAX", "18"))   # the gate alone runs this box at 8-13; workers are on E-cores meanwhile
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
@@ -94,7 +101,7 @@ BUDGET_USD = os.environ.get("WORK_BUDGET_USD", "20")
 MODEL_ALIAS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "claude-fable-5-1"}
 EFFORTS = ("low", "medium", "high")
 PRI = {"high": 0, "medium": 1, "normal": 2, "low": 3}
-CARGO_ENV = {"CARGO_BUILD_JOBS": "6", "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
+CARGO_ENV = {"CARGO_BUILD_JOBS": WORKER_JOBS, "NEXTEST_TEST_THREADS": WORKER_TEST_THREADS, "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
 
 
 def log(msg):
@@ -108,6 +115,17 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
+    # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
+    # coordinator's routine and stay in the file only.
+    level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info"}.get(kind)
+    if level:
+        try:
+            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
+                            level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
     # Poke the coordinator's pane the way the merge runner does; the file is the record, this is the wake-up.
     try:
         if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
@@ -192,7 +210,38 @@ def disk_free_gb():
 
 
 def gate_running():
-    return os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
+    # `gate-wanted` is the merge runner waiting for the running workers to drain so the gate can
+    # run alone: to dispatch it is the same as a gate in progress, or the drain never completes.
+    return (os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
+            or os.path.exists(f"{S}/gate-wanted"))
+
+
+# THE GATE SHARES THE BOX AGAIN (user, 2026-09-23 13:30). "The gate runs alone" (2026-09-22) was
+# a crisis rule: it stopped the load flakes while their causes were unknown, at the price of
+# serialising the box - gate (45 min, no dispatch) -> a minutes-wide dispatch window -> drain
+# (up to 45 min, no gate). Measured 2026-09-23: dispatch was ZERO in 10 of 13 hours while the
+# gate held the box 40-60 min of each, and the burndown went flat at ~1 ticket/hour once the
+# crisis backlog had drained. The three flake causes are fixed at the root (a hidden tab's
+# stopped rAF, a shared spec port, a self-matching wait loop), so the design this runner was
+# built for is back: workers dispatch DURING a gate, capped at the gate's reserve
+# ((CORES - GATE_RESERVE) / WORKER_CORES = 4), and the merge runner no longer waits for them
+# (WORKER_DRAIN_MAX=0). WORK_GATE_ALONE=1 restores the crisis rule wholesale if it is ever
+# needed again; nothing else changes with it.
+GATE_ALONE = os.environ.get("WORK_GATE_ALONE", "0") == "1"
+RESERVE_CAP = max(1, (CORES - GATE_RESERVE) // WORKER_CORES)
+
+
+def gate_holds_dispatch():
+    """True only in alone mode: a gate running or wanted stops every dispatch, fix runs included."""
+    return GATE_ALONE and (os.path.exists(f"{S}/gate-wanted") or gate_running())
+
+
+def queue_depth():
+    """Branches waiting in merge-queue.txt (non-comment, non-blank lines)."""
+    try:
+        return sum(1 for l in open(f"{S}/merge-queue.txt") if l.strip() and not l.lstrip().startswith("#"))
+    except OSError:
+        return 0
 
 
 def main_safe_to_commit():
@@ -219,7 +268,19 @@ def landed_tickets():
 
 
 # ---------- launch ----------
+def bounded(cmd, cores=None):
+    """Wrap a command in the worker bound - cpulimit (HiGarfield fork, descendants included), the
+    background QoS clamp, nice - so EVERY agent this runner starts is bounded the same way: workers,
+    reviewers and fix/resume runs alike. `cores` defaults to WORKER_CORES."""
+    cores = cores or WORKER_CORES
+    prefix = [CPULIMIT, "-l", str(cores * 100), "-i", "--"] if os.path.exists(CPULIMIT) else []
+    if not prefix and not getattr(bounded, "_warned", False):
+        log(f"NOTE: no cpulimit at {CPULIMIT} (see ops/README.md to build the fork) - QoS + env limits only"); bounded._warned = True
+    return prefix + ["taskpolicy", "-c", "background", "nice", "-n", "10"] + cmd
+
+
 def brief_for(t, wt, branch):
+    d = f"{WORKDIR}/{t['id']}"          # where handback.json goes
     fields = {k: t.get(k) for k in ("id", "milestone", "title", "priority", "model", "effort", "core_interface",
                                      "parallel_group", "depends_on", "use_cases", "capabilities", "acceptance",
                                      "notes", "found_by", "requested_by") if t.get(k) is not None}
@@ -234,10 +295,8 @@ never append to any merge queue - the runner does that after you hand back.
 DONE MEANS: the acceptance below is met, targeted tests pass, `just precheck <crates you touched>` is clean, and
 everything is COMMITTED on {branch} with a message that starts "{t['id']}: " and ends with the line
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Record your result on your branch with the task CLI, never by editing docs/tasks.yaml (a hook denies that):
-write your report to a file, then `just task result {t['id']} --from <that file>` (what changed, test results,
-anything you surfaced but correctly did not chase). `just task show {t['id']}` prints the ticket. Do NOT change its
-status - the runner does.
+You do NOT edit docs/tasks.yaml (a hook denies it) and you do not need to: the runner writes the ticket's
+result and status FROM YOUR HAND-BACK FILE (below). `just task show {t['id']}` prints the ticket if you need it.
 
 TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate <crate>`, `cargo nextest run -p <crate>
 -E 'binary(<name>)'`, `just test-ui`. NEVER `just gate`, `just acceptance` or the full suite (a hook blocks
@@ -246,14 +305,23 @@ them). Never end a turn waiting on a background command; block on its output fil
 FILING RULE (user, 2026-09-22): do not file new tickets for things you merely suspect. An OBSERVED failure
 you cannot fix in scope goes in your result: text with the exact evidence; the coordinator decides.
 
-HAND BACK: your final message must end with one line, exactly one of:
-HANDBACK: DONE
-HANDBACK: BLOCKED <one line: what specifically you need>
-HANDBACK: CANCEL <one line: why this ticket needs NO work - already done by T-x at <commit>, or obsoleted by <decision>>
-CANCEL is yours to propose when the evidence is in the repo: record it on your branch with
-`just task set {t['id']} status=cancelled cancelled_reason='<the same evidence>'` and commit that, so the
-cancellation is reviewed and lands like code. If `just task` is not available, hand back CANCEL anyway and the
-coordinator decides. Never silently exit with no commits - that reads as a lost agent, not a finding.
+HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no comments):
+  {d}/handback.json
+  {{"ticket": "{t['id']}",
+   "outcome": "done" | "blocked" | "cancel",
+   "summary": "what changed and why - 3 to 10 lines, written for the ticket's result: field",
+   "commits": ["<short sha>", ...],
+   "files": ["<path>", ...],
+   "tests": [{{"cmd": "just test-crate hk-x", "exit": 0, "summary": "41 passed"}}, ...],
+   "precheck": {{"exit": 0}},
+   "blocked": {{"needs": "<what specifically, if outcome is blocked>"}},
+   "cancel": {{"evidence": "<why this ticket needs NO work: done by T-x at <sha>, or obsoleted by <decision>>"}},
+   "observed_but_not_chased": ["<an observed failure outside scope, with the exact evidence>", ...],
+   "use_cases": ["<the use-case ids your tests assert on>", ...]}}
+The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
+"done" if any test exit is non-zero. A CANCEL is yours to propose with evidence in the repo; an Opus review
+confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
+Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
 TICKET:
 {body}
@@ -292,12 +360,16 @@ def launch(t, dry):
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
-    # QoS: a worker runs at `utility` + nice 10 from birth, below the gate's default tier for CPU and
-    # I/O. While a gate runs, apply_gate_qos() drops every worker to `background`, which on Apple
-    # Silicon means the efficiency cores only - the 20 P-cores of this M3 Ultra belong to the gate.
-    p = subprocess.Popen(["taskpolicy", "-c", "utility", "nice", "-n", "10", "bash", "-c", script], cwd=wt,
+    # The bound, inherited by the whole tree, three layers: (1) CPULIMIT - the HiGarfield fork of
+    # cpulimit, built from source into $HACKRIFF_OPS/bin (Homebrew's opsengine build is INERT on
+    # Apple Silicon: measured 0 % effect; the fork, `-l 200 -i` over four busy loops, measured 164 %
+    # of CPU in aggregate - a real ceiling by SIGSTOP/SIGCONT, descendants included); (2) a permanent
+    # `background` QoS clamp (efficiency cores only, low priority); (3) CARGO/NEXTEST limits in env
+    # so the build and test runners never ask for more. Without the fork binary, layers 2-3 still hold.
+    cmd_prefix = ["cpulimit"] if os.path.exists(CPULIMIT) else []
+    p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt,
                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True)
-    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; utility QoS)")
+    log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; {'cpulimit ' + str(WORKER_CORES * 100) + '% + ' if cmd_prefix else ''}background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
             "review": needs_review(t)}
@@ -311,7 +383,8 @@ def launch_review(claim):
              "(is the work really done at the commit named? is the decision real and does it obsolete THIS ticket?). "
              "PASS only if the evidence holds; FAIL names what is missing.\n") if cancel else ""
     prompt = f"""Review branch {branch} for hackriff before it is queued for merge. The diff is `git diff main...{branch}`{extra}
-(run it from {wt}). The ticket text is in {d}/brief.md and the worker's report in {d}/out.json (field "result").
+(run it from {wt}). The ticket text is in {d}/brief.md, the worker's structured hand-back in {d}/handback.json
+(review the diff against what it CLAIMS: tests listed, files listed, summary) and its transcript result in {d}/out.json.
 Check what the reviewer agent definition says to check, with CLAUDE.md's invariants and the thin-client rule.
 Do not edit anything. Your final message must end with exactly one line:
 VERDICT: PASS
@@ -321,12 +394,150 @@ VERDICT: FAIL <one line naming the defect and the file:line>
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out = open(f"{d}/review.json", "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err, env=dict(os.environ, HACKRIFF_OPS=S),
-                         start_new_session=True, text=True)
+    p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                         env=dict(os.environ, **CARGO_ENV, HACKRIFF_OPS=S), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"REVIEW {tid} pid={p.pid}")
+    log(f"REVIEW {tid} pid={p.pid} (bounded)")
     return dict(claim, pid=p.pid, started=time.time(), kind="review")
+
+
+# ---------- per-run resource accounting ----------
+# What did this ticket actually COST the box? Until now: nothing recorded. `work-done.jsonl` had
+# minutes, dollars and turns, which say what the model spent, not what the machine did - so
+# "which tickets are expensive to build" and "is the 3-core bound holding" were both unanswerable,
+# and on 2026-09-22 a leaked process tree was invisible until someone ran `ps`.
+#
+# CPU time cannot be read at reap: by then the root process has exited and the kernel has thrown
+# its accounting away. So it is SAMPLED each tick and the running maximum is kept. That
+# undercounts - a rustc that starts and finishes between two ticks contributes nothing - so these
+# are a floor on the cost, not a measurement of it, and the result line says CPU-s rather than
+# pretending to be exact.
+def _cpu_seconds(s):
+    """`ps -o time` -> seconds. macOS prints `MM:SS.ss`, or `HH:MM:SS.ss` past an hour."""
+    try:
+        parts = s.strip().split(":")
+        return int(parts[0]) * 60 + float(parts[1]) if len(parts) == 2 else \
+            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except Exception:
+        return 0.0
+
+
+def _ps_tree_rows():
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,rss=,time=,command="],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        f = line.split(None, 5)
+        if len(f) < 6:
+            continue
+        try:
+            rows.append({"pid": int(f[0]), "ppid": int(f[1]), "pgid": int(f[2]),
+                         "rss_mb": int(f[3]) / 1024.0, "cpu_s": _cpu_seconds(f[4]), "cmd": f[5]})
+        except ValueError:
+            continue
+    return rows
+
+
+def sample_group(pid, rows=None):
+    """(cpu_s, rss_mb, member_pids, member_pgids) for a claim's whole tree.
+
+    NOT just `ps -g <pgid>`: measured 2026-09-23, a claim's process group contains only the
+    `cpulimit` wrapper itself - `claude` and everything it spawns get their own groups. So the
+    tree is the pid, anything in its group, and every descendant, walked transitively.
+    """
+    rows = rows if rows is not None else _ps_tree_rows()
+    by = {r["pid"]: r for r in rows}
+    kids = {}
+    groups = {}
+    for r in rows:
+        kids.setdefault(r["ppid"], []).append(r["pid"])
+        groups.setdefault(r["pgid"], []).append(r["pid"])
+    seen, stack = set(), [pid]
+    while stack:
+        p = stack.pop()
+        if p in seen or p not in by:
+            continue
+        seen.add(p)
+        stack.extend(kids.get(p, []))
+        stack.extend(groups.get(p, []))
+    return (round(sum(by[p]["cpu_s"] for p in seen), 1),
+            round(sum(by[p]["rss_mb"] for p in seen), 1),
+            sorted(seen), sorted({by[p]["pgid"] for p in seen}))
+
+
+def track_usage(c):
+    """Fold this tick's sample into the claim; True when it changed anything.
+
+    The return value matters: the caller uses it to mark the claims file dirty. Without that the
+    sample lives only in memory and is lost at the next restart — and the whole point is that the
+    numbers survive the run they describe. Peaks only, because the high-water mark is the
+    question (`c["cpu_s"]` is monotonic by construction, so this is effectively every tick).
+    """
+    try:
+        cpu, rss, pids, pgids = sample_group(c["pid"])
+    except Exception:
+        return False
+    before = (c.get("cpu_s"), c.get("peak_rss_mb"), c.get("tree_pids"))
+    c["cpu_s"] = max(c.get("cpu_s") or 0, cpu)
+    c["peak_rss_mb"] = max(c.get("peak_rss_mb") or 0, rss)
+    if pids:
+        c["tree_pids"], c["tree_pgids"] = pids[:200], pgids[:50]
+    return before != (c.get("cpu_s"), c.get("peak_rss_mb"), c.get("tree_pids"))
+
+
+def leaked_processes(c, rows=None):
+    """Processes of this run still alive after its root exited.
+
+    Ancestry cannot find them - a leaked process is reparented to launchd, which is the whole
+    problem - so they are recognised two ways, and a pid must match one of them: it is a pid (in
+    a process group) this run was seen holding, or its command line names this run's WORKTREE.
+    The worktree path is the strong one: every cargo, rustc and test binary of this ticket
+    carries it, and no other run's does. Both guards exist because pids are recycled, and a
+    SIGKILL aimed at a recycled pid is a far worse bug than a leaked process.
+    """
+    rows = rows if rows is not None else _ps_tree_rows()
+    pids, pgids, wt = set(c.get("tree_pids") or []), set(c.get("tree_pgids") or []), c.get("wt") or ""
+    out = []
+    for r in rows:
+        if r["pid"] <= 1:
+            continue
+        if (r["pid"] in pids and r["pgid"] in pgids) or (wt and wt in r["cmd"]):
+            out.append(r)
+    return out
+
+
+def kill_leaked(rows):
+    """SIGTERM, ten seconds, SIGKILL. A cargo or nextest given a chance to exit cleanly leaves a
+    usable target dir behind; one that is SIGKILLed mid-write does not."""
+    for r in rows:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(10)
+    killed = []
+    for r in rows:
+        try:
+            os.kill(r["pid"], 0)
+            os.kill(r["pid"], signal.SIGKILL)
+            killed.append(r["pid"])
+        except OSError:
+            pass
+    return killed
+
+
+def resource_line(c):
+    """The one line a person reads: what this ticket cost the box, and what it left behind."""
+    if not c.get("cpu_s") and not c.get("peak_rss_mb"):
+        return ""
+    s = f"Resources: {c.get('cpu_s', 0):.0f} CPU-s, peak {(c.get('peak_rss_mb') or 0) / 1024:.1f} GB"
+    if c.get("leaked"):
+        s += f" — LEAKED {c['leaked']} processes (killed at reap)"
+    return s
 
 
 # ---------- reap ----------
@@ -340,13 +551,88 @@ def result_of(path):
         return {}
 
 
+def load_handback(d, tid):
+    """The worker's hand-back file: the contract. (dict, None) when valid; (None, reason) otherwise."""
+    p = f"{d}/handback.json"
+    if not os.path.exists(p):
+        return None, "no handback.json"
+    try:
+        hb = json.load(open(p))
+    except Exception as e:
+        return None, f"handback.json is not JSON: {str(e)[:80]}"
+    if not isinstance(hb, dict) or hb.get("outcome") not in ("done", "blocked", "cancel"):
+        return None, "handback.json: outcome must be done|blocked|cancel"
+    if str(hb.get("ticket", tid)) != tid:
+        return None, f"handback.json names {hb.get('ticket')}, not {tid}"
+    if not isinstance(hb.get("summary", ""), str) or not hb.get("summary", "").strip():
+        return None, "handback.json: summary missing"
+    return hb, None
+
+
+def handback_outcome(hb, text):
+    """(outcome, why) from the JSON when valid, else from the fallback HANDBACK: line, else done-by-default
+    (the commit/dirty checks that follow still decide what actually happens)."""
+    if hb:
+        o = hb["outcome"]
+        why = (hb.get("blocked") or {}).get("needs") if o == "blocked" else (hb.get("cancel") or {}).get("evidence") if o == "cancel" else ""
+        return o, why or ""
+    line = next((l for l in text.splitlines() if l.startswith("HANDBACK:")), "")
+    if "BLOCKED" in line:
+        return "blocked", line[18:300]
+    if "CANCEL" in line:
+        return "cancel", line[17:300]
+    return "done", ""
+
+
+def write_result(c, hb):
+    """Write the ticket's result: block on the worker's branch from handback.json, through the task CLI,
+    committed by the runner - so the board edit is deterministic and workers never touch tasks.yaml.
+    Needs the CLI on the branch (py/hkpy/tasks.py, task-taskcli); otherwise the summary waits in the file."""
+    tid, wt = c["ticket"], c["wt"]
+    if not os.path.exists(f"{wt}/py/hkpy/tasks.py"):
+        log(f"RESULT {tid}: no task CLI on the branch yet; summary stays in handback.json")
+        return
+    lines = [f"{hb['outcome'].upper()} (work-runner, from handback.json, {time.strftime('%Y-%m-%d %H:%M')}).", hb["summary"].strip()]
+    if hb.get("tests"):
+        lines.append("Tests: " + "; ".join(f"{t.get('cmd')} -> exit {t.get('exit')}{' (' + str(t.get('summary')) + ')' if t.get('summary') else ''}" for t in hb["tests"] if isinstance(t, dict)))
+    if hb.get("precheck"):
+        lines.append(f"precheck exit {hb['precheck'].get('exit')}")
+    if hb.get("commits"):
+        lines.append("Commits: " + ", ".join(map(str, hb["commits"])))
+    if hb.get("observed_but_not_chased"):
+        lines.append("Observed, not chased: " + " | ".join(map(str, hb["observed_but_not_chased"])))
+    if hb.get("use_cases"):
+        lines.append("Use cases: " + ", ".join(map(str, hb["use_cases"])))
+    if (rl := resource_line(c)):
+        lines.append(rl)
+    if hb["outcome"] == "cancel":
+        lines.append("Cancel evidence: " + str((hb.get("cancel") or {}).get("evidence", "")))
+    rp = f"{WORKDIR}/{tid}/result.txt"
+    open(rp, "w").write("\n".join(lines) + "\n")
+    args = ["uv", "run", "--locked", "--project", "py", "python", "-m", "hkpy.tasks"]
+    r = subprocess.run(args + ["result", tid, "--from", rp, "--file", f"{wt}/docs/tasks.yaml"], cwd=wt, capture_output=True, text=True)
+    if r.returncode == 0 and hb["outcome"] == "cancel":
+        r = subprocess.run(args + ["set", tid, "status=cancelled", f"cancelled_reason={(hb.get('cancel') or {}).get('evidence', '')[:300]}", "--file", f"{wt}/docs/tasks.yaml"], cwd=wt, capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"RESULT {tid}: task CLI failed: {(r.stderr or r.stdout).strip()[:160]}")
+        subprocess.run(["git", "checkout", "--", "docs/tasks.yaml"], cwd=wt, capture_output=True)
+        return
+    subprocess.run(["git", "add", "docs/tasks.yaml"], cwd=wt, capture_output=True)
+    r = subprocess.run(["git", "commit", "-q", "-m", f"{tid}: result and status from handback.json (work-runner)"], cwd=wt, capture_output=True, text=True)
+    log(f"RESULT {tid}: board {'written on the branch' if r.returncode == 0 else 'commit failed: ' + r.stderr.strip()[:100]}")
+
+
 def record_done(claim, outcome, res):
     with open(DONE, "a") as f:
         f.write(json.dumps({"ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
                             "started": int(claim["started"]), "finished": int(time.time()),
                             "minutes": round((time.time() - claim["started"]) / 60, 1),
                             "cost_usd": res.get("total_cost_usd"), "turns": res.get("num_turns"),
-                            "model": claim.get("model"), "outcome": outcome}) + "\n")
+                            "model": claim.get("model"), "outcome": outcome,
+                            # What the BOX spent, beside what the model spent. Sampled per tick,
+                            # so a floor rather than an exact total (see sample_group).
+                            "cpu_s": claim.get("cpu_s"), "peak_rss_mb": claim.get("peak_rss_mb"),
+                            "leaked": claim.get("leaked", 0)}) + "\n")
 
 
 def enqueue(branch, wt=None):
@@ -372,6 +658,8 @@ def reap(claims, dry):
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
         if alive(pid):
+            if track_usage(c):                      # the only chance to see this run's CPU time
+                changed = True
             if age_min > limit:
                 try:
                     os.killpg(pid, signal.SIGTERM)
@@ -384,6 +672,22 @@ def reap(claims, dry):
             continue
         # finished
         changed = True
+        # The root is gone; anything of this run still running is a LEAK, holding cores and disk
+        # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
+        # run for hours beside the gate, which is the 2026-09-22 contention in another form.
+        try:
+            leaked = leaked_processes(c)
+            if leaked:
+                c["leaked"] = len(leaked)
+                log(f"LEAKED {tid}: {len(leaked)} process(es) outlived the run: "
+                    + ", ".join(f"{r['pid']} {r['cmd'][:60]}" for r in leaked[:5]))
+                if not dry:
+                    kill_leaked(leaked)
+                attention(tid, c["branch"], "LEAKED",
+                          f"{len(leaked)} process(es) outlived the run and were killed (SIGTERM then SIGKILL): "
+                          + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
+        except Exception as e:
+            log(f"leak check error for {tid}: {e}")
         d = f"{WORKDIR}/{tid}"
         if c["kind"] == "review":
             res = result_of(f"{d}/review.json")
@@ -407,19 +711,35 @@ def reap(claims, dry):
         text = str(res.get("result", ""))
         if res.get("session_id"):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
+        hb, hb_err = load_handback(d, tid)
+        outcome, why = handback_outcome(hb, text)
+        if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
+            bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+            outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+        # How the hand-back arrived is the contract's own reliability measure: `json` is the
+        # contract, `line` the HANDBACK: fallback, `none` a worker that wrote neither (judged by
+        # its commits alone). One line per reap in $HACKRIFF_OPS/handbacks.jsonl; the rate is
+        # `jq -r .how handbacks.jsonl | sort | uniq -c`, and `briefed` says whether the brief asked.
+        how = "json" if hb else ("line" if any(l.startswith("HANDBACK:") for l in text.splitlines()) else "none")
+        if hb_err:
+            log(f"HANDBACK {tid}: {hb_err} - {'falling back to the text line' if how == 'line' else 'NO_HANDBACK, judged by commits alone'} ({outcome})")
+        with open(f"{S}/handbacks.jsonl", "a") as f:
+            f.write(json.dumps({"ts": int(time.time()), "ticket": tid, "how": how, "outcome": outcome,
+                                "briefed": os.path.exists(f"{d}/brief.md") and "handback.json" in open(f"{d}/brief.md").read()}) + "\n")
         ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+        if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
+            write_result(c, hb)                    # the board line the worker used to write by hand
+            ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
         if res.get("is_error"):
             c["state"] = "error"
             attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
             record_done(c, "error", res)
-        elif "HANDBACK: BLOCKED" in text:
+        elif outcome == "blocked":
             c["state"] = "blocked"
-            why = next((l for l in text.splitlines() if l.startswith("HANDBACK: BLOCKED")), "")
-            attention(tid, c["branch"], "BLOCKED", why[18:220])
+            attention(tid, c["branch"], "BLOCKED", (why or "")[:220])
             record_done(c, "blocked", res)
-        elif "HANDBACK: CANCEL" in text:
-            why = next((l for l in text.splitlines() if l.startswith("HANDBACK: CANCEL")), "")[17:300]
+        elif outcome == "cancel":
             if ahead > 0 and not dirty:
                 # The worker recorded the cancellation on its branch: an Opus reviewer confirms the
                 # evidence whatever the worker's model, then it lands through the gate like code.
@@ -455,6 +775,12 @@ def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
+    # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
+    # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
+    # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
+        return dict(c, state="fix-held", fail_line=fail_line[:300])
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
@@ -467,23 +793,37 @@ Passes alone but failed in the gate = load-sensitive: make it deterministic (nev
 If the failure is in code you did not touch and is a known bug on main, say so precisely and hand back BLOCKED.
 Then: targeted tests, `just precheck <crates>`, commit on {branch}, `just task note {tid} --text "<what the gate found and what you changed>"`.
 Same rules as before: never touch the main checkout, never the full gate, never edit docs/tasks.yaml by hand.
-Your final message must end with exactly one line: HANDBACK: DONE  or  HANDBACK: BLOCKED <why>
+When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
+your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out_path = f"{d}/fix{n}.json"
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
-    p = subprocess.Popen(cmd, cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
+    p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid}")
+    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 
 def release_stale_claims(claims, tasks_by_id):
     changed = False
+    # A `queued` claim whose branch is already on main is finished: the merge runner landed it
+    # (or a hand-merge did) and nothing flipped the claim. 24 of 39 "queued" claims were such
+    # on 2026-09-23 01:40, inflating the dashboard's IN QUEUE count and every throughput read.
+    for tid, c in list(claims.items()):
+        b = c.get("branch")
+        if c.get("state") == "queued" and b:
+            try:
+                if sh(["git", "rev-parse", "-q", "--verify", b]).strip() and \
+                   int(sh(["git", "rev-list", "--count", f"main..{b}"]).strip() or 0) == 0:
+                    log(f"CLAIM {tid}: {b} is on main - claim closed")
+                    c["state"] = "merged"; c["ended"] = time.time(); changed = True
+            except Exception:
+                pass
     for tid, c in list(claims.items()):
         if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
@@ -549,6 +889,19 @@ def sync_board(claims, dry):
             continue
         if c.get("state") == "running" and c.get("kind") == "work" and t.get("status") == "todo":
             flips.append((tid, "in-progress", None))
+    # Agents the coordinator or supervisor spawned with the Agent tool are not claims, but the
+    # PreToolUse(Agent) hook registered them (agent-registry.jsonl, user 2026-09-23): a ticket
+    # with a registered agent spawned in the last 30 min and still `todo` is in progress too.
+    try:
+        cut = time.time() - 1800
+        with open(f"{S}/agent-registry.jsonl") as f:
+            for line in f.readlines()[-200:]:
+                o = json.loads(line)
+                t = tasks.get(o.get("ticket") or "")
+                if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
+                    flips.append((o["ticket"], "in-progress", None))
+    except Exception:
+        pass
     for tid, sha in landed.items():
         t = tasks.get(tid)
         if t and t.get("status") in ("todo", "in-progress"):
@@ -627,8 +980,9 @@ def candidates(tasks, claims):
 
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
-    gate = gate_running()
-    cap = min(CAP - 1, GATE_CAP) if gate else CAP
+    cap = CAP
+    if not GATE_ALONE and gate_running():
+        cap = min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
     free = cap - len(running)
     if free <= 0:
         return False
@@ -636,9 +990,39 @@ def dispatch(claims, dry):
         log(f"HOLD: {disk_free_gb():.0f} GB free < {DISK_MIN_GB} GB floor")
         return False
     load1 = os.getloadavg()[0]
-    lmax = GATE_LOAD_MAX if gate else LOAD_MAX
-    if load1 > lmax:
-        log(f"HOLD: load {load1:.0f} > {lmax:.0f} ({len(running)} running{', gate running' if gate else ''})")
+    if load1 > LOAD_MAX:
+        log(f"HOLD: load {load1:.0f} > {LOAD_MAX:.0f} tripwire ({len(running)} running)")
+        return False
+    # THE GATE GETS THE BOX TO ITSELF (user, 2026-09-22). Two rules, one cycle:
+    #   1. no dispatch while a gate runs (the merge runner only starts one once no worker is
+    #      running - see merge-runner.sh workers_running) - so a gate never shares the box;
+    #   2. no dispatch once QUEUE_PAUSE branches wait in merge-queue.txt - running workers
+    #      finish and join the queue, the box empties, the gate takes the batch.
+    # Nothing is suspended; a worker that has started always runs to its hand-back.
+    # HARD PAUSE (user, 2026-09-22, "have we fully paused new development yet?"): a file, not a
+    # condition. Every conditional hold above has a gap (the bulk marker cleared and four workers
+    # started inside a minute, 14:36); this one has none. Create $HACKRIFF_OPS/dispatch-paused
+    # to stop all dispatch; delete it to resume. Reaping, results and queueing carry on.
+    if os.path.exists(f"{S}/dispatch-paused"):
+        log(f"HOLD: dispatch-paused file present ({len(running)} running)")
+        return False
+    # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
+    # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
+    # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
+    # gate ends, so the batch is "what handed back during the last gate".
+    if gate_holds_dispatch():
+        log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
+        return False
+    depth = queue_depth()
+    if GATE_ALONE and depth >= QUEUE_PAUSE:
+        log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
+        return False
+    # The gate is IMMINENT when something is queued and no worker is running: the merge runner
+    # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
+    # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
+    # dispatch into that window; the gate takes the batch, then dispatch resumes.
+    if GATE_ALONE and depth > 0 and not running:
+        log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
         return False
     free = min(free, PER_TICK)
     try:
@@ -704,36 +1088,22 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
-def apply_gate_qos(claims):
-    """The macOS stand-in for a cgroup: while a gate runs, every worker process group goes to
-    background QoS (E-cores only, throttled I/O); when it ends they come back to utility. Applied to
-    every pid in the group each tick, so children spawned since are caught too."""
-    gate = gate_running()
-    for tid, c in claims.items():
-        if c.get("state") != "running":
-            continue
-        pgid = c.get("pid")
-        pids = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
-        if not pids:
-            continue
-        want = "bg" if gate else "fg"
-        if c.get("qos") == want and len(pids) == c.get("qos_n"):
-            continue
-        flag = "-b" if gate else "-B"
-        for pid in pids:
-            subprocess.run(["taskpolicy", flag, "-p", pid], capture_output=True)
-        if c.get("qos") != want:
-            log(f"QOS {tid}: {'background (E-cores) while the gate runs' if gate else 'restored to utility'} ({len(pids)} processes)")
-        c["qos"] = want; c["qos_n"] = len(pids)
 
 
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
-    try:
-        apply_gate_qos(claims)
-    except Exception as e:
-        log(f"apply_gate_qos error: {e}")
+    # A fix run that launch_fix HELD (dispatch-paused, gate-wanted, a gate in progress) is
+    # relaunched once those clear - otherwise the claim sits as `fix-held`, the map shows the
+    # ticket FAILED, and nothing ever moves it (T-513 sat that way from 20:20 to 00:20 on
+    # 2026-09-22/23). Same holds as dispatch, checked here rather than trusted to be past.
+    if not dry and not (os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
+        for tid, c in list(claims.items()):
+            if c.get("state") == "fix-held":
+                log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
+                claims[tid] = launch_fix(dict(c, kind="work"), c.get("fail_line") or "held fix")
+                changed = True
+
     try:
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})
     except Exception as e:
@@ -773,9 +1143,10 @@ def tick(dry):
         frontier["held_groups"] = held
     except Exception:
         pass
-    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "gate_cap": GATE_CAP, "gate_load_max": GATE_LOAD_MAX, "cap": (min(CAP - 1, GATE_CAP) if gate_running() else CAP),
+    status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,
               "gate_running": gate_running(), "disk_free_gb": round(disk_free_gb()), "load1": round(os.getloadavg()[0], 1),
-              "load_max": LOAD_MAX, "per_tick": PER_TICK}
+              "load_max": LOAD_MAX, "per_tick": PER_TICK,
+              "queue_depth": queue_depth(), "queue_pause": QUEUE_PAUSE}
     json.dump(status, open(f"{S}/work-runner-status.json", "w"))
     return running
 

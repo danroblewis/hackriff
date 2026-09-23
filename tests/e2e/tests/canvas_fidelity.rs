@@ -543,9 +543,7 @@ fn run() -> Option<&'static Fidelity> {
 ///
 /// This fails today, and the failure message is the measurement: bins per cell, rows per cell, and
 /// the product — how many FFT cells the canvas replaces with one number.
-#[test]
-fn the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds() {
-    let Some(f) = run() else { return };
+fn the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds(f: &Fidelity) {
     let (bins, rows, fold) = f.fold();
     let finest_bin_hz = f.header.bandwidth_hz.unwrap() / DISPLAY_FFT_MAX as f64;
 
@@ -599,9 +597,7 @@ fn the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds() {
 ///
 /// This is a property of **dB values from two backend readers of one capture**. No colormap, no
 /// display range, no pixels — T-470 can change both without moving this number.
-#[test]
-fn the_finest_live_tier_reproduces_the_display_ffts_values() {
-    let Some(f) = run() else { return };
+fn the_finest_live_tier_reproduces_the_display_ffts_values(f: &Fidelity) {
     let tol_db = 1.0f32;
     let (_, _, fold) = f.fold();
 
@@ -721,9 +717,7 @@ fn the_finest_live_tier_reproduces_the_display_ffts_values() {
 /// So every dB the other three tests report is **the statistic and the grid, not a calibration
 /// difference**. Without this, "the canvas reads 10 dB high" could have been a unit bug; with it,
 /// the 10 dB is what the max-hold does.
-#[test]
-fn the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound() {
-    let Some(f) = run() else { return };
+fn the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound(f: &Fidelity) {
     let display = median(f.display_band(QUIET.0, QUIET.1));
     let mean_plane = median(f.canvas_band(QUIET.0, QUIET.1, &f.canvas_mean_db));
     let max_plane = median(f.canvas_band_max(QUIET.0, QUIET.1));
@@ -758,9 +752,7 @@ fn the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound() {
 ///
 /// The number reported is a property of **one emission's SNR against the same recording's own
 /// noise, measured twice** — once through each path. It is not a difference between two images.
-#[test]
-fn max_hold_folding_washes_out_the_narrow_spur_and_the_station() {
-    let Some(f) = run() else { return };
+fn max_hold_folding_washes_out_the_narrow_spur_and_the_station(f: &Fidelity) {
     let tol_db = 2.0f32;
 
     let probe = |name: &str, hz: f64, half: f64| {
@@ -822,10 +814,7 @@ fn max_hold_folding_washes_out_the_narrow_spur_and_the_station() {
 /// display path's own row rate against the canvas's one-second cell. A canvas row is a *max* over
 /// its second, so it keeps the crests and discards the troughs; the variation that survives is what
 /// the waterfall can still draw.
-#[test]
-fn one_second_cells_flatten_the_wave_the_display_path_still_shows() {
-    let Some(f) = run() else { return };
-
+fn one_second_cells_flatten_the_wave_the_display_path_still_shows(f: &Fidelity) {
     let channel = |name: &str, hz: f64, half: f64| {
         let d: Vec<f32> = f
             .display_channel_track(hz - half, hz + half)
@@ -868,4 +857,37 @@ fn one_second_cells_flatten_the_wave_the_display_path_still_shows() {
         (f.window.1 - f.window.0) as f64 * 1e-9,
         d_rows as f64 / c_rows.max(1) as f64,
     );
+}
+
+/// The module's five assertions, over **one** build of the shared `Fidelity` fixture.
+///
+/// They were five `#[test]`s sharing a `static OnceLock`, which shares nothing under nextest —
+/// every test is its own process, so the replay-and-fold ran five times (16.6, 16.5, 16.5, 16.4,
+/// 16.4 s) for one result (`docs/test-speed-review-2026-09-22.md` §2.4). Each is still a
+/// separately named check that runs even if an earlier one fails; see [`hk_e2e::Checks`].
+#[test]
+fn canvas_fidelity() {
+    let Some(f) = run() else { return };
+    let mut c = hk_e2e::Checks::new("canvas_fidelity");
+    c.check(
+        "the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds",
+        || the_finest_live_tier_is_no_coarser_than_the_display_ffts_it_folds(f),
+    );
+    c.check(
+        "the_finest_live_tier_reproduces_the_display_ffts_values",
+        || the_finest_live_tier_reproduces_the_display_ffts_values(f),
+    );
+    c.check(
+        "the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound",
+        || the_two_paths_agree_on_the_noise_floor_so_the_comparison_is_sound(f),
+    );
+    c.check(
+        "max_hold_folding_washes_out_the_narrow_spur_and_the_station",
+        || max_hold_folding_washes_out_the_narrow_spur_and_the_station(f),
+    );
+    c.check(
+        "one_second_cells_flatten_the_wave_the_display_path_still_shows",
+        || one_second_cells_flatten_the_wave_the_display_path_still_shows(f),
+    );
+    c.finish();
 }

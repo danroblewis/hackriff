@@ -120,6 +120,17 @@
 # lengthen it, by taking CPU away from the one-at-a-time tests that ARE the critical path:
 # the same 266 serial tests cost 224 s at 8 and 279 s at 28. That is also the whole flake
 # mechanism in one line, since those are the tests that bound wall-clock latencies.
+#
+#   T-763, 2026-09-22 — THE CRITICAL PATH HAS MOVED OUT OF THE GROUP; RE-MEASURE BEFORE
+#   TUNING EITHER NUMBER AGAIN. The run above was 234 s. By 2026-09-22 the workspace run
+#   is ~900 s, and the `SLOW` lines in `ops/merge-runner.log` say where it went: FIVE
+#   binaries that are NOT in this group dominate it — `hk-estimate::receiver_lines` past
+#   300 s, and `hk-classify`'s `accuracy_sweep`, `below_gate_absorption`, `open_set_stats`
+#   and `verifier_gain` at 60-180 s each. All five tripled in cost at one gate (09-21
+#   04:55, +8 tests, 462 s -> 756 s) and stayed there. So "the group IS the critical path"
+#   is no longer true, and the arithmetic above — which is why 8 beats 28 — rests on it.
+#   Shrinking those five is the lever; changing `test-threads` on the old numbers is not.
+#   docs/10, "The '60 % slower in two days' was two different measurements".
 #   - corroborating, from an investigation that was not looking for a thread count at all
 #     (T-257, docs/10 §3.4): nextest `LEAK` lines here are a macOS pipe(2)/FD_CLOEXEC race
 #     between concurrently SPAWNING test processes, and they scale with spawn concurrency
@@ -153,6 +164,55 @@
 
 [profile.default]
 test-threads = 8
+# THE `timing` TIER (user, 2026-09-22): throughput tests do not gate merges.
+#
+# Three tests assert HOW FAST the real-time path keeps up - that N stations demodulate
+# concurrently in real time, that live listen audio streams and detaches within a latency,
+# that the growing edge is not blocked by a competing pyramid writer. Those are properties
+# of the MACHINE'S HEADROOM as much as of the code, and the merge gate runs on a box that
+# by policy carries four bounded workers beside it, so a gate cannot honestly measure them:
+# since 09-21 they were 8 of the 31 red lines in ops/merge-runner.log, every one green
+# alone. They are not deleted and not #[ignore]d - they are the only tests of those
+# properties. They are a tier, like HIL (T5): `just timing` runs them on a quiet box or
+# nightly, and `just gate` never does.
+#
+# HOW: nextest's default-filter. Every run under the default profile (and `ci`, which
+# inherits) skips the set below unless `--ignore-default-filter`; the `timing` profile
+# at the end of this file inverts it. `just nextest-config-check` fails if a name here no
+# longer matches a `fn` in the tree, so a rename cannot silently re-admit a test to the
+# gate - or silently drop it from the tier.
+#
+# THE RULE, which decides what goes here and what does not: a test that reads the wall
+# clock to decide WHAT to assert on (which tile, which row, which window) is a BUG - fix it
+# by reading the instant off the wire and pinning the index (task-deflake-0922's pattern,
+# docs/10 §3.6). A test whose ASSERTION is a latency or throughput bound belongs in this
+# tier. Readiness waits with a measured bound are neither and stay in the gate.
+#
+# The seven kind-1 (wall-clock) tests that sat here during the 2026-09-22 merge crisis are
+# BACK IN THE GATE (2026-09-23): their deterministic rewrites landed - tile_shadow and
+# tile_route (task-deflake-0922), a_run_that_really_ended and a_finished_run_still_answers_410
+# (task-deflake-cov: read the HTTP body to Content-Length), a_handshake (T-602),
+# unknown_is_only (T-596 follow-up), coverage_answers (T-621 refuses without the IQ ring).
+# Only the three throughput assertions remain, and they are the tier's definition.
+default-filter = '''
+not (
+  test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
+  or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
+  or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+)
+'''
+
+# MACHINE-READABLE RESULTS (user, 2026-09-22): every nextest run writes a JUnit report -
+# each `<testcase>` with its `time`, in run order, failures with their output - to
+# target/nextest/<profile>/junit.xml. nextest overwrites it per run, so `just gate` copies
+# it to $HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml after each suite
+# (py/hkpy/gate.py keep_junit) and the dashboard renders the newest. A 36-minute gate is
+# now readable test by test instead of only as a total. (This table must sit AFTER every
+# bare key of [profile.default]: in TOML a key below a table header belongs to that table.)
+[profile.default.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
 
 [test-groups.heavy-serial]
 max-threads = 1
@@ -196,8 +256,36 @@ test-group = 'e2e-bounded'
 filter = 'package(hk-pipeline) and (test(listen) or test(retune) or test(lossless) or test(refine) or test(stream) or binary(scheduler_history) or binary(replumb_never_pays_for_the_ring))'
 test-group = 'heavy-serial'
 
+# T-SDET (2026-09-22): the blanket `package(hk-api) or package(hk-cli)` this replaces cost 244 s of
+# the workspace run's CRITICAL PATH for no resource reason. The rule above is "binds real TCP ports
+# or spawns a daemon process" — and three hk-api binaries do neither. `tile_ceiling`, `tile_cost`
+# and `tile_no_generation` call `hk_api::tiles::tile_read` in-process against a `TempDir` named with
+# `process::id()` + `thread::id()`: grep for `TcpListener::bind`, `TcpStream::connect` or
+# `local_addr()` in them and you get ZERO hits, against 8-14 in every other hk-api test binary.
+# They are simply expensive (a 12 x 15 lattice walk on an empty store, by design — see the file's
+# own header), and `max-threads = 1` was serialising CPU work against itself.
+#
+# MEASURED, this worktree, `-p hk-api -E 'binary(tile_ceiling)+binary(tile_cost)+binary(tile_no_generation)'`,
+# 10 tests, CARGO_BUILD_JOBS=2 on a box at load ~12-20:
+#
+#   in `heavy-serial` (max-threads = 1)   243.9 s wall, 195 s CPU
+#   ungrouped, --test-threads 3           116.4 s wall, 189 s CPU   -52 %
+#
+# The CPU is identical; only the serialisation goes. And the saving is larger than the wall figure
+# says, because the group IS the workspace run's critical path (docs/test-speed-review-2026-09-22.md
+# §2: run wall == group sum to under a second, 17 of 17 gates), so these seconds come off the run
+# one-for-one while the 7 free threads they move onto had idle capacity in every gate measured.
+# In the gates themselves those three binaries were 171 s of a ~1000 s critical path.
+#
+# hk-cli keeps the blanket: api_contract, control_http and iq_buffer_allocation_http start a real
+# `hk serve`, ctrl_c spawns `hk`/`hackriffd` as child processes, and temp_dir_hygiene asserts on
+# the shared temp directory. Every hk-cli binary earns its place; three hk-api ones did not.
 [[profile.default.overrides]]
-filter = 'package(hk-api) or package(hk-cli)'
+filter = 'package(hk-api) and not (binary(tile_ceiling) or binary(tile_cost) or binary(tile_no_generation))'
+test-group = 'heavy-serial'
+
+[[profile.default.overrides]]
+filter = 'package(hk-cli)'
 test-group = 'heavy-serial'
 
 [[profile.default.overrides]]
@@ -335,5 +423,42 @@ test-group = 'heavy-serial'
 # bound unmeasured quantities (T-430, T-433, T-446).
 # =========================================================================================
 
+# 2026-09-22: the merge gate failed 11 of 16 runs, each on a DIFFERENT one of these tests, with the
+# branches under test unable to have touched them (docs/ops-only). Each PASSES alone and fails only
+# beside a loaded machine; each is timing-bound. One retry at the gate is the bridge the two
+# overrides above already use; the standing obligation is the ticket beside each line - a retry
+# that keeps firing is a defect, and `$HACKRIFF_OPS/flaky.jsonl` (merge runner) records every one.
+[[profile.default.overrides]]
+filter = 'test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)'   # T-603
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(tile_shadow_carries_a_departed_band_and_nothing_where_never_observed)'   # api_contract, no ticket yet: observed 2026-09-22 08:36
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell)'   # T-509
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(a_run_that_really_ended_still_says_so)'   # recovery_spectrum_handshake, observed 2026-09-22 11:12
+retries = 1
+
+[[profile.default.overrides]]
+filter = 'test(coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked)'   # T-430/T-436/T-621
+retries = 1
+
 [profile.ci]
 test-threads = "num-cpus"
+
+# The `timing` tier, inverted (see `default-filter` under [profile.default]): `just timing`
+# runs EXACTLY the tests the gate skips, one at a time - they measure headroom, so they must
+# not be measured against each other. Keep the two lists identical but for the `not`;
+# `just nextest-config-check` verifies both name real tests.
+[profile.timing]
+test-threads = 1
+default-filter = '''
+test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
+or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
+or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+'''

@@ -34,6 +34,7 @@ Decides where the single half-duplex radio points. It alternates discovery sweep
 - **Window packing:** centre dwells to cover the most candidates while avoiding DC (SDRangel Frequency Scanner, docs/03 §2.2).
 - **Preemption** (estimate): interactive user > pinned leases (trunking CC, pass) > scheduled plans > bandit exploration > background sweep. Precedent: OpenWebRX users preempt background schedules (docs/03 §2.4 "Web-based and embedded receivers").
 - **Pass-driven dwells:** SatDump-style auto scheduler (docs/03 §3.6 "Satellites").
+  - *Implemented (T-276):* `Scheduler::reserve` books a `Reservation` (a pinned lease with a future start) from C29's predicted passes. Lower tiers are clipped at its start and the clipped slot is rolled back (revisited in full); it runs as a pass lease from start to its predicted end, shares the pinned tier round-robin with other leases, and yields to interactive intent. Late starts and missed windows are counted in `ScheduleStats`, never hidden. Overlapping passes are resolved before reserving (shared window if the downlinks fit, otherwise higher max elevation wins) in `hk_context::passes::plan`.
 
 ## Platform constraints
 - One radio, half-duplex: sweep, dwell and TX are mutually exclusive (docs/01 §1.2 "Specifications").

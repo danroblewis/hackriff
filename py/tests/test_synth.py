@@ -34,6 +34,9 @@ SMALL: dict[str, dict] = {
     "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
+    # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
+    # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
+    "multipath_echo": {"duration_s": 0.6},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
@@ -45,6 +48,7 @@ SMALL: dict[str, dict] = {
     "trunk_control_channel": {"duration_s": 0.2},
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
+    "trunk_p25p2_control_channel": {"duration_s": 0.2},
     "trunk_dmr_control_channel": {"duration_s": 0.2},
     "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
@@ -360,6 +364,65 @@ def test_fsk_bursts_demodulate_to_truth_bits_with_valid_crc(tmp_path, impaired):
         if not impaired:
             noise = 10 ** (st_floor(meta) / 10)
             assert abs(db(np.mean(np.abs(x[s : s + n]) ** 2) - noise) - t["power_dbfs"]) < 0.5
+
+
+@pytest.mark.parametrize("width", [8, 16, 24, 32])
+def test_fsk_check_width_is_parameterised_and_round_trips(tmp_path, width):
+    """T-622: docs/22 A7 needs CRC-8/16/24/32 on the generic generator; ADR-0022 SS4.3 lowered
+    the confirm-gate width floor to 8."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", check_width=width))
+    st = scenario_truth(meta)
+    bursts = truths(meta, kind="fsk-burst")
+    assert len(bursts) >= 2
+    assert st["emitter"]["crc"]["width"] == width
+    hex_width = width // 4
+    for _, t in bursts:
+        assert t["crc"]["width"] == width
+        payload = bytes.fromhex(t["frame"]["payload_hex"])
+        params = t["crc"]
+        # Independent reference: the bit-serial RevEng engine, over the params truth states.
+        crc = fsk_mod.crc_generic(payload, width, int(params["poly"], 16), int(params["init"], 16),
+                                   params["refin"], params["refout"], int(params["xorout"], 16))
+        assert f"{crc:0{hex_width}x}" == t["frame"]["crc_hex"] == params["value"][2:]
+        assert len(t["frame"]["crc_hex"]) == hex_width
+        assert t["frame"]["layout"][-1] == {"field": "check", "bits": width,
+                                            "covers": "sensor_id..flags (6 bytes)"}
+        assert params["start_bit"] == t["frame"]["preamble_bits"] + 16  # sync is always 2 bytes
+
+
+def test_fsk_off_catalogue_polynomial_is_flagged_and_not_recognised(tmp_path):
+    """T-622 / docs/22 A7: a polynomial not in the RevEng catalogue, so a structured signal
+    exists whose check cannot be looked up."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", check_width=16, check_poly_hex="0x8F45"))
+    _, t = truths(meta, kind="fsk-burst")[0]
+    assert t["crc"]["poly"] == "0x8f45"
+    assert t["crc"]["in_reveng_catalogue"] is False
+    assert t["crc"]["catalogue_name"] is None
+    assert fsk_mod.crc_catalogue_name(16, 0x8F45, 0xFFFF, False, False, 0) is None
+    # The default (no override) still lands exactly on the historical CRC-16/CCITT-FALSE, so
+    # existing fixtures and their byte-identical determinism are unaffected by this feature.
+    _, meta_default, _ = load(gen(tmp_path, "fsk_burst_train"))
+    _, td = truths(meta_default, kind="fsk-burst")[0]
+    assert td["crc"]["catalogue_name"] == "CRC-16/CCITT-FALSE" and td["crc"]["in_reveng_catalogue"]
+
+
+def test_fsk_constant_payload_beacon_repeats_the_same_frame(tmp_path):
+    """T-622 / docs/22 P7, ADR-0022 SS4.2: a beacon must NOT confirm on repeat count alone -
+    `differences` (chance-corrected) stays 1 for a beacon how ever many bursts are sent, unlike
+    `distinct_valid`, which counts every valid frame. This fixture is the case that exercises it:
+    every burst carries the identical payload and therefore the identical CRC."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", constant_payload=True))
+    st = scenario_truth(meta)
+    bursts = truths(meta, kind="fsk-burst")
+    assert len(bursts) >= 3 and st["emitter"]["constant_payload"] is True
+    payloads = {t["frame"]["payload_hex"] for _, t in bursts}
+    crcs = {t["frame"]["crc_hex"] for _, t in bursts}
+    assert len(payloads) == 1 and len(crcs) == 1
+    # A non-beacon run (the default) varies payload/CRC frame to frame.
+    _, meta_varying, _ = load(gen(tmp_path, "fsk_burst_train"))
+    varying_bursts = truths(meta_varying, kind="fsk-burst")
+    assert len(varying_bursts) >= 3
+    assert len({t["frame"]["payload_hex"] for _, t in varying_bursts}) > 1
 
 
 def st_floor(meta):
@@ -1423,14 +1486,25 @@ def test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo(tmp_p
             # Fixed LO offset: the absolute frequency changes with the centre.
             power = tone_power_dbfs(seg, fs, offset)
             assert power > floor + 6, f"artefact at offset {offset} missing at centre {centre}"
+        # T-599: an IQ image, fixed in the invariant f - 2*f_LO, so its baseband offset (and
+        # absolute frequency) changes with the centre at TWICE the LO's own step.
+        image_offset = 2.0 * centre - st["image_source_hz"] - centre
+        power = tone_power_dbfs(seg, fs, image_offset)
+        assert power > floor + 6, f"IQ image missing at centre {centre}"
 
     # The annotations say the same thing.
     for _, t in truths(meta, role="emission"):
         assert t["center_hz"] in st["emitters_hz"]
     for _, t in truths(meta, role="artefact"):
-        assert t["kind"] in ("dc-offset", "lo-spur")
-        assert t["offset_hz"] in st["lo_relative_offsets_hz"]
-        assert t["center_hz"] - t["offset_hz"] in centres
+        assert t["kind"] in ("dc-offset", "lo-spur", "iq-image")
+        if t["kind"] == "iq-image":
+            # Fixed in the invariant f - 2*f_LO, not in a fixed LO offset.
+            centre = t["center_hz"] - t["offset_hz"]
+            assert centre in centres
+            assert t["center_hz"] - 2.0 * centre == pytest.approx(-st["image_source_hz"])
+        else:
+            assert t["offset_hz"] in st["lo_relative_offsets_hz"]
+            assert t["center_hz"] - t["offset_hz"] in centres
 
 
 def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):

@@ -77,7 +77,10 @@ after(async () => {
 async function open() {
   // Its own port (never 8789/8899/8900 — the user's live-HackRF demo) and its own mock backend;
   // the shared HK_E2E_PORT backend other files use is a plain --replay with no tunable range.
-  const backend = await startBackend({ port: 8807, mockDevice: true });
+  // The port is the LANE's base + 12, not a constant: the constant 8807 was shared with
+  // fog-of-war.e2e.mjs, and at three lanes the two ran side by side on 2026-09-23 - one of them
+  // was stepped past the busy port and the other's spec then talked to the wrong server.
+  const backend = await startBackend({ port: Number(process.env.HK_E2E_PORT ?? 8791) + 12, mockDevice: true });
   await waitForCoverage(backend, 60000);
   const browser = await Browser.open();
   const page = await browser.page();

@@ -41,7 +41,7 @@ function data(a: TileAddr): TileData {
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
     measured: { nf: 2, nt: 2 },
-    rangeDb: { lo: -100, hi: -60 }, bytes: BYTES, serverInFlightLimit: null,
+    rangeDb: { lo: -100, hi: -60 }, bytes: BYTES, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

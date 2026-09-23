@@ -373,6 +373,20 @@ fn m3_unknown_recall_and_false_known_rate() {
     // §7 states no floor over it — its held-out row bounds abstention and false-known only — so
     // asserting one here would be inventing a threshold after seeing results, which the blind-test
     // rule forbids in both directions. It is measured, printed and left to the ADR to bound.
+    //
+    // **The remainder is one snippet, and it is a draw from the low tail of its own generator
+    // (T-298, T-306).** T-298 left one chirped-FSK (seed 1_700_074, 20 dB) reading `analog`/`wfm`.
+    // T-306 found that T-404 (b3fac0e2, the IF level-count rewrite) swapped it for another in one
+    // commit: the chirped-FSK now abstains (open set 1.000 today), and an 8-FSK (seed 1_700_039,
+    // 20 dB) that abstained before it now reads `wfm` with plausibility 1.000. Its own KDE resolved 2 IF levels where its 20 dB peers resolve 3 to 7 (`if_modality`
+    // 2.00, `if_local_modality` 1.86), and those peers escape `wfm` only narrowly (m 1.98 to 2.62
+    // against `wfm`'s m_p95 1.596). T-306 measured the tail-term route and refuted it: `wfm`'s own
+    // dev members are heavy-tailed on every order statistic (|z| p99: 2nd 5.50, 3rd 4.73, 4th
+    // 4.17; up to 9 dimensions beyond 2σ), and this snippet's 3.58 / 2.18 / 2.06 / 2.05 sits
+    // under all of them. Only the p95 operating point would catch it, and T-248 measured p95
+    // taking known top-1 through the 0.90 floor. Narrowing the level-count KDE kernel (T-404's
+    // 0.30) or `IF_LOCAL_WINDOW` would be fitting this seed, not the physics, so it stays a
+    // documented remainder.
     eprintln!(
         "[{T206}] held-out inputs given a family that is NOT their own: {} of {} — {:?}",
         h.wrong_family.len(),

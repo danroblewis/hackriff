@@ -63,6 +63,14 @@ every agent is configured to avoid. `GATE_BUILD_ENV`/`suite_env()` fix that at t
 this file spawns a suite, not in the justfile: a developer's own `just test` still gets whatever
 incremental behaviour they want.
 
+**The gate diagnoses its own cost (`hkpy.gatediag`).** After each suite it compares every test
+to its own median over the last green runs of the same suite, aggregates by crate, and splits
+the crates by whether *this diff* touched them. Untouched crates over 3x are contention and say
+nothing about the change (the 09-21 gate: hk-recipe 79x, hk-dsp 20x, hk-core 18x, while the 8
+tests the diff added cost 0 s); touched crates over 3x are the change's own cost. The verdict
+goes in the `gate_end` record and, when contended, into one amber alert. It is wrapped whole:
+a stopwatch with an opinion must still never fail the thing it times.
+
 Stdlib only, so it can run as `python3 py/hkpy/gate.py` as well as `just gate`.
 """
 
@@ -78,11 +86,11 @@ from dataclasses import dataclass
 
 try:  # `python -m hkpy.gate` (how `just gate` runs it)
     from . import crates as crate_select
-    from . import gatelog
+    from . import gatediag, gatelog
 except ImportError:  # `python3 py/hkpy/gate.py`, the direct-execution path the docstring promises
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from hkpy import crates as crate_select  # type: ignore[no-redef]
-    from hkpy import gatelog  # type: ignore[no-redef]
+    from hkpy import gatediag, gatelog  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Classes
@@ -94,7 +102,8 @@ DOCS = "docs"
 PY = "py"
 
 #: Classes in the order they are reported when a change spans more than one.
-CLASS_ORDER = (FULL, UI, DOCS, PY)
+OPS = "ops"
+CLASS_ORDER = (FULL, UI, DOCS, PY, OPS)
 
 #: Phases. CI runs the two separately (two jobs, one recipe call each — T-358); a local
 #: `just gate` runs both. The classification is identical either way: the phase only says
@@ -108,6 +117,16 @@ PHASES = (PHASE_ALL, PHASE_CHECK, PHASE_ACCEPTANCE)
 #: M0 slice + harness targets) rather than bare `acceptance`, so the gate an agent runs
 #: locally and the gate CI runs are one definition rather than two similar ones.
 SUITES: dict[str, dict[str, tuple[tuple[str, ...], ...]]] = {
+    # Orchestration: ops/ scripts, .claude/ roles-agents-skills-hooks, prompts/. None of it is
+    # linked into a crate or read by a suite, so the full workspace run proves nothing about it -
+    # and on 2026-09-22 four docs/ops-only branches each burned a 50-minute full gate and lost it
+    # to a load-sensitive Rust test they could not have touched. What CAN break here is a bash
+    # script or a Python tool, so: syntax-check the scripts and run the Python suite (which also
+    # validates the board).
+    OPS: {
+        PHASE_CHECK: (("just", "ops-check"), ("just", "lint-py"), ("just", "test-py")),
+        PHASE_ACCEPTANCE: (),
+    },
     FULL: {
         PHASE_CHECK: (("just", "lint"), ("just", "test")),
         PHASE_ACCEPTANCE: (("just", "acceptance-ci"), ("just", "test-ui-e2e")),
@@ -230,6 +249,9 @@ _RULES: tuple[tuple[str, str, str, str], ...] = (
     ("exact", "docs/use-cases.yaml", PY, "machine-readable use cases - the Python suite reads it"),
     ("prefix", "docs/", DOCS, "documentation"),
     ("prefix", "py/", PY, "Python tooling (orchestration/research only)"),
+    ("prefix", "ops/", OPS, "orchestration scripts - not linked into any crate"),
+    ("prefix", ".claude/", OPS, "roles, agents, skills, hooks - prompts and hook scripts"),
+    ("prefix", "prompts/", OPS, "model-selection and briefing prompts"),
 )
 
 _UNCLASSIFIED = "unclassified path — the gate fails closed"
@@ -622,6 +644,12 @@ CRATES_ENV = "HK_GATE_CRATES"
 #: Unset means RUN, like `HK_GATE_CRATES`: a bug here costs 2.5 minutes, never coverage.
 SKIP_UI_ENV = "HK_GATE_SKIP_UI"
 
+#: What `ops/merge-runner.sh` gave up waiting for before starting this gate: unowned CPU or a
+#: load over the box's plan, as `ops/watchdog.py` last saw it. Purely informational - it changes
+#: no suite and no decision - but a gate run beside a 100 % process nobody owns is not a
+#: measurement of the code, and the gate log is where that has to be said or it is lost.
+CONTENDED_ENV = "HK_GATE_CONTENDED"
+
 
 def skip_ui(decision: Decision, source: Source) -> bool:
     """True when the CHECK-phase UI suite can be skipped for this diff.
@@ -734,6 +762,72 @@ def head_sha(root: str) -> str | None:
     except Exception:
         return None
     return out.strip() if out and out.strip() else None
+
+
+def keep_junit(root: str, run_id: str, n: int, cmd: list[str], since: float) -> list[str]:
+    """Copy every nextest JUnit report this suite wrote into `$HACKRIFF_OPS/junit/<run_id>/`.
+
+    User, 2026-09-22: a 36-minute gate with no per-test record is unmeasurable — "we should be
+    recording whatever the normal machine-readable output is for the test suite". nextest writes
+    one `target/nextest/<profile>/junit.xml` per run when `.config/nextest.toml` names a
+    `[profile.default.junit] path`, and OVERWRITES it on the next run — `just test` and
+    `just acceptance-ci` both run under the default profile — so the gate copies it away after
+    each suite, keyed by run id and suite order, before the next suite can clobber it. Every
+    `<testcase>` carries its `time`, and the file order is the run order, so a slow gate can be
+    read test by test (`ops/monitor.py` renders the newest). Only files written during this
+    suite are taken (`since`): a stale report from an earlier run is not this suite's evidence.
+    Never fails the gate — a missing report is a missing measurement, not a red.
+    """
+    import glob
+
+    kept: list[str] = []
+    try:
+        dest = os.path.join(gatelog.ops_dir(), "junit", run_id)
+        for src in sorted(glob.glob(os.path.join(root, "target", "nextest", "*", "junit.xml"))):
+            if os.path.getmtime(src) < since:
+                continue
+            profile = os.path.basename(os.path.dirname(src))
+            suite = "-".join(cmd[1:]) or cmd[0]
+            os.makedirs(dest, exist_ok=True)
+            out = os.path.join(dest, f"{n:02d}-{suite}-{profile}.xml")
+            shutil.copyfile(src, out)
+            kept.append(out)
+    except OSError as e:  # pragma: no cover - best effort by design
+        print(f"gate: junit    = not kept ({e})", file=sys.stderr)
+    return kept
+
+
+def diagnose_kept(
+    kept: list[str],
+    *,
+    source: Source,
+    cmd: list[str],
+    records: list[dict] | None,
+    out: list,
+) -> None:
+    """Print `hkpy.gatediag`'s verdict for every JUnit file this suite just wrote.
+
+    WRAPPED WHOLE, deliberately. This is a stopwatch with an opinion, and a stopwatch must not
+    be able to fail the thing it times — the same rule `gatelog.append` is written under. Any
+    exception at all degrades to one stderr line and a gate that carries on exactly as before.
+    """
+    try:
+        for path in kept:
+            diag = gatediag.diagnose_suite(
+                path,
+                changed_paths=source.paths,
+                records=records,
+                cmd=" ".join(cmd),
+            )
+            if diag is None:
+                continue
+            out.append(diag)
+            print(diag.line(), flush=True)
+            dearer = diag.dearer_line()
+            if dearer:
+                print(dearer, flush=True)
+    except Exception as e:  # pragma: no cover - by design; see the docstring
+        print(f"gate: timing   = diagnosis unavailable ({e})", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -867,9 +961,17 @@ def main(argv: list[str] | None = None) -> int:
     # worth knowing about — still leaves a trace. See `gatelog.py`.
     run_id = gatelog.new_run_id()
     started = time.monotonic()
+    # `ops/merge-runner.sh` waits for the box to clear before gating, but that wait is capped
+    # (45 min) so a stuck worker or a leaked process cannot hold every merge for ever. When the
+    # cap expires it gates anyway and says what it gave up waiting for. Printed AND recorded,
+    # because the run is still a real gate - just not a measurement of the code.
+    contended = os.environ.get(CONTENDED_ENV, "").strip() or None
+    if contended:
+        print(f"gate: CONTENDED by {contended}", flush=True)
     gatelog.append(
         gatelog.start_record(
             run_id,
+            contended=contended,
             klass=decision.label,
             phase=args.phase,
             source=source.description,
@@ -883,19 +985,49 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"gate: timing   = run {run_id} -> {gatelog.log_path()}", flush=True)
 
+    # Read the timing history ONCE, before the first suite, so a suite's wall-clock baseline is
+    # the history as it stood when this gate started rather than a moving target that includes
+    # this run's own earlier suites.
+    try:
+        history_records = gatelog.read()
+    except Exception:  # pragma: no cover - gatelog.read already swallows OSError
+        history_records = []
+    diagnoses: list = []
+
     result = 0
-    for cmd in commands:
+    for n, cmd in enumerate(commands, 1):
         print(f"gate: running {' '.join(cmd)}", flush=True)
         cmd_started = time.monotonic()
+        wall_started = time.time()
         rc = subprocess.run(cmd, cwd=root, env=env, check=False).returncode
         elapsed = time.monotonic() - cmd_started
         gatelog.append(gatelog.suite_record(run_id, cmd=cmd, seconds=elapsed, rc=rc))
+        kept_files = keep_junit(root, run_id, n, cmd, since=wall_started)
+        for kept in kept_files:
+            print(f"gate: junit    = {kept}", flush=True)
         print(f"gate: {' '.join(cmd)} took {elapsed:.0f}s (exit {rc})", flush=True)
+        # T-item 4: why this suite cost what it cost — per test, per crate, split by whether
+        # THIS diff touched the crate. Printed immediately after the duration it explains, so
+        # the two are read together in the log and on the dashboard.
+        diagnose_kept(
+            kept_files, source=source, cmd=cmd, records=history_records, out=diagnoses
+        )
         if rc != 0:
             print(f"gate: FAILED {' '.join(cmd)} (exit {rc})", file=sys.stderr)
             result = rc
             break
     total = time.monotonic() - started
+
+    # One verdict for the whole gate (the worst suite wins), recorded next to the duration it
+    # qualifies and alerted ONCE per run. Wrapped for the same reason `diagnose_kept` is.
+    verdict = None
+    try:
+        verdict = gatediag.merge(diagnoses)
+        if verdict is not None:
+            print(f"gate: verdict  = {verdict.line()}", flush=True)
+            gatediag.announce(verdict, root=root, run_id=run_id)
+    except Exception as e:  # pragma: no cover - by design
+        print(f"gate: timing   = verdict unavailable ({e})", file=sys.stderr)
     gatelog.append(
         gatelog.end_record(
             run_id,
@@ -903,6 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
             phase=args.phase,
             seconds=total,
             rc=result,
+            extra=verdict.record_fields() if verdict is not None else None,
         )
     )
     if result != 0:

@@ -294,3 +294,81 @@ test("without a host-supplied onShadowGain, Ctrl+Shift+wheel falls through to th
   h.fire("wheel", { preventDefault: () => {}, clientX: 400, clientY: 300, deltaY: -120, deltaX: 0, deltaMode: 0, ctrlKey: true, shiftKey: true });
   assert.deepEqual(h.calls.map((c) => c.fn), ["wheel"], "with no shadow-gain host, the combo must still do SOMETHING sensible, not silently eat the event");
 });
+
+// ---------------------------------------------------------------------------
+// 6. T-822 / MAP-22: measurement mode is a TOGGLE, not a modifier — checked first, no shift needed
+// ---------------------------------------------------------------------------
+
+test("measureMode on: an UNMODIFIED drag marks out a measurement and pans NOTHING", () => {
+  const got: SurfaceRegion[] = [];
+  const h = harness({ measureMode: true, onMeasure: (r) => got.push(r) });
+  stroke(h, MID, [{ x: 460, y: 340 }, { x: 520, y: 380 }]);
+  assert.deepEqual(h.calls, [], "a measurement stroke moved the viewport: the readout would then describe a window that moved under it");
+  assert.equal(got.length, 1);
+  assert.deepEqual(got[0].a, { x: 400, y: H - 300 });
+  assert.deepEqual(got[0].b, { x: 520, y: H - 380 });
+});
+
+test("measureMode on: EXTENT ON ONE AXIS ALONE commits — a pure Δt or Δf, unlike a region", () => {
+  const vertical: SurfaceRegion[] = [];
+  const h1 = harness({ measureMode: true, onMeasure: (r) => vertical.push(r) });
+  stroke(h1, MID, [{ x: MID.x, y: 500 }]); // no x travel at all
+  assert.equal(vertical.length, 1, "a pure vertical stroke is still a real measurement");
+
+  const horizontal: SurfaceRegion[] = [];
+  const h2 = harness({ measureMode: true, onMeasure: (r) => horizontal.push(r) });
+  stroke(h2, MID, [{ x: 600, y: MID.y }]); // no y travel at all
+  assert.equal(horizontal.length, 1, "a pure horizontal stroke is still a real measurement");
+});
+
+test("Shift+drag NEVER changes meaning, in ANY tool mode (docs/23 §10.4): it still marks a region while measuring", () => {
+  const regions: SurfaceRegion[] = [];
+  const measures: SurfaceRegion[] = [];
+  const h = harness({ measureMode: true, onRegion: (r) => regions.push(r), onMeasure: (r) => measures.push(r) });
+  stroke(h, MID, [{ x: 460, y: 340 }], { shift: true });
+  assert.equal(regions.length, 1, "a tool mode re-binds only the BARE drag; Shift+drag is untouched by it");
+  assert.deepEqual(measures, [], "…so no measurement is ALSO produced by the same stroke");
+});
+
+test("measureMode off: a plain drag still pans, exactly as before this ticket", () => {
+  const h = harness({ measureMode: false, onMeasure: () => { throw new Error("must not fire"); } });
+  stroke(h, MID, [{ x: 460, y: 340 }]);
+  assert.deepEqual(h.calls.map((c) => c.fn), ["drag"]);
+});
+
+test("measureMode: a TAP commits nothing, does not focus, and the band is retracted on release/cancel", () => {
+  const got: SurfaceRegion[] = [];
+  const clicks: unknown[] = [];
+  const h = harness({ measureMode: true, onMeasure: (r) => got.push(r), onClick: (p) => clicks.push(p) });
+  stroke(h, MID, [{ x: 402, y: 302 }, { x: 403, y: 301 }]);
+  assert.deepEqual(got, [], "a tap must never mark out a measurement");
+  assert.deepEqual(clicks, [], "…nor fall through to the click that focuses a row");
+  assert.deepEqual(h.calls, [], "…nor pan");
+
+  const seen: (SurfaceRegion | null)[] = [];
+  const h2 = harness({ measureMode: true, onMeasure: () => {}, onMeasureDrag: (r) => seen.push(r) });
+  stroke(h2, MID, [{ x: 460, y: 340 }]);
+  assert.equal(seen[seen.length - 1], null, "the band must be retracted on release");
+
+  const c: (SurfaceRegion | null)[] = [];
+  const h3 = harness({ measureMode: true, onMeasure: () => {}, onMeasureDrag: (r) => c.push(r) });
+  h3.fire("pointerdown", { button: 0, clientX: MID.x, clientY: MID.y, pointerId: 1 });
+  h3.fire("pointermove", { buttons: 1, clientX: 500, clientY: 400 });
+  h3.fire("pointercancel", {});
+  assert.equal(c[c.length - 1], null, "a cancelled stroke must retract its band too");
+});
+
+test("measureMode: T-340's control — NO call reaches the network over the whole vocabulary", () => {
+  const g = globalThis as { fetch?: unknown };
+  const real = g.fetch;
+  const net: unknown[] = [];
+  g.fetch = (...args: unknown[]) => { net.push(args); return Promise.reject(new Error("a gesture must not reach the network")); };
+  const measures: SurfaceRegion[] = [];
+  try {
+    const h = harness({ measureMode: true, onMeasure: (r) => measures.push(r), onMeasureDrag: () => {}, onClick: () => {}, onHover: () => {} });
+    stroke(h, MID, [{ x: 700, y: 500 }]);
+    stroke(h, MID, [{ x: 401, y: 301 }]); // tap
+  } finally { if (real) g.fetch = real; else delete g.fetch; }
+  assert.deepEqual(net, [], "a measurement gesture reached the network");
+  assert.equal(measures.length, 1, "no measurement was produced at all, so the run proves nothing");
+});

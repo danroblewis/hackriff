@@ -1154,19 +1154,35 @@ fn watch_for_hang(
 
 /// Blocks until `pid` has exited, without reaping it, so its pid cannot be reused while a kill
 /// may still target it.
+///
+/// `rc == 0` alone is **not** an exit (T-323): on macOS, `waitid(P_PID, pid, WEXITED | WNOWAIT)`
+/// was observed returning 0 for a *live* plugin, with `si_pid` the plugin's own pid, `si_code`
+/// `CLD_STOPPED` and `si_status` 17, at the moment the plugin spawned or killed a child of its own
+/// (`hk-plugin-gnss-sdr` timing out its `gnss-sdr`); the plugin went on to exit 0 later. Taking
+/// that as an exit made the supervisor SIGKILL a healthy plugin's group. Only `CLD_EXITED`,
+/// `CLD_KILLED` and `CLD_DUMPED` end the wait; any other report is waited through, with a short
+/// sleep so a report the kernel repeats cannot spin.
 fn wait_exit_unreaped(pid: u32) {
     loop {
         // SAFETY: `info` is a valid, zeroed siginfo_t for waitid to fill.
-        let rc = unsafe {
+        let (rc, code) = unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
-            libc::waitid(
+            let rc = libc::waitid(
                 libc::P_PID,
                 pid as libc::id_t,
                 &mut info,
                 libc::WEXITED | libc::WNOWAIT,
-            )
+            );
+            (rc, info.si_code)
         };
-        if rc == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        if rc == 0 {
+            if matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
             return;
         }
     }

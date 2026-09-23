@@ -106,10 +106,15 @@ log "=== staging watcher up (port $PORT) ==="
 while true; do
   ensure_tunnel
   HEAD=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
+  # A bulk batch commits its merges to main BEFORE its gate runs and rewinds them if it fails
+  # ($S/bulk-in-progress marks that window). Building from that main puts un-landed code on the
+  # demo (2026-09-23 00:48: built 4338b62b 25 minutes before its gate passed). Wait it out; the
+  # landed HEAD is picked up on the next tick.
+  IN_BULK=0; [ -e "$S/bulk-in-progress" ] && IN_BULK=1
   if [ ! -x "$BIN" ]; then
     log "no binary yet -> building $HEAD"; build "$HEAD" && { stop_server; start_server; smoke; }
     LAST=$HEAD
-  elif [ "$HEAD" != "$LAST" ]; then
+  elif [ "$HEAD" != "$LAST" ] && [ "$IN_BULK" = 0 ]; then
     if code_changed "$LAST" "$HEAD"; then
       log "new code on main: $HEAD (was ${LAST:-none})"
       build "$HEAD" && { stop_server; start_server; smoke; }

@@ -115,8 +115,18 @@ FSK_DEFAULTS: dict[str, Any] = {
     "sensor_id": 0x5A3C,
     "calibration_k_db": -70.0,
     "start_utc": DEFAULT_START_UTC,
+    # T-622: check and payload parameterisation (docs/22 P6/P7, ADR-0022 SS4.2/4.3).
+    "check_width": 16,       # 8 / 16 / 24 / 32 - the confirm-gate width floor is 8 (ADR-0022 SS4.3)
+    "check_poly_hex": None,  # None -> the canonical template-fixed default for check_width;
+                             # an explicit hex string (e.g. "0x8f45") lands off the RevEng
+                             # catalogue on purpose (docs/22 A7's "random polynomial" row)
+    "constant_payload": False,  # True -> every burst repeats the same payload bytes (a beacon):
+                                 # `differences` stays 1 however many bursts are sent, so it must
+                                 # NOT confirm on repeat count alone (ADR-0022 SS4.2, docs/22 P7)
 }
 
+#: bits=16 base layout, kept for readers that expect the historical shape; `fsk_layout()` below
+#: is what `fsk_burst_train` actually annotates, with the real check width.
 FSK_LAYOUT = [
     {"field": "preamble", "bits": "preamble_bits", "value": "1010..."},
     {"field": "sync", "bits": "16 (sync_hex)"},
@@ -125,15 +135,23 @@ FSK_LAYOUT = [
     {"field": "temperature_dC", "bits": 12, "signed": True},
     {"field": "humidity_pct", "bits": 8},
     {"field": "flags", "bits": 4},
-    {"field": "crc16", "bits": 16, "covers": "sensor_id..flags (6 bytes)"},
+    {"field": "check", "bits": 16, "covers": "sensor_id..flags (6 bytes)"},
 ]
+
+
+def fsk_layout(check_width: int) -> list[dict[str, Any]]:
+    """`FSK_LAYOUT` with the check field's actual width (T-622: arbitrary check width)."""
+    return [
+        {**field, "bits": check_width} if field["field"] == "check" else dict(field)
+        for field in FSK_LAYOUT
+    ]
 
 
 def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     p = ctx.params
     fs = float(p["sample_rate"])
     scene = ctx.scene("fsk_burst_train", fs, _n(p),
-                      "hkpy.synth fsk_burst_train: periodic 2-FSK sensor bursts with CRC-16")
+                      "hkpy.synth fsk_burst_train: periodic 2-FSK sensor bursts with a check")
     _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
     cap = scene.captures[0]
     rate, dev, bt = float(p["symbol_rate_bd"]), float(p["deviation_hz"]), float(p["bt"])
@@ -150,30 +168,64 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     payload_rng = scene.rng("payload")
     temp_dc = int(payload_rng.integers(100, 250))
     humidity = int(payload_rng.integers(30, 70))
+
+    # T-622: check and payload parameterisation (docs/22 P6/P7, ADR-0022 SS4.2/4.3).
+    check_width = int(p["check_width"])
+    check_bytes = check_width // 8
+    crc_params = fsk.crc_params_for(check_width, p.get("check_poly_hex"))
+    catalogue_name = fsk.crc_catalogue_name(**crc_params)
+    constant_payload = bool(p["constant_payload"])
+    check_start_bit = int(len(preamble)) + len(sync) * 8
+    payload_bits = 48
+    crc_hex_width = check_bytes * 2
+
     k = 0
     while True:
         jitter = float(p["jitter_s"])
         t = float(p["first_burst_s"]) + k * float(p["period_s"])
         t += float(sched.uniform(-jitter, jitter)) if jitter > 0 else 0.0
-        temp_dc += int(payload_rng.integers(-3, 4))
+        if constant_payload:
+            seq = 0
+        else:
+            temp_dc += int(payload_rng.integers(-3, 4))
+            seq = k & 0xFF
         flags = 0b0001
-        payload_int = (sensor_id << 32) | ((k & 0xFF) << 24) | ((temp_dc & 0xFFF) << 12) \
+        payload_int = (sensor_id << 32) | (seq << 24) | ((temp_dc & 0xFFF) << 12) \
             | ((humidity & 0xFF) << 4) | flags
         payload = payload_int.to_bytes(6, "big")
-        crc = fsk.crc16_ccitt_false(payload)
+        crc = fsk.crc_generic(payload, **crc_params)
         bits = np.concatenate([preamble, fsk.bytes_to_bits(sync), fsk.bytes_to_bits(payload),
-                               fsk.bytes_to_bits(crc.to_bytes(2, "big"))])
+                               fsk.bytes_to_bits(crc.to_bytes(check_bytes, "big"))])
         iq = fsk.cpfsk(bits, fs, rate, dev, bt=bt, phase0=float(sched.uniform(0, 2 * math.pi)))
         start = max(0, int(round(t * fs)))
         if start + len(iq) > scene.n_samples:
             break
         tt = scene.time(start, len(iq))
         scene.add_samples(start, amp * iq * np.exp(2j * math.pi * off * tt))
+        crc_spec = {
+            "algorithm": catalogue_name or f"CRC-{check_width}/CUSTOM",
+            "poly": f"0x{crc_params['poly']:0{crc_hex_width}x}",
+            "width": check_width,
+            "init": f"0x{crc_params['init']:0{crc_hex_width}x}",
+            "refin": crc_params["refin"],
+            "refout": crc_params["refout"],
+            "xorout": f"0x{crc_params['xorout']:0{crc_hex_width}x}",
+            "covers": "payload bytes (sensor_id..flags)",
+            "start_bit": check_start_bit,
+            "covered_bits": payload_bits,
+            "tail_bits": 0,
+            "bit_order": "msb-first",
+            "in_reveng_catalogue": catalogue_name is not None,
+            "catalogue_name": catalogue_name,
+            "value": f"0x{crc:0{crc_hex_width}x}",
+            "valid": True,
+        }
         truth = scene.emission_truth(
             cap, off, bw, power, kind="fsk-burst", modulation="2fsk", levels=2,
             symbol_rate_bd=rate, deviation_hz=dev, mod_index=2 * dev / rate, bt=bt,
             nominal_center_hz=cap.center_hz + float(p["channel_offset_hz"]), cfo_hz=float(p["cfo_hz"]),
             burst_index=k, bit_order="msb-first", mapping="bit 1 = +deviation_hz",
+            constant_payload=constant_payload,
             frame={
                 "n_bits": int(len(bits)),
                 "bits_hex": fsk.bits_to_hex(bits),
@@ -181,12 +233,12 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                 "preamble_hex": fsk.bits_to_hex(preamble),
                 "sync_hex": sync.hex(),
                 "payload_hex": payload.hex(),
-                "crc_hex": f"{crc:04x}",
-                "layout": FSK_LAYOUT,
+                "crc_hex": f"{crc:0{crc_hex_width}x}",
+                "layout": fsk_layout(check_width),
             },
-            payload_fields={"sensor_id": sensor_id, "seq": k & 0xFF, "temperature_dC": temp_dc,
+            payload_fields={"sensor_id": sensor_id, "seq": seq, "temperature_dC": temp_dc,
                             "humidity_pct": humidity, "flags": flags},
-            crc={**fsk.CRC16_SPEC, "value": f"0x{crc:04X}", "valid": True},
+            crc=crc_spec,
             identity={"type": "sensor_id", "value": f"{sensor_id:04x}"},
         )
         f = cap.center_hz + off
@@ -205,7 +257,13 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         "n_bursts": k,
         "preamble_bits": int(len(preamble)),
         "sync_hex": sync.hex(),
-        "crc": fsk.CRC16_SPEC,
+        "constant_payload": constant_payload,
+        "crc": {"algorithm": catalogue_name or f"CRC-{check_width}/CUSTOM",
+                "poly": f"0x{crc_params['poly']:0{crc_hex_width}x}", "width": check_width,
+                "init": f"0x{crc_params['init']:0{crc_hex_width}x}", "refin": crc_params["refin"],
+                "refout": crc_params["refout"],
+                "xorout": f"0x{crc_params['xorout']:0{crc_hex_width}x}",
+                "in_reveng_catalogue": catalogue_name is not None},
     }
     return [scene], {}
 

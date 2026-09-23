@@ -428,6 +428,8 @@ mod tests {
             doppler_hz: 0.0,
             elevation_deg: None,
             locked: true,
+            pseudorange_m: None,
+            carrier_phase_cycles: None,
         }
     }
 
