@@ -1,6 +1,7 @@
 //! T-009: the scheduler's steady state allocates nothing: `next_step`, `preempt`,
 //! `release_intent`, POI updates and `StepApplier::apply`, including verification groups and
-//! cut slots, run under a counting global allocator. (Own test binary.)
+//! cut slots, and reserved pass windows (T-276: `reserve`, clipping and beginning them), run under
+//! a counting global allocator. (Own test binary.)
 
 mod sched_common;
 
@@ -9,9 +10,10 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hk_core::scheduler::{Poi, StepApplier, UserIntent};
+use hk_core::scheduler::{Clock, Lease, Poi, Reservation, StepApplier, UserIntent};
 use hk_core::{Gains, SourceCapabilities, SourceControl, SourceError};
 use hk_model::ScanPolicy;
+use hk_model::attention::observation::LeaseKind;
 use sched_common::*;
 use serde_json::json;
 
@@ -162,10 +164,28 @@ fn scheduling_and_applying_steps_do_not_allocate() {
                 s.offer_poi(poi(3, 0.5 + (i % 7) as f64, false)).unwrap();
                 s.remove_poi(100);
             }
+            if i % 2003 == 0 {
+                s.reserve(Reservation {
+                    lease: Lease {
+                        id: 7_000 + i,
+                        kind: LeaseKind::Pass,
+                        center_hz: 915e6,
+                        rate_hz: 2.4e6,
+                        gains: None,
+                        duration_ns: Some(2 * S),
+                    },
+                    start: clk.now().saturating_add_nanos(S / 2 + 12_345),
+                })
+                .unwrap();
+            }
         }
     });
     assert_eq!(allocations, 0, "allocations in the steady state");
     let stats = s.stats();
+    assert!(
+        stats.reservations_started > 0 && stats.reservation_clips > 0,
+        "{stats:?}"
+    );
     assert!(stats.verifications_completed > 0, "{stats:?}");
     assert!(stats.intent_steps > 0 && stats.truncated_slots > 0 && stats.trust_steps > 0);
 }

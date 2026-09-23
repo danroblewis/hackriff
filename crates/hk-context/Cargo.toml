@@ -13,6 +13,9 @@ hk-dsp.workspace = true
 h3o.workspace = true
 # T-113 (ADR-0012 §11): occupancy engine, baselines and reports read/write hk-store series.
 hk-store.workspace = true
+# T-276: pass windows become `hk_core::scheduler::Reservation`s (C29 → C04). Already in the build
+# graph through hk-dsp; no cycle (hk-core depends on hk-model only).
+hk-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,8 +23,8 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-# T-020: AWARE-006 end-to-end (synth → STFT → NoiseFloorTracker → Anomaly → Explanation).
-hk-core.workspace = true
+# T-020: AWARE-006 end-to-end (synth → STFT → NoiseFloorTracker → Anomaly → Explanation) also
+# uses hk-core, now a normal dependency (T-276).
 hk-e2e = { path = "../../tests/e2e" }
 num-complex.workspace = true
 # T-201: the C18 blind signature test measures a generated emission with the classifier and the

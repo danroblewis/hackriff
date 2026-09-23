@@ -5087,7 +5087,6 @@ tasks:
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
     status: in-progress
-    branch: task-t276
     priority: normal
     deps:
     - T-275
@@ -5103,6 +5102,16 @@ tasks:
       scheduler's reservation/pre-emption policy, which model-selection.md names explicitly under
       Fable/Opus-high work and CLAUDE.md marks core_interface. Flagging it true is the accurate
       record, not a downgrade - opus/high stands."
+    branch: task-t276
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 10:02).
+      Satellite work is now pass-scheduled. hk-context::passes parses TLEs (checksummed, fails loudly by line), propagates with near-earth SGP4 (matches the Vallado 2006 verification vectors for 00005 at 0/360/720 min; deep-space sets are refused rather than approximated), computes look angles, and finds AOS/TCA/LOS (checked against a brute-force 1 s elevation scan). feeds::tle caches CelesTrak snapshots through the existing offline-first feed cache; plan_from_cache predicts from whatever is cached and reports the feed's cache age and failed refreshes beside the plan. Every pass carries its TLE epoch/age: Fresh/Aging/Stale verdict, an age-widened AOS/LOS margin, and Stale (>14 d) passes are listed with their age but not reserved unless reserve_stale is set. Overlapping passes share one reservation when their downlinks (+/- Doppler) fit, otherwise the higher culmination wins and the loser is reported LostTo. hk-core gains Scheduler::reserve/cancel_reservation/reservations; pre-emption is stated on Reservation: lower tiers are clipped at the window start (the clipped slot is rolled back and revisited in full), the window runs as a pinned Pass lease until its predicted end, it shares the pinned tier round-robin, and interactive intent outranks it. Late starts, missed windows and clips are counted in ScheduleStats. next_step stays allocation-free. Passes also become tle-pass ExternalEvents (Geo::OrbitPass) for C30. Not wired to hk-api/hk-pipeline yet (no route, no live feed fetcher).
+      Tests: cargo nextest run -p hk-context --no-fail-fast -> exit 0 (242 passed, 2 skipped); cargo nextest run -p hk-core -E 'binary(scheduler_reservations) | binary(scheduler_no_alloc)' -> exit 0 (8 passed); cargo nextest run -p hk-context -p hk-core -E 'binary(signal_033_pass_scheduling) | binary(scheduler_reservations) | binary(scheduler_no_alloc) | binary(scheduler_golden) | binary(scheduler) | binary(scheduler_bandit) | (package(hk-context) & test(/passes::|feeds::/))' (after lint fixes) -> exit 0 (51 passed)
+      precheck exit 0
+      Commits: 5367c4cb
+      Observed, not chased: hk-core lib test source::hackrf::tests::a_slow_reader_gets_counted_drops_and_an_exact_gap fails 3/3 when run alone on this box at load avg ~10 ('the pool overflowed', crates/hk-core/src/source/hackrf.rs:1342). It sleeps 200 ms on the wall clock and expects the fake producer to have overflowed a 2-buffer pool, which is the wall-clock-chooses-the-assertion shape docs/10 §3.6 calls a bug. This diff does not touch crates/hk-core/src/source/. The other 180 hk-core tests pass (cargo nextest run -p hk-core --no-fail-fast: 180 passed, 1 failed). I did not confirm on a quiet box. | Not wired yet: no hk-api route exposes the pass plan or reservations, and hk-pipeline does not call plan_from_cache / Scheduler::reserve on a timer. No network FeedFetcher exists for CelesTrak (the existing crate-wide seam). These are the follow-ups for making pass scheduling live. | Downlinks are caller-supplied (Downlink list); a SatNOGS-DB transmitter extract (C29/C17) would be the natural source. | Pass lease ids and tle-pass native_ids key on the TCA minute, so a refreshed TLE that moves TCA across a minute boundary produces a new id rather than replacing the old one.
+      Use cases: SIGNAL-033, SIGNAL-027, AWARE-064
+      Resources: 555 CPU-s, peak 2.0 GB
   - id: T-277
     milestone: M5
     title: 'M5 HF/VLF science front ends (accessory-gated)'
