@@ -57,7 +57,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, tileAsks, until } from "./harness.mjs";
+import { Browser, addressPeak, census, tileAsks, until } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -130,9 +130,13 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // `t454-never-back-off` fault produces 8 refusals with the cap pinned at 4, against 2 with it
   // falling to 2.)
   const caps = [];
+  /** The ceiling the client may recover to at each cap sample — its SHARE since T-630, printed
+   * beside the cap as `(share N)`. Index-aligned with `caps`; NaN where the line named none. */
+  const shares = [];
   const sampleCap = async () => {
-    const m = (await page.eval(STATUS)).match(/(\d+)\/(\d+) in flight/);
-    if (m) caps.push(Number(m[2]));
+    const st = await page.eval(STATUS);
+    const m = st.match(/(\d+)\/(\d+) in flight/);
+    if (m) { caps.push(Number(m[2])); shares.push(Number(st.match(/in flight \(share (\d+)\)/)?.[1] ?? NaN)); }
   };
 
   const moved = [], clamped = [], visited = [];
@@ -391,9 +395,13 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const cancelled = Number(status.match(/(\d+) cancelled/)?.[1] ?? 0);
   const canceledOnWire = page.requests.filter((r) => r.error === "canceled").length;
   const gestures = moved.length + clamped.length;
+  const addrPeak = addressPeak(tileReqs);
+  t.diagnostic(`peak ${addrPeak}/${limit} tile ADDRESSES outstanding on the wire at once (over ` +
+    `${tiles.peak} request(s) — a batch names many)`);
   t.diagnostic(`peak ${tiles.peak}/${limit} in flight · ${tileReqs.length} tile requests · ` +
     `${cancelled} cancelled (client), ${canceledOnWire} aborted on the wire`);
   t.diagnostic(`operating cap over the run: ${caps.join(" ")} (server ceiling ${limit})`);
+  t.diagnostic(`the client's share at each sample:  ${shares.join(" ")}`);
   t.diagnostic(`503s: ${navigationRefusals} during ${gestures} viewport changes, ` +
     `${steadyRefusals.length} during ${(STEADY_STATE_MS / 1000).toFixed(0)} s of steady state ` +
     `(${steadyRequests} requests) · ${backpressure} counted by the client`);
@@ -436,6 +444,15 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `${tiles.peak} tile requests were in flight at once against a declared cap of ${limit} ` +
     "(and that is a lower bound — the browser's own 6-connection limit hides anything beyond it)");
   assert.ok(tiles.peak > 1, `only ${tiles.peak} tile request was ever in flight — the cap was never approached, so this proves nothing`);
+  // **…and counted per ADDRESS, because since T-573 that is what the cap is a cap on** (T-846). A
+  // `GET /api/tiles/batch` carries up to 64 addresses, the client charges one slot per address and
+  // the route takes one producer slot per address — so a client that ignored its cap altogether
+  // put every address it wanted into one or two batches, and the request count above read it as
+  // `peak 2/4`. Measured with `t454-ignore-the-cap` injected: green on the request count, red here.
+  assert.ok(addrPeak <= limit,
+    `${addrPeak} tile ADDRESSES were outstanding on the wire at once against a declared cap of ` +
+    `${limit}, over only ${tiles.peak} request(s). The route's cap is per address and so is the ` +
+    "client's budget: batching changes how many requests carry them, not how many may be asked for.");
 
   // (2) ONCE CONVERGED, NEVER REFUSED AGAIN. This is the strict half, and it is stricter than the
   // "zero refusals" it replaces is about anything that matters: it forbids the regime the user
@@ -615,6 +632,115 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   t.diagnostic(ended === before
     ? "the view ended where it started, as \"Fit to coverage\" intends"
     : "the view ended somewhere other than its opening box");
+});
+
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+// T-454's CONTROLLER, AGAINST A REFUSAL THIS TEST KNOWS HAPPENED (T-846)
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+//
+// Assertion (3) above — "a refusal must halve the cap" — is conditional on the route refusing, and
+// since T-573 it does not, on this fixture: a `/api/tiles/batch` answers its members on at most the
+// asker's share of workers and retires a worker on a 503 rather than recording one, and T-630's
+// share clamps the client's ceiling on every answer. Measured over the gestures above: 0 refusals,
+// the operating cap pinned at 2 by a transient share of 2 — so `t454-never-back-off` (the halving
+// deleted) came back GREEN, because there was nothing to back off from and the cap was already
+// below the server's number for another reason.
+//
+// So the refusal is put on the wire deliberately, in exactly the batch-era shape: a 200 whose one
+// member carries its own `503` and the route's own words, which is how `hk-api` answers a batch
+// member it cannot admit. The injection sits in `fetch`, before the page's scripts, like T-523's
+// proxy in `live-edge.e2e.mjs`. It rewrites ONE member of ONE batch; everything else is the real
+// route. The claim is then the controller's own contract, read off the status line the page draws:
+// the operating cap in the first readout that counts the refusal is BELOW the one before it. A
+// client that merely counts refusals keeps its cap (measured with `t454-never-back-off`: 3 -> 3,
+// share 4); the controller halves it (measured: 4 -> 2, share 4).
+test("a per-address 503 inside a batch answer halves the operating cap: back-off is a controller, not a counter (T-454, T-846)", async (t) => {
+  const limit = Number(process.env.HK_E2E_TILE_LIMIT);
+  assert.ok(Number.isInteger(limit) && limit > 0, `the server did not declare cost.in_flight_limit (got "${process.env.HK_E2E_TILE_LIMIT}")`);
+  const inject = `(() => {
+    const real = window.fetch.bind(window);
+    window.__t846 = { arm: 0, refused: [] };
+    window.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      const r = await real(input, init);
+      if (!(window.__t846.arm > 0 && url.includes("/api/tiles/batch") && r.status === 200)) return r;
+      const body = await r.json();
+      const e = (body.tiles ?? []).find((x) => x.status === 200);
+      if (e) {
+        window.__t846.arm--;
+        window.__t846.refused.push(e.address?.spelling ?? "?");
+        e.status = 503;
+        delete e.tile;
+        e.error = "too many tile reads in flight (limit ${limit}, share ${limit}): injected by ui/e2e/surface-nav.e2e.mjs (T-846)";
+      }
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+  })();`;
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: inject });
+  await page.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
+  await page.waitForSurfaceMounted();
+  await page.waitFor("the first tile textures to be uploaded",
+    `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
+
+  /** The controller's state as the page prints it: `N+M/L in flight (share C)` and `B backpressure`. */
+  const read = (st) => {
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)\)/);
+    return f ? { inflight: Number(f[1]), cap: Number(f[3]), share: Number(f[4]),
+      busy: Number(st.match(/(\d+) backpressure/)?.[1] ?? NaN), queue: Number(st.match(/queue (\d+)/)?.[1] ?? NaN) } : null;
+  };
+  // The premise: a cap that CAN halve. At 1 the halving is `max(1, …)` and a controller is
+  // indistinguishable from a counter, so the test waits for the cap to be at least 2 with the page
+  // quiet, rather than assuming where the opening fill left it.
+  const ready = await page.waitForValue("the operating cap to be at least 2 with nothing outstanding", STATUS,
+    (st) => { const c = read(st); return !!c && c.cap >= 2 && c.inflight === 0 && c.queue === 0; }, { timeoutMs: 60000 });
+  t.diagnostic(`before the injected refusal: ${JSON.stringify(read(ready.value))}`);
+  assert.ok(ready.ok, `the operating cap never reached 2 with the page quiet (last: ${JSON.stringify(read(ready.value))}), ` +
+    "so a halving could not be told from no halving and this test would assert nothing");
+
+  // Arm, then ask for tiles the page does not hold: a frequency zoom IN over the opening view, which
+  // is observed spectrum (the page opens on the coverage map's observed extent) at a finer level
+  // than anything cached — so T-580's survey cannot answer it and a batch must go out.
+  const trace = [];
+  let last = read(ready.value);
+  await page.eval("window.__t846.arm = 1");
+  const r = await page.$rect('[data-slot="canvas"]');
+  const at = { x: r.x + r.w * 0.5, y: r.y + r.h * 0.35 };
+  let hit = null;
+  for (let i = 0; i < 6 && !hit; i++) {
+    await page.wheel(at, -240, { shift: true });
+    const t0 = Date.now();
+    while (!hit && Date.now() - t0 < 8000) {
+      const c = read(await page.eval(STATUS));
+      if (c) {
+        trace.push(`${c.cap}/${c.share}·${c.busy}`);
+        if (c.busy > last.busy) hit = { before: last, after: c };
+        else last = c;
+      }
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+  const refused = await page.eval("window.__t846.refused.slice()");
+  t.diagnostic(`injected a per-address 503 for ${JSON.stringify(refused)}; cap/share·backpressure readouts: ${trace.join(" ")}`);
+  assert.ok(refused.length > 0, "no batch went out for the zoom, so no refusal was injected and this test asserts nothing");
+  assert.ok(hit, `the client never counted the injected refusal (readouts: ${trace.join(" ")})`);
+  t.diagnostic(`the readout that first counts it: ${JSON.stringify(hit.after)} (the one before: ${JSON.stringify(hit.before)})`);
+  // Strictly LOWER, and nothing more exact: the readout is a 500 ms sample, so the cap it shows as
+  // "before" may have moved by an additive step since. What no correct client can do is come out of
+  // a refusal at or above where it went in — `max(1, min(⌊cap/2⌋, ceiling))` is below any cap ≥ 2.
+  // A fall in the SHARE at the same instant would lower even a counter's cap (the insert clamp), so
+  // it is reported when it happens rather than assumed not to.
+  if (hit.after.share < hit.before.cap) {
+    t.diagnostic(`the share fell to ${hit.after.share} in the same readout, so the clamp alone could explain ` +
+      "a lower cap this run: the fault this test exists for may pass it once in such a run, a correct client never fails it");
+  }
+  assert.ok(hit.after.cap < hit.before.cap,
+    `the route refused a member of a batch and the client's operating cap went from ${hit.before.cap} to ` +
+    `${hit.after.cap} with its share at ${hit.after.share}. A 503 must HALVE it (AIMD's multiplicative ` +
+    "decrease): a client that counts the refusal and keeps its cap has not discovered anything, and it is " +
+    "refused again on its very next burst, for as long as the user keeps navigating — T-454's regime.");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the refusal was handled");
 });
 
 // ———————————————————————————————————————————————————————————————————————————————————————————————

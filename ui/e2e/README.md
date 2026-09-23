@@ -121,6 +121,7 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | **`npm run e2e` total** | **~60 s** |
 | `npm run e2e:selftest`, one fault (e.g. `node e2e/selftest.mjs t445`) | ~9 min (baseline once + the whole suite again for the fault, ~4.5 min each) |
 | `npm run e2e:selftest`, no filter (baseline + every fault in `FAULTS`) | scales with `FAULTS.length` — baseline once, then the whole suite per fault; run narrowed by name in practice |
+| `node e2e/selftest.mjs --expected-only <fault…>` | baseline + each fault against ONLY the specs the faults name (T-846) — an iteration aid: proves the named guard goes red, cannot prove no other guard caught it instead |
 
 Cold, `just test-ui-e2e` also pays `cargo build -p hk-cli --bin hk` and `npm ci`.
 
@@ -177,6 +178,19 @@ What is asserted now conditions the permission on the mechanism instead of count
 `selftest.mjs` carries a fault for each: `t454-ignore-the-cap` (peak 13), `t454-forget-abandoned-slots`
 (peak 5), `t454-never-back-off` (cap pinned at the ceiling, 10 refusals), and
 `t454-probe-gives-up-on-503`.
+
+**T-573's batch route made two of those faults invisible, and T-846 re-aimed them.** A
+`GET /api/tiles/batch` carries up to 64 addresses, so a client ignoring its cap read `peak 1/4` on
+the request count; the cap is per ADDRESS (the client charges a slot per address, the route takes a
+producer slot per address), so (1) is now also asserted over `addressPeak(tileAsks(…))` — measured
+3/4 on the correct client, 7/4 with the cap ignored. And the route no longer refuses on this fixture
+at all (batch workers retire on a 503 instead of recording one; T-630's share clamps the ceiling on
+every answer), so (3) judged an empty set and a client with the halving deleted stayed green. A
+second test now puts ONE per-address `503` inside a real batch answer (a `fetch` wrapper, like
+`live-edge`'s T-523 proxy) and requires the operating cap to fall across it: 4 -> 2 correct,
+3 -> 3 with `t454-never-back-off`. The `t454-ignore-the-cap` fault itself moved to where the cap is
+obeyed (`effectiveLimit` and `nextAddr`'s per-viewport share), because since T-630 the first answer
+clamped the constructor's 64 back to the route's number.
 
 ## Findings this tier produced
 
