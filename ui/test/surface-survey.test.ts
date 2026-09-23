@@ -50,7 +50,8 @@ function data(a: TileAddr): TileData {
     value: new Float32Array([-90, -80, -70, -60]),
     state: new Uint8Array([CELL.OBSERVED, CELL.OBSERVED, CELL.OBSERVED, CELL.OBSERVED]),
     tier: "spectrum-history", answeredLevel: 0, fold: { frequency: "exact", time: "exact" },
-    measured: { nf: 2, nt: 2 }, rangeDb: { lo: -100, hi: -60 }, bytes: 12, serverInFlightLimit: null,
+    measured: { nf: 2, nt: 2 }, rangeDb: { lo: -100, hi: -60 }, bytes: 12,
+    serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 
