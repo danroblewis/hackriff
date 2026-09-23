@@ -46,6 +46,25 @@ def _load():
 
 W = _load()
 
+
+@pytest.fixture(autouse=True)
+def _isolate_ops_state(tmp_path, monkeypatch):
+    """No test may write to the real `$HACKRIFF_OPS`.
+
+    This is T-763's lesson applied before it can happen again: `gate-timings.jsonl` ended up
+    with 31 of its 33 records written by the test suite itself, which made the one history that
+    could answer "did the gate get slower" useless. `watchdog.log` is the record of every kill
+    this thing has ever made — the first run of these tests appended a `KILL pid=1234` line to
+    the live one, from a test whose `os.kill` was mocked and which killed nothing. A log that
+    contains kills that did not happen is worse than no log.
+    """
+    monkeypatch.setattr(W, "S", str(tmp_path))
+    monkeypatch.setattr(W, "STATE", str(tmp_path / "watchdog.json"))
+    monkeypatch.setattr(W, "LOG", str(tmp_path / "watchdog.log"))
+    monkeypatch.setattr(W, "CLAIMS", str(tmp_path / "work-claims.json"))
+    monkeypatch.setenv("HK_ALERT_OFF", "1")        # and no test ever posts to Discord
+
+
 SNAP = "/bin/zsh -c source /Users/daniellewis/.claude/shell-snapshots/snapshot-zsh-1758547-abc.sh && cargo test"
 
 
@@ -369,11 +388,7 @@ def test_state_for_a_vanished_process_is_forgotten():
 
 
 # --------------------------------------------------------------------- snapshot
-def test_tick_writes_the_snapshot_the_dashboard_reads(tmp_path, monkeypatch):
-    monkeypatch.setattr(W, "S", str(tmp_path))
-    monkeypatch.setattr(W, "STATE", str(tmp_path / "watchdog.json"))
-    monkeypatch.setattr(W, "LOG", str(tmp_path / "watchdog.log"))
-    monkeypatch.setattr(W, "CLAIMS", str(tmp_path / "work-claims.json"))
+def test_tick_writes_the_snapshot_the_dashboard_reads(tmp_path):
     snap = W.tick({}, dry=True)
     assert set(snap) >= {"ts", "load", "owners", "unowned", "alarms", "budget"}
     import json
