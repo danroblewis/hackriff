@@ -5086,7 +5086,8 @@ tasks:
   - id: T-276
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
-    status: todo
+    status: in-progress
+    branch: task-t276
     priority: normal
     deps:
     - T-275
@@ -19484,7 +19485,8 @@ tasks:
   - id: T-581
     milestone: MLIVE
     title: Rework the tile in-flight cap once T-571/T-572 land - one mutex and a cap of 4 starve the panes
-    status: todo
+    status: in-progress
+    branch: task-t581
     priority: normal
     parallel_group: PIPE
     core_interface: true
