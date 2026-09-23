@@ -337,6 +337,19 @@ def test_rule_c_two_gates_is_red_immediately():
     assert next(a for a in alarms if a["rule"] == "double-gate")["level"] == "red"
 
 
+def test_an_alarm_logs_which_processes_tripped_it(tmp_path, monkeypatch):
+    """Discord dedupes by key, so the log line is the only lasting record of the pids."""
+    rows = table(
+        row(100, 1, "bash ops/merge-runner.sh"),
+        row(110, 100, "just gate --base abc", cpu=5.0),
+        row(210, 1, "just gate --base def", cpu=5.0),
+    )
+    monkeypatch.setattr(W, "read_ps", lambda: rows)
+    W.tick({}, dry=True)
+    line = next(ln for ln in open(tmp_path / "watchdog.log") if "double-gate" in ln)
+    assert "pid 110" in line and "pid 210" in line and "\n" not in line.rstrip("\n")
+
+
 def test_rule_c_quiet_for_one_gate():
     rows = table(row(110, 1, "just gate --base abc", cpu=5.0),
                  row(120, 110, "uv run python -m hkpy.gate", cpu=900.0))

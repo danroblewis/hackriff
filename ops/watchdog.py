@@ -521,7 +521,11 @@ def tick(since: dict, dry: bool = False) -> dict:
     for a in alarms:
         if not dry:
             notify(a["level"], a["title"], a.get("body", ""), key=a["key"])
-        logline(f"ALARM {a['level']} {a['rule']}: {a['title']}")
+        # The body goes in too: Discord dedupes by key, so from the second tick on the log is the
+        # only record of WHICH processes tripped an alarm (567 double-gate alarms on 2026-09-23
+        # named no pid anywhere, and by the time anyone looked the matching process was gone).
+        body = " | ".join(ln.strip() for ln in a.get("body", "").splitlines() if ln.strip())
+        logline(f"ALARM {a['level']} {a['rule']}: {a['title']}" + (f" -- {body[:600]}" if body else ""))
     return snap
 
 
