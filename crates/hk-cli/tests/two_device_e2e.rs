@@ -4,19 +4,30 @@
 //! files straight into the pipeline.
 //!
 //! T-510 already proved attribution stays apart at the pipeline/store level for two front ends on
-//! **disjoint** bands. This ticket adds the case T-510 could not: two front ends whose tuned
-//! windows **overlap**, with one tone inside the overlap (shared air) and one tone in each front
-//! end's own band alone (device-local physics). It asserts, through the wire a real client reads:
+//! **disjoint** bands, where the "own" tone sits outside the other radio's tuned window — so a
+//! radio that never looked there trivially never reports it. This ticket needs the harder case:
+//! two front ends whose tuned windows **overlap** by several MHz, with **every** tone — the shared
+//! one and each radio's own-only one — inside *both* radios' tuned windows. Both radios are tuned
+//! over every tone; only one radio's IQ actually carries each own-only one. That is what makes
+//! "device-local physics never crosses" a real assertion rather than a restatement of "a radio
+//! cannot see outside its own band": it proves the two front ends' capture, ring, detector and
+//! provenance stay genuinely separate data paths, not merely non-overlapping frequency ranges. The
+//! two front ends also carry **different gain state** (LNA/VGA), checked on every detection's own
+//! provenance, so a swapped or shared provenance record would be caught even if the frequencies
+//! never crossed. It asserts, through the wire a real client reads:
 //!
 //! - both front ends appear in `GET /api/navigation`'s `windows[]`;
-//! - both appear in `GET /api/coverage`'s `devices[]`, and each one's own coverage plane covers
-//!   only its own band — the "grey is honest" invariant, exercised over two front ends rather than
-//!   one;
+//! - both appear in `GET /api/coverage`'s `devices[]`, each one observed across the whole shared
+//!   band it was tuned over (both radios tune over every tone here — that is the point);
 //! - both appear in `GET /api/tiles`'s `coverage.devices[]` too;
-//! - the tone **both** radios were tuned over resolves to **one** inventory entry, and detections
-//!   naming both device ids fall inside that entry's occupied band (shared air, merged);
-//! - the tone **only one** radio was tuned over stays its **own** entry, and no detection naming
-//!   the other radio ever falls inside it (device-local physics never crosses).
+//! - the tone **both** radios were tuned over resolves to **one** inventory entry, that entry's
+//!   own linked tracks were produced by **both** front ends (not merely "some detection nearby
+//!   came from each" — the link is followed emitter -> track -> detection -> provenance), and the
+//!   detections near it carry each front end's own gain state, never swapped;
+//! - the tone **only one** radio's IQ actually carries stays its **own** entry, and no detection
+//!   naming the *other* radio — which was, again, tuned right over that frequency — ever falls
+//!   inside it: device-local physics never crosses even when both radios are looking straight at
+//!   it.
 //!
 //! Blind: nothing here looks a frequency up in a database or tunes from an expectation; every
 //! assertion is against what the run actually produced.
@@ -30,8 +41,8 @@ use hk_cli::pipeline::serve_api;
 use hk_core::{MockEnd, Pacing, Source};
 use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
 use hk_model::{
-    BiasTee, ClockSource, FreqRange, InventoryQuery, Provenance, Region, Repository, TimeRange,
-    Timestamp, TimestampMethod, Tune,
+    BiasTee, ClockSource, EmitterId, FreqRange, InventoryQuery, LinkTarget, Provenance, Region,
+    Repository, TimeRange, Timestamp, TimestampMethod, Tune,
 };
 use hk_pipeline::{
     ExtraSource, Pipeline, PipelineConfig, TrackInventory, open_mock_replay, replay_plan,
@@ -40,29 +51,42 @@ use serde_json::Value;
 
 const TOKEN: &str = "t513-two-device-token-0123456789abcdef";
 
-/// Device A: tuned to 99.7 MHz. Carries [`A_ONLY_HZ`] (its own alone) and [`SHARED_HZ`] (the air
-/// device B also sees).
+/// Device A: tuned to 100.0 MHz, window [97.0, 103.0] MHz.
 const DEVICE_A: &str = "unit-a";
-const CENTER_A: f64 = 99.7e6;
-const FS_A: f64 = 3.0e6;
+const CENTER_A: f64 = 100.0e6;
+const FS_A: f64 = 6.0e6;
+/// A's own gain state (checked on every detection A produces, never on B's).
+const LNA_A_DB: f64 = 24.0;
+const VGA_A_DB: f64 = 20.0;
 
-/// Device B: tuned to 101.0 MHz, overlapping A's window by 900 kHz. Carries [`SHARED_HZ`] and
-/// [`B_ONLY_HZ`] (its own alone).
+/// Device B: tuned to 101.0 MHz, window [98.0, 104.0] MHz — overlapping A's by 5 MHz: [98.0,
+/// 103.0]. Every tone below sits inside *that overlap*, so both radios are tuned over every one
+/// of them; only their own IQ decides which they actually see.
 const DEVICE_B: &str = "unit-b";
 const CENTER_B: f64 = 101.0e6;
-const FS_B: f64 = 3.0e6;
+const FS_B: f64 = 6.0e6;
+/// B's own gain state: deliberately different from A's, so a swapped or shared provenance record
+/// is caught even where the frequencies do not distinguish the two front ends.
+const LNA_B_DB: f64 = 16.0;
+const VGA_B_DB: f64 = 32.0;
 
 const SECS: f64 = 6.0;
 
-/// Inside A's window only ([98.2, 101.2] MHz): outside B's ([99.5, 102.5] MHz).
-const A_ONLY_HZ: f64 = 98.7e6;
-/// Inside both windows: the shared air.
-const SHARED_HZ: f64 = 100.3e6;
-/// Inside B's window only: outside A's.
-const B_ONLY_HZ: f64 = 102.0e6;
+/// Only in A's own recording — the device-local artefact A's front end alone produced — but
+/// **inside B's tuned window too** ([98.0, 104.0] MHz), so B is genuinely looking straight at this
+/// frequency the whole run and still must never report it. Deliberately **unevenly** spaced from
+/// [`SHARED_HZ`]/[`SPUR_B_HZ`] (1.6 MHz, then 2.3 MHz): three tones spaced at an exact common
+/// interval reads as one arithmetic comb (a switching-supply/clock artefact,
+/// `hk_model::harmonic`/`hk_detect::comb`) and the inventory correctly folds a comb's teeth into
+/// one family instead of three independent emitters — which this test does not want to exercise.
+const SPUR_A_HZ: f64 = 98.6e6;
+/// In both recordings: the shared air.
+const SHARED_HZ: f64 = 100.2e6;
+/// Only in B's own recording, inside A's tuned window too ([97.0, 103.0] MHz).
+const SPUR_B_HZ: f64 = 102.5e6;
 
 /// How close a detection or an emitter's centre must be to one of the three tones above to count
-/// as "that tone" rather than noise or another tone (the tones are >=1.5 MHz apart; this is far
+/// as "that tone" rather than noise or another tone (the tones are >=1.6 MHz apart; this is far
 /// tighter than that, and far looser than a CW tone's actual measured centre error).
 const FREQ_TOL_HZ: f64 = 50e3;
 
@@ -93,14 +117,20 @@ impl Drop for TempDir {
     }
 }
 
-fn provenance_for(device_id: &str, center_hz: f64, fs: f64) -> Provenance {
+fn provenance_for(
+    device_id: &str,
+    center_hz: f64,
+    fs: f64,
+    lna_db: f64,
+    vga_db: f64,
+) -> Provenance {
     Provenance {
         device_id: device_id.into(),
         tune: Tune {
             center_hz,
             sample_rate_hz: fs,
-            lna_db: 24.0,
-            vga_db: 20.0,
+            lna_db,
+            vga_db,
             amp_on: false,
             bandwidth_hz: fs,
         },
@@ -120,23 +150,41 @@ fn provenance_for(device_id: &str, center_hz: f64, fs: f64) -> Provenance {
     }
 }
 
-/// Writes `secs` of noise at `fs`/`center_hz`, plus one tone per entry of `tones` (absolute
-/// frequency, amplitude), as `<name>.sigmf-meta/-data` in `dir`. The capture's own
-/// `hackriff:provenance` names `device_id`, so the mock replaying it calls itself
-/// `mock:<device_id>`, and every recording shares `start_iso` so the two front ends share a clock
-/// (`hk_pipeline::MAX_START_SKEW`).
-fn device_recording(
-    dir: &Path,
-    name: &str,
+/// One front end's recording: bundled into a struct (not more `device_recording` arguments) to
+/// stay under clippy's argument-count lint.
+struct RecordingSpec<'a> {
     center_hz: f64,
     fs: f64,
     secs: f64,
-    tones: &[(f64, f64)],
-    start_iso: &str,
-) -> PathBuf {
+    /// Absolute frequency, amplitude.
+    tones: &'a [(f64, f64)],
+    start_iso: &'a str,
+    /// `(lna_db, vga_db)`.
+    gains: (f64, f64),
+}
+
+/// Writes `spec.secs` of noise at `spec.fs`/`spec.center_hz`, plus one tone per entry of
+/// `spec.tones`, as `<name>.sigmf-meta/-data` in `dir`. The capture's own `hackriff:provenance`
+/// names `device_id`, so the mock replaying it calls itself `mock:<device_id>`, and every
+/// recording shares `spec.start_iso` so the two front ends share a clock
+/// (`hk_pipeline::MAX_START_SKEW`). The noise sequence is seeded from `name` (a real hash, not
+/// just its length — two names of equal length must not produce equal noise).
+fn device_recording(dir: &Path, name: &str, spec: RecordingSpec) -> PathBuf {
+    let RecordingSpec {
+        center_hz,
+        fs,
+        secs,
+        tones,
+        start_iso,
+        gains: (lna_db, vga_db),
+    } = spec;
     std::fs::create_dir_all(dir).unwrap();
     let n = (secs * fs) as usize;
-    let mut state = 0x2545_f491_4f6c_dd1du64 ^ (name.len() as u64).wrapping_mul(0x9e37_79b9);
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    for b in name.bytes() {
+        state ^= u64::from(b);
+        state = state.wrapping_mul(0x100_0000_01b3);
+    }
     let mut noise = || {
         state ^= state << 13;
         state ^= state >> 7;
@@ -162,7 +210,7 @@ fn device_recording(
         sample_start: 0,
         frequency: Some(center_hz),
         datetime: Some(start_iso.into()),
-        provenance: Some(provenance_for(name, center_hz, fs)),
+        provenance: Some(provenance_for(name, center_hz, fs, lna_db, vga_db)),
         clip_count: None,
         extra: Default::default(),
     }];
@@ -269,20 +317,26 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
     let a = device_recording(
         &rec.0,
         DEVICE_A,
-        CENTER_A,
-        FS_A,
-        SECS,
-        &[(A_ONLY_HZ, 40.0), (SHARED_HZ, 40.0)],
-        start_iso,
+        RecordingSpec {
+            center_hz: CENTER_A,
+            fs: FS_A,
+            secs: SECS,
+            tones: &[(SPUR_A_HZ, 40.0), (SHARED_HZ, 40.0)],
+            start_iso,
+            gains: (LNA_A_DB, VGA_A_DB),
+        },
     );
     let b = device_recording(
         &rec.0,
         DEVICE_B,
-        CENTER_B,
-        FS_B,
-        SECS,
-        &[(SHARED_HZ, 40.0), (B_ONLY_HZ, 40.0)],
-        start_iso,
+        RecordingSpec {
+            center_hz: CENTER_B,
+            fs: FS_B,
+            secs: SECS,
+            tones: &[(SHARED_HZ, 40.0), (SPUR_B_HZ, 40.0)],
+            start_iso,
+            gains: (LNA_B_DB, VGA_B_DB),
+        },
     );
 
     let primary = open_mock_replay(&a, Pacing::Unpaced, MockEnd::Stop).unwrap();
@@ -379,12 +433,18 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
         .unwrap();
     assert_eq!(win_b["center_hz"], serde_json::json!(CENTER_B));
 
-    // --- /api/coverage: both front ends' devices[], each one honest about its own band ---
+    // --- /api/coverage: both front ends' devices[], both genuinely tuned over every tone ---
+    //
+    // Coverage answers "was this front end TUNED here", not "did it see a signal here" — so with
+    // SPUR_A_HZ/SHARED_HZ/SPUR_B_HZ all inside the 3 MHz overlap, both A and B must read
+    // `observed` at all three: that is what makes the detection-level check below (which tone
+    // each front end actually *reported*) a real test of separation rather than a restatement of
+    // "a radio cannot see outside its own band" (the T-510 case, and the finding this fixes).
     let w = window(start, SECS);
     let cov_path = format!(
         "/api/coverage?f_lo={}&f_hi={}&cells=64&rows=1&t0={}&t1={}",
         97.0e6,
-        103.0e6,
+        104.0e6,
         w.start.as_unix_nanos() as f64 * 1e-9,
         w.end.as_unix_nanos() as f64 * 1e-9,
     );
@@ -413,39 +473,21 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
     };
     let id_a = mock_id(DEVICE_A);
     let id_b = mock_id(DEVICE_B);
-    assert_eq!(
-        state_at(&id_a, A_ONLY_HZ),
-        "observed",
-        "A must observe its own tone"
-    );
-    assert_eq!(
-        state_at(&id_b, A_ONLY_HZ),
-        "unobserved",
-        "B must never read observed over A's own band: physics crossed"
-    );
-    assert_eq!(
-        state_at(&id_b, B_ONLY_HZ),
-        "observed",
-        "B must observe its own tone"
-    );
-    assert_eq!(
-        state_at(&id_a, B_ONLY_HZ),
-        "unobserved",
-        "A must never read observed over B's own band: physics crossed"
-    );
-    assert_eq!(
-        state_at(&id_a, SHARED_HZ),
-        "observed",
-        "A must observe the shared air"
-    );
-    assert_eq!(
-        state_at(&id_b, SHARED_HZ),
-        "observed",
-        "B must observe the shared air"
-    );
+    for &f_hz in &[SPUR_A_HZ, SHARED_HZ, SPUR_B_HZ] {
+        assert_eq!(
+            state_at(&id_a, f_hz),
+            "observed",
+            "A was tuned over {f_hz} the whole run and must read observed there"
+        );
+        assert_eq!(
+            state_at(&id_b, f_hz),
+            "observed",
+            "B was tuned over {f_hz} the whole run and must read observed there"
+        );
+    }
 
     // --- /api/tiles: both front ends, over the same coverage the tile route serves ---
-    let (level_f, f_index, f_span) = find_freq_tile(addr, 97.0e6, 103.0e6, 256);
+    let (level_f, f_index, f_span) = find_freq_tile(addr, 97.0e6, 104.0e6, 256);
     let start_ns = start.as_unix_nanos();
     let end_ns = start_ns + (SECS * 1e9) as i64;
     let (level_t, t_index, _t_span) = find_time_tile(addr, start_ns, end_ns, 256);
@@ -457,8 +499,8 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
     );
     assert_eq!(st, 200, "{tile}");
     assert!(
-        tile["extent"]["f_lo_hz"].as_f64().unwrap() <= A_ONLY_HZ - FREQ_TOL_HZ
-            && tile["extent"]["f_hi_hz"].as_f64().unwrap() >= B_ONLY_HZ + FREQ_TOL_HZ,
+        tile["extent"]["f_lo_hz"].as_f64().unwrap() <= SPUR_A_HZ - FREQ_TOL_HZ
+            && tile["extent"]["f_hi_hz"].as_f64().unwrap() >= SPUR_B_HZ + FREQ_TOL_HZ,
         "the addressed tile must span every tone: {tile}"
     );
     assert!(f_span > 0.0);
@@ -501,17 +543,64 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
             .map(|e| e.emitter.f_center_hz)
             .collect::<Vec<_>>()
     );
-    let a_entries = entry_near(A_ONLY_HZ);
+    let a_entries = entry_near(SPUR_A_HZ);
     assert_eq!(a_entries.len(), 1, "A's own tone must resolve to one entry");
-    let b_entries = entry_near(B_ONLY_HZ);
+    let b_entries = entry_near(SPUR_B_HZ);
     assert_eq!(b_entries.len(), 1, "B's own tone must resolve to one entry");
     assert_ne!(shared_entries[0].emitter.id, a_entries[0].emitter.id);
     assert_ne!(shared_entries[0].emitter.id, b_entries[0].emitter.id);
     assert_ne!(a_entries[0].emitter.id, b_entries[0].emitter.id);
 
-    // Every detection is attributed to the front end whose tuned window contains it (T-510's own
-    // invariant, re-checked here over overlapping windows), and the ones near each tone name the
-    // radios this ticket says should — both for the shared entry, one each for the private ones.
+    // --- The merge is a real link, not an inference from nearby frequencies ---
+    //
+    // Follows the entry's own append-only links (emitter -> track, `Repository::emitter_links`)
+    // through to the detections each linked track actually closed on
+    // (`Repository::track_detections`) and each one's own provenance — so this shows the shared
+    // entry's *own* tracks were produced by both front ends, not merely that "some detection
+    // near this frequency" happens to name each one.
+    let linked_devices = |emitter_id: EmitterId| -> std::collections::BTreeSet<String> {
+        repo.emitter_links(emitter_id)
+            .unwrap()
+            .iter()
+            .filter_map(|l| match l.target {
+                LinkTarget::Track(track_id) => Some(track_id),
+                _ => None,
+            })
+            .flat_map(|track_id| repo.track_detections(track_id).unwrap())
+            .map(|det_id| {
+                let d = repo.detection(det_id).unwrap();
+                repo.provenance(d.provenance_ref).unwrap().device_id
+            })
+            .collect()
+    };
+    let shared_linked = linked_devices(shared_entries[0].emitter.id);
+    assert_eq!(
+        shared_linked,
+        [id_a.clone(), id_b.clone()].into_iter().collect(),
+        "the shared entry's own linked tracks (emitter -> track -> detection -> provenance) must \
+         have been produced by both front ends, got {shared_linked:?}"
+    );
+    let a_linked = linked_devices(a_entries[0].emitter.id);
+    assert_eq!(
+        a_linked,
+        [id_a.clone()].into_iter().collect(),
+        "A's own entry must link only to tracks A produced, got {a_linked:?}: device-local \
+         physics crossed"
+    );
+    let b_linked = linked_devices(b_entries[0].emitter.id);
+    assert_eq!(
+        b_linked,
+        [id_b.clone()].into_iter().collect(),
+        "B's own entry must link only to tracks B produced, got {b_linked:?}: device-local \
+         physics crossed"
+    );
+
+    // --- Every detection is attributed to the front end whose IQ actually carries it ---
+    //
+    // Both radios are tuned over SPUR_A_HZ/SHARED_HZ/SPUR_B_HZ this whole run (checked above via
+    // /api/coverage): only one radio's own recording actually holds each own-only tone, so a
+    // detection naming the wrong device here would be real cross-talk between the two capture
+    // paths, not just a radio reporting outside its tuned window (T-510's disjoint-band case).
     let all = repo
         .detections_in_region(&Region::new(FreqRange::new(1e6, 6e9), w))
         .unwrap();
@@ -527,18 +616,48 @@ fn two_overlapping_mock_front_ends_merge_shared_air_and_keep_physics_apart() {
         [id_a.clone(), id_b.clone()].into_iter().collect(),
         "the shared tone must carry both front ends' provenance"
     );
-    let a_devices = devices_of(A_ONLY_HZ);
+    let a_devices = devices_of(SPUR_A_HZ);
     assert_eq!(
         a_devices,
         [id_a.clone()].into_iter().collect(),
-        "A's own tone must carry only A's provenance: device-local physics crossed"
+        "A's own tone must carry only A's provenance, even though B was tuned right over it: \
+         device-local physics crossed"
     );
-    let b_devices = devices_of(B_ONLY_HZ);
+    let b_devices = devices_of(SPUR_B_HZ);
     assert_eq!(
         b_devices,
         [id_b.clone()].into_iter().collect(),
-        "B's own tone must carry only B's provenance: device-local physics crossed"
+        "B's own tone must carry only B's provenance, even though A was tuned right over it: \
+         device-local physics crossed"
     );
+
+    // --- Gain state never crosses either, on every detection in the run ---
+    //
+    // The two front ends carry different LNA/VGA gains (LNA_A_DB/VGA_A_DB vs LNA_B_DB/VGA_B_DB):
+    // a swapped or shared provenance record would show up here even in a case the frequency
+    // checks above could not distinguish.
+    for d in &all {
+        let p = repo.provenance(d.provenance_ref).unwrap();
+        let (want_lna, want_vga) = if p.device_id == id_a {
+            (LNA_A_DB, VGA_A_DB)
+        } else if p.device_id == id_b {
+            (LNA_B_DB, VGA_B_DB)
+        } else {
+            panic!(
+                "a detection at {:.3} MHz carries provenance for an unrecognised device {:?}",
+                d.f_center_hz / 1e6,
+                p.device_id
+            );
+        };
+        assert_eq!(
+            (p.tune.lna_db, p.tune.vga_db),
+            (want_lna, want_vga),
+            "{}'s detection at {:.3} MHz carries the wrong gain state: provenance crossed \
+             between front ends",
+            p.device_id,
+            d.f_center_hz / 1e6
+        );
+    }
 
     drop(server);
 }
