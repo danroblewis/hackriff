@@ -106,6 +106,14 @@ reviewer and fix/resume runs, and `ops/launch.sh` wraps the coordinator/supervis
 28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
 sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
 
+**Discord alerts (user, 2026-09-23).** `ops/alert.py <red|amber|green|info> "<title>" "<body>" [--key K]`
+posts to the `#hackriff` channel and mentions the user; both runners call it — amber for every
+exception handed to a person (gate red, conflict, gave-up, MAIN_RED, suite-broken, stale merge,
+BLOCKED/ERROR/REVIEW_FAIL), red for a `GATE_TIMEOUT` kill, green for each landing. Config is
+`$HACKRIFF_OPS/discord.json` (mode 600, never in the repo): `{"token", "channel_id", "guild_id",
+"mention_user_id"}`. Same `--key` within 30 min is deduped; every attempt is recorded in
+`$HACKRIFF_OPS/alerts.jsonl`; a failed post never fails the caller. `HK_ALERT_OFF=1` silences it.
+
 **The gate runs alone (user, 2026-09-22).** The bounded budget was not enough: the SDET review
 measured untouched crates of small unit tests running 18–79× dearer during shared gates. So the two
 runners now cycle: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
