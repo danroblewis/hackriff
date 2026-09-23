@@ -21,6 +21,7 @@
 //! | `e_a_sensible_explanation_ranks_among_the_top_suggestions` | (5) a sensible explanation ranks | already passed — the control |
 //! | `e2_the_explanation_rests_on_measured_evidence_not_only_the_allocation` | (5), quality bar | a `p25-tsbk`/`dmr-csbk`/`nxdn-cac` → `public-safety` mapping, so the ranking carries a decode |
 //! | `f_the_receiver_clock_error_is_measured_not_assumed_zero` | the one thing phase 1 measured off the air | `hk_detect::trunk::raster::fit_grid_offset`: the receiver's grid offset is fitted, not assumed zero |
+//! | `g_a_grant_is_followed_off_grid_once_the_receiver_alias_is_resolved` | T-628: follow grants on an off-grid receiver | `hk_detect::trunk::raster::{grid_aliases, resolve_alias}`: the modulo-raster fit's alias is bounded by the crystal's ppm and chosen by which alias has energy on the granted channels; the CC demod keeps the integration with the most CRC-valid blocks |
 //!
 //! **The two controls are still the reason the rest means anything.** `a_…` proves the fixture,
 //! the mock device and the truth plumbing are sound; `e_…` proves the explanation path runs. A

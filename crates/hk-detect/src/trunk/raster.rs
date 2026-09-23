@@ -163,6 +163,164 @@ where
     })
 }
 
+/// The widest receiver clock error the alias search admits, ppm (T-628).
+///
+/// **A device figure, not a fitted one**: the HackRF One's crystal is specified to ±20 ppm, and
+/// this project's own unit measured −9.6 ppm (`docs/19 §7.6a`). At 851 MHz that is ±17 kHz, which
+/// does **not** pick one 12.5 kHz alias on its own — it bounds the search to three — so the bound
+/// only limits what is tried; what is *chosen* is decided by measurement ([`resolve_alias`]).
+/// A receiver with a TCXO has a tighter bound, and below ~150 MHz the bound alone settles it.
+pub const RECEIVER_CLOCK_BOUND_PPM: f64 = 20.0;
+
+/// Every absolute receiver offset a modulo-`spacing_hz` grid fit of `offset_hz` is consistent
+/// with, within `±bound_ppm` of `center_hz` — nearest zero first, ties to the negative side.
+///
+/// [`GridFit::offset_hz`] is known only modulo the spacing: +4300 Hz and −8200 Hz name the same
+/// 12.5 kHz grid. These are the candidates; empty means the fit itself sits beyond the bound,
+/// which is a receiver this search does not claim to understand.
+pub fn grid_aliases(offset_hz: f64, spacing_hz: f64, center_hz: f64, bound_ppm: f64) -> Vec<f64> {
+    let bound = bound_ppm.abs() * 1e-6 * center_hz.abs();
+    let usable =
+        offset_hz.is_finite() && spacing_hz.is_finite() && spacing_hz > 0.0 && bound.is_finite();
+    if !usable {
+        return Vec::new();
+    }
+    let lo = ((-bound - offset_hz) / spacing_hz).ceil() as i64;
+    let hi = ((bound - offset_hz) / spacing_hz).floor() as i64;
+    let mut out: Vec<f64> = (lo..=hi)
+        .map(|m| offset_hz + m as f64 * spacing_hz)
+        .collect();
+    out.sort_by(|a, b| a.abs().total_cmp(&b.abs()).then(a.total_cmp(b)));
+    out
+}
+
+/// What one candidate alias measured on the granted channels (T-628).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AliasScore {
+    /// The absolute receiver offset tried, Hz.
+    pub offset_hz: f64,
+    /// Granted channels measured under it.
+    pub targets: usize,
+    /// Of those, how many actually carried a transmission.
+    pub occupied: usize,
+}
+
+/// How a receiver's grid alias was settled, or why it was not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AliasResolution {
+    /// One alias, chosen by the evidence named.
+    Resolved {
+        /// The receiver's absolute offset, Hz: add it to a transmit frequency to find where the
+        /// emission lands in the received spectrum.
+        offset_hz: f64,
+        /// What chose it.
+        by: AliasEvidence,
+        /// Aliases the clock bound admitted.
+        candidates: usize,
+        /// Granted channels measured per alias (0 when the bound alone decided).
+        targets: usize,
+        /// Granted channels the winner found carrying energy.
+        occupied: usize,
+        /// The best any *other* alias managed.
+        runner_up: usize,
+    },
+    /// Tried and not settled: following would measure a guess, so it does not happen.
+    Unresolved {
+        /// Aliases the clock bound admitted.
+        candidates: usize,
+        /// Granted channels measured per alias.
+        targets: usize,
+        /// Best occupied count any alias reached.
+        best: usize,
+        /// Why nothing won.
+        why: AliasUnresolved,
+    },
+}
+
+/// What chose a resolved alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasEvidence {
+    /// The receiver's clock bound admits only one alias: nothing to measure.
+    ClockBound,
+    /// Of the admitted aliases, exactly one put energy on more granted channels than any other.
+    GrantedChannelEnergy,
+}
+
+/// Why an alias search did not settle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasUnresolved {
+    /// The fitted offset is already beyond the clock bound: no admissible alias at all.
+    NoAliasInBound,
+    /// No alias found energy on any granted channel.
+    NothingOccupied,
+    /// Two or more aliases found energy on equally many granted channels.
+    Tied,
+}
+
+/// Settles an alias from per-alias measurements: **the one alias whose granted channels carry the
+/// most transmissions, if it is unique.**
+///
+/// A grant is an absolute transmit frequency, so the right alias puts every granted channel on
+/// the energy the grant announced, and a wrong one puts it on the channel next door — which may be
+/// quiet or may be busy with something else. A tie is therefore reported, never broken: breaking
+/// it by the smaller offset would be assuming the receiver is nearly on frequency, which is the
+/// assumption this exists to replace, and a wrong pick measures the neighbour's traffic as the
+/// granted call. One admissible alias needs no measurement at all.
+pub fn resolve_alias(scores: &[AliasScore]) -> AliasResolution {
+    let candidates = scores.len();
+    let targets = scores.iter().map(|s| s.targets).max().unwrap_or(0);
+    match scores {
+        [] => AliasResolution::Unresolved {
+            candidates,
+            targets,
+            best: 0,
+            why: AliasUnresolved::NoAliasInBound,
+        },
+        [only] => AliasResolution::Resolved {
+            offset_hz: only.offset_hz,
+            by: AliasEvidence::ClockBound,
+            candidates,
+            targets: only.targets,
+            occupied: only.occupied,
+            runner_up: 0,
+        },
+        _ => {
+            let best = scores.iter().map(|s| s.occupied).max().unwrap_or(0);
+            let winners: Vec<&AliasScore> = scores.iter().filter(|s| s.occupied == best).collect();
+            if best == 0 {
+                return AliasResolution::Unresolved {
+                    candidates,
+                    targets,
+                    best,
+                    why: AliasUnresolved::NothingOccupied,
+                };
+            }
+            if winners.len() > 1 {
+                return AliasResolution::Unresolved {
+                    candidates,
+                    targets,
+                    best,
+                    why: AliasUnresolved::Tied,
+                };
+            }
+            let runner_up = scores
+                .iter()
+                .filter(|s| s.occupied < best)
+                .map(|s| s.occupied)
+                .max()
+                .unwrap_or(0);
+            AliasResolution::Resolved {
+                offset_hz: winners[0].offset_hz,
+                by: AliasEvidence::GrantedChannelEnergy,
+                candidates,
+                targets,
+                occupied: best,
+                runner_up,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +455,99 @@ mod tests {
         assert!(fit_grid_offset(Vec::<(f64, f64)>::new(), 0.5, 12_500.0).is_none());
         assert!(fit_grid_offset([(f64::NAN, 1.0)], 0.5, 12_500.0).is_none());
         assert!(fit_grid_offset([(0.0, f64::NAN)], 0.5, 12_500.0).is_none());
+    }
+    /// The number this exists for: at 851 MHz, the measured -8200 Hz error fits as +4300 Hz, and
+    /// a 20 ppm bound admits exactly three aliases, one of which is the truth.
+    #[test]
+    fn the_clock_bound_limits_the_aliases_to_a_handful_including_the_truth() {
+        let a = grid_aliases(4_300.0, 12_500.0, 851.0125e6, RECEIVER_CLOCK_BOUND_PPM);
+        assert_eq!(a.len(), 3, "{a:?}");
+        assert!((a[0] - 4_300.0).abs() < 1e-6, "nearest zero first: {a:?}");
+        assert!(a.iter().any(|&x| (x + 8_200.0).abs() < 1e-6), "{a:?}");
+        assert!(a.iter().any(|&x| (x - 16_800.0).abs() < 1e-6), "{a:?}");
+        // Every alias is the same grid, and every one is inside the bound.
+        for x in &a {
+            assert!(((x - 4_300.0) / 12_500.0).fract().abs() < 1e-9);
+            assert!(x.abs() <= 20e-6 * 851.0125e6);
+        }
+    }
+
+    /// At VHF the same crystal cannot reach the next alias, so the bound alone settles it.
+    #[test]
+    fn at_vhf_the_bound_alone_leaves_one_alias() {
+        let a = grid_aliases(-1_900.0, 12_500.0, 155e6, RECEIVER_CLOCK_BOUND_PPM);
+        assert_eq!(a, vec![-1_900.0]);
+        match resolve_alias(&[AliasScore {
+            offset_hz: a[0],
+            targets: 0,
+            occupied: 0,
+        }]) {
+            AliasResolution::Resolved { by, offset_hz, .. } => {
+                assert_eq!(by, AliasEvidence::ClockBound);
+                assert_eq!(offset_hz, -1_900.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fit_beyond_the_bound_or_a_degenerate_grid_admits_no_alias() {
+        // 20 ppm of 100 kHz is 2 Hz; a 4300 Hz fit cannot be reached by any alias of it.
+        assert!(grid_aliases(4_300.0, 12_500.0, 100e3, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(grid_aliases(4_300.0, 0.0, 851e6, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(grid_aliases(f64::NAN, 12_500.0, 851e6, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(matches!(
+            resolve_alias(&[]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::NoAliasInBound,
+                ..
+            }
+        ));
+    }
+
+    fn score(offset_hz: f64, occupied: usize) -> AliasScore {
+        AliasScore {
+            offset_hz,
+            targets: 3,
+            occupied,
+        }
+    }
+
+    #[test]
+    fn the_alias_that_finds_the_granted_energy_wins_by_measurement() {
+        let r = resolve_alias(&[score(4_300.0, 0), score(-8_200.0, 3), score(16_800.0, 2)]);
+        assert_eq!(
+            r,
+            AliasResolution::Resolved {
+                offset_hz: -8_200.0,
+                by: AliasEvidence::GrantedChannelEnergy,
+                candidates: 3,
+                targets: 3,
+                occupied: 3,
+                runner_up: 2,
+            }
+        );
+    }
+
+    /// A tie is reported, not broken -- and in particular not broken toward the smaller offset,
+    /// which would be assuming the receiver is nearly on frequency.
+    #[test]
+    fn a_tie_or_silence_is_unresolved_rather_than_guessed() {
+        assert!(matches!(
+            resolve_alias(&[score(4_300.0, 2), score(-8_200.0, 2), score(16_800.0, 0)]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::Tied,
+                best: 2,
+                candidates: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            resolve_alias(&[score(4_300.0, 0), score(-8_200.0, 0)]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::NothingOccupied,
+                ..
+            }
+        ));
     }
 }

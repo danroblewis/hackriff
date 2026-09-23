@@ -128,15 +128,16 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::fsk::{C4fmConfig, C4fmDemod, measure_fm_structure};
+use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, measure_fm_structure};
 use hk_detect::trunk::{
-    CC_FRAMINGS, CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant,
-    GridFit, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, Resolved, VoicePermit,
-    best_lmr_raster, dmr_protocol_of, fit_grid_offset, nxdn_protocol_of, protocol_of, scan_blocks,
-    scan_cacs, scan_csbks,
+    AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CcCandidate,
+    CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, GridFit, MIN_CC_FCO, NXDN_L3_BYTES,
+    NxdnAssignment, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit,
+    best_lmr_raster, dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of, protocol_of,
+    resolve_alias, scan_blocks, scan_cacs, scan_csbks,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
-use hk_model::repo::synthesis::ReceiverFit;
+use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
 use hk_model::{
     CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
     TrunkSystemId,
@@ -215,6 +216,23 @@ const FOLLOW_FRAME_S: f64 = 0.002;
 /// median, and the sweep's own margin already says those frames sat [`OCCUPIED_MARGIN_DB`] above
 /// the band floor.
 const FOLLOW_REF_MAX_FCO: f64 = 0.05;
+
+/// Integrate-and-dump fractions the control-channel demodulation tries, the demodulator's default
+/// first (T-628).
+///
+/// **Chosen by the decode, not by a run**: each fraction is a demodulation of the same baseband,
+/// and the one yielding the most CRC-valid blocks across every framing is kept — the product
+/// vision's "tune from the processed output", with the CRC as the output-quality measure. Ties
+/// keep the earlier entry, so where the default already does as well nothing changes. Why these
+/// two: averaging a discriminator over more of a symbol averages away more noise until the
+/// transitions start to bleed in, and a raised-cosine-shaped C4FM symbol is flat over most of its
+/// period — half a symbol gives up ~3 dB of that averaging, four-fifths keeps it while staying off
+/// the transitions. On the T-545 scene at 20 dB the default recovers 12–13 of 32 blocks and 0.8
+/// recovers 29–30: the difference between a band plan being read and not.
+///
+/// A second fraction cannot make a false confirmation likely: each demodulation is one more
+/// trial against a ~1.4e-16-per-frame CRC chance rate (`hk_detect::trunk::confirm`).
+const DEMOD_INTEGRATE_LADDER: [f64; 2] = [0.5, 0.8];
 
 /// The instantaneous window a HackRF-class front end can hold, Hz (C23's span limit, docs/01 §7.3
 /// and `docs/capabilities/C23-trunking-follow.md` §Platform constraints). Recorded on the refusal
@@ -729,7 +747,6 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
 
     // ---- Confirmation: frame sync AND valid CRC, on demodulated symbols.
     let demod_cfg = C4fmConfig::default();
-    let demod = C4fmDemod::new(demod_cfg);
     let confirmer = CcConfirmer::default();
     let decim = (fs / (DEMOD_SPS * demod_cfg.symbol_rate_bd))
         .floor()
@@ -776,7 +793,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         };
         inc(&c.cc_demods);
         let rate = ddc.output_rate_hz();
-        let Ok(symbols) = demod.demodulate(&baseband, rate, 0.0) else {
+        let Some(symbols) = demodulate_best(&baseband, rate, &confirmer) else {
             continue;
         };
         // Every framing this build knows, not just P25 (T-271). Trying a second one cannot make a
@@ -946,6 +963,25 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
             }
         };
 
+        // ---- Settle what following needs BEFORE the repository lock (T-628): the in-window
+        // targets, the noise reference and — the new part — which absolute receiver offset the
+        // modulo-raster grid fit really is. It is DSP over the window in hand, and its answer is
+        // receiver provenance the analysis row below records.
+        let plan = plan_follow(
+            shared,
+            node,
+            &FollowWindow {
+                buf,
+                base,
+                t_start,
+                prov,
+            },
+            &ks,
+            &fco,
+            &events,
+            grid_offset,
+        );
+
         // Metadata only: a protocol, the measured frequency, when it was heard, the band plan it
         // announced and the grants it issued. No audio, no payload, no recording.
         let mut repo = shared.repo();
@@ -1007,6 +1043,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 fco: fco_i,
                 protocol,
                 grid,
+                alias: plan.alias,
                 tune_center_hz: tune_center,
                 raster_hz: raster,
                 t: t_end,
@@ -1018,33 +1055,40 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         // first — the following is DSP over the window already in hand, and holding a database
         // lock across it would serialise every other writer behind a channelizer run.
         drop(repo);
-        // A grant resolves to an ABSOLUTE transmit frequency through the announced band plan, and
-        // the grid fit is only known modulo the raster (see `grid_fit`) — +4300 Hz and −8200 Hz
-        // name the same grid. Applying it to an already-unambiguous frequency would down-convert
-        // the channel NEXT DOOR and report "granted channel not radiating", which is a wrong
-        // measurement rather than a missing one. So following is skipped while the receiver is
-        // measurably off-grid, and says so.
-        if grid_offset.abs() > RASTER_TOLERANCE_HZ {
-            if crate::debug_enabled() {
-                eprintln!(
-                    "hk-pipeline: trunk-cc not following {} grant(s): the receiver is \
-                     {grid_offset:+.0} Hz off the grid and that fit is only known modulo the \
-                     {raster:.0} Hz raster, so an absolute grant frequency cannot be reached \
-                     without resolving the alias",
-                    events.len(),
-                );
-            }
-        } else {
-            // The truncated-call tails live on the system, across passes: continuing a call is a
-            // statement about one channel of one system, and the borrow ends with this call.
-            let tails = known.get_mut(&key).map(|k| &mut k.tails);
-            if let Some(tails) = tails {
-                follow_grants(
-                    shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id, tails,
-                );
-            }
+        // The truncated-call tails live on the system, across passes: continuing a call is a
+        // statement about one channel of one system, and the borrow ends with this call (T-308).
+        if let Some(tails) = known.get_mut(&key).map(|k| &mut k.tails) {
+            follow_grants(shared, node, t_start, base, prov, &plan, system_id, tails);
         }
     }
+}
+
+/// Demodulates `baseband` once per [`DEMOD_INTEGRATE_LADDER`] entry and keeps the dibits with the
+/// most CRC-valid blocks across every framing this build knows (T-628). `None` only when no entry
+/// demodulated at all.
+fn demodulate_best(
+    baseband: &[Complex32],
+    rate_hz: f64,
+    confirmer: &CcConfirmer,
+) -> Option<C4fmSymbols> {
+    let mut best: Option<(u64, C4fmSymbols)> = None;
+    for integrate_fraction in DEMOD_INTEGRATE_LADDER {
+        let cfg = C4fmConfig {
+            integrate_fraction,
+            ..C4fmConfig::default()
+        };
+        let Ok(symbols) = C4fmDemod::new(cfg).demodulate(baseband, rate_hz, 0.0) else {
+            continue;
+        };
+        let crc: u64 = CC_FRAMINGS
+            .iter()
+            .map(|&f| u64::from(confirmer.scan_framing(f, &symbols.dibits).crc_valid))
+            .sum();
+        if best.as_ref().is_none_or(|(b, _)| crc > *b) {
+            best = Some((crc, symbols));
+        }
+    }
+    best.map(|(_, s)| s)
 }
 
 /// One raster channel of the buffered window, down-converted and reduced to per-frame mean power.
@@ -1065,30 +1109,27 @@ struct ChannelFrames {
     frame_len: usize,
 }
 
-/// Allocates a channel on `offset_hz` over `buf` and measures its envelope.
+/// Allocates a channel on `offset_hz` over the window and measures its envelope.
 fn channel_frames(
-    buf: &[Complex<i8>],
-    base: u64,
-    t_start: Timestamp,
-    prov: &ProvenanceHandle,
+    win: &FollowWindow<'_>,
     offset_hz: f64,
     bandwidth_hz: f64,
 ) -> Option<ChannelFrames> {
     let mut ddc = Ddc::new(
         DdcSpec::new(offset_hz, bandwidth_hz),
-        prov.tune.sample_rate_hz,
+        win.prov.tune.sample_rate_hz,
     )
     .ok()?;
     let info = InputInfo {
         time: SampleTime {
-            sample_index: base,
-            host_time: t_start,
+            sample_index: win.base,
+            host_time: win.t_start,
         },
         discontinuity: Discontinuity::NONE,
         dropped_before: 0,
-        provenance: prov,
+        provenance: win.prov,
     };
-    let blk = ddc.process(info, buf).ok()?;
+    let blk = ddc.process(info, win.buf).ok()?;
     let frame_len = ((FOLLOW_FRAME_S * blk.header.sample_rate_hz).round() as usize).max(1);
     let powers: Vec<f64> = blk
         .samples
@@ -1228,29 +1269,99 @@ fn outside_window_event(
     ev
 }
 
-/// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
-/// channels outside it. See the module docs.
-#[allow(clippy::too_many_arguments)]
-fn follow_grants(
-    shared: &Shared,
-    node: &TrunkCcNode,
-    buf: &[Complex<i8>],
+/// The buffered window a pass follows grants over.
+struct FollowWindow<'a> {
+    buf: &'a [Complex<i8>],
     base: u64,
     t_start: Timestamp,
-    prov: &ProvenanceHandle,
+    prov: &'a ProvenanceHandle,
+}
+
+/// Everything following one pass's grants needs, settled **before** anything is written (T-628).
+struct FollowPlan<'e> {
+    /// Granted CHANNELS inside the window: one per distinct frequency, with every slot granted on
+    /// it (T-272: the slots of a TDMA carrier are one RF channel, measured once). Nearest the
+    /// tuned centre first, capped at `max_follows` channels.
+    channels: Vec<(f64, Vec<&'e GrantEvent>)>,
+    /// Granted frequencies beyond it (C23's span limit).
+    outside: Vec<&'e GrantEvent>,
+    /// Inside channels the `max_follows` cap refused.
+    refused: usize,
+    /// The quiet raster channel measured as the floor, and the occupancy threshold over it.
+    reference: Option<(i64, f64)>,
+    /// Which absolute receiver offset the modulo-raster grid fit is, and why.
+    alias: ReceiverAlias,
+    /// Per `channels` entry, its envelope under the resolved alias. Empty unless resolved.
+    frames: Vec<Option<ChannelFrames>>,
+}
+
+/// The absolute receiver offset a plan resolved, Hz, or `None`.
+fn resolved_offset(alias: &ReceiverAlias) -> Option<f64> {
+    (alias.state == AliasState::Resolved)
+        .then_some(alias.offset_hz)
+        .flatten()
+}
+
+/// Plans one pass's following: which grants are targets, the noise reference, and **the receiver
+/// alias** (T-628).
+///
+/// A grant resolves to an ABSOLUTE transmit frequency through the announced band plan, and the
+/// grid fit is only known modulo the raster (see `grid_fit`): +4300 Hz and −8200 Hz name the same
+/// grid, and down-converting at the wrong one measures the channel NEXT DOOR — a wrong
+/// measurement ("granted channel not radiating", or worse, a neighbour's traffic filed as the
+/// call). Until T-628 following was therefore skipped whenever the receiver was measurably
+/// off-grid, which on a HackRF One at 800 MHz is always.
+///
+/// Two constraints settle it, and neither is a band-plan lookup:
+///
+/// 1. **The crystal's bound** ([`RECEIVER_CLOCK_BOUND_PPM`]) limits the absolute offset to a
+///    handful of aliases ([`grid_aliases`]) — three at 851 MHz, one at VHF.
+/// 2. **Which alias has energy**: each is tried on every granted channel the pass targets, and
+///    the one that finds transmissions on more of them than any other wins
+///    ([`resolve_alias`]). A tie is recorded as unresolved and nothing is followed.
+///
+/// The on-grid case goes through the same search — "the offset is +300 Hz, not −12 200 Hz" is a
+/// claim too — so a receiver that is on frequency is *measured* to be, not assumed.
+///
+/// Cost, bounded a priori: one reference envelope, plus `aliases × min(targets, max_follows)`
+/// channelizer runs over the window already held — ≤ 3 × 8 at 800 MHz on a 12.5 kHz raster —
+/// and the winner's envelopes are reused for following rather than recomputed.
+#[allow(clippy::too_many_arguments)]
+fn plan_follow<'e>(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    win: &FollowWindow<'_>,
     ks: &[i64],
     fco: &[f64],
-    events: &[GrantEvent],
-    system: TrunkSystemId,
-    tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
-) {
+    events: &'e [GrantEvent],
+    grid_offset: f64,
+) -> FollowPlan<'e> {
     let c = &shared.counters.chains;
-    let fs = prov.tune.sample_rate_hz;
-    let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
-    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
-        return;
-    }
+    let fs = win.prov.tune.sample_rate_hz;
+    let (tune_center, raster) = (win.prov.tune.center_hz, node.raster_hz);
     let usable_hz = USABLE_FRACTION * fs;
+    let mut alias = ReceiverAlias {
+        state: AliasState::NotTried,
+        evidence: AliasEvidence::NoGrantedChannel,
+        offset_hz: None,
+        ppm: None,
+        bound_ppm: RECEIVER_CLOCK_BOUND_PPM,
+        candidates: 0,
+        targets: 0,
+        occupied: 0,
+        runner_up: 0,
+    };
+    let mut plan = FollowPlan {
+        channels: Vec::new(),
+        outside: Vec::new(),
+        refused: 0,
+        reference: None,
+        alias,
+        frames: Vec::new(),
+    };
+    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
+        return plan;
+    }
 
     // One target per distinct resolved frequency **and slot**. A control channel repeats a grant
     // and its updates many times in half a second, and that is one call, not twenty — but on a
@@ -1276,7 +1387,170 @@ fn follow_grants(
             .is_some_and(|f| (f - tune_center).abs() <= usable_hz / 2.0)
     };
     let mut inside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| reachable(e)).collect();
-    let outside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| !reachable(e)).collect();
+    plan.outside = targets.iter().copied().filter(|e| !reachable(e)).collect();
+    // Deterministic and blind: nearest the tuned centre first, where the front end rolls off
+    // least; ties by frequency.
+    inside.sort_by(|a, b| {
+        let (fa, fb) = (a.f_hz.unwrap_or(f64::NAN), b.f_hz.unwrap_or(f64::NAN));
+        (fa - tune_center)
+            .abs()
+            .total_cmp(&(fb - tune_center).abs())
+            .then(fa.total_cmp(&fb))
+    });
+    // ---- One CHANNEL per distinct frequency, whatever the slot. The slots of a TDMA carrier are
+    // one RF channel: down-converting it twice would pay the DDC twice for the same samples and
+    // measure the same envelope twice — and would count one carrier twice when scoring an alias.
+    // So the targets are grouped by frequency here, each channel is measured once, and each
+    // slot's call is written from that one measurement (T-272). `inside` is already sorted by
+    // distance from the tuned centre, so the members of a group are adjacent.
+    let mut channels: Vec<(f64, Vec<&GrantEvent>)> = Vec::new();
+    for g in inside {
+        let f = g.f_hz.unwrap_or(f64::NAN);
+        match channels.last_mut() {
+            Some((cf, members)) if cf.to_bits() == f.to_bits() => members.push(g),
+            _ => channels.push((f, vec![g])),
+        }
+    }
+    if channels.len() > node.max_follows {
+        plan.refused = channels.len() - node.max_follows;
+        channels.truncate(node.max_follows);
+    }
+    plan.channels = channels;
+    if plan.channels.is_empty() {
+        return plan;
+    }
+    alias.targets = plan.channels.len() as u32;
+
+    // ---- The noise reference: an empty raster channel through the SAME DDC spec, so the granted
+    // channel and its floor are on one scale by construction. `k = 0` is excluded — on a HackRF
+    // the tuned centre carries a DC spike, and a reference sitting in it would read as a floor no
+    // real channel has, which would quietly cost calls rather than announce anything. It is
+    // measured on the FITTED grid, which is where `fco` measured it quiet.
+    plan.reference = ks
+        .iter()
+        .zip(fco)
+        .filter(|&(&k, &f)| k != 0 && f <= FOLLOW_REF_MAX_FCO)
+        .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.abs().cmp(&b.0.abs())))
+        .map(|(k, _)| *k)
+        .and_then(|k| channel_frames(win, k as f64 * raster + grid_offset, raster).map(|f| (k, f)))
+        .and_then(|(k, r)| {
+            let floor = median(&r.powers);
+            (floor.is_finite() && floor > 0.0)
+                .then(|| (k, floor * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0)))
+        });
+    let Some((_, threshold)) = plan.reference else {
+        alias.evidence = AliasEvidence::NoReference;
+        plan.alias = alias;
+        return plan;
+    };
+
+    // ---- The alias: bounded by the crystal, chosen by which alias has energy.
+    let aliases = grid_aliases(grid_offset, raster, tune_center, RECEIVER_CLOCK_BOUND_PPM);
+    alias.candidates = aliases.len() as u32;
+    let mut per_alias: Vec<Vec<Option<ChannelFrames>>> = Vec::with_capacity(aliases.len());
+    let mut scores: Vec<AliasScore> = Vec::with_capacity(aliases.len());
+    for &a in &aliases {
+        let frames: Vec<Option<ChannelFrames>> = plan
+            .channels
+            .iter()
+            .map(|(f, _)| channel_frames(win, f - tune_center + a, raster))
+            .collect();
+        let occupied = frames
+            .iter()
+            .flatten()
+            .filter(|ch| !keyings(ch, threshold, fs).0.is_empty())
+            .count();
+        scores.push(AliasScore {
+            offset_hz: a,
+            targets: plan.channels.len(),
+            occupied,
+        });
+        per_alias.push(frames);
+    }
+    match resolve_alias(&scores) {
+        AliasResolution::Resolved {
+            offset_hz,
+            by,
+            occupied,
+            runner_up,
+            ..
+        } => {
+            inc(&c.cc_alias_resolved);
+            alias.state = AliasState::Resolved;
+            alias.evidence = match by {
+                hk_detect::trunk::AliasEvidence::ClockBound => AliasEvidence::ClockBound,
+                hk_detect::trunk::AliasEvidence::GrantedChannelEnergy => {
+                    AliasEvidence::GrantedChannelEnergy
+                }
+            };
+            alias.offset_hz = Some(offset_hz);
+            alias.ppm = Some(1e6 * offset_hz / tune_center);
+            alias.occupied = occupied as u32;
+            alias.runner_up = runner_up as u32;
+            let i = aliases
+                .iter()
+                .position(|&a| a == offset_hz)
+                .unwrap_or_default();
+            plan.frames = per_alias.swap_remove(i);
+        }
+        AliasResolution::Unresolved { best, why, .. } => {
+            inc(&c.cc_alias_unresolved);
+            alias.state = AliasState::Unresolved;
+            alias.evidence = match why {
+                AliasUnresolved::NoAliasInBound => AliasEvidence::NoAliasInBound,
+                AliasUnresolved::NothingOccupied => AliasEvidence::NothingOccupied,
+                AliasUnresolved::Tied => AliasEvidence::Tied,
+            };
+            alias.occupied = best as u32;
+            alias.runner_up = best as u32;
+        }
+    }
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: trunk-cc receiver alias {:?} ({:?}) from grid fit {grid_offset:+.0} Hz: \
+             tried {:?} Hz on {} granted channel(s), occupied {:?}",
+            alias.state,
+            alias.evidence,
+            aliases.iter().map(|a| a.round()).collect::<Vec<_>>(),
+            plan.channels.len(),
+            scores.iter().map(|s| s.occupied).collect::<Vec<_>>(),
+        );
+    }
+    plan.alias = alias;
+    plan
+}
+
+/// A channel envelope's transmissions over `threshold`, and the frame length in seconds.
+fn keyings(ch: &ChannelFrames, threshold: f64, fs: f64) -> (Vec<(usize, usize, bool)>, f64) {
+    let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
+    let silence_frames = (SILENCE_TIMEOUT_S / frame_s).ceil().max(1.0) as usize;
+    (
+        split_keyings(&ch.powers, threshold, silence_frames),
+        frame_s,
+    )
+}
+
+/// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
+/// channels outside it. See the module docs and [`plan_follow`].
+#[allow(clippy::too_many_arguments)]
+fn follow_grants(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    t_start: Timestamp,
+    base: u64,
+    prov: &ProvenanceHandle,
+    plan: &FollowPlan<'_>,
+    system: TrunkSystemId,
+    tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
+) {
+    let c = &shared.counters.chains;
+    let fs = prov.tune.sample_rate_hz;
+    let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
+    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
+        return;
+    }
+    let usable_hz = USABLE_FRACTION * fs;
+    let (channels, outside) = (&plan.channels, &plan.outside);
 
     // Everything written in one repository section at the end, so no lock is held across the DSP.
     // `bool` = this row continues a call an earlier pass left truncated, so it is an UPDATE to an
@@ -1285,7 +1559,7 @@ fn follow_grants(
 
     // ---- C23's span limit. A grant beyond the window the radio is holding is a ROW, not a
     // silence.
-    for g in &outside {
+    for g in outside {
         let mut ev = outside_window_event(system, g, tune_center, usable_hz, fs);
         // The call happened; this receiver could not observe it. `t_end` stays NULL, which the
         // model defines as "still open, **or when its end was never observed**", and the reason
@@ -1297,73 +1571,43 @@ fn follow_grants(
         inc(&c.cc_grants_outside_window);
     }
 
-    // ---- The noise reference: an empty raster channel through the SAME DDC spec, so the granted
-    // channel and its floor are on one scale by construction. `k = 0` is excluded — on a HackRF
-    // the tuned centre carries a DC spike, and a reference sitting in it would read as a floor no
-    // real channel has, which would quietly cost calls rather than announce anything.
-    let reference = (!inside.is_empty())
-        .then(|| {
-            ks.iter()
-                .zip(fco)
-                .filter(|&(&k, &f)| k != 0 && f <= FOLLOW_REF_MAX_FCO)
-                .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.abs().cmp(&b.0.abs())))
-                .map(|(k, _)| *k)
-        })
-        .flatten()
-        .and_then(|k| {
-            channel_frames(buf, base, t_start, prov, k as f64 * raster, raster).map(|f| (k, f))
-        });
-    let threshold = reference.as_ref().and_then(|(_, r)| {
-        let floor = median(&r.powers);
-        (floor.is_finite() && floor > 0.0).then(|| floor * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0))
-    });
-    if !inside.is_empty() && threshold.is_none() {
+    if !channels.is_empty() && plan.reference.is_none() {
         // No quiet channel, or no measurable floor on one. Nothing is claimed rather than measured
         // against a reference the call is itself sitting in.
         inc(&c.cc_follow_no_reference);
     }
-
-    if let (Some(threshold), Some((ref_k, _))) = (threshold, &reference) {
-        // Deterministic and blind: nearest the tuned centre first, where the front end rolls off
-        // least; ties by frequency.
-        inside.sort_by(|a, b| {
-            let (fa, fb) = (a.f_hz.unwrap_or(f64::NAN), b.f_hz.unwrap_or(f64::NAN));
-            (fa - tune_center)
-                .abs()
-                .total_cmp(&(fb - tune_center).abs())
-                .then(fa.total_cmp(&fb))
-        });
-        // ---- One CHANNEL per distinct frequency, whatever the slot. The slots of a TDMA carrier
-        // are one RF channel: down-converting it twice would pay the DDC twice for the same
-        // samples and measure the same envelope twice. So the targets are grouped by frequency
-        // here, the channel is measured once, and each slot's call is written from that one
-        // measurement (T-272). `inside` is already sorted by distance from the tuned centre, so
-        // the members of a group are adjacent.
-        let mut groups: Vec<(f64, Vec<&GrantEvent>)> = Vec::new();
-        for g in &inside {
-            let f = g.f_hz.unwrap_or(f64::NAN);
-            match groups.last_mut() {
-                Some((gf, members)) if gf.to_bits() == f.to_bits() => members.push(g),
-                _ => groups.push((f, vec![g])),
-            }
-        }
-        if groups.len() > node.max_follows {
-            add(
-                &c.cc_follow_refused,
-                (groups.len() - node.max_follows) as u64,
+    if !channels.is_empty() && plan.alias.state == AliasState::Unresolved {
+        // Tried and not settled: every alias the crystal allows was measured and none stood out.
+        // Following at a guessed one would file a neighbour's traffic as the granted call, so the
+        // grants stand as rows and nothing is followed — and the analysis row records which
+        // aliases were tried and why none won, distinct from "never tried".
+        add(&c.cc_follow_unresolved, channels.len() as u64);
+        if crate::debug_enabled() {
+            eprintln!(
+                "hk-pipeline: trunk-cc not following {} granted channel(s): receiver alias \
+                 unresolved ({:?} over {} candidate(s))",
+                channels.len(),
+                plan.alias.evidence,
+                plan.alias.candidates,
             );
-            groups.truncate(node.max_follows);
         }
-        for (f, members) in &groups {
+    }
+
+    if let (Some((ref_k, threshold)), Some(offset_hz)) =
+        (plan.reference, resolved_offset(&plan.alias))
+    {
+        add(&c.cc_follow_refused, plan.refused as u64);
+        // One CHANNEL per distinct frequency, whatever the slot (T-272): `plan_follow` measured
+        // each once under the resolved alias, and each slot's call is written from that one
+        // envelope below.
+        for ((f, members), ch) in channels.iter().zip(&plan.frames) {
             let f = *f;
-            let Some(ch) = channel_frames(buf, base, t_start, prov, f - tune_center, raster) else {
+            let Some(ch) = ch else {
                 inc(&c.errors);
                 continue;
             };
             inc(&c.cc_follows);
-            let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
-            let silence_frames = (SILENCE_TIMEOUT_S / frame_s).ceil().max(1.0) as usize;
-            let runs = split_keyings(&ch.powers, threshold, silence_frames);
+            let (runs, frame_s) = keyings(ch, threshold, fs);
             if runs.is_empty() {
                 // Granted, and nothing was on it in this window. The grant row already records the
                 // grant; inventing a call would claim an observation nobody made.
@@ -1507,6 +1751,10 @@ fn follow_grants(
                     "frame_s": frame_s,
                     "margin_db": OCCUPIED_MARGIN_DB,
                     "reference_raster_channel": ref_k,
+                    // Where the granted frequency was actually measured: the transmit frequency
+                    // plus the receiver's resolved absolute offset (T-628), and what chose it.
+                    "receiver_offset_hz": offset_hz,
+                    "receiver_alias": plan.alias.evidence,
                 });
                 open.detail["continued_across_passes"] = json!(is_continuation);
                 if !is_continuation {
@@ -1537,8 +1785,8 @@ fn follow_grants(
         eprintln!(
             "hk-pipeline: trunk-cc followed {} of {} granted channel(s) ({} outside the \
              {:.3} MHz window at {:.4} MHz): {} call(s)",
-            inside.len(),
-            inside.len() + outside.len(),
+            channels.len(),
+            channels.len() + outside.len(),
             outside.len(),
             usable_hz / 1e6,
             tune_center / 1e6,
@@ -1587,6 +1835,7 @@ struct AttachInput<'a> {
     fco: f64,
     protocol: TrunkProtocol,
     grid: Option<GridFit>,
+    alias: ReceiverAlias,
     tune_center_hz: f64,
     raster_hz: f64,
     t: Timestamp,
@@ -1661,6 +1910,7 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
         offset_hz: g.offset_hz,
         concentration: g.concentration,
         ppm: 1e6 * g.offset_hz / input.tune_center_hz,
+        alias: Some(input.alias),
     });
     let obs = CcObservation {
         center_hz: input.candidate.center_hz,
@@ -1718,7 +1968,8 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
 ///
 /// **The fit is modulo the raster, and that is all the data says.** It re-aligns the *grid*; it
 /// does not say which grid line an emission is on, so it is applied to the hunt's own channel
-/// arithmetic and never to a frequency that is already unambiguous (see [`follow_grants`]).
+/// arithmetic and never directly to a frequency that is already unambiguous: reaching one (a
+/// grant) goes through the alias [`plan_follow`] resolves (T-628).
 fn grid_fit(buf: &[Complex<i8>], fs: f64, raster_hz: f64) -> Option<GridFit> {
     let n = SWEEP_FFT_LEN;
     let frames = buf.len() / n;

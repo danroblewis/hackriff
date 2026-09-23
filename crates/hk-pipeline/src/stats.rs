@@ -383,6 +383,17 @@ counter_group!(
         /// Followed channels that carried no transmission at all inside the window. The grant row
         /// still stands; no call is invented for an observation that was not made.
         cc_follow_silent,
+        /// T-628: passes whose receiver **alias** was resolved — the absolute offset behind the
+        /// modulo-raster grid fit, chosen by the crystal's bound alone or by which admissible
+        /// alias put energy on the most granted channels. Following needs it: a grant is an
+        /// absolute frequency.
+        cc_alias_resolved,
+        /// T-628: passes that TRIED the alias and could not settle it (a tie, nothing occupied, or
+        /// no alias inside the bound). Distinct from never trying, which counts in neither.
+        cc_alias_unresolved,
+        /// T-628: in-window grants NOT followed because the alias was unresolved. The grant rows
+        /// stand; no call is filed from a guessed offset.
+        cc_follow_unresolved,
         /// `CallRecord` rows written (metadata only: who, where, when, on what channel — never
         /// audio, never content).
         cc_calls,
