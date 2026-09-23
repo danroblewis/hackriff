@@ -344,6 +344,33 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
             &fsk,
             48_000.0,
         ),
+        // T-609: the liquid path through the resampler (d8psk at 4 samples/symbol → 5), at an
+        // exact integer rate (8psk: no resampler), and the native OQPSK path. The measured
+        // chunks include the acquisition FFT (it lands inside the warm-up for these rates).
+        (
+            "psk_demod",
+            json!({"modulation": "qpsk", "symbol_rate_bd": 4800}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "d8psk", "symbol_rate_bd": 12000}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "8psk", "symbol_rate_bd": 9600, "max_offset_hz": 0}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "oqpsk", "symbol_rate_bd": 4800, "pulse": "half-sine"}),
+            &fsk,
+            48_000.0,
+        ),
         ("slicer", json!({}), &soft, 2_400.0),
         ("diff_decode", json!({}), &bits, 2_400.0),
         ("nrzi", json!({}), &bits, 2_400.0),

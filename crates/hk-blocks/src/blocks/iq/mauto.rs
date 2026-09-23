@@ -1,7 +1,7 @@
 //! ADR-0011 §9 (T-606) catalogue rows for group `iq`: `psk_demod`, `css_demod`, `ssb_demod`,
 //! `cw_demod`. **Ports are pinned; parameters are placeholders** (`params_pinned: false`) that
-//! each block's implementing ticket pins (T-609 `psk_demod`; the others are unfiled, docs/18 §9).
-//! None of these blocks is implemented here. `ofdm_demod` is a reserved name with **no**
+//! each block's implementing ticket pins (the others are unfiled, docs/18 §9). `psk_demod`'s
+//! parameters are pinned (T-609) and it is implemented in `psk.rs`; the rest are not. `ofdm_demod` is a reserved name with **no**
 //! descriptor: its output needs a port type that does not exist yet (ADR-0011 §9.2).
 
 use hk_recipe::PortType::{Iq, Real, Soft};
@@ -15,8 +15,10 @@ pub fn planned() -> Vec<BlockDescriptor> {
         descriptor(
             "psk_demod",
             "iq",
-            "PSK demodulator: carrier + timing recovery and matched filter, de-mapped inside the \
-             block to one soft item per BIT (k per symbol, label MSB first, positive = 1).",
+            "PSK demodulator: coarse carrier acquisition, RRC matched filter, symbol timing and \
+             carrier recovery (liquid-dsp symtrack; native for OQPSK), de-mapped inside the \
+             block to one soft item per BIT (k per symbol, label MSB first, positive = 1, \
+             max-log LLR up to a common scale).",
             vec![PortSpec::new("in", Iq)],
             vec![
                 PortSpec::new("out", Soft),
@@ -36,32 +38,34 @@ pub fn planned() -> Vec<BlockDescriptor> {
                         "8psk",
                         "d8psk",
                     ]),
-                    "Constellation and differential coding (k = 1, 2 or 3 bits per symbol).",
+                    "Constellation and differential coding (k = 1, 2 or 3 bits per symbol); \
+                     differential modes emit data bits.",
                 )
                 .required(),
                 param(
                     "symbol_rate_bd",
                     float(1.0, 10e6, "Bd"),
-                    "Nominal symbol rate.",
+                    "Nominal symbol rate (OQPSK: I/Q pairs per second).",
                 )
                 .required(),
                 param(
                     "pulse",
                     one_of(&["rrc", "rect", "half-sine"]),
-                    "Matched-filter pulse (half-sine: 802.15.4 O-QPSK).",
+                    "Matched-filter pulse; rect and half-sine (802.15.4) are OQPSK-only.",
                 )
                 .default_value("rrc"),
-                param("rolloff", float(0.0, 1.0, ""), "RRC roll-off.").default_value(0.35),
+                param("rolloff", float(0.05, 1.0, ""), "RRC roll-off.").default_value(0.35),
                 param(
                     "mapping",
                     one_of(&["gray", "natural"]),
-                    "Symbol label of each constellation point.",
+                    "Symbol label of each constellation point (or phase change).",
                 )
                 .default_value("gray"),
                 param(
                     "rotation_deg",
                     int(0, 315),
-                    "Resolves the coherent M-fold phase ambiguity (multiples of 360/M).",
+                    "Resolves the coherent M-fold phase ambiguity (a multiple of 360/M; OQPSK: \
+                     90 inverts I, 180 both rails, 270 Q; differential modes: 0 only).",
                 )
                 .default_value(0)
                 .hot(),
@@ -69,24 +73,22 @@ pub fn planned() -> Vec<BlockDescriptor> {
                     .default_value(false)
                     .hot(),
                 param(
-                    "carrier_loop_bandwidth",
-                    float(1e-6, 0.25, ""),
-                    "Normalised carrier-loop bandwidth.",
+                    "loop_bandwidth",
+                    float(1e-4, 1.0, ""),
+                    "Tracker loop bandwidth on liquid symtrack's scale (carrier and timing \
+                     loops at 0.001x, AGC and equaliser at 0.02x); the OQPSK loops use the \
+                     same carrier law.",
                 )
-                .hot(),
-                param(
-                    "timing_loop_bandwidth",
-                    float(1e-6, 0.25, ""),
-                    "Normalised timing-loop bandwidth.",
-                )
+                .default_value(0.2)
                 .hot(),
                 param(
                     "max_offset_hz",
                     float(0.0, 1e6, "Hz"),
-                    "Largest carrier offset acquired (FLL/band-edge pull-in).",
+                    "Largest carrier offset the coarse estimator removes; absent: \
+                     symbol_rate/4; 0: off.",
                 ),
             ],
-            false,
+            true,
         ),
         descriptor(
             "css_demod",

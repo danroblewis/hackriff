@@ -1822,7 +1822,7 @@ Conventions:
 | GET | `/api/blocks` | – | `{"blocks": [BlockDescriptor]}`: `name`, `version`, `group`, `doc`, `inputs`/`outputs` (`{name, types, diagnostic}`), `params` (`{name, type, required, default, hot, doc}`), `params_pinned` |
 | GET | `/api/recipes` | – | `{"recipes": [{id, name, version (latest), versions, builtin, builtin_version, description, match, input: {port}}]}` by id |
 | POST | `/api/recipes` | recipe document | 201 `{id, version, warnings, recipe}`: saved as `latest + 1` after validation against `/api/blocks` |
-| POST | `/api/recipes/validate` | recipe document | 200 `{valid, errors, warnings, edges: [{node, port, from ("input" \| "node.port"), type}]}`. Nothing is saved. |
+| POST | `/api/recipes/validate` | recipe document | 200 `{valid, errors, warnings, edges: [{node, port, from ("input" \| "node.port"), type}]}`. Nothing is saved. A diagnostic output (`inputs`/`outputs` `diagnostic: true`, e.g. `psk_demod.symbols`) may feed `outputs[]` but never a node input: wiring one is an error at that input's path (ADR-0011 §9.2, T-609). |
 | GET | `/api/recipes/match` | – | `?emitter=<id>`: every recipe ranked against that emitter's **measured** parameters, with per-field reasons ("Recipe matching" below) |
 | GET | `/api/recipes/{id}` | – | the latest version's document; 404 `not_found` |
 | GET | `/api/recipes/{id}/versions/{version}` | – | that version's document |

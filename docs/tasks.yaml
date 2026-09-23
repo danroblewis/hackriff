@@ -20699,7 +20699,6 @@ tasks:
     milestone: MAUTO
     title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
     status: in-progress
-    branch: task-t609
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -20738,6 +20737,20 @@ tasks:
       be read as superseded by this ticket; T-606's amendment is the place that records it.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+    branch: task-t609
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 10:28).
+      psk_demod is implemented and registered, and its parameters are pinned. BPSK, DBPSK, QPSK, DQPSK, pi/4-DQPSK, 8PSK and D8PSK go through liquid-dsp symtrack_cccf (the T-607 binding; the safe wrapper lives in psk.rs). OQPSK goes through a native receiver: RRC/half-sine/rect matched filter, half-symbol cubic interpolator, per-rail Gardner timing and an offset-aware Costas loop. The block de-maps internally to one soft item per bit (T-606 option a): max-log LLR, MSB first, positive = 1. Differential modes are detected softly to data bits. Hot rotation_deg/iq_swap resolve the phase ambiguity (for OQPSK, rotation_deg selects inverted rails).
+      Carrier acquisition is a feed-forward M-th-power spectral-line estimator over a fixed window after each restart, not the FLL/band-edge the ticket sketched. Both of those were built and measured first: the delay-and-multiply estimator was still 200-400 Hz out after 256 symbols, and an FLL on the tracker output wandered 110 Hz against liquid's NCO integrator. The line estimator lands within 1 Hz. The rate plan keeps the line from aliasing, and the block re-acquires after a sustained loss of lock (e.g. a burst that starts late).
+      DISCONTINUITY/RESET drops all state, including liquid 1.8.2's derivative-matched-filter history, which symsync_reset misses; it is flushed with zeros, allocation-free. Feedback decisions land at fixed sample counts, so every port is chunking-invariant down to 1-sample chunks. The time map is within 0.15 symbol. Measured BER is close to theory (QPSK 9 dB Es/N0: 3.3e-3 vs 2.4e-3 theory).
+      Recipe::validate now refuses a diagnostic output wired into a node input (ADR-0011 §9.2 precondition). The ADR-0011 §9.1/§9.4 rows are updated, api.md documents the new validate rule, and the synth trace no longer claims no psk_demod exists. With registration removed, 11 of 15 targeted tests go red.
+      Red proof (not a gating run): with the psk_demod registration commented out, `cargo nextest run -p hk-blocks -E 'test(/psk/) | binary(blocks_a_alloc_free)'` exited 100 with 11 failed and 4 passed (the 4 are catalogue-contract tests); registration restored before commit.
+      Tests: just test-crate hk-blocks -> exit 0 (99 passed, 1 skipped (9 psk_demod unit tests, alloc-free incl. 4 psk configs, mauto_catalogue 10)); just test-crate hk-recipe -> exit 0 (44 passed (incl. a_diagnostic_output_may_be_tapped_but_not_wired_into_a_node)); cargo nextest run -p hk-pipeline -E 'test(/synth/)' -> exit 0 (5 passed)
+      precheck exit 0
+      Commits: ebf05c27
+      Observed, not chased: Upstream liquid-dsp 1.8.2 bug: symsync_reset (vendor/liquid-dsp/src/filter/src/symsync.proto.c:297) resets FIRPFB mf but not dmf, so symtrack_cccf_reset is not a full reset. Worked around in psk.rs Symtrack::reset (zero flush + second reset); hk-liquid-sys's coverage note could mention it. | psk_demod is not a burst receiver: acquisition needs a 512-symbol window (1024 for x^8 and RRC OQPSK), so a packet shorter than that (802.15.4 frames, ~2000 symbols max) loses its start. A preamble-driven burst mode marking each burst's first item DISCONTINUITY (§9.2) is follow-up work for SIGNAL-054-class families. | 8PSK/D8PSK acquisition (x^8 line) needs Es/N0 >= ~15 dB; at 13 dB about 3 of 5 seeds mis-acquired in a sweep. D8PSK needs ~15 dB for usable BER anyway, but a symbol-rate refinement stage could lower the threshold. | The ticket's use cases are served at block level only: no recipe wires psk_demod end to end yet (CCSDS also needs T-610 viterbi and T-611 reed_solomon), and hk_pipeline::synth's S1 search does not yet try a linear-modulation hypothesis through psk_demod. | LIQUID_DELAY_SYMBOLS (9) was measured at 3 and 5 samples/symbol, within 0.15 symbol; it is not re-derived for other k.
+      Use cases: SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081
+      Resources: 205 CPU-s, peak 2.0 GB
   - id: T-610
     milestone: MAUTO
     title: 'hk-blocks `viterbi`: convolutional/punctured FEC incl. CCSDS R=1/2 K=7 - rank 3 on the T-554 gap list, 10 families'
