@@ -242,6 +242,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const d = ringEl.dataset;
       d.retentionS = rules ? String(rules.retentionS) : "";
       d.iqS = rules?.iqS != null ? String(rules.iqS) : "";
+      // What those two rules were derived FROM, this frame: the edge the panes are drawn to and the
+      // ring window as last polled. The server's ring moves on between that poll and any later
+      // question, so a claim about the rules is only checkable against the snapshot they came from.
+      d.edgeS = rules ? String(rules.retentionS + rules.spanS) : "";
+      d.ringT0S = w?.buffered ? String(w.buffered.t0S) : "";
+      d.ringT1S = w?.buffered ? String(w.buffered.t1S) : "";
       d.backing = backing;
       d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
       d.paneT1S = String(pane.box.t1Ns / S_TO_NS);
