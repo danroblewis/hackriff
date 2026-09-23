@@ -822,7 +822,7 @@ def _voice_scene(ctx: Ctx, name: str, modulation: str) -> tuple[list[Scene], dic
     scene.annotate(0, n, f - bw / 2, f + bw / 2, name,
                    scene.emission_truth(cap, off, bw, power, kind="none", modulation=modulation,
                                         symbol_alphabet=None, framed=False, burst_samples=bursts,
-                                        snr_db_per_hz=power - cap.floor_dbfs_per_hz - db(bw)))
+                                        snr_db_per_hz=power - cap.floor_dbfs_per_hz))
     return [scene], {}
 
 
