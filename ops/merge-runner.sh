@@ -47,6 +47,21 @@ BULKMARK=$S/bulk-in-progress
 # No database and no daemon: append-only text, and `gate_attempts` is read from the ledger
 # this script already keeps rather than counted a second way.
 LANDED=$S/landed.jsonl
+# THE KNOB STORE (pipeline manager, 2026-09-23): `$S/env` holds KEY=VALUE lines written by
+# `just knobs set`, so an experiment's setting survives a plain restart (on 2026-09-23 the cap-6
+# trial lived only in one process's environment). The process environment still wins - a
+# deliberate one-off override on the command line is not silently replaced by the store.
+if [ -f "$S/env" ]; then
+  # `|| [ -n "$k" ]` keeps a last line without a newline; CR and surrounding spaces are stripped
+  # so a hand-edited store reads the same here as in ops/work-runner.py (review, 2026-09-23).
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k//$'\r'/}"; k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    v="${v//$'\r'/}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    case "$k" in ''|'#'*) continue ;; esac
+    [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+    [ -z "${!k+x}" ] && export "$k=$v"
+  done < "$S/env"
+fi
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 # Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
 BULK_MAX=${BULK_MAX:-15}
@@ -68,6 +83,9 @@ alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 
 # on names alone never released on a fix pushed to a queued branch - at 04:06 on 2026-09-23 the
 # fixed branch sat behind "waiting for the queue to change" until a person deleted the marker.
 batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse --short "$b" 2>/dev/null)"; done | sort | tr '\n' ' '; }
+# One hold.jsonl line, JSON-encoded by Python so a `\`, a tab or a quote in `why` cannot produce a
+# record `hkpy.flow` would silently drop (review, 2026-09-23). event: expired | ended-by-queue.
+hold_event(){ python3 -c 'import json,sys,time; print(json.dumps({"ts": int(time.time()), "event": sys.argv[1], "why": sys.argv[2]}))' "$1" "$2" >> "$S/hold.jsonl" 2>/dev/null || true; }
 notify_coordinator(){
   alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
   tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
@@ -606,6 +624,15 @@ try_bulk(){
     # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
     if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
       log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
+      # REBUILD FIRST. The spec runner serves whatever `target/debug/hk` and `ui/dist` already exist
+      # (ui/e2e/backend.mjs), and those were built from the BATCH tree by the gate that just failed.
+      # At 13:47 on 2026-09-23 this step ran main's spec against the batch's UI bundle - which
+      # carried the very tilecache.ts change surface-nav was red on - and declared MAIN IS RED,
+      # re-queueing eight branches behind a defect that belonged to one of them. `just test-ui-e2e`
+      # rebuilds both before it runs; this path must too, or its verdict is about the wrong tree.
+      log "TRIAGE: rebuilding hk and ui/dist from the rewound main before the spec re-run"
+      ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+        || log "TRIAGE: WARN rebuild failed; the spec re-run below may test the batch's artefacts"
       if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
         for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
         batch_sig "${branches[@]}" > "$S/suite-broken"
@@ -662,6 +689,8 @@ self_version(){
 ( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
+# What this process is actually running with - `just knobs show` reads it back as "effective".
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a
@@ -721,6 +750,35 @@ while true; do
   for qb in $queued; do
     case " $SEEN_QUEUED " in *" $qb "*) ;; *) SEEN_QUEUED="$SEEN_QUEUED $qb"; log "QUEUED $qb";; esac
   done
+  # A BOUNDED HOLD (pipeline manager, 2026-09-23; invariants 4-6 in .claude/rules/pipeline-
+  # invariants.md). `$S/hold` is written by `just hold` with until=/why=/owner= and at most 30
+  # minutes; this runner takes no branch while it is live, IGNORES it once expired, and ENDS it the
+  # moment a branch is queued - a hold means "prefer idle", never "refuse work". Every end is
+  # logged and the early end alerts, so a hold that cost anything is visible within a minute.
+  if [ -f "$S/hold" ]; then
+    hold_until=$(sed -n 's/^until=//p' "$S/hold" | head -1); hold_since=$(sed -n 's/^since=//p' "$S/hold" | head -1)
+    hold_why=$(sed -n 's/^why=//p' "$S/hold" | head -1); now_s=$(date +%s)
+    # The READER enforces the bound too (review, 2026-09-23): a hand-written marker with a
+    # non-numeric or far-off `until=` is capped at 30 minutes from `since=` (or from now), so
+    # "bounded, auto-expiring" is a property of the runner and not only of `just hold`.
+    case "$hold_until" in ''|*[!0-9]*) hold_until=0 ;; esac
+    case "$hold_since" in ''|*[!0-9]*) hold_since=$now_s ;; esac
+    [ "$hold_until" -gt $(( hold_since + 1800 )) ] && { hold_until=$(( hold_since + 1800 )); log "HOLD: marker asked for more than 30 min - capped at $(date -r "$hold_until" '+%H:%M' 2>/dev/null || echo "$hold_until")"; }
+    if [ "$now_s" -ge "$hold_until" ]; then
+      rm -f "$S/hold"; log "HOLD expired ($hold_why) - resuming"
+      hold_event expired "$hold_why"
+      # Invariant 6's second alert: the hold ran out with work already waiting behind it.
+      [ -n "$queued" ] && alert amber "hold reached its expiry with work waiting" "$hold_why - expired with queued: $(printf '%s' "$queued" | tr '\n' ' ' | cut -c1-80)" --key "hold-expired-queued"
+    elif [ -n "$queued" ]; then
+      rm -f "$S/hold"; log "HOLD ended at the first queued branch ($hold_why): $(printf '%s' "$queued" | tr '\n' ' ' | cut -c1-80)"
+      hold_event ended-by-queue "$hold_why"
+      alert amber "hold ended by queued work" "$hold_why - a branch arrived; the runner resumed. Blocked minutes are charged to the open experiment." --key "hold-ended"
+    else
+      [ -z "${HOLD_SAID:-}" ] && { log "HOLD: merge queue held until $(date -r "$hold_until" '+%H:%M' 2>/dev/null || echo "$hold_until") - $hold_why"; HOLD_SAID=1; }
+      sleep 8; continue
+    fi
+  fi
+  HOLD_SAID=""
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)

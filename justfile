@@ -145,6 +145,27 @@ builders *args:
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
+# THE PIPELINE MANAGER'S INSTRUMENTS (2026-09-23; .claude/roles/pipeline-manager.md). All read the
+# ops logs; none touches main. `flow` is where the hours went (per hour / per gate / per ticket);
+# `experiment` is the one-at-a-time ledger with baseline, guards and a prepared rollback;
+# `knobs` is the persistent knob store every ops restart reads; `hold` is the bounded (<= 30 min,
+# auto-expiring, ended by the first queued branch) merge-queue hold. Skills: .claude/skills/{flow,
+# experiment,knobs}; invariants: .claude/rules/pipeline-invariants.md.
+flow *args:
+    uv run --locked --project py python -m hkpy.flow {{args}}
+
+experiment *args:
+    uv run --locked --project py python -m hkpy.experiment {{args}}
+
+knobs *args:
+    uv run --locked --project py python -m hkpy.knobs {{args}}
+
+hold *args:
+    uv run --locked --project py python -m hkpy.knobs hold {{args}}
+
+touchpoints *args:
+    uv run --locked --project py python -m hkpy.flow --touchpoints {{args}}
+
 # Is the merge suite within its duration budget? Exits 1 if not (T-762). Deliberately NOT part
 # of any suite: it reads this machine's recorded history, so no diff can clear it and a merge
 # must never hang on it.

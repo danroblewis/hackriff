@@ -13,14 +13,33 @@
 # Any extra args after the role are passed straight to `claude` (e.g. --resume <id>).
 set -euo pipefail
 REPO=/Users/daniellewis/hackriff
-ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator> [extra claude args...]}"; shift || true
+ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator|pipeline-manager> [extra claude args...]}"; shift || true
 RF="$REPO/.claude/roles/$ROLE.md"
 [ -f "$RF" ] || { echo "no role file: $RF"; exit 1; }
 
+# The knob store (`just knobs`): a role session inherits it so anything it starts by hand reads the
+# same values the runners do. It is PREFIXED ONTO THE TYPED COMMAND, like HACKRIFF_ROLE below -
+# exporting it here reaches nothing: a tmux pane's environment comes from the tmux SERVER, not from
+# the client that ran new-session (reviewed and measured 2026-09-23). A pre-set process variable
+# is left out of the prefix, so the environment still wins over the store.
+S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+KNOBPREFIX=""
+if [ -f "$S/env" ]; then
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k//$'\r'/}"; k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    v="${v//$'\r'/}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    case "$k" in ''|'#'*) continue ;; esac
+    [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+    [ -z "${!k+x}" ] && KNOBPREFIX="$KNOBPREFIX$k=$(printf '%q' "$v") "
+  done < "$S/env"
+fi
+
 case "$ROLE" in
-  coordinator) SESSION=dev;   MODEL=opus; EFFORT=high ;;
-  supervisor)  SESSION=super; MODEL=opus; EFFORT=high ;;
-  *) echo "unknown role '$ROLE' (expected supervisor|coordinator)"; exit 1 ;;
+  coordinator)      SESSION=dev;   MODEL=opus; EFFORT=high ;;
+  supervisor)       SESSION=super; MODEL=opus; EFFORT=high ;;
+  # The pipeline manager (2026-09-23): owns throughput, ticks every 30 min, one instance (invariant 22).
+  pipeline-manager) SESSION=flow;  MODEL=opus; EFFORT=high ;;
+  *) echo "unknown role '$ROLE' (expected supervisor|coordinator|pipeline-manager)"; exit 1 ;;
 esac
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -55,7 +74,7 @@ fi
 # command line, and is readable wherever this runs on Linux.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
 tmux send-keys -t "$SESSION" -l \
-  "HACKRIFF_ROLE=$ROLE $CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
+  "HACKRIFF_ROLE=$ROLE $KNOBPREFIX$CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
 tmux send-keys -t "$SESSION" Enter
 echo "launched '$ROLE' in tmux session '$SESSION' (model=$MODEL effort=$EFFORT)"
 echo "  role prompt: $RF  (+ root CLAUDE.md invariants)"
