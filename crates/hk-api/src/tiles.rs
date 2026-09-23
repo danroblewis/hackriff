@@ -93,7 +93,9 @@
 //!   history lock per chunk, so a tile fan-out at the live edge can never lock ingest out for a
 //!   whole tile (§5.5 cap 3, the report builder's discipline).
 //! - **Concurrency** is bounded by [`TILE_MAX_IN_FLIGHT`] ([`TileSlot`]). Over the cap the answer
-//!   is `503` naming the cap, not a queue that grows until ingest starves.
+//!   is `503` naming the cap, not a queue that grows until ingest starves — **unless the tile is
+//!   sealed and already in the hot-tile cache** (T-581): the cap bounds *production*, and a cached
+//!   answer produces nothing, so it is served without a slot ([`hot_hit_unslotted`]).
 //!
 //! # The coverage plane is a table of distinct planes, run-length encoded (T-467)
 //!
@@ -227,6 +229,14 @@ pub const TILE_MAX_SHADOW_SOURCE_CELLS: usize = TILE_CELLS * SHADOW_SEARCH_ROWS;
 /// keeps a pan's burst moving while leaving the lock free most of the time. Over the cap the answer
 /// is `503`, which a client retries — §5.5's cap (1) is LIFO with viewport cancellation on the
 /// client, and a refusal is what lets it cancel rather than wait.
+///
+/// **It is a PRODUCER cap** (T-581). A sealed tile the hot-tile cache (T-572) already holds is
+/// answered even with every slot out, because answering it takes no pyramid read: before that, a
+/// couple of slow coarse tiles holding the cap turned every re-poll of an already-drawn screen into
+/// a `503`, and the client halves its operating limit on each (T-450: 26 tiles resident against
+/// 17 268 cancelled in 75 s). The number itself is unchanged: every read that *does* produce still
+/// takes the one history mutex per chunk, so raising it would only lengthen the stretch ingest
+/// competes for that mutex — the store's lock was not changed, so neither is the cap.
 pub const TILE_MAX_IN_FLIGHT: usize = 4;
 
 /// The widest tile the view lattice needs: the whole 1 MHz–6 GHz device range in two tiles
@@ -341,6 +351,9 @@ pub struct TileAdmission {
     in_flight: Arc<AtomicUsize>,
     clients: Mutex<Vec<TileClient>>,
     fair: bool,
+    /// Reads admission refused that were answered anyway from the hot-tile cache, holding no slot
+    /// (T-581) — each one a `503` the pre-T-581 route would have issued.
+    hot_answers: AtomicUsize,
 }
 
 impl Default for TileAdmission {
@@ -358,6 +371,7 @@ impl Default for TileAdmission {
             in_flight: Arc::new(AtomicUsize::new(0)),
             clients: Mutex::new(Vec::new()),
             fair,
+            hot_answers: AtomicUsize::new(0),
         }
     }
 }
@@ -366,6 +380,11 @@ impl TileAdmission {
     /// Slots out across every client.
     pub fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Acquire)
+    }
+
+    /// Refused reads answered from the hot-tile cache without a slot (T-581).
+    pub fn hot_answers(&self) -> usize {
+        self.hot_answers.load(Ordering::Acquire)
     }
 
     /// Is the fair share in force?
@@ -2307,10 +2326,18 @@ pub fn tiles_json(state: &ApiState, q: &Params) -> Result<Value, ApiError> {
     // T-700: the plane selection is validated BEFORE admission, so a misspelled `planes` is a 400
     // that never takes a slot from the client's share.
     let planes = parse_planes(q)?;
-    let slot = state
-        .tile_admission
-        .acquire(&client_id(q))
-        .map_err(too_many_in_flight)?;
+    let client = client_id(q);
+    let slot = match state.tile_admission.acquire(&client) {
+        Ok(slot) => slot,
+        // T-581: the cap is a PRODUCER cap. A sealed tile the hot-tile cache already holds is
+        // answered from RAM with no pyramid read, so refusing it would only turn a cheap answer
+        // into a client-side halving of its operating limit (`tilecache.ts`'s AIMD) behind a
+        // couple of slow coarse producers. See [`hot_hit_unslotted`].
+        Err(share) => {
+            return hot_hit_unslotted(state, q, planes, &client, share)
+                .ok_or_else(|| too_many_in_flight(share));
+        }
+    };
     let answer = tile_body(state, q, &slot, planes);
     // Served means *drawn*: only an answer disarms this client's bootstrap reserve.
     if answer.is_ok() {
@@ -2717,6 +2744,62 @@ fn stamp_read_cost(cost: &mut Value, elapsed_ms: f64, slot: &TileSlot) {
     cost["client"] = json!(slot.client());
     cost["reserved"] = json!(share.reserved);
     cost["fair_share"] = json!(share.fair);
+}
+
+/// **A sealed, already-cached tile is answered even when every producer slot is out** (T-581).
+///
+/// [`TILE_MAX_IN_FLIGHT`] exists because tile *production* takes the history lock and competes
+/// with ingest. A hot-tile hit does no production: one brief hold to resolve the address and read
+/// the watermark (exactly the hold an admitted hit already took), then a RAM lookup. Before T-581
+/// such a hit still needed a slot, so while a couple of slow coarse tiles held the cap every
+/// already-drawn sealed tile a steady-state poll re-asked for came back `503` — and the client
+/// halves its operating limit on each one, which is how T-450 saw 17 268 cancellations against 26
+/// resident tiles.
+///
+/// Only reached **after** admission refused, so an admitted read's accounting (T-630's shares, the
+/// bootstrap reserve) is exactly what it was. A LIVE tile is never in the cache (T-572), so it
+/// still needs a slot and still meets the cap: the cap keeps binding every read that would touch
+/// the store for more than that one hold. `None` means "no cached answer": the caller refuses.
+fn hot_hit_unslotted(
+    state: &ApiState,
+    q: &Params,
+    planes: Planes,
+    client: &str,
+    share: Share,
+) -> Option<Value> {
+    let started = Instant::now();
+    let cache = state.tile_cache.as_ref()?;
+    let store = tile_store(state, q);
+    let (key, sealed) = with_tile_history(state, store, |p| {
+        let key = parse_key(p.geometry(), q)?;
+        let sealed = p.watermark().as_unix_nanos() >= key.region.t1_ns;
+        Ok((key, sealed))
+    })
+    .ok()?;
+    if !sealed {
+        return None;
+    }
+    let max_live = crate::http::max_live_span_hz(state);
+    let k = hot_tile_key(&key, store, planes, max_live);
+    let mut v = cache.get(&k, coverage_epoch(state))?;
+    let cost = &mut v["cost"];
+    cost["build_ms"] = json!((started.elapsed().as_secs_f64() * 1e6).round() / 1000.0);
+    cost["in_flight"] = json!(state.tile_admission.in_flight());
+    cost["in_flight_share"] = json!(share.share);
+    // This read holds no producer slot, and says so.
+    cost["in_flight_held"] = json!(0);
+    cost["clients"] = json!(share.clients);
+    cost["client"] = json!(client);
+    cost["reserved"] = json!(share.reserved);
+    cost["fair_share"] = json!(share.fair);
+    cost["served_from"] = json!("hot-tile-cache");
+    state
+        .tile_admission
+        .hot_answers
+        .fetch_add(1, Ordering::Relaxed);
+    // Served means drawn, however it was served (T-630).
+    state.tile_admission.mark_served(client);
+    Some(v)
 }
 
 /// Hold `v` in the hot-tile cache when this address earned one (T-572), and hand it back.
@@ -4949,6 +5032,200 @@ mod tests {
         let s = c.stats_json();
         assert_eq!(s["invalidations"], json!(2), "{s}");
         assert_eq!(s["entries"], json!(0), "{s}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-581: the in-flight cap is a PRODUCER cap; a cached sealed tile needs no slot.
+    // -----------------------------------------------------------------------------------------
+
+    /// One screen around the fixture's sealed tile: 4 frequency x 3 time addresses, every one of
+    /// them sealed (its whole extent is behind the watermark).
+    fn sealed_screen() -> Vec<(i64, i64)> {
+        let mut v = Vec::new();
+        for t in T_INDEX - 2..=T_INDEX {
+            for f in F_INDEX - 2..=F_INDEX + 1 {
+                v.push((f, t));
+            }
+        }
+        v
+    }
+
+    fn viewer_params(f_index: i64, t_index: i64) -> Vec<(String, String)> {
+        let mut q = tile_params(f_index, t_index);
+        q.push(("client".into(), "viewer".into()));
+        q
+    }
+
+    /// Two slow coarse producers of two OTHER clients holding every slot, each inside its own
+    /// share — the state T-450 measured the fill collapsing behind.
+    fn slow_producers_hold_the_cap(state: &ApiState) -> Vec<TileSlot> {
+        let held: Vec<TileSlot> = ["slow-a", "slow-a", "slow-b", "slow-b"]
+            .iter()
+            .map(|c| state.tile_admission.acquire(c).unwrap())
+            .collect();
+        assert_eq!(held.last().unwrap().in_flight(), TILE_MAX_IN_FLIGHT);
+        held
+    }
+
+    /// **A steady-state fill of a drawn screen issues ZERO 503s behind slow producers** (T-581).
+    ///
+    /// Counts, not wall clock. A screen of 12 sealed tiles is drawn once, then every producer slot
+    /// is taken by two other clients' slow coarse reads, then the screen is re-polled three times
+    /// by `2 x TILE_MAX_IN_FLIGHT` concurrent readers. Before T-581 every one of those 36 reads was
+    /// a `503` — each a halving of the client's operating limit — although not one of them needed
+    /// the store. Now: 36 admitted, 0 refused, 0 source tiles read, and the refused-to-resident
+    /// ratio for the screen is 0 (bound: 0).
+    #[test]
+    fn a_steady_state_fill_behind_slow_producers_issues_no_503s() {
+        let dir = temp_dir("t581-fill");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+        let screen = sealed_screen();
+        for &(f, t) in &screen {
+            let v = tiles_json(&state, &viewer_params(f, t)).unwrap();
+            assert_eq!(v["sealed"], json!(true), "({f}, {t}) must be sealed: {v}");
+        }
+        let held = slow_producers_hold_the_cap(&state);
+        reset_source_reads(&state);
+
+        const POLLS: usize = 3;
+        let readers = 2 * TILE_MAX_IN_FLIGHT;
+        let admitted = AtomicUsize::new(0);
+        let refused = AtomicUsize::new(0);
+        let other = AtomicUsize::new(0);
+        let peak_unslotted = AtomicUsize::new(0);
+        let asks: Vec<(i64, i64)> = (0..POLLS).flat_map(|_| screen.clone()).collect();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..readers {
+                s.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::AcqRel);
+                        let Some(&(f, t)) = asks.get(i) else { break };
+                        match tiles_json(&state, &viewer_params(f, t)) {
+                            Ok(v) => {
+                                admitted.fetch_add(1, Ordering::AcqRel);
+                                assert_eq!(v["cost"]["served_from"], json!("hot-tile-cache"));
+                                assert_eq!(v["cost"]["in_flight_held"], json!(0), "{v}");
+                                peak_unslotted.fetch_max(
+                                    v["cost"]["in_flight"].as_u64().unwrap() as usize,
+                                    Ordering::AcqRel,
+                                );
+                            }
+                            Err(e) if e.status == 503 => {
+                                refused.fetch_add(1, Ordering::AcqRel);
+                            }
+                            Err(_) => {
+                                other.fetch_add(1, Ordering::AcqRel);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let (admitted, refused) = (admitted.into_inner(), refused.into_inner());
+        let exercised = screen.len() * POLLS;
+        // Not 0 of 0: this run asked 36 times, from 8 readers, with 4 slots out.
+        assert_eq!(exercised, 36);
+        assert_eq!(other.into_inner(), 0);
+        assert_eq!(
+            admitted + refused,
+            exercised,
+            "every ask must be answered one way or the other"
+        );
+        assert_eq!(
+            refused, 0,
+            "{refused} of {exercised} steady-state reads of a drawn screen were refused 503 \
+             behind {TILE_MAX_IN_FLIGHT} slow producers; each is a halving of the client's limit"
+        );
+        assert_eq!(admitted, exercised);
+        // The ratio the ticket bounds, over this one screen: refusals (what the client cancels
+        // and re-asks) per resident tile.
+        assert_eq!(refused as f64 / screen.len() as f64, 0.0);
+        assert_eq!(
+            state.tile_admission.hot_answers(),
+            exercised,
+            "each admitted read was a slot-less hot answer"
+        );
+        // The producer cap itself never moved: the slow producers still hold all of it.
+        assert_eq!(held[0].in_flight(), TILE_MAX_IN_FLIGHT);
+        assert_eq!(
+            peak_unslotted.into_inner(),
+            TILE_MAX_IN_FLIGHT,
+            "a hot answer must not take a slot"
+        );
+        assert_eq!(
+            source_reads(&state),
+            0,
+            "a hot answer must not read the store"
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The cap still binds every read that would PRODUCE** (T-581's other half): a LIVE tile is
+    /// never cached, so with every slot out it is refused `503`, naming the cap, exactly as
+    /// before — and so is a sealed tile nobody has read yet. Only a cached sealed answer escapes.
+    #[test]
+    fn a_live_or_uncached_tile_still_meets_the_producer_cap() {
+        let dir = temp_dir("t581-cap");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+        // The live tile, read once so a cache COULD have held it if the policy were wrong.
+        let live = tiles_json(&state, &viewer_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(live["sealed"], json!(false));
+        let held = slow_producers_hold_the_cap(&state);
+        let err = tiles_json(&state, &viewer_params(F_INDEX, T_INDEX + 1)).unwrap_err();
+        assert_eq!(err.status, 503, "{}", err.message);
+        assert!(err.message.contains(&TILE_MAX_IN_FLIGHT.to_string()));
+        // A sealed tile, but never read: nothing to answer from RAM, so it must produce.
+        let err = tiles_json(&state, &viewer_params(F_INDEX, T_INDEX)).unwrap_err();
+        assert_eq!(err.status, 503, "{}", err.message);
+        assert_eq!(state.tile_admission.hot_answers(), 0);
+        drop(held);
+        assert!(tiles_json(&state, &viewer_params(F_INDEX, T_INDEX)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A batch for a drawn screen is answered whole behind slow producers** (T-581, T-573's
+    /// route): a viewport of 12 addresses admits all 12 with no per-address 503, where before
+    /// every member was refused once the batch's last worker met the full cap.
+    #[test]
+    fn a_batch_for_a_drawn_screen_admits_every_address_behind_slow_producers() {
+        let dir = temp_dir("t581-batch");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+        let screen = sealed_screen();
+        for &(f, t) in &screen {
+            tiles_json(&state, &viewer_params(f, t)).unwrap();
+        }
+        let held = slow_producers_hold_the_cap(&state);
+        let addresses = screen
+            .iter()
+            .map(|(f, t)| format!("0.0.{f}.{t}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let v = tiles_batch_json(
+            &state,
+            &params(&[
+                ("cells", &N.to_string()),
+                ("client", "viewer"),
+                ("addresses", &addresses),
+            ]),
+        )
+        .unwrap();
+        let tiles = v["tiles"].as_array().unwrap();
+        assert_eq!(tiles.len(), screen.len(), "{v}");
+        let refused = tiles.iter().filter(|e| e["status"] == json!(503)).count();
+        let ok = tiles.iter().filter(|e| e["status"] == json!(200)).count();
+        assert_eq!(
+            (ok, refused),
+            (screen.len(), 0),
+            "{refused} of {} batch members refused behind slow producers",
+            screen.len()
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two answers that differ may never share one entry: the key carries everything that decides
