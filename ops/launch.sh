@@ -13,14 +13,23 @@
 # Any extra args after the role are passed straight to `claude` (e.g. --resume <id>).
 set -euo pipefail
 REPO=/Users/daniellewis/hackriff
-ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator> [extra claude args...]}"; shift || true
+ROLE="${1:?usage: ops/launch.sh <supervisor|coordinator|pipeline-manager> [extra claude args...]}"; shift || true
 RF="$REPO/.claude/roles/$ROLE.md"
 [ -f "$RF" ] || { echo "no role file: $RF"; exit 1; }
 
+# The knob store (`just knobs`): a role session inherits it so anything it starts by hand reads the
+# same values the runners do. Process environment wins over the store, as in the runners.
+S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+if [ -f "$S/env" ]; then
+  while IFS='=' read -r k v; do case "$k" in ''|'#'*) continue ;; esac; [ -z "${!k+x}" ] && export "$k=$v"; done < "$S/env"
+fi
+
 case "$ROLE" in
-  coordinator) SESSION=dev;   MODEL=opus; EFFORT=high ;;
-  supervisor)  SESSION=super; MODEL=opus; EFFORT=high ;;
-  *) echo "unknown role '$ROLE' (expected supervisor|coordinator)"; exit 1 ;;
+  coordinator)      SESSION=dev;   MODEL=opus; EFFORT=high ;;
+  supervisor)       SESSION=super; MODEL=opus; EFFORT=high ;;
+  # The pipeline manager (2026-09-23): owns throughput, ticks every 30 min, one instance (invariant 22).
+  pipeline-manager) SESSION=flow;  MODEL=opus; EFFORT=high ;;
+  *) echo "unknown role '$ROLE' (expected supervisor|coordinator|pipeline-manager)"; exit 1 ;;
 esac
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then

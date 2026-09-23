@@ -220,6 +220,33 @@ inside that tree still oversubscribes the scheduler. It overrides the work runne
 so the effective ceiling is unchanged. The **merge runner is not a Claude session** and keeps its
 own `CARGO_BUILD_JOBS=6`, which `py/hkpy/gate.py` sets explicitly for the suites it launches.
 
+## The pipeline manager, the knob store and the bounded hold (2026-09-23)
+
+A fourth role, **the pipeline manager** (`ops/launch.sh pipeline-manager`, tmux `flow`; role
+`.claude/roles/pipeline-manager.md`, invariants `.claude/rules/pipeline-invariants.md`, workflows
+`.claude/pipeline/workflows/`), owns *throughput*: landings per hour at constant gate honesty. It
+ticks every 30 minutes, measures with `just flow`, runs one experiment at a time through `just
+experiment` (ledger: `docs/ops-experiments.md`), and changes the pipeline through branches like
+everyone else. The coordinator owns the backlog; the supervisor owns the user's intent; this role
+owns the rate. Why: on 2026-09-23 the burndown went flat at ~1 ticket/hour with the box idle half
+of every hour, and nobody's job was to see that in numbers.
+
+- **`just flow [--hourly|--gates|--tickets|--touchpoints] [--since 24h] [--record]`** — where the
+  hours went, from `merge-runner.log`, `work-runner.log`, `landed.jsonl`, `handbacks.jsonl`;
+  `--record` appends to `$HACKRIFF_OPS/flow.jsonl`. Read-only.
+- **`just knobs show|set K=V|unset K|reset`** — the persistent knob store `$HACKRIFF_OPS/env`
+  (`KEY=VALUE`), which **both runners, `ops/launch.sh` and `/dev-env restart` read on start**
+  (process environment wins). `show` reports the *effective* value from each runner's own `KNOBS:`
+  start line. Refuses `WORK_CAP=0`. Every change is a line in `env.jsonl`, tagged with the open
+  experiment or as an incident change.
+- **`just hold --minutes N --why "…"` / `--release` / `--status`** — a merge-queue hold that is a
+  marker with an expiry (`$HACKRIFF_OPS/hold`): at most 30 minutes, no second within 2 hours,
+  refused while a branch is queued or a gate runs; the merge runner ignores it once expired and
+  **ends it at the first queued branch**, alerting. Every hold is charged to the open experiment
+  as blocked minutes. Dispatch is never held for measurement (the floor is `WORK_CAP=1`).
+- **`just experiment new|status|close|list`** — one open at a time; `new` needs a rollback line
+  and snapshots the baseline; `close` refuses `keep` when a guard is broken.
+
 ## Starting the orchestration environment (cold start, reboot, or "stop everything and restart")
 
 Order matters: **runners before the coordinator**, and the coordinator **last**, because it reads

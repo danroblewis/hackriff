@@ -85,6 +85,27 @@ find whose edits those were before touching them.
 ### restart
 `stop` (waiting for the gate if at all possible), then `start`.
 
+### restart <script>   (one script: `merge-runner` | `work-runner` | `watchdog` | `monitor` | `stage`)
+The pipeline manager's per-script restart (`.claude/pipeline/workflows/restart-an-ops-script.md`
+says what each one interrupts). Every start sources the knob store `$HACKRIFF_OPS/env` (`just knobs
+show`) so an experiment's setting survives the restart; the process environment still wins.
+```bash
+export HACKRIFF_OPS=~/.hackriff-ops; cd /Users/daniellewis/hackriff
+set -a; . $HACKRIFF_OPS/env 2>/dev/null; set +a
+# merge-runner: REFUSE while a gate runs or a merge is staged - its startup rewinds a provisional batch
+if [ "$1" = merge-runner ]; then ls $HACKRIFF_OPS/bulk-in-progress .git/MERGE_HEAD 2>/dev/null && { echo "gate running - wait for MERGED"; exit 1; }; fi
+pkill -f "ops/$1" 2>/dev/null; sleep 2
+case "$1" in
+  merge-runner) nohup bash ops/merge-runner.sh >/dev/null 2>&1 & disown ;;
+  work-runner)  nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown ;;
+  watchdog)     nohup python3 ops/watchdog.py >/dev/null 2>&1 & disown ;;
+  monitor)      MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 & disown ;;
+  stage)        nohup bash ops/stage.sh >/dev/null 2>&1 & disown ;;   # restarts the :8899 demo - only when the user is not on it
+esac
+sleep 4; pgrep -fl "ops/$1"; grep -E 'VERSION|KNOBS' $HACKRIFF_OPS/${1}.log 2>/dev/null | tail -2
+```
+Report the `VERSION: matches …` and `KNOBS: …` lines; a `STALE`/`DIFFERS` version means the script on disk is not what `main` has.
+
 ## Rules that bind this skill's session too
 - Never edit, `stash`, `reset` or commit in the main checkout except the documented rewind, and
   never while a gate runs (root `CLAUDE.md`, Coordination). Your own changes go on a branch in

@@ -66,6 +66,24 @@ LANDED = f"{S}/landed.jsonl"
 # CAP, and the gate always has its reserve. A cpulimit FORK (see launch()) is the hard ceiling on
 # top. No load-average admission, no gate-time throttling, no suspend/resume: a known bound per
 # worker is the whole mechanism.
+# THE KNOB STORE (pipeline manager, 2026-09-23): `$HACKRIFF_OPS/env` (KEY=VALUE lines, written by
+# `just knobs set`) is read before the defaults below, so an experiment's setting survives a plain
+# restart. The process environment wins over the store: a one-off override on the command line is
+# deliberate and is not silently replaced.
+def _load_knob_store() -> None:
+    try:
+        with open(f"{S}/env", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+    except FileNotFoundError:
+        pass
+
+
+_load_knob_store()
 CORES = int(os.environ.get("WORK_CORES", "28"))
 GATE_RESERVE = int(os.environ.get("WORK_GATE_RESERVE", "14"))
 WORKER_JOBS = os.environ.get("WORK_WORKER_JOBS", "2")            # cargo build jobs per worker
@@ -1136,6 +1154,9 @@ def main():
         open(p, "a").close()
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
+    # What this process is actually running with - `just knobs show` reads it back as "effective".
+    log(f"KNOBS: WORK_CAP={CAP} WORK_QUEUE_PAUSE={QUEUE_PAUSE} WORK_GATE_ALONE={int(GATE_ALONE)} WORK_PER_TICK={PER_TICK} "
+        f"WORK_GATE_RESERVE={GATE_RESERVE} WORK_WORKER_CORES={WORKER_CORES} WORK_GROUP_CAP={GROUP_CAP} WORK_MAX_MINUTES={MAX_MINUTES}")
     while True:
         try:
             running = tick(a.dry_run)

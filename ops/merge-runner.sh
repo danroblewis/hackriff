@@ -47,6 +47,16 @@ BULKMARK=$S/bulk-in-progress
 # No database and no daemon: append-only text, and `gate_attempts` is read from the ledger
 # this script already keeps rather than counted a second way.
 LANDED=$S/landed.jsonl
+# THE KNOB STORE (pipeline manager, 2026-09-23): `$S/env` holds KEY=VALUE lines written by
+# `just knobs set`, so an experiment's setting survives a plain restart (on 2026-09-23 the cap-6
+# trial lived only in one process's environment). The process environment still wins - a
+# deliberate one-off override on the command line is not silently replaced by the store.
+if [ -f "$S/env" ]; then
+  while IFS='=' read -r k v; do
+    case "$k" in ''|'#'*) continue ;; esac
+    [ -z "${!k+x}" ] && export "$k=$v"
+  done < "$S/env"
+fi
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 # Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
 BULK_MAX=${BULK_MAX:-15}
@@ -647,6 +657,8 @@ self_version(){
 ( cd "$REPO" && just setup-git ) >>"$LOG" 2>&1 || log "WARN: just setup-git failed; tasks.yaml merges may conflict"
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
+# What this process is actually running with - `just knobs show` reads it back as "effective".
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a
@@ -706,6 +718,26 @@ while true; do
   for qb in $queued; do
     case " $SEEN_QUEUED " in *" $qb "*) ;; *) SEEN_QUEUED="$SEEN_QUEUED $qb"; log "QUEUED $qb";; esac
   done
+  # A BOUNDED HOLD (pipeline manager, 2026-09-23; invariants 4-6 in .claude/rules/pipeline-
+  # invariants.md). `$S/hold` is written by `just hold` with until=/why=/owner= and at most 30
+  # minutes; this runner takes no branch while it is live, IGNORES it once expired, and ENDS it the
+  # moment a branch is queued - a hold means "prefer idle", never "refuse work". Every end is
+  # logged and the early end alerts, so a hold that cost anything is visible within a minute.
+  if [ -f "$S/hold" ]; then
+    hold_until=$(sed -n 's/^until=//p' "$S/hold" | head -1); hold_why=$(sed -n 's/^why=//p' "$S/hold" | head -1)
+    if [ -z "$hold_until" ] || [ "$(date +%s)" -ge "${hold_until:-0}" ]; then
+      rm -f "$S/hold"; log "HOLD expired ($hold_why) - resuming"
+      printf '{"ts":%s,"event":"expired","why":%s}\n' "$(date +%s)" "\"${hold_why//\"/\\\"}\"" >> "$S/hold.jsonl"
+    elif [ -n "$queued" ]; then
+      rm -f "$S/hold"; log "HOLD ended at the first queued branch ($hold_why): $(echo $queued | cut -c1-80)"
+      printf '{"ts":%s,"event":"ended-by-queue","why":%s}\n' "$(date +%s)" "\"${hold_why//\"/\\\"}\"" >> "$S/hold.jsonl"
+      alert amber "hold ended by queued work" "$hold_why - a branch arrived; the runner resumed. Blocked minutes are charged to the open experiment." --key "hold-ended"
+    else
+      [ -z "${HOLD_SAID:-}" ] && { log "HOLD: merge queue held until $(date -r "$hold_until" '+%H:%M' 2>/dev/null || echo "$hold_until") - $hold_why"; HOLD_SAID=1; }
+      sleep 8; continue
+    fi
+  fi
+  HOLD_SAID=""
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
