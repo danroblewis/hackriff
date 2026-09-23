@@ -18958,7 +18958,7 @@ tasks:
   - id: T-578
     milestone: M2-hardening
     title: The chain concurrency cap and the retain buffer are consts - size them from the device and the settings
-    status: in-progress
+    status: deferred
     branch: task-t578
     priority: normal
     parallel_group: PIPE
@@ -18989,6 +18989,8 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21): thread counts, running-chain counts,
       buffer bytes. Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
   - id: T-591
     milestone: M2-hardening
     title: /api/events and /api/inventory disagree about the same emitter's liveness, which docs/api.md promises cannot happen
@@ -20003,7 +20005,7 @@ tasks:
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
-    status: in-progress
+    status: deferred
     branch: task-t597
     priority: normal
     parallel_group: M3A
@@ -20035,6 +20037,8 @@ tasks:
       per SNR, and the reasons sum to the number of classifications - a report whose parts do not
       account for the whole is how a skipped stage hides.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
   - id: T-600
     milestone: M2-hardening
     title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
@@ -20119,7 +20123,7 @@ tasks:
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -20147,6 +20151,8 @@ tasks:
       report the notch width and the band width it judged.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
   - id: T-603
     milestone: M2-hardening
     title: The listen acceptance test's listener-cap assertion is load-sensitive, and the acceptance suites are outside every serial protection
@@ -22089,7 +22095,7 @@ tasks:
   - id: T-720
     milestone: M2-hardening
     title: The six milestone acceptance recipes now run under nextest but have never been measured there
-    status: todo
+    status: deferred
     priority: low
     parallel_group: OPS
     model: sonnet
@@ -22113,6 +22119,8 @@ tasks:
       Filed 2026-09-21 by T-631 (worker, task-e2eguard). Not a defect - a measurement that was
       deliberately not done inside T-631's scope, recorded rather than implied.
 
+
+      2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
   - id: T-721
     milestone: M2-hardening
     title: tail() is a verbatim fourfold copy across the tutorial acceptance files, and T-632 had to edit all four
@@ -22142,7 +22150,7 @@ tasks:
   - id: T-722
     milestone: M2-hardening
     title: heavy-serial's max-threads = 1 has never been measured against a bounded alternative for the crates that are in it
-    status: todo
+    status: deferred
     priority: normal
     parallel_group: OPS
     model: opus
@@ -22174,6 +22182,8 @@ tasks:
       on the strength of one crate's measurement would be the same guess in the other direction.
       Relevant history in the file's own header: T-344, T-383 and T-436.
 
+
+      2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
   - id: T-629
     milestone: M2-hardening
     title: "The plugin-readiness test family: five gate flakes, one mechanism - a budget on a freshly linked subprocess started at the spawn instead of at the child's first byte"
