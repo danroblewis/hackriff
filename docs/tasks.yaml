@@ -6615,6 +6615,15 @@ tasks:
       for M5B; this overlaps its machinery, so sequence after it rather than building a second feed path.
       Offline-first per the product constraints: cache the reference data and degrade honestly when there
       is no connectivity - an absent ephemeris must read as not-yet-fetched, never as agreement'
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:06).
+      SIGNAL-032 GNSS constellation forensics now has its reference feeds. The GPS ephemerides a receiver logs (RINEX 2/3 nav, such as GNSS-SDR's output) are evaluated with IS-GPS-200 Table 20-IV (hk_context::ephemeris::orbit, checked against closed-form orbits and a Kepler round-trip) and compared against cached IGS precise orbits (SP3-c/d, GPS time only). Where an SP3 file has no data for a satellite, the comparison falls back to the IGS merged broadcast ephemerides (RINEX nav). Both references are reference snapshots handled by the same FeedCache, ingest/refresh and FeedFetcher path as the T-276 TLE feed (feeds::gnss_orbits: Sp3Adapter igs-sp3, BrdcAdapter igs-brdc, compare_from_cache), so there is no second feed path. Orbit and clock are flagged separately (Disagrees{orbit, clock}; defaults 25 m / 60 ns, unverified). A reference that was never cached reads NotYetFetched, including the last failed attempt such as offline. A cached reference that doesn't span the ephemeris reads NotCovered, and one that lacks the satellite reads NoReferenceForSv. None of these counts as agreement. A cached reference always carries its age and whether its last refresh failed. Malformed nav/SP3 files, RINEX 4 and SP3 files not in GPS time fail loudly and cache nothing. Tested on a synthetic constellation only; not yet run against a real IGS BRDC/SP3 pair.
+      Tests: cargo nextest run -p hk-context --no-fail-fast -> exit 0 (265 passed, 2 skipped (incl. 8 in signal_032_gnss_forensics and 15 ephemeris unit tests))
+      precheck exit 0
+      Commits: 793b39b0
+      Observed, not chased: Not wired: no network FeedFetcher for CDDIS/IGN SP3 or BRDC (the crate-wide seam, same as TLE), no hk-api route, and the GNSS-SDR plugin (T-323) does not yet keep its RINEX nav output for this check. The forensics result also doesn't reach C30 as an Explanation/ExternalEvent yet. | Tolerances (25 m orbit, 60 ns clock) and the GPS-UTC = 18 s constant are unverified against real IGS data; the first real capture should check a BRDC/SP3 pair. | GPS LNAV only: Galileo/BeiDou/GLONASS records are skipped and counted. Precise orbits are sampled only at SP3 epochs (no interpolation), which is enough for 15 min files.
+      Use cases: SIGNAL-032
+      Resources: 105 CPU-s, peak 1.7 GB
   - id: T-325
     milestone: M2-hardening
     title: Bias-tee state is not in provenance, so a bias-tee left on into a passive or DC-shorted port
