@@ -18,7 +18,9 @@ fn main() {
     let t = Instant::now();
     let mut acc = 0f32;
     for _ in 0..n {
-        acc += adc_fill_ci8(std::hint::black_box(&buf)).sigma_lsb.unwrap_or(0.0);
+        acc += adc_fill_ci8(std::hint::black_box(&buf))
+            .sigma_lsb
+            .unwrap_or(0.0);
     }
     let per = t.elapsed().as_secs_f64() / n as f64;
     let period = BLOCK as f64 / 20e6;
