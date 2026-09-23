@@ -30,6 +30,8 @@ from hkpy.synth.__main__ import main as cli_main
 #: Small parameter sets so the suite stays fast.
 SMALL: dict[str, dict] = {
     "tone": {},
+    "nbfm_voice": {"duration_s": 0.3},
+    "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
     "injected_floor": {"segment_duration_s": 0.02},
