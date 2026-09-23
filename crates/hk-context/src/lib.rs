@@ -14,6 +14,10 @@
 //! - [`passes`]: satellite passes computed from cached TLEs (SGP4, look angles, AOS/TCA/LOS), their
 //!   TLE-age verdicts, and the pass reservations they hand the C04 scheduler (T-276); the cached
 //!   feed is [`feeds::tle`].
+//! - [`ephemeris`]: SIGNAL-032 GNSS constellation forensics — received GPS ephemerides (RINEX nav)
+//!   compared against IGS precise orbits (SP3) or reference broadcast ephemerides, with an absent
+//!   reference reported as not-yet-fetched, never as agreement (T-324); the cached feeds are
+//!   [`feeds::gnss_orbits`].
 //! - [`anomaly`]: noise-floor episodes → `Anomaly(noise-floor-rise)` lifecycle (T-020).
 //! - [`correlate`]: Anomaly × cached events → ranked Explanations (T-020).
 //! - [`gnss_service`]: C36's measured GNSS-service statement reaching C30 as evidence on
@@ -25,6 +29,7 @@
 pub mod anomaly;
 pub mod band_table;
 pub mod correlate;
+pub mod ephemeris; // T-324 (C36 × C29): SIGNAL-032 broadcast vs precise orbit forensics
 pub mod feeds;
 pub mod geo;
 pub mod gnss_service;
