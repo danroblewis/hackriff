@@ -19495,7 +19495,6 @@ tasks:
     milestone: MLIVE
     title: Rework the tile in-flight cap once T-571/T-572 land - one mutex and a cap of 4 starve the panes
     status: in-progress
-    branch: task-t581
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -19522,6 +19521,16 @@ tasks:
       requests is vacuous - report what each run actually exercised.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    branch: task-t581
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 09:38).
+      The tile in-flight cap is now explicitly a PRODUCER cap. When admission refuses a /api/tiles read, the route checks T-572's hot-tile cache: a SEALED tile already cached is answered 200 (one brief address/watermark hold plus a RAM lookup; no pyramid read, no slot; cost.served_from=hot-tile-cache, cost.in_flight_held=0) instead of 503. Live tiles and uncached sealed tiles still meet the cap. Admitted reads' T-630 accounting is unchanged (the probe runs only after a refusal). TILE_MAX_IN_FLIGHT stays 4: the history store is still one Mutex per scheme and pyramid reads still need &mut for materialize, so a RwLock would not admit concurrent producers; raising the number would only lengthen ingest's contention. Counted tests (crates/hk-api/src/tiles.rs, T-581 section): with 4 slots held by two other clients' slow producers, a 12-tile drawn screen re-polled 3x by 8 concurrent readers gives 36 admitted / 0 refused / 0 source tiles read (refused-to-resident ratio 0, bound 0); a 12-address batch gives 12x200 / 0x503. Proved RED by disabling the cache probe: 36 of 36 and 12 of 12 refused. docs/api.md cost.in_flight_limit paragraph updated.
+      Tests: cargo nextest run -p hk-api --no-fail-fast -E 'not test(silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay)' -> exit 0 (278 passed, 1 skipped (the excluded pre-existing ondemand failure, see observed_but_not_chased)); cargo nextest run -p hk-api --lib -E 'test(/steady_state_fill|producer_cap|drawn_screen|in_flight_cap|sealed_tile|live_tile_is_never/)' -> exit 0 (7 passed (3 new T-581 tests + 4 existing cap/cache tests))
+      precheck exit 0
+      Commits: 7705dcd9
+      Observed, not chased: crates/hk-api/tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails ALONE, 3 of 3 runs, at ondemand.rs:365 `assert!(records > 20)` with '9 records' (WS /ws/open/listen, ping 50 ms, peer timeout 400 ms). Unrelated to the tile route (this diff touches only tiles.rs admission and docs/api.md); not triaged further. It fails `just test-crate hk-api` fast (exit 100). | The client-side cancelled-to-resident ratio (ui/src/surface/tilecache.ts AIMD) was not measured in a UI e2e; the server-side analog (503s per resident tile for one screen) is asserted as 0. | Live tiles (never cached) still compete for the 4 slots with slow coarse producers; a reserve for the live-edge tile, or per-store caps (view vs main pyramids are already separate mutexes), would be the next lever if the live edge is seen starving.
+      Use cases: AWARE-011
+      Resources: 180 CPU-s, peak 0.8 GB
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
