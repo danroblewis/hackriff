@@ -21292,7 +21292,7 @@ tasks:
   - id: T-628
     milestone: MAUTO
     title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
-    status: in-progress
+    status: done
     branch: task-t628
     priority: normal
     parallel_group: DETECT
@@ -21336,6 +21336,7 @@ tasks:
       Use cases: SIGNAL-087
     notes: |
       rebuilt on main after a code conflict: trunk.rs vs T-272/T-308 resolved in 47369e75 (cherry-pick of f537c966) - plan_follow now plans one channel per frequency with all its slots (T-272), follow_grants keeps T-308's per-(frequency, slot) tails; alias search scores channels
+    commit: 36c18a44
   - id: T-621
     milestone: M2-hardening
     title: Two coverage contract tests fail when the machine is low on disk, because they require the IQ ring to allocate
