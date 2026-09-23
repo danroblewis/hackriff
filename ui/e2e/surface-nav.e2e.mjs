@@ -80,6 +80,27 @@ const READOUT = `[...document.querySelectorAll('.hk-surface-viewport')].map((v) 
 
 const STATUS = `(document.querySelector('[data-slot="status"]')?.textContent ?? '')`;
 
+/**
+ * **A status line this file cannot parse is a wording drift, never a controller state** — so it
+ * fails at once, naming the line, before anything waits on a parse.
+ *
+ * On 2026-09-23 the share clause gained its age (`share 2, stated 0.4 s ago`, a6ae3d17) while this
+ * file matched `in flight \(share (\d+)\)` with the closing paren. Every readout became null; the
+ * T-846 test spent 60 s waiting for a premise it could not parse and then reported "the operating
+ * cap never reached 2 with the page quiet (last: null)" — a claim about the controller, on a page
+ * whose status line read `0+0/2 in flight (share 2, stated 8.2 s ago) · queue 0`, which IS the
+ * premise. The merge runner took that for a product defect on main. `parse` is the caller's own
+ * reader, so this checks the exact pattern the claims below are read with.
+ */
+const assertReadable = (parse, st) => {
+  const c = parse(st);
+  assert.ok(c && Number.isFinite(c.busy) && Number.isFinite(c.queue),
+    "the page's status line does not read as `N+M/L in flight (share C` … `queue Q` … `B backpressure`: " +
+    "this file's parser and preview-main.ts's wording have drifted, so every controller readout " +
+    `would be null and every claim about the cap vacuous. The line: ${JSON.stringify(st)}`);
+  return c;
+};
+
 /** The page's own action buttons, found by the label the user reads. */
 const BUTTON = (label) =>
   `[...document.querySelectorAll('.sp-btn')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})`;
@@ -402,6 +423,12 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `${cancelled} cancelled (client), ${canceledOnWire} aborted on the wire`);
   t.diagnostic(`operating cap over the run: ${caps.join(" ")} (server ceiling ${limit})`);
   t.diagnostic(`the client's share at each sample:  ${shares.join(" ")}`);
+  // A NaN share is the wording drift above, not a share: it made this trace NaN on every sample of
+  // the 2026-09-23 run while the test stayed green, so it is a failure rather than a diagnostic.
+  assert.ok(caps.length > 0 && shares.every(Number.isFinite),
+    `the status line's share did not parse at ${shares.filter((x) => !Number.isFinite(x)).length} of ` +
+    `${shares.length} cap sample(s) (last line: ${JSON.stringify(await page.eval(STATUS))}) — the parser ` +
+    "and preview-main.ts's wording have drifted");
   t.diagnostic(`503s: ${navigationRefusals} during ${gestures} viewport changes, ` +
     `${steadyRefusals.length} during ${(STEADY_STATE_MS / 1000).toFixed(0)} s of steady state ` +
     `(${steadyRequests} requests) · ${backpressure} counted by the client`);
@@ -690,13 +717,16 @@ test("a per-address 503 inside a batch answer halves the operating cap: back-off
     return f ? { inflight: Number(f[1]), cap: Number(f[3]), share: Number(f[4]),
       busy: Number(st.match(/(\d+) backpressure/)?.[1] ?? NaN), queue: Number(st.match(/queue (\d+)/)?.[1] ?? NaN) } : null;
   };
+  // The status line must parse BEFORE the premise is waited for: an unreadable line would time the
+  // wait out and report a controller state the page may well be in (2026-09-23, `assertReadable`).
+  assertReadable(read, await page.eval(STATUS));
   // The premise: a cap that CAN halve. At 1 the halving is `max(1, …)` and a controller is
   // indistinguishable from a counter, so the test waits for the cap to be at least 2 with the page
   // quiet, rather than assuming where the opening fill left it.
   const ready = await page.waitForValue("the operating cap to be at least 2 with nothing outstanding", STATUS,
     (st) => { const c = read(st); return !!c && c.cap >= 2 && c.inflight === 0 && c.queue === 0; }, { timeoutMs: 60000 });
   t.diagnostic(`before the injected refusal: ${JSON.stringify(read(ready.value))}`);
-  assert.ok(ready.ok, `the operating cap never reached 2 with the page quiet (last: ${JSON.stringify(read(ready.value))}), ` +
+  assert.ok(ready.ok, `the operating cap never reached 2 with the page quiet (last: ${JSON.stringify(assertReadable(read, ready.value))}), ` +
     "so a halving could not be told from no halving and this test would assert nothing");
 
   // Arm, then ask for tiles the page does not hold: a frequency zoom IN over the opening view, which
