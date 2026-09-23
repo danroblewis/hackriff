@@ -644,9 +644,20 @@ self_version
 # runner started a second gate beside one such orphan and the two shared the tree, the ports
 # and the CPU for 30 minutes (run ids d1503dd80480 and 4ecba9c10c0a). At startup NO gate
 # process can be legitimate, so every one of them is killed before anything else.
+# ONLY ON THIS CHECKOUT, though. The gate runs in $REPO; a worker's targeted `cargo nextest run`
+# in its own worktree matches the same pattern and is not ours to kill - at 05:13 on 2026-09-23
+# a restart killed a coordinator's `nextest run -p hk-cli -E binary(api_contract)` this way.
+# The process's cwd decides: under $REPO but not under $REPO/.claude/worktrees/ is the gate's
+# tree; anywhere else is someone else's run and is left alone (and said so).
 for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
   for opid in $(pgrep -f "$pat" 2>/dev/null); do
     [ "$opid" = "$$" ] && continue
+    ocwd=$(lsof -a -p "$opid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    case "$ocwd" in
+      "$REPO"/.claude/worktrees/*) log "STARTUP: leaving $opid ($pat) alone - it runs in a worktree ($ocwd)"; continue ;;
+      "$REPO"|"$REPO"/*) ;;
+      *) log "STARTUP: leaving $opid ($pat) alone - not on this checkout (cwd ${ocwd:-unknown})"; continue ;;
+    esac
     log "STARTUP: killing orphan gate process $opid ($pat)"; kill -TERM "$opid" 2>/dev/null
   done
 done
