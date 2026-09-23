@@ -71,7 +71,8 @@ def test_turns_of_is_incremental_and_marks_the_open_turn(tmp_path):
 
 def test_discover_names_roles_from_argv_tmux_pointer_and_registry(tmp_path):
     sess, ops = tmp_path / "sessions", tmp_path / "ops"
-    sess.mkdir(); ops.mkdir()
+    sess.mkdir()
+    ops.mkdir()
     (sess / "1.json").write_text(json.dumps({"pid": 1, "sessionId": "pm-1", "tmux": "flow:@1.%1"}))
     (sess / "2.json").write_text(json.dumps({"pid": 2, "sessionId": "co-2", "tmux": None}))
     (sess / "3.json").write_text(json.dumps({"pid": 3, "sessionId": "user-3", "tmux": None}))
