@@ -10,7 +10,7 @@
 //! `state`/`lifecycle`/`recurrence` and T-163 `estimated_params` fields),
 //! `/api/inventory/{id}[/promote\|/decode]` (T-078, T-159, T-163),
 //! `/api/analysis/strongest` (T-079), `/api/status`, `/api/control/*`, `/api/bookmarks[/<id>]`,
-//! `/api/selections[/<id>[/links]]`, `/api/outputs[...]`, `/ws/<id>` (spectrum header),
+//! `/api/selections[/<id>[/links]]`, `/api/annotations[/<id>]` (T-816), `/api/outputs[...]`, `/ws/<id>` (spectrum header),
 //! `/ws/open/listen` (audio header + PCM data records on the 101.3 MHz station), and auth/CORS
 //! refusals. `docs/stream-contract.md` covers stream framing in full; this file only checks the
 //! shapes `docs/api.md` promises.
@@ -2512,6 +2512,194 @@ fn control_display_and_bookmarks_answer_as_documented() {
     assert_eq!((st, deleted["deleted"]["id"].as_str()), (200, Some(id)));
     let (st, missing) = get(addr, &format!("/api/bookmarks/{id}"));
     assert_eq!((st, missing["code"].as_str()), (404, Some("not_found")));
+
+    stop_server(serving);
+}
+
+/// T-817 (MAP-17, RESEARCH-003): `/api/collections`, `/api/collections/{id}/markers` and
+/// `/api/markers[/{id}]` as `docs/api.md` "Marker collections" documents them, on a live `hk serve`
+/// over the mock SDR device. A marker is a time-frequency place; its provenance is stamped by the
+/// server (including the named front end's sample rate) and never accepted from the client;
+/// authoring reaches no radio; and `/api/bookmarks` is a facade over the reserved collection.
+#[test]
+fn marker_collections_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let (_, state) = get(addr, "/api/control/state");
+    let device_id = state["device"]["device_id"].as_str().unwrap().to_owned();
+    let tuned = state["tuning"].clone();
+
+    // The reserved `Bookmarks` collection exists on a fresh server, and a bookmark is its marker.
+    let (st, bm) = post(
+        addr,
+        "/api/bookmarks",
+        r#"{"name": "FM", "f_center_hz": 100.8e6}"#,
+    );
+    assert_eq!(st, 201, "{bm}");
+    let (st, list) = get(addr, "/api/collections");
+    assert_eq!(st, 200, "{list}");
+    for key in ["collections", "count", "matched", "limit", "next_cursor"] {
+        assert!(
+            list.get(key).is_some(),
+            "collections list missing {key}: {list}"
+        );
+    }
+    assert_eq!(list["limit"], json!(500));
+    let reserved = list["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["reserved"] == json!(true))
+        .unwrap_or_else(|| panic!("no reserved bookmarks collection: {list}"))
+        .clone();
+    assert_eq!(reserved["name"], json!("Bookmarks"));
+    assert_eq!(reserved["member_count"], json!(1), "{reserved}");
+    let (st, m) = get(
+        addr,
+        &format!("/api/markers/{}", bm["id"].as_str().unwrap()),
+    );
+    assert_eq!((st, &m["collection_id"]), (200, &reserved["id"]), "{m}");
+
+    // A collection and a timed marker on it, authored from a live-IQ pane on this device.
+    let (st, c) = post(addr, "/api/collections", r#"{"name": "bursts"}"#);
+    assert_eq!(st, 201, "{c}");
+    for field in [
+        "id",
+        "name",
+        "note",
+        "color",
+        "visible",
+        "reserved",
+        "member_count",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(c.get(field).is_some(), "collection missing {field}: {c}");
+    }
+    let cid = c["id"].as_str().unwrap().to_owned();
+    let view = json!({
+        "center_hz": FIXTURE_CENTER_HZ,
+        "span_hz": FIXTURE_RATE_HZ,
+        "t_capture": 1_726_480_000.0,
+        "tier": "live-iq",
+        "device_id": device_id,
+    });
+    let body = json!({
+        "name": "burst", "f_center_hz": 100.9e6, "bandwidth_hz": 50e3,
+        "t_center_s": 1_726_480_000.0, "duration_s": 2.0, "view": view,
+    });
+    let (st, mk) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &body.to_string(),
+    );
+    assert_eq!(st, 201, "{mk}");
+    for field in [
+        "id",
+        "collection_id",
+        "name",
+        "note",
+        "f_center_hz",
+        "bandwidth_hz",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t_center_s",
+        "duration_s",
+        "t_start_s",
+        "t_end_s",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(mk.get(field).is_some(), "marker missing {field}: {mk}");
+    }
+    assert_eq!(
+        (&mk["t_start_s"], &mk["t_end_s"]),
+        (&json!(1_726_479_999.0), &json!(1_726_480_001.0)),
+        "{mk}"
+    );
+    let p = &mk["provenance"];
+    assert_eq!(p["device_id"], json!(device_id), "{p}");
+    assert_eq!(
+        p["sample_rate_hz"],
+        json!(FIXTURE_RATE_HZ),
+        "stamped by the server: {p}"
+    );
+    assert_eq!(
+        p["t_capture"],
+        json!([1_726_480_000.0, 1_726_480_000.0]),
+        "{p}"
+    );
+    assert_eq!(p["authored"], json!(true));
+    assert!(p["actor"].is_string() && p["actor"] != json!(TOKEN), "{p}");
+    assert!(
+        mk.get("device").is_none(),
+        "authoring is not a device action: {mk}"
+    );
+
+    // A client cannot supply provenance.
+    let mut forged = body.clone();
+    forged["view"]["actor"] = json!("someone else");
+    let (st, v) = post(
+        addr,
+        &format!("/api/collections/{cid}/markers"),
+        &forged.to_string(),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // Windowed list: the marker's time finds it; a far window does not.
+    let (st, v) = get(
+        addr,
+        &format!("/api/collections/{cid}/markers?t0=1726480000&t1=1726480000.5"),
+    );
+    assert_eq!((st, &v["matched"]), (200, &json!(1)), "{v}");
+    let (_, v) = get(addr, "/api/markers?t0=1&t1=2&f_lo=100e6&f_hi=101e6");
+    assert!(
+        v["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["t_center_s"].is_null()),
+        "only frequency-only pins match a far window: {v}"
+    );
+
+    // Toggle, edit, delete.
+    let (st, v) = put(
+        addr,
+        &format!("/api/collections/{cid}"),
+        r#"{"visible": false}"#,
+    );
+    assert_eq!((st, &v["visible"]), (200, &json!(false)), "{v}");
+    let mid = mk["id"].as_str().unwrap();
+    let (st, v) = put(
+        addr,
+        &format!("/api/markers/{mid}"),
+        r#"{"note": "again at 12:00"}"#,
+    );
+    assert_eq!(
+        (st, v["note"].as_str()),
+        (200, Some("again at 12:00")),
+        "{v}"
+    );
+    let (st, v) = delete(addr, &format!("/api/collections/{cid}"));
+    assert_eq!((st, &v["members_deleted"]), (200, &json!(1)), "{v}");
+    let (st, v) = get(addr, &format!("/api/markers/{mid}"));
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    let (st, v) = delete(
+        addr,
+        &format!("/api/collections/{}", reserved["id"].as_str().unwrap()),
+    );
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // None of it moved the radio.
+    let (_, after) = get(addr, "/api/control/state");
+    assert_eq!(
+        (
+            &after["tuning"]["center_hz"],
+            &after["tuning"]["sample_rate_hz"]
+        ),
+        (&tuned["center_hz"], &tuned["sample_rate_hz"]),
+        "authoring markers never reaches the device"
+    );
 
     stop_server(serving);
 }
@@ -8832,6 +9020,135 @@ fn mmap_research_routes_are_reserved_and_gated() {
     stop_server(serving);
 }
 
+/// T-816 (MAP-16): `/api/annotations` as `docs/api.md` documents it — the `Annotation` shape with
+/// its server-stamped provenance, the required window and paging fields, update/delete, and that
+/// an authored note never becomes an inventory row (it is user metadata, never detection input).
+#[test]
+fn annotations_crud_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let body = json!({
+        "kind": "box",
+        "f_lo_hz": f - 1.0e5,
+        "f_hi_hz": f + 1.0e5,
+        "t0_s": 1000.0,
+        "t1_s": 1002.0,
+        "label": "t816-contract-note",
+        "view": {"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"},
+    });
+    let (st, a) = post(addr, "/api/annotations", &body.to_string());
+    assert_eq!(st, 201, "{a}");
+    for field in [
+        "id",
+        "collection_id",
+        "kind",
+        "f_lo_hz",
+        "f_hi_hz",
+        "t0_s",
+        "t1_s",
+        "label",
+        "body",
+        "author",
+        "provenance",
+        "created_s",
+        "updated_s",
+    ] {
+        assert!(a.get(field).is_some(), "annotation missing {field}: {a}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            a["provenance"].get(field).is_some(),
+            "provenance missing {field}: {a}"
+        );
+    }
+    assert_eq!(a["provenance"]["authored"], true);
+    assert!(
+        a["author"].as_str().is_some_and(|s| s.starts_with("tok-")),
+        "{a}"
+    );
+    assert!(
+        !a.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = a["id"].as_str().unwrap().to_owned();
+
+    // Client-supplied provenance is refused.
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, v) = post(addr, "/api/annotations", &forged.to_string());
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    let window = format!(
+        "/api/annotations?f_lo={}&f_hi={}&t0=0&t1=5000",
+        f - 1e6,
+        f + 1e6
+    );
+    let (st, list) = get(addr, &window);
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "annotations",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 200, "documented default page");
+    assert!(list["next_cursor"].is_null());
+    let (st, v) = get(addr, "/api/annotations");
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (400, Some("invalid")),
+        "window required: {v}"
+    );
+
+    let path = format!("/api/annotations/{id}");
+    let (st, got) = get(addr, &path);
+    assert_eq!(
+        (st, got["label"].as_str()),
+        (200, Some("t816-contract-note"))
+    );
+    let (st, upd) = put(addr, &path, r#"{"body": "carrier edge"}"#);
+    assert_eq!(
+        (st, upd["body"].as_str()),
+        (200, Some("carrier edge")),
+        "{upd}"
+    );
+
+    // User metadata only: no inventory row names it.
+    let (st, inv) = get(addr, "/api/inventory");
+    assert_eq!(st, 200, "{inv}");
+    assert!(
+        !inv.to_string().contains("t816-contract-note"),
+        "an annotation never reaches the inventory: {inv}"
+    );
+
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
+    stop_server(serving);
+}
+
 /// T-107: `PUT /api/pipelines/{id}/channels` and `POST /api/pipelines/{id}/channels/refresh` on a
 /// follow-hops pipeline over the mock device's FM window, as `docs/api.md` documents them: the
 /// answer shape, a no-op change, `400 invalid` bodies, the refresh back to the recipe's
@@ -9863,6 +10180,9 @@ fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> 
         "/api/inventory",
         "/api/selections",
         "/api/bookmarks",
+        // T-817: marker collections (the reserved bookmarks collection exists on a fresh server)
+        "/api/collections",
+        "/api/markers",
         "/api/blocks",
         "/api/iqbuffer",
         "/api/clusters",
@@ -11357,5 +11677,148 @@ fn measurements_crud_and_paging_answer_as_documented() {
     );
     let (st, _) = get(addr, &path);
     assert_eq!(st, 404);
+    stop_server(serving);
+}
+
+/// T-819 (MAP-19, AWARE-042): `/api/views` as `docs/api.md` documents it — the `SavedView` shape
+/// (a named point in view-arithmetic state) with its server-stamped provenance and `share`
+/// re-creating body, the two time-extent shapes, the durable-but-paged list, edit, delete, the
+/// share round trip, and that a saved view reaches no device and never becomes an inventory row.
+#[test]
+fn saved_views_crud_share_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let (_, before) = get(addr, "/api/control/state");
+    let body = json!({
+        "name": "t819-contract-view",
+        "center_f_hz": f,
+        "span_f_hz": 1.2e6,
+        "center_t_s": 1000.0,
+        "span_t_s": 20.0,
+        "follow_live": false,
+        "pane_layout": {"panes": [{"center_f_hz": f, "span_f_hz": 1.2e6}]},
+        "view": view,
+    });
+    let (st, v) = post(addr, "/api/views", &body.to_string());
+    assert_eq!(st, 201, "{v}");
+    for field in [
+        "id",
+        "name",
+        "note",
+        "center_f_hz",
+        "span_f_hz",
+        "center_t_s",
+        "span_t_s",
+        "follow_live",
+        "pane_layout",
+        "provenance",
+        "created_s",
+        "updated_s",
+        "share",
+    ] {
+        assert!(v.get(field).is_some(), "saved view missing {field}: {v}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            v["provenance"].get(field).is_some(),
+            "provenance missing {field}: {v}"
+        );
+    }
+    assert_eq!(
+        (v["center_t_s"].as_f64(), v["span_t_s"].as_f64()),
+        (Some(1000.0), Some(20.0))
+    );
+    assert_eq!(v["provenance"]["authored"], true);
+    assert!(
+        !v.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = v["id"].as_str().unwrap().to_owned();
+    // `share` is exactly the create body minus `view`.
+    let mut expect = body.clone();
+    expect.as_object_mut().unwrap().remove("view");
+    expect["id"] = json!(id);
+    expect["note"] = Value::Null;
+    assert_eq!(v["share"], expect, "{v}");
+
+    // A frozen view without its window, and a supplied provenance, are refused.
+    let mut bad = body.clone();
+    bad.as_object_mut().unwrap().remove("center_t_s");
+    let (st, e) = post(addr, "/api/views", &bad.to_string());
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, e) = post(addr, "/api/views", &forged.to_string());
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+
+    let (st, list) = get(addr, "/api/views");
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "views",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 500, "documented default page");
+    let (st, e) = get(addr, "/api/views?f_lo=1");
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+
+    let path = format!("/api/views/{id}");
+    let (st, upd) = put(
+        addr,
+        &path,
+        &json!({"follow_live": true, "center_t_s": null, "note": "now live"}).to_string(),
+    );
+    assert_eq!(st, 200, "{upd}");
+    assert_eq!(
+        (upd["follow_live"].as_bool(), upd["note"].as_str()),
+        (Some(true), Some("now live"))
+    );
+    assert!(upd["center_t_s"].is_null());
+
+    // User metadata only: no inventory row names it, and the device was not moved.
+    let (_, inv) = get(addr, "/api/inventory");
+    assert!(!inv.to_string().contains("t819-contract-view"), "{inv}");
+    let (_, after) = get(addr, "/api/control/state");
+    assert_eq!(
+        before["tuning"]["center_hz"], after["tuning"]["center_hz"],
+        "saving a view never retunes"
+    );
+    assert!(before["tuning"]["center_hz"].is_number(), "{before}");
+
+    // Share round trip: delete, re-create from `share` + a view, same state and id.
+    let (_, got) = get(addr, &path);
+    let share = got["share"].clone();
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
+    let mut again = share.clone();
+    again["view"] = view.clone();
+    let (st, back) = post(addr, "/api/views", &again.to_string());
+    assert_eq!(st, 201, "{back}");
+    assert_eq!(back["share"], share);
     stop_server(serving);
 }

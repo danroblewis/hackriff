@@ -27,12 +27,14 @@
 //! handheld; idle connections cost no CPU.
 
 pub mod analyze; // T-190
+pub mod annotations; // T-816 MAP-16
 pub mod assist;
 pub mod auth;
 pub mod bridge;
 pub mod captures;
 pub mod classification; // T-247
 pub mod clusters; // T-202
+pub mod collections; // T-817 (MAP-17): time-frequency marker collections
 pub mod control;
 pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
@@ -59,6 +61,7 @@ pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
 pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
+pub mod views; // T-819 MAP-19
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122

@@ -34,8 +34,11 @@
 //! | `/api/anomalies[?f_lo&f_hi][&t0&t1][&kind][&status][&cursor][&limit]`, `/api/anomalies/<id>[/dismiss\|/reopen]` | GET, POST | token (header only for mutating) | T-122 anomalies and novelty alarms with explanations; dismiss/reopen ([`crate::anomalies`]) |
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
+//! | `/api/collections[/<id>[/markers]]`, `/api/markers[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-817 marker collections ([`crate::collections`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
 //! | `/api/measurements[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-818 saved measurements: cursors in, server-computed value+unit+place out, server-stamped provenance ([`crate::measurements`]) |
+//! | `/api/annotations[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-816 human-authored time–frequency annotations with a server-stamped provenance ([`crate::annotations`]) |
+//! | `/api/views[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-819 saved views: named, restorable (time × frequency) window extents; view-arithmetic state, never a device command ([`crate::views`]) |
 //! | `/api/selections/<id>/watch` | GET | token | T-166 the selection's region-watch alerts and the activity it did not alert on, with reasoning ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
@@ -174,6 +177,30 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/measurements/{id}"),
     ("PUT", "/api/measurements/{id}"),
     ("DELETE", "/api/measurements/{id}"),
+    // T-816 MAP-16 human-authored annotations
+    ("GET", "/api/annotations"),
+    ("POST", "/api/annotations"),
+    ("GET", "/api/annotations/{id}"),
+    ("PUT", "/api/annotations/{id}"),
+    ("DELETE", "/api/annotations/{id}"),
+    // T-819 MAP-19 saved views
+    ("GET", "/api/views"),
+    ("POST", "/api/views"),
+    ("GET", "/api/views/{id}"),
+    ("PUT", "/api/views/{id}"),
+    ("DELETE", "/api/views/{id}"),
+    // T-817 (MAP-17): time-frequency marker collections; /api/bookmarks is a facade over one.
+    ("GET", "/api/collections"),
+    ("POST", "/api/collections"),
+    ("GET", "/api/collections/{id}"),
+    ("PUT", "/api/collections/{id}"),
+    ("DELETE", "/api/collections/{id}"),
+    ("GET", "/api/collections/{id}/markers"),
+    ("POST", "/api/collections/{id}/markers"),
+    ("GET", "/api/markers"),
+    ("GET", "/api/markers/{id}"),
+    ("PUT", "/api/markers/{id}"),
+    ("DELETE", "/api/markers/{id}"),
     ("GET", "/api/outputs"),
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
@@ -1211,6 +1238,9 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
         .or_else(|| crate::measurements::route(state, &ctl)) // T-818
+        .or_else(|| crate::annotations::route(state, &ctl)) // T-816
+        .or_else(|| crate::views::route(state, &ctl)) // T-819
+        .or_else(|| crate::collections::route(state, &ctl)) // T-817 (MAP-17)
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route

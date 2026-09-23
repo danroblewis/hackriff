@@ -110,6 +110,12 @@ define_ids! {
     /// A persisted region selection (T-052): a frequency extent, optionally a time extent, the
     /// user named. User metadata, mutable.
     SelectionId;
+    /// A named, toggleable collection of time-frequency markers (T-817, docs/25 §3). User
+    /// metadata, mutable.
+    CollectionId;
+    /// A time-frequency marker in a [`CollectionId`] collection (T-817, docs/25 §3): a frequency
+    /// place, optionally a time place. User metadata, mutable.
+    MarkerId;
     /// A survey site (ADR-0012 §3.5): a discrete place the device was parked, the key of
     /// occupancy baselines for a moving device. Aggregate, user-renamable.
     SiteId;
@@ -122,6 +128,9 @@ define_ids! {
     /// A saved measurement (T-818, docs/25 §4): Δf/Δt/bandwidth/duration/symbol-rate/period with
     /// its place and provenance. User metadata, mutable.
     MeasurementId;
+    /// A saved view (T-819, docs/25 §6): a named point in view-arithmetic state — a (time ×
+    /// frequency) window extent to restore. User metadata, mutable; never a device command.
+    SavedViewId;
 }
 
 #[cfg(test)]
