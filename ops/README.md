@@ -6,13 +6,13 @@ never lose them again (they used to live in a `/tmp` scratchpad that a reboot wi
 
 Runtime state (logs, tokens, the demo build, the merge queue) lives in **`$HACKRIFF_OPS`**,
 default **`~/.hackriff-ops`** — deliberately outside `/tmp` so it survives a reboot. Override
-with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The four scripts share that one dir.
+with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The five scripts share that one dir.
 
 Environment-specific constants at the top of each file (edit for a different machine/checkout):
 `REPO` (the repo path, `/Users/daniellewis/hackriff`); in `monitor.py` also `PROJ` (the Claude
 projects dir), `COORD` (the coordinator's conversation id), and `SUPER`.
 
-## The four scripts
+## The five scripts
 
 ### `stage.sh` — staging demo watcher (port 8899)
 Rebuilds the `hk` binary and restarts the "bears" demo on every **code** commit to `main`
@@ -85,6 +85,15 @@ merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-a
 time, user-requested first, then priority, then number — into a fresh worktree + branch
 (`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
 `model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
+**Every run is accounted for (2026-09-23):** each tick samples the claim's whole process
+TREE - not `ps -g <pgid>`, which on this box contains only the `cpulimit` wrapper - and keeps the
+peak, so `work-claims.json`, `work-done.jsonl` and the ticket's `result:` all carry `cpu_s` and
+`peak_rss_mb` ("Resources: 412 CPU-s, peak 1.9 GB"). CPU time cannot be read at reap (the kernel
+discards it when the root exits), so these are a floor, not an exact total. At reap, anything of
+the run still alive is a LEAK - it cannot be found by ancestry, because being reparented to
+launchd *is* the leak, so it is matched by a pid+group the run was seen holding or by its
+worktree path - and is killed (SIGTERM, 10 s, SIGKILL), noted in `work-needs-attention.txt` and
+in the result.
 **The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
 (`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
 `precheck`, `blocked.needs`, `cancel.evidence`, `observed_but_not_chased`, `use_cases`). The runner
@@ -147,6 +156,70 @@ it handles the two attention files, reviews, triage and ordering, and hand-launc
 runner will not touch (`needs: user|hardware`, `dispatch: manual`). **Append to the merge queue,
 never rewrite it** — a rewrite on 2026-09-22 dropped a queued branch.
 
+### `watchdog.py` — resource-contention watchdog (the fifth script, 2026-09-23)
+The budget above is only a budget if something checks it, and nothing did. On **2026-09-22** a
+deflaker agent exited and left **sixteen** `/bin/zsh -c source …/shell-snapshots/snapshot-zsh-….sh`
+busy loops reparented to launchd, each at 100 % CPU, from 14:29 to 16:47 — through every merge
+gate in those two and a quarter hours. In the same window a killed merge runner left an orphan
+`just gate` running beside its replacement's, and `ops/monitor.py` sat at 440 % CPU. None of it
+appeared in a log, on the dashboard or in an alert: it was found because a person ran `ps`. Each
+runner knows only its own children, so **no runner can see this**; the watchdog is the one process
+whose subject is the whole box.
+
+Every 20 s it builds a process table (`ps -axo pid,ppid,pgid,pcpu,rss,etime,command`) and
+attributes every process to an **owner** — a worker (its claim's pid is its process group, or an
+ancestor of it), the merge runner, the **gate** (its own owner even under the runner, because the
+14-core reserve is the gate's), a role session (named from `HACKRIFF_ROLE`, else its
+`--append-system-prompt-file` role file), the demo, the dashboard, the runners, the fuzz rig, plus
+`sccache` / `system` / `apps` / `tunnel` / `claude-other` as **fallbacks applied only after
+ancestry fails**. Anything left is **UNOWNED**. Ancestry always answers before a command-line
+guess, so a worker's `rustc`, `git` and `/bin/zsh` stay the worker's, and only a process whose
+ancestors are all gone can be unowned. Five rules:
+
+| | condition | action |
+|---|---|---|
+| a | an UNOWNED process >90 % CPU for >120 s | amber, keyed per pid |
+| b | an UNOWNED `shell-snapshots/snapshot-zsh` shell >50 % for >600 s | **SIGKILL** + red |
+| c | more than one merge gate running | red |
+| d | `ops/monitor.py` >200 % CPU or >1.5 GB for >120 s | amber |
+| e | load1 over the plan (owners' budgets, capped at the core count, +4) for >5 min | amber + top 5 |
+
+**Rule (b) is the only thing it kills**, and only on that signature, only when unowned, only
+sustained: a live agent's shell has a live parent, so it is *owned* and can never match. Every
+kill is logged to `watchdog.log` with its full command line. Everything else is an alert through
+`ops/alert.py` (deduped 30 min per key). The last tick is `$HACKRIFF_OPS/watchdog.json`, which
+`ops/monitor.py` renders as the **Box** line in the System card — owners with CPU, unowned in red,
+and "no watchdog running" when the file is missing or stale.
+```bash
+HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/watchdog.py >/dev/null 2>&1 & disown
+python3 ops/watchdog.py --once --print --dry-run   # one tick to stdout; never kills, never alerts
+cat $HACKRIFF_OPS/watchdog.json   ·   cat $HACKRIFF_OPS/watchdog.log
+```
+Rules and attribution are pure functions over a list of rows, tested against a synthetic process
+table in `py/tests/test_watchdog.py` — including the sixteen-loop incident, which cannot be
+reproduced on demand.
+
+**Two cheaper guards sit in front of it**, so most of this never has to be caught after the fact:
+
+* **`.claude/hooks/reap-agent-processes.sh`**, wired to `Stop` and `SubagentStop`. The moment an
+  agent finishes, it kills any `shell-snapshots/snapshot-zsh` shell that is **orphaned** (ppid 1,
+  or a parent that is gone) **and** above 50 % CPU, and records the reap in the agent's transcript
+  as a `systemMessage`. A live agent's shell has a live parent and is never touched. Fail-open on
+  every error path.
+* **`.claude/hooks/block-full-gate.sh`** now also refuses, in *every* session, to run a busy loop
+  (`while :; do :; done` — polling with a `sleep` in the body is fine), `yes`, `stress`/`stress-ng`,
+  more than two backgrounded loops in one command, and `npm run e2e` / `node e2e/run.mjs` /
+  `hk serve` while a gate is running or `bulk-in-progress` exists. `HK_ALLOW_LOAD=1` overrides,
+  for a genuine contention repro. `py/tests/test_hooks.py` runs the scripts as the harness does.
+
+**`.claude/settings.json` sets `CARGO_BUILD_JOBS=3`, `NEXTEST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0` for every Claude Code session and subagent on this box.** That is where the
+bound actually binds: `cpulimit` wraps a worker's *tree*, but an agent typing `cargo build -j 28`
+inside that tree still oversubscribes the scheduler. It overrides the work runner's `CARGO_ENV`
+(`CARGO_BUILD_JOBS=2`) inside a worker session — both are at or below the 3-core `cpulimit` bound,
+so the effective ceiling is unchanged. The **merge runner is not a Claude session** and keeps its
+own `CARGO_BUILD_JOBS=6`, which `py/hkpy/gate.py` sets explicitly for the suites it launches.
+
 ## Starting the orchestration environment (cold start, reboot, or "stop everything and restart")
 
 Order matters: **runners before the coordinator**, and the coordinator **last**, because it reads
@@ -158,8 +231,8 @@ OPS=$(cat ~/.hackriff-ops/active-ops-dir)                 # where the running sy
 tmux kill-session -t dev                                  # the coordinator + every subagent it spawned
 pkill -f 'ops/merge-runner.sh'; pkill -f 'just gate'; pkill -f 'cargo-nextest nextest run'
 pkill -f 'stage.sh'; pkill -f 'hk serve --bind 127.0.0.1:8899'
-pkill -f 'monitor.py'; pkill -f 'work-runner.py'
-ps -axo pid,command | grep -E 'Role: Coo|merge-runner|just gate|stage.sh|monitor.py|work-runner|hk serve' | grep -v grep   # must print nothing
+pkill -f 'monitor.py'; pkill -f 'work-runner.py'; pkill -f 'ops/watchdog.py'
+ps -axo pid,command | grep -E 'Role: Coo|merge-runner|just gate|stage.sh|monitor.py|work-runner|watchdog.py|hk serve' | grep -v grep   # must print nothing
 ```
 **If a gate was killed mid-run, `main` is provisional.** A bulk batch commits each merge before
 gating (`$OPS/bulk-in-progress` names the pre-batch `base=` sha and the branches); a killed gate
@@ -182,7 +255,7 @@ export HACKRIFF_OPS=~/.hackriff-ops
 ```
 Every script below rewrites `~/.hackriff-ops/active-ops-dir` to point at itself on start.
 
-### 2. Start the four scripts, always from the repo (never a copy)
+### 2. Start the five scripts, always from the repo (never a copy)
 ```bash
 cd /Users/daniellewis/hackriff && export HACKRIFF_OPS=~/.hackriff-ops
 nohup bash ops/stage.sh          >/dev/null 2>&1 & disown        # demo :8899, live HackRF or replay
@@ -190,6 +263,7 @@ nohup bash ops/merge-runner.sh   >/dev/null 2>&1 & disown        # the sole merg
 python3 ops/work-runner.py --once --dry-run                       # READ what it would dispatch first
 nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown        # dispatch
 MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &   # dashboard :8901
+nohup python3 ops/watchdog.py    >/dev/null 2>&1 & disown        # contention watchdog
 ```
 Verify, a minute later:
 ```bash
@@ -197,6 +271,7 @@ grep VERSION $HACKRIFF_OPS/merge-runner.log | tail -1   # "matches HEAD:ops/merg
 tail -3 $HACKRIFF_OPS/work-runner.log                    # "VERSION: matches" then "DISPATCH T-…"
 tail -2 $HACKRIFF_OPS/stage.log                          # "started (live)" — or "(replay …)" if the HackRF is busy
 curl -s http://127.0.0.1:8901/burndown.json | head -c 80 # dashboard answers
+python3 -c 'import json;d=json.load(open("'"$HACKRIFF_OPS"'/watchdog.json"));print(d["load"],d["budget"],list(d["owners"])[:5])'
 ```
 If a script's newest version is only on an unmerged branch, start it from that branch's worktree
 (`.claude/worktrees/<name>/ops/<script>`) and restart it from `main` once the branch lands.

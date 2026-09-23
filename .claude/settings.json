@@ -1,4 +1,9 @@
 {
+  "env": {
+    "CARGO_BUILD_JOBS": "3",
+    "NEXTEST_TEST_THREADS": "2",
+    "CARGO_INCREMENTAL": "0"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -25,6 +30,28 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-board-edits.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/reap-agent-processes.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/reap-agent-processes.sh",
+            "timeout": 15
           }
         ]
       }

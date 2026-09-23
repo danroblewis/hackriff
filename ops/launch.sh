@@ -46,9 +46,16 @@ fi
 # (--append-system-prompt-file): typing "$(cat ROLE)" into the shell parsed the role's own text -
 # backticks, quotes, an `if` - and on 2026-09-22 left the pane stuck at zsh's `if>` continuation
 # prompt for three hours, swallowing every merge-runner notice and supervisor relay.
+#
+# HACKRIFF_ROLE is exported into the session so ops/watchdog.py can NAME this session's owner.
+# On macOS it cannot actually read it back (no process on this box can read another's
+# environment - measured 2026-09-23), so the watchdog names the role from the role file in
+# `--append-system-prompt-file` instead, which is why that argument is passed by path. The
+# export costs nothing, is what the session says about itself rather than a guess about its
+# command line, and is readable wherever this runs on Linux.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
 tmux send-keys -t "$SESSION" -l \
-  "$CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
+  "HACKRIFF_ROLE=$ROLE $CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
 tmux send-keys -t "$SESSION" Enter
 echo "launched '$ROLE' in tmux session '$SESSION' (model=$MODEL effort=$EFFORT)"
 echo "  role prompt: $RF  (+ root CLAUDE.md invariants)"

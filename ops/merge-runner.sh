@@ -256,19 +256,50 @@ PY
   # workers: the gate waits for them the same way (and the same 45-min cap applies). This is
   # only consulted BEFORE a gate starts, when none of these can be the runner's own.
   foreign=$(pgrep -f 'node e2e/run.mjs|hk serve --bind 127.0.0.1:87' 2>/dev/null | wc -l | tr -d ' ')
+  FOREIGN_RUNNING=${foreign:-0}   # read by workers_drained: a spec run is minutes, a worker is an hour
   echo $(( claimed + ${foreign:-0} ))
 }
+FOREIGN_RUNNING=0
+# A foreign spec run holds the gate for at most this long. A deflaker that re-runs a spec every
+# time it sees no gate, beside a runner that waits for the spec to end before starting one, is a
+# standoff the 45-min worker cap resolves too slowly (02:27 on 2026-09-23: one 54-min worker and
+# one spec run held a 12-branch batch).
+FOREIGN_DRAIN_MAX=${FOREIGN_DRAIN_MAX:-300}
 # While this waits it holds `$S/gate-wanted`, which the work runner reads as "a gate is
 # pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
 # the box and the drain would never complete (observed 14:12: T-565 started during the wait).
 GATEWANT=$S/gate-wanted
-workers_drained(){ # 0 = no worker running (or waited long enough), 1 = wait
-  local n; n=$(workers_running)
-  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0; fi
-  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $n worker(s) running - the gate runs alone, dispatch is paused, waiting for them to hand back"; }
-  printf 'since=%s\nworkers=%s\n' "$DRAIN_SINCE" "$n" > "$GATEWANT"
-  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
-    log "WAIT over: $n worker(s) still running after $WORKER_DRAIN_MAX s - gating anyway (a stuck worker must not hold every merge)"
+# The claims file only knows about processes THIS orchestration started. On 2026-09-22 the box
+# also carried sixteen orphaned 100 % busy shells belonging to an agent that had already exited,
+# and every gate in two and a quarter hours ran beside them with `workers_running` reporting
+# zero. `ops/watchdog.py` is what sees those; this reads its last tick. A stale tick (>3 min) is
+# treated as "nothing known", never as "clear" - a dead watchdog must not silently license a
+# contended gate, but it must not block every merge either.
+# The rule itself lives in `ops/watchdog.py --contended` (unit-tested in py/tests/test_watchdog.py)
+# rather than in a here-doc here, so it can be exercised without a merge runner and a loaded box.
+contention(){ # echoes what the box is doing that this gate should not share; empty = clear
+  python3 "$(dirname "${BASH_SOURCE[0]}")/watchdog.py" --contended 2>/dev/null
+}
+HK_GATE_CONTENDED=""; export HK_GATE_CONTENDED   # py/hkpy/gate.py prints and records it
+workers_drained(){ # 0 = no worker running and the box is clear (or waited long enough), 1 = wait
+  local n c why; n=$(workers_running); c=$(contention)
+  if [ "${n:-0}" -eq 0 ] && [ -z "$c" ]; then
+    DRAIN_SINCE=""; rm -f "$GATEWANT"; HK_GATE_CONTENDED=""; return 0
+  fi
+  why=""
+  [ "${n:-0}" -gt 0 ] && why="$n worker(s) running"
+  [ -n "$c" ] && why="${why:+$why; }contention: $c"
+  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $why - the gate runs alone, dispatch is paused"; }
+  printf 'since=%s\nworkers=%s\ncontention=%s\n' "$DRAIN_SINCE" "$n" "$c" > "$GATEWANT"
+  # Only foreign spec runs / contention left (no claimed worker): the short cap applies.
+  local cap="$WORKER_DRAIN_MAX"
+  [ $(( ${n:-0} - ${FOREIGN_RUNNING:-0} )) -le 0 ] && cap="$FOREIGN_DRAIN_MAX"
+  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$cap" ]; then
+    log "WAIT over: $why still, after $cap s - gating anyway (nothing stuck must hold every merge)"
+    # The gate runs, but it is not a clean measurement of the code, and the gate log is the only
+    # place that can still say so once the run is over.
+    HK_GATE_CONTENDED="$why"
+    [ -n "$c" ] && alert amber "gating a contended box" "Waited ${WORKER_DRAIN_MAX}s and gave up: $why. Timings from this gate are not comparable (see ops/watchdog.py)." --key "contended-gate"
     DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0
   fi
   return 1
@@ -651,6 +682,10 @@ while true; do
   if [ -n "$queued" ] && main_ready && workers_drained; then
     # keep only branches that still exist and are ahead of main
     ready=$(ready_filter $queued)
+    # Dedupe, first occurrence wins: a branch appended more than once (each new tip re-queues the
+    # same name) took one BULK_MAX slot per copy - `task-alerts` x4 pushed gate-diag, spec-waits
+    # and watchdog out of the 03:12 batch on 2026-09-23.
+    ready=$(printf '%s\n' $ready | awk '!seen[$0]++' | tr '\n' ' ')
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:

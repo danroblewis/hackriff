@@ -1033,3 +1033,33 @@ def test_ops_plus_crates_is_still_full():
 def test_the_justfile_stays_full_even_though_it_lives_beside_ops():
     from hkpy.gate import classify
     assert classify(["justfile", "ops/stage.sh"]).is_full
+
+
+def test_a_contended_gate_records_what_it_was_gating_beside():
+    """`ops/merge-runner.sh` waits for the box to clear, but the wait is capped at 45 min so a
+    stuck worker or a leaked process cannot hold every merge. Past the cap it gates anyway and
+    exports `HK_GATE_CONTENDED`.
+
+    That run is still a real gate — the code is still tested — but it is NOT a measurement of
+    the code's cost, and the timing log is the only place that can still say so afterwards. On
+    2026-09-22 sixteen unowned busy loops ran through every gate for 2 h 18 m, and the gates
+    they slowed were read as a regression in the suites.
+    """
+    from hkpy import gatelog
+
+    r = gatelog.start_record("abc", klass="full", phase="all", source="s", n_files=1,
+                             contended="load 44.0 over budget 32.0")
+    assert r["contended"] == "load 44.0 over budget 32.0"
+    assert gatelog.start_record("abc", klass="full", phase="all", source="s", n_files=1)["contended"] is None
+
+
+def test_the_contended_env_name_is_the_one_the_merge_runner_exports():
+    """The two halves live in different languages and different files; nothing but this pins
+    them together."""
+    import pathlib
+
+    from hkpy.gate import CONTENDED_ENV
+
+    runner = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert CONTENDED_ENV == "HK_GATE_CONTENDED"
+    assert f"export {CONTENDED_ENV}" in runner or f"{CONTENDED_ENV}=" in runner

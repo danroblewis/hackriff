@@ -1763,9 +1763,28 @@ def system_load():
     return {"load1": round(l1, 1), "load5": round(l5, 1), "cores": cores,
             "rustc": count(r"bin/rustc"), "cargo": count(r"cargo (build|nextest|test)")}
 
+def watchdog_box():
+    """The last tick of ops/watchdog.py: who on this box owns the CPU, and what nothing owns.
+
+    Read from the file, never recomputed here - the dashboard already costs 440 % CPU when it
+    does its own scanning (2026-09-22), and the whole point of the watchdog being a separate
+    process is that one thing builds the process table. A missing or stale file says so rather
+    than showing nothing: "no watchdog" is itself the condition that let sixteen busy loops run
+    for two hours unseen.
+    """
+    try:
+        d = json.load(open(os.path.join(SCRATCH, "watchdog.json")))
+    except Exception:
+        return {"state": "absent"}
+    age = time.time() - float(d.get("ts", 0))
+    d["age_s"] = round(age)
+    d["state"] = "stale" if age > 120 else "live"
+    return d
+
+
 def sysstats():
     if psutil is None:
-        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}}
+        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}, "box": watchdog_box()}
     series = [[round(x) for x in snap] for snap in CPU_HIST]   # up to 5 one-second samples, oldest→newest
     per = series[-1] if series else [round(x) for x in psutil.cpu_percent(percpu=True)]
     vm = psutil.virtual_memory()
@@ -1780,6 +1799,7 @@ def sysstats():
         "busy": round(sum(per) / 100, 1),   # core-equivalents of work
         "mem": {"pct": round(vm.percent), "used_gb": round(vm.used / 1e9, 1), "total_gb": round(vm.total / 1e9)},
         "disk": disk,
+        "box": watchdog_box(),
     }
 
 _GATHER_LOCK = threading.Lock()
@@ -1922,6 +1942,10 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
 .mem-lbl{display:flex;justify-content:space-between;gap:6px;font:11px var(--mono);color:var(--mut);margin-bottom:3px;white-space:nowrap}
 .mem-bar{height:12px;border-radius:6px;background:#0a0f12;border:1px solid var(--line);overflow:hidden}
 .mem-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3a6ea5,#52C2AE);transition:width .4s ease}
+.boxline{margin-top:9px;font:11px var(--mono);color:var(--mut);line-height:1.6;overflow-wrap:anywhere}
+.boxline .ow{color:var(--teal)}.boxline .ow.hot{color:var(--amber)}
+.boxline .un{color:var(--coral)}
+.boxline .hd{color:var(--dim);letter-spacing:.06em;text-transform:uppercase;font-size:10px}
 @media(max-width:1000px){.cols{grid-template-columns:1fr 1fr}}
 @media(max-width:640px){
   body{overflow:auto;overflow-x:hidden;font-size:12px}
@@ -1958,6 +1982,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
         <div><div class="mem-lbl"><span>Disk free</span><span id=disk-txt></span></div><div class="mem-bar"><i id=disk-fill></i></div></div>
       </div>
+      <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
     <div class="card" style="flex:0 0 auto;max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
@@ -2145,7 +2170,24 @@ async function sysTick(){
     $('#disk-fill').style.background=col;
     $('#disk-txt').style.color=free<10?'#E47B68':free<25?'#F0A542':'var(--mut)';
   }
+  renderBox(s.box||{});
  }catch(e){}
+}
+// "Box": who owns the CPU right now, from ops/watchdog.py's last tick. Unowned is drawn in red
+// and never hidden — sixteen unowned busy loops ran for 2 h 18 m on 2026-09-22 because nothing
+// displayed them. "no watchdog running" is itself shown, for the same reason.
+function renderBox(b){
+  const el=$('#boxline'); if(!el) return;
+  if(b.state==='absent'){ el.innerHTML='<span class=un>⚠ no watchdog running</span> <span class=hd>— start ops/watchdog.py</span>'; return; }
+  const ow=Object.entries(b.owners||{}).filter(([k,v])=>v.cpu>=1).slice(0,9)
+    .map(([k,v])=>`<span class="ow${v.cpu>=150?' hot':''}">${esc(k)} ${Math.round(v.cpu)}%</span>`).join(' · ');
+  const un=(b.unowned||[]).filter(u=>u.cpu>=20);
+  const alarms=(b.alarms||[]).map(a=>`<span class=un>${esc(a.title)}</span>`).join(' · ');
+  const over=(b.load||0)>(b.budget||1e9);
+  el.innerHTML=`<div class=hd>Box · load <span style="color:${over?'#E47B68':'var(--mut)'}">${b.load}</span>/${b.budget} budget${b.state==='stale'?` · <span class=un>stale ${b.age_s}s</span>`:''}</div>`
+    +`<div>${ow||'<span class=hd>idle</span>'}</div>`
+    +(un.length?`<div class=un>unowned: ${un.map(u=>`${Math.round(u.cpu)}% pid ${u.pid} ${esc((u.cmd||'').slice(0,58))}`).join(' · ')}</div>`:'')
+    +(alarms?`<div>${alarms}</div>`:'');
 }
 sysTick(); setInterval(sysTick,5000); setInterval(playFrame,1000);
 </script></body></html>"""
