@@ -20,25 +20,40 @@
 import type { AppContext } from "../context";
 import { h } from "../dom";
 import { startPoll } from "../net";
-import { setCaptureWindow, toast, type AppState } from "../state";
+import { setCaptureWindow, setIqAvailability, toast, type AppState } from "../state";
 import { timelineRequest } from "../../navigators";
-import { captureWindow, currentSpan, type TimelineResponse } from "./capture-window";
+import { captureWindow, currentSpan, iqAvailability, type RecordingsIqResponse, type TimelineResponse } from "./capture-window";
 
 /** How often the capture window is re-read. The rules on the canvas advance per frame from the live
  * edge (`ringRules`), so this only has to catch the ring's *fill* (`buffered.t0_s`) and a
- * reconfigured retention — neither needs the stream's cadence. */
+ * reconfigured retention — neither needs the stream's cadence. The raw-IQ-available spans
+ * (`state.iqAvailability`) are read on the same cadence: the ring rolls (CLAUDE.md, "Playback": "the
+ * boundary is not a constant and must not be cached as one"), so this must be asked afresh, never
+ * derived once and held. */
 export const CAPTURE_CLOCK_MS = 5_000;
 
 /** The one request the capture clock makes: the window, with no band, no grid to fold. */
 export const CAPTURE_CLOCK_REQUEST = timelineRequest(null, 1, 1);
 
-/** Start polling the capture window into `state.captureWindow`. Returns the stop function. */
+/**
+ * `GET /api/recordings`'s `iq_available` (T-469): the ring **and** persisted recordings — the wider
+ * of the two audio horizons (T-464), never `/api/coverage` or `/api/tiles`, which answer a different
+ * question (observed-vs-unobserved) over a much longer horizon than raw IQ actually survives.
+ */
+export const IQ_AVAILABILITY_REQUEST = "/api/recordings";
+
+/** Start polling the capture window and the raw-IQ-available spans. Returns the stop function. */
 export function startCaptureClock(ctx: AppContext): () => void {
   const { store, client } = ctx;
   return startPoll(async () => {
-    const tl = await client.get<TimelineResponse>(CAPTURE_CLOCK_REQUEST).catch(() => null);
-    // A failed read is *not answered*, which is `null` — unknown, never a window of our own.
+    const [tl, rec] = await Promise.all([
+      client.get<TimelineResponse>(CAPTURE_CLOCK_REQUEST).catch(() => null),
+      client.get<RecordingsIqResponse>(IQ_AVAILABILITY_REQUEST).catch(() => null),
+    ]);
+    // A failed read is *not answered*, which is `null` — unknown, never a window (or horizon) of
+    // our own invention.
     store.set(setCaptureWindow(captureWindow(tl)));
+    store.set(setIqAvailability(rec === null ? null : iqAvailability(rec)));
   }, CAPTURE_CLOCK_MS);
 }
 

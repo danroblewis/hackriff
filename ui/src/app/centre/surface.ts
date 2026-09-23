@@ -256,7 +256,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (p && pane.id === p.activePane) {
       const following = p.view.panes.isFollowing(pane.id);
       const posS = pane.box.t1Ns / S_TO_NS;
-      const backing = iqBackingAt(posS, following, rules);
+      // T-464: the wider audio horizon (ring + recordings), from `state.iqAvailability`; `null` (not
+      // polled yet) falls back inside `iqBackingAt` to the ring-only `rules` this pane already reads.
+      const backing = iqBackingAt(posS, following, rules, s.iqAvailability);
       const w = s.captureWindow;
       const held = w?.buffered ? Math.max(0, w.buffered.t1S - (rules?.iqS ?? w.buffered.t0S)) : null;
       setText(ringEl, !rules
