@@ -5041,6 +5041,8 @@ tasks:
       This ticket's whole acceptance is tagging three already-permanent use-case ids as
       needs-accessory in hardware_fit/fit_note - the fixed-rubric bulk-classification pattern
       model-selection.md names for Sonnet/medium, not new capability design."
+    notes: |
+      2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -15563,6 +15565,8 @@ tasks:
       draws its own REFUSED_MARK, never grey or the unknown hatch, with backoff on the transport) and
       deliberately left this server half alone as out of its lane.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator, from the task-deflake-0922 triage): the oldest_record == None window on a young server - rows after recording_began served as unknown - was MEASURED at >= 370 ms under gate load (T-507 recorded ~30 ms). Tests now wait past it (tile_route... in api_contract); the product still shows unknown in that window. Same commit fixed recording_began_s snapping back to the log hour after a retune (ObservationStore::earliest_start).
   - id: T-508
     milestone: MLIVE
     title: A failed re-plumb ends the run for good while hk serve stays up saying finished - the other road to "retune never recovers"
@@ -15626,6 +15630,8 @@ tasks:
     notes: |
       Filed 2026-09-18 by the coordinator so an intermittent red is recorded, not waved through.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-22 (coordinator): RECURRED in merge gates (task-t299 09:22) through a SECOND wall-clock re-derivation of the tile index; fixed deterministically by task-deflake-0922 (1bf095f6, landed): the test reads its tile from the store newest frame (shadow.edge_s) and waits for oldest_record_s. Isolation 20/20 alone and 15/15 under the gate load; red 3/3 with the clock put ahead of the data. Status stays done.
   - id: T-510
     milestone: MSDR
     title: Multi-source capture composition - one Pipeline spawning N source/ring/capture-thread sets into the shared per-device stores
@@ -18828,6 +18834,8 @@ tasks:
       every commit; cache entries and bytes stay under the stated cap under sustained scrolling.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      2026-09-22 (coordinator): implemented (a53c6fac, rebuilt as 0fec97ea onto T-630 admission); carried by branch hold-tilebody2 with T-573/T-700. BOUND 32 MiB AND 256 entries, LRU, SEALED tiles only (live never cached), no capture-thread cost. Found + fixed the per-read-field ETag trap (cost.served_from; and T-630 share fields excluded from the sealed ETag in http.rs). NOT LANDED: hold-tilebody2 turned live-edge / surface-address / surface-nav browser specs red in the 09-22 18:34 gate; fix in progress on task-tilebody3.
   - id: T-573
     milestone: MLIVE
     title: HTTP keep-alive and a BATCH /api/tiles endpoint - one request per viewport, not one per tile
@@ -18863,6 +18871,8 @@ tasks:
       green). Assert the REQUEST the client builds in `ui/test`, not only the response it renders.
       Prove the tests go RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      2026-09-22 (coordinator): implemented (2df0ba8b, rebuilt as cd2ed16f): GET /api/tiles/batch - 8 addresses in 1 request, pane+minimap in 2; the batch carries client (T-630) and each address is admitted under that share. HTTP keep-alive NOT done (proposed as a follow-up, not filed under the 09-22 observed-defects-only rule). NOT LANDED: see T-572 note - browser specs red with hold-tilebody2; fix on task-tilebody3.
   - id: T-574
     milestone: MLIVE
     title: Sealed tiles are immutable - serve them with an ETag and a long immutable cache, so a re-read is a 304
