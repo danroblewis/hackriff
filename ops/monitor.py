@@ -994,6 +994,14 @@ def last_gates(n=4):
                 nxt = next((lines[j].strip() for j in range(i + 1, min(i + 4, len(lines))) if lines[j].strip()), "")
                 tgt["msg"] = nxt[:300]
             continue
+        # The gate's own timing verdict (py/hkpy/gatediag.py), printed after each suite. The
+        # structured copy in gate-timings.jsonl is the primary source (gate_timing below); this
+        # is the fallback, and it is per SUITE where the record carries one verdict per run.
+        if l.startswith("gate: CONTENDED") or l.startswith("gate: DEARER") or l.startswith("gate: timing ok"):
+            cur.setdefault("timing", [])
+            if l.strip() not in cur["timing"]:
+                cur["timing"].append(l.strip()[:200])
+            continue
         if l.startswith("[") and "TRIAGE:" in l:
             cur["triage"].append(l.split("] ", 1)[-1][:200])
             if "retry PASSED" in l:
@@ -1025,7 +1033,43 @@ def last_gates(n=4):
             g["seconds"] = 0
         for k in ("suites", "fails", "triage"):
             g[k] = g[k][:12]
+        g["timing"] = g.get("timing", [])[:6]
     return gates[-n:][::-1]
+
+def gate_timing():
+    """The newest gate's SELF-DIAGNOSIS: contended, or timing ok, and which crates.
+
+    `py/hkpy/gatediag.py` folds one verdict per run into the `gate_end` record — whether crates
+    the diff never touched ran dearer than their own history. A 36-minute gate and a 36-minute
+    gate on a loaded box are the same number and different facts (docs/test-speed-review §1:
+    untouched crates 18-79x while the diff's own new tests cost 0 s), so the dashboard says
+    which one this was instead of leaving a person to guess from the total.
+    """
+    path = os.path.join(SCRATCH, "gate-timings.jsonl")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 400_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("kind") != "gate_end" or "contended" not in rec:
+            continue
+        return {
+            "contended": bool(rec.get("contended")),
+            "crates": [[c[0], c[1]] for c in (rec.get("contended_crates") or [])][:6],
+            "dearer": [[c[0], c[1]] for c in (rec.get("dearer") or [])][:6],
+            "max_untouched": rec.get("max_untouched_ratio"),
+            "suite": rec.get("timing_suite") or "",
+            "runs": rec.get("timing_baseline_runs") or 0,
+            "load": (rec.get("loadavg") or [None])[0],
+            "age_s": int(time.time() - float(rec.get("ts") or 0)) if rec.get("ts") else None,
+        }
+    return None
 
 def latest_junit():
     """The newest gate's per-test record: $HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml,
@@ -1063,6 +1107,36 @@ def latest_junit():
                       "slowest": sorted(cases, key=lambda c: -c["s"])[:10],
                       "total_s": round(sum(c["s"] for c in cases))})
     return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
+
+def flake_top(n=5):
+    """The flake ledger's worst offenders — `$HACKRIFF_OPS/flakes.json` (py/hkpy/flakes.py).
+
+    The merge runner forgives a load flake on every single gate and forgets it, so the same
+    spec can cost four gates in a day with nothing counting to two. The ledger counts; this
+    shows the top of it, with which WAY each test went, because "passes alone" (a wait to make
+    deterministic) and "fails alone" (a real defect) are opposite jobs.
+    """
+    try:
+        with open(os.path.join(SCRATCH, "flakes.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        tests = data.get("tests") or {}
+    except Exception:
+        return []
+    rows = []
+    for name, rec in tests.items():
+        if not isinstance(rec, dict):
+            continue
+        rows.append({
+            "test": str(name),
+            "red": int(rec.get("red_in_gate") or 0),
+            "recent": int(rec.get("recent_red") or 0),
+            "pass_alone": int(rec.get("passed_alone") or 0),
+            "fail_alone": int(rec.get("failed_alone") or 0),
+            "loads": [x for x in (rec.get("loads") or [])][-4:],
+            "last": rec.get("last_seen") or 0,
+        })
+    rows.sort(key=lambda r: (-r["red"], -r["recent"], r["test"]))
+    return rows[:n]
 
 def work_queue(smap, wts, ags, merge_ticket=""):
     """Two queues the dashboard couldn't show before:
@@ -1760,6 +1834,7 @@ def gather():
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
         "gates": gates, "junit": junit,
+        "timing": gate_timing(), "flakes": flake_top(),
         "budget": budget_status(),
     }
 
@@ -1945,10 +2020,39 @@ async function tick(){
       ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)+(J.stale?`<div style="color:#F0A542">${stale}</div>`:'')+fails
         +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
     }
+    // Was the gate SLOW, or was the BOX slow? (py/hkpy/gatediag.py, from the gate_end record;
+    // the per-suite line in the log is the fallback.) A 36-minute gate on a quiet box and one
+    // on a loaded box are the same number and opposite facts, so the dashboard names which.
+    const T=d.timing; let tm='';
+    if(T){
+      if(T.contended){
+        const cr=(T.crates||[]).map(c=>`${esc(c[0])} ${Number(c[1]).toFixed(1)}x`).join(', ');
+        tm=`<div style="color:#F0A542;padding:2px 0"><b>CONTENDED</b> <span style="color:#8595A0">${esc(T.suite||'')}</span> — ${cr||'untouched crates over 3x'} <span style="color:#5A6973">(untouched by the diff${T.load!=null?' · load '+Number(T.load).toFixed(1):''})</span></div>`;
+      } else if(T.max_untouched!=null){
+        tm=`<div style="color:#52C2AE;padding:2px 0">timing ok <span style="color:#5A6973">· max untouched crate ${Number(T.max_untouched).toFixed(1)}x · ${esc(T.suite||'')} vs ${T.runs} green run(s)</span></div>`;
+      }
+      if((T.dearer||[]).length)
+        tm+=`<div style="color:#A395E0;padding:1px 0">DEARER — ${T.dearer.map(c=>`${esc(c[0])} ${Number(c[1]).toFixed(1)}x`).join(', ')} <span style="color:#5A6973">(touched: the change cost this)</span></div>`;
+    }
+    if(!tm){
+      // Fallback: the line the gate printed, per suite, straight out of merge-runner.log.
+      const tl=(G[0]&&G[0].timing)||[];
+      if(tl.length) tm=tl.map(l=>`<div style="${mono};color:${l.startsWith('gate: CONTENDED')?'#F0A542':l.startsWith('gate: DEARER')?'#A395E0':'#52C2AE'}">${esc(l)}</div>`).join('');
+    }
+    // The flake ledger: which tests keep costing gates, and which WAY they go when re-run alone.
+    const FL=d.flakes||[];
+    const fl=FL.length?FL.map(f=>{
+      const real=f.fail_alone>0, col=real?'#E47B68':'#F0A542';
+      const how=real?(f.pass_alone?'both ways — triage in isolation':'fails alone — a real defect'):'passes alone — a load flake';
+      const ld=(f.loads||[]).length?` · loads ${f.loads.map(x=>Number(x).toFixed(0)).join(',')}`:'';
+      return `<div style="${mono};padding:1px 0"><span style="color:${col}">${f.red}x</span> <span style="color:#5A6973">(${f.recent} in 7d)</span> ${esc(f.test)}<div style="color:#8595A0;padding-left:14px">${how}${ld}</div></div>`;
+    }).join(''):'';
     // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),
     // and the waiting list capped: the full set is in the Work trees card.
     const CAP=12; const wtShown=ahead.length>CAP?ahead.slice(0,CAP).map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join('')+`<div style="color:#5A6973;padding:2px 0">… and ${ahead.length-CAP} more (see Work trees)</div>`:wt;
-    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+gates+ju+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
+      +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
+      +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
   const b=d.budget||{}; const bEl=$('#budget');

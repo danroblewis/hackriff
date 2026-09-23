@@ -164,6 +164,13 @@ ops-check:
 gate-stats:
     uv run --locked --project py python -m hkpy.cycletime --stats
 
+# Which tests have cost merge gates, which WAY (passed alone = a load flake, failed alone = a
+# real defect), and under what load - from $HACKRIFF_OPS/flaky.jsonl plus the merge runner's
+# TRIAGE lines. `ops/merge-runner.sh` calls `--update` after every triage, which files a test
+# once in merge-needs-attention.txt when it has cost two gates in seven days; this is the read.
+flakes *args:
+    uv run --locked --project py python -m hkpy.flakes {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
