@@ -636,6 +636,12 @@ CRATES_ENV = "HK_GATE_CRATES"
 #: Unset means RUN, like `HK_GATE_CRATES`: a bug here costs 2.5 minutes, never coverage.
 SKIP_UI_ENV = "HK_GATE_SKIP_UI"
 
+#: What `ops/merge-runner.sh` gave up waiting for before starting this gate: unowned CPU or a
+#: load over the box's plan, as `ops/watchdog.py` last saw it. Purely informational - it changes
+#: no suite and no decision - but a gate run beside a 100 % process nobody owns is not a
+#: measurement of the code, and the gate log is where that has to be said or it is lost.
+CONTENDED_ENV = "HK_GATE_CONTENDED"
+
 
 def skip_ui(decision: Decision, source: Source) -> bool:
     """True when the CHECK-phase UI suite can be skipped for this diff.
@@ -914,9 +920,17 @@ def main(argv: list[str] | None = None) -> int:
     # worth knowing about — still leaves a trace. See `gatelog.py`.
     run_id = gatelog.new_run_id()
     started = time.monotonic()
+    # `ops/merge-runner.sh` waits for the box to clear before gating, but that wait is capped
+    # (45 min) so a stuck worker or a leaked process cannot hold every merge for ever. When the
+    # cap expires it gates anyway and says what it gave up waiting for. Printed AND recorded,
+    # because the run is still a real gate - just not a measurement of the code.
+    contended = os.environ.get(CONTENDED_ENV, "").strip() or None
+    if contended:
+        print(f"gate: CONTENDED by {contended}", flush=True)
     gatelog.append(
         gatelog.start_record(
             run_id,
+            contended=contended,
             klass=decision.label,
             phase=args.phase,
             source=source.description,

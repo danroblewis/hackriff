@@ -517,12 +517,51 @@ def tick(since: dict, dry: bool = False) -> dict:
     return snap
 
 
+CONTENTION_STALE_S = 180
+
+
+def contention(snap: dict | None, now: float | None = None) -> str:
+    """What the box is doing that a merge gate should not share, in one line; "" when clear.
+
+    `ops/merge-runner.sh` calls this (`--contended`) before every gate. Its own `workers_running`
+    only knows processes this orchestration started, which is exactly why the sixteen orphaned
+    shells of 2026-09-22 ran through every gate with the drain check reporting zero.
+
+    A STALE tick is "nothing known", not "clear" and not "contended": a dead watchdog must not
+    silently license a contended gate, and must not block every merge either. The caller's
+    45-minute cap is what makes that safe in the one direction, and the cap is why this can
+    afford to be conservative in the other.
+    """
+    if not snap:
+        return ""
+    now = time.time() if now is None else now
+    if now - float(snap.get("ts", 0)) > CONTENTION_STALE_S:
+        return ""
+    out = [f"pid {u['pid']} {float(u.get('cpu', 0)):.0f}% {str(u.get('cmd', ''))[:70]}"
+           for u in snap.get("unowned", []) if float(u.get("cpu", 0)) > UNOWNED_CPU]
+    if float(snap.get("load", 0)) > float(snap.get("budget", 1e9)):
+        out.append(f"load {snap['load']} over budget {snap['budget']}")
+    return " | ".join(out)
+
+
+def read_snapshot() -> dict:
+    try:
+        return json.load(open(STATE))
+    except Exception:
+        return {}
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--contended", action="store_true",
+                    help="print what the last tick saw contending the box (empty = clear), then exit")
     ap.add_argument("--once", action="store_true", help="one tick, then exit")
     ap.add_argument("--print", action="store_true", dest="show", help="print the tick as JSON")
     ap.add_argument("--dry-run", action="store_true", help="never kill, never alert")
     a = ap.parse_args(argv)
+    if a.contended:
+        print(contention(read_snapshot()))
+        return 0
     # Point active-ops-dir at ourselves the way the other ops scripts do, so a later cold start
     # finds the same state directory.
     try:

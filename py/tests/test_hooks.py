@@ -122,6 +122,13 @@ def test_redirections_and_and_lists_are_not_counted_as_backgrounding():
 
 # ------------------------------------------------------------------ e2e / hk serve beside a gate
 def test_spec_run_allowed_when_no_gate_is_running(tmp_path):
+    """The one rule here that reads LIVE machine state, deliberately: "is a gate running right
+    now" cannot be answered from the payload. So this case is skipped when a gate really is
+    running, rather than asserted and flaky — it failed exactly that way on first run, while the
+    merge runner happened to be gating. The deny side below is file-controlled and always runs.
+    """
+    if subprocess.run(["pgrep", "-f", "just gate"], capture_output=True).returncode == 0:
+        pytest.skip("a merge gate is running on this box; the hook is correct to deny")
     assert bash("npm run e2e", ops=tmp_path) is None
 
 

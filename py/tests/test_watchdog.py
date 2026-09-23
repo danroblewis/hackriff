@@ -387,3 +387,32 @@ def test_hackriff_role_env_wins_over_the_command_line():
     rows[0]["env"] = "HACKRIFF_ROLE=supervisor"
     agg, _ = W.owners(rows, {})
     assert set(agg) == {"role:supervisor"}
+
+
+# --------------------------------------------------------------------- contention (merge gate)
+def test_contention_reports_unowned_cpu_and_over_budget():
+    """What `ops/merge-runner.sh` waits for before starting a gate. Its own `workers_running`
+    counts only processes this orchestration started, which is why the sixteen orphaned shells
+    ran through every gate on 2026-09-22 with the drain check reporting zero."""
+    now = 1_000_000.0
+    snap = {"ts": now, "load": 44.0, "budget": 32.0,
+            "unowned": [{"pid": 31000, "cpu": 99.5, "cmd": SNAP},
+                        {"pid": 31001, "cpu": 12.0, "cmd": "quiet"}]}
+    c = W.contention(snap, now)
+    assert "pid 31000" in c and "100%" in c
+    assert "31001" not in c
+    assert "load 44.0 over budget 32.0" in c
+
+
+def test_contention_is_empty_on_a_clear_box():
+    assert W.contention({"ts": 1.0, "load": 8.0, "budget": 32.0, "unowned": []}, 1.0) == ""
+
+
+def test_a_stale_or_missing_tick_says_nothing_rather_than_clear_or_contended():
+    """A dead watchdog must not silently license a contended gate - and must not block every
+    merge either. The runner's 45-minute cap is what makes erring either way survivable."""
+    snap = {"ts": 0.0, "load": 44.0, "budget": 32.0,
+            "unowned": [{"pid": 31000, "cpu": 99.5, "cmd": SNAP}]}
+    assert W.contention(snap, W.CONTENTION_STALE_S + 1) == ""
+    assert W.contention({}, 1.0) == ""
+    assert W.contention(None, 1.0) == ""

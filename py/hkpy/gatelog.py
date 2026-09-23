@@ -121,10 +121,19 @@ def start_record(
     branch: str | None = None,
     sha: str | None = None,
     root: str | None = None,
+    contended: str | None = None,
 ) -> dict[str, Any]:
-    """The line written before any suite runs."""
+    """The line written before any suite runs.
+
+    ``contended`` is what `ops/watchdog.py` saw on the box at the moment the gate started, and
+    only ever set when the merge runner gave up waiting for it to clear (``HK_GATE_CONTENDED``).
+    It belongs next to ``loadavg`` for the same reason that does: a 35-minute gate run beside
+    an unowned 100 % busy loop is not evidence that the gate got slower, and on 2026-09-22 that
+    exact confusion cost a day of chasing a regression that was sixteen orphaned shells.
+    """
     return {
         "kind": "gate_start",
+        "contended": contended,
         "run": run_id,
         "ts": time.time(),
         "sha": sha,

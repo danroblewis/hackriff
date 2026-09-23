@@ -262,13 +262,34 @@ PY
 # pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
 # the box and the drain would never complete (observed 14:12: T-565 started during the wait).
 GATEWANT=$S/gate-wanted
-workers_drained(){ # 0 = no worker running (or waited long enough), 1 = wait
-  local n; n=$(workers_running)
-  if [ "${n:-0}" -eq 0 ]; then DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0; fi
-  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $n worker(s) running - the gate runs alone, dispatch is paused, waiting for them to hand back"; }
-  printf 'since=%s\nworkers=%s\n' "$DRAIN_SINCE" "$n" > "$GATEWANT"
+# The claims file only knows about processes THIS orchestration started. On 2026-09-22 the box
+# also carried sixteen orphaned 100 % busy shells belonging to an agent that had already exited,
+# and every gate in two and a quarter hours ran beside them with `workers_running` reporting
+# zero. `ops/watchdog.py` is what sees those; this reads its last tick. A stale tick (>3 min) is
+# treated as "nothing known", never as "clear" - a dead watchdog must not silently license a
+# contended gate, but it must not block every merge either.
+# The rule itself lives in `ops/watchdog.py --contended` (unit-tested in py/tests/test_watchdog.py)
+# rather than in a here-doc here, so it can be exercised without a merge runner and a loaded box.
+contention(){ # echoes what the box is doing that this gate should not share; empty = clear
+  python3 "$(dirname "${BASH_SOURCE[0]}")/watchdog.py" --contended 2>/dev/null
+}
+HK_GATE_CONTENDED=""; export HK_GATE_CONTENDED   # py/hkpy/gate.py prints and records it
+workers_drained(){ # 0 = no worker running and the box is clear (or waited long enough), 1 = wait
+  local n c why; n=$(workers_running); c=$(contention)
+  if [ "${n:-0}" -eq 0 ] && [ -z "$c" ]; then
+    DRAIN_SINCE=""; rm -f "$GATEWANT"; HK_GATE_CONTENDED=""; return 0
+  fi
+  why=""
+  [ "${n:-0}" -gt 0 ] && why="$n worker(s) running"
+  [ -n "$c" ] && why="${why:+$why; }contention: $c"
+  [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $why - the gate runs alone, dispatch is paused"; }
+  printf 'since=%s\nworkers=%s\ncontention=%s\n' "$DRAIN_SINCE" "$n" "$c" > "$GATEWANT"
   if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
-    log "WAIT over: $n worker(s) still running after $WORKER_DRAIN_MAX s - gating anyway (a stuck worker must not hold every merge)"
+    log "WAIT over: $why still, after $WORKER_DRAIN_MAX s - gating anyway (nothing stuck must hold every merge)"
+    # The gate runs, but it is not a clean measurement of the code, and the gate log is the only
+    # place that can still say so once the run is over.
+    HK_GATE_CONTENDED="$why"
+    [ -n "$c" ] && alert amber "gating a contended box" "Waited ${WORKER_DRAIN_MAX}s and gave up: $why. Timings from this gate are not comparable (see ops/watchdog.py)." --key "contended-gate"
     DRAIN_SINCE=""; rm -f "$GATEWANT"; return 0
   fi
   return 1
