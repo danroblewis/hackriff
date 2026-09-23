@@ -13416,7 +13416,8 @@ tasks:
   - id: T-463
     milestone: MPLAY
     title: Historical playback - play from a chosen past time, and "now" moves forward over recorded history
-    status: todo
+    status: in-progress
+    branch: task-t463
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -20002,7 +20003,8 @@ tasks:
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
-    status: todo
+    status: in-progress
+    branch: task-t597
     priority: normal
     parallel_group: M3A
     model: opus
