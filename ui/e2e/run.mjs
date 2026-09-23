@@ -10,7 +10,7 @@
 //
 // **Lanes (the spec pool).** Until 2026-09-22 this ran `for (const f of files)` against ONE shared
 // backend: 12 specs, strictly one browser at a time on a 28-core box — a quarter of the merge gate.
-// The loop is now a bounded pool of `HK_E2E_CONCURRENCY` lanes (default 3), and **each lane gets its
+// The loop is now a bounded pool of `HK_E2E_CONCURRENCY` lanes (default 2), and **each lane gets its
 // own `hk serve` on its own port**, not a share of one. Measured on a quiet box, same tree, same
 // day: **695.3 s sequential -> 207.7 s at 3 lanes**, 11 of 12 specs passing either way (the one red,
 // `surface-address`, fails alone too and is nothing to do with this).
@@ -88,7 +88,12 @@ const SPEC_TIMEOUT_MS = Number(process.env.HK_E2E_SPEC_TIMEOUT_MS ?? 600_000);
 // axis"), passed alone in 61 s, and passed again at 3 — a load flake bought for 11 s. So the default
 // sits where the wall clock stops improving rather than where the box stops fitting.
 // 1 restores the old strictly-sequential behaviour exactly.
-const CONCURRENCY = Math.max(1, Number(process.env.HK_E2E_CONCURRENCY ?? 3));
+// Default 2, not the 3 that measured fastest (208 s vs ~300 s): the first gate at 3 lanes went
+// red on three DIFFERENT specs across two runs (app-surface; then surface-nav + canvas-journey),
+// each green alone - the specs' readiness waits are still time-based, and a third lane beside
+// one bounded worker is enough to trip them. Two lanes keep most of the saving with margin;
+// raise it again when the waits read server state (docs/10 §3.6).
+const CONCURRENCY = Math.max(1, Number(process.env.HK_E2E_CONCURRENCY ?? 2));
 
 /**
  * Lane `i`'s base port. Lane 0 keeps the historical 8791 so a single-lane run is byte-for-byte the
