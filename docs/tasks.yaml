@@ -21061,7 +21061,8 @@ tasks:
   - id: T-628
     milestone: MAUTO
     title: The fitted receiver clock offset is known only modulo the raster, so a grant cannot be followed off-grid
-    status: todo
+    status: in-progress
+    branch: task-t628
     priority: normal
     parallel_group: DETECT
     model: opus
