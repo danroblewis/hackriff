@@ -364,6 +364,7 @@ fn a_finished_run_still_answers_410() {
     let Run {
         handle,
         ctl,
+        streams,
         server,
         _dir,
         ..
@@ -380,7 +381,14 @@ fn a_finished_run_still_answers_410() {
 
     // The source ended: nothing will be offered under this id again, and the honest answer is the
     // one T-508 made visible on the canvas — this run is over.
-    let started = Instant::now();
+    //
+    // *Why* it is known at once and not waited out, stated as ordering rather than as elapsed
+    // time (T-602's pattern, `hk-api/tests/bridge.rs`): the between-windows wait is only reachable
+    // through a park in `StreamRegistry::wait_for_offer_after`, counted by `successor_waits_entered`
+    // before the park. A 410 that had been mistaken for a gap first would have entered that wait
+    // (and, on this run, waited the settle gap out to its bound); a real end never enters it. Timing
+    // the response instead made the answer a function of the machine.
+    let waits_before = streams.successor_waits_entered();
     let (status, text) = handshake(addr);
     assert_eq!(
         status, 410,
@@ -391,12 +399,10 @@ fn a_finished_run_still_answers_410() {
         text.contains("stream finished"),
         "the 410 must still name the reason:\n{text}"
     );
-    // Promptly: a real end is known, not waited out. Anything near the handshake's between-windows
-    // bound would mean the end had been mistaken for a gap first.
-    assert!(
-        started.elapsed() < Duration::from_millis(1500),
-        "the 410 took {:?} — the end was treated as a gap and waited out",
-        started.elapsed()
+    assert_eq!(
+        streams.successor_waits_entered(),
+        waits_before,
+        "the end was treated as a gap and waited out for a successor that was never promised"
     );
     drop(server);
 }
