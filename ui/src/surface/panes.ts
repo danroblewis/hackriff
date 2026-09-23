@@ -690,6 +690,11 @@ export interface PaneStatus {
   readonly tierLabel: string;
   /** `LIVE`, or how far behind the live edge the frozen window's newest row sits. */
   readonly timeLabel: string;
+  /** **The pane's actual time window**, absolute capture ns, exactly as the frame drew it — the
+   * state `timeLabel` rounds for a reader. Stated so a caller that must decide "did the time axis
+   * move?" reads the axis itself, not a label that rounds a sub-second move to the same `−23 s`. */
+  readonly t0Ns: number;
+  readonly t1Ns: number;
   readonly freqLabel: string;
   readonly tiles: number;
   readonly fallbacks: number;
@@ -796,6 +801,8 @@ export function paneStatuses(
       tier: r.tier,
       tierLabel: tierStatement(r),
       timeLabel: live ? "LIVE" : `−${fmtSpan((edgeNs - t.t1Ns) / 1e9)}`,
+      t0Ns: t.t0Ns,
+      t1Ns: t.t1Ns,
       freqLabel: `${(p.freq.centerHz / 1e6).toFixed(3)} MHz ± ${fmtBandwidth(p.freq.spanHz / 2)}`,
       tiles: r.tiles,
       fallbacks: r.fallbacks,

@@ -82,6 +82,11 @@ export interface ReadoutRow {
   readonly following: boolean;
   /** Where this viewport is looking: frequency window, time window, and whose coverage. */
   readonly headline: string;
+  /** The time window the headline rounds, unrounded: absolute capture ns as decimal strings, set on
+   * the row as `data-t0-ns` / `data-t1-ns` (same reason `data-tier` is — a test reads state, not a
+   * sentence; T-472's alt-wheel probe once read `−23 s` → `−23 s` for a move that did happen). */
+  readonly t0Ns: string;
+  readonly t1Ns: string;
   /** **The stated level**: the cell size the pixels are made of, and the level indices. */
   readonly level: string;
   /** **Which tier the pane drew from** (T-505): `detail` or `overview`. The honesty tiers are two
@@ -130,6 +135,8 @@ export function readoutOf(
       viewport,
       following: s.following,
       headline: [s.freqLabel, s.timeLabel, s.device === "any" ? null : s.device].filter(Boolean).join(" · "),
+      t0Ns: String(s.t0Ns),
+      t1Ns: String(s.t1Ns),
       level: s.levelLabel,
       tier: s.tier,
       tierLabel: s.tierLabel,
@@ -200,6 +207,8 @@ export class SurfaceChrome {
       // The tier on the element as well as in the text, so a stylesheet (and a test) can see which
       // source a viewport was drawn from without parsing a sentence.
       entry.root.setAttribute("data-tier", row.tier);
+      entry.root.setAttribute("data-t0-ns", row.t0Ns);
+      entry.root.setAttribute("data-t1-ns", row.t1Ns);
       set(entry.cells[0], row.viewport === "minimap" ? `${row.id} (map)` : row.id);
       set(entry.cells[1], row.headline);
       set(entry.cells[2], row.level);
