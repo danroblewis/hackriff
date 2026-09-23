@@ -122,6 +122,14 @@ BLOCKED/ERROR/REVIEW_FAIL), red for a `GATE_TIMEOUT` kill, green for each landin
 `$HACKRIFF_OPS/discord.json` (mode 600, never in the repo): `{"token", "channel_id", "guild_id",
 "mention_user_id"}`. Same `--key` within 30 min is deduped; every attempt is recorded in
 `$HACKRIFF_OPS/alerts.jsonl`; a failed post never fails the caller. `HK_ALERT_OFF=1` silences it.
+**Pipeline alarms also wake the pipeline manager:** a key starting `watchdog:`, `mr:`, `hold:`,
+`timeout:`, `contended-gate` or `flake:` is typed into its tmux session `flow` (`HK_PM_SESSION`)
+as a message, once per key per 30 min (its own dedupe, recorded as `woke` in `alerts.jsonl`, so a
+failing Discord cannot turn a looping condition into a message every tick); no session, no wake.
+**The flow digest:** `just flow --record --digest` (the pipeline manager's tick) posts the tick line
+green under key `flow:digest` when 2 h have passed since the last one, and at once, amber, on a
+trend break against the record ~2 h earlier — landings/h (6 h) halved from ≥ 0.5, real reds (24 h)
+doubled by ≥ 2, a new touchpoint, or a hold in force — each under `flow:break:<kind>`.
 
 **The gate shares the box (default since 2026-09-23 13:30; user).** Workers keep dispatching while a
 gate runs, capped at the gate's reserve (`(WORK_CORES − WORK_GATE_RESERVE) / WORK_WORKER_CORES` = 4)

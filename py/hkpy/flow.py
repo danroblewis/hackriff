@@ -378,13 +378,113 @@ def summary(ops: str, now: datetime | None = None) -> dict:
     }
 
 
+def _cause(s: dict) -> str:
+    """'reds 17/33 (7 real) · flakes 6'. `(real)` beside 17/33 read as 17 real reds when 7 were; and
+    flakes are their own count, not a share of the reds - a gate that flaked and passed on retry is
+    green, so '(7 real, 6 flake)' would not add up to 17 and would not be about the same gates."""
+    real = f" ({s['real_reds_24h']} real)" if s["reds_24h"] else ""
+    return real + (f" · flakes {s['flakes_24h']}" if s.get("flakes_24h") else "")
+
+
 def summary_line(s: dict) -> str:
-    cause = "" if not s["reds_24h"] else (" (real)" if s["real_reds_24h"] else " (flake)")
+    cause = _cause(s)
     workers = "?" if s["workers_running"] is None else f"{s['workers_running']}/{s['worker_cap'] or '?'}"
     return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
             f"reds {s['reds_24h']}/{s['gates_24h']}{cause} · conflicts {s['conflicts_24h']} · "
             f"touchpoints {s['touchpoints_24h']} · queue {s['queue_depth']} · workers {workers} · "
             f"dispatch-hours {s['hours_with_dispatch_24h']}/24 · gate {int(s['gate_occupancy_24h'] * 100)}%")
+
+
+# --------------------------------------------------------------------- digest
+# The user reads the numbers on his phone (2026-09-23: "visibility into pipeline improvements
+# without waiting days"): the tick line goes to Discord every DIGEST_EVERY_S, and at once on a
+# trend break. Breaks are judged against the flow.jsonl record nearest BREAK_LOOKBACK_S ago, so a
+# 30-minute wobble in a 6 h rolling number is not a break.
+DIGEST_EVERY_S = 2 * 3600
+BREAK_LOOKBACK_S = 2 * 3600
+
+
+def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
+    """Invariant 23: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> ·
+    <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`."""
+    now = now or datetime.now()
+    try:
+        from hkpy import experiment              # lazy: experiment imports this module
+        cur, m, checks = experiment.status_of(ops, now)
+        if cur:
+            broken = [t for ok, t in checks if ok is False]
+            exp = f"{cur['id']} gate {m['gates']}/{cur['gates']}" + (f" GUARD BROKEN: {'; '.join(broken)}" if broken else "")
+        else:
+            exp = "no experiment"
+    except Exception as e:                       # the digest must not die on a ledger problem
+        exp = f"experiment ? ({type(e).__name__})"
+    return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
+            f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
+            f"{exp} · holding: {_holding(ops, now)}")
+
+
+def _holding(ops: str, now: datetime) -> str:
+    rec: dict = {}
+    try:
+        for ln in open(os.path.join(ops, "hold"), encoding="utf-8"):
+            k, _, v = ln.strip().partition("=")
+            rec[k] = v
+        until = float(rec.get("until", 0))
+    except (OSError, ValueError):
+        return "none"
+    if until <= now.timestamp():
+        return "none"
+    return f"until {datetime.fromtimestamp(until).strftime('%H:%M')} {rec.get('why', '')}".rstrip()
+
+
+def trend_breaks(s: dict, records: list[dict], holding: bool) -> list[tuple[str, str]]:
+    """[(kind, why)] for this summary against the record nearest BREAK_LOOKBACK_S before it.
+    The role's list: landings/h halves, real red rate doubles, a touchpoint appears, a hold is
+    written. Small numbers are not trends: halving needs a prior rate of at least 0.5/h, doubling
+    needs at least +2 real reds."""
+    prior = [r for r in records if isinstance(r, dict) and r.get("ts", 0) <= s["ts"] - BREAK_LOOKBACK_S]
+    ref = max(prior, key=lambda r: r["ts"]) if prior else None
+    last = max((r for r in records if isinstance(r, dict) and r.get("ts", 0) < s["ts"]), key=lambda r: r["ts"], default=None)
+    out = []
+    if ref:
+        a, b = ref.get("landings_per_h_6h") or 0, s["landings_per_h_6h"]
+        if a >= 0.5 and b <= a / 2:
+            out.append(("landings", f"landings/h (6h) halved: {a} -> {b} since {ref.get('at')}"))
+        a, b = ref.get("real_reds_24h") or 0, s["real_reds_24h"]
+        if b >= 2 * a and b >= a + 2:
+            out.append(("reds", f"real reds (24h) doubled: {a} -> {b} since {ref.get('at')}"))
+    if last and s["touchpoints_24h"] > (last.get("touchpoints_24h") or 0):
+        out.append(("touchpoint", f"touchpoints (24h) {last.get('touchpoints_24h')} -> {s['touchpoints_24h']}: a person had to act"))
+    if holding:
+        out.append(("hold", "the merge queue is held"))
+    return out
+
+
+def _last_sent(ops: str, key: str) -> float:
+    last = 0.0
+    for o in _jsonl(os.path.join(ops, "alerts.jsonl"))[-2000:]:
+        if o.get("key") == key and o.get("status") == "sent":
+            last = max(last, float(o.get("ts", 0)))
+    return last
+
+
+def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[str]:
+    """Post the tick line when due, and each trend break at once. Returns what was posted (keys).
+    `send(level, title, body, key)` defaults to ops/alert.py, which dedupes by key for 30 min and
+    never raises; a break uses its own key so it is never swallowed by the 2 h digest."""
+    now = now or datetime.now()
+    if send is None:
+        from hkpy.knobs import alert as send
+    line = tick_line(ops, s, now)
+    posted = []
+    holding = _holding(ops, now) != "none"
+    for kind, why in trend_breaks(s, _jsonl(os.path.join(ops, "flow.jsonl")), holding):
+        send("amber", f"pipeline trend break: {kind}", f"{why}\n{line}", f"flow:break:{kind}")
+        posted.append(f"flow:break:{kind}")
+    if now.timestamp() - _last_sent(ops, "flow:digest") >= DIGEST_EVERY_S:
+        send("green", "pipeline digest", line, "flow:digest")
+        posted.append("flow:digest")
+    return posted
 
 
 def _parse_since(text: str, now: datetime) -> datetime:
@@ -414,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--touchpoints", action="store_true", help="what a person had to do")
     p.add_argument("--since", default="24h", help="24h | 6h | 2d | ISO datetime (default 24h)")
     p.add_argument("--record", action="store_true", help="append the summary to $HACKRIFF_OPS/flow.jsonl")
+    p.add_argument("--digest", action="store_true",
+                   help="post the tick line to Discord if 2 h have passed, and any trend break now (run after --record)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--ops", default=OPS)
     a = p.parse_args(argv)
@@ -441,6 +543,10 @@ def main(argv: list[str] | None = None) -> int:
         os.makedirs(a.ops, exist_ok=True)
         with open(os.path.join(a.ops, "flow.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(s) + "\n")
+    if a.digest:
+        print(tick_line(a.ops, s, now))
+        for k in digest(a.ops, s, now):
+            print(f"digest: posted {k}")
     return 0
 
 
