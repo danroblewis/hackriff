@@ -158,3 +158,128 @@ def test_track_usage_reports_whether_the_claim_needs_writing(monkeypatch):
     assert R.track_usage(c) is False          # an identical sample is not a write
     monkeypatch.setattr(R, "sample_group", lambda pid, rows=None: (501.0, 2048.0, [800], [800]))
     assert R.track_usage(c) is True
+
+
+# --------------------------------------------------------------------- conflicts (2026-09-23)
+# A conflict-skipped branch waited for the coordinator: median 3.5 h from skip to landing over 16
+# tickets, and 20 more never landed. It now goes back to its own worker like a gate failure.
+NEEDS_LINES = (
+    "09-23 15:26  task-t613  T-613  CONFLICT(skipped from bulk)\n"
+    "09-23 16:11  task-t627  T-627  CONFLICT(skipped from bulk)\n"
+    "09-23 16:20  task-t700  T-700  CONFLICT\n"
+    "[09-23 13:47]  (bulk)  T-276 T-581  MAIN_RED - browser spec(s) fail on main itself\n"
+    "09-23 09:10  task-gate-waiters  task-gate-waiters  GATE_FAIL\n"
+)
+
+
+def _claim(tid, branch, state="queued"):
+    return {"ticket": tid, "branch": branch, "state": state, "session_id": "s-" + tid, "wt": "/tmp", "kind": "work",
+            "started": 0}
+
+
+@pytest.fixture
+def conflicts(tmp_path, monkeypatch):
+    needs = tmp_path / "merge-needs-attention.txt"
+    needs.write_text(NEEDS_LINES)
+    monkeypatch.setattr(R, "MERGE_NEEDS", str(needs))
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "NEEDS", str(tmp_path / "work-needs-attention.txt"))
+    monkeypatch.setattr(R.os.path, "isdir", lambda p: True)
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    launched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line: launched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "merges_cleanly", lambda b, target="main": b == "task-t700")
+    monkeypatch.setattr(R, "commits_ahead", lambda b, target: 3)
+    monkeypatch.setattr(R, "board_statuses", lambda: {"T-613": "in-progress", "T-627": "in-progress", "T-700": "in-progress"})
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
+    return tmp_path, launched
+
+
+def test_is_conflict_reads_both_runner_shapes_and_nothing_else():
+    lines = NEEDS_LINES.splitlines()
+    assert [R.is_conflict(ln) for ln in lines] == [True, True, True, False, False]
+
+
+def test_a_conflicted_queued_branch_goes_back_to_its_worker_one_per_tick(conflicts):
+    tmp, launched = conflicts
+    claims = {"T-613": _claim("T-613", "task-t613"), "T-627": _claim("T-627", "task-t627"),
+              "T-700": _claim("T-700", "task-t700")}
+    assert R.handle_gate_failures(claims, dry=False)
+    assert [t for t, _ in launched] == ["T-613"]                        # one conflict run per tick
+    assert "CONFLICT(skipped from bulk)" in launched[0][1]
+    assert "gate_fails_seen" not in claims["T-627"]                     # deferred, not dropped
+    assert claims["T-700"]["gate_fails_seen"]                           # merges cleanly now: seen, re-queued
+    assert (tmp / "merge-queue.txt").read_text().split() == ["task-t700"]
+    R.handle_gate_failures(claims, dry=False)
+    assert [t for t, _ in launched] == ["T-613", "T-627"]               # next tick takes the next one
+    R.handle_gate_failures(claims, dry=False)
+    assert len(launched) == 2                                           # never twice for one line
+
+
+def test_a_landed_ticket_a_stale_line_or_an_empty_branch_gets_no_run(conflicts, monkeypatch):
+    tmp, launched = conflicts
+    monkeypatch.setattr(R, "board_statuses", lambda: {"T-613": "done", "T-627": "in-progress", "T-700": "todo"})
+    claims = {"T-613": _claim("T-613", "task-t613"),                   # landed via a -rl branch
+              "T-627": dict(_claim("T-627", "task-t627"), started=R._line_ts("09-23 16:11") + 3600),
+              "T-700": _claim("T-700", "task-t700")}
+    monkeypatch.setattr(R, "commits_ahead", lambda b, target: 0 if b == "task-t700" else 3)
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and all(c["gate_fails_seen"] for c in claims.values())
+    assert not (tmp / "merge-queue.txt").exists()                      # nothing ahead: nothing re-queued
+
+
+def test_an_unreadable_board_defers_every_conflict(conflicts, monkeypatch):
+    tmp, launched = conflicts
+    monkeypatch.setattr(R, "board_statuses", lambda: {})
+    claims = {"T-613": _claim("T-613", "task-t613")}
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and "gate_fails_seen" not in claims["T-613"]
+
+
+def test_a_conflict_run_waits_for_a_slot_and_for_holds(conflicts, monkeypatch):
+    tmp, launched = conflicts
+    busy = {f"W{i}": dict(_claim(f"W{i}", f"w{i}", "running"), kind=k) for i, k in enumerate(["work", "work", "fix", "work"])}
+    claims = {"T-613": _claim("T-613", "task-t613"), **busy}
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == []                                               # 4 busy (fix runs count) >= cap 4
+    del claims["W0"]
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)          # alone mode: wait, never fix-held
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and "gate_fails_seen" not in claims["T-613"]
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    (tmp / "merge-queue.txt").write_text("task-t613\n")                # someone re-queued it by hand
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and claims["T-613"]["gate_fails_seen"]
+
+
+def test_escalation_names_the_conflict_and_spends_no_slot(conflicts):
+    tmp, launched = conflicts
+    claims = {"T-613": dict(_claim("T-613", "task-t613"), fix_attempts=2), "T-627": _claim("T-627", "task-t627")}
+    R.handle_gate_failures(claims, dry=False)
+    assert "CONFLICT_ESCALATE" in (tmp / "work-needs-attention.txt").read_text()
+    assert [t for t, _ in launched] == ["T-627"]
+
+
+def test_fixes_merge_the_gated_base_while_a_batch_is_gating(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    assert R.merge_target() == "main"
+    (tmp_path / "bulk-in-progress").write_text("base=eab4bfae\nstarted=x\nbranches=a b\n")
+    assert R.merge_target() == "eab4bfae"
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    seen = {}
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt: seen.update(n=n, prompt=prompt) or c)
+    R.launch_fix(_claim("T-613", "task-t613"), "09-23 15:26  task-t613  T-613  CONFLICT(skipped from bulk)")
+    assert seen["n"] == 1 and "no longer merges cleanly" in seen["prompt"]
+    assert "git merge eab4bfae" in seen["prompt"] and "git checkout eab4bfae -- docs/tasks.yaml" in seen["prompt"]
+    R.launch_fix(_claim("T-1", "task-t1"), "09-23 09:10  task-t1  T-1  GATE_FAIL")
+    assert "FAILED its merge gate on main" in seen["prompt"] and "git merge eab4bfae" in seen["prompt"]
+
+
+def test_dispatch_counts_fix_runs_against_the_cap():
+    claims = {"A": {"state": "running", "kind": "work"}, "B": {"state": "running", "kind": "fix"},
+              "C": {"state": "running", "kind": "review"}, "D": {"state": "queued", "kind": "work"}}
+    assert R.busy_workers(claims) == 2
