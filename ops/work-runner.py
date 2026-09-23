@@ -856,6 +856,19 @@ def sync_board(claims, dry):
             continue
         if c.get("state") == "running" and c.get("kind") == "work" and t.get("status") == "todo":
             flips.append((tid, "in-progress", None))
+    # Agents the coordinator or supervisor spawned with the Agent tool are not claims, but the
+    # PreToolUse(Agent) hook registered them (agent-registry.jsonl, user 2026-09-23): a ticket
+    # with a registered agent spawned in the last 30 min and still `todo` is in progress too.
+    try:
+        cut = time.time() - 1800
+        with open(f"{S}/agent-registry.jsonl") as f:
+            for line in f.readlines()[-200:]:
+                o = json.loads(line)
+                t = tasks.get(o.get("ticket") or "")
+                if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
+                    flips.append((o["ticket"], "in-progress", None))
+    except Exception:
+        pass
     for tid, sha in landed.items():
         t = tasks.get(tid)
         if t and t.get("status") in ("todo", "in-progress"):

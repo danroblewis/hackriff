@@ -71,7 +71,10 @@ def notify(level: str, title: str, body: str = "", key: str | None = None) -> bo
     tok, chan = cfg.get("token"), os.environ.get("HK_ALERT_CHANNEL") or cfg.get("channel_id")
     if not tok or not chan:
         rec["status"] = "unconfigured"; _record(rec); return False
-    text = f"{ICON.get(level, '•')} **hackriff · {title}**"
+    # Every message mentions the user (user, 2026-09-23: "all messages should ping my user id")
+    # so the phone notifies; `mention_user_id` in discord.json, none means no mention.
+    who = cfg.get("mention_user_id")
+    text = (f"<@{who}> " if who else "") + f"{ICON.get(level, '•')} **hackriff · {title}**"
     if body:
         text += "\n" + body[:1700]
     req = urllib.request.Request(
