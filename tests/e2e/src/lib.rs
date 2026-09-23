@@ -28,6 +28,7 @@
 
 pub mod assertions;
 pub mod blind;
+pub mod checks;
 pub mod fixture;
 pub mod paths;
 pub mod pipeline;
@@ -38,6 +39,7 @@ pub mod synth;
 pub use assertions::{
     BoxTolerance, MatchReport, Tolerance, assert_param, check_param, match_detections,
 };
+pub use checks::Checks;
 pub use fixture::{Fixture, FixtureError, Role, TruthItem};
 pub use pipeline::{
     DecodedMessage, DetectionBox, FloorEstimate, ParameterEstimate, Pipeline, PipelineError,
