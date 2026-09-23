@@ -24386,7 +24386,7 @@ tasks:
   - id: T-846
     milestone: M2-hardening
     title: "ui/e2e selftest attribution holes after T-573 batching: t454 cap/back-off, t523 and t532 faults no longer turn their specs red"
-    status: in-progress
+    status: done
     branch: task-t846
     priority: high
     deps:
@@ -24427,6 +24427,7 @@ tasks:
       Commits: 67f61c3b, 3dac3ebc
       Observed, not chased: Worker environment runs niced beside a 120 % CPU `hk serve` and mds_stores, and specs ran about 3x slower than in the gate (surface-nav 190-310 s vs 48-60 s). These baseline tests fail here on the UNMODIFIED build but are green in recent gates (merge-runner.log 474515, 474470, 478763): live-edge 'a FOLLOWING pane keeps drawing rows' (newest rows flat at t+8..16 s; the 11/0 minimap tile took 14.5 s); live-edge test 3's drawn>=4 samples; surface-nav T-486 ('4700 ms behind the edge at the release') and T-456; canvas-journey test 4 (killed backend); canvas-journey hitting the 600 s per-spec timeout. So the full selftest's file-level verdicts are only trustworthy on a quiet box. | ui/src/surface/tilebatch.ts issue(): a batch member's 503 becomes `new TileBusyError(capFromRefusal(err.message), err.message)` with no share argument. The share the route names in the refusal (T-630: 'share replaces the ceiling') is therefore dropped on every batch-era refusal. Only the single-tile path passes it. | surface-nav test 1's assertion (3) still compares the cap with the server's global limit, not the client's share. In the batch era it is vacuous (0 refusals). The new injected-refusal test carries the claim; (3) was left as is. | live-edge test 1's `tiles.peak <= limit` is still a REQUEST count, which a batch makes as blind as surface-nav's was. It was not re-aimed, so that a live-edge red would not muddy t454-ignore-the-cap's attribution. | t454-forget-abandoned-slots was not re-measured in the batch era. A batch is aborted only when ALL its members are, so its wire signature may have changed too.
       Resources: 258 CPU-s, peak 0.8 GB
+    commit: b692415f
   - id: T-847
     milestone: M2-hardening
     title: Verify the app-surface load flake is gone after task-spec-waits lands (flake ledger at loads 12/10.6)
