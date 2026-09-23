@@ -1524,6 +1524,40 @@ def ticket_detail(tid):
         out["timing"] = None
     return out
 
+def _registry_ticket(label):
+    """Ticket recorded at spawn by .claude/hooks/register-agent.sh, matched on the prompt head."""
+    try:
+        head = (label or "")[:120]
+        if not head:
+            return None
+        with open(os.path.join(SCRATCH, "agent-registry.jsonl")) as f:
+            for line in f.readlines()[-400:][::-1]:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("ticket") and (o.get("prompt_head") or "")[:120] == head:
+                    return o["ticket"]
+    except Exception:
+        pass
+    return None
+
+
+def _tid_of_cwd(path):
+    """The transcript's own cwd names the worktree: …/worktrees/rl-t740 or …/t513 → the ticket."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(60000).decode("utf-8", "replace")
+        m = re.search(r'"cwd"\s*:\s*"([^"]+)"', head)
+        if m:
+            mm = re.search(r"worktrees/[A-Za-z-]*t0*(\d{2,4})(?:/|$)", m.group(1))
+            if mm:
+                return f"T-{mm.group(1)}"
+    except Exception:
+        pass
+    return None
+
+
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
@@ -1571,6 +1605,11 @@ def agents(status_map):
             # still in it somewhere — take the first T-### we see.
             m2 = re.search(r"\bT-\d+\b", s["label"], re.IGNORECASE)
             tid = m2.group(0).upper() if m2 else None
+        if not tid:
+            # The orchestrator knew at spawn time (user, 2026-09-23): the PreToolUse(Agent) hook
+            # wrote {ticket, prompt_head, cwd} to agent-registry.jsonl; match by prompt head,
+            # else read the ticket out of the transcript's own cwd (…/worktrees/rl-t740 → T-740).
+            tid = _registry_ticket(s["label"]) or _tid_of_cwd(p)
         st = status_map.get(tid)
         if st in ("done", "cancelled"): continue     # merged already
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
