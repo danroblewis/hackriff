@@ -13670,6 +13670,8 @@ tasks:
     notes: |
       Filed 2026-09-17 from the user's playback directive.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): the review FAIL (a stale 5 s ring-span snapshot overrides the per-frame ring rule, so a just-paused pane reads no IQ/no audio) shares its cause with T-845 (the drawn IQ horizon can claim up to ~7.5 s of IQ the ring already dropped, because the page learns the ring window only every CAPTURE_CLOCK_MS = 5 s). Fix the shared cause once: the per-frame decision must use the ring window the backend reports, not a snapshot older than the frame; if the fix also closes T-845, say so in the result and the coordinator will close T-845 with it.
   - id: T-465
     milestone: M2-hardening
     title: drain-timeout discards the recorder's queued records without counting them, so the books do not balance
@@ -24332,6 +24334,8 @@ tasks:
       Count-based, no wall-clock sleeps in the assertion. TESTING PROTOCOL: targeted tests only, then HAND BACK.
     notes: |
       FOUND BY task-deflake-appsurface.
+
+      2026-09-23 (coordinator): T-464 review FAIL has the same root cause (stale 5 s ring-window snapshot vs per-frame rule); its fix may close this - check T-464's result before starting.
   - id: T-846
     milestone: M2-hardening
     title: "ui/e2e selftest attribution holes after T-573 batching: t454 cap/back-off, t523 and t532 faults no longer turn their specs red"
