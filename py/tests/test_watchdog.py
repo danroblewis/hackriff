@@ -139,6 +139,22 @@ def test_role_session_named_from_its_role_file():
     assert agg["role:coordinator"]["cpu"] == 30.0
 
 
+def test_a_role_sessions_attached_limiter_is_named_not_unowned():
+    """ops/launch.sh execs claude into the pane and attaches `cpulimit -p` from outside it (a
+    wrapped child is not the pane's foreground group and stops on SIGTTIN)."""
+    rows = table(
+        row(500, 1, "claude --model opus --append-system-prompt-file /r/.claude/roles/pipeline-manager.md"),
+        row(600, 1, "/Users/d/.hackriff-ops/bin/cpulimit -l 800 -i -p 500", cpu=1.5),
+    )
+    agg, unowned = W.owners(rows, {})
+    assert set(agg) == {"role:pipeline-manager", "limiter"}
+    assert unowned == []
+    # an orphaned WRAPPER is not a limiter, whatever `-p <digits>` its wrapped command carries
+    orphan = table(row(700, 1, "/x/bin/cpulimit -l 300 -i -- taskpolicy -c background claude -p 12", cpu=95.0))
+    _, unowned = W.owners(orphan, {})
+    assert [r["pid"] for r in unowned] == [700]
+
+
 def test_hackriff_role_env_names_the_session_when_present():
     assert W.role_name("claude", "HACKRIFF_ROLE=supervisor PATH=/usr/bin") == "supervisor"
     assert W.role_name("bash ops/launch.sh supervisor") == "supervisor"
@@ -323,6 +339,43 @@ def test_rule_c_two_gates_is_red_immediately():
     rules, _, alarms = fire(rows, {}, 0.0)
     assert "double-gate" in rules
     assert next(a for a in alarms if a["rule"] == "double-gate")["level"] == "red"
+
+
+def test_a_shell_that_quotes_just_gate_is_not_a_second_gate():
+    """2026-09-23: 567 double-gate alarms, every window opened by an agent's wait loop. The Bash
+    tool's shell carries the command text in its argv; the gate's own processes START with it."""
+    rows = table(
+        row(100, 1, "bash ops/merge-runner.sh"),
+        row(110, 100, "just gate --base abc", cpu=5.0),
+        row(111, 110, "uv run --locked --project py python -m hkpy.gate --base abc"),
+        row(112, 111, "/Users/d/hackriff/py/.venv/bin/python3 -m hkpy.gate --base abc"),
+        row(300, 1, "claude -p --agent worker --model opus"),
+        # verbatim shape of the 13:51:31 loop that held the alarm to 15:26:29
+        row(310, 300, "/bin/zsh -c source /Users/d/.claude/shell-snapshots/snapshot-zsh-1.sh && "
+                      "eval 'cd /x/t846fix && just wait-for-gate 2>&1 | tail -5; pgrep -fl '\\''just gate'\\'' ; date'"),
+        row(320, 300, "/bin/zsh -c eval 'until ! pgrep -f \"just gate\"; do sleep 30; done; "
+                      "uv run python -m hkpy.gate --dry-run'"),
+    )
+    assert [g["pid"] for g in W.gate_roots(rows)] == [110]
+    rules, _, _ = fire(rows, {}, 0.0)
+    assert "double-gate" not in rules
+    agg, _ = W.owners(rows, {})
+    assert 310 not in agg["gate"]["pids"] and 320 not in agg["gate"]["pids"]
+    # and `just gate-merge` (the coordinator's merge-index gate) is still a gate
+    assert [g["pid"] for g in W.gate_roots(table(row(400, 1, "just gate-merge")))] == [400]
+
+
+def test_an_alarm_logs_which_processes_tripped_it(tmp_path, monkeypatch):
+    """Discord dedupes by key, so the log line is the only lasting record of the pids."""
+    rows = table(
+        row(100, 1, "bash ops/merge-runner.sh"),
+        row(110, 100, "just gate --base abc", cpu=5.0),
+        row(210, 1, "just gate --base def", cpu=5.0),
+    )
+    monkeypatch.setattr(W, "read_ps", lambda: rows)
+    W.tick({}, dry=True)
+    line = next(ln for ln in open(tmp_path / "watchdog.log") if "double-gate" in ln)
+    assert "pid 110" in line and "pid 210" in line and "\n" not in line.rstrip("\n")
 
 
 def test_rule_c_quiet_for_one_gate():
