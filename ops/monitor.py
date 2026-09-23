@@ -467,26 +467,42 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
             lines.append(f'MS_{ms}(["▼ {ms} · {cnt} · open"]):::msopen')
         else:
             lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
+    # Mermaid styles an edge by its INDEX in order of definition (`linkStyle i,j stroke:…`), so
+    # every edge below is counted as it is emitted.
+    edge_n = 0
     chain = [m for m in ORDER if m != "MUI"]
     for a, b in zip(chain, chain[1:]):
-        lines.append(f"MS_{a} --> MS_{b}")
-    lines.append("MS_M1 --> MS_MUI")
+        lines.append(f"MS_{a} --> MS_{b}"); edge_n += 1
+    lines.append("MS_M1 --> MS_MUI"); edge_n += 1
     for nid, x in nodes.items():
         c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped", "blocked": "blocked"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
         shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'), "blocked": ('(["', '"])'),
                  "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
         lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
-    # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
+    # dependency edges (solid) — draw among all nodes in scope, not just from active tasks.
+    # An edge whose BOTH ends belong to an open milestone is coloured in that milestone's colour
+    # (user, 2026-09-23: "I want to know which nodes those are") — only those; an edge into or
+    # out of the milestone keeps the default stroke.
+    MS_PALETTE = ["#FFD98a", "#5EE0C4", "#C7B8FF", "#FF9F7A", "#8FD3FF", "#F0A542"]
+    ms_colour = {m: MS_PALETTE[i % len(MS_PALETTE)] for i, m in enumerate(open_ms)}
+    ms_edges = {m: [] for m in open_ms}
     for nid, x in nodes.items():
         for dp in deps(x):
             if dp in nodes:
                 lines.append(f"{dp} --> {nid}")
+                m = norm_ms(x.get("milestone"))
+                if m in ms_edges and norm_ms(nodes[dp].get("milestone")) == m:
+                    ms_edges[m].append(edge_n)
+                edge_n += 1
     # membership links (dotted) — connect every task to its milestone node
     for nid, x in nodes.items():
         ms = norm_ms(x.get("milestone"))
         if ms in ORDER and not (ms in set(open_ms) and x.get("status") in ("done", "cancelled")):
-            lines.append(f"MS_{ms} -.-> {nid}")
+            lines.append(f"MS_{ms} -.-> {nid}"); edge_n += 1
+    for m, idx in ms_edges.items():
+        if idx:
+            lines.append(f"linkStyle {','.join(map(str, idx))} stroke:{ms_colour[m]},stroke-width:3px")
     total = len(tl)
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
     counts = {}
@@ -567,7 +583,10 @@ let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter=
 // is open and close it.
 let openMs=new Set(); try{ localStorage.removeItem('graph.openMs'); openMs=new Set(JSON.parse(sessionStorage.getItem('graph.openMs')||'[]')); }catch(e){}
 function renderOpenChips(){ const el=document.getElementById('openms'); if(!el) return;
-  el.innerHTML=openMs.size?('open: '+[...openMs].map(m=>`<button class="chipx" data-ms="${m}" title="close ${m}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
+  // Same palette and order as task_graph()'s MS_PALETTE: the chip's border is the colour of that
+  // milestone's internal dependency edges on the map.
+  const PAL=["#FFD98a","#5EE0C4","#C7B8FF","#FF9F7A","#8FD3FF","#F0A542"];
+  el.innerHTML=openMs.size?('open: '+[...openMs].map((m,i)=>`<button class="chipx" data-ms="${m}" title="close ${m} · its internal edges are this colour" style="border-color:${PAL[i%PAL.length]};box-shadow:inset 0 -2px 0 ${PAL[i%PAL.length]}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
   el.querySelectorAll('button[data-ms]').forEach(b=>b.onclick=()=>toggleMs(b.dataset.ms)); const ca=document.getElementById('closeall'); if(ca) ca.onclick=()=>{openMs.clear(); saveMs(); last=''; draw();}; }
 function saveMs(){ try{sessionStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} renderOpenChips(); }
 function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); saveMs(); last=''; draw(); }
