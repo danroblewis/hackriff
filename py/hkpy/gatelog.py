@@ -158,10 +158,23 @@ def suite_record(
 
 
 def end_record(
-    run_id: str, *, klass: str, phase: str, seconds: float, rc: int
+    run_id: str,
+    *,
+    klass: str,
+    phase: str,
+    seconds: float,
+    rc: int,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The closing line. Its absence means the run did not finish — see the docstring."""
-    return {
+    """The closing line. Its absence means the run did not finish — see the docstring.
+
+    ``extra`` carries the self-diagnosis (`hkpy.gatediag`: ``contended``,
+    ``max_untouched_ratio``, ``dearer``, …). It is merged in as ADDITIONAL keys and can never
+    replace one of the fields above — a reader written against the original shape (the
+    dashboard, `hkpy.cycletime`) keeps working, which is the rule this file has always been
+    under: the format may grow, it may not be renamed.
+    """
+    rec = {
         "kind": "gate_end",
         "run": run_id,
         "ts": time.time(),
@@ -172,6 +185,10 @@ def end_record(
         "result": "pass" if rc == 0 else "fail",
         "loadavg": loadavg(),
     }
+    for k, v in (extra or {}).items():
+        if k not in rec:
+            rec[k] = v
+    return rec
 
 
 def read(path: str | None = None) -> list[dict[str, Any]]:
