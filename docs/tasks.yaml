@@ -23052,7 +23052,7 @@ tasks:
   - id: T-750
     milestone: MAUTO
     title: 'Measure ADC fill on the live capture path - or prove the per-row cost first (T-625 residual)'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -23094,6 +23094,7 @@ tasks:
       Observed, not chased: Live wiring of noise_sigma_lsb (cadence + quantised sigma) and the fill_flags_disagree surface remain undone.
       Use cases: RESEARCH-008
       Resources: 38 CPU-s, peak 0.6 GB
+    commit: 79bea95f
   - id: T-800
     milestone: MMAP
     title: 'Design + ADR-0023: map-UI chrome, the layer model, and the research-state stores'
