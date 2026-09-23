@@ -868,6 +868,16 @@ def reap_worktrees(claims, dry):
 def tick(dry):
     claims = load_claims()
     changed = reap(claims, dry)
+    # A fix run that launch_fix HELD (dispatch-paused, gate-wanted, a gate in progress) is
+    # relaunched once those clear - otherwise the claim sits as `fix-held`, the map shows the
+    # ticket FAILED, and nothing ever moves it (T-513 sat that way from 20:20 to 00:20 on
+    # 2026-09-22/23). Same holds as dispatch, checked here rather than trusted to be past.
+    if not dry and not (os.path.exists(f"{S}/dispatch-paused") or os.path.exists(f"{S}/gate-wanted") or gate_running()):
+        for tid, c in list(claims.items()):
+            if c.get("state") == "fix-held":
+                log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
+                claims[tid] = launch_fix(dict(c, kind="work"), c.get("fail_line") or "held fix")
+                changed = True
 
     try:
         changed |= release_stale_claims(claims, {t["id"]: t for t in board()})

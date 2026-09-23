@@ -937,14 +937,26 @@ def last_gates(n=4):
                 tgt["msg"] = nxt[:300]
             continue
         if l.startswith("[") and "TRIAGE:" in l:
-            cur["triage"].append(l.split("] ", 1)[-1][:200]); continue
+            cur["triage"].append(l.split("] ", 1)[-1][:200])
+            if "retry PASSED" in l:
+                cur["retry_passed"] = True
+            continue
         if not cur["error"] and re.match(r"^(error(\[E\d+\])?: |gate: FAILED )", l) and "test run failed" not in l and "recipe" not in l:
             cur["error"] = l.strip()[:300]
         e = _GATE_END.search(l)
         if e:
             cur["ended"] = e.group(1)
-            cur["outcome"] = "passed" if "MERGED" in e.group(2) else "failed"
-            cur["end_line"] = e.group(2)[:160]
+            end = e.group(2)
+            # A gate whose retry PASSED but whose merge was then refused (the branch moved
+            # mid-gate) is not a failed gate: the tests were green. Say what happened instead
+            # of "failed" (user, 2026-09-23: the 21:33 task-gate-speed gate read as a red).
+            if "MERGE STATE LOST" in end:
+                cur["outcome"] = "not-merged"
+            else:
+                cur["outcome"] = "passed" if "MERGED" in end else "failed"
+            if cur.get("retry_passed") and cur["outcome"] != "failed":
+                cur["error"] = ""   # the first red was a flake the retry cleared
+            cur["end_line"] = end[:160]
             cur = None
     for g in gates:
         try:
@@ -1789,7 +1801,7 @@ async function tick(){
       const fails=(g.fails||[]).map(f=>`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">✗ ${esc(f.test)} <span style="color:#5A6973">${esc(f.binary)} · ${f.s.toFixed(1)}s</span>${f.at?`<div style="color:#8595A0;padding-left:14px">${esc(f.at)} — ${esc(f.msg)}</div>`:''}</div>`).join('');
       const err=(!g.fails.length&&g.error)?`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">${esc(g.error)}</div>`:'';
       const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
-      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
+      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':g.outcome==='not-merged'?'✓ tests passed · NOT merged (branch moved mid-gate; re-queued)':'✗ failed'}${g.retry_passed&&g.outcome!=='not-merged'?' <span style="color:#F0A542">(after one flake retry)</span>':''}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
     };
     // Only the NEWEST gate is shown in full; earlier ones collapse to one line each, their
     // failures behind a toggle - a failure that was fixed must not keep reading as current.
