@@ -261,8 +261,20 @@ PY
   # only consulted BEFORE a gate starts, when none of these can be the runner's own.
   foreign=$(pgrep -f 'node e2e/run.mjs|hk serve --bind 127.0.0.1:87' 2>/dev/null | wc -l | tr -d ' ')
   FOREIGN_RUNNING=${foreign:-0}   # read by workers_drained: a spec run is minutes, a worker is an hour
+  # A claimed worker that is itself waiting for the gate (`just wait-for-gate`, a live pid under
+  # $S/gate-waiters/) is idle, not contending: don't wait for it. On 2026-09-23 T-846 polled for
+  # "no gate" while this runner waited for T-846, for the whole 2700 s drain cap. A marker whose
+  # pid is gone is a waiter that was killed mid-wait; drop it.
+  local waiting=0 m
+  for m in "$S"/gate-waiters/*; do
+    [ -e "$m" ] || continue
+    if kill -0 "${m##*/}" 2>/dev/null; then waiting=$((waiting + 1)); else rm -f "$m"; fi
+  done
+  GATE_WAITERS=$waiting
+  [ "$waiting" -gt 0 ] && [ "$claimed" -gt 0 ] && claimed=$(( claimed > waiting ? claimed - waiting : 0 ))
   echo $(( claimed + ${foreign:-0} ))
 }
+GATE_WAITERS=0
 FOREIGN_RUNNING=0
 # A foreign spec run holds the gate for at most this long. A deflaker that re-runs a spec every
 # time it sees no gate, beside a runner that waits for the spec to end before starting one, is a
@@ -653,7 +665,7 @@ self_version
 # a restart killed a coordinator's `nextest run -p hk-cli -E binary(api_contract)` this way.
 # The process's cwd decides: under $REPO but not under $REPO/.claude/worktrees/ is the gate's
 # tree; anywhere else is someone else's run and is left alone (and said so).
-for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
+for pat in '^just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
   for opid in $(pgrep -f "$pat" 2>/dev/null); do
     [ "$opid" = "$$" ] && continue
     ocwd=$(lsof -a -p "$opid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)

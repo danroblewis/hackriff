@@ -47,8 +47,10 @@ if [ -n "$CMD" ] && [ "${HK_ALLOW_LOAD:-0}" != "1" ]; then
     OPS="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
     WHY=""
     [ -e "$OPS/bulk-in-progress" ] && WHY="a bulk merge is in progress ($OPS/bulk-in-progress)"
-    if [ -z "$WHY" ] && pgrep -f 'just gate' >/dev/null 2>&1; then WHY="a merge gate is running right now"; fi
-    [ -n "$WHY" ] && deny "Not while $WHY. A spec run or an \`hk serve\` beside the gate's browser tier shares its ports and its reserved cores, and turns green specs red — three of them in two gates on 2026-09-22. Wait for the gate (\`pgrep -f 'just gate'\` empty, no \$HACKRIFF_OPS/bulk-in-progress), or HK_ALLOW_LOAD=1 if you accept both results being untrustworthy."
+    # Anchored: an agent's own `pgrep -f "just gate"` wait loop carries the string in its argv and
+    # would count as a running gate forever (2026-09-23, T-846). The real gate's argv starts with it.
+    if [ -z "$WHY" ] && pgrep -f '^just gate' >/dev/null 2>&1; then WHY="a merge gate is running right now"; fi
+    [ -n "$WHY" ] && deny "Not while $WHY. A spec run or an \`hk serve\` beside the gate's browser tier shares its ports and its reserved cores, and turns green specs red — three of them in two gates on 2026-09-22. Wait for it with \`just wait-for-gate\` (blocks until the gate ends AND tells the merge runner you are idle, so it does not wait 45 min for you in turn - never a hand-rolled sleep loop), or HK_ALLOW_LOAD=1 if you accept both results being untrustworthy."
   fi
 fi
 
