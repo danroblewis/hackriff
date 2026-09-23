@@ -20368,7 +20368,8 @@ tasks:
   - id: T-607
     milestone: MAUTO
     title: 'liquid-dsp is DESIGNATED BUT NOT LINKED: land the FFI binding, or record the refusal and re-price the four block tickets that assume it'
-    status: todo
+    status: in-progress
+    branch: task-t607
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -20800,7 +20801,8 @@ tasks:
   - id: T-615
     milestone: MAUTO
     title: SIGNAL-085's claim is band-gated, not measurement-driven - the 851-869 MHz trigger is not the use case
-    status: todo
+    status: in-progress
+    branch: task-t615
     priority: normal
     parallel_group: DETECT
     model: opus
