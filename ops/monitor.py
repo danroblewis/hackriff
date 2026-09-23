@@ -1858,6 +1858,144 @@ def gather():
         "budget": budget_status(),
     }
 
+# ------------------------------------------------------------------------------
+# /flow — pipeline throughput visibility (pipeline manager, 2026-09-23): landings/h
+# with the rolling 6h/24h lines, per-hour occupancy, per-gate durations by class,
+# red rate by cause, touchpoints, and the open experiment (if any). Reads through
+# hkpy.flow / hkpy.experiment (py/hkpy/flow.py, py/hkpy/experiment.py) — never
+# re-parses the ops logs itself. build_flow_panel() is a pure function of `ops`
+# and `now` so it is the pytest target directly; the route only adds the cache.
+# ------------------------------------------------------------------------------
+
+def _flow_modules():
+    import sys as _sys
+    py_dir = os.path.join(REPO, "py")
+    if py_dir not in _sys.path:
+        _sys.path.insert(0, py_dir)
+    from hkpy import flow as flow_mod, experiment as exp_mod
+    return flow_mod, exp_mod
+
+
+def _flow_jsonl_points(ops, since_ts, until_ts):
+    """Raw flow.jsonl records in [since_ts, until_ts] — the few real ticks recorded so far
+    (the file started 2026-09-23 ~15:30), overlaid on the series backfilled from the logs.
+    A missing or garbage file degrades to an empty list, never an exception."""
+    out = []
+    try:
+        with open(os.path.join(ops, "flow.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                ts = r.get("ts")
+                if isinstance(ts, (int, float)) and since_ts <= ts <= until_ts:
+                    out.append({"ts": ts, "landings_per_h_6h": r.get("landings_per_h_6h"),
+                                "landings_per_h_24h": r.get("landings_per_h_24h")})
+    except (FileNotFoundError, OSError):
+        pass
+    return out
+
+
+def _landings_series(hourly_rows, since):
+    """One point per hour: rolling 6h/24h landings/h, from flow.hourly()'s per-hour landed
+    counts — this is the backfill; flow.jsonl (above) has too few ticks yet to stand alone."""
+    from datetime import timedelta
+    landed = [r["landed"] for r in hourly_rows]
+    h0 = since.replace(minute=0, second=0, microsecond=0)
+    out = []
+    for i in range(len(landed)):
+        t = h0 + timedelta(hours=i)
+        w6 = landed[max(0, i - 5):i + 1]
+        w24 = landed[max(0, i - 23):i + 1]
+        out.append({"hour": hourly_rows[i]["hour"], "ts": t.timestamp(), "landed": landed[i],
+                    "roll6": round(sum(w6) / len(w6), 2) if w6 else 0.0,
+                    "roll24": round(sum(w24) / len(w24), 2) if w24 else 0.0})
+    return out
+
+
+def build_flow_panel(ops, now=None):
+    """Everything /flow.json serves, as one pure function over `ops` — never raises: any
+    failure (hkpy unimportable, unreadable/garbage logs) comes back as {"error": ...} so a
+    broken panel never takes the rest of the dashboard down with it."""
+    from datetime import datetime, timedelta
+    now = now or datetime.now()
+    at = now.strftime("%Y-%m-%d %H:%M")
+    try:
+        flow_mod, exp_mod = _flow_modules()
+    except Exception as e:
+        return {"error": f"hkpy.flow unavailable: {e}", "at": at}
+    try:
+        warmup_since = now - timedelta(hours=72)   # 48h shown + 24h so roll24 is full at hour 0
+        hourly72 = flow_mod.hourly(ops, warmup_since, now)
+        landings_all = _landings_series(hourly72, warmup_since)
+        display_h0 = (now - timedelta(hours=48)).replace(minute=0, second=0, microsecond=0)
+        landings = [p for p in landings_all if p["ts"] >= display_h0.timestamp()]
+        flow_points = _flow_jsonl_points(ops, display_h0.timestamp(), now.timestamp())
+
+        hourly24 = flow_mod.hourly(ops, now - timedelta(hours=24), now)
+        gates48 = flow_mod.gate_rows(ops, now - timedelta(hours=48), now)
+        gates24 = flow_mod.gate_rows(ops, now - timedelta(hours=24), now)
+        closed24 = [g for g in gates24 if g["verdict"] in ("green", "red")]
+        full24 = sorted(g["minutes"] for g in closed24 if g["class"] == "full" and g["minutes"])
+        full_p50 = full24[len(full24) // 2] if full24 else None
+        reds24 = [g for g in closed24 if g["verdict"] == "red"]
+        causes = collections.Counter(g["cause"] if g["cause"] in ("real", "flake", "flake-then-real") else "other"
+                                      for g in reds24)
+
+        tp_all = flow_mod.touchpoints(ops, now - timedelta(hours=24), now)
+
+        cur, m, checks = exp_mod.status_of(ops, now)
+        if cur is None:
+            experiment = {"open": False}
+        else:
+            metric = cur["metric"].split()[0]
+            base = cur["baseline"].get(metric)
+            val = (m or {}).get(metric)
+            delta = None if base in (None, 0) or val is None else round((val - base) / base * 100, 1)
+            experiment = {
+                "open": True, "id": cur["id"], "hypothesis": cur["hypothesis"], "knobs": cur["knobs"],
+                "opened": cur["opened"], "opened_ts": cur["ts"], "rollback": cur["rollback"],
+                "gates_counted": (m or {}).get("gates"), "gates_target": cur["gates"],
+                "hours_counted": (m or {}).get("hours"), "hours_target": cur["hours"],
+                "metric": metric, "metric_now": val, "metric_baseline": base, "metric_delta_pct": delta,
+                "baseline_landings_per_h_24h": cur["baseline"].get("landings_per_h_24h"),
+                "guards": [{"ok": ok, "text": text} for ok, text in checks],
+            }
+        # Baseline horizontal line for the full-gate p50 chart: the open experiment's own
+        # baseline when one is running (what it's being measured against), else this window's.
+        baseline_full_p50 = (cur["baseline"].get("full_gate_p50_min") if cur else None)
+        if baseline_full_p50 is None:
+            baseline_full_p50 = full_p50
+
+        return {
+            "at": at, "ts": now.timestamp(),
+            "landings": {"series": landings, "flow_jsonl": flow_points},
+            "hourly_24h": hourly24,
+            "gates_48h": gates48,
+            "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
+            "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
+            "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            "experiment": experiment,
+        }
+    except Exception as e:
+        return {"error": str(e), "at": at}
+
+
+_FLOW_LOCK = threading.Lock()
+_FLOW_CACHE = {"at": 0.0, "data": None}
+
+def flow_panel_cached(ops, max_age=30.0):
+    """One build_flow_panel() per ~30 s, shared by every client — hourly()/gate_rows()/
+    touchpoints() each re-read merge-runner.log in full (~500k lines), so this is the hard
+    cache the brief asks for rather than a per-poller cost."""
+    with _FLOW_LOCK:
+        if _FLOW_CACHE["data"] is not None and time.time() - _FLOW_CACHE["at"] < max_age:
+            return _FLOW_CACHE["data"]
+        data = build_flow_panel(ops)
+        _FLOW_CACHE.update(at=time.time(), data=data)
+        return data
+
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff agents</title>
 <style>
@@ -1965,7 +2103,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -2578,9 +2716,238 @@ let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout((
 load();
 </script></body></html>"""
 
+# ------------------------------------------------------------------------------
+# /flow — pipeline throughput visibility. Same dark tokens as PAGE/PERF_PAGE,
+# hand-drawn inline SVG (no chart library loaded anywhere in this file but
+# mermaid, which is for /graph only). Data from /flow.json (build_flow_panel).
+# ------------------------------------------------------------------------------
+FLOW_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff flow</title>
+<style>
+:root{--bg:#0D1317;--panel:#131B20;--line:#243039;--txt:#D5DEE2;--mut:#8595A0;--dim:#5A6973;--teal:#52C2AE;--amber:#F0A542;--lav:#A395E0;--coral:#E47B68;--blue:#3a6ea5;--mono:"SFMono-Regular",Menlo,monospace}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--txt);font:13px/1.5 -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+.top span.nm b{color:var(--amber)}
+a{color:var(--mut);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font-size:12px}
+a:hover{color:var(--txt)}
+.sub{color:var(--dim);font:12px var(--mono);margin-left:auto}
+.wrap{flex:1;min-height:0;overflow:auto;padding:14px}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;align-items:start}   /* minmax(0,..): a chart's width attr must not set the column's minimum */
+@media(max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.wrap{padding:10px}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0}
+.card.wide{grid-column:1/-1}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 10px;display:flex;justify-content:space-between;gap:8px}
+.card h2 em{font-style:normal;color:var(--dim);text-transform:none;letter-spacing:0}
+.chart{width:100%;min-height:20px}
+svg{display:block;width:100%;height:auto}
+.tlink{cursor:pointer}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font:11px var(--mono);color:var(--mut);margin-top:9px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
+.legend i.dash{background:none;border-top:2px dashed var(--dim);width:12px;height:0;vertical-align:2px}
+table{width:100%;border-collapse:collapse;font:11.5px var(--mono);table-layout:fixed}
+th,td{text-align:left;padding:4px 6px;border-top:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+th{color:var(--dim);font-weight:400;text-transform:uppercase;letter-spacing:.06em;font-size:10px}
+td.num{text-align:right;color:var(--amber)}
+.empty{color:var(--dim);font-size:12px;padding:10px 0}
+.errbox{color:var(--coral);font:12px var(--mono);padding:10px 0}
+.tp-row{padding:3px 0;border-top:1px solid var(--line);font:11.5px var(--mono);color:var(--mut);overflow-wrap:anywhere}
+.tp-row:first-child{border-top:0}
+.guard{padding:2px 0;font:11.5px var(--mono)}
+.guard.ok{color:var(--teal)}.guard.bad{color:var(--coral)}.guard.nodata{color:var(--dim)}
+.kv{display:flex;flex-wrap:wrap;gap:10px 18px;font:11.5px var(--mono);color:var(--mut);margin-bottom:8px}
+.kv b{color:var(--txt)}
+.rollback{font:11px var(--mono);color:var(--amber);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-top:8px;overflow-wrap:anywhere}
+*{scrollbar-width:thin;scrollbar-color:transparent transparent}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+:hover::-webkit-scrollbar-thumb{background:rgba(133,149,160,.4)}::-webkit-scrollbar-thumb:hover{background:rgba(133,149,160,.7)}
+:hover{scrollbar-color:rgba(133,149,160,.4) transparent}
+</style></head><body>
+<div class=top><span class=nm>hack<b>riff</b> · flow</span><a href="/">← dashboard</a><a href="/perf">perf ↗</a><span class=sub id=sub>loading…</span></div>
+<div class=wrap><div id=charts>loading…</div></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const FM='ui-monospace,Menlo,monospace';
+const C={txt:'#D5DEE2',mut:'#8595A0',dim:'#5A6973',teal:'#52C2AE',amber:'#F0A542',lav:'#A395E0',coral:'#E47B68',blue:'#3a6ea5'};
+const CLASSCOL={full:C.teal,ui:C.lav,py:C.amber,docs:C.blue};
+function classColor(k){ return CLASSCOL[k]||C.mut; }
+const F={
+  dur(m){ if(m==null) return '—'; if(m<60) return Math.round(m)+'m'; return (m/60).toFixed(1)+'h'; },
+  n(x){ return x==null?'—':x; },
+  pct(x){ return x==null?'—':(x>0?'+':'')+x+'%'; },
+  date(ts){ if(!ts) return '—'; return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+};
+function rect(x,y,w,h,fill){ return `<rect x="${(+x).toFixed(1)}" y="${(+y).toFixed(1)}" width="${Math.max(0,+w).toFixed(1)}" height="${h}" rx="2" fill="${fill}"/>`; }
+
+// 1. landings/h line chart: rolling 6h/24h over the last 48h, flow.jsonl points overlaid,
+// the open experiment's opening time as a vertical line and its baseline as a dashed line.
+function drawLandings(el, d){
+  const pts=(d.landings&&d.landings.series)||[];
+  const W=el.clientWidth||700, H=170, padL=34, padR=8, padT=10, padB=18;
+  if(!pts.length){ el.innerHTML='<div class=empty>no hourly data yet</div>'; return; }
+  const xs=pts.map(p=>p.ts), t0=Math.min.apply(null,xs), t1=Math.max.apply(null,xs)||t0+3600;
+  const vals=pts.flatMap(p=>[p.roll6,p.roll24]).filter(v=>v!=null);
+  const exp=d.experiment&&d.experiment.open?d.experiment:null;
+  const base=exp?exp.baseline_landings_per_h_24h:null;
+  const maxV=Math.max.apply(null,vals.concat(base||0,0.1));
+  const x=ts=>padL+(W-padL-padR)*((ts-t0)/Math.max(1,t1-t0));
+  const y=v=>padT+(H-padT-padB)*(1-(v||0)/maxV);
+  const line=(key,col)=>{
+    let d2='', started=false;
+    pts.forEach(p=>{ const v=p[key]; if(v==null){ started=false; return; } const cmd=started?'L':'M'; d2+=`${cmd}${x(p.ts).toFixed(1)},${y(v).toFixed(1)} `; started=true; });
+    return d2.trim()?`<path d="${d2}" fill="none" stroke="${col}" stroke-width="2"/>`:'';
+  };
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  // gridlines + y labels
+  for(let i=0;i<=3;i++){ const v=maxV*i/3, yy=y(v); s+=`<line x1="${padL}" x2="${W-padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.dim}" stroke-opacity=".25"/>`; s+=`<text x="2" y="${(yy+3).toFixed(1)}" fill="${C.dim}" font-size="9.5" font-family="${FM}">${v.toFixed(1)}</text>`; }
+  if(base!=null) s+=`<line x1="${padL}" x2="${W-padR}" y1="${y(base).toFixed(1)}" y2="${y(base).toFixed(1)}" stroke="${C.dim}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  if(exp&&exp.opened_ts) s+=`<line x1="${x(exp.opened_ts).toFixed(1)}" x2="${x(exp.opened_ts).toFixed(1)}" y1="${padT}" y2="${H-padB}" stroke="${C.amber}" stroke-width="1.5" stroke-dasharray="2,2"/>`;
+  s+=line('roll24',C.blue)+line('roll6',C.teal);
+  (d.landings.flow_jsonl||[]).forEach(p=>{ if(p.landings_per_h_24h!=null) s+=`<circle cx="${x(p.ts).toFixed(1)}" cy="${y(p.landings_per_h_24h).toFixed(1)}" r="2.6" fill="${C.amber}"/>`; });
+  s+=`<text x="${padL}" y="${H-4}" fill="${C.dim}" font-size="10" font-family="${FM}">${F.date(t0)}</text>`;
+  s+=`<text x="${W-padR}" y="${H-4}" text-anchor="end" fill="${C.dim}" font-size="10" font-family="${FM}">${F.date(t1)}</text>`;
+  s+='</svg>';
+  el.innerHTML=s;
+}
+
+// 2. per-hour, last 24h: dispatch-hours + gate occupancy as bars, landed count, red count.
+function drawHourly(el, rows){
+  if(!rows||!rows.length){ el.innerHTML='<div class=empty>no hourly data</div>'; return; }
+  const W=el.clientWidth||700, rh=16, lblW=54, barX=lblW+12, barW=Math.max(20,W-barX-122);   // 122: room for '0 landed · 3 red' beside a full bar
+  const H=8+rows.length*rh;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  rows.forEach((r,i)=>{
+    const y=4+i*rh, bh=11, by=y+1;
+    s+=`<text x="${lblW}" y="${by+9}" text-anchor="end" fill="${C.mut}" font-size="10" font-family="${FM}">${esc(r.hour.split(' ')[1]||r.hour)}</text>`;
+    const gateFrac=Math.max(0,Math.min(1,(r.gate_min||0)/60));
+    s+=rect(barX,by,barW,bh,'#0a0f12');
+    if(gateFrac>0) s+=rect(barX,by,barW*gateFrac,bh,C.amber);
+    if(r.dispatch>0) s+=rect(lblW+4,by,5,bh,C.teal);   // its own mark left of the bar, not hidden under a full one
+    const meta=`${r.landed||0} landed${r.red?` · ${r.red} red`:''}`;
+    s+=`<text x="${W-2}" y="${by+9}" text-anchor="end" fill="${r.red?C.coral:C.mut}" font-size="10" font-family="${FM}">${esc(meta)}</text>`;
+  });
+  s+='</svg>';
+  el.innerHTML=s;
+  el.insertAdjacentHTML('afterend','<div class=legend><span><i style="background:'+C.amber+'"></i>gate occupancy (of the hour)</span><span><i style="background:'+C.teal+'"></i>dispatch happened</span></div>');
+}
+
+// 3. per-gate durations by class, last 48h; baseline full-gate p50 as a horizontal line.
+function drawGates(el, gates, baseline){
+  const rows=(gates||[]).filter(g=>g.minutes!=null);
+  if(!rows.length){ el.innerHTML='<div class=empty>no closed gates in range</div>'; return; }
+  const W=el.clientWidth||700, H=170, padL=34, padR=8, padT=10, padB=22;
+  const maxM=Math.max.apply(null,rows.map(g=>g.minutes).concat(baseline||0,1));
+  const x=i=>padL+(W-padL-padR)*(rows.length<=1?0.5:i/(rows.length-1));
+  const y=v=>padT+(H-padT-padB)*(1-v/maxM);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  for(let i=0;i<=3;i++){ const v=maxM*i/3, yy=y(v); s+=`<line x1="${padL}" x2="${W-padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.dim}" stroke-opacity=".25"/>`; s+=`<text x="2" y="${(yy+3).toFixed(1)}" fill="${C.dim}" font-size="9.5" font-family="${FM}">${Math.round(v)}</text>`; }
+  if(baseline!=null) s+=`<line x1="${padL}" x2="${W-padR}" y1="${y(baseline).toFixed(1)}" y2="${y(baseline).toFixed(1)}" stroke="${C.mut}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  rows.forEach((g,i)=>{
+    const cx=x(i), cy=y(g.minutes), red=g.verdict==='red', open=g.verdict==='open';
+    const col = open? C.dim : (red?C.coral:classColor(g.class));
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${red?4.2:3.2}" fill="${col}"${red?` stroke="${C.coral}" stroke-width="1.5" fill-opacity=".35"`:''}><title>${esc(g.start)} · ${g.class} · ${Math.round(g.minutes)}m · ${g.verdict}${g.cause?' · '+g.cause:''}</title></circle>`;
+  });
+  s+=`<text x="${padL}" y="${H-4}" fill="${C.dim}" font-size="10" font-family="${FM}">${esc((rows[0]||{}).start||'')}</text>`;
+  s+=`<text x="${W-padR}" y="${H-4}" text-anchor="end" fill="${C.dim}" font-size="10" font-family="${FM}">${esc((rows[rows.length-1]||{}).start||'')}</text>`;
+  s+='</svg>';
+  el.innerHTML=s;
+  const classes=[...new Set(rows.map(g=>g.class))];
+  el.insertAdjacentHTML('afterend','<div class=legend>'+classes.map(k=>`<span><i style="background:${classColor(k)}"></i>${esc(k)}</span>`).join('')
+    +'<span><i style="background:'+C.coral+'"></i>red</span>'+(baseline!=null?'<span><i class=dash></i>baseline p50 '+Math.round(baseline)+'m</span>':'')+'</div>');
+}
+
+// 4. red rate by cause, 24h.
+function drawCauses(el, d){
+  const c=d.causes_24h||{}; const order=['real','flake','flake-then-real','other'];
+  const total=d.gates_24h||0, reds=d.reds_24h||0;
+  let h=`<div class=kv><span>reds <b>${reds}/${total}</b></span></div>`;
+  const max=Math.max.apply(null,order.map(k=>c[k]||0).concat(1));
+  h+='<table><thead><tr><th>cause</th><th>count</th></tr></thead><tbody>';
+  order.forEach(k=>{ const v=c[k]||0; const w=100*v/max;
+    h+=`<tr><td style="color:${C.txt}">${k}</td><td class=num><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><span style="width:${w.toFixed(0)}%;max-width:80px;height:8px;background:${k==='real'?C.coral:k==='other'?C.mut:C.amber};border-radius:4px;display:inline-block"></span>${v}</div></td></tr>`;
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+
+// 5. touchpoints, 24h.
+function drawTouchpoints(el, d){
+  const tp=d.touchpoints_24h||{count:0,items:[]};
+  let h=`<div class=kv><span>count <b>${tp.count}</b></span></div>`;
+  h += (tp.items&&tp.items.length) ? tp.items.map(t=>`<div class=tp-row>${esc(t)}</div>`).join('') : '<div class=empty>none in the last 24h</div>';
+  el.innerHTML=h;
+}
+
+// 6. open experiment.
+function drawExperiment(el, d){
+  const e=d.experiment;
+  if(!e||!e.open){ el.innerHTML='<div class=empty>no experiment open</div>'; return; }
+  const delta=F.pct(e.metric_delta_pct);
+  let h=`<div class=kv>
+    <span>id <b>${esc(e.id)}</b></span>
+    <span>opened <b>${esc(e.opened)}</b></span>
+    <span>knobs <b>${esc((e.knobs||[]).join(', '))}</b></span>
+    <span>gates <b>${F.n(e.gates_counted)}/${F.n(e.gates_target)}</b></span>
+    <span>hours <b>${(e.hours_counted!=null?e.hours_counted.toFixed(1):'—')}/${F.n(e.hours_target)}</b></span>
+  </div>
+  <div style="color:${C.mut};margin-bottom:8px">${esc(e.hypothesis)}</div>
+  <div class=kv><span>${esc(e.metric)} <b>${F.n(e.metric_now)}</b> vs baseline <b>${F.n(e.metric_baseline)}</b> <span style="color:${(e.metric_delta_pct||0)>=0?C.teal:C.coral}">${delta}</span></span></div>`;
+  h += (e.guards||[]).map(g=>{ const cls=g.ok===true?'ok':g.ok===false?'bad':'nodata'; const mark=g.ok===true?'✓':g.ok===false?'✗ BROKEN':'—'; return `<div class="guard ${cls}">${mark} ${esc(g.text)}</div>`; }).join('');
+  h += `<div class=rollback>rollback: ${esc(e.rollback)}</div>`;
+  el.innerHTML=h;
+}
+
+async function load(){
+  try{
+    const d=await (await fetch('/flow.json',{cache:'no-store'})).json();
+    if(d.error){ $('#charts').innerHTML=`<div class=errbox>flow error: ${esc(d.error)}</div>`; $('#sub').textContent='error'; return; }
+    $('#sub').textContent=`as of ${esc(d.at)}`;
+    $('#charts').innerHTML=`
+    <div class=grid>
+      <div class="card wide"><h2><span>Landings/h <em>rolling 6h (teal) / 24h (blue) · flow.jsonl ticks (amber dots)</em></span></h2><div id=cLand class=chart></div></div>
+      <div class="card wide"><h2><span>Per hour, last 24h</span></h2><div id=cHourly class=chart></div></div>
+      <div class="card wide"><h2><span>Per-gate durations by class, last 48h</span></h2><div id=cGates class=chart></div></div>
+      <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
+      <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
+    </div>`;
+    drawLandings($('#cLand'), d);
+    drawHourly($('#cHourly'), d.hourly_24h||[]);
+    drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
+    drawCauses($('#cCauses'), d);
+    drawTouchpoints($('#cTouch'), d);
+    drawExperiment($('#cExp'), d);
+  }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }
+}
+load(); setInterval(load,30000);
+let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
+</script></body></html>"""
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
+        if self.path.startswith("/worklog.json"):
+            try:
+                import sys as _sys
+                if OPSDIR not in _sys.path:
+                    _sys.path.insert(0, OPSDIR)
+                import worklog
+                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/worklog"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import worklog
+            body = worklog.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/term.json"):
             try:
                 body = json.dumps({"coord": term_pane(), "now": time.strftime("%H:%M:%S %Z")}).encode(); self.send_response(200)
@@ -2722,6 +3089,17 @@ class H(BaseHTTPRequestHandler):
             body = PERF_PAGE.replace("</body>", TICKET_MODAL + "</body>").encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/flow.json"):
+            try:
+                body = json.dumps(flow_panel_cached(SCRATCH)).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/flow"):
+            body = FLOW_PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/data.json"):
             try:
                 body = json.dumps(gather_cached()).encode()
@@ -2746,4 +3124,6 @@ if __name__ == "__main__":
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", 8901), H).serve_forever()
+    # MONITOR_PORT was documented (ops/README.md, /dev-env) but never read: a second copy always
+    # died binding 8901. 8901 stays the default.
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("MONITOR_PORT") or 8901)), H).serve_forever()
