@@ -22388,7 +22388,7 @@ tasks:
   - id: T-680
     milestone: MLIVE
     title: Decide whether the dwell in flight should also SET the record horizon, not only be clipped to it
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -22431,6 +22431,7 @@ tasks:
       Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails ALONE, 3/3, and also at HEAD e945f6bf with this ticket's change reverted: ondemand.rs:365 `records > 20` got `10 records` in 1.5 s (load avg ~5-7 at the time). Real bug or a throughput assertion that belongs in the timing tier - not T-680's. | stop_server in hk-cli api_contract takes ~47 s for servers started with start_server_retaining (IQ ring enabled): unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so body finishes in 6.6 s, total 53 s; the same 54 s at HEAD with the original test. Several other api_contract tests show the same ~52 s. Teardown cost, not T-680's.
       Use cases: AWARE-011
       Resources: 296 CPU-s, peak 1.4 GB
+    commit: 2006e211
   - id: T-720
     milestone: M2-hardening
     title: The six milestone acceptance recipes now run under nextest but have never been measured there
