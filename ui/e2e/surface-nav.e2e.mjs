@@ -57,7 +57,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, tileAsks } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -184,7 +184,13 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   await page.frames(10);
   await new Promise((r) => setTimeout(r, 1500));
   const navigationEnded = Date.now();
-  const navigationRefusals = page.requests.filter((r) => r.status === 503).length;
+  // **Counted per ADDRESS** (T-573): a `GET /api/tiles/batch` answers 200 and carries each
+  // address's own 503 inside, so a status-line count would see none of the refusals the client
+  // backs off from. [[tileAsks]] expands every request into the addresses it named, each with the
+  // status the route gave THAT address; everything below that reasons about refusals, re-asks or
+  // turnover is per address for the same reason.
+  await page.settleBodies();
+  const navigationRefusals = tileAsks(page.requests).filter((a) => a.status === 503).length;
 
   // ——— STEADY STATE: the page keeps rendering, nothing moves the view ———
   //
@@ -293,13 +299,14 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const mapFollowing = await page.eval(
     `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="minimap"]')]` +
     `.map((v) => v.getAttribute('data-following')).join(",")`);
-  const schemeOf = (r) => new URL(r.url).searchParams.get("scheme") ?? "view";
+  const schemeOf = (a) => a.scheme;
 
   // ——— the evidence, gathered and PRINTED before anything is asserted ———
   // A failing guard whose first assertion hides the rest of the picture is a guard people bisect by
   // hand. Everything below is reported, then judged.
-  const tileReqs = page.requests.filter((r) => r.url.includes("/api/tiles"));
-  const refused = page.requests.filter((r) => r.status === 503);
+  await page.settleBodies();
+  const tileReqs = tileAsks(page.requests);
+  const refused = tileReqs.filter((a) => a.status === 503);
   const steadyRefusals = refused.filter((r) => r.startedMs >= navigationEnded);
   const steady = tileReqs.filter((r) => r.startedMs >= navigationEnded);
   const steadyRequests = steady.length;
@@ -329,10 +336,10 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // leaked. So the set is the addresses that came back `200`.
   const askedBefore = new Set(tileReqs
     .filter((r) => r.startedMs < navigationEnded && r.status === 200)
-    .map((r) => r.url));
+    .map((a) => a.key));
   const steadyDetailReqs = steady.filter((r) => schemeOf(r) === "view");
   const steadyDetail = steadyDetailReqs.length;
-  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.url));
+  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.key));
   const steadyFirstTime = steadyDetail - steadyReasks.length;
   const status = await page.eval(STATUS);
   const backpressure = Number(status.match(/(\d+) backpressure/)?.[1] ?? -1);
@@ -359,7 +366,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // Tile reads the route COMPLETED for the page during the probe window, counted from CDP's own
   // network log rather than from anything the client says about itself: a `200` whose body
   // finished inside the window. This is the budget turning over, measured from outside.
-  const served = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200 &&
+  const served = tileReqs.filter((r) => r.status === 200 &&
     r.endedMs !== null && r.endedMs >= probeFrom && r.endedMs <= probeTo).length;
   t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
     `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
@@ -467,7 +474,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // speculation is not free: every speculative read that a later gesture aborts leaves the server
   // producing a tile nobody will read, holding the slot (2) and (2b) are about.
   if (frozen(followingBefore) && frozen(followingAfter)) {
-    assert.deepEqual(steadyReasks.map((r) => new URL(r.url).search).slice(0, 5), [],
+    assert.deepEqual(steadyReasks.map((r) => r.key).slice(0, 5), [],
       `the page RE-ASKED ${steadyReasks.length} DETAIL-tier addresses it had already been ANSWERED ` +
       "for, " +
       `during ${(STEADY_STATE_MS / 1000).toFixed(0)} s in which nothing moved the view and no pane ` +
