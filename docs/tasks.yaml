@@ -16008,6 +16008,16 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): rebuilt on main after the branch conflicted only on the board (runner result commit vs main status sync); code commit(s) cherry-picked unchanged, result re-applied via just task. Old tip kept as old/task-t513.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 02:00).
+      Second gate finding was 'UNCOMMITTED 1 modified files left uncommitted (ahead=3)': docs/tasks.yaml from the previous round's `just task note` had been left uncommitted, though the work-runner had already auto-committed it (9acc8aad) before this gate ran. Triaged: no test failure was named, only the hygiene finding, which was already resolved -- `git status` was clean. Followed the TRIAGE FIRST instruction to `git merge main` and hit main's own `hkboard` merge driver refusing to auto-resolve docs/tasks.yaml ('not an append-only merge; leaving it to a person') because ~60 unrelated files and concurrent board churn from other tickets have landed on main since this branch's base. Hand-resolving that conflict is exactly what the board-edit hook and CLAUDE.md forbid a worker from doing, and it is unrelated to T-513's own change (crates/hk-cli/tests/two_device_e2e.rs only), so the merge was aborted rather than forced through. Re-ran the targeted test and precheck on the unmerged, clean branch to confirm nothing regressed, then committed the round-2 triage note (this time verified committed, not left uncommitted).
+      Tests: cargo nextest run -p hk-cli -E 'binary(two_device_e2e)' -> exit 0 (1 passed (126s), re-confirmed after aborting the main-merge attempt)
+      precheck exit 0
+      Commits: 997965ed, 9acc8aad, 9e295e59
+      Observed, not chased: The wider overlap band needed for the review-1 fix roughly tripled this test's runtime (from ~65s to ~126-238s across runs); still within nextest's heavy-serial group with no config change, but a noticeably heavier member of it. | docs/tasks.yaml's `hkboard` merge driver correctly refuses to auto-merge when board churn is not append-only (observed here between task-t513 and main); that conflict needs the coordinator's own gate-merge (same driver, run as a person/tooling with the authority to touch docs/tasks.yaml) at actual merge time -- a worker branch does not need main pre-merged in to fix an uncommitted-file finding, and forcing that merge would have required a worker to hand-resolve a file it is barred from touching.
+      Use cases: AWARE-011
   - id: T-514
     milestone: MSDR
     title: RTL-SDR source - a native librtlsdr driver behind an rtlsdr feature, for the NooElec Nano 3
