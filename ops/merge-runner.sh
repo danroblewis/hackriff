@@ -256,8 +256,15 @@ PY
   # workers: the gate waits for them the same way (and the same 45-min cap applies). This is
   # only consulted BEFORE a gate starts, when none of these can be the runner's own.
   foreign=$(pgrep -f 'node e2e/run.mjs|hk serve --bind 127.0.0.1:87' 2>/dev/null | wc -l | tr -d ' ')
+  FOREIGN_RUNNING=${foreign:-0}   # read by workers_drained: a spec run is minutes, a worker is an hour
   echo $(( claimed + ${foreign:-0} ))
 }
+FOREIGN_RUNNING=0
+# A foreign spec run holds the gate for at most this long. A deflaker that re-runs a spec every
+# time it sees no gate, beside a runner that waits for the spec to end before starting one, is a
+# standoff the 45-min worker cap resolves too slowly (02:27 on 2026-09-23: one 54-min worker and
+# one spec run held a 12-branch batch).
+FOREIGN_DRAIN_MAX=${FOREIGN_DRAIN_MAX:-300}
 # While this waits it holds `$S/gate-wanted`, which the work runner reads as "a gate is
 # pending: dispatch nothing" - otherwise, below WORK_QUEUE_PAUSE, dispatch would keep refilling
 # the box and the drain would never complete (observed 14:12: T-565 started during the wait).
@@ -284,8 +291,11 @@ workers_drained(){ # 0 = no worker running and the box is clear (or waited long 
   [ -n "$c" ] && why="${why:+$why; }contention: $c"
   [ -z "$DRAIN_SINCE" ] && { DRAIN_SINCE=$(date +%s); log "WAIT: $why - the gate runs alone, dispatch is paused"; }
   printf 'since=%s\nworkers=%s\ncontention=%s\n' "$DRAIN_SINCE" "$n" "$c" > "$GATEWANT"
-  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$WORKER_DRAIN_MAX" ]; then
-    log "WAIT over: $why still, after $WORKER_DRAIN_MAX s - gating anyway (nothing stuck must hold every merge)"
+  # Only foreign spec runs / contention left (no claimed worker): the short cap applies.
+  local cap="$WORKER_DRAIN_MAX"
+  [ $(( ${n:-0} - ${FOREIGN_RUNNING:-0} )) -le 0 ] && cap="$FOREIGN_DRAIN_MAX"
+  if [ $(( $(date +%s) - DRAIN_SINCE )) -ge "$cap" ]; then
+    log "WAIT over: $why still, after $cap s - gating anyway (nothing stuck must hold every merge)"
     # The gate runs, but it is not a clean measurement of the code, and the gate log is the only
     # place that can still say so once the run is over.
     HK_GATE_CONTENDED="$why"
