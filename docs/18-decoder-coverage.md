@@ -1017,6 +1017,78 @@ spread invisibly across five. **T-607 lands or refuses that binding, and T-608/T
 priced against its answer.** This is exactly the check the ticket asked for, and the answer is "not
 yet", not "yes".
 
+### 7.1.1 The answer (T-607, 2026-09-23): landed for the PSK kernels, refused for the FEC
+
+**Measured, not assumed.** liquid-dsp **v1.8.2** (2026-08-06, MIT) builds, links and runs on both
+targets, and it is now in the build as **`crates/hk-liquid-sys`**: vendored source compiled by `cc`,
+with hand-written FFI and tests in `crates/hk-liquid-sys/tests/coverage.rs` that pin every row below.
+But the premise that it "ships FEC" is **false for the two codes the satellite families need**.
+In liquid, convolutional (Viterbi) and Reed–Solomon codecs are thin wrappers over Phil Karn's
+**libfec (LGPL-2.1)**. They are compiled in only when liquid's *autotools* build finds libfec; its
+*CMake* build (the current default) never looks for it; and without libfec, `fec_create` returns
+NULL with "install libfec". liquid's own FEC is Hamming, Golay(24,12), SEC-DED and repetition codes.
+
+**Build cost.** Measured 2026-09-23 on the dev Mac (M-series, 28 cores) at load average 20–26, so
+the wall times are pessimistic:
+
+| Target | How | Wall time (C part) | Artefact |
+|---|---|---|---|
+| macOS arm64 | liquid's CMake, `-j6` | 17.4 s (20 s CPU) | `libliquid.a` 1.67 MB |
+| macOS arm64 | `cc` in `build.rs` (the landed route), release | 12.8 s at `-j6`; 23.9 s at `-j2` | 1.67 MB |
+| macOS arm64 | same, `dev` profile (`-g`) | — | 4.2 MB |
+| aarch64 Linux, cross from the Mac | liquid's CMake + clang + an Ubuntu 22.04 arm64 sysroot | 20.5 s | 1.99 MB |
+| aarch64 Linux, cross from the Mac | `cc` (landed route): the crate's whole test build, clean | 20.9 s (26.1 s release) | 2.56 MB release, 7.6 MB dev |
+| aarch64 Linux, native gcc 11.4 (the `just deploy-jetson` path) | 157 files, `-P6`, in an `ubuntu:22.04` arm64 container | 2.4 s | 2.02 MB |
+| Linked-in cost | `symtrack` + `modemcf` + `firinterp`, stripped release binary, with vs without | — | **+123 KB** macOS, **+153 KB** aarch64 |
+
+The cross-built aarch64 binary needs at most `GLIBC_2.34`, so it runs on JetPack 6.x (glibc 2.35).
+It was **run** in an Ubuntu 22.04 arm64 container (glibc 2.35) and produced the Mac's SER table
+exactly. **Not measured:** a build on a real Orin. The Orin's six A78AE cores are several times
+slower than the container's host, so expect roughly 10–15 s of one-off C compile there (an
+unverified estimate). None of this is on the capture path: the C compiles once per clean target
+directory, then cargo caches it.
+
+**Vendored vs system library vs crates.io — vendored, because:**
+- *System library:* Ubuntu 22.04 (JetPack 6's base) ships `libliquid-dev` **1.3.2** (2019). That
+  predates the 1.4.0 `modem` → `modemcf` rename, so the Mac and the Jetson would compile against
+  different APIs. Homebrew's `liquid-dsp` 1.8.2 **depends on FFTW (GPLv2)**, so taking the system
+  library on the Mac would link GPL code into the core.
+- *crates.io:* `liquid-dsp-sys` 0.1.0 (Dec 2024, ~950 downloads) is a 3.9 KB crate with no
+  vendored source. It links whatever system library is installed, so it inherits both problems
+  above, and it adds a `bindgen`/libclang build dependency. bindgen does not model C99 `_Complex`,
+  which liquid passes by value everywhere.
+- *Vendored + `cc`:* one pinned version on both targets, and no new host tool (`cc` is already
+  in `Cargo.lock` for `libsqlite3-sys`). There is no `cmake` on the Jetson and no FFTW. It also
+  avoids liquid's CMake cross-compile trap: `FindSIMD.cmake` probes with `try_run`, which
+  cannot execute when cross-compiling, so a CMake cross build fails until the probe results are
+  hand-set. Cost: 265 files / 2.9 MB of MIT C in-tree, refreshed by the recipe in
+  `crates/hk-liquid-sys/vendor/VENDORED.md`.
+
+**Per-block coverage — what the block tickets are priced against.** The PSK results come from
+synthetic RRC signals at k = 2 samples/symbol, 22 dB Es/N0, a 0.3-sample timing offset and a
+0.7 rad phase offset, recovered blind to delay and phase ambiguity:
+
+| Block (rank) | liquid covers? | What liquid provides | What remains |
+|---|---|---|---|
+| **`psk_demod`** (1, T-609) | **Mostly** | `symtrack_cccf`: AGC → polyphase RRC matched filter + symbol timing → LMS equaliser → NCO/PLL carrier loop; `modemcf` de-map with per-bit soft output (`demodulate_soft`, which matches §8.2's additive one-`soft`-per-bit answer); EVM and phase error for a `status()`. **Zero symbol errors** for BPSK, QPSK, 8PSK, DBPSK, **D8PSK** and **π/4-DQPSK**. Output is bit-identical at any chunking (1 / 37 / 1000 / whole). | **Acquisition:** coherent pull-in is bounded. Unaided, BPSK locks to 0.02 rad/sample, QPSK to 0.01 and 8PSK to 0.005. Past that (QPSK: SER 0.55 at 0.015, 0.74 at 0.02) it needs a coarse CFO, and handing one in through `symtrack_cccf_adjust_frequency` locks it with no symbol errors. That coarse estimate is ours to supply. hk-estimate's only CFO estimator today, `params::cfo_from_fsk_levels`, is FSK-specific, so PSK needs an M-th-power spectral-line estimator or an FLL, which is DSP work. **OQPSK: no liquid modem** (Zigbee), so it is our DSP work: a half-symbol I/Q offset ahead of the tracker, or the MSK view of half-sine OQPSK. Lock detection, discontinuity behaviour and the safe wrapper are adapter logic. **Re-priced: medium, not months.** |
+| **`viterbi`** (3, T-610) | **No** | Nothing: `v27`, `v29`, `v39`, `v615` and every punctured variant are libfec wrappers, absent. | All of it: native Rust, textbook Viterbi with soft input, traceback and puncturing. **Re-priced as DSP work, not an adapter.** Drop its dependency on T-607. |
+| **`reed_solomon`** (4, T-611) | **No** | Nothing: `rs8` is a libfec wrapper, and even with libfec it is only RS(255,223) through Karn's generic `init_rs_char`, in the conventional basis with no CCSDS dual-basis transform. | All of it: native Rust. T-611 was already scoped as standalone, so its estimate stands. |
+| `descramble` (2, T-608) | Not needed | liquid's `msequence`/`scramble_data` are its own whitening, not CCSDS/PN9/BLE. | An LFSR. Must not wait on T-607, and it does not. |
+| `mlevel_slicer` (5, T-612) | Not needed | — | A decision rule. |
+| `bitstuff`, `codeword_map` (6, 7) | Not needed | — | — |
+| `ssb_demod`/`cw_demod` (8) | Partly | `ampmodem` DSB/USB/LSB | Carrier estimate, raster snap, clarifier (§7 rank 8's actual cost). |
+| `css_demod` (9) | No | An FFT only, which hk-dsp already has | Dechirp and de-map. |
+| `despread` (10) | No (in usable form) | `msequence`; `dsssframe` is liquid's own frame format | A chip correlator. |
+| `ofdm_demod` (11) | No (in usable form) | `ofdmframesync` expects liquid's own S0/S1 preamble, not DAB's null + phase-reference symbols | As §7 says. |
+| `equalise` (12) | **Yes, the kernel** | `eqlms_cccf` (trained/decision-directed `step`, constant-modulus `step_blind`), `eqrls_cccf` | Adapter + `status()`. |
+| Framing generally | No | `flexframe`, `framegen64` and `qpacketmodem` are liquid-proprietary formats, not CCSDS/AX.25 | hk-blocks' existing sync/framing blocks. |
+
+So the answer to §7.1's question is **yes for rank 1 and rank 12, and no for ranks 3 and 4.** That
+is the opposite of how §7.1 grouped them: "PSK + Viterbi + RS as one liquid adapter job" was wrong
+about two of the three. ADR-0010's ledger records both halves: liquid in-core, and libfec **not
+adopted**, because Viterbi and RS are textbook algorithms and CCSDS 131.0-B is a published
+standard. Pulling LGPL into the core to save writing them buys nothing.
+
 ---
 
 ## 8. What ADR-0011 would have to absorb
@@ -1058,7 +1130,8 @@ really missing is soft values carrying frame boundaries rather than complex poin
    double-gating (`content_class` ceiling, `output_policy` clamp) and the same schema-version rule.
    §8.6 bumped `schema_version` 2 → 3 for three keys at once; this is a fourth key of the same shape.
 5. **§1.6's "adapter over an existing kernel" rule needs a second column.** Today it names in-repo
-   kernels. Ranks 1/3/4/12 would name **liquid-dsp**, which §7.1 establishes is not yet linked. The
+   kernels. Ranks 1/3/4/12 would name **liquid-dsp**, which §7.1 establishes is not yet linked (§7.1.1:
+   linked since T-607 for ranks 1 and 12 only; ranks 3 and 4 are native, because liquid's Viterbi/RS are libfec). The
    rule should say what a block adapts *and whether that kernel is in the build*, so the next audit
    cannot repeat this mistake.
 6. **A block-catalogue gap is a product-visible state.** Already ADR-0015 §8 and T-550's territory,
@@ -1117,3 +1190,4 @@ evidence on bitrot and the GR4 licence statements are:
 - gr-satellites' per-GR-version release lines: [discussion #459](https://github.com/daniestevez/gr-satellites/discussions/459), [issue #215](https://github.com/daniestevez/gr-satellites/issues/215)
 - GR4 licence and ported-block policy: [Community stewardship, 2026-05-21](https://www.gnuradio.org/news/2026-05-21-gr4-community-stewardship/) · [RC1, 2026-03-22](https://www.gnuradio.org/news/2026-03-22-gr4-release-candidate-1/) · [GR4 workflows, 2025-12-17](https://www.gnuradio.org/news/2025-12-17-gr4-transform-sdr-workflows/) · [gnuradio4-core](https://github.com/gnuradio/gnuradio4-core) (MIT) vs [fair-acc/gnuradio4](https://github.com/fair-acc/gnuradio4) (LGPL-3.0, prototype)
 - [liquid-dsp](https://github.com/jgaeddert/liquid-dsp) (MIT, v1.8.2 2026-08), the licence-clean kernel alternative referenced in §3
+- §7.1.1 (T-607, checked 2026-09-23): liquid-dsp v1.8.2 source — `src/fec/src/fec_conv.c` and `fec_rs.c` (the `LIBFEC_ENABLED` guard and the "libfec not installed" stubs), `include/liquid.internal.h` (`HAVE_FEC_H && HAVE_LIBFEC`), `configure.ac` (the only libfec probe), `cmake/FindSIMD.cmake` (`try_run`), README "License" (the FFTW/libfec caveats), CHANGELOG 1.4.0 (`modem` → `modemcf`) · [libfec](https://github.com/quiet/libfec) (LGPL-2.1) · Ubuntu 22.04 arm64 `libliquid-dev` 1.3.2-3 ([ports.ubuntu.com jammy/universe](http://ports.ubuntu.com/ubuntu-ports/dists/jammy/universe/binary-arm64/)) · Homebrew `liquid-dsp` 1.8.2 (depends on `fftw`) · crates.io [`liquid-dsp-sys`](https://crates.io/crates/liquid-dsp-sys) 0.1.0

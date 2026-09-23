@@ -971,6 +971,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-liquid-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "num-complex",
+]
+
+[[package]]
 name = "hk-ml"
 version = "0.1.0"
 dependencies = [

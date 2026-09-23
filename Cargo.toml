@@ -71,6 +71,9 @@ libc = "0.2"
 num-complex = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rustfft = "6.4"
+# T-607: the C build of the vendored liquid-dsp in hk-liquid-sys. Already in Cargo.lock (1.4.6,
+# build-only, via libsqlite3-sys) with `jobserver`/`libc` resolved, so `parallel` adds no crate.
+cc = { version = "1.4", features = ["parallel"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
@@ -104,3 +107,5 @@ hk-pipeline = { path = "crates/hk-pipeline" }
 # T-085 (ADR-0011): decoder workbench contracts.
 hk-recipe = { path = "crates/hk-recipe" }
 hk-blocks = { path = "crates/hk-blocks" }
+# T-607: FFI over vendored liquid-dsp 1.8.2 (MIT) — the ADR-0010 DSP-kernel library, now linked.
+hk-liquid-sys = { path = "crates/hk-liquid-sys" }

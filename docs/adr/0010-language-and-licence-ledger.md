@@ -14,7 +14,7 @@ CLAUDE.md: no language preference, choose robust support; the real-time path mus
 | Layer | Language | Rationale |
 |---|---|---|
 | Real-time core (sample path, control plane, API server) | **Rust** | No GC pauses, memory safety for ring-buffer/timing code, strong FFI to liquid-dsp/CUDA, first-class WASM for the UI, and the FutureSDR option ([ADR-0001](0001-pipeline-runtime.md)). |
-| DSP kernels | **liquid-dsp (C, MIT)** via FFI + **cuFFT/CUDA** on GPU | Licence-clean, embedded-friendly ([docs/03 §1.4](../03-sdr-software.md)). |
+| DSP kernels | **liquid-dsp (C, MIT)** via FFI + **cuFFT/CUDA** on GPU | Licence-clean, embedded-friendly ([docs/03 §1.4](../03-sdr-software.md)). **Linked since T-607** as `crates/hk-liquid-sys` (vendored 1.8.2, built by `cc`) for the modem / PSK tracking / equaliser kernels. liquid's convolutional and Reed–Solomon codecs are *libfec* (LGPL-2.1), not liquid, and are **not** taken: those blocks are native Rust ([docs/18 §7.1.1](../18-decoder-coverage.md)). |
 | Orchestration, research, test tooling, fixture/synthetic generation | **Python** | Numpy/scipy/CuPy/TorchSig/SigMF ecosystem; never on the sample path (CLAUDE.md). |
 | UI | **TypeScript + WASM (WebGL2)** | [ADR-0002](0002-ui-web-vs-native.md). |
 | Plugins | Native binaries wrapped as subprocesses; own demods in Rust | [ADR-0003](0003-process-plugin-model.md). |
@@ -27,6 +27,10 @@ CLAUDE.md: no language preference, choose robust support; the real-time path mus
 |---|---|---|---|
 | liquid-dsp | Core DSP kernels | MIT | **In-core** — licence-clean |
 | VOLK | SIMD kernels | **LGPL-3.0-or-later** from VOLK 3.0 (Homebrew `volk` 3.3.0 metadata, checked T-556); GPLv3 before 3.0 | **Plugin/subprocess only**: it only ever reaches hackriff through GNU Radio, which is GPLv3, so the placement does not change with VOLK's own relicence |
+| liquid-dsp | Core DSP kernels | MIT | **In-core** — licence-clean. T-607: vendored v1.8.2 in `hk-liquid-sys`, built without FFTW and without libfec (both rows below); measured build/size on macOS and aarch64 Linux in [docs/18 §7.1.1](../18-decoder-coverage.md) |
+| libfec (Karn; the source of liquid's `v27`/`v29`/`v39`/`v615`/`rs8` codecs) | Viterbi + Reed–Solomon | **LGPL-2.1** | **Not adopted (T-607).** Viterbi and RS are textbook, and CCSDS 131.0-B is published, so native Rust costs little and keeps LGPL out of the core. `hk-liquid-sys/tests/coverage.rs` fails if it ever gets linked |
+| FFTW3 | liquid's optional FFT backend | **GPLv2** | **Not linked.** liquid's CMake links it by default when found, and Homebrew's `liquid-dsp` depends on it: one more reason liquid is vendored, not taken from the system |
+| VOLK | SIMD kernels | **GPLv3** | **Plugin/subprocess only**, never in a non-GPL core |
 | GNU Radio 3.10 / GR4-ported blocks | Optional decode chains | **GPLv3** (GR4 core MIT) | **Subprocess plugin only** ([ADR-0003](0003-process-plugin-model.md)) |
 | FutureSDR | Candidate runtime | Apache-2.0 (verify) | In-core if adopted — permissive |
 | SoapySDR | Device abstraction (later SDRs) | Boost (verify) | In-core — permissive |
@@ -140,3 +144,5 @@ append-only (`merge=union` in `.gitattributes`).
 | *(T-556 spike)* gr-satellites | commit 4210dc45 (2026-09-22) | GPL-3.0 | spike adapter | Subprocess only; private prefix |
 | *(T-556 spike)* pybind11 (headers, private build dependency matching the GR bottle's ABI) | 3.1.0 | BSD-3-Clause | building the two OOTs | Build tooling only, outside the repo |
 | *(T-556 spike)* Python deps of gr-satellites: construct 2.10.70, requests 2.34.2, websocket-client 1.9.2, pyzmq 27.2.0 (bundles libzmq), urllib3 2.8.0, idna 3.20, charset-normalizer 3.5.1, certifi 2026.7.22 | as listed | MIT; Apache-2.0; Apache-2.0; BSD-3-Clause (libzmq itself MPL-2.0); MIT; BSD-3-Clause; MIT; MPL-2.0 (from each `METADATA`) | gr-satellites inside the spike subprocess | Private `--target` dir outside the repo; subprocess only |
+| liquid-dsp (vendored C source, not a crate) | 1.8.2 (tag commit `03d052b8`) | MIT | new crate hk-liquid-sys (T-607); provenance and refresh recipe in `crates/hk-liquid-sys/vendor/VENDORED.md` | In-core, statically linked, permissive. Built without FFTW and without libfec (rows in the table above) |
+| cc (feature `parallel` now requested by hk-liquid-sys) | 1.4.6 (already locked, build-only, via libsqlite3-sys) | MIT OR Apache-2.0 | hk-liquid-sys build script | Build tooling only; `parallel` resolves to jobserver 0.1.35 + libc 0.2.189, both already in `Cargo.lock` — no new crate |
