@@ -3613,7 +3613,7 @@ tasks:
   - id: T-222
     milestone: M3
     title: "C40 content-correlated multipath: two detections that decode to the same content (same RDS PI, same ADS-B ICAO, high audio/bit cross-correlation) are one emission, with the correlation lag giving the path difference"
-    status: todo
+    status: done
     priority: normal
     deps: [T-201, T-219]
     parallel_group: M3B
@@ -3700,6 +3700,9 @@ tasks:
         abstain until an audio or bit tap feeds the same rule. That is the ticket's "high
         audio/bit cross-correlation" half, and it needs a per-emitter content tap that does not
         exist yet.
+    commit: 3a73925f
+    notes: |
+      2026-09-23 (coordinator): landed GATED via task-t222-rl (merge 3a73925f) in the 04:12 batch of 12, re-landed on main after the original branch conflicted; flipped by hand because the runner does not map -rl branch names.
   - id: T-223
     milestone: M2-hardening
     title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"
@@ -5058,7 +5061,7 @@ tasks:
   - id: T-275
     milestone: M5
     title: 'M5 satellite imagery, tiered by what the receiver can actually reach: 137 MHz APT/LRPT native, L-band accessory, X-band out of reach'
-    status: in-progress
+    status: done
     branch: task-t275
     priority: normal
     deps:
@@ -5077,6 +5080,9 @@ tasks:
       (\"wrapping existing decoders as plugins\", \"bulk mapping and classification work with a
       fixed rubric\") as Sonnet/medium explicitly. Escalate one tier if T-258's coordination on
       the X-band retag proves ambiguous."
+    commit: 7e935719
+    notes: |
+      2026-09-23 (coordinator): landed GATED via task-t275-rl (merge 7e935719) in the 04:12 batch of 12, re-landed on main after the original branch conflicted; flipped by hand because the runner does not map -rl branch names.
   - id: T-276
     milestone: M5
     title: 'M5 pass scheduling: TLE / satellite-pass context feed drives the attention scheduler'
@@ -6140,7 +6146,7 @@ tasks:
     milestone: M4
     title: A followed transmission still running when the buffered window ends is written open, and a later
       pass cannot continue it
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-269
@@ -6242,6 +6248,9 @@ tasks:
         (rounded frequency, slot) and taken per member - one slot's call is never continued as
         another's. The TDMA shared-envelope reason goes through push_reason so a continued row does
         not repeat it.
+    commit: 536bef7c
+    notes: |
+      2026-09-23 (coordinator): landed GATED via task-t308-rl (merge 536bef7c) in the 04:12 batch of 12, re-landed on main after the original branch conflicted; flipped by hand because the runner does not map -rl branch names.
   - id: T-309
     milestone: M2-hardening
     title: C18 clustering compares period_s, duty_cycle and burst_length_s unconditionally - a single disagreeing
@@ -13471,7 +13480,7 @@ tasks:
   - id: T-468
     milestone: MLIVE
     title: A row-push route - and it must subscribe to an ADDRESS RANGE, not to "the live stream"
-    status: todo
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -13507,11 +13516,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       Review fix 1: the branch was rebased onto main because the old base 24a84b11 was rolled back. RowCursor now waits for the tune record's forward reach (the as_of_s rule), so a row is never pushed grey ahead of it; a regression test covers this. RowAccumulator keeps unobserved gaps as row ranges instead of tiles.
+
+      2026-09-23 (coordinator): landed GATED via task-t468-rl (merge eb712370) in the 04:12 batch of 12, re-landed on main after the original branch conflicted; flipped by hand because the runner does not map -rl branch names.
     result: |
       DONE (work-runner, from handback.json, 2026-09-22 12:07).
       Review fix 1. (1) Rebased onto main 82e91730; the old base 24a84b11 was a rolled-back batch. (2) RowCursor never pushes a row ahead of the tune record's forward reach (the as_of_s rule), so recorded rows are never sent grey and left uncorrected; a regression test fails without the fix. (3) The client keeps unobserved stretches as merged row ranges, not tiles. Still open, as before: rowfeed.ts is not yet wired into TileCache.
       Tests: 
       Commits: ad858db8, 028bb3ac, 606d68d1
+    commit: eb712370
   - id: T-462
     milestone: MLIVE
     title: Make the level_f=0 time column incrementally maintained - the 15 coarse nodes, not the whole lattice
@@ -19498,7 +19510,7 @@ tasks:
   - id: T-585
     milestone: MLIVE
     title: Coarse-tile residency is one open accumulator per node - hold committed rows encoded instead
-    status: todo
+    status: done
     priority: medium
     parallel_group: PIPE
     core_interface: true
@@ -19527,6 +19539,9 @@ tasks:
       residency with a measured bound, as `the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`
       already does, never with a wall-clock budget.
 
+    commit: c2bfee52
+    notes: |
+      2026-09-23 (coordinator): landed GATED via task-t585-rl (merge c2bfee52) in the 04:12 batch of 12, re-landed on main after the original branch conflicted; flipped by hand because the runner does not map -rl branch names.
   - id: T-582
     milestone: M2-hardening
     title: Every pair of branches that files a ticket conflicts on docs/tasks.yaml's tail
