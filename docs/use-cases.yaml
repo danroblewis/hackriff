@@ -8718,7 +8718,7 @@ use_cases:
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems
   name: Automatic control-channel discovery
-  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?".'
+  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?". The hunt reads no band: it runs on whatever the radio is tuned to, and the built-in registry *spends* it only in the land-mobile allocations — a dwell budget, not a search prior (T-615); a plan widening that budget to 1 MHz–6 GHz finds the same channel anywhere.'
   band: VHF / UHF / 700 / 800 MHz
   tx: none
   receiver_hint: null

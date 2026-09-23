@@ -34,13 +34,15 @@ const T545: &str = "T-545/SIGNAL-087";
 /// "the control channel is at 851.0500 MHz". It never narrows the search inside the band, never
 /// pre-populates the inventory and never commands a tune.
 ///
-/// **But it is band-gated rather than measurement-driven, and that is a real limit**: the same
-/// chain would not fire on a VHF (150–174 MHz), UHF (450–470 MHz) or 700 MHz trunked system, so
-/// `SIGNAL-085`'s actual claim — find a 100 %-duty narrowband four-level emission *anywhere* —
-/// is not what runs today. T-546 should make the occupancy trigger fire from the measured
-/// structure (continuous + on a narrowband raster + four-level) with the band as a *prior on the
-/// ranking* rather than a gate on the search. That is recorded here rather than asserted, because
-/// it is a separate capability from the five this ticket scopes.
+/// **T-545 found it band-gated rather than measurement-driven; T-615 measured which it is.** The
+/// hunt itself reads no band — raster origin, occupancy floor and sync + CRC are all measured from
+/// the window — so the band decides only whether a pass is *spent*: a dwell budget, recorded on
+/// `Trigger::Occupancy`. T-615 added the VHF high band the registry had been missing and asserts
+/// in `signal_085.rs` that the control channel is found at 155 MHz with the built-in registry and
+/// at 300 MHz once a plan widens the budget to the whole device, while the built-in hunt spends
+/// no pass at 300 MHz. Making the four-level structure itself the *trigger* (rather than the
+/// thing each pass measures) would still let the budget shrink further; that is a cost question,
+/// not a blindness one.
 pub const NO_LOOKUP: &str = "band gate, not a frequency lookup; see the doc comment";
 
 /// The a-priori tolerances. **Set from the standards figures in `docs/19 §2.1` and from the

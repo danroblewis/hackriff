@@ -21070,6 +21070,16 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK: a four-level 100 %-duty emission placed OUTSIDE the
       trigger band is found, or the ticket records why it cannot be.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 01:42).
+      Decision: the trunk-cc-hunt trigger band is a permanent DWELL-BUDGET constraint, not a search prior, and is now recorded and measured as one. Nothing inside the hunt reads the band (raster origin = tuned centre, occupancy against the window's own floor, confirmation = frame sync + CRC); the band only decides whether a pass (one window + up to 8 demods) is spent, since outside LMR allocations every continuously-occupied raster channel (WFM, DTV) costs a demod that sync+CRC rejects. Documented on Trigger::Occupancy in hk-pipeline chains/spec.rs. The built-in gate was missing the VHF high band SIGNAL-085 names first; added [150.8, 174] MHz. SIGNAL-085's text (docs/05 + use-cases.yaml) now states the budget and that a plan widening freq_hz to [[1e6, 6e9]] hunts everywhere. New tests/e2e/tests/acceptance/signal_085.rs (acceptance_mauto), counts only: CC found at 155 MHz with the built-in registry (1 pass, 2 candidates, 1 confirmed); built-in hunt spends 0 passes at 300 MHz; with the budget widened to 1 MHz-6 GHz the CC is found at 300 MHz and the continuous decoy rejected. T-545's NO_LOOKUP comment and the acceptance_mauto header updated.
+      Tests: cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto) and test(/signal_085/)' -> exit 0 (3 passed (VHF found; 300 MHz built-in 0 passes; 300 MHz widened budget found)); cargo nextest run -p hk-pipeline --lib -E 'test(/chains::spec/)' -> exit 0 (7 passed)
+      precheck exit 0
+      Commits: fbd0129b
+      Observed, not chased: Not run (in scope of the gate): pipeline runs of the POCSAG scene at 152.36 MHz now carry a trunk-cc hunt chain because VHF 150.8-174 MHz is gated in; no test found asserting an exact /chains/attached count for that scene (tutorial_pocsag goes through the API server), but the full gate is the check. | Untracked .githooks/{post-checkout,post-commit,post-merge,pre-push} exist in the worktree and are not from this ticket; left uncommitted.
+      Use cases: SIGNAL-085
+    notes: |
+      2026-09-23 (coordinator): rebuilt on main after a board-only conflict; code commits cherry-picked unchanged, result re-applied. Old tip kept as old/task-t615.
   - id: T-620
     milestone: M2-hardening
     title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
