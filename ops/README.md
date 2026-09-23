@@ -34,6 +34,15 @@ the merge queue + derived "up next" order, system load, a Claude token-budget ti
 MONITOR_PORT=8901 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &
 # open http://127.0.0.1:8901  (or tunnel it with cloudflared)
 ```
+**Role work log — `/worklog`** (`ops/worklog.py`, linked "work log ↗" in the top bar): for each
+role session (pipeline manager, coordinator, supervisor) the final assistant message of every
+turn, newest first, as markdown, collapsed to its first line (click to expand), with a `flow:`
+filter that lists just the pipeline manager's tick lines. It is how the user reads what the roles
+did without running a command. Sessions are found from `~/.claude/sessions/<pid>.json` (role from
+the process's `roles/<role>.md` argument or its tmux session `flow`/`dev`/`super`) and remembered
+in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — the supervisor in
+the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
+"source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
 
 ### `merge-runner.sh` — automated, no-AI merge runner
 Owns all merges to `main` deterministically. The coordinator appends a **code-complete** branch

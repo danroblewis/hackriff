@@ -1965,7 +1965,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -2581,6 +2581,26 @@ load();
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
+        if self.path.startswith("/worklog.json"):
+            try:
+                import sys as _sys
+                if OPSDIR not in _sys.path:
+                    _sys.path.insert(0, OPSDIR)
+                import worklog
+                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/worklog"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import worklog
+            body = worklog.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/term.json"):
             try:
                 body = json.dumps({"coord": term_pane(), "now": time.strftime("%H:%M:%S %Z")}).encode(); self.send_response(200)
@@ -2746,4 +2766,6 @@ if __name__ == "__main__":
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", 8901), H).serve_forever()
+    # MONITOR_PORT was documented (ops/README.md, /dev-env) but never read: a second copy always
+    # died binding 8901. 8901 stays the default.
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("MONITOR_PORT") or 8901)), H).serve_forever()
