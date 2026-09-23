@@ -378,3 +378,12 @@ def test_tick_writes_the_snapshot_the_dashboard_reads(tmp_path, monkeypatch):
     assert set(snap) >= {"ts", "load", "owners", "unowned", "alarms", "budget"}
     import json
     assert json.load(open(tmp_path / "watchdog.json"))["owners"] == snap["owners"]
+
+
+def test_hackriff_role_env_wins_over_the_command_line():
+    """ops/launch.sh exports it; where a kernel lets it be read, the session's own statement
+    beats parsing its arguments."""
+    rows = table(row(500, 1, "claude --model opus --append-system-prompt-file /x/roles/coordinator.md"))
+    rows[0]["env"] = "HACKRIFF_ROLE=supervisor"
+    agg, _ = W.owners(rows, {})
+    assert set(agg) == {"role:supervisor"}

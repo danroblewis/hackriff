@@ -182,6 +182,27 @@ Rules and attribution are pure functions over a list of rows, tested against a s
 table in `py/tests/test_watchdog.py` — including the sixteen-loop incident, which cannot be
 reproduced on demand.
 
+**Two cheaper guards sit in front of it**, so most of this never has to be caught after the fact:
+
+* **`.claude/hooks/reap-agent-processes.sh`**, wired to `Stop` and `SubagentStop`. The moment an
+  agent finishes, it kills any `shell-snapshots/snapshot-zsh` shell that is **orphaned** (ppid 1,
+  or a parent that is gone) **and** above 50 % CPU, and records the reap in the agent's transcript
+  as a `systemMessage`. A live agent's shell has a live parent and is never touched. Fail-open on
+  every error path.
+* **`.claude/hooks/block-full-gate.sh`** now also refuses, in *every* session, to run a busy loop
+  (`while :; do :; done` — polling with a `sleep` in the body is fine), `yes`, `stress`/`stress-ng`,
+  more than two backgrounded loops in one command, and `npm run e2e` / `node e2e/run.mjs` /
+  `hk serve` while a gate is running or `bulk-in-progress` exists. `HK_ALLOW_LOAD=1` overrides,
+  for a genuine contention repro. `py/tests/test_hooks.py` runs the scripts as the harness does.
+
+**`.claude/settings.json` sets `CARGO_BUILD_JOBS=3`, `NEXTEST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0` for every Claude Code session and subagent on this box.** That is where the
+bound actually binds: `cpulimit` wraps a worker's *tree*, but an agent typing `cargo build -j 28`
+inside that tree still oversubscribes the scheduler. It overrides the work runner's `CARGO_ENV`
+(`CARGO_BUILD_JOBS=2`) inside a worker session — both are at or below the 3-core `cpulimit` bound,
+so the effective ceiling is unchanged. The **merge runner is not a Claude session** and keeps its
+own `CARGO_BUILD_JOBS=6`, which `py/hkpy/gate.py` sets explicitly for the suites it launches.
+
 ## Starting the orchestration environment (cold start, reboot, or "stop everything and restart")
 
 Order matters: **runners before the coordinator**, and the coordinator **last**, because it reads

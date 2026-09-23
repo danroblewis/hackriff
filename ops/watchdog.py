@@ -138,13 +138,39 @@ def parse_ps(text: str) -> list[dict]:
     return rows
 
 
+def annotate_env(rows: list[dict]) -> list[dict]:
+    """Attach `HACKRIFF_ROLE` to the few rows that could be a role session.
+
+    Best-effort and deliberately narrow. macOS does NOT expose another process's environment -
+    neither `ps -E`/`ps -axeww` nor psutil's `environ()` returns it here (measured 2026-09-23),
+    so on this box the role is answered by the `--append-system-prompt-file` role file instead
+    and this adds nothing. It is kept because `ops/launch.sh` exports the variable and because
+    the same watchdog on Linux (a Jetson, CI) can read it, where the command line may not carry
+    the role at all.
+    """
+    try:
+        import psutil                                    # optional; absent is fine
+    except Exception:
+        return rows
+    for r in rows:
+        if "claude" not in r["cmd"] and "launch.sh" not in r["cmd"]:
+            continue
+        try:
+            role = psutil.Process(r["pid"]).environ().get("HACKRIFF_ROLE")
+        except Exception:
+            continue
+        if role:
+            r["env"] = f"HACKRIFF_ROLE={role}"
+    return rows
+
+
 def read_ps() -> list[dict]:
     try:
         out = subprocess.run(["ps", "-axo", ",".join(PS_FIELDS)],
                              capture_output=True, text=True, timeout=25).stdout
     except Exception:
         return []
-    return parse_ps(out)
+    return annotate_env(parse_ps(out))
 
 
 # ---------------------------------------------------------------- attribution (pure)
@@ -193,8 +219,8 @@ def anchor_owner(row: dict, claim_pids: dict[int, str]) -> str | None:
         return "fuzz-rig"
     if "ops/stage.sh" in cmd or "hk serve --bind 127.0.0.1:8899" in cmd:
         return "demo"
-    if "--append-system-prompt-file" in cmd or "ops/launch.sh" in cmd:
-        return "role:" + role_name(cmd)
+    if "--append-system-prompt-file" in cmd or "ops/launch.sh" in cmd or row.get("env"):
+        return "role:" + role_name(cmd, row.get("env", ""))
     return None
 
 
