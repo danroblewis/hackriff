@@ -171,7 +171,7 @@ fn signal_034_ccsds_psk_viterbi_asm_derandomise_rs_type_checks() {
                           "invert": [false, true] } },
             { "id": "asm", "block": "sync_search", "params": sync("0x1ACFFC1D", 32, 8160) },
             { "id": "pn", "block": "descramble",
-              "params": { "mode": "additive", "poly": "0xA9", "init": "0xFF" } },
+              "params": { "mode": "additive", "poly": "0x1A9", "init": "0xFF", "offset_bits": 0 } },
             { "id": "rs", "block": "reed_solomon",
               "params": { "n": 255, "k": 223, "poly": "0x187", "fcr": 112, "prim": 11,
                           "dual_basis": true, "depth": 4 } }
@@ -204,7 +204,7 @@ fn signal_004_vdl2_d8psk_descramble_rs_destuff_type_checks() {
               "params": { "modulation": "d8psk", "symbol_rate_bd": 10500 } },
             { "id": "slice", "block": "slicer" },
             { "id": "sync", "block": "sync_search", "params": sync("0x0", 16, 8192) },
-            { "id": "pn", "block": "descramble", "params": { "mode": "additive", "poly": "0x4001" } },
+            { "id": "pn", "block": "descramble", "params": { "mode": "additive", "poly": "0x8003" } },
             { "id": "rs", "block": "reed_solomon",
               "params": { "n": 255, "k": 249, "poly": "0x187", "fcr": 120 } },
             { "id": "hdlc", "block": "bitstuff" },
@@ -255,7 +255,7 @@ fn signal_053_lora_css_deframe_dewhiten_type_checks() {
             { "id": "slice", "block": "slicer" },
             { "id": "packet", "block": "deframe", "params": { "frame_bits": 2048 } },
             { "id": "whiten", "block": "descramble",
-              "params": { "mode": "additive", "poly": "0x1D", "init": "0xFF" } },
+              "params": { "mode": "additive", "poly": "0x171", "init": "0xFF" } },
             { "id": "crc", "block": "crc", "params": { "width": 16, "poly": "0x1021" } }
         ]),
         frames_out("crc"),

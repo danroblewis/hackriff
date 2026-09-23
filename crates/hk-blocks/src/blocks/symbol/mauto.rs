@@ -1,8 +1,8 @@
 //! ADR-0011 §9 (T-606) catalogue rows for group `symbol`: `mlevel_slicer`, `descramble`,
 //! `bitstuff`, `codeword_map`, `despread`, `equalise`. **Ports are pinned; parameters are
-//! placeholders** (`params_pinned: false`) that each implementing ticket pins (T-608
-//! `descramble`, T-612 `mlevel_slicer`, T-613 `bitstuff`; the rest are unfiled, docs/18 §9).
-//! None of these blocks is implemented here.
+//! placeholders** (`params_pinned: false`) that each implementing ticket pins (T-612
+//! `mlevel_slicer`, T-613 `bitstuff`; the rest are unfiled, docs/18 §9). `descramble` is
+//! implemented and its parameters pinned (T-608): its row is `super::descramble::descriptor`.
 
 use hk_recipe::PortType::{Bits, Frames, Iq, Soft};
 use hk_recipe::{BlockDescriptor, PortSpec};
@@ -59,37 +59,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
             ],
             false,
         ),
-        descriptor(
-            "descramble",
-            "symbol",
-            "LFSR de-whitening: additive (free-running or reset per frame) or multiplicative \
-             (self-synchronising).",
-            dsc_in,
-            dsc_out,
-            vec![
-                param(
-                    "mode",
-                    one_of(&["additive", "multiplicative"]),
-                    "Scrambler kind.",
-                )
-                .required(),
-                param("poly", hex(64), "LFSR polynomial.").required(),
-                param("init", hex(64), "Register seed (additive)."),
-                param(
-                    "offset_bits",
-                    int(0, 1_000_000),
-                    "frames: first descrambled bit (the sync word is not scrambled).",
-                )
-                .default_value(0),
-                param(
-                    "output",
-                    one_of(&["serial", "byte-lsb"]),
-                    "Bit-serial sequence, or byte mode (CC1101 PN9).",
-                )
-                .default_value("serial"),
-            ],
-            false,
-        ),
+        super::descramble::descriptor(dsc_in, dsc_out),
         descriptor(
             "bitstuff",
             "symbol",
