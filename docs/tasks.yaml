@@ -20698,7 +20698,7 @@ tasks:
   - id: T-609
     milestone: MAUTO
     title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -20751,6 +20751,7 @@ tasks:
       Observed, not chased: Upstream liquid-dsp 1.8.2 bug: symsync_reset (vendor/liquid-dsp/src/filter/src/symsync.proto.c:297) resets FIRPFB mf but not dmf, so symtrack_cccf_reset is not a full reset. Worked around in psk.rs Symtrack::reset (zero flush + second reset); hk-liquid-sys's coverage note could mention it. | psk_demod is not a burst receiver: acquisition needs a 512-symbol window (1024 for x^8 and RRC OQPSK), so a packet shorter than that (802.15.4 frames, ~2000 symbols max) loses its start. A preamble-driven burst mode marking each burst's first item DISCONTINUITY (§9.2) is follow-up work for SIGNAL-054-class families. | 8PSK/D8PSK acquisition (x^8 line) needs Es/N0 >= ~15 dB; at 13 dB about 3 of 5 seeds mis-acquired in a sweep. D8PSK needs ~15 dB for usable BER anyway, but a symbol-rate refinement stage could lower the threshold. | The ticket's use cases are served at block level only: no recipe wires psk_demod end to end yet (CCSDS also needs T-610 viterbi and T-611 reed_solomon), and hk_pipeline::synth's S1 search does not yet try a linear-modulation hypothesis through psk_demod. | LIQUID_DELAY_SYMBOLS (9) was measured at 3 and 5 samples/symbol, within 0.15 symbol; it is not re-derived for other k.
       Use cases: SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081
       Resources: 205 CPU-s, peak 2.0 GB
+    commit: cb998e72
   - id: T-610
     milestone: MAUTO
     title: 'hk-blocks `viterbi`: convolutional/punctured FEC incl. CCSDS R=1/2 K=7 - rank 3 on the T-554 gap list, 10 families'
