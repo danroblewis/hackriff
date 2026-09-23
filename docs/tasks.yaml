@@ -6603,7 +6603,7 @@ tasks:
     milestone: M5
     title: SIGNAL-032 GNSS forensics needs a broadcast-ephemeris context feed, so it sequences after the
       TLE/pass feed work
-    status: todo
+    status: done
     priority: low
     deps:
     - T-274
@@ -6624,6 +6624,7 @@ tasks:
       Observed, not chased: Not wired: no network FeedFetcher for CDDIS/IGN SP3 or BRDC (the crate-wide seam, same as TLE), no hk-api route, and the GNSS-SDR plugin (T-323) does not yet keep its RINEX nav output for this check. The forensics result also doesn't reach C30 as an Explanation/ExternalEvent yet. | Tolerances (25 m orbit, 60 ns clock) and the GPS-UTC = 18 s constant are unverified against real IGS data; the first real capture should check a BRDC/SP3 pair. | GPS LNAV only: Galileo/BeiDou/GLONASS records are skipped and counted. Precise orbits are sampled only at SP3 epochs (no interpolation), which is enough for 15 min files.
       Use cases: SIGNAL-032
       Resources: 105 CPU-s, peak 1.7 GB
+    commit: "10106691"
   - id: T-325
     milestone: M2-hardening
     title: Bias-tee state is not in provenance, so a bias-tee left on into a passive or DC-shorted port
