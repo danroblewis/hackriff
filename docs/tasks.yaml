@@ -20695,6 +20695,17 @@ tasks:
       catalogue row; the descriptor comes from T-606.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): rebuilt on main after a conflict with T-609 in the hk-blocks module doc table (both rows kept) plus the board; result re-applied. Old tip kept as old/task-t608.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 09:32).
+      Implemented hk-blocks `descramble` (group symbol, bits|frames -> same, ADR-0011 §9.1) as one generic LFSR, parameters now pinned: mode additive/multiplicative, poly (characteristic polynomial in full form: CCSDS 0x1A9, PN9 0x221, BLE 0x91; delay-form 1+x^12+x^17 = 0x20021), init (default all ones additive / zero multiplicative), register fibonacci/galois (galois = the BLE core spec's register, init 0x40|channel), seed_channel (reseed from FrameInfo/ChunkMeta channel for BLE under follow_hops), reset per-frame/free-running, offset_bits (sync word passes through), bit_order serial/byte-lsb (CC1101 PN9). For RESEARCH-012, status() reports a phase- and init-free syndrome score (error_rate = min(r,1-r), quality = |1-2r|, lock) of how well the input obeys the polynomial, so a search can rank candidate whiteners. New tests/descramble.rs (9 tests, all verified RED with the block unregistered): known vectors CCSDS FF 48 0E C0 9A 0D 70 BC + period 255, PN9 serial and CC1101 FF E1 1D 9A (bit-for-bit vs hk-estimate framing::whitening), BLE ch37 8D D2 57 A1 + all 40 channels vs a literal model of the spec register; chunking invariance (bits and frames, both reset rules); synthetic whitened frames behind a sync word, G3RUH-style multiplicative self-sync; identification via status(); parameter rules. ADR-0011 §9.1 row and mauto_catalogue.rs recipes updated to the pinned poly convention. Red check: with the registration removed, binary(descramble) ran 9 tests, 0 passed; registration restored before commit.
+      Tests: just test-crate hk-blocks -> exit 0 (97 passed, 1 skipped)
+      precheck exit 0
+      Commits: de4512c3
+      Observed, not chased: seed_channel ORs the recipe's channel index (FrameInfo/ChunkMeta.channel) into init; it seeds BLE correctly only when follow_hops' channel numbering equals the BLE channel index — a BLE recipe ticket should confirm or add a channel map. | The VDL2 (0x8003) and LoRa (0x171) polys in tests/mauto_catalogue.rs are type-check-only placeholders, not verified against ICAO Annex 10 / gr-lora_sdr; their recipe tickets should pin them with known vectors.
+      Use cases: SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, AWARE-025, AWARE-026, RESEARCH-012
+      Resources: 36 CPU-s, peak 1.2 GB
   - id: T-609
     milestone: MAUTO
     title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
