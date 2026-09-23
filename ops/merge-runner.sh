@@ -182,9 +182,15 @@ process(){
     staged_head=$(git -C "$REPO" rev-parse --verify --quiet MERGE_HEAD || true)
     branch_tip=$(git -C "$REPO" rev-parse --verify --quiet "$branch" || true)
     if [ -z "$staged_head" ] || [ "$staged_head" != "$branch_tip" ]; then
-      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - NOT committing"
-      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST" >> "$NEEDS"
-      notify_coordinator "$ticket ($branch) gated GREEN but its staged merge was lost (MERGE_HEAD ${staged_head:-absent}, branch $branch_tip). NOT committed - main is untouched and needs a person."
+      # Two cases, neither a person's job. (a) The branch moved while its old tip was gated
+      # (a fix pushed mid-gate, 2026-09-22 22:02): the staged merge is of a tip nobody wants
+      # any more - abort it and re-queue the branch, which gates the new tip. (b) MERGE_HEAD is
+      # gone (someone stashed/reset in main): nothing to commit; re-queue. Leaving the staged
+      # merge in place parked the runner on "a merge is already in progress" for 95 minutes.
+      log "MERGE STATE LOST for $branch: MERGE_HEAD=${staged_head:-<none>} branch=${branch_tip:-<none>} - aborting the stale merge and re-queueing the branch"
+      git merge --abort >>"$LOG" 2>&1 || true
+      echo "$branch" >> "$QUEUE"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGE_STATE_LOST (branch moved mid-gate; stale merge aborted, branch re-queued)" >> "$NEEDS"
       return 0
     fi
     # T-764: the commit can now be REFUSED — `.githooks/pre-commit` validates docs/tasks.yaml
