@@ -27,6 +27,7 @@
 //! the result provisional ([`crate::correlate`]).
 
 pub mod gpsjam;
+pub mod tle;
 
 use std::collections::BTreeMap;
 use std::fmt;
