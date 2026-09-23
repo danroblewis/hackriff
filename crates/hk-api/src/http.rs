@@ -49,6 +49,7 @@
 //! | `/api/clusters[/<id>[/promote]]` | GET, POST | token (header only for mutating) | T-202 C18 clusters of unknown emissions — "the same thing I saw before" ([`crate::clusters`]). A *type* above emitters; evidence, never an identity |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
+//! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
 //! | `/`, `/<file>` | GET | none | Static files from the UI build directory (code, no data) |
 //!
 //! Frequencies are Hz; times are Unix seconds (floats), so browsers never handle i64 nanoseconds.
@@ -224,6 +225,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/clusters/{id}/promote"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
+    // T-468 rows pushed to a subscription over an address range of the tile lattice
+    ("GET", "/ws/tiles/rows"),
     // Decoder workbench (ADR-0011 §7): each task appends its rows under its own marker.
     // T-088 recipes and pipelines
     ("GET", "/api/blocks"),
@@ -437,6 +440,9 @@ pub struct ApiState {
     /// state built by hand in a test that is not about caching), so every existing assertion
     /// about what a tile read costs still measures a real read.
     pub tile_cache: Option<Arc<crate::tiles::HotTileCache>>,
+    /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
+    /// Per state for the same reason as `tile_admission`.
+    pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).
@@ -1188,6 +1194,10 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
             control::audit_refused(state, &req.method, &req.path, &who, 403, "cross-origin");
             return respond_error(&mut stream, 403, "cross-origin control request refused");
         }
+    }
+    // T-468: before the `/ws/{stream_id}` bridge, which would otherwise read this as a stream id.
+    if req.path == "/ws/tiles/rows" && req.method == "GET" {
+        return crate::rows::serve(stream, &shared.state, &req.query, &req.headers);
     }
     if let Some(name) = req.path.strip_prefix("/ws/open/")
         && req.method == "GET"
