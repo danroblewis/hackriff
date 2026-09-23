@@ -498,7 +498,7 @@ fn t222_the_multipath_claim_is_reversible_ranked_evidence_and_never_a_delete() {
 
     // And with `relations=all` the copy was reachable all along.
     let all = rows_at(&r, t.echo_hz);
-    let ids: Vec<_> = all.iter().map(|e| row_id_of(e)).collect();
+    let ids: Vec<_> = all.iter().map(row_id_of).collect();
     assert!(
         !ids.is_empty(),
         "[{T222}] the copy is still listed with relations=all"
