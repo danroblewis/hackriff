@@ -6158,6 +6158,90 @@ tasks:
       call as explicitly truncated so downstream never reads t_end as an observed end. Do NOT silently close
       it at the window edge: that manufactures a boundary the radio never produced. Metadata only, M4 stays
       audio-free'
+    result: |
+      T-308: a call still keyed when the buffered window ends is now EXPLICITLY TRUNCATED, and
+      cross-pass continuation is implemented with a stated bound (the silence timeout itself).
+
+      ## The decision
+
+      Both halves of the ticket's either/or, as one rule:
+
+      1. **Truncation (the answer that fires in practice).** `CallRecord` gains `observed_until` — the
+         last instant this receiver was actually watching the call's channel. With `t_end` it separates
+         the two opposite claims `t_end IS NULL` used to carry:
+         - `t_end` set                      -> the end was OBSERVED (T-269's 90 ms silence timeout); duration exact.
+         - `t_end` NULL + `observed_until`  -> TRUNCATED: present at `observed_until`, nothing claimed after; duration a LOWER BOUND.
+         - both NULL                        -> never observed (grant outside the window / unmapped channel).
+         `CallRecord::ending() -> CallEnding`, `end_is_observed()`, `duration_is_lower_bound()` and
+         `observed_duration_ns()` are how a consumer is kept from reading a truncated row as an end.
+         Nothing closes a call at the window edge.
+      2. **Continuation, bounded by arithmetic.** `CONTINUATION_GAP_S == SILENCE_TIMEOUT_S` (90 ms) —
+         deliberately not a second number: a gap shorter than the silence that defines an end could not
+         have hidden one, so crossing it merges exactly what the in-pass splitter already merges. A
+         truncated call is continued (same row, same id, same measured `t_start`) only when the channel
+         is keyed in the next pass's FIRST frame, the gap is 0..=90 ms, and no talkgroup contradicts it.
+         The built-in hunt observes 0.5 s of every 10 s, so its gap is 9.5 s = 105x the bound and
+         continuation correctly never fires there; those calls stay truncated.
+         Error direction: continuing over <=90 ms over-states by at most that gap (and only merges what
+         the 90 ms rule merges anyway); refusing never over-states, it leaves a lower bound; closing at
+         the window edge -- the rejected third option -- would systematically UNDER-state every call
+         longer than the dwell, which is the defect the ticket names.
+
+      ## Changes
+
+      - `hk-model/trunking.rs`: `CallRecord.observed_until`, `CallEnding`, the three accessors,
+        `validate()` refuses observation that stops before the call started or before the end it claims
+        to have measured.
+      - migration `0018_call_observed_until.sql` (renumbered from 0016 on re-land: T-272 took 0016, T-222 0017): the column, a trigger pair for the two constraints
+        `ALTER TABLE ADD COLUMN` cannot carry, and a partial index for the truncated set.
+        `Repository::truncated_calls`; `close_call` advances `observed_until` with the end it records
+        (closing IS an observation of the end), so a row can never say "ended at T, stopped watching
+        before T". `open_calls` doc says it now returns three different things.
+      - `hk-pipeline/chains/trunk.rs`: every followed call carries `observed_until` = end of the last
+        frame measured on its channel; `continues_truncated()` is the pure decision (documented clause
+        by clause); truncated tails are kept per-system per-frequency on `KnownCc` across passes and
+        expire unclaimed; a continuation writes no second `call-start` (one transmission, one
+        beginning) and is counted apart from `cc_calls`; reason pushes are deduplicated so a multi-pass
+        call cannot grow a copy per pass and hit `CALL_REASONS_MAX`.
+      - counters `cc_calls_truncated` / `cc_calls_continued`, both printed in the run summary beside
+        "closed on silence".
+      - docs/07 2.29 (the three-state table, the continuation bound and its error directions, storage,
+        tests); C23 capability card.
+
+      ## Tests (targeted only)
+
+      - `cargo nextest run -p hk-model -E 'test(/trunk|call/)'` — 19 passed, incl. two new:
+        `a_call_says_whether_its_end_was_observed_or_only_unwatched`,
+        `a_truncated_call_persists_its_observation_boundary_and_never_an_end`.
+      - `just test-crate hk-model` — 332 passed.
+      - `cargo nextest run -p hk-pipeline -E 'test(/chains::trunk/)'` — 12 passed, incl. two new:
+        `a_call_is_continued_across_passes_only_over_a_gap_no_end_could_hide_in` (asserts the bound IS
+        the silence timeout and that the 9.5 s duty-cycle gap is refused),
+        `an_unfinished_call_reads_as_truncated_and_never_as_an_observed_end`.
+      - `cargo nextest run -p hk-e2e -E 'test(t269)'` — passed, with new in-scene assertions that every
+        followed call states how far it was watched, a truncated one keeps `t_end` NULL with reason
+        `window-ended`, and an unreachable grant claims no observation boundary.
+      - `cargo nextest run -p hk-e2e -E 'test(/t27[013]|t268|t345|t287/)'` — 5 passed (the neighbouring
+        trunking scenes).
+      - `just precheck hk-model hk-pipeline hk-e2e` — fmt clean, clippy clean.
+
+      ## Surfaced, not chased
+
+      - `hk-api` exposes no `CallRecord` route (trunking.rs computes over `GrantEvent` only), so nothing
+        on the wire or in `docs/api.md` changed and no UI surface shows truncation yet. When calls do get
+        a route, `ending()` must reach the client rather than a bare `t_end`.
+      - The continuation path cannot fire under any shipped recipe (gap 9.5 s vs 90 ms bound), so it is
+        covered by unit tests of the pure decision, not by an e2e scene. An e2e scene would need a
+        `period_s <= window_s + 0.09` trunk-cc spec; worth one if a continuously-tuned dwell is ever
+        configured.
+
+      RE-LAND ON MAIN (2026-09-23)
+      - Migration renumbered 0016 -> 0018 (T-272 took 0016_tdma_slots, T-222's re-land takes 0017).
+      - Merged with T-272 (P25 Phase 2 TDMA slots): follow_grants now measures one channel per
+        frequency and writes one call per slot member, so the truncated-call tails are keyed by
+        (rounded frequency, slot) and taken per member - one slot's call is never continued as
+        another's. The TDMA shared-envelope reason goes through push_reason so a continued row does
+        not repeat it.
   - id: T-309
     milestone: M2-hardening
     title: C18 clustering compares period_s, duty_cycle and burst_length_s unconditionally - a single disagreeing

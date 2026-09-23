@@ -188,6 +188,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0015_retune_verdict.sql"), // T-598 persisted retune verdict
     include_str!("migrations/0016_tdma_slots.sql"), // T-272 C23 P25 Phase 2 TDMA slot count
     include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
+    include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
 ];
 
 /// Schema version this build creates and understands.

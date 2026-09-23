@@ -69,6 +69,28 @@
 //!   consume — and measures where energy on it starts and stops. Each transmission becomes a
 //!   [`CallRecord`] with boundaries that were *measured*, ended by an observed
 //!   [`SILENCE_TIMEOUT_S`], plus `call-start` / `call-end` events linking it to the grant stream.
+//!
+//! # Where the WINDOW ends, not the call (T-308)
+//!
+//! A transmission still keyed when the buffered window runs out has no observed end, and the one
+//! thing this module must not do is write the window's edge into `t_end`: that manufactures a
+//! boundary the radio never produced, and does it systematically — every call longer than the
+//! dwell would read as ending exactly when the receiver stopped looking.
+//!
+//! So such a call is written **open and explicitly truncated**: `t_end` stays NULL, and
+//! `observed_until` carries the last instant this channel was actually watched. Those two columns
+//! are what separate "still running" from "we stopped looking" (docs/07 §2.29): the row's
+//! [`hk_model::CallEnding`] is `Truncated`, its duration announces itself as a **lower bound**,
+//! and `cc_calls_truncated` counts how often the schedule — not the radio — decided where
+//! measurement stopped.
+//!
+//! A later pass may **continue** such a call rather than starting a second row, but only across a
+//! gap no end could have hidden in: [`CONTINUATION_GAP_S`], which *is* [`SILENCE_TIMEOUT_S`]
+//! rather than a second number, so one rule applies whether or not the receiver was looking. On
+//! the built-in duty cycle (0.5 s of every 10 s) the gap is 9.5 s — 105× the bound — so
+//! continuation does not fire and the truncated row stands, which is the honest answer: 9.5 s
+//! unwatched can hold a complete end, a new grant and a new call. [`continues_truncated`] is that
+//! decision, pure and stated clause by clause.
 //! - **Outside it:** the grant becomes an [`GrantKind::OutsideWindow`] row carrying the frequency
 //!   it resolved to and how far beyond the window that is, and a `CallRecord` whose `t_end` is
 //!   NULL and whose reason says why. **It is never dropped.** A dropped grant is indistinguishable
@@ -230,6 +252,35 @@ const LATE_ENTRY: &str = "late-entry";
 /// it was. Recording the reason is what keeps a two-slot call list from reading as two
 /// independently timed measurements.
 const TDMA_SHARED_ENVELOPE: &str = "tdma-shared-envelope";
+/// Machine reason: this call is the continuation of a truncated one from an earlier pass, joined
+/// across an unobserved gap short enough that no end could have happened in it
+/// ([`CONTINUATION_GAP_S`], T-308).
+const CONTINUED: &str = "continued-across-passes";
+
+/// How long an **unobserved** gap may be and still be crossed by one call, s (T-308).
+///
+/// It is [`SILENCE_TIMEOUT_S`] itself, and deliberately not a second number: inside a pass, a call
+/// ends when the channel is silent for 90 ms, so a gap *shorter* than that could not have
+/// contained an end even if it had been watched. Crossing it merges exactly what the in-pass
+/// splitter already merges — one rule, applied whether or not the receiver happened to be looking.
+///
+/// **Arithmetic, and the error it leaves.** The hunt observes `window_s` out of every `period_s`
+/// of stream time (the built-in chain uses 0.5 s in 10 s), so the ordinary gap between passes is
+/// `period_s − window_s ≈ 9.5 s` — **105×** this bound. Continuation therefore does **not** fire
+/// on a duty-cycled hunt, and must not: a P25 transmission is seconds long and its LLDU cadence is
+/// 180 ms, so 9.5 s unwatched can hold a complete end, a new grant and a new call, and joining
+/// across it would fuse distinct calls into one. It fires only where passes nearly abut (a
+/// continuously-tuned dwell, `period_s ≤ window_s + 0.09`), which is the one case where continuity
+/// is a measurement rather than a guess.
+///
+/// **Error direction, both ways.** Continuing over a gap ≤ 90 ms can over-state a call by at most
+/// that gap, and only by merging two keyings that the same 90 ms rule would have merged anyway.
+/// Refusing to continue never over-states: the earlier call stays **truncated** (its duration a
+/// lower bound, its `t_end` still NULL) and the later one starts as late entry. What is never done
+/// is the third option — closing the call at the window's edge — because that manufactures a
+/// boundary the radio never produced and would systematically under-state every call longer than
+/// the dwell.
+const CONTINUATION_GAP_S: f64 = SILENCE_TIMEOUT_S;
 
 /// A control channel this chain has already written, and the band plan decoded off it.
 ///
@@ -240,6 +291,14 @@ const TDMA_SHARED_ENVELOPE: &str = "tdma-shared-envelope";
 struct KnownCc {
     system: TrunkSystem,
     map: ChannelMap,
+    /// Calls left **truncated** by the previous pass, by rounded voice frequency and TDMA slot
+    /// (T-308; the slot since T-272, so one slot's call is never continued as another's): the
+    /// channel was still keyed when the buffered window ran out, so no end was observed. A later
+    /// pass may continue one — but only across a gap no longer than [`CONTINUATION_GAP_S`], and
+    /// the ordinary duty cycle's gap is 105× that, so ordinarily these simply expire unclaimed and
+    /// their rows stay truncated. One entry per followed channel slot, bounded by `max_follows`
+    /// channels times the plan's slot count.
+    tails: HashMap<(i64, Option<u8>), CallRecord>,
 }
 
 /// The `grant_event` a decoded grant produces, resolved through `map` as of `t`.
@@ -766,6 +825,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         let k = known.entry(key).or_insert_with(|| KnownCc {
             system: TrunkSystem::new(cc.protocol(), Some(cc.cc_freq_hz()), t_end),
             map: ChannelMap::new(),
+            tails: HashMap::new(),
         });
         k.system.last_seen = t_end;
         k.system.updated_at = t_end;
@@ -975,9 +1035,14 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 );
             }
         } else {
-            follow_grants(
-                shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id,
-            );
+            // The truncated-call tails live on the system, across passes: continuing a call is a
+            // statement about one channel of one system, and the borrow ends with this call.
+            let tails = known.get_mut(&key).map(|k| &mut k.tails);
+            if let Some(tails) = tails {
+                follow_grants(
+                    shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id, tails,
+                );
+            }
         }
     }
 }
@@ -1076,6 +1141,59 @@ fn split_keyings(
     out
 }
 
+/// Appends a machine reason once. A call that spans passes is written more than once, and a
+/// reason list that grew a copy per pass would hit [`hk_model::CALL_REASONS_MAX`] and stop
+/// recording anything at all.
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_owned());
+    }
+}
+
+/// Whether a call an earlier pass left **truncated** is the same transmission as one already keyed
+/// in this pass's first frame (T-308).
+///
+/// Pure, so the bound can be tested without a pipeline — and it is a *decision about evidence*,
+/// which is why it is one function rather than a condition spread through the follower.
+///
+/// Every clause is a refusal to assume:
+///
+/// 1. **`first_frame`** — the channel was already keyed when observation resumed. A run that
+///    starts later means the receiver *watched* the channel go from silent to keyed, and that
+///    start is a measurement; joining it to an older call would overwrite it.
+/// 2. **The earlier call is truncated, not ended.** A call with an observed `t_end` ended; nothing
+///    continues it. A call with no `observed_until` was never watched at all (outside the window),
+///    so there is no boundary to continue *from*.
+/// 3. **The unobserved gap is `0 ≤ gap ≤` [`CONTINUATION_GAP_S`]** — short enough that no end
+///    could have occurred in it under the same 90 ms silence rule the in-pass splitter uses. On
+///    the built-in 0.5 s-in-10 s duty cycle the gap is 9.5 s and this clause refuses, which is the
+///    intended answer: the call stays truncated and the new one starts fresh.
+/// 4. **Nothing contradicts the identity.** Where both rows name a talkgroup they must name the
+///    same one; an absent talkgroup is not evidence of difference, so it neither joins nor splits.
+///
+/// Frequency and slot are not re-checked here because the caller keys the tails by rounded
+/// frequency and TDMA slot: only the same channel slot's tail is ever offered.
+fn continues_truncated(
+    prev: &CallRecord,
+    g: &GrantEvent,
+    start: Timestamp,
+    first_frame: bool,
+) -> bool {
+    if !first_frame || prev.t_end.is_some() {
+        return false;
+    }
+    let Some(observed_until) = prev.observed_until else {
+        return false;
+    };
+    let gap_ns = start.as_unix_nanos() - observed_until.as_unix_nanos();
+    let within = (0..=(CONTINUATION_GAP_S * 1e9) as i64).contains(&gap_ns);
+    let same_talkgroup = match (prev.talkgroup.as_deref(), g.talkgroup.as_deref()) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    within && same_talkgroup
+}
+
 /// The `outside-window` row a grant beyond the dwell gets.
 ///
 /// Split out and pure so the refusal can be tested without a pipeline. It keeps the frequency the
@@ -1124,6 +1242,7 @@ fn follow_grants(
     fco: &[f64],
     events: &[GrantEvent],
     system: TrunkSystemId,
+    tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
 ) {
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
@@ -1160,7 +1279,9 @@ fn follow_grants(
     let outside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| !reachable(e)).collect();
 
     // Everything written in one repository section at the end, so no lock is held across the DSP.
-    let mut writes: Vec<(CallRecord, Vec<GrantEvent>)> = Vec::new();
+    // `bool` = this row continues a call an earlier pass left truncated, so it is an UPDATE to an
+    // existing row rather than a new call (T-308) and is counted as such.
+    let mut writes: Vec<(CallRecord, Vec<GrantEvent>, bool)> = Vec::new();
 
     // ---- C23's span limit. A grant beyond the window the radio is holding is a ROW, not a
     // silence.
@@ -1172,7 +1293,7 @@ fn follow_grants(
         let mut call = CallRecord::from_grant(&ev, g.kind == GrantKind::GrantUpdate);
         call.reasons.push(OUTSIDE_WINDOW.to_owned());
         ev.call = Some(call.id);
-        writes.push((call, vec![ev]));
+        writes.push((call, vec![ev], false));
         inc(&c.cc_grants_outside_window);
     }
 
@@ -1253,9 +1374,24 @@ fn follow_grants(
                 let src = ch.source_index + (frame * ch.frame_len) as f64 * ch.source_per_output;
                 t_start.saturating_add_nanos(((src - base as f64).max(0.0) * 1e9 / fs) as i64)
             };
-            for (g, (first, last, ended)) in members
+            // Where observation of THIS channel stopped: the end of the last frame measured. It
+            // is a fact about the receiver's schedule, not about the call, and it is what lets a
+            // call with no observed end say "truncated here" instead of nothing at all (T-308).
+            let observed_until = at(ch.powers.len());
+            let fkey = f.round() as i64;
+            // Any truncated call each slot of this channel left behind last pass, keyed by
+            // frequency AND slot: two talkgroups on one TDMA carrier are two calls, and one must
+            // never be continued as the other (T-272). Taken out unconditionally, so a tail that
+            // cannot be continued expires here rather than accumulating.
+            let member_tails: Vec<Option<CallRecord>> = members
                 .iter()
-                .flat_map(|g| runs.iter().copied().map(move |r| (g, r)))
+                .map(|g| tails.remove(&(fkey, g.slot)))
+                .collect();
+            let run_count = runs.len();
+            for (m, g, (i, (first, last, ended))) in members
+                .iter()
+                .enumerate()
+                .flat_map(|(m, g)| runs.iter().copied().enumerate().map(move |r| (m, g, r)))
             {
                 let (start, end) = (at(first), ended.then(|| at(last + 1)));
                 // Active in the window's very first frame means the transmission began before this
@@ -1263,13 +1399,53 @@ fn follow_grants(
                 // rather than clear, and `from_grant` carries the grant's state verbatim — nothing
                 // here reads an encryption bit, so nothing is claimed (T-266, T-270).
                 let late = first == 0 || g.kind == GrantKind::GrantUpdate;
-                let mut call = CallRecord::from_grant(g, late);
-                call.t_start = start;
+                // ---- Cross-pass continuation (T-308). Only the run already keyed in this
+                // window's FIRST frame can be the same transmission as one truncated last pass,
+                // and only across a gap too short to have hidden an end — see
+                // `CONTINUATION_GAP_S`. Everything else starts a new call, and the truncated row
+                // it leaves behind stays truncated rather than being closed at a window edge.
+                let continued = (i == 0)
+                    .then_some(member_tails[m].as_ref())
+                    .flatten()
+                    .filter(|prev| continues_truncated(prev, g, start, first == 0))
+                    .cloned();
+                let is_continuation = continued.is_some();
+                let mut call = match continued {
+                    // The SAME row: same id, same measured `t_start`, same late-entry state. Its
+                    // duration grows by what this pass observed instead of a second row appearing
+                    // for a transmission that never stopped.
+                    Some(mut prev) => {
+                        // It is no longer truncated: the next thing observed on this channel was
+                        // the same transmission, so the reason that said "we stopped looking"
+                        // goes, and the one that says why this row spans a gap arrives.
+                        prev.reasons.retain(|r| r != WINDOW_ENDED);
+                        push_reason(&mut prev.reasons, CONTINUED);
+                        // Later evidence may sharpen encryption; it never walks back towards
+                        // clear (`Encryption::refine`, and the repository refuses it again).
+                        prev.refine_encryption(g.encryption);
+                        prev
+                    }
+                    None => {
+                        let mut call = CallRecord::from_grant(g, late);
+                        call.t_start = start;
+                        call
+                    }
+                };
                 call.t_end = end;
-                call.reasons
-                    .push(if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED }.to_owned());
-                if first == 0 {
-                    call.reasons.push(LATE_ENTRY.to_owned());
+                // What the receiver watched, for every followed call: with `t_end` it is what
+                // separates an observed end from "we stopped looking" (docs/07 §2.29).
+                call.observed_until = Some(observed_until);
+                push_reason(
+                    &mut call.reasons,
+                    if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED },
+                );
+                if first == 0 && !is_continuation {
+                    push_reason(&mut call.reasons, LATE_ENTRY);
+                }
+                // The last run of a still-keyed channel is what the next pass may continue. Only
+                // the last one can be unended; the others were closed by observed silence.
+                if !ended && i + 1 == run_count {
+                    tails.insert((fkey, g.slot), call.clone());
                 }
                 // A TDMA call's boundaries are the SHARED CARRIER's, not that slot's. Both slots
                 // of a P25 Phase 2 channel key the same carrier, and nothing here demodulates the
@@ -1279,7 +1455,7 @@ fn follow_grants(
                 // (T-272). Silence about it would present per-slot timing this build never
                 // measured, the same defect as implying resolution nobody captured.
                 if call.slot.is_some() {
-                    call.reasons.push(TDMA_SHARED_ENVELOPE.to_owned());
+                    push_reason(&mut call.reasons, TDMA_SHARED_ENVELOPE);
                 }
                 // ---- The encryption check, at the point a voice path would be opened (C23
                 // §Methods "encryption check before the vocoder", T-270).
@@ -1294,7 +1470,7 @@ fn follow_grants(
                 let voice_reason = match &voice {
                     Ok(_) => "permitted",
                     Err(why) => {
-                        call.reasons.push(why.reason().to_owned());
+                        push_reason(&mut call.reasons, why.reason());
                         inc(&c.cc_voice_refused);
                         why.reason()
                     }
@@ -1302,6 +1478,11 @@ fn follow_grants(
                 if call.encryption.is_encrypted() {
                     inc(&c.cc_calls_encrypted);
                 }
+                // A continuation is the SAME call, so it gets no second `call-start`: the start
+                // it already has was measured, and announcing another would put two beginnings in
+                // the grant stream for one transmission. The row's `continued-across-passes`
+                // reason is where the join is recorded.
+                let mut evs: Vec<GrantEvent> = Vec::new();
                 let mut open = GrantEvent::new(system, GrantKind::CallStart, start);
                 open.call = Some(call.id);
                 open.talkgroup = g.talkgroup.clone();
@@ -1327,7 +1508,10 @@ fn follow_grants(
                     "margin_db": OCCUPIED_MARGIN_DB,
                     "reference_raster_channel": ref_k,
                 });
-                let mut evs = vec![open];
+                open.detail["continued_across_passes"] = json!(is_continuation);
+                if !is_continuation {
+                    evs.push(open);
+                }
                 if let Some(t_end) = end {
                     let mut close = GrantEvent::new(system, GrantKind::CallEnd, t_end);
                     close.call = Some(call.id);
@@ -1341,7 +1525,7 @@ fn follow_grants(
                     });
                     evs.push(close);
                 }
-                writes.push((call, evs));
+                writes.push((call, evs, is_continuation));
             }
         }
     }
@@ -1362,15 +1546,24 @@ fn follow_grants(
         );
     }
     let mut repo = shared.repo();
-    for (call, evs) in &writes {
+    for (call, evs, continued) in &writes {
         if let Err(e) = repo.put_call(call) {
             inc(&c.errors);
             eprintln!("hk-pipeline: trunk-cc call: {e}");
             continue;
         }
-        inc(&c.cc_calls);
+        if *continued {
+            // Not a new call: the same row, grown by what this pass observed.
+            inc(&c.cc_calls_continued);
+        } else {
+            inc(&c.cc_calls);
+        }
         if call.t_end.is_some() {
             inc(&c.cc_calls_closed);
+        } else if call.observed_until.is_some() {
+            // Watched, and still keyed when the window ran out. Written open and TRUNCATED, never
+            // closed at the window's edge — the boundary the radio never produced.
+            inc(&c.cc_calls_truncated);
         }
         for ev in evs {
             if let Err(e) = repo.append_grant(ev) {
@@ -1811,6 +2004,128 @@ mod tests {
             2.0 * SILENCE_TIMEOUT_S < pass_window_s,
             "a {pass_window_s} s pass must fit a keying and the silence that closes it"
         );
+    }
+
+    /// T-308: the bound on continuing a call across passes is the silence timeout **itself**, and
+    /// the duty cycle the built-in hunt runs at is far outside it — so a long transmission is
+    /// recorded as truncated rather than joined across nine unwatched seconds, and never closed at
+    /// the window's edge.
+    #[test]
+    fn a_call_is_continued_across_passes_only_over_a_gap_no_end_could_hide_in() {
+        // Not a second threshold: one rule, applied whether or not the receiver was looking.
+        assert_eq!(
+            CONTINUATION_GAP_S, SILENCE_TIMEOUT_S,
+            "the gap a call may be joined across is the same silence that would have ended it"
+        );
+        // The built-in `trunk-cc-hunt` spec: 0.5 s of every 10 s, so 9.5 s is unwatched.
+        let (window_s, period_s) = (0.5_f64, 10.0_f64);
+        let duty_gap_s = period_s - window_s;
+        assert!(
+            duty_gap_s > 100.0 * CONTINUATION_GAP_S,
+            "the ordinary gap is {duty_gap_s} s, {:.0}x the bound: continuation must NOT fire on              a duty-cycled hunt, because that gap can hold a whole end and a new call",
+            duty_gap_s / CONTINUATION_GAP_S
+        );
+
+        let system = TrunkSystemId::new();
+        let ns = |s: f64| Timestamp::from_unix_nanos((s * 1e9) as i64);
+        let mut g = GrantEvent::new(system, GrantKind::Grant, ns(0.0));
+        g.talkgroup = Some("4242".into());
+        g.f_hz = Some(851.075e6);
+        // What the previous pass left: watched to 1.0 s, still keyed, no end observed.
+        let mut prev = CallRecord::from_grant(&g, false);
+        prev.t_start = ns(0.6);
+        prev.observed_until = Some(ns(1.0));
+        assert!(prev.duration_is_lower_bound(), "truncated, not ended");
+
+        // Gaps inside the bound join; the duty cycle's gap does not.
+        for gap in [0.0, CONTINUATION_GAP_S / 2.0, CONTINUATION_GAP_S] {
+            assert!(
+                continues_truncated(&prev, &g, ns(1.0 + gap), true),
+                "a {gap} s unobserved gap cannot have hidden an end"
+            );
+        }
+        for gap in [CONTINUATION_GAP_S * 1.5, duty_gap_s] {
+            assert!(
+                !continues_truncated(&prev, &g, ns(1.0 + gap), true),
+                "{gap} s unwatched can hold an end, a new grant and a new call"
+            );
+        }
+
+        // A start the receiver actually WATCHED happen is a measurement, not a continuation.
+        assert!(
+            !continues_truncated(&prev, &g, ns(1.05), false),
+            "the channel was seen going from silent to keyed; that start stands"
+        );
+        // A call whose end was observed is over, and one never watched has no boundary to
+        // continue from.
+        let mut ended = prev.clone();
+        ended.t_end = Some(ns(1.0));
+        assert!(!continues_truncated(&ended, &g, ns(1.05), true));
+        let mut never_watched = prev.clone();
+        never_watched.observed_until = None;
+        assert!(!continues_truncated(&never_watched, &g, ns(1.05), true));
+        // Time never runs backwards into a continuation either.
+        assert!(!continues_truncated(&prev, &g, ns(0.95), true));
+
+        // Where both name a talkgroup they must agree; an absent one is not evidence of
+        // difference, so it neither joins nor splits.
+        let mut other = g.clone();
+        other.talkgroup = Some("7".into());
+        assert!(!continues_truncated(&prev, &other, ns(1.05), true));
+        other.talkgroup = None;
+        assert!(continues_truncated(&prev, &other, ns(1.05), true));
+    }
+
+    /// T-308: the three answers a followed call can give about its end, and the one it may never
+    /// give — an end at the window's edge that nothing measured.
+    #[test]
+    fn an_unfinished_call_reads_as_truncated_and_never_as_an_observed_end() {
+        let system = TrunkSystemId::new();
+        let ns = |s: f64| Timestamp::from_unix_nanos((s * 1e9) as i64);
+        let mut g = GrantEvent::new(system, GrantKind::Grant, ns(0.0));
+        g.f_hz = Some(851.075e6);
+
+        // Still keyed when the buffered window (1.0 s) ran out.
+        let mut open = CallRecord::from_grant(&g, false);
+        open.t_start = ns(0.6);
+        open.observed_until = Some(ns(1.0));
+        push_reason(&mut open.reasons, WINDOW_ENDED);
+        open.validate().expect("a writable row");
+        assert_eq!(
+            open.ending(),
+            hk_model::CallEnding::Truncated {
+                observed_until: ns(1.0)
+            }
+        );
+        assert!(!open.end_is_observed());
+        assert_eq!(open.duration_ns(), None, "no end was measured");
+        assert_eq!(
+            open.observed_duration_ns(),
+            Some(400_000_000),
+            "0.4 s is how long it was WATCHED; the call may have run for minutes"
+        );
+
+        // The same call closed by an observed silence is a different claim entirely.
+        let mut closed = open.clone();
+        closed.t_end = Some(ns(0.9));
+        closed.reasons.retain(|r| r != WINDOW_ENDED);
+        push_reason(&mut closed.reasons, SILENCE_TIMEOUT);
+        closed.validate().expect("a writable row");
+        assert_eq!(closed.ending(), hk_model::CallEnding::Observed(ns(0.9)));
+        assert!(closed.end_is_observed() && !closed.duration_is_lower_bound());
+
+        // And a reason list cannot grow a copy per pass: a call written five times still says
+        // each thing once, so it never hits CALL_REASONS_MAX and starts dropping reasons.
+        let mut c = open.clone();
+        for _ in 0..5 {
+            push_reason(&mut c.reasons, WINDOW_ENDED);
+            push_reason(&mut c.reasons, CONTINUED);
+        }
+        assert_eq!(
+            c.reasons,
+            vec![WINDOW_ENDED.to_owned(), CONTINUED.to_owned()]
+        );
+        assert!(c.reasons.len() < hk_model::CALL_REASONS_MAX);
     }
 
     /// The frame walk: a transmission ends only when the silence after it was actually observed,
