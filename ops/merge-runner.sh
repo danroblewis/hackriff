@@ -52,8 +52,13 @@ LANDED=$S/landed.jsonl
 # trial lived only in one process's environment). The process environment still wins - a
 # deliberate one-off override on the command line is not silently replaced by the store.
 if [ -f "$S/env" ]; then
-  while IFS='=' read -r k v; do
+  # `|| [ -n "$k" ]` keeps a last line without a newline; CR and surrounding spaces are stripped
+  # so a hand-edited store reads the same here as in ops/work-runner.py (review, 2026-09-23).
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k//$'\r'/}"; k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    v="${v//$'\r'/}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
     case "$k" in ''|'#'*) continue ;; esac
+    [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
     [ -z "${!k+x}" ] && export "$k=$v"
   done < "$S/env"
 fi
@@ -78,6 +83,9 @@ alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 
 # on names alone never released on a fix pushed to a queued branch - at 04:06 on 2026-09-23 the
 # fixed branch sat behind "waiting for the queue to change" until a person deleted the marker.
 batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse --short "$b" 2>/dev/null)"; done | sort | tr '\n' ' '; }
+# One hold.jsonl line, JSON-encoded by Python so a `\`, a tab or a quote in `why` cannot produce a
+# record `hkpy.flow` would silently drop (review, 2026-09-23). event: expired | ended-by-queue.
+hold_event(){ python3 -c 'import json,sys,time; print(json.dumps({"ts": int(time.time()), "event": sys.argv[1], "why": sys.argv[2]}))' "$1" "$2" >> "$S/hold.jsonl" 2>/dev/null || true; }
 notify_coordinator(){
   alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
   tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
@@ -748,13 +756,22 @@ while true; do
   # moment a branch is queued - a hold means "prefer idle", never "refuse work". Every end is
   # logged and the early end alerts, so a hold that cost anything is visible within a minute.
   if [ -f "$S/hold" ]; then
-    hold_until=$(sed -n 's/^until=//p' "$S/hold" | head -1); hold_why=$(sed -n 's/^why=//p' "$S/hold" | head -1)
-    if [ -z "$hold_until" ] || [ "$(date +%s)" -ge "${hold_until:-0}" ]; then
+    hold_until=$(sed -n 's/^until=//p' "$S/hold" | head -1); hold_since=$(sed -n 's/^since=//p' "$S/hold" | head -1)
+    hold_why=$(sed -n 's/^why=//p' "$S/hold" | head -1); now_s=$(date +%s)
+    # The READER enforces the bound too (review, 2026-09-23): a hand-written marker with a
+    # non-numeric or far-off `until=` is capped at 30 minutes from `since=` (or from now), so
+    # "bounded, auto-expiring" is a property of the runner and not only of `just hold`.
+    case "$hold_until" in ''|*[!0-9]*) hold_until=0 ;; esac
+    case "$hold_since" in ''|*[!0-9]*) hold_since=$now_s ;; esac
+    [ "$hold_until" -gt $(( hold_since + 1800 )) ] && { hold_until=$(( hold_since + 1800 )); log "HOLD: marker asked for more than 30 min - capped at $(date -r "$hold_until" '+%H:%M' 2>/dev/null || echo "$hold_until")"; }
+    if [ "$now_s" -ge "$hold_until" ]; then
       rm -f "$S/hold"; log "HOLD expired ($hold_why) - resuming"
-      printf '{"ts":%s,"event":"expired","why":%s}\n' "$(date +%s)" "\"${hold_why//\"/\\\"}\"" >> "$S/hold.jsonl"
+      hold_event expired "$hold_why"
+      # Invariant 6's second alert: the hold ran out with work already waiting behind it.
+      [ -n "$queued" ] && alert amber "hold reached its expiry with work waiting" "$hold_why - expired with queued: $(printf '%s' "$queued" | tr '\n' ' ' | cut -c1-80)" --key "hold-expired-queued"
     elif [ -n "$queued" ]; then
-      rm -f "$S/hold"; log "HOLD ended at the first queued branch ($hold_why): $(echo $queued | cut -c1-80)"
-      printf '{"ts":%s,"event":"ended-by-queue","why":%s}\n' "$(date +%s)" "\"${hold_why//\"/\\\"}\"" >> "$S/hold.jsonl"
+      rm -f "$S/hold"; log "HOLD ended at the first queued branch ($hold_why): $(printf '%s' "$queued" | tr '\n' ' ' | cut -c1-80)"
+      hold_event ended-by-queue "$hold_why"
       alert amber "hold ended by queued work" "$hold_why - a branch arrived; the runner resumed. Blocked minutes are charged to the open experiment." --key "hold-ended"
     else
       [ -z "${HOLD_SAID:-}" ] && { log "HOLD: merge queue held until $(date -r "$hold_until" '+%H:%M' 2>/dev/null || echo "$hold_until") - $hold_why"; HOLD_SAID=1; }

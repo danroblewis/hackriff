@@ -30,6 +30,29 @@ def test_set_refuses_cap_zero_and_unknown_keys(tmp_path):
     assert knobs.read_store(ops) == {}
 
 
+def test_set_refuses_values_the_readers_cannot_parse(tmp_path):
+    """A typo in the store would kill the work runner at its next start (review, 2026-09-23)."""
+    ops = str(tmp_path)
+    assert knobs.cmd_set(ops, ["BULK_MAX=abc"], why="", who="t") == 2
+    assert knobs.cmd_set(ops, ["WORK_CAP=-1"], why="", who="t") == 2
+    assert knobs.cmd_set(ops, ["BULK_MAX=0"], why="", who="t") == 2
+    assert knobs.cmd_set(ops, ["WORKER_DRAIN_MAX=0", "WORK_CAP=1"], why="", who="t") == 0
+    assert knobs.read_store(ops) == {"WORKER_DRAIN_MAX": "0", "WORK_CAP": "1"}
+
+
+def test_an_expired_marker_left_by_a_dead_runner_does_not_block_the_next_hold(tmp_path):
+    ops = str(tmp_path)
+    (tmp_path / "hold").write_text("until=100\nsince=40\nowner=p\nwhy=old\n")
+    assert knobs.cmd_hold(ops, 10, "new", "p", now=10_000.0, repo=str(tmp_path), do_alert=False) == 0
+    assert knobs.read_hold(ops)["why"] == "new"
+
+
+def test_why_is_flattened_to_one_line(tmp_path):
+    ops = str(tmp_path)
+    assert knobs.cmd_hold(ops, 5, "line one\n  line two\ttabbed", "p", now=0.0, repo=str(tmp_path), do_alert=False) == 0
+    assert knobs.read_hold(ops)["why"] == "line one line two tabbed"
+
+
 def test_unset_and_reset(tmp_path):
     ops = str(tmp_path)
     knobs.cmd_set(ops, ["WORK_CAP=6", "BULK_MAX=10"], why="", who="t")

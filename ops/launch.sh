@@ -18,10 +18,20 @@ RF="$REPO/.claude/roles/$ROLE.md"
 [ -f "$RF" ] || { echo "no role file: $RF"; exit 1; }
 
 # The knob store (`just knobs`): a role session inherits it so anything it starts by hand reads the
-# same values the runners do. Process environment wins over the store, as in the runners.
+# same values the runners do. It is PREFIXED ONTO THE TYPED COMMAND, like HACKRIFF_ROLE below -
+# exporting it here reaches nothing: a tmux pane's environment comes from the tmux SERVER, not from
+# the client that ran new-session (reviewed and measured 2026-09-23). A pre-set process variable
+# is left out of the prefix, so the environment still wins over the store.
 S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+KNOBPREFIX=""
 if [ -f "$S/env" ]; then
-  while IFS='=' read -r k v; do case "$k" in ''|'#'*) continue ;; esac; [ -z "${!k+x}" ] && export "$k=$v"; done < "$S/env"
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k//$'\r'/}"; k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    v="${v//$'\r'/}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    case "$k" in ''|'#'*) continue ;; esac
+    [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+    [ -z "${!k+x}" ] && KNOBPREFIX="$KNOBPREFIX$k=$(printf '%q' "$v") "
+  done < "$S/env"
 fi
 
 case "$ROLE" in
@@ -64,7 +74,7 @@ fi
 # command line, and is readable wherever this runs on Linux.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 -c "$REPO"
 tmux send-keys -t "$SESSION" -l \
-  "HACKRIFF_ROLE=$ROLE $CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
+  "HACKRIFF_ROLE=$ROLE $KNOBPREFIX$CPUWRAP claude --model $MODEL --effort $EFFORT --dangerously-skip-permissions --append-system-prompt-file '$RF' $EXTRA"
 tmux send-keys -t "$SESSION" Enter
 echo "launched '$ROLE' in tmux session '$SESSION' (model=$MODEL effort=$EFFORT)"
 echo "  role prompt: $RF  (+ root CLAUDE.md invariants)"

@@ -123,11 +123,20 @@ def metrics_over(ops: str, t0: datetime, t1: datetime) -> dict:
 def blocked_minutes(ops: str, t0: datetime, t1: datetime) -> float:
     """Minutes the pipeline was held (hold.jsonl) or dispatch floored (env.jsonl WORK_CAP=1) in the window."""
     total = 0.0
-    for r in flow._jsonl(os.path.join(ops, "hold.jsonl")):
+    # A hold is charged from its start to the FIRST end event after it - `release` (just hold
+    # --release), `expired` or `ended-by-queue` (the runner) - and only to `until` when no end was
+    # recorded. Charging every hold its full window billed a 30-minute hold the runner ended in
+    # 40 seconds as 30 blocked minutes (review, 2026-09-23), which invariant 7 turns into a verdict.
+    holds = flow._jsonl(os.path.join(ops, "hold.jsonl"))
+    for i, r in enumerate(holds):
         if r.get("event") != "hold":
             continue
         a = datetime.fromtimestamp(float(r.get("ts", 0)))
         b = datetime.fromtimestamp(float(r.get("until", 0)))
+        for later in holds[i + 1:]:
+            if later.get("event") in ("release", "expired", "ended-by-queue"):
+                b = min(b, datetime.fromtimestamp(float(later.get("ts", 0))))
+                break
         total += flow._overlap_minutes(a, b, t0, t1)
     floor_since: datetime | None = None
     for r in flow._jsonl(os.path.join(ops, "env.jsonl")):

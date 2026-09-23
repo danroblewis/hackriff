@@ -72,6 +72,21 @@ def test_close_refuses_keep_when_a_guard_is_broken_and_records_otherwise(tmp_pat
     assert "E-1 closed" in (tmp_path / "docs" / "ops-experiments.md").read_text()
 
 
+def test_blocked_minutes_charges_a_hold_only_until_its_end_event(tmp_path):
+    """A 30-minute hold the runner ends 40 s later costs 40 s, not 30 min (review, 2026-09-23)."""
+    ops, _ = _ops(tmp_path)
+    t = lambda h, m=0, s=0: datetime(2026, 9, 23, h, m, s).timestamp()  # noqa: E731
+    (tmp_path / "hold.jsonl").write_text(
+        json.dumps({"ts": t(10), "event": "hold", "minutes": 30, "until": t(10, 30), "why": "a"}) + "\n"
+        + json.dumps({"ts": t(10, 0, 40), "event": "ended-by-queue", "why": "a"}) + "\n"
+        + json.dumps({"ts": t(13), "event": "hold", "minutes": 20, "until": t(13, 20), "why": "b"}) + "\n"
+        + json.dumps({"ts": t(13, 5), "event": "release", "held_minutes": 5.0, "why": "b"}) + "\n"
+        + json.dumps({"ts": t(16), "event": "hold", "minutes": 10, "until": t(16, 10), "why": "c"}) + "\n",
+        encoding="utf-8")
+    got = experiment.blocked_minutes(ops, datetime(2026, 9, 23, 9), datetime(2026, 9, 23, 17))
+    assert got == round(40 / 60 + 5 + 10, 1)          # ended by queue, released, never ended
+
+
 def test_blocked_minutes_counts_cap_floor_periods(tmp_path):
     ops, _ = _ops(tmp_path)
     t = lambda h, m=0: datetime(2026, 9, 23, h, m).timestamp()  # noqa: E731

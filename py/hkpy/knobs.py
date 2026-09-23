@@ -47,8 +47,12 @@ KNOBS: dict[str, tuple[str, str, str]] = {
     "MAX_ATTEMPTS": ("2", "merge-runner", "gate attempts per branch tip"),
     "HK_E2E_CONCURRENCY": ("3", "gate (ui/e2e/run.mjs)", "browser-spec lanes"),
     "NEXTEST_TEST_THREADS": ("profile default 8", "gate (nextest)", "test threads for the workspace suite"),
-    "CARGO_BUILD_JOBS": ("all cores", "gate / workers", "parallel rustc jobs"),
+    "CARGO_BUILD_JOBS": ("6 (gate.py sets it)", "gate only", "parallel rustc jobs for the gate; workers keep their own bound (CARGO_ENV in work-runner.py)"),
 }
+
+#: Every knob is a non-negative integer; these must be at least 1 (WORK_CAP=1 is invariant 3's floor).
+_AT_LEAST_ONE = {"WORK_CAP", "WORK_PER_TICK", "WORK_WORKER_CORES", "WORK_GROUP_CAP", "WORK_MAX_MINUTES",
+                 "BULK_MAX", "GATE_TIMEOUT", "MAX_ATTEMPTS", "HK_E2E_CONCURRENCY", "NEXTEST_TEST_THREADS", "CARGO_BUILD_JOBS"}
 
 _KV = re.compile(r"^([A-Z][A-Z0-9_]+)=(.*)$")
 
@@ -110,8 +114,10 @@ def effective(ops: str = OPS) -> dict[str, str]:
     out: dict[str, str] = {}
     for log in ("work-runner.log", "merge-runner.log"):
         try:
-            with open(os.path.join(ops, log), encoding="utf-8", errors="replace") as fh:
-                tail = fh.readlines()[-3000:]
+            with open(os.path.join(ops, log), "rb") as fh:       # the runner log is never rotated: read only its tail
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 512 * 1024))
+                tail = fh.read().decode("utf-8", errors="replace").splitlines()
         except FileNotFoundError:
             continue
         for line in reversed(tail):
@@ -150,10 +156,20 @@ def cmd_set(ops: str, pairs: list[str], why: str, who: str) -> int:
         if k not in KNOBS:
             print(f"knobs: unknown knob {k}; known: {', '.join(KNOBS)}", file=sys.stderr)
             return 2
-        if k == "WORK_CAP" and v.strip() in ("0", ""):
+        v = v.strip()
+        # A stored value the reader cannot parse kills the work runner at its next start (an
+        # uncaught ValueError at import) and makes the merge runner print "integer expression
+        # expected" every loop - so the store only ever holds what both readers accept.
+        if not v.isdigit():
+            print(f"knobs: {k}={v!r} is not a non-negative integer; nothing stored", file=sys.stderr)
+            return 2
+        if k == "WORK_CAP" and int(v) < 1:
             print("knobs: refusing WORK_CAP=0 - dispatch is never fully paused for measurement (invariant 3); "
                   "the floor is 1, and the full stop is $HACKRIFF_OPS/dispatch-paused (user/supervisor only)", file=sys.stderr)
             return 3
+        if k in _AT_LEAST_ONE and int(v) < 1:
+            print(f"knobs: {k} must be at least 1; nothing stored", file=sys.stderr)
+            return 2
         changes[k] = v
     store = read_store(ops)
     before = {k: store.get(k) for k in changes}
@@ -239,13 +255,18 @@ def alert(level: str, title: str, body: str, key: str, repo: str = REPO) -> None
 def cmd_hold(ops: str, minutes: int, why: str, owner: str, now: float | None = None, repo: str = REPO,
              do_alert: bool = True) -> int:
     now = time.time() if now is None else now
+    why = " ".join(why.split())           # one line: the marker is line-oriented and the alert is one sentence
     if minutes <= 0 or minutes > HOLD_MAX_MIN:
         print(f"hold: refusing {minutes} min - the limit is {HOLD_MAX_MIN} (invariant 4); longer needs the user, via the supervisor", file=sys.stderr)
         return 3
-    if not why.strip():
+    if not why:
         print("hold: --why is required (it is what the alert and the ledger say)", file=sys.stderr)
         return 2
-    if read_hold(ops):
+    live = read_hold(ops)
+    if live and float(live.get("until", 0) or 0) <= now:
+        os.remove(hold_path(ops))          # the runner was down when it expired; an expired marker holds nothing
+        live = None
+    if live:
         print("hold: one is already in force (just hold --status)", file=sys.stderr)
         return 3
     last = last_hold_start(ops)
