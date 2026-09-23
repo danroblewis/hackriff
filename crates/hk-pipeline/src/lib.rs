@@ -77,6 +77,7 @@ mod detect;
 /// be a new drift surface.
 pub mod history;
 pub mod iqbuffer; // T-157
+pub mod playback; // T-463
 mod recorder;
 mod run;
 mod spectrum;

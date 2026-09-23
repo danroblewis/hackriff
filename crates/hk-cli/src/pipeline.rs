@@ -46,8 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelineRecordings, PipelineRetuner,
-    PipelineRunControl,
+    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback, PipelineRecordings,
+    PipelineRetuner, PipelineRunControl,
 };
 use crate::signal;
 
@@ -1096,13 +1096,29 @@ pub fn serve_api(
     // On-demand streams (T-043 listen, T-060 burst bits and symbols, T-165 channelised IQ), over
     // WebSocket and TCP.
     let recipes = handle.recipe_runtime();
+    // T-463: historical playback - the one playhead, reading raw IQ from the ring and the
+    // persisted recordings; its opener re-runs demod/decode, never detection.
+    let playback = Arc::new(hk_pipeline::playback::PlaybackService::new(
+        Arc::new(hk_pipeline::playback::RunIq::new(
+            handle.iq_buffer(),
+            Some((
+                handle.data_dir().join("hackriff.db"),
+                handle.data_dir().to_path_buf(),
+            )),
+        )),
+        hk_pipeline::playback::PlaybackConfig::default(),
+    ));
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
         .with("symbols", handle.symbols_service())
         .with("iq", handle.iq_service()) // T-165
         .with("stage", recipes.stage_service()) // T-088
-        .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
+        .with("inspector", recipes.inspector_service()) // T-088 (T-089/T-092 extend it)
+        .with(
+            "playback",
+            Arc::clone(&playback) as Arc<dyn hk_api::stream::StreamOpener>,
+        ); // T-463
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
@@ -1176,6 +1192,8 @@ pub fn serve_api(
             handle.data_dir().join("hackriff.db"),
             handle.data_dir().to_path_buf(),
         ))),
+        // T-463: the one playhead of historical playback.
+        playback: Some(Arc::new(PipelinePlayback(playback))),
         // T-438: the tile route's ingest-backpressure cap, per server.
         tile_admission: Default::default(),
         // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the

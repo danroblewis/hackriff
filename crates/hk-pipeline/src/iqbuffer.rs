@@ -41,11 +41,11 @@ use hk_model::{
     ContentClass, ProvenanceId, Recording, RecordingId, RecordingKind, RecordingTrigger,
     RetentionClass, TimeRange, Timestamp,
 };
-pub use hk_store::iqbuffer::ClipRange;
 use hk_store::iqbuffer::{
-    Allocation, ClipError, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks,
-    SegmentStart, is_allocation_refused, is_ring_incompatible, is_ring_locked,
+    Allocation, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks, SegmentStart,
+    is_allocation_refused, is_ring_incompatible, is_ring_locked,
 };
+pub use hk_store::iqbuffer::{ClipError, ClipRange};
 
 /// How long a segment's feeder waits for the ring to open before it reads (and, while the ring
 /// is still allocating, discards) captured blocks.
@@ -202,6 +202,62 @@ pub struct ClipExported {
     pub content_class: ContentClass,
     /// One entry per SigMF capture.
     pub captures: Vec<ClipCaptureInfo>,
+}
+
+/// The SigMF metadata of an exported ring window: one capture per contiguous piece, each with
+/// its sample-clock `core:datetime`, `core:global_index` and provenance — what both a clip file
+/// and playback's in-memory window ([`IqBufferService::read_window`]) carry.
+fn clip_meta(
+    clip: &hk_store::iqbuffer::Clip,
+    hw: Option<String>,
+    label: Option<&str>,
+    band: Option<(f64, f64)>,
+) -> SigmfMeta {
+    let first = &clip.pieces[0];
+    let mut meta = SigmfMeta::new(Datatype::Ci8);
+    meta.global.sample_rate = Some(clip.sample_rate_hz);
+    meta.global.description = Some(match label {
+        Some(l) => format!("hk-pipeline IQ capture buffer clip ({l})"),
+        None => "hk-pipeline IQ capture buffer clip".into(),
+    });
+    meta.global.recorder = Some("hk-pipeline:iqbuffer".into());
+    meta.global.hw = hw;
+    meta.global.provenance = Some(first.provenance.clone());
+    meta.captures = clip
+        .pieces
+        .iter()
+        .map(|p| {
+            let mut extra = serde_json::Map::new();
+            extra.insert("core:global_index".into(), p.global_index.into());
+            extra.insert("hackriff:buffer_segment".into(), p.segment.into());
+            extra.insert("hackriff:buffer_run".into(), p.run.into());
+            Capture {
+                sample_start: p.sample_start,
+                frequency: Some(p.provenance.tune.center_hz),
+                datetime: Some(iso8601(Timestamp::from_unix_nanos(p.t_ns))),
+                provenance: Some(p.provenance.clone()),
+                clip_count: None,
+                extra,
+            }
+        })
+        .collect();
+    if let Some((lo, hi)) = band {
+        meta.annotations.push(Annotation {
+            sample_start: 0,
+            sample_count: Some(clip.samples),
+            freq_lower_edge: Some(lo),
+            freq_upper_edge: Some(hi),
+            label: Some("requested band".into()),
+            comment: Some(
+                "clip exported for this band: segments whose tuned window overlaps it, as \
+                     captured (not channelised)"
+                    .into(),
+            ),
+            truth: None,
+            extra: serde_json::Map::new(),
+        });
+    }
+    meta
 }
 
 /// Where the ring's background open stands.
@@ -499,6 +555,43 @@ impl IqBufferService {
         r
     }
 
+    /// Raw IQ of `[t0_ns, t1_ns)` on the sample clock — segments whose tuned window overlaps
+    /// `band` when given — **in memory**, as SigMF metadata plus ci8 data, for playback (T-463)
+    /// to replay through the device interface ([`hk_core::SigmfReplaySource::from_reader`]).
+    ///
+    /// The same ring-window extract as [`Self::export_clip`] (same plan, same eviction check,
+    /// same metadata), but it writes no file and stores no `Recording` row: a playhead walking
+    /// forward reads many windows, and none of them is a recording the user made. At most
+    /// `max_bytes` of data. Returns the window's content class (of its first piece) beside it.
+    pub fn read_window(
+        &self,
+        t0_ns: i64,
+        t1_ns: i64,
+        band: Option<(f64, f64)>,
+        max_bytes: u64,
+    ) -> Result<(SigmfMeta, Vec<u8>, ContentClass), ClipError> {
+        let Some(buffer) = self.buffer() else {
+            return Err(ClipError::Empty);
+        };
+        if !(0 <= t0_ns && t0_ns < t1_ns) {
+            return Err(ClipError::Empty);
+        }
+        let plan = buffer.plan_clip_run(ClipRange::Time { t0_ns, t1_ns }, band, None)?;
+        if plan.bytes() > max_bytes {
+            return Err(ClipError::TooLarge {
+                bytes: plan.bytes(),
+            });
+        }
+        let mut data = Vec::with_capacity(plan.bytes() as usize);
+        let clip = plan.write(&mut data)?;
+        let class = clip.pieces[0].content_class;
+        Ok((
+            clip_meta(&clip, self.device_hw.clone(), Some("playback window"), band),
+            data,
+            class,
+        ))
+    }
+
     fn store(
         &self,
         id: RecordingId,
@@ -510,49 +603,7 @@ impl IqBufferService {
     ) -> Result<ClipExported, ClipFailure> {
         let failed = |e: String| ClipFailure::Failed(e);
         let first = &clip.pieces[0];
-        let mut meta = SigmfMeta::new(Datatype::Ci8);
-        meta.global.sample_rate = Some(clip.sample_rate_hz);
-        meta.global.description = Some(match label {
-            Some(l) => format!("hk-pipeline IQ capture buffer clip ({l})"),
-            None => "hk-pipeline IQ capture buffer clip".into(),
-        });
-        meta.global.recorder = Some("hk-pipeline:iqbuffer".into());
-        meta.global.hw = self.device_hw.clone();
-        meta.global.provenance = Some(first.provenance.clone());
-        meta.captures = clip
-            .pieces
-            .iter()
-            .map(|p| {
-                let mut extra = serde_json::Map::new();
-                extra.insert("core:global_index".into(), p.global_index.into());
-                extra.insert("hackriff:buffer_segment".into(), p.segment.into());
-                extra.insert("hackriff:buffer_run".into(), p.run.into());
-                Capture {
-                    sample_start: p.sample_start,
-                    frequency: Some(p.provenance.tune.center_hz),
-                    datetime: Some(iso8601(Timestamp::from_unix_nanos(p.t_ns))),
-                    provenance: Some(p.provenance.clone()),
-                    clip_count: None,
-                    extra,
-                }
-            })
-            .collect();
-        if let Some((lo, hi)) = band {
-            meta.annotations.push(Annotation {
-                sample_start: 0,
-                sample_count: Some(clip.samples),
-                freq_lower_edge: Some(lo),
-                freq_upper_edge: Some(hi),
-                label: Some("requested band".into()),
-                comment: Some(
-                    "clip exported for this band: segments whose tuned window overlaps it, as \
-                     captured (not channelised)"
-                        .into(),
-                ),
-                truth: None,
-                extra: serde_json::Map::new(),
-            });
-        }
+        let meta = clip_meta(clip, self.device_hw.clone(), label, band);
         meta.write(meta_path)
             .map_err(|e| failed(format!("writing the clip metadata: {e}")))?;
         let duration_s = clip.samples as f64 / clip.sample_rate_hz;
