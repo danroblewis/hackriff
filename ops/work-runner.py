@@ -382,6 +382,144 @@ VERDICT: FAIL <one line naming the defect and the file:line>
     return dict(claim, pid=p.pid, started=time.time(), kind="review")
 
 
+# ---------- per-run resource accounting ----------
+# What did this ticket actually COST the box? Until now: nothing recorded. `work-done.jsonl` had
+# minutes, dollars and turns, which say what the model spent, not what the machine did - so
+# "which tickets are expensive to build" and "is the 3-core bound holding" were both unanswerable,
+# and on 2026-09-22 a leaked process tree was invisible until someone ran `ps`.
+#
+# CPU time cannot be read at reap: by then the root process has exited and the kernel has thrown
+# its accounting away. So it is SAMPLED each tick and the running maximum is kept. That
+# undercounts - a rustc that starts and finishes between two ticks contributes nothing - so these
+# are a floor on the cost, not a measurement of it, and the result line says CPU-s rather than
+# pretending to be exact.
+def _cpu_seconds(s):
+    """`ps -o time` -> seconds. macOS prints `MM:SS.ss`, or `HH:MM:SS.ss` past an hour."""
+    try:
+        parts = s.strip().split(":")
+        return int(parts[0]) * 60 + float(parts[1]) if len(parts) == 2 else \
+            int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except Exception:
+        return 0.0
+
+
+def _ps_tree_rows():
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,rss=,time=,command="],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        f = line.split(None, 5)
+        if len(f) < 6:
+            continue
+        try:
+            rows.append({"pid": int(f[0]), "ppid": int(f[1]), "pgid": int(f[2]),
+                         "rss_mb": int(f[3]) / 1024.0, "cpu_s": _cpu_seconds(f[4]), "cmd": f[5]})
+        except ValueError:
+            continue
+    return rows
+
+
+def sample_group(pid, rows=None):
+    """(cpu_s, rss_mb, member_pids, member_pgids) for a claim's whole tree.
+
+    NOT just `ps -g <pgid>`: measured 2026-09-23, a claim's process group contains only the
+    `cpulimit` wrapper itself - `claude` and everything it spawns get their own groups. So the
+    tree is the pid, anything in its group, and every descendant, walked transitively.
+    """
+    rows = rows if rows is not None else _ps_tree_rows()
+    by = {r["pid"]: r for r in rows}
+    kids = {}
+    groups = {}
+    for r in rows:
+        kids.setdefault(r["ppid"], []).append(r["pid"])
+        groups.setdefault(r["pgid"], []).append(r["pid"])
+    seen, stack = set(), [pid]
+    while stack:
+        p = stack.pop()
+        if p in seen or p not in by:
+            continue
+        seen.add(p)
+        stack.extend(kids.get(p, []))
+        stack.extend(groups.get(p, []))
+    return (round(sum(by[p]["cpu_s"] for p in seen), 1),
+            round(sum(by[p]["rss_mb"] for p in seen), 1),
+            sorted(seen), sorted({by[p]["pgid"] for p in seen}))
+
+
+def track_usage(c):
+    """Fold this tick's sample into the claim; True when it changed anything.
+
+    The return value matters: the caller uses it to mark the claims file dirty. Without that the
+    sample lives only in memory and is lost at the next restart — and the whole point is that the
+    numbers survive the run they describe. Peaks only, because the high-water mark is the
+    question (`c["cpu_s"]` is monotonic by construction, so this is effectively every tick).
+    """
+    try:
+        cpu, rss, pids, pgids = sample_group(c["pid"])
+    except Exception:
+        return False
+    before = (c.get("cpu_s"), c.get("peak_rss_mb"), c.get("tree_pids"))
+    c["cpu_s"] = max(c.get("cpu_s") or 0, cpu)
+    c["peak_rss_mb"] = max(c.get("peak_rss_mb") or 0, rss)
+    if pids:
+        c["tree_pids"], c["tree_pgids"] = pids[:200], pgids[:50]
+    return before != (c.get("cpu_s"), c.get("peak_rss_mb"), c.get("tree_pids"))
+
+
+def leaked_processes(c, rows=None):
+    """Processes of this run still alive after its root exited.
+
+    Ancestry cannot find them - a leaked process is reparented to launchd, which is the whole
+    problem - so they are recognised two ways, and a pid must match one of them: it is a pid (in
+    a process group) this run was seen holding, or its command line names this run's WORKTREE.
+    The worktree path is the strong one: every cargo, rustc and test binary of this ticket
+    carries it, and no other run's does. Both guards exist because pids are recycled, and a
+    SIGKILL aimed at a recycled pid is a far worse bug than a leaked process.
+    """
+    rows = rows if rows is not None else _ps_tree_rows()
+    pids, pgids, wt = set(c.get("tree_pids") or []), set(c.get("tree_pgids") or []), c.get("wt") or ""
+    out = []
+    for r in rows:
+        if r["pid"] <= 1:
+            continue
+        if (r["pid"] in pids and r["pgid"] in pgids) or (wt and wt in r["cmd"]):
+            out.append(r)
+    return out
+
+
+def kill_leaked(rows):
+    """SIGTERM, ten seconds, SIGKILL. A cargo or nextest given a chance to exit cleanly leaves a
+    usable target dir behind; one that is SIGKILLed mid-write does not."""
+    for r in rows:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(10)
+    killed = []
+    for r in rows:
+        try:
+            os.kill(r["pid"], 0)
+            os.kill(r["pid"], signal.SIGKILL)
+            killed.append(r["pid"])
+        except OSError:
+            pass
+    return killed
+
+
+def resource_line(c):
+    """The one line a person reads: what this ticket cost the box, and what it left behind."""
+    if not c.get("cpu_s") and not c.get("peak_rss_mb"):
+        return ""
+    s = f"Resources: {c.get('cpu_s', 0):.0f} CPU-s, peak {(c.get('peak_rss_mb') or 0) / 1024:.1f} GB"
+    if c.get("leaked"):
+        s += f" — LEAKED {c['leaked']} processes (killed at reap)"
+    return s
+
+
 # ---------- reap ----------
 def result_of(path):
     try:
@@ -445,6 +583,8 @@ def write_result(c, hb):
         lines.append("Observed, not chased: " + " | ".join(map(str, hb["observed_but_not_chased"])))
     if hb.get("use_cases"):
         lines.append("Use cases: " + ", ".join(map(str, hb["use_cases"])))
+    if (rl := resource_line(c)):
+        lines.append(rl)
     if hb["outcome"] == "cancel":
         lines.append("Cancel evidence: " + str((hb.get("cancel") or {}).get("evidence", "")))
     rp = f"{WORKDIR}/{tid}/result.txt"
@@ -468,7 +608,11 @@ def record_done(claim, outcome, res):
                             "started": int(claim["started"]), "finished": int(time.time()),
                             "minutes": round((time.time() - claim["started"]) / 60, 1),
                             "cost_usd": res.get("total_cost_usd"), "turns": res.get("num_turns"),
-                            "model": claim.get("model"), "outcome": outcome}) + "\n")
+                            "model": claim.get("model"), "outcome": outcome,
+                            # What the BOX spent, beside what the model spent. Sampled per tick,
+                            # so a floor rather than an exact total (see sample_group).
+                            "cpu_s": claim.get("cpu_s"), "peak_rss_mb": claim.get("peak_rss_mb"),
+                            "leaked": claim.get("leaked", 0)}) + "\n")
 
 
 def enqueue(branch, wt=None):
@@ -494,6 +638,8 @@ def reap(claims, dry):
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
         if alive(pid):
+            if track_usage(c):                      # the only chance to see this run's CPU time
+                changed = True
             if age_min > limit:
                 try:
                     os.killpg(pid, signal.SIGTERM)
@@ -506,6 +652,22 @@ def reap(claims, dry):
             continue
         # finished
         changed = True
+        # The root is gone; anything of this run still running is a LEAK, holding cores and disk
+        # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
+        # run for hours beside the gate, which is the 2026-09-22 contention in another form.
+        try:
+            leaked = leaked_processes(c)
+            if leaked:
+                c["leaked"] = len(leaked)
+                log(f"LEAKED {tid}: {len(leaked)} process(es) outlived the run: "
+                    + ", ".join(f"{r['pid']} {r['cmd'][:60]}" for r in leaked[:5]))
+                if not dry:
+                    kill_leaked(leaked)
+                attention(tid, c["branch"], "LEAKED",
+                          f"{len(leaked)} process(es) outlived the run and were killed (SIGTERM then SIGKILL): "
+                          + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
+        except Exception as e:
+            log(f"leak check error for {tid}: {e}")
         d = f"{WORKDIR}/{tid}"
         if c["kind"] == "review":
             res = result_of(f"{d}/review.json")

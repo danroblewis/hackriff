@@ -85,6 +85,15 @@ merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-a
 time, user-requested first, then priority, then number — into a fresh worktree + branch
 (`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
 `model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
+**Every run is accounted for (2026-09-23):** each tick samples the claim's whole process
+TREE - not `ps -g <pgid>`, which on this box contains only the `cpulimit` wrapper - and keeps the
+peak, so `work-claims.json`, `work-done.jsonl` and the ticket's `result:` all carry `cpu_s` and
+`peak_rss_mb` ("Resources: 412 CPU-s, peak 1.9 GB"). CPU time cannot be read at reap (the kernel
+discards it when the root exits), so these are a floor, not an exact total. At reap, anything of
+the run still alive is a LEAK - it cannot be found by ancestry, because being reparented to
+launchd *is* the leak, so it is matched by a pid+group the run was seen holding or by its
+worktree path - and is killed (SIGTERM, 10 s, SIGKILL), noted in `work-needs-attention.txt` and
+in the result.
 **The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
 (`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
 `precheck`, `blocked.needs`, `cancel.evidence`, `observed_but_not_chased`, `use_cases`). The runner
