@@ -19189,7 +19189,8 @@ tasks:
   - id: T-579
     milestone: MLIVE
     title: Memoize the per-request tile geometry - readable_ceiling and the coverage raster are recomputed from scratch on every tile request
-    status: todo
+    status: in-progress
+    branch: task-t579
     priority: normal
     parallel_group: PIPE
     model: opus
@@ -20311,7 +20312,8 @@ tasks:
   - id: T-606
     milestone: MAUTO
     title: 'ADR-0011 AMENDMENT: absorb the T-554 coverage catalogue delta, and decide what a PSK demodulator puts on its output port'
-    status: todo
+    status: in-progress
+    branch: task-t606
     priority: normal
     parallel_group: MAUTOD
     model: opus
