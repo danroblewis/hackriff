@@ -20005,7 +20005,7 @@ tasks:
   - id: T-597
     milestone: M3
     title: Nothing reports how often the psk-qam verifier actually runs, so a stage that never fires looks like one that always agrees
-    status: deferred
+    status: done
     branch: task-t597
     priority: normal
     parallel_group: M3A
@@ -20039,6 +20039,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       2026-09-23 (coordinator): DEFERRED per the user directive of 2026-09-22 05:40 (close M2-hardening/M3/M4 observed defects by Wed 09-23 night): speculative - no observed failure - so it waits until after the burndown. Re-open when an observed failure appears or after Wed night.
+    commit: d3d7d8bc
   - id: T-600
     milestone: M2-hardening
     title: A resolved artefact does not rank below a clean row, because the evidence proxy counts only measured flag bits
