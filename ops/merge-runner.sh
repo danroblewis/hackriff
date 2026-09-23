@@ -563,6 +563,18 @@ self_version
 # re-queue those branches, and carry on. Waiting for a person to type `git merge --abort`
 # cost an hour of an empty box today. Refuse only if the tree has uncommitted edits that are
 # not the merge's own - that is someone else's work and a person must look.
+# ORPHAN GATES FIRST. A runner killed mid-gate leaves its gate subshell (just gate / cargo /
+# nextest / npm e2e / hk serve) running on this very checkout; at 17:58 on 2026-09-22 a new
+# runner started a second gate beside one such orphan and the two shared the tree, the ports
+# and the CPU for 30 minutes (run ids d1503dd80480 and 4ecba9c10c0a). At startup NO gate
+# process can be legitimate, so every one of them is killed before anything else.
+for pat in 'just gate' 'python -m hkpy.gate' 'cargo-nextest nextest run' 'node e2e/run.mjs' 'npm run e2e' 'hk serve --bind 127.0.0.1:87'; do
+  for opid in $(pgrep -f "$pat" 2>/dev/null); do
+    [ "$opid" = "$$" ] && continue
+    log "STARTUP: killing orphan gate process $opid ($pat)"; kill -TERM "$opid" 2>/dev/null
+  done
+done
+sleep 2
 if [ -e "$REPO/.git/MERGE_HEAD" ]; then
   stale=$(git -C "$REPO" rev-parse --short MERGE_HEAD 2>/dev/null)
   git -C "$REPO" merge --abort >>"$LOG" 2>&1 && log "STARTUP: aborted a staged merge ($stale) a killed gate left behind" \
