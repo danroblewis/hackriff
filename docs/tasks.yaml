@@ -11339,7 +11339,7 @@ tasks:
   - id: T-432
     milestone: M3
     title: A fifth draw of held-out unknown recall lives in accuracy_sweep.rs, printed under the same name as the gate's
-    status: todo
+    status: done
     priority: low
     parallel_group: M3A
     deps: [T-428]
@@ -11364,6 +11364,7 @@ tasks:
       precheck exit 0
       Commits: 0ccf37b1
       Resources: 20 CPU-s, peak 0.4 GB
+    commit: ed442436
   - id: T-433
     milestone: M2-hardening
     title: concurrent_demod asserts dropped == 0 on a real-time chain, a quantity whose range under contended CPU has never been measured
