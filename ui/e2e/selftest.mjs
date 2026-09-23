@@ -56,15 +56,31 @@ export const __selftestMark = __selftestPredicate(1);
   {
     name: "t454-ignore-the-cap",
     expect: "surface-nav.e2e.mjs",
-    what: "T-454: the client stops obeying the tile route's in-flight cap. The server answers 503 " +
-      "over cost.in_flight_limit, and the refusal reaches the user — a defect a client with a cap, " +
-      "an AbortController per request and measured cancellation still had.",
+    what: "T-454: the client stops obeying the tile route's in-flight cap — every address it wants " +
+      "goes on the wire at once. Since T-573 they ride in one or two batches, so the request count " +
+      "cannot see it; surface-nav counts outstanding ADDRESSES (T-846).",
     file: "surface/tilecache.ts",
+    // **Injected where the cap is OBEYED, not where it is first set** (T-846). This used to raise the
+    // constructor's starting cap to 64, and since T-630 the first tile answered clamps the ceiling
+    // back to the route's own `in_flight_limit`/`in_flight_share` — so the fault lived for one pump
+    // and then healed itself. `effectiveLimit` is the single number [[pump]] and the refresh lane
+    // compare against, so this is the client ignoring the cap for the whole session, as T-454's was.
+    //
+    // **And the per-viewport share with it**, because [[nextAddr]] divides `this.limit` between the
+    // viewports and would otherwise re-impose the cap one step down: measured with only
+    // `effectiveLimit` patched, the page never had more than 3 addresses out against a cap of 4.
     patch: (src) => {
-      const from = "this.ceiling = this.limit = Math.max(1, opts.inFlight ?? 4);";
-      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
-      return src.replace(from,
-        "this.ceiling = this.limit = 64; // injected by ui/e2e/selftest.mjs — ignore the server's cap");
+      const sites = [
+        ["    return this.silences > 0 ? 1 : this.limit;",
+          "    return 64; // injected by ui/e2e/selftest.mjs — ignore the route's cap"],
+        ["    const share = Math.max(1, Math.floor(this.limit / vs.length));",
+          "    const share = 64; // injected by ui/e2e/selftest.mjs — ignore the route's cap"],
+      ];
+      for (const [from, to] of sites) {
+        if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+        src = src.replace(from, to);
+      }
+      return src;
     },
   },
   {
@@ -91,6 +107,12 @@ export const __selftestMark = __selftestPredicate(1);
     // sits at the ceiling permanently and is refused for as long as it keeps rendering — the
     // difference between backpressure as a *probe* and backpressure as a *regime*, which is the
     // whole reason the bound is "none after convergence" rather than "none at all".
+    //
+    // **Caught since T-846 by surface-nav's injected-refusal test, not by the steady-state bound.**
+    // After T-573/T-630 the route refuses nothing on this fixture (batch workers retire on a 503; the
+    // share clamps the ceiling on every answer), so the steady-state bound judged an empty set and
+    // this fault stayed green. The new test puts one per-address 503 inside a real batch answer and
+    // requires the operating cap to fall across it — measured 4 -> 2 correct, 3 -> 3 with this fault.
     name: "t454-never-back-off",
     expect: "surface-nav.e2e.mjs",
     what: "T-454's controller removed: the client notices the 503 but does not halve its operating " +
@@ -255,6 +277,26 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // **T-523, and the first standing fault for `live-edge.e2e.mjs` test 3** (T-846). The supervisor
+    // put it back by hand on 2026-09-23 and the file stayed green; nothing here re-checked it, so the
+    // file's claim to see this defect rested on the manual run T-523 made when it landed.
+    //
+    // The smallest edit that is the defect: the route's vocabulary widens back to "every status
+    // line", so a proxy's 502 reads as the route's own answer, and [[retryable]] makes the place
+    // terminal. That is the pre-T-523 predicate verbatim.
+    name: "t523-proxy-502-is-terminal",
+    expect: "live-edge.e2e.mjs",
+    what: "T-523: a 502 from a proxy between the client and `hk serve` is read as the route's own " +
+      "refusal, so a place the tunnel failed once is never asked for again and the pane draws an " +
+      "upscaled coarser ancestor there until something (the user's resize) re-addresses it.",
+    file: "surface/tilecache.ts",
+    patch: (src) => {
+      const from = "  return status < 500 || status === 500 || status === 501 || status === 503;";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+      return src.replace(from, "  return true; // injected by ui/e2e/selftest.mjs — every status line is the route's");
+    },
+  },
+  {
     // T-479, restored as the inverted predicate rather than as a removed line: `retryable` goes back
     // to "everything the server said is worth asking again", which is exactly the default the real
     // defect had.
@@ -404,9 +446,15 @@ function build(fault) {
   return dist;
 }
 
-/** Run the real suite against a dist, and report which files failed. */
-function runSuite(dist) {
-  const r = spawnSync(process.execPath, [path.join(HERE, "run.mjs")], {
+/**
+ * Run the real suite against a dist, and report which files failed.
+ *
+ * `specs` narrows the run to those files (`--expected-only`, T-846). That is an ITERATION aid: it
+ * proves a fault turns its own guard red, and cannot prove no OTHER guard caught it instead, so the
+ * summary says which mode it ran in.
+ */
+function runSuite(dist, specs = []) {
+  const r = spawnSync(process.execPath, [path.join(HERE, "run.mjs"), ...specs], {
     cwd: UI_DIR, stdio: "pipe", encoding: "utf8",
     env: dist ? { ...process.env, HK_E2E_UI_DIST: dist } : process.env,
   });
@@ -427,14 +475,24 @@ function runSuite(dist) {
 const only = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const faults = FAULTS.filter((f) => only.length === 0 || only.some((o) => f.name.includes(o)));
 if (faults.length === 0) { console.error(`no fault matched; known: ${FAULTS.map((f) => f.name).join(", ")}`); process.exit(1); }
+// `--expected-only` (T-846): run just the guards the selected faults name, baseline included. A
+// whole-suite run per fault is ~13 specs x N faults; while re-aiming one fault that is hours for a
+// verdict about one file. The default stays the whole suite, because attribution ("the RIGHT guard
+// and no other") is only measurable there.
+const expectedOnly = process.argv.includes("--expected-only");
+const specs = expectedOnly
+  ? [...new Set(faults.flatMap((f) => (Array.isArray(f.expect) ? f.expect : [f.expect])))]
+  : [];
+if (expectedOnly) console.log(`selftest: --expected-only, running ${specs.join(", ")} (attribution to OTHER guards is not measured)`);
 
 // The baseline, first, because a fault whose guard is ALREADY red on this tree proves nothing about
 // the fault: the run would have been red either way. That distinction is the whole value of a
 // non-vacuity check, so it is measured rather than assumed.
 console.log("=== selftest: baseline (unmodified build) ===");
 const tBase = Date.now();
-const baseline = runSuite(null);
-console.log(baseline.out.split("\n").filter((l) => /^(e2e:|✔|✖|  \d)/.test(l)).join("\n"));
+const baseline = runSuite(null, specs);
+// Diagnostics (ℹ) too, as for each fault below: a guard that is already red says why only there.
+console.log(baseline.out.split("\n").filter((l) => /^(e2e:|✔|✖|ℹ|  \d)/.test(l)).join("\n"));
 console.log(`-> baseline ${baseline.status === 0 ? "GREEN" : `RED (${baseline.failedFiles.join(", ")})`}` +
   ` in ${((Date.now() - tBase) / 1000).toFixed(1)} s`);
 
@@ -443,7 +501,7 @@ for (const fault of faults) {
   console.log(`\n=== selftest: ${fault.name} ===\n${fault.what}\n`);
   const dist = build(fault);
   const t0 = Date.now();
-  const { status, out, failedFiles } = runSuite(dist);
+  const { status, out, failedFiles } = runSuite(dist, specs);
   const expects = Array.isArray(fault.expect) ? fault.expect : [fault.expect];
   const alreadyRed = expects.some((e) => baseline.failedFiles.includes(e));
   const caught = status !== 0;

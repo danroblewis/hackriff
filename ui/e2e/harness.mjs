@@ -157,7 +157,8 @@ export function tileAsks(requests) {
   for (const r of requests) {
     if (!r.url.includes("/api/tiles") || r.url.includes("/api/tiles/events")) continue;
     const u = new URL(r.url), q = u.searchParams;
-    const common = { url: r.url, startedMs: r.startedMs, endedMs: r.endedMs, error: r.error,
+    const common = { url: r.url, startedMs: r.startedMs, respondedMs: r.respondedMs ?? null,
+      endedMs: r.endedMs, error: r.error,
       scheme: q.get("scheme") ?? "view", device: q.get("device") ?? "any",
       cells: q.has("cells") ? Number(q.get("cells")) : 256 };
     if (u.pathname.endsWith("/api/tiles/batch")) {
@@ -177,6 +178,33 @@ export function tileAsks(requests) {
     }
   }
   return out;
+}
+
+/**
+ * The most tile ADDRESSES this page ever had outstanding on the wire at once (T-846).
+ *
+ * [[Page.watchConcurrency]] counts REQUESTS, and since T-573 a request is a batch of up to 64
+ * addresses: a client that ignored the route's in-flight cap entirely put all of them in ONE batch
+ * and read `peak 1/4`. The cap the client obeys is per address (`TileCache` charges one slot per
+ * address, and the route takes one producer slot per address), so this is the like-for-like count.
+ *
+ * Each address is outstanding from its request's start until the route ANSWERED it — the response
+ * line, not the end of the body, for the reason `#release` gives — or until the request failed or
+ * was cancelled. A batch's addresses are all outstanding until the batch answers, which is exactly
+ * what the route was asked for and what the client's own budget charged. Like the request count, it
+ * is a LOWER bound on what the client had queued behind the browser's connection limit.
+ */
+export function addressPeak(asks) {
+  const ev = [];
+  for (const a of asks) {
+    const end = a.respondedMs ?? a.endedMs ?? Number.POSITIVE_INFINITY;
+    ev.push([a.startedMs, 1], [end, -1]);
+  }
+  // Ends before starts at the same millisecond: a slot released and re-taken in one tick is not two.
+  ev.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let live = 0, peak = 0;
+  for (const [, d] of ev) { live += d; peak = Math.max(peak, live); }
+  return peak;
 }
 
 export class Browser {
