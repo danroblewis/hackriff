@@ -19495,7 +19495,7 @@ tasks:
   - id: T-581
     milestone: MLIVE
     title: Rework the tile in-flight cap once T-571/T-572 land - one mutex and a cap of 4 starve the panes
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: PIPE
     core_interface: true
@@ -19532,6 +19532,7 @@ tasks:
       Observed, not chased: crates/hk-api/tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails ALONE, 3 of 3 runs, at ondemand.rs:365 `assert!(records > 20)` with '9 records' (WS /ws/open/listen, ping 50 ms, peer timeout 400 ms). Unrelated to the tile route (this diff touches only tiles.rs admission and docs/api.md); not triaged further. It fails `just test-crate hk-api` fast (exit 100). | The client-side cancelled-to-resident ratio (ui/src/surface/tilecache.ts AIMD) was not measured in a UI e2e; the server-side analog (503s per resident tile for one screen) is asserted as 0. | Live tiles (never cached) still compete for the 4 slots with slow coarse producers; a reserve for the live-edge tile, or per-store caps (view vs main pyramids are already separate mutexes), would be the next lever if the live edge is seen starving.
       Use cases: AWARE-011
       Resources: 180 CPU-s, peak 0.8 GB
+    commit: 441442ba
   - id: T-584
     milestone: MLIVE
     title: Late-path frames reach level 0 only and are invisible to every coarse node under coarse_live
