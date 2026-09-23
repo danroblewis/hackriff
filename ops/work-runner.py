@@ -799,6 +799,22 @@ def launch_fix(c, fail_line):
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
+    if is_conflict(fail_line):
+        prompt = f"""Your branch {branch} was SKIPPED by the merge runner: it no longer merges cleanly into main
+(fix attempt {n} of {FIX_ATTEMPTS}). The runner's line:
+{fail_line}
+In your worktree {wt}: `git merge main`, resolve every conflict keeping BOTH sides' intent (main's change
+is already gated and landed - never revert it; re-apply your change on top of it), then re-run the
+targeted tests for every crate or suite the resolved files touch. docs/tasks.yaml: never hand-resolve it;
+take main's copy (`git checkout main -- docs/tasks.yaml`) and re-apply your ticket's own fields with
+`just task set/result/note`.
+Commit the merge on {branch}. If the conflict shows main already did your ticket's work, or the two changes
+cannot both hold, say so precisely and hand back BLOCKED.
+Same rules as before: never touch the main checkout, never the full gate, never edit docs/tasks.yaml by hand.
+When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
+your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
+"""
+        return _run_fix(c, n, prompt)
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
@@ -814,6 +830,12 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
+    return _run_fix(c, n, prompt)
+
+
+def _run_fix(c, n, prompt):
+    tid, wt = c["ticket"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out_path = f"{d}/fix{n}.json"
@@ -850,8 +872,34 @@ def release_stale_claims(claims, tasks_by_id):
     return changed
 
 
+def queued_branches():
+    try:
+        return {l.strip() for l in open(f"{S}/merge-queue.txt") if l.strip() and not l.lstrip().startswith("#")}
+    except OSError:
+        return set()
+
+
+def merges_cleanly(branch):
+    """`git merge-tree --write-tree` (git >= 2.38) merges in memory: exit 0 clean, 1 conflicted.
+    Anything else (an old git, a missing branch) answers False - the fix run then decides."""
+    try:
+        return subprocess.run(["git", "-C", REPO, "merge-tree", "--write-tree", "main", branch],
+                              capture_output=True, timeout=60).returncode == 0
+    except Exception:
+        return False
+
+
+def is_conflict(line):
+    """A merge-runner CONFLICT line (`CONFLICT` or `CONFLICT(skipped from bulk)`) - a branch main moved
+    past. It used to wait for the coordinator: median 3.5 h from skip to landing over 16 tickets on
+    2026-09-22/23, and 20 more conflicted branches never landed. The worker that wrote the branch is
+    the cheapest one to re-apply it on main, exactly like a gate failure."""
+    parts = line.split()
+    return len(parts) > 4 and parts[4].startswith("CONFLICT")
+
+
 def handle_gate_failures(claims, dry):
-    """Merge-runner GATE_FAIL lines for branches this runner queued -> resume the worker to fix.
+    """Merge-runner GATE_FAIL and CONFLICT lines for branches this runner queued -> resume the worker to fix.
     Also: claims left in review-failed (from before the review-fix path existed) get the same path."""
     for tid, c in list(claims.items()):
         if c.get("state") == "review-failed" and c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
@@ -863,11 +911,12 @@ def handle_gate_failures(claims, dry):
             if not dry:
                 claims[tid] = launch_fix(dict(c, kind="work"), f"REVIEW_FAIL {fail[:300]} (full review: {WORKDIR}/{tid}/review.json)")
     try:
-        lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l]
+        lines = [l.rstrip("\n") for l in open(MERGE_NEEDS) if "GATE_FAIL" in l or is_conflict(l)]
     except FileNotFoundError:
         return False
     by_branch = {c["branch"]: tid for tid, c in claims.items() if c.get("branch")}
     changed = False
+    conflict_runs = 0
     for line in lines:
         parts = line.split()
         branch = parts[2] if len(parts) > 2 else ""
@@ -877,6 +926,18 @@ def handle_gate_failures(claims, dry):
         c = claims[tid]
         if line in c.get("gate_fails_seen", []) or c.get("state") != "queued":
             continue
+        if is_conflict(line) and not dry:
+            if branch in queued_branches() or merges_cleanly(branch):
+                c.setdefault("gate_fails_seen", []).append(line)
+                changed = True
+                log(f"CONFLICT {tid}: {branch} is queued again or merges cleanly now - no fix run ({line[:80]})")
+                continue
+            # A conflict run is a worker: it takes a slot under the same cap as dispatch, one per
+            # tick, and waits (the line stays unseen) rather than bursting - the first run after this
+            # rule shipped found 16 queued claims with old CONFLICT lines behind them.
+            if conflict_runs >= 1 or busy_workers(claims) >= dispatch_cap():
+                continue
+            conflict_runs += 1
         c.setdefault("gate_fails_seen", []).append(line)
         changed = True
         if dry:
@@ -996,11 +1057,20 @@ def candidates(tasks, claims):
     return out
 
 
+def dispatch_cap():
+    if not GATE_ALONE and gate_running():
+        return min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
+    return CAP
+
+
+def busy_workers(claims):
+    """Running work AND fix runs: both are a worker on the box (dispatch counted only `work`)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix"))
+
+
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
-    cap = CAP
-    if not GATE_ALONE and gate_running():
-        cap = min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
+    cap = dispatch_cap()
     free = cap - len(running)
     if free <= 0:
         return False
