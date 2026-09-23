@@ -216,6 +216,26 @@ def gate_running():
             or os.path.exists(f"{S}/gate-wanted"))
 
 
+# THE GATE SHARES THE BOX AGAIN (user, 2026-09-23 13:30). "The gate runs alone" (2026-09-22) was
+# a crisis rule: it stopped the load flakes while their causes were unknown, at the price of
+# serialising the box - gate (45 min, no dispatch) -> a minutes-wide dispatch window -> drain
+# (up to 45 min, no gate). Measured 2026-09-23: dispatch was ZERO in 10 of 13 hours while the
+# gate held the box 40-60 min of each, and the burndown went flat at ~1 ticket/hour once the
+# crisis backlog had drained. The three flake causes are fixed at the root (a hidden tab's
+# stopped rAF, a shared spec port, a self-matching wait loop), so the design this runner was
+# built for is back: workers dispatch DURING a gate, capped at the gate's reserve
+# ((CORES - GATE_RESERVE) / WORKER_CORES = 4), and the merge runner no longer waits for them
+# (WORKER_DRAIN_MAX=0). WORK_GATE_ALONE=1 restores the crisis rule wholesale if it is ever
+# needed again; nothing else changes with it.
+GATE_ALONE = os.environ.get("WORK_GATE_ALONE", "0") == "1"
+RESERVE_CAP = max(1, (CORES - GATE_RESERVE) // WORKER_CORES)
+
+
+def gate_holds_dispatch():
+    """True only in alone mode: a gate running or wanted stops every dispatch, fix runs included."""
+    return GATE_ALONE and (os.path.exists(f"{S}/gate-wanted") or gate_running())
+
+
 def queue_depth():
     """Branches waiting in merge-queue.txt (non-comment, non-blank lines)."""
     try:
@@ -758,7 +778,7 @@ def launch_fix(c, fail_line):
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
-    if os.path.exists(f"{S}/dispatch-paused") or os.path.exists(f"{S}/gate-wanted") or gate_running():
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
@@ -961,6 +981,8 @@ def candidates(tasks, claims):
 def dispatch(claims, dry):
     running = [c for c in claims.values() if c.get("state") == "running" and c.get("kind") == "work"]
     cap = CAP
+    if not GATE_ALONE and gate_running():
+        cap = min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
     free = cap - len(running)
     if free <= 0:
         return False
@@ -984,18 +1006,22 @@ def dispatch(claims, dry):
     if os.path.exists(f"{S}/dispatch-paused"):
         log(f"HOLD: dispatch-paused file present ({len(running)} running)")
         return False
-    if gate_running():
+    # The three holds below are the alone-mode cycle (WORK_GATE_ALONE=1, see gate_holds_dispatch).
+    # In the default overlap mode a gate only lowers the cap to the reserve (above) and the queue
+    # never pauses dispatch: the merge runner gates whatever is queued as soon as the previous
+    # gate ends, so the batch is "what handed back during the last gate".
+    if gate_holds_dispatch():
         log(f"HOLD: a gate is running ({len(running)} workers still finishing)")
         return False
     depth = queue_depth()
-    if depth >= QUEUE_PAUSE:
+    if GATE_ALONE and depth >= QUEUE_PAUSE:
         log(f"HOLD: {depth} branches queued for merge >= {QUEUE_PAUSE}; letting {len(running)} workers drain so the gate can run alone")
         return False
     # The gate is IMMINENT when something is queued and no worker is running: the merge runner
     # starts it within seconds, and its bulk marker can land a tick after this check (21:02:21
     # marker vs 21:02:22 dispatch on 2026-09-22 - two workers built beside that gate). Do not
     # dispatch into that window; the gate takes the batch, then dispatch resumes.
-    if depth > 0 and not running:
+    if GATE_ALONE and depth > 0 and not running:
         log(f"HOLD: {depth} branch(es) queued and no worker running - a gate is about to start")
         return False
     free = min(free, PER_TICK)
@@ -1071,7 +1097,7 @@ def tick(dry):
     # relaunched once those clear - otherwise the claim sits as `fix-held`, the map shows the
     # ticket FAILED, and nothing ever moves it (T-513 sat that way from 20:20 to 00:20 on
     # 2026-09-22/23). Same holds as dispatch, checked here rather than trusted to be past.
-    if not dry and not (os.path.exists(f"{S}/dispatch-paused") or os.path.exists(f"{S}/gate-wanted") or gate_running()):
+    if not dry and not (os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
         for tid, c in list(claims.items()):
             if c.get("state") == "fix-held":
                 log(f"FIX {tid}: hold cleared - relaunching the held fix ({(c.get('fail_line') or '')[:80]})")
