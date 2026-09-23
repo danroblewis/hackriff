@@ -16477,7 +16477,7 @@ tasks:
   - id: T-538
     milestone: MLIVE
     title: Re-land the viewport tile prefetch WITHOUT leaking the route's slots, and with a guard that cannot pass vacuously
-    status: todo
+    status: done
     priority: normal
     parallel_group: CANVAS-FE
     model: opus
@@ -16505,6 +16505,9 @@ tasks:
     notes: |
       Filed 2026-09-20. Branch task-t471 holds the reverted implementation.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): landed GATED via task-t538-rl (merge a90603ae), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
+    commit: a90603ae
   - id: T-539
     milestone: MLIVE
     title: The tile cache's AIMD cap only rises on a completion, so a still view never recovers from one 503
@@ -22505,7 +22508,7 @@ tasks:
   - id: T-740
     milestone: M2-hardening
     title: "run.mjs's killSpecTree only sweeps a spec it timed out, so a run killed from outside leaves Chrome behind for hours"
-    status: todo
+    status: done
     priority: normal
     parallel_group: OPS
     model: sonnet
@@ -22543,6 +22546,8 @@ tasks:
       checked, rather than assumed, that 14 OTHER Chrome processes on the box belonged to a
       different agent's live worktree and left those alone - the right instinct, and the reason a
       blanket sweep is not the fix here either.
+
+      2026-09-23 (coordinator): landed GATED via task-t740-rl (merge f5f4108a), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
     result: |
       DONE (work-runner, from handback.json, 2026-09-22 12:58).
       Review round 1 failed on: sweepStaleRuns() SIGKILLed a recorded pid with no check it still ran the same process, so pid reuse could kill an unrelated process (ui/e2e/run.mjs:86). Fixed by making trackChild(pid, marker) also record the process's OS start time (ps -o lstart=) at track time, and adding verifyStillOurs(pid, marker, lstart) which sweepStaleRuns now calls immediately before every kill: only an exact lstart match AND a command line still containing the marker (the child's own hk-e2e-chrome-*/hk-e2e-data-*/spec-path substring) counts as a match; 'gone'/'reused'/'mismatch' all refuse to kill. Locks older than 24h are deleted outright without touching any pid. cdp.mjs's onSpawn now also passes Chrome's profile dir so the readiness-probe browser gets its own specific marker. selftest-orphan-sweep.mjs gained a third leg that fabricates a stale lock naming a genuinely alive but unrelated process and confirms it survives with a logged 'reused' refusal. Merged main cleanly (no conflicts).
@@ -22552,6 +22557,7 @@ tasks:
       Tests: node --check on ui/e2e/run.mjs, cdp.mjs, selftest-orphan-sweep.mjs -> exit 0 (syntax clean); node ui/e2e/selftest-orphan-sweep.mjs -> exit 0 (all three legs green: SIGINT/SIGTERM sweep synchronously, SIGKILL orphans survive then get swept at next run's start with verified-pid matches, pid-reuse guard refuses an unrelated live process logging "reused"); node ui/e2e/selftest-timeout.mjs -> exit 0 (T-473 per-spec timeout unaffected, hung spec killed/reported red, 0 orphans); node e2e/run.mjs app-surface (HK_E2E_CONCURRENCY=1, one real browser spec through the composed lane pool) -> exit 0, 3/3 assertions passed, confirming the lane pool and the T-740 sweep coexist. All run only when no gate/merge was in progress (checked bulk-in-progress, MERGE_HEAD, `pgrep -f 'just gate'` before each); ps -axo checked after each run showed zero leftover processes from this worktree.
 
       Original observed-but-not-chased note carries forward for the coordinator to re-check against current main: just test-ui may still show an unrelated pre-existing TS issue outside this diff's scope (ui/e2e/*, justfile, ui/package.json only).
+    commit: f5f4108a
   - id: T-760
     milestone: MLIVE
     title: 'The growing edge loses frames because the view WRITER holds the pyramid for seconds writing tiles - not, as this ticket first claimed, because a reader starves it'
@@ -23272,7 +23278,7 @@ tasks:
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
-    status: in-progress
+    status: done
     branch: task-t816
     priority: normal
     parallel_group: MAP-API
@@ -23304,6 +23310,8 @@ tasks:
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
 
       2026-09-23: code carried by the bundle branch task-mmap-bundle (T-816, T-817, T-819 and T-822 together) because each branch's runner-written board commit conflicted with main's board; this result was re-applied from task-t816's board. Reconciliation in the bundle: T-816's duplicate AuthoredProvenance, AuthoredTier and stamp() were folded onto T-818's shared MeasurementProvenance, MeasurementTier and measurements::stamp (identical fields and serde, so no wire or storage change); hk_model::AuthoredProvenance is now only T-817's nullable marker stamp.
+
+      2026-09-23 (coordinator): landed GATED via task-mmap-bundle (merge e39df2e3), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
     result: |
       DONE (work-runner, from handback.json, 2026-09-22 20:14).
       MAP-16 landed: a durable store for human-authored time-frequency annotations (text/box/marker) plus GET/POST /api/annotations and GET/PUT/DELETE /api/annotations/{id}. hk-model gains AuthoredAnnotation/AuthoredProvenance (repo/authored.rs). Its own `authored_annotation` table is created on first use, the same way selections are, so there is no migration-number race with T-817..T-819. It is separate from the §2.13 append-only machine `annotation` table. The store answers windowed, paged queries, and to_sigmf() exports a SigMF annotations entry carrying a `hackriff:annotation` block (authored: true), never `hackriff:truth`. hk-api: the list call needs f_lo/f_hi/t0/t1 (limit 200 by default, 2000 max, cursor paging), and results come newest capture time first. The client sends only `view`; the server stamps actor/author (the token fingerprint, never the token), authored_s (wall clock, kept apart from the capture-clock t_capture), authored:true, and sample_rate_hz only when this run holds the named device. Client-supplied provenance is 400. Writes are audited with no `device` key, a server with no audit log answers 503, and a duplicate id is 409. Nothing feeds detection. docs/api.md now has an Annotations section, and its reserved-table rows are marked served. docs/sigmf-extension.md documents the new key. There are contract tests in api_contract.rs and control_api.rs (T-079).
@@ -23312,10 +23320,11 @@ tasks:
       Commits: f4eb1671
       Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails even when run alone (3/3 runs, load avg ~11): panics at crates/hk-api/tests/ondemand.rs:365 with '10 records' against the assertion records > 20 over a 1.5 s window. It asserts throughput, so it belongs in the `timing` tier or needs a determinism fix; it is in the on-demand WebSocket path, which this diff does not touch. It was not checked against main on a quiet machine. | collection_id is checked only as a UUID. Checking that the collection exists, and what happens to its annotations when a collection is deleted, belongs to MAP-17 (T-817) once /api/collections exists. | The docs/api.md 'Reserved' preamble still says the routes are 'not yet served'. Only the three annotation rows are marked served; the preamble text should be reworded once all four stores land.
       Use cases: RESEARCH-003, RESEARCH-001
+    commit: e39df2e3
   - id: T-817
     milestone: MMAP
     title: 'Marker collections: generalize /api/bookmarks to time-frequency markers grouped into named collections'
-    status: in-progress
+    status: done
     branch: task-t817
     priority: normal
     parallel_group: MAP-API
@@ -23346,6 +23355,8 @@ tasks:
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
 
       2026-09-23: code carried by the bundle branch task-mmap-bundle (T-816, T-817, T-819 and T-822 together) because each branch's runner-written board commit conflicted with main's board; this result was re-applied from task-t817's board. Reconciliation in the bundle: T-816's duplicate AuthoredProvenance, AuthoredTier and stamp() were folded onto T-818's shared MeasurementProvenance, MeasurementTier and measurements::stamp (identical fields and serde, so no wire or storage change); hk_model::AuthoredProvenance is now only T-817's nullable marker stamp.
+
+      2026-09-23 (coordinator): landed GATED via task-mmap-bundle (merge e39df2e3), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
     result: |
       DONE (work-runner, from handback.json, 2026-09-22 20:29).
       Marker collections (MAP-17) are now served: GET/POST /api/collections, GET/PUT/DELETE /api/collections/{id}, GET/POST /api/collections/{id}/markers, GET /api/markers (every collection, the canvas layer's query) and GET/PUT/DELETE /api/markers/{id}.
@@ -23359,6 +23370,7 @@ tasks:
       Commits: 8f47507d
       Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails every time, including run alone (3 of 3): panics at crates/hk-api/tests/ondemand.rs:365 with '11 records' against `records > 20`. It is a throughput bound (records received in 1.5 s), and the machine's load average was about 16 while it ran. This diff touches nothing on the /ws/open or ondemand path (no changes to ondemand.rs, bridge.rs or that test). It looks like a timing-tier test outside `timing`; needs a check on a quiet machine or by the deflaker. | The MMAP stores share a provenance shape. This ticket defines hk_model::AuthoredProvenance and ViewTier in repo/collections.rs, and MAP-16/18/19 (T-816/T-818/T-819) should reuse them rather than each defining their own. | The UI bookmark client (ui/src/controls/bookmarks.ts) is unchanged and still works against the facade. The collection layer and table are MAP-21's job.
       Use cases: RESEARCH-003
+    commit: e39df2e3
   - id: T-818
     milestone: MMAP
     title: 'Saved measurements store + /api/measurements (value+unit+place+time+provenance)'
@@ -23403,7 +23415,7 @@ tasks:
   - id: T-819
     milestone: MMAP
     title: 'Saved views: named, restorable (time x frequency) window extents'
-    status: in-progress
+    status: done
     branch: task-t819
     priority: normal
     parallel_group: MAP-API
@@ -23434,6 +23446,8 @@ tasks:
       module + migration; a cheaper model's output here is reviewed by Opus before merge.
 
       2026-09-23: code carried by the bundle branch task-mmap-bundle (T-816, T-817, T-819 and T-822 together) because each branch's runner-written board commit conflicted with main's board; this result was re-applied from task-t819's board. Reconciliation in the bundle: T-816's duplicate AuthoredProvenance, AuthoredTier and stamp() were folded onto T-818's shared MeasurementProvenance, MeasurementTier and measurements::stamp (identical fields and serde, so no wire or storage change); hk_model::AuthoredProvenance is now only T-817's nullable marker stamp.
+
+      2026-09-23 (coordinator): landed GATED via task-mmap-bundle (merge e39df2e3), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
     result: |
       DONE (work-runner, from handback.json, 2026-09-23 00:32).
       Saved views (MAP-19) land as their own small store, /api/views, as docs/25 §10.6 settled: a view is a named point in view-arithmetic state, not a marker and not a device command. hk-model gains SavedView/SavedViewId (repo/saved_views.rs, a saved_view table ensured on first use). Each view has center_f/span_f plus one of two time shapes: follow_live (no centre time, optional span_t depth) or a frozen capture-clock center_t ± span_t/2. It also carries an opaque client pane_layout (capped at 16 KiB) and the shared server-stamped provenance. hk-api serves GET/POST /api/views and GET/PUT/DELETE /api/views/{id}, paged 500/2000 with an optional window filter. Mutations are audited with no device key, the store answers 503 without an audit log and 409 on a duplicate id, and supplied provenance/share fields are refused with 400. Every served view carries `share`, the POST body that re-creates it with its id preserved, which makes a view shareable and exportable. There is no restore route: restoring stays client view arithmetic, and an un-tuned frequency takes the ordinary gated retune offer. docs/api.md and api_contract.rs were updated together (T-079), and the tests assert device.calls() is empty.
@@ -23442,6 +23456,7 @@ tasks:
       Commits: 56f3375c
       Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay failed 3/3 when run alone with load average ~17 (ondemand.rs:365: `assert!(records > 20)` saw only 10 records in a 1.5 s wall-clock window). It is a throughput bound, so it belongs in the timing tier or needs a deflake. It is unrelated to this diff, which does not touch ondemand/WebSocket code. I could not confirm on a quiet machine; flag for deflaker. | MeasurementProvenance::validate's error text says "a measurement's provenance"; saved views now reuse that stamp. When the MAP-16..19 stores are consolidated, it should be renamed to a shared ResearchProvenance. | T-816/T-817 branches also append ids to hk-model ids.rs and add routes in http.rs, so expect trivial merge conflicts there.
       Use cases: AWARE-042
+    commit: e39df2e3
   - id: T-820
     milestone: MMAP
     title: 'Annotation authoring on the canvas (draw box/marker/label -> create annotation)'
@@ -23502,7 +23517,7 @@ tasks:
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
-    status: in-progress
+    status: done
     branch: task-t822
     priority: normal
     parallel_group: MAP-RESEARCH
@@ -23531,6 +23546,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       2026-09-23: code carried by the bundle branch task-mmap-bundle (T-816, T-817, T-819 and T-822 together) because each branch's runner-written board commit conflicted with main's board; this result was re-applied from task-t822's board. Reconciliation in the bundle: T-816's duplicate AuthoredProvenance, AuthoredTier and stamp() were folded onto T-818's shared MeasurementProvenance, MeasurementTier and measurements::stamp (identical fields and serde, so no wire or storage change); hk_model::AuthoredProvenance is now only T-817's nullable marker stamp.
+
+      2026-09-23 (coordinator): landed GATED via task-mmap-bundle (merge e39df2e3), re-landed on current main after the original branch conflicted on the board; the runner does not map that branch name to the ticket, so flipped by hand.
     result: |
       DONE (work-runner, from handback.json, 2026-09-23 00:30).
       Added an on-canvas measurement tool (MAP-22, RESEARCH-003) to the MCANVAS surface: a 'Measure' tool-mode toggle (docs/23 §10.4) that re-binds the bare drag to lay two measurement cursors and show a live Δf/Δt readout (ui/src/surface/measure.ts, pure arithmetic), while Shift+drag keeps marking a region unchanged in every mode per the docs/23 §10.4 gesture table. On release, ui/src/app/explore/measure.ts POSTs the cursors (never a computed value) to the existing /api/measurements (T-818) once per applicable kind — delta_f and/or delta_t — stamped with the pane's view context (frequency window, capture-time window, honesty tier derived from the pane's report/follow state). The saved record is drawn as a persistent MEASUREMENT_MARK box on the canvas (ui/src/surface/marks.ts) rather than vanishing on mouse-up. Follows T-458's gesture discipline: mode latched at press, distance gate via Math.hypot, extent on either axis alone still commits (unlike a region). No signal logic added to ui/src; the server computes value/unit/place.
@@ -23539,6 +23556,7 @@ tasks:
       Commits: c4a1ac0b
       Observed, not chased: docs/23 §10.4's gesture table also envisages Shift+drag's region (in ANY tool mode, including Navigate/default) feeding a menu action 'measure this' / 'annotate this' alongside the existing region->selection/band-edit destinations in ui/src/app/explore/region.ts. That would need a UI decision (a context menu or similar) about which of select/measure/annotate an unarmed region becomes, and T-820 (annotation authoring) is a separate not-yet-built sibling ticket touching the same region-destination logic — better resolved together than half-built here. This ticket's own acceptance (a drag/toggle measurement mode, readout on canvas, save to /api/measurements) is met without it. | symbol_rate/period (docs/25 §4's other two measurement kinds) need a cycle count `n` the backend requires (hk-model MEASUREMENT_N_MAX) that a plain two-point drag has no way to supply; this ticket persists only delta_f/delta_t (always valid from two cursors with no extra claim). A kind picker or an 'n' stepper for symbol-rate/period is natural follow-up scope, likely alongside T-821's collections/table panel which will also want a UI for editing an existing saved measurement's kind/n. | Saved measurements are held in a local in-session array (ui/src/app/centre/surface.ts's `measurements`) rather than fetched from GET /api/measurements on load/pane-scrub — so a measurement saved in an earlier session, or by another client, does not appear on the canvas until this ticket's own drag creates one. T-821 ('Collections panel + table view synced with the canvas — every mark is also a row') is the natural owner of a shared, fetched, cross-session list; wiring that list into `measurementMarkBoxes` here would be a one-line change once it exists.
       Use cases: RESEARCH-003
+    commit: e39df2e3
   - id: T-823
     milestone: MMAP
     title: 'Export: collections, measurements, annotations out as file/link (SigMF-adjacent)'
