@@ -795,6 +795,7 @@ dependencies = [
  "hk-demod",
  "hk-dsp",
  "hk-estimate",
+ "hk-liquid-sys",
  "hk-model",
  "hk-recipe",
  "hk-stream",

@@ -709,6 +709,23 @@ impl Recipe {
                 match self.source(&r, &index, &descriptors, &out_types) {
                     Err(m) => e.push(path, m),
                     Ok((from, ty)) => {
+                        // A diagnostic output is a presentation tap (a `stage` output), never a
+                        // data path: wiring one into a node would add an unreviewed port type
+                        // by the back door (ADR-0011 §9.2, T-609 — `psk_demod.symbols`).
+                        let diagnostic = match &from {
+                            Endpoint::Node { node, port } => index
+                                .get(node.as_str())
+                                .and_then(|&j| descriptors[j])
+                                .and_then(|sd| sd.output(port))
+                                .is_some_and(|p| p.diagnostic),
+                            Endpoint::Input => false,
+                        };
+                        if diagnostic {
+                            e.push(
+                                path.clone(),
+                                "a diagnostic output is a tap for outputs[], not a node input",
+                            );
+                        }
                         if !spec.types.contains(&ty) {
                             e.push(
                                 path,
@@ -892,6 +909,52 @@ mod tests {
         let mut v = minimal();
         v["nodse"] = json!([]);
         assert!(serde_json::from_value::<Recipe>(v).is_err());
+    }
+
+    #[test]
+    fn a_diagnostic_output_may_be_tapped_but_not_wired_into_a_node() {
+        // ADR-0011 §9.2 (T-609): `psk_demod.symbols` is a constellation tap. Wiring any
+        // diagnostic port into a node input would add a port type by the back door.
+        let mut cat = catalogue();
+        cat.push(BlockDescriptor {
+            name: "demod".into(),
+            version: 1,
+            group: "iq".into(),
+            doc: String::new(),
+            inputs: vec![PortSpec::new("in", PortType::Iq)],
+            outputs: vec![
+                PortSpec::new("out", PortType::Soft),
+                PortSpec::new("symbols", PortType::Iq).diagnostic(),
+            ],
+            params: vec![],
+            params_pinned: true,
+        });
+        let recipe = |from: &str| -> Recipe {
+            serde_json::from_value(json!({
+                "schema": "hackriff.recipe", "schema_version": 2, "id": "t", "version": 1,
+                "name": "T", "input": {"port": "iq"},
+                "nodes": [
+                    {"id": "d", "block": "demod"},
+                    {"id": "n", "block": "identity", "inputs": {"in": from}}
+                ],
+                "outputs": [
+                    {"id": "c", "kind": "stage", "from": "d.symbols"},
+                    {"id": "s", "kind": "stage", "from": "n"}
+                ],
+                "output_policy": {"content_class": "unrestricted"}
+            }))
+            .unwrap()
+        };
+        // Tapping it as a stage output, and wiring the main port, both validate.
+        recipe("d.out").validate(&cat).expect("main port wires");
+        recipe("d").validate(&cat).expect("default port wires");
+        let errors = recipe("d.symbols").validate(&cat).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.path == "nodes[1].inputs.in" && e.message.contains("diagnostic")),
+            "{errors:?}"
+        );
     }
 
     #[test]

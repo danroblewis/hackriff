@@ -101,7 +101,7 @@ The runtime polls it about every 250 ms. It serves three uses:
 
 **Stage outputs:**
 - Every output port of every node is a stage output; blocks do nothing to offer one. The runtime taps `(node, port)` after `process` only while a consumer is open, so an untapped stage costs nothing.
-- A **diagnostic** output (`PortSpec::diagnostic`, e.g. `clock_recovery.timing_error`) is computed only while tapped (`Io::tapped`).
+- A **diagnostic** output (`PortSpec::diagnostic`, e.g. `clock_recovery.timing_error`) is computed only while tapped (`Io::tapped`). It is a tap for `outputs[]`, never a node input: `Recipe::validate` refuses `node.port` wiring from a diagnostic port (§9.2, T-609).
 - Rendering reduction, e.g. the `spectrum` view of an `iq`/`real` port, is server-side, so the thin UI never processes samples.
 
 ### 1.4 Lifecycle and real-time rules
@@ -567,7 +567,7 @@ That one document is the whole point of the amendment: **one pipeline, two outpu
 
 | Group | Block | Ports | Parameter sketch (placeholder; the ticket pins it) | Ticket |
 |---|---|---|---|---|
-| iq | `psk_demod` | iq → soft (+ diagnostic `symbols` iq, `timing_error` real) | `modulation` (`bpsk`/`dbpsk`/`qpsk`/`oqpsk`/`dqpsk`/`pi4-dqpsk`/`8psk`/`d8psk`), `symbol_rate_bd`, `pulse` (`rrc`/`rect`/`half-sine`), `rolloff`, `mapping` (`gray`/`natural`), `rotation_deg` (hot), `iq_swap` (hot), `carrier_loop_bandwidth` (hot), `timing_loop_bandwidth` (hot), `max_offset_hz` | T-609 |
+| iq | `psk_demod` | iq → soft (+ diagnostic `symbols` iq, `timing_error` real) | **pinned by T-609:** `modulation` (`bpsk`/`dbpsk`/`qpsk`/`oqpsk`/`dqpsk`/`pi4-dqpsk`/`8psk`/`d8psk`), `symbol_rate_bd`, `pulse` (`rrc`/`rect`/`half-sine`; the last two OQPSK-only), `rolloff` (0.05–1), `mapping` (`gray`/`natural`; OQPSK Gray only), `rotation_deg` (hot), `iq_swap` (hot), `loop_bandwidth` (hot; replaces the sketch's two loop bandwidths, since liquid's `symtrack` has one knob), `max_offset_hz` | T-609 (**implemented**) |
 | iq | `css_demod` | iq → soft | `spreading_factor`, `bandwidth_hz`, `ldro`, `sync_word`, `header` (`explicit`/`implicit`) | unfiled |
 | iq | `ssb_demod` | iq → real | `sideband`, `carrier` (`estimate`/`raster`/`fixed`), `raster_hz`, `clarifier_hz` (hot), `bandwidth_hz`, `output_rate_hz` | unfiled |
 | iq | `cw_demod` | iq → real | `output` (`tone`/`envelope`), `tone_hz` (hot), `bandwidth_hz` (hot), `output_rate_hz` | unfiled |
@@ -658,7 +658,7 @@ A `bits` port can't say where a code block starts. So:
 | Block | Adapts | In the build? |
 |---|---|---|
 | every §1.5 and §8.4 block | hk-dsp, hk-demod, hk-estimate kernels (§1.6 list) | **yes**, in-repo |
-| `psk_demod` | liquid-dsp modem / symsync / NCO; in-repo fallback: hk-dsp `filter::Nco`, hk-demod `pilot::PilotPll`, `clock_recovery`'s timing loops | **not linked** (T-607); fallback partial |
+| `psk_demod` | liquid-dsp `symtrack_cccf` (AGC, RRC matched filter + timing, equaliser, NCO/PLL) for BPSK/DBPSK/QPSK/DQPSK/π/4-DQPSK/8PSK/D8PSK; native for OQPSK (no liquid modem) and for carrier acquisition (M-th-power spectral line) | **yes**: `hk-liquid-sys` (T-607); the native parts are in `psk.rs` (T-609) |
 | `viterbi`, `viterbi_frames` | liquid-dsp convolutional FEC | **not linked** (T-607) |
 | `reed_solomon` | liquid-dsp Reed–Solomon | **not linked** (T-607) |
 | `equalise` | liquid-dsp `eqlms`/`eqrls` | **not linked** (T-607) |
@@ -682,4 +682,5 @@ Its wire form is that ticket's question. §4's reasoning applies: a new stream `
 
 - No port type is added (§1.1 is unchanged), and `schema_version` is not bumped. New blocks are catalogue data: a recipe naming one validates against the catalogue, and a placeholder only warns.
 - The M1 catalogue and the §8 audio rows are untouched. ADR-0015 §10's M-14 ("optional `psk_demod`") is superseded by T-609, as filed.
+- **T-609 landed `psk_demod` (2026-09-23).** Its parameters are now pinned (`params_pinned: true`), and the §9.1 row above lists them. It keeps §9.2's contract exactly: k soft items per symbol, MSB first, max-log magnitude. Hot `rotation_deg` / `iq_swap` resolve the phase ambiguity; for OQPSK, `rotation_deg` selects inverted rails, because a 90° slip there is a one-bit slip plus a rail inversion. `Recipe::validate` now refuses any diagnostic output wired into a node input, as §9.2 required before registration. `crates/hk-blocks/src/blocks/iq/psk.rs` documents the acquisition, hold and DISCONTINUITY behaviour, and the measured reasons carrier acquisition is a feed-forward M-th-power line search rather than the "FLL or band-edge" the ticket sketched.
 - **A catalogue gap is a product-visible state** (ADR-0015 §8, T-550). "This build has no `css_demod`" must never read like "this is not LoRa". `hk_pipeline::synth` already says so for `psk_demod`, and each new row inherits the obligation until its block registers.

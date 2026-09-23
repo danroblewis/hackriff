@@ -300,7 +300,8 @@ fn mis_ordered_fec_chains_are_refused_by_type() {
     let rs_on_bits = recipe(
         "rs-on-bits",
         json!([
-            { "id": "psk", "block": "psk_demod" },
+            { "id": "psk", "block": "psk_demod",
+              "params": { "modulation": "bpsk", "symbol_rate_bd": 9600 } },
             { "id": "fec", "block": "viterbi" },
             { "id": "rs", "block": "reed_solomon" }
         ]),
@@ -316,7 +317,8 @@ fn mis_ordered_fec_chains_are_refused_by_type() {
     let soft_into_frames = recipe(
         "soft-into-frames",
         json!([
-            { "id": "psk", "block": "psk_demod" },
+            { "id": "psk", "block": "psk_demod",
+              "params": { "modulation": "bpsk", "symbol_rate_bd": 9600 } },
             { "id": "fec", "block": "viterbi_frames" }
         ]),
         frames_out("fec"),
@@ -327,5 +329,53 @@ fn mis_ordered_fec_chains_are_refused_by_type() {
             .any(|e| e.path.contains("nodes[1]")),
         "{:?}",
         errors(&soft_into_frames)
+    );
+}
+
+/// T-609: `psk_demod` is implemented, so its parameters are pinned and a recipe naming it is
+/// checked against them (the other §9.1 rows still only warn).
+#[test]
+fn psk_demod_is_registered_with_pinned_parameters() {
+    let registry = hk_blocks::Registry::builtin();
+    let d = registry
+        .get("psk_demod")
+        .expect("psk_demod is registered")
+        .descriptor()
+        .clone();
+    assert!(d.params_pinned, "psk_demod parameters are pinned");
+    let cat = catalogue::planned();
+    assert_eq!(cat.descriptor("psk_demod"), Some(&d));
+    let bad = recipe(
+        "psk-bad-params",
+        json!([{ "id": "psk", "block": "psk_demod", "params": { "modulation": "16qam" } }]),
+        json!([{ "id": "bits", "kind": "stage", "from": "psk" }]),
+    );
+    let errs = errors(&bad);
+    assert!(
+        errs.iter().any(|e| e.path.starts_with("nodes[0].params")),
+        "{errs:?}"
+    );
+}
+
+/// ADR-0011 §9.2: the `symbols` diagnostic port is a constellation tap, never a data path.
+/// Tapping it as an output validates (SIGNAL-034's chain does); wiring it into a node is
+/// refused, so a symbol-domain port type cannot arrive unreviewed.
+#[test]
+fn psk_symbols_tap_cannot_be_wired_into_a_node() {
+    let r = recipe(
+        "psk-symbols-into-node",
+        json!([
+            { "id": "psk", "block": "psk_demod",
+              "params": { "modulation": "qpsk", "symbol_rate_bd": 9600 } },
+            { "id": "eq", "block": "lowpass", "params": { "cutoff_hz": 4800 },
+              "inputs": { "in": "psk.symbols" } }
+        ]),
+        json!([{ "id": "s", "kind": "stage", "from": "eq" }]),
+    );
+    let errs = errors(&r);
+    assert!(
+        errs.iter()
+            .any(|e| e.path == "nodes[1].inputs.in" && e.message.contains("diagnostic")),
+        "{errs:?}"
     );
 }

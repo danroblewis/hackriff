@@ -13,6 +13,7 @@ mod demod;
 mod filter;
 pub mod mauto;
 mod ppm;
+mod psk;
 mod subcarrier;
 #[cfg(test)]
 pub(crate) mod testkit;
@@ -323,4 +324,7 @@ pub fn register(r: &mut Registry) {
     add("msk_demod", demod::build_msk);
     add("ppm_demod", ppm::build);
     add("subcarrier", subcarrier::build);
+    // ADR-0011 §9 row, pinned by its own descriptor in `mauto` (T-609).
+    let mauto = mauto::planned();
+    common::register_pinned(r, &mauto, "psk_demod", psk::build);
 }
