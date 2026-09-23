@@ -194,6 +194,7 @@ test-rust:
     #!/usr/bin/env bash
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
+    t0=$SECONDS
     # T-492: hk-plugins::host spawns these via CARGO_BIN_EXE_*, resolved at the *test binary's*
     # compile time. `--workspace` does not reliably rebuild them if hk-plugins' own fingerprint
     # is otherwise fresh — the same one line `acceptance` (below) already runs before its
@@ -201,12 +202,17 @@ test-rust:
     # Unconditional: it is cheap, and it is a build the *selected* set may still spawn.
     cargo build -p hk-plugins --bins
     scope=$(just _crate-scope hk-e2e)
+    tbuild=$((SECONDS-t0))
     if command -v cargo-nextest >/dev/null 2>&1; then
         cargo nextest run $scope
     else
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
         cargo test $scope
     fi
+    # nextest prints its own `Summary [Ns]`, which covers the RUN only. The difference between
+    # that and this is the compile plus the **list** phase — every test binary spawned once with
+    # `--list` — which is most of what `just test` used to spend unattributed (R7).
+    echo "test-rust: $((SECONDS-t0)) s total, of which $tbuild s before cargo nextest run" >&2
 
 # T-631: a nextest override must be reachable by a nextest run that reads it.
 #
@@ -236,11 +242,36 @@ conflict-check:
 nextest-config-check:
     uv run --locked --project py python -m hkpy.nextest_config
 
+# The crates whose `src/` holds a code fence rustdoc would actually run — DERIVED, never a
+# maintained list (`py/hkpy/doctests.py`). Prints the selection and the skipped crates on stderr,
+# and falls back to the whole workspace on any scan failure.
+_doctest-scope exclude="":
+    @uv run --locked --project py python -m hkpy.doctests {{exclude}}
+
 # nextest doesn't run doctests, so `just test` runs them separately.
+#
+# **Only over the crates that can have one.** `--workspace --exclude hk-e2e` invoked rustdoc over
+# 19 crates to execute 3 doctests (hk-blocks, hk-pipeline::region, hk-recipe); the other 16 print
+# `0 passed; 0 failed` and each of those zeroes is still a full `rustdoc --test` of the crate, paid
+# on every gate because doctest runs are not fingerprinted. `_doctest-scope` finds the crates by
+# **scanning for a runnable doc fence**, so this narrows what is *invoked*, never what is *tested*:
+# write a doctest in any crate and that crate is selected again with no edit here. (48 of the 58
+# doc fences in this workspace are ```text and 4 more are ```json — rustdoc runs none of them, which
+# is why "has a fence" and "has a doctest" are different questions.)
+#
+# Times itself, because a quarter of `just test` had no owner at all until it was measured
+# (docs/test-speed-review-2026-09-22.md §1.2, R7).
 test-doc:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo test $(just _crate-scope hk-e2e) --doc
+    t0=$SECONDS
+    scope=$(just _doctest-scope hk-e2e)
+    if [ -z "$scope" ]; then
+        echo "test-doc: no crate in scope holds a runnable doc fence — nothing to run ($((SECONDS-t0)) s)" >&2
+        exit 0
+    fi
+    cargo test $scope --doc
+    echo "test-doc: $((SECONDS-t0)) s" >&2
 
 # T-543. The ONE place `$HK_GATE_CRATES` becomes cargo arguments, printed on stderr so a
 # narrowed run always says so. `$1` is a package to drop from the selection (hk-e2e, which
