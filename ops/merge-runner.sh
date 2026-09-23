@@ -354,7 +354,29 @@ limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
   wait "$pid"; return $?
 }
 
-flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
+# THE LEDGER (py/hkpy/flakes.py). Every triage above is a forgiveness: a test that passes alone
+# costs a gate, gets retried, and is forgotten - so the same spec can cost four gates in one day
+# and nothing anywhere counts to two. This reads BOTH of the runner's own outputs (flaky.jsonl
+# for the load, the TRIAGE lines for the failed-alone direction the jsonl never records), counts
+# per test, and at two reds in seven days writes ONE line into merge-needs-attention.txt with
+# the evidence attached, so the coordinator files it from data instead of rediscovering it.
+#
+# Best effort, always: it runs AFTER the triage decision has already been made and returned, it
+# cannot change that decision, and `|| true` plus a total `try/except` inside mean a broken
+# ledger can never fail a merge. A measurement must not be able to break what it measures.
+flake_ledger(){
+  ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --update ) >>"$LOG" 2>&1 || true
+}
+
+# One wrapper, one call: every path out of the triage (passed alone, failed alone, not a flake
+# candidate) updates the ledger, without four copies of the same line inside the branches.
+flake_retry(){
+  _flake_retry "$@"; local rc=$?
+  flake_ledger
+  return $rc
+}
+
+_flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
   # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
   # `--base` gate would diff the wrong thing.

@@ -1108,6 +1108,36 @@ def latest_junit():
                       "total_s": round(sum(c["s"] for c in cases))})
     return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
 
+def flake_top(n=5):
+    """The flake ledger's worst offenders — `$HACKRIFF_OPS/flakes.json` (py/hkpy/flakes.py).
+
+    The merge runner forgives a load flake on every single gate and forgets it, so the same
+    spec can cost four gates in a day with nothing counting to two. The ledger counts; this
+    shows the top of it, with which WAY each test went, because "passes alone" (a wait to make
+    deterministic) and "fails alone" (a real defect) are opposite jobs.
+    """
+    try:
+        with open(os.path.join(SCRATCH, "flakes.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        tests = data.get("tests") or {}
+    except Exception:
+        return []
+    rows = []
+    for name, rec in tests.items():
+        if not isinstance(rec, dict):
+            continue
+        rows.append({
+            "test": str(name),
+            "red": int(rec.get("red_in_gate") or 0),
+            "recent": int(rec.get("recent_red") or 0),
+            "pass_alone": int(rec.get("passed_alone") or 0),
+            "fail_alone": int(rec.get("failed_alone") or 0),
+            "loads": [x for x in (rec.get("loads") or [])][-4:],
+            "last": rec.get("last_seen") or 0,
+        })
+    rows.sort(key=lambda r: (-r["red"], -r["recent"], r["test"]))
+    return rows[:n]
+
 def work_queue(smap, wts, ags, merge_ticket=""):
     """Two queues the dashboard couldn't show before:
       merge_ready  in-progress tickets whose branch has commits AHEAD of main and
@@ -1733,7 +1763,7 @@ def gather():
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
         "gates": gates, "junit": junit,
-        "timing": gate_timing(),
+        "timing": gate_timing(), "flakes": flake_top(),
         "budget": budget_status(),
     }
 
@@ -1938,10 +1968,20 @@ async function tick(){
       const tl=(G[0]&&G[0].timing)||[];
       if(tl.length) tm=tl.map(l=>`<div style="${mono};color:${l.startsWith('gate: CONTENDED')?'#F0A542':l.startsWith('gate: DEARER')?'#A395E0':'#52C2AE'}">${esc(l)}</div>`).join('');
     }
+    // The flake ledger: which tests keep costing gates, and which WAY they go when re-run alone.
+    const FL=d.flakes||[];
+    const fl=FL.length?FL.map(f=>{
+      const real=f.fail_alone>0, col=real?'#E47B68':'#F0A542';
+      const how=real?(f.pass_alone?'both ways — triage in isolation':'fails alone — a real defect'):'passes alone — a load flake';
+      const ld=(f.loads||[]).length?` · loads ${f.loads.map(x=>Number(x).toFixed(0)).join(',')}`:'';
+      return `<div style="${mono};padding:1px 0"><span style="color:${col}">${f.red}x</span> <span style="color:#5A6973">(${f.recent} in 7d)</span> ${esc(f.test)}<div style="color:#8595A0;padding-left:14px">${how}${ld}</div></div>`;
+    }).join(''):'';
     // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),
     // and the waiting list capped: the full set is in the Work trees card.
     const CAP=12; const wtShown=ahead.length>CAP?ahead.slice(0,CAP).map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join('')+`<div style="color:#5A6973;padding:2px 0">… and ${ahead.length-CAP} more (see Work trees)</div>`:wt;
-    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
+      +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
+      +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
   const b=d.budget||{}; const bEl=$('#budget');
