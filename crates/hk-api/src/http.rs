@@ -35,6 +35,7 @@
 //! | `/api/status` | GET | token | T-027 pipeline counters. Never content |
 //! | `/api/control/*`, `/api/bookmarks[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-050 control API ([`crate::control`]) |
 //! | `/api/selections[/<id>[/links]]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-052 persisted region selections ([`crate::selections`]) |
+//! | `/api/measurements[/<id>]` | GET, POST, PUT, DELETE | token (header only for mutating) | T-818 saved measurements: cursors in, server-computed value+unit+place out, server-stamped provenance ([`crate::measurements`]) |
 //! | `/api/selections/<id>/watch` | GET | token | T-166 the selection's region-watch alerts and the activity it did not alert on, with reasoning ([`crate::selections`]) |
 //! | `/api/outputs[/record/start\|/record/stop]`, `/api/outputs/<id>/files/<name>` | GET, POST | token (header only for mutating) | T-061 output recordings and downloads ([`crate::outputs`]) |
 //! | `/api/analyze` | POST | token | T-190 stub: validates a selection/emitter/band target, answers `501 not_implemented` until MAUTO fills it in ([`crate::analyze`]) |
@@ -163,6 +164,12 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/selections/{id}"),
     ("POST", "/api/selections/{id}/links"),
     ("GET", "/api/selections/{id}/watch"),
+    // T-818 MAP-18 saved measurements
+    ("GET", "/api/measurements"),
+    ("POST", "/api/measurements"),
+    ("GET", "/api/measurements/{id}"),
+    ("PUT", "/api/measurements/{id}"),
+    ("DELETE", "/api/measurements/{id}"),
     ("GET", "/api/outputs"),
     ("POST", "/api/outputs/record/start"),
     ("POST", "/api/outputs/record/stop"),
@@ -1196,6 +1203,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
     };
     if let Some(r) = control::route(state, &ctl)
         .or_else(|| crate::selections::route(state, &ctl))
+        .or_else(|| crate::measurements::route(state, &ctl)) // T-818
         .or_else(|| crate::decode::route(state, &ctl)) // T-159; before inventory::route (see its docs)
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route

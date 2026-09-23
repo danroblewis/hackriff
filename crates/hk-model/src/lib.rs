@@ -109,8 +109,9 @@ pub use harmonic::{
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
-    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId,
-    RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId, TrunkSystemId,
+    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, MeasurementId,
+    ProvenanceId, RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId,
+    TrunkSystemId,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -145,6 +146,12 @@ pub use repo::{
     SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink,
     SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
     USER_BAND_MAX_WIDTH_HZ, UserBand,
+};
+// T-818 MAP-18 saved measurements (docs/25 §4).
+pub use repo::{
+    MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX, MEASUREMENT_REF_MAX,
+    Measurement, MeasurementBasis, MeasurementComputed, MeasurementCursor, MeasurementFilter,
+    MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
 };
 pub use retune::{
     RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,
