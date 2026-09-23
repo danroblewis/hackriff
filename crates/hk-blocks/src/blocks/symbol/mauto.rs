@@ -1,13 +1,14 @@
 //! ADR-0011 §9 (T-606) catalogue rows for group `symbol`: `mlevel_slicer`, `descramble`,
 //! `bitstuff`, `codeword_map`, `despread`, `equalise`. **Ports are pinned; parameters are
-//! placeholders** (`params_pinned: false`) that each implementing ticket pins (T-612
-//! `mlevel_slicer`, T-613 `bitstuff`; the rest are unfiled, docs/18 §9). `descramble` is
-//! implemented and its parameters pinned (T-608): its row is `super::descramble::descriptor`.
+//! placeholders** (`params_pinned: false`) that each implementing ticket pins (T-613 `bitstuff`;
+//! the rest are unfiled, docs/18 §9). `descramble` (T-608) and `mlevel_slicer` (T-612) are
+//! implemented with their parameters pinned: their rows are `super::descramble::descriptor` and
+//! `super::mlevel::descriptor`.
 
 use hk_recipe::PortType::{Bits, Frames, Iq, Soft};
 use hk_recipe::{BlockDescriptor, PortSpec};
 
-use crate::schema::{ParamExt, boolean, descriptor, float, hex, int, list, one_of, param};
+use crate::schema::{ParamExt, descriptor, float, hex, int, list, one_of, param};
 
 /// `bits|frames → same`: a streaming mode, and a per-frame mode that restarts at each frame.
 fn bits_or_frames() -> (Vec<PortSpec>, Vec<PortSpec>) {
@@ -23,42 +24,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
     let (stf_in, stf_out) = bits_or_frames();
     let (cwm_in, cwm_out) = bits_or_frames();
     vec![
-        descriptor(
-            "mlevel_slicer",
-            "symbol",
-            "M-ary hard decision: one soft symbol → k bits (label MSB first).",
-            vec![PortSpec::new("in", Soft)],
-            vec![PortSpec::new("out", Bits)],
-            vec![
-                param("levels", int(2, 16), "M, a power of two (4: C4FM dibits).").required(),
-                param(
-                    "thresholds",
-                    one_of(&["auto", "fixed"]),
-                    "Decision levels tracked from the symbol histogram, or fixed_levels.",
-                )
-                .default_value("auto"),
-                param(
-                    "fixed_levels",
-                    list(float(-1e9, 1e9, ""), 1),
-                    "The M-1 thresholds for `fixed`, ascending.",
-                )
-                .hot(),
-                param(
-                    "mapping",
-                    one_of(&["gray", "natural"]),
-                    "Label of each level, lowest first.",
-                )
-                .default_value("gray"),
-                param(
-                    "invert",
-                    boolean(),
-                    "Mirror the levels (as slicer's invert).",
-                )
-                .default_value(false)
-                .hot(),
-            ],
-            false,
-        ),
+        super::mlevel::descriptor(),
         super::descramble::descriptor(dsc_in, dsc_out),
         descriptor(
             "bitstuff",

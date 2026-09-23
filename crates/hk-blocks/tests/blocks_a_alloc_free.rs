@@ -1,7 +1,7 @@
-//! Blocks A (T-086 iq and symbol groups; T-610 adds the streaming `viterbi`) allocate nothing
-//! in `process` over steady-state chunks, including chunks flagged `DISCONTINUITY`/`RESET`
-//! (ADR-0011 §1.4 rule 1), and a restart leaves each block exactly as a freshly built one
-//! (T-104).
+//! Blocks A (T-086 iq and symbol groups; T-610 adds the streaming `viterbi`, T-612
+//! `mlevel_slicer`) allocate nothing in `process` over steady-state chunks, including chunks
+//! flagged `DISCONTINUITY`/`RESET` (ADR-0011 §1.4 rule 1), and a restart leaves each block
+//! exactly as a freshly built one (T-104).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -373,6 +373,21 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
             48_000.0,
         ),
         ("slicer", json!({}), &soft, 2_400.0),
+        // T-612: the M-ary decision, auto (the windowed level fit) and fixed.
+        ("mlevel_slicer", json!({"levels": 4}), &soft, 2_400.0),
+        (
+            "mlevel_slicer",
+            json!({"levels": 8, "window": 1000, "mapping": "natural", "bit_order": "lsb"}),
+            &soft,
+            2_400.0,
+        ),
+        (
+            "mlevel_slicer",
+            json!({"levels": 4, "thresholds": "fixed", "fixed_levels": [-0.5, 0.0, 0.5],
+                   "mapping": "table", "table": [3, 2, 0, 1]}),
+            &soft,
+            2_400.0,
+        ),
         ("diff_decode", json!({}), &bits, 2_400.0),
         ("nrzi", json!({}), &bits, 2_400.0),
         ("manchester", json!({}), &soft, 2_400.0),
