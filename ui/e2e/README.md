@@ -51,6 +51,17 @@ Two of those deserve a note:
 - **The cap is read from the server** (`cost.in_flight_limit`), never restated here. The runner reads
   it *before any browser starts*, because asking for it while a browser holds four reads in flight
   gets a `503` — the harness would manufacture the condition it exists to detect.
+- **A second page belongs in its own window, or the first one stops running** (2026-09-23). A spec
+  that needs two clients *at the same time* must open the second with `browser.page(url, { newWindow:
+  true })`. A second target in the same window becomes that window's active tab, so the first page's
+  `visibilityState` flips to `hidden` and Chrome delivers it no `requestAnimationFrame` — measured
+  here at 26 frames/s before and **0 after**, with `--disable-background-timer-throttling` and
+  `--disable-renderer-backgrounding` both already set (those govern timers and process priority, not
+  rAF for a hidden page). The surface computes its tile demand in its render pass, so a same-window
+  second tab silently ends the first one's fetching: `surface-contention` was left asserting on the
+  tail of an already-draining queue and went red three times in one day's gate on a race that never
+  happened. `setInterval` readouts keep ticking while hidden, which is why the symptom reads as a
+  stale number rather than a dead page.
 
 ## What's here
 

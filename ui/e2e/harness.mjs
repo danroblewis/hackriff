@@ -220,10 +220,24 @@ export class Browser {
 
 /** One page target, with its console, its exceptions and its network recorded from before load. */
 export class Page {
-  static async open(conn, url, { width = 1440, height = 900, initScript = null } = {}) {
-    // No width/height here: `Target.createTarget` only accepts them for a new *window*, and the
-    // viewport is set by `Emulation.setDeviceMetricsOverride` below anyway.
-    const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
+  static async open(conn, url, { width = 1440, height = 900, initScript = null, newWindow = false } = {}) {
+    // **`newWindow` is not cosmetic: it decides whether the page ALREADY OPEN keeps rendering**
+    // (2026-09-23). A second target in the SAME window becomes the window's active tab, so the
+    // first one's `document.visibilityState` flips to `hidden` and Chrome stops delivering it
+    // `requestAnimationFrame` — measured here at 26 frames/s before and **0 frames/s after**, with
+    // `--disable-background-timer-throttling` and `--disable-renderer-backgrounding` both already
+    // set (they govern timers and process priority, not rAF for a hidden page). The surface's tile
+    // demand is computed in its render pass (`preview.ts` `start()` → `frame()`), so a spec that
+    // opens a second tab has silently stopped the first one's fetching — which is exactly the
+    // situation `surface-contention.e2e.mjs` exists to create. In its own window both pages stay
+    // `visible` and both keep rendering (measured 26 and 68 frames/s side by side).
+    //
+    // Default off, so every existing single-page spec opens exactly the target it always did.
+    //
+    // width/height are only accepted by `Target.createTarget` for a new *window*; the page's own
+    // viewport comes from `Emulation.setDeviceMetricsOverride` below either way.
+    const { targetId } = await conn.send("Target.createTarget",
+      newWindow ? { url: "about:blank", newWindow: true, width, height } : { url: "about:blank" });
     const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
     const p = new Page(conn, sessionId);
     conn.on("Runtime.consoleAPICalled", (m, sid) => {
