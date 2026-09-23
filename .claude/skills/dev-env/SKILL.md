@@ -34,16 +34,14 @@ Report: which of the five are up, whether a gate is running, what is queued, wha
 4. `pkill -f stage.sh; pkill -f 'hk serve --bind 127.0.0.1:8899'; pkill -f monitor.py`
 5. Verify nothing is left: the `ps` line from **status** must print nothing.
 
-**A killed gate leaves `main` provisional.** A bulk batch commits each merge before gating; the
-marker `$HACKRIFF_OPS/bulk-in-progress` names `base=<sha>` and `branches=…`. Rewind and re-queue:
-```bash
-cat $HACKRIFF_OPS/bulk-in-progress
-git -C /Users/daniellewis/hackriff status --porcelain | grep -v '^??'   # must be empty (else: git merge --abort)
-git -C /Users/daniellewis/hackriff reset --hard <base>                  # use -C: never rely on cwd
-rm -f $HACKRIFF_OPS/bulk-in-progress
-printf '%s\n' <the branches> >> $HACKRIFF_OPS/merge-queue.txt
-```
-A staged single merge is `.git/MERGE_HEAD`: `git merge --abort`, re-queue the branch.
+**A killed gate leaves `main` provisional — and the runner repairs it itself at its next start.**
+A bulk batch commits each merge before gating (marker `$HACKRIFF_OPS/bulk-in-progress`, with
+`base=<sha>` and `branches=…`); a single merge stages `.git/MERGE_HEAD`. On startup
+`ops/merge-runner.sh` aborts a staged merge, rewinds a provisional bulk to its base and re-queues
+its branches, and logs `STARTUP: …` for each. So the repair is: **start the runner.** Only if it
+logs "a person must look" (the tree has edits that are not the merge's own) do the manual steps
+apply — `git -C /Users/daniellewis/hackriff merge --abort` / `reset --hard <base>` — and then
+find whose edits those were before touching them.
 
 ### start
 0. **Pre-flight.** `git -C $REPO branch --show-current` is `main`; no `MERGE_HEAD`, no
