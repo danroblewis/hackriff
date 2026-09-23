@@ -2313,6 +2313,28 @@ A measurement a researcher takes on the canvas — Δf, Δt, bandwidth, duration
 - **Audited** as `measurement_create`, `measurement_update`, `measurement_delete` (token id, peer, request, old/new, status), with **no `device` key**: measuring is a view act and reaches no radio. Without an audit log every mutating route is `503 unavailable`; without a store, every route is.
 - **Never detection input.** A saved measurement mints no candidate, moves no threshold and never pre-populates the inventory (docs/25 §10.7).
 
+## Saved views (T-819, MAP-19)
+
+A **saved view** is a named, restorable (time × frequency) window extent — the ArcGIS spatial-bookmark analogue on the canvas plane ([docs/25 §6](25-spectrum-research-workflow.md), the normative store contract in §10, [ADR-0023](adr/0023-map-ui-and-research-state.md) §5; AWARE-042). It is a **named point in view-arithmetic state**, nothing more, and it is its own store rather than a bookmark/marker because it has no frequency *centre* in a marker's sense (docs/25 §10.6). Stored in the run's user-metadata database beside bookmarks, selections and measurements. Errors: `{"error", "code"}` with `invalid`, `not_found`, `conflict`, `unavailable`; `405` with `Allow` for a wrong method; `401` before dispatch.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/views` | `f_lo`, `f_hi` (Hz), `t0`, `t1` (capture-clock Unix s) — **all four or none**; `limit`? (default 500, max 2000); `cursor`? | `{"window", "views": [SavedView, …], "count", "matched", "limit", "next_cursor"}` |
+| POST | `/api/views` | `{"name", "note"?, "center_f_hz", "span_f_hz", "center_t_s"?, "span_t_s"?, "follow_live", "pane_layout"?, "id"?, "view"}` | `SavedView` (`201`); `409 conflict` when `id` already exists |
+| GET | `/api/views/{id}` | – | `SavedView` |
+| PUT | `/api/views/{id}` | any create field but `id` (`null` clears `note`, `center_t_s`, `span_t_s`, `pane_layout`); the result is re-validated whole | `SavedView` |
+| DELETE | `/api/views/{id}` | – | `{"deleted": SavedView}` |
+
+`SavedView`: `{id, name, note, center_f_hz, span_f_hz, center_t_s, span_t_s, follow_live, pane_layout, provenance, created_s, updated_s, share}`, with `provenance` the same stamp as an annotation's or a measurement's: `{device_id, center_hz, span_hz, sample_rate_hz, t_capture: [t0_s, t1_s], tier, authored_s, actor, authored: true}`.
+
+- **The time extent is one of two shapes.** `follow_live: true` pins the view to the growing live edge: `center_t_s` must be absent/`null` (its time position *is* the live edge) and `span_t_s` is the optional time depth shown. `follow_live: false` freezes it on the capture-clock window `center_t_s ± span_t_s/2`, and both are then **required** — a pane's pause *is* its time window. `span_f_hz` is positive and the frequency extent `center_f_hz ± span_f_hz/2` sits at or above 0 Hz. `name` is 1–200 characters (trimmed), `note` at most 4000, and `pane_layout` — the N-pane arrangement to restore, **client presentation state stored opaquely** — is a JSON object or array of at most 16 KiB.
+- **Restoring is view arithmetic, not a device command.** There is no restore route: the client applies the extent through its own view arithmetic over already-captured data. A view whose frequency extent lies outside the tuned window raises the client's ordinary gated retune **offer** through the one `DeviceAction` path, snapped to an achievable config — **no exemption** (ADR-0023 §5). No `/api/views*` route reaches a front end, and a saved view is *restored on request*, never the bootstrap (the view still opens on the observed extent from the coverage map).
+- **Shareable and exportable.** Every `SavedView` carries `share`: exactly the POST body (without `view`) that re-creates it — a few numbers, so "send me the view where you found it" is a link or a small JSON, not a screenshot (docs/25 §8). POSTing it (plus the receiver's own `view`) on this or another server re-creates the same view-arithmetic state **with its id preserved**, or answers `409 conflict` when that id is taken. Provenance is never shared in; the receiving server stamps its own.
+- **The list is durable but bounded** (the `/api/events` paging contract: `count` this page, `matched` the whole filter, `next_cursor` an opaque offset string, `null` on the last page). `f_lo`/`f_hi`/`t0`/`t1` narrow it to views whose frequency extent intersects `[f_lo, f_hi]` and — for a frozen view — whose time window intersects `[t0, t1]`; a follow-live view has no fixed window and matches on frequency alone. Order: newest created first (then id).
+- **Provenance is stamped by the server; the client sends only `view`** — `{center_hz, span_hz, t_capture: [t0_s, t1_s], tier, device_id?}`, exactly as for measurements. The server adds `actor` (the token fingerprint, **never the token**), `authored_s` (wall clock, never compared with capture-clock times), `authored: true`, and `sample_rate_hz` only when this run holds the named device. `provenance`, `author`, `actor`, `authored`, `authored_s`, `created_s`, `updated_s` or `share` in a body (top level or inside `view`) is `400 invalid`. A PUT without `view` keeps the original stamp; one with `view` re-stamps it.
+- **Audited** as `view_create`, `view_update`, `view_delete` (token id, peer, request, old/new, status), with **no `device` key**. Without an audit log every mutating route is `503 unavailable`; without a store, every route is.
+- **Never detection input** (docs/25 §10.7): a saved view mints no candidate and never pre-populates the inventory.
+
 ## Reserved: the map-UI research routes (MMAP, T-800 / ADR-0023)
 
 **These routes are SPECIFIED and RESERVED, not yet served.** T-800 (MAP-00) fixed their shapes so the
@@ -2336,8 +2358,8 @@ four stores), [`docs/24 §7`](24-canvas-as-data-surface.md) (priors), [ADR-0023]
 | GET | `/api/measurements` | MAP-18 | **served (T-818)** — see [Saved measurements](#saved-measurements-t-818-map-18); `collection`?, `f_lo`/`f_hi`/`t0`/`t1`?, `limit`?, `cursor`? | `{measurements, …}` |
 | POST | `/api/measurements` | MAP-18 | **served (T-818)** — `{kind, cursors, n?, note?, collection_id?, view}` — **`value`/`unit` in the body is `400 invalid`** | `Measurement` (201, audited) |
 | GET/PUT/DELETE | `/api/measurements/{id}` | MAP-18 | **served (T-818)** — `{cursors?, n?, note?, collection_id?, view?}`; a moved cursor is **re-computed server-side** | `Measurement` / `{deleted}` |
-| GET/POST | `/api/views` | MAP-19 | `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
-| GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | any create field | `SavedView` / `{deleted}` |
+| GET/POST | `/api/views` | MAP-19 | **served (T-819)** — see [Saved views](#saved-views-t-819-map-19); `{name, note?, center_f_hz, span_f_hz, center_t_s?, span_t_s?, follow_live, pane_layout?}` | `{views, …}` / `SavedView` (201, audited) |
+| GET/PUT/DELETE | `/api/views/{id}` | MAP-19 | **served (T-819)** — any create field but `id` | `SavedView` / `{deleted}` |
 | GET | `/api/priors` | MAP-12 | `f_lo`,`f_hi`,`t0`,`t1` | `{priors: [{f_lo_hz, f_hi_hz, service, allocation, source, rank, reason, off_raster_hz?}]}` — ranked **explanations**, computed on demand, gated like `/api/events` |
 
 **Rules every one of them inherits** (`docs/25 §10`):

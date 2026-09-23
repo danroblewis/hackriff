@@ -120,12 +120,12 @@ fn repo_fail(e: RepoError) -> Fail {
     }
 }
 
-fn secs(t: Timestamp) -> f64 {
+pub(crate) fn secs(t: Timestamp) -> f64 {
     t.as_unix_nanos() as f64 / 1e9
 }
 
 /// Unix seconds (capture clock) → timestamp.
-fn from_secs(key: &str, s: f64) -> Result<Timestamp, Fail> {
+pub(crate) fn from_secs(key: &str, s: f64) -> Result<Timestamp, Fail> {
     if !(s.is_finite() && s.abs() < 9.2e9) {
         return Err(Fail::invalid(format!(
             "{key} must be a finite Unix time in seconds"
@@ -170,14 +170,14 @@ pub fn measurement_json(m: &Measurement) -> Value {
     })
 }
 
-fn query<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
+pub(crate) fn query<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
     q.iter()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.trim())
         .filter(|v| !v.is_empty())
 }
 
-fn query_f64(q: &[(String, String)], key: &str) -> Result<Option<f64>, Fail> {
+pub(crate) fn query_f64(q: &[(String, String)], key: &str) -> Result<Option<f64>, Fail> {
     query(q, key)
         .map(|v| {
             v.parse::<f64>()
@@ -288,7 +288,7 @@ const COMPUTED: &[&str] = &[
     "value", "unit", "basis", "f_lo_hz", "f_hi_hz", "t0_s", "t1_s",
 ];
 /// Provenance fields only the server may write (docs/25 §10.2).
-const SERVER_OWNED: &[&str] = &[
+pub(crate) const SERVER_OWNED: &[&str] = &[
     "provenance",
     "author",
     "actor",
@@ -374,7 +374,7 @@ fn cycles(body: &Map<String, Value>) -> Result<Option<Option<u32>>, Fail> {
 
 /// Parses `view` and stamps it into provenance: the client's view context plus what the server
 /// knows authoritatively.
-fn stamp(
+pub(crate) fn stamp(
     state: &ApiState,
     view: &Value,
     actor: Option<String>,

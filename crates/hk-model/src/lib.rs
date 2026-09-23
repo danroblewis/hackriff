@@ -110,7 +110,7 @@ pub use hash::{ContentHash, canonical_json};
 pub use ids::{
     AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
     DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, MeasurementId,
-    ProvenanceId, RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId,
+    ProvenanceId, RecordingId, SavedViewId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId,
     TrunkSystemId,
 };
 pub use plan::{
@@ -154,6 +154,11 @@ pub use repo::{
     MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX, MEASUREMENT_REF_MAX,
     Measurement, MeasurementBasis, MeasurementComputed, MeasurementCursor, MeasurementFilter,
     MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
+};
+// T-819 MAP-19 saved views (docs/25 §6).
+pub use repo::{
+    SAVED_VIEW_LAYOUT_MAX, SAVED_VIEW_NAME_MAX, SAVED_VIEW_NOTE_MAX, SAVED_VIEW_PAGE_MAX,
+    SavedView, SavedViewFilter, SavedViewPage,
 };
 pub use retune::{
     RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,

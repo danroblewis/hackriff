@@ -11366,3 +11366,146 @@ fn measurements_crud_and_paging_answer_as_documented() {
     assert_eq!(st, 404);
     stop_server(serving);
 }
+
+/// T-819 (MAP-19, AWARE-042): `/api/views` as `docs/api.md` documents it — the `SavedView` shape
+/// (a named point in view-arithmetic state) with its server-stamped provenance and `share`
+/// re-creating body, the two time-extent shapes, the durable-but-paged list, edit, delete, the
+/// share round trip, and that a saved view reaches no device and never becomes an inventory row.
+#[test]
+fn saved_views_crud_share_and_paging_answer_as_documented() {
+    let (_dir_guard, serving, addr) = start_server();
+    let f = FIXTURE_CENTER_HZ;
+    let view = json!({"center_hz": f, "span_hz": 2.4e6, "t_capture": [990.0, 1010.0], "tier": "spectrum-history"});
+    let (_, before) = get(addr, "/api/control/state");
+    let body = json!({
+        "name": "t819-contract-view",
+        "center_f_hz": f,
+        "span_f_hz": 1.2e6,
+        "center_t_s": 1000.0,
+        "span_t_s": 20.0,
+        "follow_live": false,
+        "pane_layout": {"panes": [{"center_f_hz": f, "span_f_hz": 1.2e6}]},
+        "view": view,
+    });
+    let (st, v) = post(addr, "/api/views", &body.to_string());
+    assert_eq!(st, 201, "{v}");
+    for field in [
+        "id",
+        "name",
+        "note",
+        "center_f_hz",
+        "span_f_hz",
+        "center_t_s",
+        "span_t_s",
+        "follow_live",
+        "pane_layout",
+        "provenance",
+        "created_s",
+        "updated_s",
+        "share",
+    ] {
+        assert!(v.get(field).is_some(), "saved view missing {field}: {v}");
+    }
+    for field in [
+        "device_id",
+        "center_hz",
+        "span_hz",
+        "sample_rate_hz",
+        "t_capture",
+        "tier",
+        "authored_s",
+        "actor",
+        "authored",
+    ] {
+        assert!(
+            v["provenance"].get(field).is_some(),
+            "provenance missing {field}: {v}"
+        );
+    }
+    assert_eq!(
+        (v["center_t_s"].as_f64(), v["span_t_s"].as_f64()),
+        (Some(1000.0), Some(20.0))
+    );
+    assert_eq!(v["provenance"]["authored"], true);
+    assert!(
+        !v.to_string().contains(TOKEN),
+        "the token itself is never stored"
+    );
+    let id = v["id"].as_str().unwrap().to_owned();
+    // `share` is exactly the create body minus `view`.
+    let mut expect = body.clone();
+    expect.as_object_mut().unwrap().remove("view");
+    expect["id"] = json!(id);
+    expect["note"] = Value::Null;
+    assert_eq!(v["share"], expect, "{v}");
+
+    // A frozen view without its window, and a supplied provenance, are refused.
+    let mut bad = body.clone();
+    bad.as_object_mut().unwrap().remove("center_t_s");
+    let (st, e) = post(addr, "/api/views", &bad.to_string());
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+    let mut forged = body.clone();
+    forged["provenance"] = json!({"authored_s": 0});
+    let (st, e) = post(addr, "/api/views", &forged.to_string());
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+
+    let (st, list) = get(addr, "/api/views");
+    assert_eq!(st, 200, "{list}");
+    for field in [
+        "window",
+        "views",
+        "count",
+        "matched",
+        "limit",
+        "next_cursor",
+    ] {
+        assert!(list.get(field).is_some(), "list missing {field}: {list}");
+    }
+    assert_eq!(
+        (list["count"].as_u64(), list["matched"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(list["limit"], 500, "documented default page");
+    let (st, e) = get(addr, "/api/views?f_lo=1");
+    assert_eq!((st, e["code"].as_str()), (400, Some("invalid")), "{e}");
+
+    let path = format!("/api/views/{id}");
+    let (st, upd) = put(
+        addr,
+        &path,
+        &json!({"follow_live": true, "center_t_s": null, "note": "now live"}).to_string(),
+    );
+    assert_eq!(st, 200, "{upd}");
+    assert_eq!(
+        (upd["follow_live"].as_bool(), upd["note"].as_str()),
+        (Some(true), Some("now live"))
+    );
+    assert!(upd["center_t_s"].is_null());
+
+    // User metadata only: no inventory row names it, and the device was not moved.
+    let (_, inv) = get(addr, "/api/inventory");
+    assert!(!inv.to_string().contains("t819-contract-view"), "{inv}");
+    let (_, after) = get(addr, "/api/control/state");
+    assert_eq!(
+        before["tuning"]["center_hz"], after["tuning"]["center_hz"],
+        "saving a view never retunes"
+    );
+    assert!(before["tuning"]["center_hz"].is_number(), "{before}");
+
+    // Share round trip: delete, re-create from `share` + a view, same state and id.
+    let (_, got) = get(addr, &path);
+    let share = got["share"].clone();
+    let (st, del) = delete(addr, &path);
+    assert_eq!(
+        (st, del["deleted"]["id"].as_str()),
+        (200, Some(id.as_str()))
+    );
+    let (st, _) = get(addr, &path);
+    assert_eq!(st, 404);
+    let mut again = share.clone();
+    again["view"] = view.clone();
+    let (st, back) = post(addr, "/api/views", &again.to_string());
+    assert_eq!(st, 201, "{back}");
+    assert_eq!(back["share"], share);
+    stop_server(serving);
+}

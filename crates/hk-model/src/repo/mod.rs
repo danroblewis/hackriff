@@ -92,6 +92,7 @@ mod retune; // T-598 persisted cross-centre retune verdict
 mod retune_tests;
 #[cfg(test)]
 mod same_emission_tests;
+mod saved_views; // T-819 MAP-19 saved views
 mod selections;
 #[cfg(test)]
 mod signature_tests; // T-218
@@ -131,6 +132,10 @@ pub use measurements::{
     MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
 };
 pub use refined::{REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RefinedTuning};
+pub use saved_views::{
+    SAVED_VIEW_LAYOUT_MAX, SAVED_VIEW_NAME_MAX, SAVED_VIEW_NOTE_MAX, SAVED_VIEW_PAGE_MAX,
+    SavedView, SavedViewFilter, SavedViewPage,
+};
 // `synthesis` keeps its own namespace rather than flattening: its `Stage`, `Outcome`,
 // `Resolution` and `Measured` are the decode-search vocabulary and would collide with
 // `classify::Stage` and `cluster::Resolution`, which mean entirely different things.

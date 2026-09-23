@@ -122,6 +122,9 @@ define_ids! {
     /// A saved measurement (T-818, docs/25 §4): Δf/Δt/bandwidth/duration/symbol-rate/period with
     /// its place and provenance. User metadata, mutable.
     MeasurementId;
+    /// A saved view (T-819, docs/25 §6): a named point in view-arithmetic state — a (time ×
+    /// frequency) window extent to restore. User metadata, mutable; never a device command.
+    SavedViewId;
 }
 
 #[cfg(test)]
