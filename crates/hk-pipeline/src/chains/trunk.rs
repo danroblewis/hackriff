@@ -1242,7 +1242,7 @@ fn follow_grants(
     fco: &[f64],
     events: &[GrantEvent],
     system: TrunkSystemId,
-    tails: &mut HashMap<i64, CallRecord>,
+    tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
 ) {
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
@@ -1383,13 +1383,15 @@ fn follow_grants(
             // frequency AND slot: two talkgroups on one TDMA carrier are two calls, and one must
             // never be continued as the other (T-272). Taken out unconditionally, so a tail that
             // cannot be continued expires here rather than accumulating.
-            let member_tails: Vec<Option<CallRecord>> =
-                members.iter().map(|g| tails.remove(&(fkey, g.slot))).collect();
+            let member_tails: Vec<Option<CallRecord>> = members
+                .iter()
+                .map(|g| tails.remove(&(fkey, g.slot)))
+                .collect();
             let run_count = runs.len();
-            for (m, g, (i, (first, last, ended))) in
-                members.iter().enumerate().flat_map(|(m, g)| {
-                    runs.iter().copied().enumerate().map(move |r| (m, g, r))
-                })
+            for (m, g, (i, (first, last, ended))) in members
+                .iter()
+                .enumerate()
+                .flat_map(|(m, g)| runs.iter().copied().enumerate().map(move |r| (m, g, r)))
             {
                 let (start, end) = (at(first), ended.then(|| at(last + 1)));
                 // Active in the window's very first frame means the transmission began before this
