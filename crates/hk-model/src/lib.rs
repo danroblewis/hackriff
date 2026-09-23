@@ -57,6 +57,7 @@ pub mod harmonic; // T-374 (C40): harmonics of a fundamental nobody can see
 mod harmonic_tests;
 pub mod hash;
 pub mod ids;
+pub mod multipath; // T-222 (C40): content-correlated multipath
 pub mod plan;
 pub mod presence; // T-262 (ADR-0017 TM-5): presence intervals, close and revive
 pub mod provenance;
@@ -112,6 +113,10 @@ pub use ids::{
     CollectionId, DecodeId, DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId,
     MarkerId, MeasurementId, ProvenanceId, RecordingId, SavedViewId, ScanPlanId, SelectionId,
     SpurMaskId, SurveyId, TrackId, TrunkSystemId,
+};
+pub use multipath::{
+    ContentCorrelation, ContentKind, IdentityAgreement, MultipathFinding, MultipathRow,
+    MultipathVerdict, content_multipath,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,

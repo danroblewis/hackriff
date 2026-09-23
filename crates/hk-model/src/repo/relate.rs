@@ -179,6 +179,7 @@ fn kind_from(text: &str) -> Result<RelationKind, RepoError> {
         "duplicate-of" => RelationKind::DuplicateOf,
         "artifact-of" => RelationKind::ArtifactOf,
         "retune-sibling-of" => RelationKind::RetuneSiblingOf,
+        "multipath-of" => RelationKind::MultipathOf,
         other => {
             return Err(RepoError::Invalid(format!(
                 "unknown relation kind {other:?}"

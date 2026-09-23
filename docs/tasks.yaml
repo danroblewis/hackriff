@@ -3627,6 +3627,79 @@ tasks:
     core_interface: true
     field_case: "user field observation 2026-09-15: intermittent bursts near 100.3 MHz next to a strong WFM station - a real-air case for distinguishing a same-source duplicate from an independent emitter once content correlation exists."
 
+    result: |
+      Content-correlated multipath landed as a new relationship kind, measured from content
+      rather than geometry.
+
+      WHAT CHANGED
+      - hk-dsp/src/xcorr.rs (new): normalised cross-correlation with a lag search. Pearson per
+        lag over the overlap only (the two copies differ in scale, so only shape is comparable),
+        plus a RUNNER-UP peak guarded away from the winner - a periodic content series correlates
+        with itself at every period, and a delay that cannot be pinned to one lag must not be
+        claimed as a path difference. O(n x lags), no allocation beyond the peaks.
+      - hk-model/src/multipath.rs (new): the rule and its a-priori guards. Different decoded
+        identities end it outright; correlation >= 0.75 and dominance >= 1.5; the delay must
+        exceed 2x the measurement's own stated resolution (below that a second path cannot be
+        told from a second transmitter) and stay under 150 ms; the LATER copy must be the weaker
+        one, by 0-40 dB. Verdict is Related / Independent / Undecidable - an abstention neither
+        claims nor revokes. path_difference_m = c x delay is disclosed as the REFLECTION READING
+        of the delay (a relay or re-broadcast measures the same), always with its uncertainty.
+        Explicitly NOT gated on ReceiveChain, unlike T-302's artefact rules: a reflection happens
+        in the air, not in one front end's mixer, and the module says so.
+      - hk-model: RelationKind::MultipathOf + migration 0017 (renumbered from 0016 on re-land: T-272 took 0016_tdma_slots; table rebuild to widen the kind
+        CHECK, as 0015 did). Its own kind, for T-598's reason: duplicate-of/artifact-of are
+        claimed and revoked by the T-219 overlap resolver over OVERLAPPING bands, and these two
+        rows need not overlap at all.
+      - hk-context/src/multipath.rs (new): reads the repository, rasterises each row's measured
+        energy-vs-time onto ONE shared grid (so a lag is a delay), correlates, records an
+        append-only revocable claim. Bin = a quarter of the shortest detection, clamped, and is
+        reported as the claim's resolution. DETECTION_BAND_MIN_FRACTION rejects detections far
+        wider than the row they would be attributed to - without it the detector's occasional
+        full-span one-frame box entered every row's series AND set every row's peak level, so
+        two rows 4 dB apart measured as equal and no echo could be told from its direct path.
+      - hk-context/src/watch.rs: the new kind's label (a watch does not alert on a row already
+        explained as another row's second path).
+      - hk-pipeline/src/inventory.rs: resolve_multipath() in touch(), after overlap and retune,
+        with GEOMETRIC back-off - a row is reviewed again only once its sighting count doubles,
+        so O(log n) reviews per row per run, each bounded by MultipathConfig. No ring, sample or
+        device access: it reads the detection record the repository already holds.
+      - docs/api.md: the `multipath-of` kind, its detail fields and every guard; the watch
+        suppression enum. py/hkpy/synth/multipath.py: the `multipath_echo` scenario.
+        justfile: a new `acceptance-multipath` target.
+
+      ACCEPTANCE (tests/e2e/tests/acceptance/t222_multipath.rs, blind, through the mock SDR)
+      - a two-path scene yields ONE shown emission, the copy recorded multipath-of the direct
+        path: measured delay 49.9 ms vs 50.0 ms injected (stated resolution 8.3 ms, a-priori
+        tolerance 3 resolutions), correlation 0.91, dominance 9.9, attenuation 4.03 dB vs 4.0 dB
+        injected, reasoning and arithmetic disclosed;
+      - two distinct stations sharing family, bandwidth and modulation are NOT related (neither
+        direction), and the decoy stays its own shown row with relation null;
+      - the claim is ranked (score), append-only, and a revocation restores the row with nothing
+        deleted.
+
+      TESTS RUN (targeted): hk-model + hk-dsp + hk-context 744 passed; hk-pipeline 331 passed;
+      hk-e2e acceptance_multipath 3 passed. `just precheck hk-model hk-dsp hk-context hk-pipeline
+      hk-api` clean. Whole-workspace verification (M0/M1/M2 regression) is the coordinator's.
+
+      SURFACED, NOT CHASED (observed, with evidence - the coordinator decides)
+      - The burst detector draws occasional FULL-SPAN, sub-frame-duration boxes over a busy span:
+        on the 2 MSps three-emitter scene at 20 dB SNR, 6 of 246 detections measured 1.2-1.5 MHz
+        obw with 0.0-0.7 ms duration, and at 12 dB SNR they vanished entirely. They are
+        signal-driven, not the design false-alarm rate. Their effect was real: one such box gave
+        entity resolution a 340 kHz-wide sighting that swallowed two 29 kHz channels into a single
+        row. Worked around here inside the multipath rule (DETECTION_BAND_MIN_FRACTION) and by
+        lowering the scene's SNR; the detector itself is untouched and unexamined.
+      - A scene of three narrowband bursters keying in turn at low duty is read as ONE
+        frequency-hopping emitter (a hop-set row whose bandwidth is the hull of all three
+        channels). That is a defensible reading, and what refutes it is overlapping keyings - the
+        scene therefore runs at ~70 % duty. Whether the hop-set rule should require an absence of
+        overlap before claiming a hop set is a real question this ticket did not open.
+      - The content series implemented is the ENVELOPE. ContentKind already names Audio, Bits and
+        Frames and the rule is written against the abstraction, but a continuous emission with no
+        keying structure (a steady broadcast carrier) has no envelope to correlate and will
+        abstain until an audio or bit tap feeds the same rule. That is the ticket's "high
+        audio/bit cross-correlation" half, and it needs a per-emitter content tap that does not
+        exist yet.
   - id: T-223
     milestone: M2-hardening
     title: "signal_001 readsb plugin chain misses the earliest ADS-B emission when the acceptance suite runs in parallel under load (just acceptance uses cargo test, so nextest heavy-serial pinning does not apply)"
