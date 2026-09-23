@@ -5,7 +5,7 @@
 //! | Module | Task | Blocks |
 //! |---|---|---|
 //! | [`iq`] | T-086, T-609 | mix, lowpass, resample, fm_demod, am_demod, fsk_demod, msk_demod, ppm_demod, subcarrier; psk_demod (T-609) |
-//! | [`symbol`] | T-086 | clock_recovery, slicer, diff_decode, nrzi, manchester |
+//! | [`symbol`] | T-086, T-608 | clock_recovery, slicer, diff_decode, nrzi, manchester, descramble |
 //! | [`framing`] | T-087 | sync_search, deframe, interleave, deinterleave |
 //! | [`fec`] | T-087 | crc, bch, parity, checksum |
 //! | [`parse`] | T-089 | fields, text |
