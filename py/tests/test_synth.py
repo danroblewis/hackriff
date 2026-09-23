@@ -50,7 +50,6 @@ SMALL: dict[str, dict] = {
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
     "mismatched_hypothesis": {"duration_s": 0.3},
-    "multipath_echo": {"duration_s": 0.6},
 }
 
 
