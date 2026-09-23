@@ -22383,6 +22383,15 @@ tasks:
       ASSERT WITH COUNTS, NOT WALL-CLOCK. Prove any test goes RED without the change.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 13:01).
+      Decided YES, on evidence: the dwell in flight now CONTRIBUTES to the record horizon (oldest_record, and recording_began) instead of being clipped to a sealed-only one. The clip only ever bound before a seal (a dwell opens where the previous closed), and there it broke T-596's own rule that a cell does not change when the seal catches up: rows read "unknown" until the seal, "observed" after. T-507's real-server unknown band (2 s ring, young server) was exactly that artefact - nothing forgotten, the record in memory; and on a refused-ring server the clip dropped the open dwell entirely, so the tuned band stayed unobserved for the ~60 s until the first seal. The feared failure (an unsealed claim hiding forgetting) cannot happen: the open dwell reaches only its own start, the horizon is a min, and a genuinely lost seal lies before the next open dwell and stays "unknown" (asserted). Open dwells are now read once per answer (horizon and spans from one snapshot). T-507's contract test and T-596's unit test were rewritten deliberately and docs/api.md states the contract change; the two horizons are now symmetric. RED proven: both new hk-api unit tests fail under the old semantics (9 unknown rows / 10 unobserved rows), and the rewritten contract test times out waiting for oldest_record to reach past the ring floor.
+      Tests: cargo nextest run --no-fail-fast -p hk-api -E 'not (binary(ondemand) & test(silent_peers_are_dropped))' -> exit 0 (276 passed, 1 skipped (the pre-existing ondemand failure, see observed_but_not_chased)); cargo nextest run --no-fail-fast -p hk-cli -E 'binary(api_contract) & test(/coverage|tile|unknown|horizon|timeline/)' -> exit 0 (13 passed)
+      precheck exit 0
+      Commits: 8a58460d
+      Observed, not chased: hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails ALONE, 3/3, and also at HEAD e945f6bf with this ticket's change reverted: ondemand.rs:365 `records > 20` got `10 records` in 1.5 s (load avg ~5-7 at the time). Real bug or a throughput assertion that belongs in the timing tier - not T-680's. | stop_server in hk-cli api_contract takes ~47 s for servers started with start_server_retaining (IQ ring enabled): unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so body finishes in 6.6 s, total 53 s; the same 54 s at HEAD with the original test. Several other api_contract tests show the same ~52 s. Teardown cost, not T-680's.
+      Use cases: AWARE-011
+      Resources: 296 CPU-s, peak 1.4 GB
   - id: T-720
     milestone: M2-hardening
     title: The six milestone acceptance recipes now run under nextest but have never been measured there
