@@ -32,6 +32,9 @@ SMALL: dict[str, dict] = {
     "tone": {},
     "fsk_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
+    # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
+    # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
+    "multipath_echo": {"duration_s": 0.6},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
