@@ -395,7 +395,7 @@ impl RowCursor {
         // device is answered from the map alone, as one message.
         let probe_end = limit.min(self.next.saturating_add(self.gap_span));
         let probe_rows = (probe_end - self.next) as usize;
-        let probe = crate::coverage::TileOverlay::collect(
+        let probe = crate::coverage::TileOverlay::collect_once(
             state,
             freq,
             self.window(self.next, probe_end),
@@ -444,7 +444,7 @@ impl RowCursor {
         let s = &self.sub;
         let nrows = (b - a) as usize;
         let key = s.key_at(a);
-        let overlay = crate::coverage::TileOverlay::collect(
+        let overlay = crate::coverage::TileOverlay::collect_once(
             state,
             key.region.freq,
             self.window(a, b),

@@ -443,6 +443,13 @@ pub struct ApiState {
     /// T-468: `/ws/tiles/rows` subscriptions open now, capped at [`crate::rows::MAX_ROW_FEEDS`].
     /// Per state for the same reason as `tile_admission`.
     pub row_feeds: Arc<std::sync::atomic::AtomicUsize>,
+    /// T-579: the per-lattice readable ceiling, memoised — a pure function of the store's
+    /// geometry and config, so it is computed once per lattice rather than probed per request.
+    /// Shared by cloning, like [`Self::tile_admission`].
+    pub ceiling_memo: Arc<crate::tiles::CeilingMemo>,
+    /// T-579: the tile coverage raster, memoised against the tune history it is computed from.
+    /// Always on: its key is the evidence itself, so it cannot serve a stale grey.
+    pub coverage_raster: Arc<crate::coverage::CoverageRasterMemo>,
 }
 
 /// Builds the `/api/status` JSON (counters only: no content, no identities).

@@ -1201,6 +1201,10 @@ pub fn serve_api(
         // growing edge are never cached — see `HotTileCache`.
         tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
         row_feeds: Default::default(),
+        // T-579: the tile route's memoised geometry, per server — the readable ceiling per
+        // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
+        ceiling_memo: Default::default(),
+        coverage_raster: Default::default(),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;

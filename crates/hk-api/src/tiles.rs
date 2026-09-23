@@ -1240,6 +1240,64 @@ pub fn readable_ceiling(p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize,
     best
 }
 
+/// **[`readable_ceiling`], memoised per lattice** (T-579).
+///
+/// The ceiling probes the whole lattice — `nf × nt` addresses, each through [`servable`] and
+/// `materialize_cost_bound` — and `GET /api/tiles` states it on every answer, so before this it was
+/// recomputed from scratch on every one of a screen's 135–290 tile requests. It is a **pure
+/// function** of the lattice, the store's geometry and its `coarse_on_demand` switch (the only
+/// config `materialize_cost_bound` reads) — nothing the store *holds* enters it, which is the
+/// whole point of the ceiling (a client caches it). So the key is exactly those three, spelled in
+/// full, and an entry never needs invalidating: a different geometry is a different key.
+#[derive(Default)]
+pub struct CeilingMemo {
+    inner: Mutex<CeilingMemoInner>,
+}
+
+#[derive(Default)]
+struct CeilingMemoInner {
+    map: std::collections::HashMap<String, (usize, usize)>,
+    computed: u64,
+}
+
+/// Distinct (lattice, geometry) pairs held; a server has two or three. Past this the table is
+/// dropped whole rather than grown, which only costs a recomputation.
+const CEILING_MEMO_MAX: usize = 64;
+
+impl CeilingMemo {
+    /// [`readable_ceiling`] for `lattice` over `p`, computed at most once per distinct key.
+    pub fn ceiling(&self, p: &hk_store::Pyramid, lattice: &TileLattice) -> (usize, usize) {
+        let key = format!(
+            "{lattice:?}|{:?}|{}",
+            p.geometry(),
+            p.config().coarse_on_demand
+        );
+        if let Some(c) = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|g| g.map.get(&key).copied())
+        {
+            return c;
+        }
+        let c = readable_ceiling(p, lattice);
+        if let Ok(mut g) = self.inner.lock() {
+            g.computed += 1;
+            if g.map.len() >= CEILING_MEMO_MAX {
+                g.map.clear();
+            }
+            g.map.insert(key, c);
+        }
+        c
+    }
+
+    /// Lattice probes performed — full [`readable_ceiling`] computations — since this state was
+    /// built.
+    pub fn computations(&self) -> u64 {
+        self.inner.lock().map_or(0, |g| g.computed)
+    }
+}
+
 /// One tile's measurement plane, and what produced it.
 pub struct TileRead {
     /// The tile's grid, exactly `cells × cells` on the tile's own extent.
@@ -2270,7 +2328,7 @@ fn tile_body(
     let store = tile_store(state, q);
     let (key, ceiling, readable, sealed) = with_tile_history(state, store, |p| {
         let key = parse_key(p.geometry(), q)?;
-        let ceiling = readable_ceiling(p, &key.lattice);
+        let ceiling = state.ceiling_memo.ceiling(p, &key.lattice);
         let readable = servable(p, &key);
         // T-574: sealedness is a fact about the ADDRESS, not about what answered it — a tile's
         // whole time extent can never change again once the watermark has passed its end, because
@@ -4589,6 +4647,116 @@ mod tests {
             ("t_index", &t_index.to_string()),
             ("cells", &N.to_string()),
         ])
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // T-579: the per-request tile geometry, memoised.
+    // -----------------------------------------------------------------------------------------
+
+    /// One screen's worth of tiles: `F_INDEX-1 ..= F_INDEX+2` × `{T_INDEX-1, T_INDEX}`.
+    fn viewport() -> Vec<(i64, i64)> {
+        let mut v = Vec::new();
+        for t in [T_INDEX - 1, T_INDEX] {
+            for f in F_INDEX - 1..=F_INDEX + 2 {
+                v.push((f, t));
+            }
+        }
+        v
+    }
+
+    fn poll(state: &ApiState) -> Vec<Value> {
+        viewport()
+            .into_iter()
+            .map(|(f, t)| tiles_json(state, &tile_params(f, t)).unwrap())
+            .collect()
+    }
+
+    /// **Counts, not wall clock** (T-579): serving an N-tile viewport probes the lattice ONCE, not
+    /// N times; re-polling it rasterises coverage ZERO more times; and a tune-history change that
+    /// reaches one tile re-rasterises exactly THAT tile, exactly once — and its answer changes.
+    /// The last half is what keeps the cache honest: a memo that never invalidated would pass the
+    /// "cheap" half while serving grey where data now exists.
+    #[test]
+    fn a_viewport_probes_the_lattice_once_and_rasterises_coverage_once_per_history_change() {
+        let dir = temp_dir("t579-memo");
+        let (state, t0, f_lo) = state_with_records(&dir, (N as i64) + 36, 0);
+        let n = viewport().len() as u64;
+
+        let first = poll(&state);
+        assert_eq!(
+            state.ceiling_memo.computations(),
+            1,
+            "an {n}-tile viewport probed the whole lattice more than once"
+        );
+        assert_eq!(
+            state.coverage_raster.rasterisations(),
+            n,
+            "each distinct tile is rasterised once on first sight"
+        );
+
+        for round in 0..3 {
+            let again = poll(&state);
+            assert_eq!(state.ceiling_memo.computations(), 1, "round {round}");
+            assert_eq!(
+                state.coverage_raster.rasterisations(),
+                n,
+                "round {round}: an unchanged tune history was rasterised again"
+            );
+            for (a, b) in first.iter().zip(&again) {
+                assert_eq!(
+                    a["coverage"], b["coverage"],
+                    "a memo hit changed the answer"
+                );
+                assert_eq!(a["axes"], b["axes"], "a memo hit changed the ceiling");
+            }
+        }
+        assert_eq!(state.coverage_raster.hits(), 3 * n);
+
+        // The tune history changes INSIDE one tile, (F_INDEX, T_INDEX): a second front end dwells
+        // on the middle of its band for ten seconds of its window.
+        let changed = viewport()
+            .iter()
+            .position(|&k| k == (F_INDEX, T_INDEX))
+            .unwrap();
+        let mid = f_lo + 6250.0 * N as f64 / 2.0;
+        let mut rec = dwell(
+            mid - 20e3,
+            mid + 20e3,
+            t0 + 10_000_000_000,
+            t0 + 20_000_000_000,
+        );
+        if let hk_model::attention::observation::ObservationRecord::Dwell(d) = &mut rec {
+            d.device_id = Some("mock:1".into());
+        }
+        let log = state.observations.as_ref().unwrap();
+        log.append(&rec);
+        log.flush();
+
+        let after = poll(&state);
+        assert_eq!(
+            state.coverage_raster.rasterisations(),
+            n + 1,
+            "the tune-history change must re-rasterise the one tile it reaches, exactly once"
+        );
+        let devices = |v: &Value| v["coverage"]["devices"].as_array().unwrap().len();
+        assert_eq!(
+            devices(&after[changed]),
+            devices(&first[changed]) + 1,
+            "the changed tile must SHOW the new front end's coverage, not the cached answer"
+        );
+        for (i, (a, b)) in first.iter().zip(&after).enumerate() {
+            if i != changed {
+                assert_eq!(a["coverage"]["planes"], b["coverage"]["planes"], "tile {i}");
+            }
+        }
+        poll(&state);
+        assert_eq!(
+            state.coverage_raster.rasterisations(),
+            n + 1,
+            "once re-rasterised, the new history is memoised too"
+        );
+        assert_eq!(state.ceiling_memo.computations(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------------------------
