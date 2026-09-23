@@ -10,7 +10,7 @@
 //
 // **Lanes (the spec pool).** Until 2026-09-22 this ran `for (const f of files)` against ONE shared
 // backend: 12 specs, strictly one browser at a time on a 28-core box — a quarter of the merge gate.
-// The loop is now a bounded pool of `HK_E2E_CONCURRENCY` lanes (default 2), and **each lane gets its
+// The loop is now a bounded pool of `HK_E2E_CONCURRENCY` lanes (default 3), and **each lane gets its
 // own `hk serve` on its own port**, not a share of one. Measured on a quiet box, same tree, same
 // day: **695.3 s sequential -> 207.7 s at 3 lanes**, 11 of 12 specs passing either way (the one red,
 // `surface-address`, fails alone too and is nothing to do with this).
@@ -261,7 +261,11 @@ const SPEC_TIMEOUT_MS = Number(process.env.HK_E2E_SPEC_TIMEOUT_MS ?? 600_000);
 // each green alone - the specs' readiness waits are still time-based, and a third lane beside
 // one bounded worker is enough to trip them. Two lanes keep most of the saving with margin;
 // raise it again when the waits read server state (docs/10 §3.6).
-const CONCURRENCY = Math.max(1, Number(process.env.HK_E2E_CONCURRENCY ?? 2));
+// Back to 3 (2026-09-23): the reason for 2 - time-based readiness waits tripping under a third
+// lane - is gone. task-spec-waits rewrote every such wait in the six specs that had them to
+// read server/surface state; each was then proven 5x alone and 3x POOLED AT 3 LANES, and a
+// 13-spec run at 3 lanes was green. 3 lanes measured 208 s against ~300 s at 2 (docs/10).
+const CONCURRENCY = Math.max(1, Number(process.env.HK_E2E_CONCURRENCY ?? 3));
 
 /**
  * Lane `i`'s base port. Lane 0 keeps the historical 8791 so a single-lane run is byte-for-byte the
