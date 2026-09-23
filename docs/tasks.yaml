@@ -21794,6 +21794,8 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). Cheapest row in the corpus and it covers the
       failure T-614 already observed in a neighbouring component.
+
+      Review fix: snr_db_per_hz corrected to power minus floor per Hz; snr_db remains in-band SNR.
     result: |
       DONE (work-runner, from handback.json, 2026-09-23 15:21).
       Added nbfm_voice and am_voice synth scenarios (keyed speech-like audio, controllable snr_db, noise_dbfs for ADC fill, burst on/off), truth kind=none, symbol_alphabet null; registered under SIGNAL-052; just synth generates at several SNRs.
