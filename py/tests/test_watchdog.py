@@ -139,6 +139,18 @@ def test_role_session_named_from_its_role_file():
     assert agg["role:coordinator"]["cpu"] == 30.0
 
 
+def test_a_role_sessions_attached_limiter_is_named_not_unowned():
+    """ops/launch.sh execs claude into the pane and attaches `cpulimit -p` from outside it (a
+    wrapped child is not the pane's foreground group and stops on SIGTTIN)."""
+    rows = table(
+        row(500, 1, "claude --model opus --append-system-prompt-file /r/.claude/roles/pipeline-manager.md"),
+        row(600, 1, "/Users/d/.hackriff-ops/bin/cpulimit -l 800 -i -p 500", cpu=1.5),
+    )
+    agg, unowned = W.owners(rows, {})
+    assert set(agg) == {"role:pipeline-manager", "limiter"}
+    assert unowned == []
+
+
 def test_hackriff_role_env_names_the_session_when_present():
     assert W.role_name("claude", "HACKRIFF_ROLE=supervisor PATH=/usr/bin") == "supervisor"
     assert W.role_name("bash ops/launch.sh supervisor") == "supervisor"

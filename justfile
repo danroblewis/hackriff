@@ -150,21 +150,28 @@ cycle-time *args:
 # `experiment` is the one-at-a-time ledger with baseline, guards and a prepared rollback;
 # `knobs` is the persistent knob store every ops restart reads; `hold` is the bounded (<= 30 min,
 # auto-expiring, ended by the first queued branch) merge-queue hold. Skills: .claude/skills/{flow,
-# experiment,knobs}; invariants: .claude/rules/pipeline-invariants.md.
+# experiment,knobs}; invariants: .claude/rules/pipeline-invariants.md. They pass their arguments
+# through as "$@" ([positional-arguments]): `{{args}}` re-split `--hypothesis "a b (c)"` and
+# `--guard "x <= baseline*1.25"` into shell words, and the first E-001 registration died on `(`.
+[positional-arguments]
 flow *args:
-    uv run --locked --project py python -m hkpy.flow {{args}}
+    uv run --locked --project py python -m hkpy.flow "$@"
 
+[positional-arguments]
 experiment *args:
-    uv run --locked --project py python -m hkpy.experiment {{args}}
+    uv run --locked --project py python -m hkpy.experiment "$@"
 
+[positional-arguments]
 knobs *args:
-    uv run --locked --project py python -m hkpy.knobs {{args}}
+    uv run --locked --project py python -m hkpy.knobs "$@"
 
+[positional-arguments]
 hold *args:
-    uv run --locked --project py python -m hkpy.knobs hold {{args}}
+    uv run --locked --project py python -m hkpy.knobs hold "$@"
 
+[positional-arguments]
 touchpoints *args:
-    uv run --locked --project py python -m hkpy.flow --touchpoints {{args}}
+    uv run --locked --project py python -m hkpy.flow --touchpoints "$@"
 
 # Is the merge suite within its duration budget? Exits 1 if not (T-762). Deliberately NOT part
 # of any suite: it reads this machine's recorded history, so no diff can clear it and a merge

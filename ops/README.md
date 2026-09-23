@@ -110,8 +110,11 @@ throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` fr
 `cd $HACKRIFF_OPS/src/cpulimit && make install DESTDIR=$HOME/.local/bin && cp src/cpulimit $HACKRIFF_OPS/bin/` —
 no sudo needed; do NOT `brew install cpulimit`, that is the inert opsengine build) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
 the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. The same bound wraps the
-reviewer and fix/resume runs, and `ops/launch.sh` wraps the coordinator/supervisor session itself at
-`ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. Budget of
+reviewer and fix/resume runs, and `ops/launch.sh` bounds each role session itself at
+`ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. It
+**attaches** the limiter (`cpulimit -i -p <pane pid>`, detached, named `limiter` by the watchdog) to a session
+`exec`ed into the pane, and never wraps it: a wrapped child runs in its own process group, not the
+pane's foreground one, and stops on SIGTTIN at its first terminal read (2026-09-23: state T, no prompt). Budget of
 28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
 sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
 

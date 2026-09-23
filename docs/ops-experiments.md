@@ -17,7 +17,7 @@ Baseline for the first week: 2026-09-23 00:00–13:00 (alone mode): landings 49 
 - **Duration:** 8 full gates or 8 h.
 - **Decision rule:** keep if landings/h ≥ +30 % over baseline throughput (≈1.3/h → ≥ 1.7/h) and no guard broken.
 - **Rollback:** `just knobs set WORK_GATE_ALONE=1 WORKER_DRAIN_MAX=2700 && /dev-env restart work-runner merge-runner` (merge runner between gates only).
-- **Status:** open — applied when `task-pipeline-overlap` lands and both runners restart.
+- **Status:** open — overlap live since 2026-09-23 14:44; registered in the machine ledger (`$HACKRIFF_OPS/experiments.jsonl`) 2026-09-23 15:32 by the pipeline manager, so `just experiment status` counts gates from 15:32 (the 14:44–15:32 overlap stretch is outside the count). **Measured baseline** over 00:00..13:00: landings/h **0.92**, real reds 2/15, full-gate p50 47 min, dispatch-hours 5, blocked 0 min — not the ~1.3/h assumed above, so the +30 % bar is **≥ 1.20 landings/h**. Registered guards: `real_reds_24h <= baseline*1.25`, `full_gate_p50_min <= 56`, `blocked_minutes < 30`; 8 gates or 8 h.
 - **Result:** —
 
 ---

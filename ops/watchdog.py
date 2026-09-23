@@ -177,13 +177,13 @@ def read_ps() -> list[dict]:
 def role_name(cmd: str, env: str = "") -> str:
     """The role a session is running in: `HACKRIFF_ROLE` when ops/launch.sh exported it into the
     environment we can see, else the role file the session was launched with."""
-    m = re.search(r"HACKRIFF_ROLE=(\w+)", env or "")
+    m = re.search(r"HACKRIFF_ROLE=([\w-]+)", env or "")
     if m:
         return m.group(1)
-    m = re.search(r"[/\s]roles/(\w+)\.md", cmd)
+    m = re.search(r"[/\s]roles/([\w-]+)\.md", cmd)
     if m:
         return m.group(1)
-    m = re.search(r"launch\.sh\s+(\w+)", cmd)
+    m = re.search(r"launch\.sh\s+([\w-]+)", cmd)
     return m.group(1) if m else "session"
 
 
@@ -242,6 +242,10 @@ def fallback_owner(row: dict) -> str | None:
         return "sccache"
     if cmd.startswith("cloudflared ") or "cloudflared tunnel" in cmd:
         return "tunnel"
+    # ops/launch.sh attaches a role session's limiter by pid (`cpulimit -i -p <pane pid>`), detached
+    # from the pane so it cannot take the terminal: it hangs off launchd, at ~1 % CPU.
+    if re.search(r"(^|/)cpulimit\s.*-p\s*\d+", cmd):
+        return "limiter"
     # A Claude session this orchestration did not launch - the user's own terminal. Naming it
     # matters for rule (b): its shells have a LIVE parent and reach it by ancestry, so they are
     # owned and never killed; only a shell whose session has EXITED falls through to UNOWNED,
