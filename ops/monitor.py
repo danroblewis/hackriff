@@ -319,7 +319,8 @@ def runtime_states(smap, tl=None, limit=10):
 
 
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
-               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
+               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=(),
+               collapse_done=False):
     try:
         tl = load_tasks_yaml()      # mtime-cached; a fresh PyYAML parse per poll had the monitor at 65 % CPU (2026-09-22)
         if not tl:
@@ -405,6 +406,31 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     for tid in opened:
         if tid not in nodes:
             nodes[tid] = node_for(tid)
+    # COLLAPSE DONE (user, 2026-09-23): contract every done/cancelled node out of the drawn graph
+    # while keeping reachability - an edge that ran through a chain of done tickets becomes ONE
+    # edge from the nearest live ancestor to the live descendant, labelled "via N done". A done
+    # ticket that is an anchor for another reason (a live agent, a runtime state) stays.
+    collapsed = set()
+    if collapse_done:
+        collapsed = {tid for tid, x in nodes.items()
+                     if x.get("status") in ("done", "cancelled") and tid not in running and not rt.get(tid)}
+    eff_memo = {}
+    def eff_preds(tid, _stack=()):
+        """{live ancestor: min number of collapsed nodes between it and `tid`}."""
+        if tid in eff_memo:
+            return eff_memo[tid]
+        out = {}
+        for dp in deps(nodes[tid]):
+            if dp not in nodes or dp in _stack:
+                continue
+            if dp in collapsed:
+                for anc, via in eff_preds(dp, _stack + (tid,)).items():
+                    if anc not in out or via + 1 < out[anc]:
+                        out[anc] = via + 1
+            else:
+                out[dp] = 0   # a direct live edge beats any route through collapsed nodes
+        eff_memo[tid] = out
+        return out
     cls = {"in-progress": "inprog", "todo": "todo", "blocked": "blocked", "paused": "blocked",
            "review": "review", "deferred": "deferred", "done": "done", "cancelled": "done"}
     def label(x):
@@ -475,6 +501,8 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
         lines.append(f"MS_{a} --> MS_{b}"); edge_n += 1
     lines.append("MS_M1 --> MS_MUI"); edge_n += 1
     for nid, x in nodes.items():
+        if nid in collapsed:
+            continue
         c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped", "blocked": "blocked"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
         shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'), "blocked": ('(["', '"])'),
@@ -488,15 +516,22 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     ms_colour = {m: MS_PALETTE[i % len(MS_PALETTE)] for i, m in enumerate(open_ms)}
     ms_edges = {m: [] for m in open_ms}
     for nid, x in nodes.items():
-        for dp in deps(x):
-            if dp in nodes:
+        if nid in collapsed:
+            continue
+        preds = eff_preds(nid) if collapse_done else {dp: 0 for dp in deps(x) if dp in nodes}
+        for dp, via in preds.items():
+            if via:
+                lines.append(f'{dp} -. "via {via} done" .-> {nid}')
+            else:
                 lines.append(f"{dp} --> {nid}")
-                m = norm_ms(x.get("milestone"))
-                if m in ms_edges and norm_ms(nodes[dp].get("milestone")) == m:
-                    ms_edges[m].append(edge_n)
-                edge_n += 1
+            m = norm_ms(x.get("milestone"))
+            if m in ms_edges and norm_ms(nodes[dp].get("milestone")) == m:
+                ms_edges[m].append(edge_n)
+            edge_n += 1
     # membership links (dotted) — connect every task to its milestone node
     for nid, x in nodes.items():
+        if nid in collapsed:
+            continue
         ms = norm_ms(x.get("milestone"))
         if ms in ORDER and not (ms in set(open_ms) and x.get("status") in ("done", "cancelled")):
             lines.append(f"MS_{ms} -.-> {nid}"); edge_n += 1
@@ -566,7 +601,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button><button id=f-collapse title="contract done/cancelled tickets out of the graph; a chain through them becomes one edge labelled 'via N done'">collapse done</button>
 <button id=f-next class="on rt rt-next">UP NEXT</button><button id=f-merging class="on rt rt-merging">MERGING</button><button id=f-queue class="on rt rt-queue">IN QUEUE</button><button id=f-review class="on rt rt-review">IN REVIEW</button><button id=f-failed class="on rt rt-failed">FAILED</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <span class=filters id=openms></span>
@@ -595,9 +630,13 @@ document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
 ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
+// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
+if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  if(flt.collapse) q+='&collapse=1';
   if(openMs.size) q+='&open='+encodeURIComponent([...openMs].join(','));
   const d=await (await fetch(q,{cache:'no-store'})).json();
   const hid=['done','todo','blocked','next','merging','queue','review','failed'].filter(k=>!flt[k]);
@@ -2336,8 +2375,9 @@ class H(BaseHTTPRequestHandler):
             keep_review = "review=0" not in self.path
             _oq = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("open", [""])[0]
             open_ms = tuple(m for m in _oq.split(",") if m)
+            collapse_done = "collapse=1" in self.path
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms, collapse_done=collapse_done)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
