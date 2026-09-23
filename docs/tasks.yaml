@@ -24112,6 +24112,55 @@ tasks:
       Count-based, no wall-clock sleeps in the assertion. TESTING PROTOCOL: targeted tests only, then HAND BACK.
     notes: |
       FOUND BY task-deflake-appsurface.
+  - id: T-846
+    milestone: M2-hardening
+    title: "ui/e2e selftest attribution holes after T-573 batching: t454 cap/back-off, t523 and t532 faults no longer turn their specs red"
+    status: todo
+    priority: high
+    deps:
+    - T-573
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-23 (supervisor, from the gate's flake/attribution evidence; `npm run e2e:selftest` reports it):
+      after T-573's batch tile route, ui/e2e/selftest.mjs no longer attributes several injected faults to the spec that
+      should catch them - the faults stay GREEN:
+      - t454-ignore-the-cap and t454-never-back-off leave surface-nav green: a batch carries up to 64 addresses, so the
+        spec's `tiles.peak <= limit` check cannot see the in-flight cap being ignored, and fair_share pins the cap so
+        removing the AIMD back-off is invisible.
+      - t523 (a proxy 502 made terminal) leaves live-edge green: T-580 answers the zoom-out from the coverage map, so the
+        faulted path is never exercised.
+      - t532 is marginal: 4.2 % against its 5 % threshold.
+      Re-aim each fault (or its guard) at a batch-era observable so the fault turns its spec RED again: per-ADDRESS
+      in-flight counts (harness tileAsks()), the per-address 503 statuses inside a batch answer, a path T-580 does not
+      short-circuit for t523, and a t532 margin that is not a coin flip.
+      ASSERT: `npm run e2e:selftest` attributes every fault to its spec (red with the fault, green without), with the
+      margin for t532 stated. Browser specs only when no merge gate is running. TESTING PROTOCOL: targeted, hand back.
+    notes: |
+      FOUND BY supervisor 2026-09-23 (gate evidence).
+  - id: T-847
+    milestone: M2-hardening
+    title: Verify the app-surface load flake is gone after task-spec-waits lands (flake ledger at loads 12/10.6)
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: sonnet
+    effort: low
+    acceptance: |
+      OBSERVED 2026-09-22 (flake ledger, task-gate-diag): ui/e2e/app-surface.e2e.mjs failed inside merge gates at loads
+      12 and 10.6 while passing alone - (a) "drawing-buffer height is not the CSS box at this dpr" and (b) T-506 "the IQ
+      horizon never claims IQ the ring does not hold". task-deflake-appsurface (9e08619d, landed 23:38) fixed both at the
+      cause (read box+buffer together until they agree; compare the horizon against the page's own .sf-ring snapshot),
+      and the supervisor's spec-waits branch reworks the neighbouring specs' readiness waits.
+      VERIFY after task-spec-waits lands: app-surface does not appear in the flake ledger over the following gates
+      (state the gate count and window), and if it does, root-cause the new signature rather than widening a wait.
+      Close as done with the ledger evidence. No load experiments. TESTING PROTOCOL: targeted, hand back.
+    notes: |
+      FOUND BY supervisor 2026-09-23 (flake ledger, task-gate-diag).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
