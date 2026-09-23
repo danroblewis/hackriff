@@ -20686,7 +20686,7 @@ tasks:
   - id: T-608
     milestone: MAUTO
     title: 'hk-blocks `descramble`: the LFSR de-whitener - rank 2 on the T-554 gap list, 10 families, and the cheapest block on it'
-    status: in-progress
+    status: done
     branch: task-t608
     priority: normal
     parallel_group: MAUTOD
@@ -20735,6 +20735,7 @@ tasks:
       Observed, not chased: seed_channel ORs the recipe's channel index (FrameInfo/ChunkMeta.channel) into init; it seeds BLE correctly only when follow_hops' channel numbering equals the BLE channel index — a BLE recipe ticket should confirm or add a channel map. | The VDL2 (0x8003) and LoRa (0x171) polys in tests/mauto_catalogue.rs are type-check-only placeholders, not verified against ICAO Annex 10 / gr-lora_sdr; their recipe tickets should pin them with known vectors.
       Use cases: SIGNAL-034, SIGNAL-027, SIGNAL-025, SIGNAL-028, AWARE-025, AWARE-026, RESEARCH-012
       Resources: 36 CPU-s, peak 1.2 GB
+    commit: "07924639"
   - id: T-609
     milestone: MAUTO
     title: 'hk-blocks `psk_demod`: carrier recovery + matched filter - rank 1 on the T-554 gap list (11 families), and it SUPERSEDES ADR-0015 M-14'
