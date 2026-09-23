@@ -160,7 +160,7 @@ process(){
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
   local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
-  just gate-merge >>"$LOG" 2>&1; rc=$?
+  limited just gate-merge; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
   # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
   # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
@@ -302,6 +302,35 @@ ready_filter(){
 # branches it merged. It is still guarded — the rewind happens only if HEAD is still the
 # commit this function created, so a concurrent commit is never discarded.
 FLAKY=$S/flaky.jsonl
+# A HARD TIME LIMIT ON EVERY GATE (user, 2026-09-22: "a time-limit kill after 60 minutes").
+# A gate that runs past GATE_TIMEOUT seconds is killed - its whole process group, so nextest,
+# cargo, hk serve and Chrome go with it - and counts as a failure of kind "timeout", which is
+# re-queued once (like a suite-wide red) rather than isolated. Job control (`set -m`) gives the
+# background job its own process group, which is what makes the kill complete.
+GATE_TIMEOUT=${GATE_TIMEOUT:-3600}
+GATE_TIMED_OUT=0
+limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
+  local pid start now
+  GATE_TIMED_OUT=0
+  set -m
+  ( cd "$REPO" && "$@" ) >>"$LOG" 2>&1 &
+  pid=$!
+  set +m
+  start=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $(( now - start )) -ge "$GATE_TIMEOUT" ]; then
+      log "GATE TIMEOUT: '$*' exceeded ${GATE_TIMEOUT}s - killing its process group"
+      kill -TERM -- "-$pid" 2>/dev/null; sleep 20; kill -KILL -- "-$pid" 2>/dev/null
+      GATE_TIMED_OUT=1
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 10
+  done
+  wait "$pid"; return $?
+}
+
 flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
   # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
@@ -325,7 +354,7 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
       # test-ui-e2e), not the 15-minute workspace suite again.
       log "TRIAGE: they PASS alone -> load flake; retrying the gate's acceptance phase once"
       printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
-      ( cd "$REPO" && $retry --phase acceptance ) >>"$LOG" 2>&1; rc=$?
+      limited $retry --phase acceptance; rc=$?
       [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
       return $rc
     fi
@@ -342,7 +371,7 @@ flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the r
   if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
     log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
     printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
-    ( cd "$REPO" && $retry ) >>"$LOG" 2>&1; rc=$?
+    limited $retry; rc=$?
     [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
     return $rc
   fi
@@ -406,14 +435,19 @@ try_bulk(){
   # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
   # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
   local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
-  ( cd "$REPO" && just gate --base "$base" ) >>"$LOG" 2>&1; rc=$?
+  limited just gate --base "$base"; rc=$?
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
   # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
   # recorded in flaky.jsonl, and the whole gate is retried ONCE (workers are bounded, so the
   # gate's reserved cores are the gate's - nothing is suspended). Only a test that fails alone,
   # or a second red gate, still isolates.
-  if [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
+  if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
+    # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
+    # re-queue the batch once, hold until the queue changes - and say so where a person looks.
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""
+    echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
+  elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     log "BULK MERGED ✓ $tickets"
     for b in "${branches[@]}"; do
