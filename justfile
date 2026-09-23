@@ -249,6 +249,28 @@ conflict-check:
 nextest-config-check:
     uv run --locked --project py python -m hkpy.nextest_config
 
+# Block until no merge gate is running, and SAY SO while waiting. A worker that needs a spec run
+# or an `hk serve` while the gate holds the ports (the block-full-gate hook refuses them) used
+# to hand-roll a sleep loop - and ops/merge-runner.sh, which waits for every claimed worker
+# before it gates, counted that idle worker as running: on 2026-09-23 the two waited on each
+# other for the full 45-minute drain cap. The marker under $HACKRIFF_OPS/gate-waiters/ is this
+# recipe's pid; the runner does not count a worker whose wait is declared here, and drops a
+# marker whose pid is gone.
+#
+# Block until no merge gate is running, telling the merge runner this worker is idle meanwhile
+wait-for-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+    mkdir -p "$S/gate-waiters"; m="$S/gate-waiters/$$"; printf '%s\n' "$PWD" > "$m"
+    trap 'rm -f "$m"' EXIT
+    t0=$SECONDS
+    while [ -e "$S/bulk-in-progress" ] || pgrep -f 'just gate' >/dev/null 2>&1; do
+        [ $(( (SECONDS - t0) % 300 )) -lt 15 ] && echo "wait-for-gate: a merge gate is running ($(( (SECONDS - t0) / 60 )) min so far)" >&2
+        sleep 15
+    done
+    echo "wait-for-gate: clear after $(( (SECONDS - t0) / 60 )) min" >&2
+
 # The crates whose `src/` holds a code fence rustdoc would actually run — DERIVED, never a
 # maintained list (`py/hkpy/doctests.py`). Prints the selection and the skipped crates on stderr,
 # and falls back to the whole workspace on any scan failure.
