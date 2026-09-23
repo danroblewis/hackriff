@@ -20796,7 +20796,7 @@ tasks:
   - id: T-610
     milestone: MAUTO
     title: 'hk-blocks `viterbi`: convolutional/punctured FEC incl. CCSDS R=1/2 K=7 - rank 3 on the T-554 gap list, 10 families'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: opus
@@ -20831,6 +20831,7 @@ tasks:
       BACK. Never `just gate`.
 
       Review fix e468b99a: realign now starts the new lane at steps - (D+B-1) (was steps - (D+B), which let the next step trace back D+B+1 steps: debug panic trellis.rs:438, stale slot in release). emit clamps lo to steps - (D+B) and counts older steps as dropped_bits (release-safe guard). Regression a_mid_stream_pair_slip_realigns_within_the_survivor_window (80 slip offsets): red without the fix (panic; with guard only, dropped_bits=1 at shift 21), green with it. from_table refuses > 65536 states before the O(states^2) tail walk; tested in code_parameters_are_checked.
+    commit: 7b12448e
   - id: T-611
     milestone: MAUTO
     title: 'hk-blocks `reed_solomon`: RS(255,223) dual-basis and friends - rank 4 on the T-554 gap list, 8 families'
