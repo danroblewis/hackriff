@@ -1336,18 +1336,48 @@ def ticket_transcript(tid):
     one-liners from the best-matching subagent transcript (largest, then newest)."""
     tid = (tid or "").upper()
     best = None  # (size, mtime, path)
-    for p in glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True):
+    # Three places an agent's transcript can live (user, 2026-09-23: every modal said "no agent
+    # transcript" while workers were busy): (1) a work-runner worker runs `claude -p` with its
+    # WORKTREE as cwd, so its transcript is under the per-worktree project dir; (2) a subagent of
+    # ANY session (coordinator or supervisor), matched by the ticket id in its launch prompt;
+    # (3) the legacy coordinator-only path, now covered by (2).
+    cands = []
+    m = re.match(r"T-0*(\d+)$", tid)
+    if m:
+        cands += [(p, True) for p in glob.glob(f"{PROJ}--claude-worktrees-t{m.group(1)}/*.jsonl")]
+    cands += [(p, False) for p in glob.glob(f"{PROJ}/*/**/*.jsonl", recursive=True)]
+    for p, by_dir in cands:
         try:
             head, _, sz = head_tail(p)
         except Exception:
             continue
-        if _tid_of_label(first_user(head)) != tid:
+        if not by_dir and _tid_of_label(first_user(head)) != tid:
             continue
         mt = os.path.getmtime(p)
         if best is None or (sz, mt) > (best[0], best[1]):
             best = (sz, mt, p)
     if not best:
-        return None
+        # No transcript, but the work runner may still have a record: say what it knows.
+        d = os.path.join(SCRATCH, "work", tid)
+        bits = []
+        try:
+            hb = json.load(open(os.path.join(d, "handback.json")))
+            bits.append(f"**Hand-back** ({hb.get('outcome')}): {str(hb.get('summary', ''))[:1500]}")
+        except Exception:
+            pass
+        try:
+            res = json.load(open(os.path.join(d, "out.json"))).get("result", "")
+            if res:
+                bits.append("**Worker's last words:** " + str(res)[-1500:])
+        except Exception:
+            pass
+        try:
+            c = json.load(open(os.path.join(SCRATCH, "work-claims.json"))).get(tid)
+            if c:
+                bits.append(f"**Runner claim:** state `{c.get('state')}`, branch `{c.get('branch')}`, model {c.get('model')}")
+        except Exception:
+            pass
+        return {"id": tid, "markdown": "\n\n".join(bits), "file": "work-runner record", "size_kb": 0} if bits else None
     PER = 20000          # per tool-call input / tool-result char cap
     TOTAL = 4_000_000    # overall cap (a safety valve for the browser)
     parts, total, truncated = [], [0], [False]
@@ -1494,6 +1524,42 @@ def ticket_detail(tid):
         out["timing"] = None
     return out
 
+def _registry_ticket(label):
+    """Ticket recorded at spawn by .claude/hooks/register-agent.sh, matched on the prompt head."""
+    try:
+        head = (label or "")[:120]
+        if not head:
+            return None
+        with open(os.path.join(SCRATCH, "agent-registry.jsonl")) as f:
+            for line in f.readlines()[-400:][::-1]:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("ticket") and (o.get("prompt_head") or "")[:120] == head:
+                    return o["ticket"]
+    except Exception:
+        pass
+    return None
+
+
+def _tid_of_cwd(path):
+    """The transcript's own cwd names the worktree: …/worktrees/rl-t740 or …/t513 → the ticket."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(60000).decode("utf-8", "replace")
+        # The cwd first; else the first worktree path the agent touches (a coordinator subagent
+        # keeps the coordinator's cwd and `cd`s into .claude/worktrees/rl-t740 in its commands).
+        m = re.search(r'"cwd"\s*:\s*"([^"]+)"', head)
+        for text in ([m.group(1)] if m else []) + [head]:
+            mm = re.search(r"worktrees/[A-Za-z-]*t0*(\d{2,4})(?:[/\s\"'&]|$)", text)
+            if mm:
+                return f"T-{mm.group(1)}"
+    except Exception:
+        pass
+    return None
+
+
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
@@ -1541,6 +1607,11 @@ def agents(status_map):
             # still in it somewhere — take the first T-### we see.
             m2 = re.search(r"\bT-\d+\b", s["label"], re.IGNORECASE)
             tid = m2.group(0).upper() if m2 else None
+        if not tid:
+            # The orchestrator knew at spawn time (user, 2026-09-23): the PreToolUse(Agent) hook
+            # wrote {ticket, prompt_head, cwd} to agent-registry.jsonl; match by prompt head,
+            # else read the ticket out of the transcript's own cwd (…/worktrees/rl-t740 → T-740).
+            tid = _registry_ticket(s["label"]) or _tid_of_cwd(p)
         st = status_map.get(tid)
         if st in ("done", "cancelled"): continue     # merged already
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running

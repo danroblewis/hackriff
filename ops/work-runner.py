@@ -115,6 +115,17 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
+    # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
+    # coordinator's routine and stay in the file only.
+    level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info"}.get(kind)
+    if level:
+        try:
+            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
+                            level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
     # Poke the coordinator's pane the way the merge runner does; the file is the record, this is the wake-up.
     try:
         if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
@@ -696,6 +707,19 @@ def sync_board(claims, dry):
             continue
         if c.get("state") == "running" and c.get("kind") == "work" and t.get("status") == "todo":
             flips.append((tid, "in-progress", None))
+    # Agents the coordinator or supervisor spawned with the Agent tool are not claims, but the
+    # PreToolUse(Agent) hook registered them (agent-registry.jsonl, user 2026-09-23): a ticket
+    # with a registered agent spawned in the last 30 min and still `todo` is in progress too.
+    try:
+        cut = time.time() - 1800
+        with open(f"{S}/agent-registry.jsonl") as f:
+            for line in f.readlines()[-200:]:
+                o = json.loads(line)
+                t = tasks.get(o.get("ticket") or "")
+                if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
+                    flips.append((o["ticket"], "in-progress", None))
+    except Exception:
+        pass
     for tid, sha in landed.items():
         t = tasks.get(tid)
         if t and t.get("status") in ("todo", "in-progress"):
