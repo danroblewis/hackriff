@@ -13348,6 +13348,13 @@ tasks:
       Filed 2026-09-17 from /tmp/claude-501/live-tiles-assessment.md, which calls this "the one to
       design properly".
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      Review fix 1: the branch was rebased onto main because the old base 24a84b11 was rolled back. RowCursor now waits for the tune record's forward reach (the as_of_s rule), so a row is never pushed grey ahead of it; a regression test covers this. RowAccumulator keeps unobserved gaps as row ranges instead of tiles.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-22 12:07).
+      Review fix 1. (1) Rebased onto main 82e91730; the old base 24a84b11 was a rolled-back batch. (2) RowCursor never pushes a row ahead of the tune record's forward reach (the as_of_s rule), so recorded rows are never sent grey and left uncorrected; a regression test fails without the fix. (3) The client keeps unobserved stretches as merged row ranges, not tiles. Still open, as before: rowfeed.ts is not yet wired into TileCache.
+      Tests: 
+      Commits: ad858db8, 028bb3ac, 606d68d1
   - id: T-462
     milestone: MLIVE
     title: Make the level_f=0 time column incrementally maintained - the 15 coarse nodes, not the whole lattice
