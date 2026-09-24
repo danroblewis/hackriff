@@ -426,14 +426,25 @@ const mountFocus: MountFn = (el, ctx) => {
         outputPanelsEl,
       );
       ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
       return;
     }
     if (focus.kind === "selection") {
       const sel = s.selections.list.find((x) => x.id === focus.id);
       el.replaceChildren(sel ? renderSelectionFocus(ctx, sel) : h("div", { class: "empty" }, "Select a signal or a selection."), outputPanelsEl);
+      el.classList.remove("is-empty");
       return;
     }
     el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."), outputPanelsEl);
+    // T-801 round 3: nothing is focused, so this panel is just the placeholder sentence — mark it
+    // so `map-layout.css` can hide it instead of covering the canvas's right edge with an empty
+    // box. `.focus:empty` never fired: `render()` always fills the slot with *something* (a real
+    // focus, a "not found" explanation, or this placeholder), so the element is never literally
+    // empty. This class is the one case that should collapse; a real focus or an explanatory
+    // "not here" state (the two branches above, which both `return` before reaching here) keeps it
+    // shown, unchanged.
+    el.classList.add("is-empty");
+    return;
   }
   // `inventory.window` is selected too (T-385): the window is what turns "not among the rows" into
   // a sentence, and it changes without the rows changing (a re-ask that returned the same set).

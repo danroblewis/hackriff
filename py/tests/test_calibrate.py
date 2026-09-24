@@ -166,3 +166,109 @@ def test_tight_nominal_bounds_are_available_but_not_the_default() -> None:
     )
     assert tight["conditioning"]["sigma_lsb_range"][0] == 1.0
     assert tight["conditioning"]["clip_fraction_max"] == 0.10
+
+
+# --- T-853 (MAUTO M-2): draws -> document -------------------------------------------------------
+
+
+def _draws(rho_pair: float, *, n: int = 256, min_n: int | None = None) -> dict:
+    """Two S2 metrics declared in different groups, with a chosen dependence, over 4096 windows."""
+    rng = np.random.default_rng(7)
+    a = rng.normal(size=4096)
+    b = rho_pair * a + math.sqrt(max(0.0, 1 - rho_pair**2)) * rng.normal(size=4096)
+    return {
+        "block": "clock_recovery@1",
+        "corpus": "synthetic",
+        "fill": {"sigma_lsb": 8.0, "clip_fraction": 0.0},
+        "cells": [
+            {
+                "n": n,
+                "min_n": n if min_n is None else min_n,
+                "max_n": n + 3,
+                "windows": 4096,
+                "metrics": {
+                    "eye_open": {
+                        "stage": "S2",
+                        "group": "eye",
+                        "direction": "larger",
+                        "raw": a.tolist(),
+                    },
+                    # Evidence when small: the generator negates it before calibrating.
+                    "timing_var": {
+                        "stage": "S2",
+                        "group": "soft_quality",
+                        "direction": "smaller",
+                        "raw": (-b).tolist(),
+                    },
+                },
+            }
+        ],
+    }
+
+
+def test_independent_metrics_keep_their_declared_groups() -> None:
+    doc = calibrate.document_from_draws(
+        _draws(0.0), nominal_bounds=calibrate.TIGHT_NOMINAL_BOUNDS
+    )
+    assert doc["groups"] == {
+        "S2": {"eye": ["eye_open"], "soft_quality": ["timing_var"]}
+    }
+    rho = doc["correlation"]["rho"]
+    assert abs(rho[0][1]) < calibrate.GROUP_SPLIT_MAX_RHO
+    # The tight bucket is stated in the file (ADR-0015 §16.4).
+    assert doc["conditioning"]["sigma_lsb_range"][0] == 1.0
+    assert doc["conditioning"]["clip_fraction_max"] == 0.10
+    assert {t["metric"] for t in doc["tables"]} == {"eye_open", "timing_var"}
+    assert all(t["null"] == "noise" and t["n"] == 256 for t in doc["tables"])
+
+
+def test_dependent_metrics_are_merged_into_one_group_never_split() -> None:
+    # Correlated in the evidence direction (timing_var negated back): one group.
+    doc = calibrate.document_from_draws(
+        _draws(0.9), nominal_bounds=calibrate.TIGHT_NOMINAL_BOUNDS
+    )
+    assert doc["correlation"]["rho"][0][1] >= calibrate.GROUP_SPLIT_MAX_RHO
+    assert list(doc["groups"]["S2"].values()) == [["eye_open", "timing_var"]]
+
+
+def test_a_cell_whose_draws_had_another_support_is_refused() -> None:
+    with pytest.raises(ValueError, match="for a cell at n = 256"):
+        calibrate.document_from_draws(
+            _draws(0.0, min_n=250), nominal_bounds=calibrate.TIGHT_NOMINAL_BOUNDS
+        )
+
+
+def test_the_support_slack_mirrors_the_rust_scorer() -> None:
+    # hk_synth::calibration::support_matches: n in [cell_n, cell_n + cell_n/50 + 16].
+    assert calibrate.support_slack(256) == 21
+    assert calibrate.support_slack(16384) == 343
+
+
+def test_spearman_is_rank_based_and_a_constant_column_cannot_justify_a_split() -> None:
+    x = np.arange(100.0)
+    assert calibrate.spearman_matrix([x, x**3])[0][1] == 1.0
+    assert calibrate.spearman_matrix([x, -x])[0][1] == -1.0
+    assert calibrate.spearman_matrix([x, np.zeros(100)])[0][1] == 1.0
+
+
+def test_the_shipped_tables_are_what_the_rust_loader_reads() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "synth" / "calibration"
+    files = sorted(root.glob("*.json"))
+    assert len(files) >= 11
+    for f in files:
+        doc = json.loads(f.read_text())
+        assert doc["schema"] == calibrate.CALIBRATION_SCHEMA
+        assert (
+            doc["conditioning"]["sigma_lsb_range"][0]
+            == calibrate.TIGHT_NOMINAL_BOUNDS["sigma_lsb_min"]
+        )
+        for t in doc["tables"]:
+            assert t["windows"] >= calibrate.WINDOWS_PER_CELL_FLOOR
+            assert t["admissible_bits"] <= calibrate.CALIBRATED_CLAIM_CAP_BITS
+            assert all(
+                abs(lv["realised_bits"] - lv["bits"])
+                <= calibrate.EXPRESSIBILITY_TOLERANCE_BITS
+                for lv in t["levels"]
+            )

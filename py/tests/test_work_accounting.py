@@ -717,3 +717,138 @@ def test_board_sync_runs_under_one_lock(tmp_path, monkeypatch):
         return "synced"
     monkeypatch.setattr(R, "_sync_board", inner)
     assert R.sync_board({}, False) == "synced" and held == [True]
+
+
+
+# --------------------------------------------------------------------- reaping stuck worktrees (2026-09-24)
+def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_quietly(tmp_path, monkeypatch):
+    """t356 (0 commits, claim blocked, only an untracked .githooks/) held 31 GB and failed
+    `worktree remove` 1,499 times; a worktree whose directory was gone failed 1,730 times."""
+    import os
+    import shutil
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    g = lambda *a, cwd=repo: sp.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                    check=True, capture_output=True, text=True)
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    wts = repo / ".claude" / "worktrees"
+    for name in ("t356", "t900", "tgone"):
+        g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
+    (wts / "t356" / ".githooks").mkdir()
+    (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
+    (wts / "t356" / "target").mkdir()
+    (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
+    shutil.rmtree(wts / "tgone")                                   # registered, directory gone
+    old = 1_000_000_000
+    for name in ("t356", "t900"):
+        os.utime(wts / name, (old, old))
+
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: real_sh(args, cwd=cwd or str(repo), **k))
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "no-bulk"))
+    monkeypatch.setattr(R, "REAP_AFTER_MIN", 0)
+    monkeypatch.setattr(R, "_REAP_SAID", set())
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")}}
+
+    R.reap_worktrees(claims, dry=False)
+    assert not (wts / "t356").exists()                             # only build output: reaped
+    assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
+    assert "tgone" not in g("worktree", "list").stdout             # pruned
+    kept = [m for m in said if "kept - untracked" in m]
+    assert len(kept) == 1 and "notes-i-never-committed.md" in kept[0]
+    R.reap_worktrees(claims, dry=False)
+    assert len([m for m in said if "kept - untracked" in m]) == 1  # said once, not every tick
+    assert not any("fatal" in m for m in said)
+
+
+def test_only_regenerable_is_strict():
+    assert R.only_regenerable([".githooks/", "target/"])
+    assert not R.only_regenerable([".githooks/", "src/new.rs"])
+    assert not R.only_regenerable([])
+
+
+def test_a_deflake_waits_while_a_ticket_branch_edits_its_spec(df, monkeypatch):
+    """2026-09-23 23:30: the runner dispatched deflakers on app-trace and fog-of-war while T-801's
+    worker was rewriting both under the user's authorization; the coordinator held one by hand."""
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"))
+    edits = {"task-t801": "ui/e2e/app-trace.e2e.mjs\n"}
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        edits.get(args[3].split("...")[1], "") if args[:3] == ["git", "diff", "--name-only"] else "")
+    claims = {"T-801": {"ticket": "T-801", "branch": "task-t801", "state": "review-failed", "kind": "work"},
+              "T-9": {"ticket": "T-9", "branch": "task-t9", "state": "running", "kind": "work"}}
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    assert (tmp / "work-runner.log").read_text().count("DEFLAKE WAIT deflake-a: request for app-trace.e2e.mjs - T-801's") == 1
+    claims["T-801"]["state"] = "queued"                   # a queued claim whose branch is in no queue: stale
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+    launched.clear()
+    (tmp / "merge-queue.txt").write_text("task-t801\n")    # ...but really queued: it waits
+    claims["DEFLAKE:deflake-a"]["state"] = "no-work"
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"), _req("deflake-a", 2e9, test="app-trace.e2e.mjs"))
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    edits.clear()                                        # landed: main now has it, the three-dot diff is empty
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+
+
+def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 600.0))
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 1)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_red_proof_is_not_a_failing_test(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done", tests=[{"cmd": "node run.mjs app-trace.e2e.mjs  # defect injected", "exit": 1, "expect": "red"},
+                      {"cmd": "node run.mjs app-trace.e2e.mjs", "exit": 0}])
+    claims = claim()
+    R.reap(claims, dry=False)
+    assert len(reviews) == 1 and seen == []
+    hb("done", tests=[{"cmd": "x", "exit": 1, "expect": "red"}])     # a "proof" with no green run beside it
+    R.reap(claim(), dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"]
+
+
+def test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed(tmp_path, monkeypatch):
+    """task-t538 landed as task-t538-rl: its own branch is never on main, so the claim stayed
+    `queued` for 42 h (12 of 13 such on 2026-09-24). Board done + in no queue = closed."""
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")     # branch not on main
+    (tmp_path / "merge-queue.txt").write_text("task-t2\n")
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-t3 task-t4\n")
+    claims = {t: {"ticket": t, "branch": f"task-t{t[2:]}", "state": "queued", "started": 0} for t in ("T-1", "T-2", "T-3", "T-5")}
+    board = {"T-1": {"status": "done"}, "T-2": {"status": "done"}, "T-3": {"status": "done"}, "T-5": {"status": "in-progress"}}
+    assert R.release_stale_claims(claims, board)
+    assert {t: c["state"] for t, c in claims.items()} == {"T-1": "merged", "T-2": "queued", "T-3": "queued", "T-5": "queued"}
+    assert "CLAIM T-1: the board says done and task-t1 is in no queue" in (tmp_path / "work-runner.log").read_text()
+
+
+def test_no_rebuilt_branch_close_while_a_single_merge_is_staged(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "MERGE_HEAD").write_text("abc\n")      # the runner is merging task-t1 alone
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "queued", "started": 0}}
+    R.release_stale_claims(claims, {"T-1": {"status": "done"}})
+    assert claims["T-1"]["state"] == "queued"

@@ -336,3 +336,49 @@ def test_the_deflake_counter_follows_the_window_down():
     flakes.deflake_due({"t": e})
     e.recent_passed = 3                                           # three NEW flakes
     assert flakes.deflake_due({"t": e}) == [e]
+
+
+
+def test_a_branch_breaking_a_spec_is_not_the_spec_being_flaky():
+    """2026-09-23 23:01: T-801 broke three specs (failed alone on its merge) -> three FLAKY alarms."""
+    single = log(
+        "[09-23 22:57:49] TRIAGE: browser specs red: fog-of-war.e2e.mjs app-trace.e2e.mjs - re-running them alone",
+        "[09-23 23:01:05] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 23:01:07] GATE FAILED task-t801 (attempt 1/2, tip 7a5d243f) -> abort + flag for AI",
+    )
+    bulk = log(
+        "[09-23 18:27:40] TRIAGE: browser specs red: fog-of-war.e2e.mjs - re-running them alone",
+        "[09-23 18:28:18] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 18:28:19] TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: fog-of-war.e2e.mjs",
+        "[09-23 18:30:00] TRIAGE: main is green on them -> the batch introduced it; isolating",
+    )
+    main_red = log(
+        "[09-23 13:40:00] TRIAGE: browser specs red: surface-nav.e2e.mjs - re-running them alone",
+        "[09-23 13:41:00] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 13:41:01] TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: surface-nav.e2e.mjs",
+        "[09-23 13:47:00] TRIAGE: MAIN IS RED on browser spec(s): surface-nav.e2e.mjs -> batch re-queued in order",
+    )
+    incs = flakes.parse_runner_log(single + bulk + main_red, YEAR)
+    assert [(i.tests, i.branch_defect) for i in incs] == [
+        (("fog-of-war.e2e.mjs", "app-trace.e2e.mjs"), True), (("fog-of-war.e2e.mjs",), True),
+        (("surface-nav.e2e.mjs",), False)]
+    ledger = flakes.build(incs, now=NOW + 86400)
+    assert ledger["fog-of-war.e2e.mjs"].recent_red == 0 and ledger["fog-of-war.e2e.mjs"].branch_defects == 2
+    assert ledger["surface-nav.e2e.mjs"].recent_red == 1                 # main red on it: counts
+
+
+def test_failed_alone_is_charged_only_to_the_specs_the_isolated_run_named():
+    """09-22 16:25: four specs re-run alone, the tier named two as failed - app-trace passed that
+    run yet was counted "failed alone", and its FLAKY verdict read "both ways" for two days."""
+    text = log(
+        "e2e: 10/14 files passed in 237.5 s (backend 2.3 s); failed: app-trace.e2e.mjs, fog-of-war.e2e.mjs",  # the gate's own run
+        "[09-22 16:21:59] TRIAGE: browser specs red: app-trace.e2e.mjs fog-of-war.e2e.mjs surface-address.e2e.mjs - re-running them alone",
+        "e2e: 1/3 files passed in 203.8 s (backend 1.9 s); failed: fog-of-war.e2e.mjs, surface-address.e2e.mjs",
+        "[09-22 16:25:23] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+    )
+    led = flakes.build(flakes.parse_runner_log(text, YEAR))
+    assert (led["app-trace.e2e.mjs"].failed_alone, led["app-trace.e2e.mjs"].red_in_gate) == (0, 1)
+    assert led["fog-of-war.e2e.mjs"].failed_alone == 1 and led["surface-address.e2e.mjs"].failed_alone == 1
+    # no summary line (a Rust test set): every test in the set, as before
+    led = flakes.build(flakes.parse_runner_log(log(*FAIL_EPISODE), YEAR))
+    assert led["the_view_lattices_floor"].failed_alone == 1

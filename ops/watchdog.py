@@ -589,6 +589,8 @@ def main(argv: list[str]) -> int:
         open(os.path.expanduser("~/.hackriff-ops/active-ops-dir"), "w").write(S + "\n")
     except Exception:
         pass
+    import launchpath
+    launchpath.check(__file__, logline)
     logline(f"START pid={os.getpid()} interval={INTERVAL}s ops={S}"
             + (" (dry-run)" if a.dry_run else ""))
     since: dict = {}

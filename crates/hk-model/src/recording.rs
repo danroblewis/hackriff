@@ -36,6 +36,9 @@ pub enum RecordingTrigger {
     Scheduler,
     /// Requested by the user.
     Manual,
+    /// Pinned by a region analysis at job start (ADR-0015 §6 "pin on analyze", T-857): the ring
+    /// windows the job acquired, exported before the search so ring eviction cannot race it.
+    Analyze,
 }
 
 /// Eviction ranking class (C25: pinned > unknown > decoder-confirmed > routine).

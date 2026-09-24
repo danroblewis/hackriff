@@ -20,8 +20,10 @@ use serde_json::Value;
 
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkMeta, PortSlice, PortVec};
+use crate::evidence::{emit, saturate};
 use crate::registry::{BlockFactory, BuildCtx};
 use crate::status::Status;
+use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
 
 /// Builds [`Fields`].
 pub struct FieldsFactory {
@@ -56,6 +58,7 @@ impl BlockFactory for FieldsFactory {
             skip_invalid,
             invalid: 0,
             counts: [0; 3],
+            ev: [0; 2],
             status: Status::default(),
         }))
     }
@@ -100,6 +103,8 @@ pub struct Fields {
     invalid: u64,
     /// Frames ok, partial, failed since the map was (re)compiled.
     counts: [u64; 3],
+    /// Evidence (T-853): frames fitting fully, and frames evaluated, since `reset()`.
+    ev: [u64; 2],
     status: Status,
 }
 
@@ -175,6 +180,10 @@ impl Block for Fields {
                 continue;
             }
             let tree = self.evaluator.eval(f.bytes, f.info.bit_len);
+            self.ev[1] += 1;
+            if matches!(tree.fit, FitStatus::Ok) {
+                self.ev[0] += 1;
+            }
             match tree.fit {
                 FitStatus::Ok | FitStatus::None => self.counts[0] += 1,
                 FitStatus::Partial => self.counts[1] += 1,
@@ -191,7 +200,31 @@ impl Block for Fields {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev = [0; 2];
+    }
+
+    /// S6 `field_fit`: `raw` = frames the map fits fully, `n` = frames evaluated. **0 bits**:
+    /// the analytic null is a binomial against the chance a *random* frame fits the map, and a
+    /// field map does not state that rate (a map with no value constraints fits any frame of
+    /// the right length). A template's `plausibility` (M-5) is where a stated chance rate
+    /// arrives; until then the fit is reported and never credited.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev[1] == 0 {
+            return;
+        }
+        emit(
+            out,
+            Evidence::new(
+                Stage::S6,
+                MetricId::FieldFit,
+                GroupId::Undeclared,
+                self.ev[0] as f32,
+                saturate(self.ev[1]),
+                0.0,
+            ),
+        );
+    }
 
     fn update_params(
         &mut self,

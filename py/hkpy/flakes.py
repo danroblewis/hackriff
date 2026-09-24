@@ -89,11 +89,20 @@ _DECLARE = (
     re.compile(r"^TRIAGE: browser specs red: (.*?) - re-running them alone\s*$"),
 )
 _PASSED = re.compile(r"^TRIAGE: they PASS alone")
+#: The browser tier's own summary of each isolated run (`ui/e2e/run.mjs`, no timestamp): which of
+#: the declared specs actually failed ALONE. Without it "a browser spec FAILS alone" was charged to
+#: every spec in the set - 09-22 16:25 app-trace passed its isolated run (`failed: fog-of-war,
+#: surface-address`) and was still counted "failed alone", which made its 09-24 FLAKY verdict
+#: "both ways: real under some condition".
+_E2E_SUMMARY = re.compile(r"^e2e: \d+/\d+ files passed .*; failed: (.*?)\s*$")
 _FAILED = re.compile(r"^TRIAGE: (?:a test|a browser spec) FAILS alone")
 
 #: Explicitly NOT a gate red: the runner also re-runs the same specs on a rewound `main` to ask
 #: whether main itself is broken. Counting those would double every browser incident.
 _ON_MAIN = re.compile(r"^TRIAGE: (?:is main itself red\?|MAIN IS RED)")
+_BRANCH_INTRODUCED = re.compile(r"^TRIAGE: main is green on them")
+_SINGLE_GATE_FAILED = re.compile(r"^GATE FAILED \S+")
+_MAIN_RED = re.compile(r"^TRIAGE: MAIN IS RED")
 
 PASSED_ALONE = "passed_alone"
 FAILED_ALONE = "failed_alone"
@@ -117,6 +126,14 @@ class Incident:
     load: float | None = None
     batch: str = ""
     source: str = "log"
+    #: Failed alone AND the runner then pinned it on the merge: "main is green on them -> the batch
+    #: introduced it", or a single merge's `GATE FAILED <branch>`. That is the branch's own defect,
+    #: not evidence the SPEC is flaky - on 2026-09-23 23:01 one branch (T-801) breaking three specs
+    #: raised three FLAKY alarms. Recorded, never counted toward the FLAKY threshold.
+    branch_defect: bool = False
+    #: The specs the last isolated run named as failed (`_E2E_SUMMARY`); empty = not known, and a
+    #: FAILED_ALONE then counts against every test in the set, as before.
+    failed_alone_tests: tuple[str, ...] = ()
 
 
 def _first_load(text: str) -> float | None:
@@ -136,15 +153,19 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
     """
     out: list[Incident] = []
     pending: Incident | None = None
+    last_failed: Incident | None = None
     seen: set[tuple[str, str]] = set()
     prev: datetime | None = None
     cur_year = year
     for raw in text.splitlines():
         m = _LINE.match(raw.strip())
         if not m:
+            hit = _E2E_SUMMARY.match(raw.strip()) if pending is not None else None
+            if hit:
+                pending.failed_alone_tests = tuple(t for t in hit.group(1).replace(",", " ").split() if t)
             continue
         mon, day, hh, mm, ss, rest = m.groups()
-        if not rest.startswith("TRIAGE:"):
+        if not rest.startswith("TRIAGE:") and not (last_failed is not None and _SINGLE_GATE_FAILED.match(rest)):
             continue
         try:
             when = datetime(cur_year, int(mon), int(day), int(hh), int(mm), int(ss))
@@ -161,6 +182,12 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
             continue
         seen.add(key)
 
+        if last_failed is not None:
+            if _BRANCH_INTRODUCED.match(rest) or _SINGLE_GATE_FAILED.match(rest):
+                last_failed.branch_defect = True
+                last_failed = None
+            elif _MAIN_RED.match(rest):
+                last_failed = None            # main itself is red on it: that DOES count
         if _ON_MAIN.match(rest):
             # A re-run on the rewound main, not a gate red. It also ENDS the pending incident's
             # window: whatever follows is about main, not about this merge.
@@ -173,6 +200,7 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
                 declared = hit.group(1)
                 break
         if declared is not None:
+            last_failed = None
             tests = tuple(t for t in declared.replace(",", " ").split() if t)
             if tests:
                 pending = Incident(ts=when.timestamp(), tests=tests)
@@ -185,6 +213,7 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
             pending = None
         elif _FAILED.match(rest):
             pending.outcome = FAILED_ALONE
+            last_failed = pending
             pending = None
     return out
 
@@ -277,6 +306,8 @@ class Entry:
     first_seen: float
     last_seen: float
     red_in_gate: int = 0
+    #: Reds that were a branch's own defect (see `Incident.branch_defect`): shown, never counted.
+    branch_defects: int = 0
     passed_alone: int = 0
     failed_alone: int = 0
     loads: list[float] = field(default_factory=list)
@@ -298,6 +329,7 @@ class Entry:
             "first_seen": round(self.first_seen, 1),
             "last_seen": round(self.last_seen, 1),
             "red_in_gate": self.red_in_gate,
+            "branch_defects": self.branch_defects,
             "passed_alone": self.passed_alone,
             "failed_alone": self.failed_alone,
             "loads": self.loads,
@@ -340,12 +372,18 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
             e = ledger.get(test)
             if e is None:
                 e = ledger[test] = Entry(test=test, first_seen=inc.ts, last_seen=inc.ts)
+            if inc.branch_defect:
+                e.branch_defects += 1
+                continue
             e.first_seen = min(e.first_seen, inc.ts)
             e.last_seen = max(e.last_seen, inc.ts)
             e.red_in_gate += 1
-            if inc.outcome == PASSED_ALONE:
+            outcome = inc.outcome
+            if outcome == FAILED_ALONE and inc.failed_alone_tests and test not in inc.failed_alone_tests:
+                outcome = UNRESOLVED        # it passed that isolated run; another spec in the set failed
+            if outcome == PASSED_ALONE:
                 e.passed_alone += 1
-            elif inc.outcome == FAILED_ALONE:
+            elif outcome == FAILED_ALONE:
                 e.failed_alone += 1
             if inc.load is not None:
                 e.loads.append(inc.load)

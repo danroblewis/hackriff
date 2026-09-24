@@ -76,6 +76,8 @@ touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 # bogus names failed the rev-parse check. Same family as the `tr -d` bug that once glued every
 # queued branch into one unmergeable token: a helper's diagnostics leaking into its data.
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >&2; }
+# Never from a worktree (ops/launch-guard.sh): logs PATH:, refuses before the startup repair or any merge.
+. "$(dirname "${BASH_SOURCE[0]}")/launch-guard.sh"; launch_guard "${BASH_SOURCE[0]}"
 # Discord (user, 2026-09-23): every exception the runner hands to a person is also an alert;
 # every landing is a green one-liner. ops/alert.py dedupes by key and never fails the caller.
 alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 || true; }
@@ -95,8 +97,14 @@ notify_coordinator(){
 # green merge with startable work undone. It says "reconcile", never a computed to-do list:
 # the coordinator's `just reconcile` is the single source of truth, and any list we pasted here
 # would be stale by the time it acts.
-notify_ok(){
-  alert green "landed" "$1"
+notify_ok(){ # coordinator_notice [header branch...]
+  # Discord gets release notes (user, 2026-09-23): the header, then one line per landed branch - the
+  # ticket id AND its board title, or a non-ticket branch with its first commit subject
+  # (py/hkpy/landnotes.py; under the 2000-char limit, "+N more"). The coordinator's pane keeps the
+  # short notice.
+  local notice=$1 header=${2:-$1} body=""; shift; [ "$#" -gt 0 ] && shift
+  [ "$#" -gt 0 ] && body=$(cd "$REPO" && uv run --locked --project py python -m hkpy.landnotes --header "$header" "$@" 2>/dev/null)
+  alert green "landed" "${body:-$notice}"
   tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
@@ -198,6 +206,7 @@ process(){
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
+  GATE_T0=$SECONDS
   local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
   limited just gate-merge; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
@@ -252,7 +261,8 @@ process(){
     if [ -n "$wt" ] && [ "$(cd "$wt" && pwd -P)" != "$(cd "$REPO" && pwd -P)" ]; then
       git worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     fi
-    notify_ok "MERGED $ticket ($branch); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
+    local q; q=$(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0)
+    notify_ok "MERGED $ticket ($branch); queue now $q waiting." "1 landed · gate $(( (SECONDS - ${GATE_T0:-$SECONDS} + 30) / 60 )) min · queue now $q waiting" "$branch"
   else
     git merge --abort 2>/dev/null || true
     record_attempt "$branch" "$tip"
@@ -640,6 +650,7 @@ try_bulk(){
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
   log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
+  GATE_T0=$SECONDS
   # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
   # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
   # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
@@ -668,7 +679,8 @@ try_bulk(){
     done
     rm -f "$BULKMARK"
     board_sync_now
-    notify_ok "MERGED batch ($tickets); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
+    local q; q=$(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0)
+    notify_ok "MERGED batch ($tickets); queue now $q waiting." "${#branches[@]} landed · gate $(( (SECONDS - ${GATE_T0:-$SECONDS} + 30) / 60 )) min · queue now $q waiting" "${branches[@]}"
     return 0
   fi
   if [ "$(git -C "$REPO" rev-parse HEAD)" = "$after" ]; then

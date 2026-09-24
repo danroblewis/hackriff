@@ -25,6 +25,7 @@ safe leaves the file exactly as it found it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -529,6 +530,31 @@ def cmd_new(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------------------------
 
 
+def cmd_order(args: argparse.Namespace) -> int:
+    """Read-only leverage view (py/hkpy/taskorder.py) over main's COMMITTED board by default."""
+    from hkpy import taskorder
+    if args.working:
+        try:
+            tasks_, ref = (load_doc(args.file.read_text(encoding="utf-8")).get("tasks") or []), str(args.file)
+        except yaml.YAMLError as e:
+            return die(f"docs/tasks.yaml is not strict YAML:\n{e}")
+    else:
+        try:
+            tasks_, ref = taskorder.committed_tasks(str(args.file.resolve().parent.parent))
+        except Exception as e:
+            return die(f"could not read the committed board: {e}")
+    a = taskorder.analyse(tasks_)
+    a["board"] = ref
+    if args.json:
+        key = "value" if args.sort == "value" else "unblocks"
+        a["rows"] = sorted(a["rows"], key=lambda r: (-r[key], -r["unblocks" if key == "value" else "value"], r["id"]))
+        print(json.dumps(a, indent=1))
+    else:
+        print(f"board: {ref}")
+        print("\n".join(taskorder.render(a, top=args.top, show_order=args.topo, sort=args.sort)))
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     text = args.file.read_text(encoding="utf-8")
     try:
@@ -638,6 +664,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--found-by", help="a ticket/agent id, recorded as the notes' provenance line")
     add_file_arg(p)
     p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("order", help="read-only: bottlenecks by 'unblocks N', the frontier, a topological order")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--topo", action="store_true", help="also list each depth group's tickets")
+    p.add_argument("--sort", choices=("unblocks", "value"), default="unblocks")
+    p.add_argument("--working", action="store_true", help="read the working file (--file) instead of main's committed board")
+    p.add_argument("--json", action="store_true")
+    add_file_arg(p)
+    p.set_defaults(func=cmd_order)
 
     p = sub.add_parser("validate", help="strict-parse the board and check its invariants")
     add_file_arg(p)

@@ -136,7 +136,7 @@ The persistent "thing seen on the air": `emitter_id`, current `f`/`BW`, `fingerp
 - **Tests:** replay two sessions of the same emitter; assert one Emitter with `count` summed and `first/last_seen` spanning both; assert an unknown signal yields `known_status: unknown` with a non-zero open-set score.
 
 ### 2.12 Recording  [C25]
-A SigMF dataset reference: `recording_id`, `uri` (`.sigmf-data` + `.sigmf-meta` paths), `type` (`iq-snippet` / `channel-decimated` / `audio`), `t_span`, `f_center`, `fs`, `trigger` (`detection_ref` / `manual`), pre/post-trigger seconds, `size_bytes`, `retention_class`, `content_class` (for gating), `provenance_ref`, embedded `annotations[]`.
+A SigMF dataset reference: `recording_id`, `uri` (`.sigmf-data` + `.sigmf-meta` paths), `type` (`iq-snippet` / `channel-decimated` / `audio`), `t_span`, `f_center`, `fs`, `trigger` (`detection_ref` / `demodulation_ref` / `scheduler` / `manual` / `analyze` — *`analyze` added T-857: the ring windows a region analysis acquired, pinned before its search, ADR-0015 §6*), pre/post-trigger seconds, `size_bytes`, `retention_class`, `content_class` (for gating), `provenance_ref`, embedded `annotations[]`.
 - **Identity & lifecycle:** `recording_id`; files live on disk, **not** as blobs in the DB; triggered by detection with pre-trigger from the ring buffer (C03).
 - **Relationships:** referenced by Detection/Emitter/Demodulation; carries Annotations (written into the SigMF meta).
 - **Retention & size:** the IQ budget — 20 Msps is 144 GB/h, so recordings are short snippets, quota-managed and ranked by interestingness; `content_class` can forbid retention outright (restricted content, docs/06 §5).

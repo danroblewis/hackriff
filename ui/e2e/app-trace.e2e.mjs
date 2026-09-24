@@ -578,6 +578,44 @@ async function scrubOntoCell(page, lagS, tries = 8) {
 const FOLLOWING_EXPR =
   `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
 
+/**
+ * **Bring the tuned band, with a control region on each side, into the columns the surface itself
+ * is showing** (T-801). The app's panels float over the full-bleed canvas's sides by design; the
+ * view opens on the observed extent, which puts the band's edges near the canvas's own edges, under
+ * them. A frequency-only zoom OUT (shift+wheel, T-456 — view arithmetic, never a device route)
+ * anchored at the band's own centre shrinks the band towards that centre until both edges and a
+ * margin beyond each lie in the widest uncovered run of columns, read from the browser's own hit
+ * test (`Page.unoccludedColumns`) — never from a hard-coded panel width. Returns a sentence for the
+ * diagnostics; the extent test re-checks the fit on the observation it actually measures.
+ */
+async function fitBandIntoUncovered(page, { tries = 12 } = {}) {
+  let said = "";
+  for (let i = 0; i <= tries; i++) {
+    await page.waitFor("the tap to see a stream header and the pane to state its frequency window",
+      `!!(window.__hkTap.geom && window.__hkTap.geom.bandwidthHz > 0) &&
+       / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+      { timeoutMs: 30000 });
+    const snap = JSON.parse(await page.eval(SNAPSHOT));
+    const unocc = await page.unoccludedColumns(".sf-canvas", { y0: snap.rect.y, y1: snap.rect.y + TRACE_PX });
+    const win = windowOf(snap.headline);
+    const g = snap.tap.geom;
+    const w = snap.rect.w;
+    const colOf = (hz) => ((hz - win.f0Hz) / win.spanHz) * w;
+    const lo = colOf(g.centerHz - g.bandwidthHz / 2), hi = colOf(g.centerHz + g.bandwidthHz / 2);
+    const vLo = unocc.x - snap.rect.x, vHi = vLo + unocc.w - 1;
+    // A control region of a tenth of the uncovered width beyond each edge, which is well over the
+    // extent test's own stroke tolerance and its 5 %-of-the-canvas control-region floor.
+    const margin = Math.max(24, unocc.w * 0.1);
+    said = `band columns ${lo.toFixed(0)}–${hi.toFixed(0)}, uncovered ${vLo.toFixed(0)}–${vHi.toFixed(0)} ` +
+      `of ${w.toFixed(0)}, after ${i} zoom step(s)`;
+    if (lo >= vLo + margin && hi <= vHi - margin) return said;
+    const cx = Math.min(vHi - margin, Math.max(vLo + margin, (lo + hi) / 2));
+    await page.wheel({ x: snap.rect.x + cx, y: snap.rect.y + snap.rect.h * 0.4 }, 240, { shift: true });
+    await page.frames(3);
+  }
+  return said;
+}
+
 const LIVE_FRAME_EXPR =
   `/slice [\\d:]+Z \\(live frame\\) · peak/.test(document.querySelector('.sf-trace')?.textContent ?? "")`;
 const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.trace);
@@ -640,7 +678,12 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     const still = before.trace === after.trace && before.headline === after.headline
       && sameBox(before.rect, after.rect);
     if (still && accept(before)) {
-      return { snap: before, img, rect: before.rect, withheld: after.tap.withheld, waited,
+      // T-801: which of the strip's columns the SURFACE is on top at, from the browser's own hit
+      // test on this same (held, box-checked) layout — the app's panels float over the full-bleed
+      // canvas by design, and their pixels are not the trace's.
+      const unocc = await page.unoccludedColumns(".sf-canvas",
+        { y0: before.rect.y, y1: before.rect.y + TRACE_PX });
+      return { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld, waited,
         rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
     }
     last = { still, accepted: accept(before), before: before.trace, after: after.trace,
@@ -819,6 +862,17 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   // below are indexed by comes back with them, from `heldObservation` — see the note there.
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
+  // **Both band edges and a control region on each side must be where the SURFACE is on top**
+  // (T-801). Since MAP-01 the canvas is full-bleed and the app's inventory panel (and the focus
+  // panel, when something is focused) float over its sides by design — and the view opens on the
+  // observed extent, i.e. with the tuned band's edges out near the canvas's own edges, under those
+  // panels. The first red run measured it: the band's left edge at column 205.7 lay under the
+  // inventory panel (whose own coloured text supplied a "trace sample" at column 51). The claim —
+  // drawn exactly where data exists, absent everywhere else, both edges pinned in one frame — is
+  // kept whole by bringing the band INTO the uncovered region with a frequency-only zoom out (a
+  // pure view gesture; it never reaches a device route), rather than by dropping an edge.
+  const fit = await fitBandIntoUncovered(page);
+  t.diagnostic(`fitting the tuned band into the uncovered columns: ${fit}`);
   // A live-frame slice, so the boundary under test is the tuned band and not a tile edge.
   const obs = await heldObservation(page, path.join(ART, "app-trace-extent.png"), {
     what: "the trace to state a live-frame slice", expr: LIVE_FRAME_EXPR, accept: isLiveFrame,
@@ -830,8 +884,25 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   const geom = snap.tap.geom;
   assert.ok(geom && geom.bandwidthHz > 0, "the tap never saw a stream header to take the band from");
   const band = { f0Hz: geom.centerHz - geom.bandwidthHz / 2, f1Hz: geom.centerHz + geom.bandwidthHz / 2 };
+  // Columns are still indexed across the canvas's FULL width: the pane maps frequency over the
+  // whole full-bleed canvas, and the panels float over that drawing without reframing it.
   const colOf = (hz) => ((hz - win.f0Hz) / win.spanHz) * s.w;
   const expLo = colOf(band.f0Hz), expHi = colOf(band.f1Hz);
+  // The columns the surface is on top at (canvas-relative), from the observation's own hit test.
+  const vis = obs.unocc && obs.unocc.w > 0
+    ? { lo: Math.round(obs.unocc.x - obs.rect.x), hi: Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1 }
+    : { lo: 0, hi: s.w - 1 };
+  const visible = (i) => i >= vis.lo && i <= vis.hi;
+  t.diagnostic(`uncovered columns ${vis.lo}..${vis.hi} of ${s.w} (${obs.unocc?.occluded ?? 0} under floating chrome)`);
+  // The premise the whole test rests on, asserted rather than assumed: both edges, with a stroke's
+  // slack either side, are on columns the surface itself is showing.
+  const tol0 = Math.max(8, (2 * s.w) / TRACE_COLUMNS);
+  assert.ok(visible(Math.floor(expLo - tol0)) && visible(Math.ceil(expHi + tol0)),
+    `the tuned band's columns ${expLo.toFixed(1)}–${expHi.toFixed(1)} are not both inside the uncovered ` +
+    `columns ${vis.lo}..${vis.hi} after fitting (${fit}) — an edge under a panel cannot be pinned`);
+  // Every column a panel covers is dropped from the strip: its pixels are the panel's, not the trace's.
+  for (let i = 0; i < s.w; i++) if (!visible(i)) s.cols[i] = -1;
+  s.drawn = s.cols.filter((v) => v >= 0).length;
 
   const drawnAt = s.cols.map((v, i) => (v >= 0 ? i : -1)).filter((i) => i >= 0);
   t.diagnostic(`viewport ${(win.f0Hz / 1e6).toFixed(3)}–${(win.f1Hz / 1e6).toFixed(3)} MHz over ${s.w} px; ` +
@@ -856,15 +927,19 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   // ABSENT: every column outside the band is empty. This is the half that a floor, a zero, or a line
   // interpolated across the gap would fail — and it is not vacuous, because the columns inside the
   // band were just shown to be drawn.
-  const outside = s.cols.map((v, i) => ({ v, i })).filter(({ i }) => i < expLo - tol || i > expHi + tol);
+  const outside = s.cols.map((v, i) => ({ v, i })).filter(({ i }) => visible(i) && (i < expLo - tol || i > expHi + tol));
   const lit = outside.filter(({ v }) => v >= 0);
   t.diagnostic(`${outside.length} columns lie outside the tuned band; ${lit.length} of them are drawn`);
   assert.equal(lit.length, 0,
     `${lit.length} columns outside the tuned band carry a trace sample (first at ${lit[0]?.i}). ` +
     "There is no current frame out there: drawing one claims a measurement nobody took.");
   // The whole viewport is not the band, or the two assertions above are the same assertion.
-  assert.ok(outside.length > s.w * 0.05,
-    `only ${outside.length} of ${s.w} columns are outside the band — this frame has no control region`);
+  // …and on BOTH sides of it, where a panel no longer hides either end (T-801).
+  const leftCtl = outside.filter(({ i }) => i < expLo).length, rightCtl = outside.length - leftCtl;
+  t.diagnostic(`control columns: ${leftCtl} left of the band, ${rightCtl} right of it`);
+  assert.ok(outside.length > s.w * 0.05 && leftCtl >= tol && rightCtl >= tol,
+    `only ${outside.length} of ${s.w} columns are outside the band (${leftCtl} left, ${rightCtl} right) — ` +
+    "this frame has no control region on each side");
 
   await page.eval("window.__hkTap.resume()");
   assert.deepEqual(page.exceptions, [], "uncaught exception while measuring the trace's extent");

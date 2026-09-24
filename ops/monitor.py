@@ -1994,7 +1994,13 @@ def flow_panel_cached(ops, max_age=30.0):
     with _FLOW_LOCK:
         if _FLOW_CACHE["data"] is not None and time.time() - _FLOW_CACHE["at"] < max_age:
             return _FLOW_CACHE["data"]
-        data = build_flow_panel(ops)
+        # built in a child process (_child_json): the log parse's heap goes when the child exits
+        data = _child_json(f"""
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(REPO, "ops", "monitor.py")!r})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.build_flow_panel({ops!r})))
+""")
         _FLOW_CACHE.update(at=time.time(), data=data)
         return data
 
@@ -2012,8 +2018,13 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-right:5px}
 .top .counts{margin-left:auto}
 .cols{flex:1;min-height:0;display:grid;grid-template-columns:1.5fr 1fr 1.15fr;gap:10px;padding:10px}
-.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;min-height:0;min-width:0}
+/* REACHABILITY RULE (user, 2026-09-24): nothing on this page may be unreachable. Every card can
+   shrink (flex-shrink 1 - never an inline flex:0 0 auto, which is what hid #mergecard on 09-22 and
+   Work trees / Merge queue / Recent commits on 09-24), keeps a floor so it never collapses to its
+   border, and scrolls its own body (.bd) or itself; the column scrolls when the floors alone do not
+   fit. py/tests/test_monitor_layout.py enforces it on every card. */
+.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;flex:0 1 auto;min-height:min(96px,100%);min-width:0;overflow:auto}
 .card.fill{flex:1}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 8px;display:flex;justify-content:space-between;flex:0 0 auto}
 .card h2 em{font-style:normal;color:var(--dim)}
@@ -2086,7 +2097,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
 .boxline .ow{color:var(--teal)}.boxline .ow.hot{color:var(--amber)}
 .boxline .un{color:var(--coral)}
 .boxline .hd{color:var(--dim);letter-spacing:.06em;text-transform:uppercase;font-size:10px}
-@media(max-width:1000px){.cols{grid-template-columns:1fr 1fr}}
+@media(max-width:1000px){
+  body{overflow:auto;overflow-x:hidden}
+  .app{height:auto;min-height:100vh;overflow:visible}
+  .cols{grid-template-columns:1fr 1fr;flex:none}
+  .col{overflow:visible}
+  .card.fill{flex:none}
+  .bd{max-height:60vh}
+}
 @media(max-width:640px){
   body{overflow:auto;overflow-x:hidden;font-size:12px}
   .app{height:auto;overflow:visible}
@@ -2105,18 +2123,19 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
     <div class="card" id=mergecard><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
-    <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
+    <div class="card" id=levcard><h2>Leverage <em><a class=maplink href="/worklog#leverage">all ↗</a></em></h2><div class=bd id=lev style="font-size:12px"></div></div>
+    <div class="card" id=queuecard style="max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
   <div class=col>
-    <div class="card" id=syscard style="flex:0 0 auto"><h2>System <em id=sys-sub></em></h2>
+    <div class="card" id=syscard style="flex-shrink:0.2"><h2>System <em id=sys-sub></em></h2>
       <div class="cpu-wrap"><div class="cores" id=cores></div></div>
       <div class="gauges">
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
@@ -2124,9 +2143,9 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
       </div>
       <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
-    <div class="card" style="flex:0 0 auto;max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
+    <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
-    <div class="card" style="flex:0 0 auto;height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
+    <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
   </div>
 </div></div>
 <script>
@@ -2285,6 +2304,20 @@ async function tick(){
  }catch(e){ $('#err').textContent='fetch error: '+e; $('#st').textContent='retrying'; }
 }
 tick(); setInterval(tick,5000);
+// Leverage beside the merge queue (user, 2026-09-24: "put the Leverage top-5 and the ETA line on the
+// MAIN page beside the queue, since that is where he looks") - the full panel is /worklog#leverage.
+async function levTick(){ try{
+  const [b,e]=await Promise.all([fetch('/taskorder.json',{cache:'no-store'}).then(r=>r.json()),
+                                 fetch('/eta.json',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}))]);
+  const el=$('#lev'); if(!el) return;
+  if(b.error){ el.innerHTML='<div style="color:var(--dim)">'+esc(String(b.error))+'</div>'; return; }
+  const rows=(b.rows||[]).filter(r=>r.unblocks>0).slice(0,5);
+  el.innerHTML=(e.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px">${esc(e.line)}</div>`:'')+
+    (e.graph&&e.graph.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px" title="max expected landing over every todo/in-progress ticket; deferred and blocked excluded (py/hkpy/graphclear.py)">${esc(e.graph.line)}</div>`:'')+
+    rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline"><span style="font:12px var(--mono);color:var(--amber);min-width:2.2em;text-align:right" title="open tickets transitively behind it">${esc(String(r.unblocks))}</span><span class=tlink data-tid="${esc(r.id)}" style="font:12px var(--mono)">${esc(r.id)}</span><span style="color:var(--dim);font:11px var(--mono)">${esc(Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', '))}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.title)}</span></div>`).join('')+
+    `<div style="color:var(--dim);font:11px var(--mono);margin-top:3px">${esc(String(b.open))} open · frontier ${esc(String((b.frontier||[]).length))} ready now${(b.self_deps||[]).length?' · <span style="color:var(--coral)">self-dependency '+esc(b.self_deps.join(' '))+'</span>':''}</div>`;
+}catch(x){} }
+levTick(); setInterval(levTick,60000);
 const coreEl=$('#cores'); let cells=[];
 function coreColor(v){ return v>=85?'#E47B68':v>=55?'#F0A542':v>=20?'#52C2AE':'#2E4A5B'; }
 function buildCores(n){ coreEl.innerHTML=''; cells=[]; for(let i=0;i<n;i++){ const c=document.createElement('div'); c.className='core'; const f=document.createElement('i'); c.appendChild(f); c.title='core '+i; coreEl.appendChild(c); cells.push(f);} }
@@ -2927,9 +2960,104 @@ load(); setInterval(load,30000);
 let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
 </script></body></html>"""
 
+def _child_json(code, timeout=90):
+    """Run a heavy build in a short-lived child Python and return its JSON. The dashboard is a
+    long-lived process, and each board parse (1.9 MB YAML) or flow build (merge-runner.log, ~500k
+    lines) left ~6 MB of heap it never returned: measured 2026-09-24, RSS 470 -> 667 MB in 19 min,
+    the watchdog's 1536 MB ceiling in ~1.5 h (the 2026-09-22 dashboard reached 2.1 GB and stopped
+    answering). A child's memory goes back to the OS when it exits. A subprocess, not a fork: this
+    is a threaded server, and a forked child can deadlock on a lock another thread held."""
+    import sys as _sys
+    out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
+                         env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "py"), HACKRIFF_OPS=SCRATCH))
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
+    return json.loads(out.stdout)
+
+
+_TASKORDER = {"t": 0.0, "v": None}
+_ETA = {"t": 0.0, "v": None}
+
+
+def eta_cached(max_age=300.0):
+    """The digest's ETA line (hkpy.flow.eta_line: queue clears / top Leverage ticket lands), for the
+    main page's Leverage card, plus the open-graph line (hkpy.graphclear) - built in a child
+    (_child_json), cached 5 min: the graph estimate reads the board and the runner logs."""
+    if _ETA["v"] is not None and time.time() - _ETA["t"] < max_age:
+        return _ETA["v"]
+    v = _child_json(f"""
+import json
+from datetime import datetime
+from hkpy import flow
+now = datetime.now()
+s = flow.summary({SCRATCH!r}, now)
+print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": flow.open_graph({SCRATCH!r}, now, s, repo={REPO!r})}}))
+""")
+    _ETA.update(t=time.time(), v=v)
+    return v
+
+
+_FIXES = {"t": 0.0, "v": None}
+
+
+def fixes_cached(max_age=60.0):
+    """Why tickets were handed back for a fix run (hkpy.fixes.summary; user, 2026-09-24) - the
+    /worklog "Fix runs" card. Built in a child (_child_json), cached 60 s."""
+    if _FIXES["v"] is not None and time.time() - _FIXES["t"] < max_age:
+        return _FIXES["v"]
+    v = _child_json(f"""
+import json
+from hkpy import fixes
+print(json.dumps(fixes.summary({SCRATCH!r})))
+""")
+    _FIXES.update(t=time.time(), v=v)
+    return v
+
+
+def taskorder_cached(max_age=60.0):
+    """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
+    gates - never the provisional tip), built in a child process (_child_json) and cached 60 s."""
+    if _TASKORDER["v"] is not None and time.time() - _TASKORDER["t"] < max_age:
+        return _TASKORDER["v"]
+    v = _child_json(f"""
+import json
+from hkpy import taskorder
+tasks, ref = taskorder.committed_tasks({REPO!r}, {SCRATCH!r})
+a = taskorder.analyse(tasks)
+keep = ("id", "title", "status", "milestone", "depth", "gate", "unblocks", "value", "downstream_milestones", "blocked")
+print(json.dumps({{"board": ref, "formula": a["formula"], "open": a["open"], "rows": [{{k: r[k] for k in keep}} for r in a["rows"]],
+                  "groups": a["groups"], "frontier": a["frontier"], "cycle": a["cycle"], "self_deps": a["self_deps"]}}))
+""")
+    _TASKORDER.update(t=time.time(), v=v)
+    return v
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
+        # when they land, over main's committed board - the panel on /worklog beside the role logs.
+        if self.path.startswith("/eta.json"):
+            try:
+                body = json.dumps(eta_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/fixes.json"):
+            try:
+                body = json.dumps(fixes_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/taskorder.json"):
+            try:
+                body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
         if self.path.startswith("/worklog.json"):
             try:
@@ -3115,7 +3243,39 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
+#: The dashboard re-executes itself in place above this RSS (MB): the watchdog's ceiling is 1536,
+#: and on 2026-09-23/24 it crossed it twice in one evening (1746 MB after 6.5 h, then 1818 MB 50
+#: min after a restart) and was restarted by hand both times - its rebuilds allocate big transient
+#: structures and CPython does not hand the freed heap back. Twice by hand -> a rule.
+RSS_MAX_MB = int(os.environ.get("MONITOR_RSS_MAX") or 1200)
+
+
+def _rss_mb():
+    try:
+        return int(subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True,
+                                  text=True, timeout=10).stdout.strip() or 0) / 1024
+    except Exception:
+        return 0.0
+
+
+def _rss_guard(limit_mb=None, every_s=60, rss=_rss_mb, execv=os.execv, sleep=time.sleep):
+    """Checks own RSS every `every_s`; above the limit, logs and re-executes this script in place
+    (same pid and port, ~2 s without a dashboard). Returns only in tests (execv stubbed)."""
+    limit_mb = limit_mb or RSS_MAX_MB
+    while True:
+        sleep(every_s)
+        mb = rss()
+        if mb > limit_mb:
+            import sys as _sys
+            print(f"monitor: RSS {mb:.0f} MB > {limit_mb} MB - re-executing in place", file=_sys.stderr, flush=True)
+            return execv(_sys.executable, [_sys.executable] + _sys.argv)
+
+
 if __name__ == "__main__":
+    import sys
+    import launchpath
+    launchpath.check(__file__, lambda m: print(f"monitor: {m}", file=sys.stderr, flush=True))
+    threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
     threading.Thread(target=_usage_poller, daemon=True).start()

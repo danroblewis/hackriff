@@ -11,11 +11,16 @@
 //! [`crate::classify`] and `hk-classify` re-exports them. `hk-synth` re-exports every item
 //! here, so `hk_synth::Stage` is the name the ADR uses. (Recorded in ADR-0015 §16, delta D1.)
 //!
-//! This module holds data only: no scoring, no nulls, no calibration. A `bits` value in an
-//! [`Evidence`] is whatever the emitting block computed against its own null; the engine (not
-//! the block) subtracts the look-elsewhere cost (ADR-0015 §2.2).
+//! This module holds data plus the **analytic** nulls ([`null`], T-853): no calibration and no
+//! scoring. A `bits` value in an [`Evidence`] is what the emitting block computed against its
+//! own null — the closed-form tail for an analytic metric ([`MetricId::is_analytic`]), and
+//! **0.0** for a calibrated one, which `hk-synth` scores against the block's calibration table
+//! (a block cannot read a table: `hk-synth` owns them). The engine (not the block) subtracts the
+//! look-elsewhere cost (ADR-0015 §2.2).
 
 use serde::{Deserialize, Serialize};
+
+pub mod null;
 
 /// The closed synthesis stage ladder, S0–S6 (ADR-0015 §1.1). Adding a stage is a contract change.
 ///

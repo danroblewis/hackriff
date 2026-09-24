@@ -35,6 +35,9 @@
 //! address of the emitter to write to. The known-signal database still explains afterwards, ranked
 //! *below* this evidence rather than instead of it (ADR-0017).
 
+pub mod acquire; // T-857 (MAUTO M-6): ring read, burst set, pin-on-analyze
+pub mod jobs; // T-859 (MAUTO M-8): /api/analyze jobs, stream, cancel
+
 use hk_demod::fsk::{FmStructure, Levels};
 use hk_detect::trunk::{
     CcEvidence, CcFraming, ConfirmedCc, MIN_CC_FCO, MIN_CRC_VALID, MIN_SYNC_HITS,

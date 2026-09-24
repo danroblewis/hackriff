@@ -246,9 +246,32 @@ PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 .md th,.md td{border:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top}
 .md th{color:var(--mut)}.md a{color:var(--amber)}.md b,.md strong{color:#fff}
 .empty{color:var(--dim);padding:20px 0}
+.bn{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 12px;margin-bottom:10px;font-size:12.5px}
+.bn h3{margin:0 0 2px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bn .f{color:var(--dim);font:11px var(--mono);margin:0 0 6px}
+.bn .sort{margin-left:auto;display:flex;gap:4px;text-transform:none;letter-spacing:0}
+.bn .sort span{border:1px solid var(--line);border-radius:10px;padding:0 8px;cursor:pointer;color:var(--mut);font-weight:400}
+.bn .sort span.on{color:var(--bg);background:var(--amber);border-color:var(--amber)}
+.bn table{width:100%;border-collapse:collapse;font-size:12px}
+.bn td{padding:2px 6px 2px 0;vertical-align:top;border-top:1px solid var(--line)}
+.bn td.n{font:12px var(--mono);color:var(--amber);text-align:right;white-space:nowrap}
+.bn td.id{font:12px var(--mono);white-space:nowrap}
+.bn td.ms{font:11px var(--mono);color:var(--mut);white-space:nowrap}
+.bn td.t{width:100%;overflow-wrap:anywhere}
+.bn .more{color:var(--mut);cursor:pointer;font:11.5px var(--mono);margin-top:6px;display:inline-block}
+.bn .dg{margin-top:8px}.bn .dg b{color:var(--mut);font-weight:600;font-size:11.5px}
+.bn .dg div{font:11.5px var(--mono);color:var(--txt);padding-left:10px}
+.bn .dg i{color:var(--dim);font-style:normal}
+.bn .foot{color:var(--dim);font:11.5px var(--mono);margin-top:4px}
+.bn .warn{color:var(--coral)}
+.bn td.c{font:11px var(--mono);white-space:nowrap}
+.c-REVIEW_FAIL{color:var(--amber)}.c-GATE_FAIL{color:var(--coral)}.c-CONFLICT{color:#B69CF0}.c-UNCOMMITTED{color:var(--teal)}.c-OTHER{color:var(--dim)}
+.bn .tl{font:11.5px var(--mono);color:var(--mut);margin:0 0 6px}.bn .tl b{color:var(--txt);font-weight:400}
 </style></head><body>
 <div class=top><span class=nm>hack<b>riff</b> · role work log</span><a href="/">← dashboard</a><span class=sub id=sub>loading…</span></div>
 <div class=wrap>
+<a id=leverage></a><div class=bn id=bn></div>
+<a id=fixes></a><div class=bn id=fx></div>
 <div class=tabs id=tabs></div>
 <div class=ctl><label><input type=checkbox id=flowonly> <code>flow:</code> lines only</label><span class=sess id=sess></span></div>
 <div id=list></div>
@@ -284,6 +307,51 @@ document.addEventListener('click',e=>{
 });
 document.getElementById('flowonly').onchange=e=>{ try{localStorage.setItem('wl-flow',e.target.checked?'1':'0');}catch(x){} render(); };
 async function tick(){ try{ D=await (await fetch('/worklog.json',{cache:'no-store'})).json(); document.getElementById('sub').textContent='updated '+(D.generated||''); render(); }catch(e){ document.getElementById('sub').textContent='error: '+e; } }
-tick(); setInterval(tick,30000);
+let LV=null, lvSort='unblocks', lvAll=location.search.includes('all=1');
+try{ lvSort=localStorage.getItem('lv-sort')||'unblocks'; }catch(e){}
+function lvRender(){
+  const b=LV, el=document.getElementById('bn'); if(!b) return;
+  if(b.error){ el.innerHTML='<h3>Leverage</h3><div class=foot>'+esc(b.error)+'</div>'; return; }
+  const key=lvSort, other=key==='value'?'unblocks':'value';
+  const rows=(b.rows||[]).filter(r=>r.unblocks>0).sort((x,y)=>(y[key]-x[key])||(y[other]-x[other])||(x.id<y.id?-1:1));
+  const ms=r=>Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', ');
+  const tr=r=>`<tr><td class=n>${r.unblocks}</td><td class=n>${r.value}</td><td class=id>${esc(r.id)}</td><td class=ms>${esc(ms(r))}</td><td class=t>${esc(r.title)}${r.blocked?' <span class=warn>(blocked)</span>':''}</td></tr>`;
+  const shown=lvAll?rows:rows.slice(0,5);
+  const head='<tr><td class=ms>unblocks</td><td class=ms>value</td><td class=ms>ticket</td><td class=ms>downstream milestones</td><td class=ms>title</td></tr>';
+  let depth='';
+  if(lvAll){
+    const byId={}; (b.rows||[]).forEach(r=>byId[r.id]=r);
+    const order=Object.keys(b.groups||{}).sort((x,y)=>(x==='cycle')-(y==='cycle')||(+x)-(+y));
+    depth='<div class=dg>'+order.map(d=>`<b>${d==='0'?'ready now / being worked':d==='cycle'?'in a dependency cycle':d+' landing'+(d==='1'?'':'s')+' away'} (${b.groups[d].length})</b>`+
+      b.groups[d].map(i=>{const r=byId[i]||{}; return `<div>${esc(i)} <i>${esc(r.milestone||'')} · ${esc(r.status||'')}</i>${(r.gate||[]).length?' <i>waits on</i> '+esc(r.gate.map(g=>g.length>90?g.slice(0,89)+'…':g).join(', ')):''}</div>`;}).join('')).join('')+'</div>';
+  }
+  const warn=(b.self_deps&&b.self_deps.length)?` · <span class=warn>self-dependency: ${esc(b.self_deps.join(' '))}</span>`:((b.cycle&&b.cycle.length)?` · <span class=warn>cycle: ${esc(b.cycle.join(' '))}</span>`:'');
+  el.innerHTML=`<h3>Leverage · what landing each open ticket releases<span class=sort><span data-s=unblocks class="${key==='unblocks'?'on':''}">unblocks</span><span data-s=value class="${key==='value'?'on':''}">value</span></span></h3>`+
+    `<div class=f>${esc(b.formula)} · board ${esc(b.board||'main')} · just task order</div>`+
+    `<table>${head}${shown.map(tr).join('')||'<tr><td colspan=5 class=ms>nothing open holds another open ticket</td></tr>'}</table>`+
+    (rows.length>5||!lvAll?`<span class=more data-more=1>${lvAll?'▾ top 5 only':'▸ show all '+rows.length+' and the order by depth'}</span>`:'')+depth+
+    `<div class=foot>${b.open} open · frontier ${(b.frontier||[]).length} dispatchable now${(b.frontier||[]).length?': '+esc(b.frontier.join(' ')):''}${warn}</div>`;
+}
+async function bn(){ try{ LV=await (await fetch('/taskorder.json',{cache:'no-store'})).json(); }catch(e){ LV={error:String(e)}; } lvRender(); }
+document.addEventListener('click',e=>{
+  const s=e.target.closest('#bn .sort span'); if(s){ lvSort=s.dataset.s; try{localStorage.setItem('lv-sort',lvSort);}catch(x){} lvRender(); return; }
+  if(e.target.closest('#bn [data-more]')){ lvAll=!lvAll; lvRender(); }
+});
+// Fix runs (hkpy.fixes, user 2026-09-24): why each ticket was handed back to its worker.
+let FX=null, fxAll=false;
+function fxRender(){
+  const b=FX, el=document.getElementById('fx'); if(!b) return;
+  if(b.error){ el.innerHTML='<h3>Fix runs</h3><div class=foot>'+esc(b.error)+'</div>'; return; }
+  const rows=b.rows||[], shown=fxAll?rows:rows.slice(0,10);
+  const days=Object.entries(b.tally||{}).map(([d,c])=>`<div><b>${esc(d)}</b> ${Object.entries(c).map(([k,v])=>`<span class="c-${esc(k)}">${esc(k)} ${v}</span>`).join(' · ')}</div>`).join('');
+  const tr=r=>`<tr><td class=ms>${esc(when(r.ts*1000))}</td><td class=id>${esc(r.ticket)}</td><td class=n>${esc(r.attempt==null?'':r.attempt)}</td><td class="c c-${esc(r.reason_class)}">${esc(r.reason_class)}</td><td class=t>${esc(r.reason)}${r.backfilled?' <i style="color:var(--dim)" title="recorded before the runner stored reasons; recovered from the work-runner log / attention files">(backfilled)</i>':''}</td><td class=ms>${esc(r.outcome||'')}</td><td class=n>${r.minutes==null?'':esc(r.minutes)+' m'}</td></tr>`;
+  el.innerHTML=`<h3>Fix runs · why tickets were handed back (last 7 days)</h3><div class=tl>${days||'none'}</div>`+
+    `<table><tr><td class=ms>started</td><td class=ms>ticket</td><td class=ms>#</td><td class=ms>class</td><td class=ms>reason</td><td class=ms>outcome</td><td class=ms>min</td></tr>${shown.map(tr).join('')||'<tr><td colspan=7 class=ms>no fix runs</td></tr>'}</table>`+
+    (rows.length>10?`<span class=more data-fxmore=1>${fxAll?'▾ newest 10 only':'▸ show all '+rows.length}</span>`:'')+
+    `<div class=foot>${esc(b.line||'')} · ops/work-runner.py fix runs, work-done.jsonl</div>`;
+}
+async function fx(){ try{ FX=await (await fetch('/fixes.json',{cache:'no-store'})).json(); }catch(e){ FX={error:String(e)}; } fxRender(); }
+document.addEventListener('click',e=>{ if(e.target.closest('#fx [data-fxmore]')){ fxAll=!fxAll; fxRender(); } });
+tick(); setInterval(tick,30000); bn(); setInterval(bn,60000); fx(); setInterval(fx,60000);
 </script></body></html>
 """
