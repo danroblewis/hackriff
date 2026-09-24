@@ -97,3 +97,25 @@
 .focus .decode { background: var(--ground); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
 /* The focus panel's action buttons moved to the right-click/long-press context menu (T-192,
    ui/src/app/menu/); `.hint` (base.css) carries the "right-click for actions" note instead. */
+/* ---- T-804 (MAP-04): the detail sheet (ui/mockups/map-ui-v1.html `.detail`) — the focused
+   signal's big frequency, state and liveness in one line, then Measured (with the time it was
+   measured over) beside the ranked explanations, and the action row. Reflows to one column in a
+   narrow sheet. ---- */
+.focus .detail { display: flex; flex-direction: column; gap: 10px; }
+.focus .detail .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.focus .detail .head .bigf { margin-top: 0; }
+.focus .detail .eyebrow:empty { display: none; }
+.focus .detail .liveness { font-size: 12px; color: var(--muted); }
+.focus .detail .liveness.live { color: var(--teal); }
+.focus .detail .liveness.live::before { content: "●"; margin-right: 5px; }
+.focus .detail .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px 18px; }
+.focus .detail .kv dd { text-align: left; }
+.focus .detail .at { color: var(--dim); font-size: 11px; margin-top: 6px; }
+.focus .detail .expl li.flagged .rank { color: var(--coral); }
+.focus .detail .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.focus .detail .actions button { border: 1px solid var(--line); background: var(--panel-2); color: inherit; border-radius: 6px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.focus .detail .actions button.primary { border-color: var(--teal); color: var(--teal); background: var(--teal-soft); }
+.focus .detail .actions button.danger { color: var(--coral); }
+.focus .detail .actions button:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.focus .detail .sub:empty { display: none; }
+.focus .detail .unk-score { margin-top: 0; }
