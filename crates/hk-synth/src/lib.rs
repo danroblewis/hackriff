@@ -50,9 +50,12 @@ pub mod stage;
 pub mod template;
 pub mod trace;
 
-pub use calibration::{CellId, FillBucket, NullKind, Score, Threshold, Unexpressible};
+pub use calibration::{
+    CalibrationTable, CellId, FillBucket, Level, LoadError, NullKind, Score, Threshold,
+    Unexpressible, UnexpressibleLevel,
+};
 pub use candidate::{Candidate, Domain, FreeParam, SeedSource};
-pub use evidence::{NodeScore, prior_bits};
+pub use evidence::{NodeScore, combine_stage_bits, prior_bits};
 pub use hk_model::synth::{
     EVIDENCE_SET_CAPACITY, Evidence, EvidenceSet, EvidenceSetFull, GroupId, MetricId, Stage,
     quality_from_bits,
