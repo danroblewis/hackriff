@@ -1046,3 +1046,34 @@ def test_no_claim_is_closed_as_on_main_while_main_is_provisional(tmp_path, monke
     (tmp_path / "bulk-in-progress").unlink()                                             # the batch landed
     R.release_stale_claims(claims, {"T-866": {"status": "in-progress"}})
     assert claims["T-866"]["state"] == "merged"
+
+
+def test_needs_a_person_titles_only_what_no_automation_picks_up(tmp_path, monkeypatch):
+    """User, 2026-09-24 11:40: six "needs a person" alerts were fix-run outcomes; the user came asking
+    what to decide. The title is reserved for escalations, cancellations, unresolved review FAILs and
+    BLOCKED hand-backs that ask for a decision."""
+    monkeypatch.setattr(R, "NEEDS", str(tmp_path / "needs.txt"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    sent = []
+
+    class Ok:
+        returncode = 1                                                   # no tmux session: no send-keys
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **k: (sent.append(args) if "alert.py" in " ".join(args) else None) or Ok())
+    for kind, detail in [("CONFLICT_ESCALATE", "2 fix attempts spent"), ("CANCEL_PROPOSED", "already done"),
+                         ("BLOCKED", "User decision per use case"), ("BLOCKED", "fails alone: real bug in hk-api"),
+                         ("ERROR", "claude -p error"), ("NO_WORK", "no commits")]:
+        R.attention("T-9", "task-t9", kind, detail)
+    titles = [a[next(i for i, x in enumerate(a) if x.endswith("alert.py")) + 2] for a in sent if "--no-receiver" not in a]
+    assert titles == ["needs a person - T-9 CONFLICT_ESCALATE", "needs a person - T-9 CANCEL_PROPOSED",
+                      "needs a person - T-9 BLOCKED", "T-9 BLOCKED", "T-9 ERROR"]
+
+
+def test_the_merge_runner_says_needs_a_person_only_when_it_gave_up():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    calls = [ln for ln in text.splitlines() if "notify_coordinator \"" in ln]
+    assert calls and all(ln.rstrip().rstrip(";").split('"')[-2] for ln in calls)     # every call titles itself
+    person = [ln for ln in calls if "needs a person" in ln]
+    assert len(person) == 1 and "GIVEN UP" in person[0]
+    gate_fail = next(ln for ln in calls if "FAILED the merge gate" in ln)
+    assert '"gate failed - fix run"' in gate_fail and "TRIAGE_SPECS" in gate_fail   # names the failing test/spec
