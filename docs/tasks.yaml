@@ -23741,7 +23741,6 @@ tasks:
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
     status: in-progress
-    branch: task-t806
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
@@ -23771,6 +23770,16 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a layers menu that lists base styles and overlays per pane; toggling one changes that pane only. Say in your handback exactly what to open on staging to see it.
+    branch: task-t806
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:29).
+      Built the per-pane layer registry from docs/24 §13 (ui/src/surface/layers.ts). Each layer has a fixed plane (data/overlay/dom) and a z value that only orders it within its plane. Defaults follow §13.4: detections, including Candidate and unknown ones, start visible. The registries live in the store as state.layers (ui/src/app/map/layers-slice.ts). A split pane starts with a copy of its creator's registry and then changes independently. Each pane's registry is saved in localStorage under its pane id, and the page still works when storage is unavailable. The ring rules and the found-signal boxes are now the `rules` and `detections` overlay layers. The visible overlay layers are combined in z order into the one existing marks hook, so there is still a single overlay path (no sampler, no ramp) and the byte-identical-with-overlays-off guard is unchanged. The layers menu from T-802 now has two axes for the active pane: base style (Amplitude ramp or Phosphor, radios) and overlays in paint order (checkboxes), headed 'this pane' or 'pane N of M'. It also has one 'Every pane' switch for the spectrum-trace strip. Phosphor draws that pane's spectrum trace and afterglow in one green ink that is not on the waterfall's colour ramp. The toolbar Signals button now toggles the active pane's detections layer. TO SEE IT ON STAGING: open the app, click the Layers button (top-right of the canvas), then click 'Split ⇔' in the surface toolbar. The menu header changes to 'pane 2 of 2'. Choose Phosphor and untick Detections and Capture rules: only the new pane changes (green trace, no boxes, no ring lines, and the readouts say so). Click 'Close' and pane 1 is exactly as it was.
+      Tests: just test-ui -> exit 0 (build + typecheck + 60/60 test files passed (incl. 7 new MAP-06 tests)); cd ui && node e2e/run.mjs app-surface -> exit 0 (5/5 incl. new T-806 browser test; last 4 consecutive runs green)
+      precheck exit 0
+      Commits: e4dd8926
+      Observed, not chased: ui/e2e/app-surface.e2e.mjs 'a drag on the app's surface moves the view…' timed out ('waiting for the per-viewport readout to change after a drag') in 3 of the first 4 runs, at load averages of 21 to 27. main's code passed it 2/2 at a similar load, and my branch then passed 4/4 in a row once load dropped to about 15-20. The drag starts 0.6 s after the canvas is >200 px wide, which looks like a readiness race under load. This is a flake for the deflaker, not a product failure. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff touches no crate, and `just precheck` with no crate list runs clippy over the whole workspace, which was skipped. | docs/24 §13.4 says the `research` layer (saved measurements) is hidden by default. T-822's saved measurements, selections and in-progress gestures are still drawn as always-on interaction marks after the registry overlays, to avoid hiding a measurement right after it is saved. When MAP-20/22 take `research`, they should decide whether to move measurements into it. | The `coverage` and `tier` data layers and the other overlays (artifacts, priors, collection:*, pins) are defined in the registry but not yet offered in the menu. The menu lists only layers that have a renderer, and MAP-07/08/11/12/21 each add one to `overlayFns` in surface.ts. Phosphor currently changes the spectrum trace only; a phosphor tile ramp would be a data-plane change to the one ramp module.
+      Use cases: AWARE-042
+      Resources: 264 CPU-s, peak 2.4 GB
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'

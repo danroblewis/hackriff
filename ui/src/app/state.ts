@@ -10,6 +10,7 @@ import { decodeInitial, type DecodeState } from "./decode/slice";
 import { dockInitial, type DockState } from "./dock/slice";
 import { exploreInitial, type ExploreState } from "./explore/slice";
 import { reviewInitial, type ReviewState } from "./review/slice";
+import { layersInitial, type LayersState } from "./map/layers-slice";
 import { parsePrefs, shellInitial, type Prefs, type ShellState } from "./shell-slice";
 
 export * from "./shell-slice";
@@ -21,12 +22,13 @@ export * from "./decode/slice";
 export * from "./decode/inspector-slice";
 export * from "./review/slice";
 export * from "./explore/analyze-slice";
+export * from "./map/layers-slice";
 
-export interface AppState extends ShellState, CaptureState, DockState, ExploreState, CentreState, DecodeState, InspectorState, ReviewState, AnalyzeState {}
+export interface AppState extends ShellState, CaptureState, DockState, ExploreState, CentreState, DecodeState, InspectorState, ReviewState, AnalyzeState, LayersState {}
 
 export function initialState(prefs: Prefs = parsePrefs(null)): AppState {
   return {
     ...shellInitial(prefs), ...captureInitial(), ...dockInitial(), ...exploreInitial(),
-    ...centreInitial(), ...decodeInitial(), ...inspectorInitial(), ...reviewInitial(), ...analyzeInitial(),
+    ...centreInitial(), ...decodeInitial(), ...inspectorInitial(), ...reviewInitial(), ...analyzeInitial(), ...layersInitial(),
   };
 }
