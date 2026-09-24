@@ -25076,7 +25076,7 @@ tasks:
   - id: T-854
     milestone: MAUTO
     title: "MAUTO M-3: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25109,6 +25109,7 @@ tasks:
       Observed, not chased: ADR-0015 is ACCEPTED, so its text was not edited. The ADR still reads 'wall budget' in §3.3 and lists the budget unit as open in §16.8 item 2, while this ticket implemented docs/27 §6's count budgets (max_proposal_calls, a shared max_assist_ops pool, wall/CPU as backstops) and new count caps: quick 128 evals / 6 calls / 1e9 ops, standard 2048 / 40 / 8e9, deep 20000 / 240 / 5e10. Changing an accepted ADR needs Fable plus the user. quick's 6 calls exactly cover docs/27 §4's two skeletons x sync+codes+fields minimum, with no margin for a wrong first guess. | Not done in hk-synth because ADR-0015 §9 places them elsewhere: the `synth` chain kind and lower OS priority for search threads belong to hk-pipeline::synth (M-8); max_iq_samples is acquisition (M-6); the engine never produces refined_into (that is M-7's EvidenceObjective). | The negative reason is the engine's own reading (SearchOutcome.reason). M-9 still has to seal the Resolution, and should check its precedence order: unsupported, then no-signal, then budget-exhausted, then tied (complete candidates only), then nothing-scored. | A memoised node is recorded as `memoised {reused}` whatever its beam fate, because the trace can hold only one outcome per node. ADR-0021 §2.2 does not say which should win; the reviewer should confirm this reading. | stage.rs default_floor_bits still has S3 = 6, which T-660 showed is unreachable under the §13.1 maximum rule (ADR-0015 §16.8 item 1). The engine prunes at that floor, so real S3 recall will suffer until the floor amendment lands. | TraceCost is measured per job, but against a synthetic evaluator the fraction means nothing, because the evaluator is nearly free. The real trace-cost measurement (ADR-0021 §3 / T-453) needs M-2's real evaluator and a Jetson run (M-13).
       Use cases: RESEARCH-002
       Resources: 72 CPU-s, peak 0.7 GB
+    commit: d223e7f3
   - id: T-855
     milestone: MAUTO
     title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
