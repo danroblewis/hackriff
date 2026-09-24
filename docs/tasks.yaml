@@ -24540,7 +24540,7 @@ tasks:
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-506
@@ -24576,6 +24576,7 @@ tasks:
       Observed, not chased: hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops fails ALONE (load ~10, just after a gate): decoded.rs:1529 assert c.dropped_records > 0, got CaptureInfo{frames: 29, dropped_records: 0}. The diff does not touch decoded.rs; needs triage on a quiet box (the test depends on wall-clock timing). | hk-api ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails ALONE (load ~10): tests/ondemand.rs:365 wants more than 20 records in 1.5 s, got '10 records'. The diff does not touch ondemand; it asserts throughput against the wall clock, which belongs in the timing tier. | ui/e2e app-surface 'GET / mounts the unified surface in the app, under the product CSP' timed out after 60 s waiting for .sf-note in one run at load 16.8 (backend startup 162 s). In the same run T-506 passed and showed the fix: the page's ring snapshot was 5.09 s old, and the drawn horizon equalled the server's later buffered.t0_s exactly. This looks like a load flake in mount time; ring-drop needed a 120 s first-mount wait for the same reason. | The browser-tier ring-drop spec failed once under run.mjs at load 4.7 with the same first-mount timeout (60 s), then passed via run.mjs and directly. The wait is now 120 s, and a timeout dumps the page readout, the server window and the backend log tail. If it recurs, suspect the first mount of a fresh backend is slow. | With slots shorter than DROP_LEAD_S (a short --iq-retention), the horizon always under-promises by 1-2 slots (the spec measured the closest at 1.25 s). That is safe, but a lead that scales with the slot, or one measured from the writer's lead over the drawn edge, would tighten it.
       Use cases: AWARE-011
       Resources: 757 CPU-s, peak 4.5 GB
+    commit: 86f18a95
   - id: T-846
     milestone: M2-hardening
     title: "ui/e2e selftest attribution holes after T-573 batching: t454 cap/back-off, t523 and t532 faults no longer turn their specs red"
