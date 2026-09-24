@@ -64,7 +64,7 @@ import {
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
-  peakOf, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
+  afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
@@ -429,7 +429,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // ticket asks for and the one a live-only persistence buffer could not make.
         shadows.length
           ? `afterglow ${shadows.length} × ${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} back to ${at(shadows[shadows.length - 1].tAtNs - (win.t1Ns - win.t0Ns))}`
-          : "afterglow — no earlier row in this window",
+          : afterglowAbsence(report,
+            persistenceShortTiles(lat, s.cache, pane.box, report.levelF, report.levelT, dev, tAtNs)),
         // T-470: one scale for the trace's y axis and the ramp, and it says which of the two ways it
         // was decided. It used to read "measured from the served tiles" — true of the viewport-
         // tracking range, and exactly what stopped being true when the scale stopped following the

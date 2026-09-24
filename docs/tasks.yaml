@@ -6463,7 +6463,7 @@ tasks:
     milestone: M2-hardening
     title: The 99.99 MHz reference-harmonic artefact is identified from a single tune, so the retune test
       that would settle it has not been run
-    status: todo
+    status: blocked
     priority: high
     deps:
     - T-289
@@ -6489,6 +6489,10 @@ tasks:
       SDR, so the non-hardware half proceeds now. THIS ticket stays the HARDWARE half: the capture over
       100.x / 840-900 / 892.5 is a capture-agent session the supervisor schedules with the user, and the
       99.99 MHz reference-harmonic question is settled by the same retunes.'
+    needs: hardware
+    blocked_on: a HackRF capture session with the user (capture-agent, radio free of the :8899 demo) at 2-3 tuner centres covering 99.99 MHz, 100.x MHz and 840-900 MHz / 892.5 MHz, so the retune test can separate a reference harmonic from an emission
+    notes: |
+      2026-09-23 (coordinator): the worker handed back BLOCKED on 2026-09-22 06:48 (needs the HackRF capture session above; no in-worktree way to settle it) but the board still read todo, so it kept showing as ready. Marked blocked + needs: hardware so the runner stops dispatching it.
   - id: T-319
     milestone: M2-hardening
     title: Three more silent chain_emitter swallows would produce the same unnameable error count T-293
@@ -6748,7 +6752,7 @@ tasks:
     milestone: M4
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-270
@@ -6767,6 +6771,16 @@ tasks:
     depends_on: [T-849]
     notes: |
       2026-09-23 (coordinator, user request): was blocked on a missing capability with no ticket; now todo depending on T-849 (P25 voice-frame LDU1/LDU2 demodulation, filed today).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 20:03).
+      The call's own LDU2 ALGID (read from IQ by T-849) now decides its encryption state. New hk_detect::trunk::CallHeader::fold folds the ALGIDs of the LDU2s attributed to a call (T-849's midpoint rule, shared via VoiceFrames::inside) with Encryption::refine and applies them to the grant's state: the header replaces an Unknown grant and names the algorithm/key behind a service-options Encrypted one; a clear header never walks back an encrypted grant (kept encrypted, reason algid-contradicts-grant) - the safer-answer rule the repository/schema already enforce on rewrites. The fold produces an Encryption, never a permit: the follower still asks VoicePermit::open, the only door, so a call clear by its own ALGID 0x80 earns the first permit and nothing else can; no bypass added. Follower also drops a continued call's stale refusal reason before re-asking; call-start detail gains encryption_evidence and header_encryption; new counter cc_calls_algid. New e2e acceptance_m4::t330_algid (blind, mock SDR, T-849's scene whose grants state nothing): clear call -> Clear{Algid,0x80} permitted, AES-256 call -> Encrypted{Algid,0x84,key id} refused, unframed control channel stays Unknown and refused. C23 card updated.
+      Tests: cargo nextest run -p hk-detect -E 'test(/trunk::/)' -> exit 0 (90 passed (incl. 2 new CallHeader tests)); cargo nextest run -p hk-pipeline -E 'test(/chains::trunk::/)' -> exit 0 (12 passed); HK_E2E_REQUIRE_SYNTH=1 cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)' -> exit 0 (10 passed (t267..t849 unchanged + new t330_algid))
+      precheck exit 0
+      Commits: bd8503ff
+      Observed, not chased: Design choice for review: grant Encrypted (service options) + header ALGID 0x80 stays Encrypted (fail closed, reason algid-contradicts-grant) rather than letting the header lower it to Clear; the repo's put_call and schema trigger already refuse encrypted->clear rewrites, so the stronger override would be inconsistent across passes. Not staged in e2e (scene grants state nothing); pinned by CallHeader unit tests. | cc_calls_algid counts per write, so a T-308 continued call decided by ALGID on two passes is counted twice (continuations are rare on the built-in 9.5 s duty cycle). | HDU (which also carries ALGID at call start) is still not decoded (T-849 note); a call whose transmission window holds no LDU2 stays at the grant's state.
+      Use cases: AWARE-067
+      Resources: 135 CPU-s, peak 2.6 GB
+    commit: 4ff9087b
   - id: T-331
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
@@ -16029,7 +16043,7 @@ tasks:
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
-    status: todo
+    status: done
     branch: task-t512
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
@@ -16045,6 +16059,16 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690). Well-specified CLI plumbing over T-510/T-511.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 19:36).
+      hk serve/hk run/hackriffd accept a repeatable --device (first = primary; --device replaces --source on run/hackriffd). Per-device settings via repeatable --device-set SPEC:KEY=VALUE (center-hz, rate, lna, vga, amp, baseband-filter-hz, gain.STAGE); shared --center-hz/--rate/gains are defaults. resolve_devices/resolve_primary refuse empty/duplicate devices, unknown device in --device-set and unknown keys. start_live opens extras and composes them via Pipeline::start_multi (T-510) and offers LiveControls (T-511) with one SourceLiveControl per device (none under the scheduler, as before). One device / no --device keeps behaviour unchanged. Covered by a unit test; no two-mock end-to-end CLI test added. Review fix: extra devices' SourceLiveControl is now built with_fixed_rate(), so an API rate change is refused as the pipeline refuses it (FixedRate). Merged main 8c98e822 (tasks.yaml conflict took main). Review 2: hackriffd with a sigmf: primary now errors on extra --device instead of silently dropping them.
+      Tests: cargo nextest run -p hk-cli -E 'test(/daemon_replay_refuses|device_flags_resolve/)' -> exit 0 (2 passed)
+      precheck exit 0
+      Commits: aef4b77e
+      Observed, not chased: docs/api.md untouched (CLI-only change); hk-cli full test binaries only compile-checked, not run
+      Use cases: AWARE-011
+      Resources: 38 CPU-s, peak 1.3 GB
+    commit: 271bbafc
   - id: T-513
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
@@ -16994,7 +17018,7 @@ tasks:
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
-    status: in-progress
+    status: done
     branch: task-t560
     priority: normal
     parallel_group: PIPE
@@ -17022,6 +17046,28 @@ tasks:
       Filed 2026-09-20 from T-544's measurements. Cheap, self-contained, and independent of whether
       the BART target is ever reachable.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      {"ticket": "T-560", "outcome": "done",
+       "summary": "Merged main (T-628/T-272/T-308/T-849) into task-t560; one conflict in trunk.rs (grid_fit doc) resolved to main's text. T-546/T-628 on main already fit the 800 MHz grid per pass and resolve the absolute alias, so the raster/candidacy half of the ticket was covered; what was missing was (a) recording the clock as C05 calibration state and (b) a correct ppm to record. WIP evaluation: KEPT CalibrationMethod::LmrRaster and Repository::latest_calibration_state_for_device (+ its repo test; added rowid tiebreak). REDONE: the WIP's receiver_grid cached the modulo-raster grid-fit phase as ppm (a -8.2 kHz clock fits as +4.3 kHz so it stored ~+5 ppm), that phase also includes where the tuned centre sits against the grid, and the cached value replaced the fit at every later tune forever - wrong at any other frequency; removed. DROPPED the CalibrationState.confidence model field and its hk-dsp edits. FIX: (1) hk_detect::trunk::clock_offset_mod_grid removes the tuned centre's own phase against the channel grid (from a granted absolute frequency, not a lookup) before the alias search; T-628 assumed an on-channel tune, and 852.456 MHz (the docs/19 7.6a capture) is 6 kHz off the raster, so its alias search never offered the true clock. (2) record_receiver_clock writes a resolved alias as CalibrationState {method lmr-raster, device_id, measured_at, supersedes}, ppm = -offset/f (model convention: positive = oscillator fast, so emissions 9.6 ppm low = +9.6 ppm), once per device, re-versioned only when it moves by more than RASTER_TOLERANCE_HZ. docs/07 2.7 updated. RED/GREEN: pipeline test a_minus_9_6_ppm_receiver_off_a_channel... goes red with the phase correction reverted (true clock -8184 Hz not among aliases [-1682, 10818, -14182]); e2e signal_087 (H) goes red with the record call removed ('THE RECEIVER CLOCK WAS NOT RECORDED') and green with it: shifted run records +9.57 ppm, one version; clean run records ~0.",
+       "commits": ["d02a9cb6b79a9c5eff5a99a1aa1377cfe0cd7d95"],
+       "files": ["crates/hk-detect/src/trunk/raster.rs", "crates/hk-detect/src/trunk/mod.rs", "crates/hk-model/src/calibration.rs", "crates/hk-model/src/repo/measure.rs", "crates/hk-model/src/repo/tests.rs", "crates/hk-pipeline/src/chains/trunk.rs", "tests/e2e/tests/acceptance/signal_087.rs", "docs/07-data-model.md"],
+       "tests": [
+        {"cmd": "just test-crate hk-detect", "exit": 0, "summary": "223 passed, 1 skipped"},
+        {"cmd": "just test-crate hk-model", "exit": 0, "summary": "362 passed"},
+        {"cmd": "cargo nextest run -p hk-pipeline -E 'test(/trunk/)' --test-threads 2", "exit": 0, "summary": "16 passed"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)' --test-threads 2", "exit": 0, "summary": "10 passed"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto) & test(/signal_087::/)' --test-threads 2 (HK_E2E_REQUIRE_SYNTH=1)", "exit": 0, "summary": "9 passed incl. new (H)"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto)' --test-threads 2", "exit": 100, "summary": "22 passed, 1 failed: mauto_corpus::manifest_declarations_cite_open_tickets_and_none_is_a_catch_all - pre-existing board-state failure (cites T-623 which is now done), independent of this diff"}
+       ],
+       "precheck": {"exit": 0},
+       "use_cases": ["SIGNAL-087"],
+       "observed_but_not_chased": [
+        "tests/e2e mauto_corpus::manifest_declarations_cite_open_tickets_and_none_is_a_catch_all fails on current main: the ofdm declaration cites T-623, whose board status is now done - needs a re-point to an open ticket or Ticket::Unfiled.",
+        "The stored LmrRaster calibration is recorded but not yet consumed: the trunk hunt still re-fits the grid per pass (it must, for the tune phase) and does not use the stored ppm to settle a Tied/NothingOccupied alias or to seed it; nor is calibration_state_ref set on subsequent Provenance. Both are follow-ups.",
+        "family.rs raster_fit (the off-raster flag in ranked explanations) does not subtract the device's recorded clock; only the US FM raster exists there today, where 9.6 ppm is ~1 kHz against a 20 kHz tolerance, so it is harmless now but would matter the day an 800 MHz LMR raster is added to CHANNEL_RASTERS.",
+        "ReceiverFit.ppm in the EmitterSynthesis row is still 1e6*grid_offset/tune_centre, i.e. the modulo-raster phase including the tune's grid phase, not a clock; the alias.ppm next to it is the real figure (opposite sign convention to CalibrationState.ppm)."
+       ]}
+    commit: a3f9c0e9
   - id: T-544
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
@@ -18802,6 +18848,8 @@ tasks:
       actually delivers the budget, and A2 is the only part of it with any statistical power.
       Runs after T-568 builds the populations; do not rebuild them.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator, from the MAUTO manifest refresh): this ticket's acceptance text is word-for-word T-576's (acceptance_mauto::false_confirm_budget) and its notes say 'Runs after T-568 builds the populations' - i.e. the body was copied from its dependant. By its title T-568 is the negative-control guard suite that BUILDS the four populations (N1-N4: ofdm_nonstandard_cp, dsss_m_sequence, qam16_unframed, nbfm_voice/am_voice scenes now exist via T-623/T-624). Rewrite the acceptance from docs/22 before dispatching; the manifest now cites T-568 for the ofdm/dsss/16qam and voice negatives.
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
@@ -19695,7 +19743,7 @@ tasks:
   - id: T-594
     milestone: M3
     title: Fingerprint.structure has no producer, so entity resolution's envelope-shape comparison is dead in a real run
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     model: opus
@@ -19720,6 +19768,45 @@ tasks:
       after, and how many comparisons actually used it. A test that passes because the field was
       absent on both sides is vacuous.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DECISION: REMOVED Fingerprint.structure and its comparison; did not wire a producer.
+
+      Evidence (counts, real run - new test crates/hk-pipeline/tests/fingerprint_field_census.rs, which replays the
+      real HackRF FM (fm_100p8M...) and 433 MHz ISM (ism_433p62M...) captures blind through the mock SDR and counts
+      every stored emitter fingerprint's fields):
+      - BEFORE (unmodified tree): 18 stored fingerprints, `structure` on 0 of 18 -> 0 comparisons could use it
+        (a stored row is the fold of its sightings and fold keeps any Some, so 0 on stored = 0 on every comparison).
+      - AFTER: the key does not exist; the test asserts no real-run fingerprint carries any key `compare` does not read
+        (non-vacuous: anti-vacuity asserts >=2 fingerprints, centre on all, family on >=1).
+      - Why not wire: every production producer that holds IQ (analogue chain/RDS writer, FSK chain, trunk CC synth)
+        also writes an exact `family`, and every family they write is constant-envelope (wfm/nfm, 2fsk, 4-level FSK),
+        where envelope_shape reads 1.00 by construction. A wired comparison could only split on multipath fading or
+        noise-correction error - the look, not the emitter. Producers without IQ (tracker, hop-set) cannot compute it.
+        bpsk/qpsk, the pair it was measured on, has no fingerprint producer. So the T-321 "fifth field" margin does not
+        materialise either (and envelope_shape was never in hk_model::CLUSTER_FIELDS anyway).
+
+      Changes:
+      - hk-model cluster.rs: removed ModulationStructure, Fingerprint.structure, the envelope_shape comparison, the
+        fold branch, Tolerances::structure_sigmas + STRUCTURE_SIGMAS_DEFAULT, and the four T-233 structure tests; module
+        docs record the removal and why. New test t594_a_stored_fingerprint_with_the_removed_structure_key_still_parses
+        (old rows with the key still parse; key ignored). lib.rs re-export dropped.
+      - hk-classify: ModulationStructure re-homed locally in structure.rs (statistic + its unit tests kept as a
+        measurement with no inventory consumer; header says so). Deleted tests/structure_rates.rs and
+        src/bin/structure-probe.rs - they measured merge/split rates of the removed comparison.
+      - docs/adr/0016: T-594 paragraph with the counts; C18 row and §5.1 heading amended.
+
+      Tests: cargo nextest -p hk-model -p hk-classify: 435 passed, 1 skipped. fingerprint_field_census: pass (before
+      and after). just precheck hk-model hk-classify hk-pipeline: fmt clean, clippy clean.
+
+      SURFACED, NOT CHASED (observed, same census, per the ticket's "measure how much of entity resolution is in this
+      state"): over those two real runs only f_center_hz, bandwidth_hz, duty_cycle (18/18) and burst_length_s (12/18)
+      are ever present on both sides of a pair. family is on 1 of 18 stored fingerprints (0 usable pairs), and
+      symbol_rate_hz, deviation_hz, period_s, hop_raster_hz, hop_set_hz are on 0 of 18. In particular the 433 MHz ISM
+      run stored 8 fingerprints with no symbol_rate/deviation/family, i.e. the FSK chain's fields never reached the
+      store on that capture. The census prints this table on every run (--no-capture).
+      Note: `just task` is not in this branch's justfile (branch base predates it); the result was recorded with
+      main's py/hkpy/tasks.py run from a temp copy.
+    commit: 4765c337
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
@@ -21207,7 +21294,7 @@ tasks:
   - id: T-620
     milestone: M2-hardening
     title: "Briefs point agents at whole ADRs, not sections - the biggest ones are read in full repeatedly"
-    status: todo
+    status: done
     priority: normal
     parallel_group: CI
     model: opus
@@ -21245,6 +21332,33 @@ tasks:
       cheapest fix (b) needs to be run past that rule before landing, not assumed to be a formatting
       nit.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      T-620 DONE (option c: briefing convention only; no ADR content touched, so no Fable/user sign-off needed).
+
+      MEASURED (bytes/4 as the token estimate, since no tokenizer is available offline; treat it as rough, about ±20%):
+      - Large ADRs, read whole: 0011 15k tok, 0012 27k, 0013 15k, 0015 28k, 0016 21k, 0017 19k, 0021 14k, 0022 11k.
+        The median top-level section is 450-920 tokens. The largest section is 3.7-7.6k (ADR-0016 §7 is the biggest at 7.6k).
+      - Live briefs: T-844 names "ADR-0016 section 6". §6 is 48 lines, about 1.2k tokens, against 21k for the whole ADR,
+        so about 17x (§6 + §10 amendment = 2.4k, about 9x). T-366 needs §7 (377 lines, 7.7k tokens), about 2.8x.
+        ADR-0016 §1 (the taxonomy-versioning rule the ticket uses as its example) is 18 lines, about 0.4k tokens, about 49x.
+      - Board: 447 ADR citations, and only 166 name a section. So at least 281 existing citations can't be narrowed by a
+        citation convention alone.
+
+      CHANGED:
+      - ops/work-runner.py brief template: new "READING ADRs" paragraph. Read a >300-line ADR by the section cited, or list
+        its sections with `grep -n '^##'` and read only the ones the change touches. This covers the ~281 existing
+        un-sectioned citations, because it acts at the reader, not the citation.
+      - .claude/agents/worker.md: the same rule for Agent-tool workers.
+      - .claude/roles/coordinator.md + .claude/skills/file-ticket/SKILL.md: task entries and briefs that name a >300-line
+        ADR also name the section ("ADR-0016 §6").
+      - CLAUDE.md: the "read the ADRs a task names" line now says "by section" for large ADRs.
+
+      TESTS: docs/ops text only. `python3 -m py_compile ops/work-runner.py` ok. No Rust touched, so no precheck crate.
+
+      NOT CHASED: option (b), line-anchored TOCs inside the ADRs, would edit ADR files and needs Fable + user sign-off.
+      Grep-listing the sections gives most of the same benefit without it. The ADR list in the rule is hard-coded as
+      "today"; it goes stale as ADRs grow, so it says "over ~300 lines (wc -l)" as the actual criterion.
+    commit: 72e4ea05
   - id: T-616
     milestone: MAUTO
     title: 'ADR-0015 section 1.3: evidence_bits must not sum correlated metric significances (snr == evm, measured)'
@@ -22287,7 +22401,7 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: todo
+    status: in-progress
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
@@ -24505,6 +24619,7 @@ tasks:
     title: C38 durable shadow sink in hk-store plus the three /api/ml routes, landed with a producer
       so the path is not vacuous
     status: todo
+    branch: task-t844
     priority: normal
     deps:
     - T-203
@@ -24543,6 +24658,11 @@ tasks:
       to mislead the next reader. If the section 4.6 evidence still does not support wiring any
       producer when this is picked up, do not force it: say so and leave the ticket open rather than
       landing a vacuous half.
+    result: |
+      I kept the WIP and corrected it. What is built: the durable sink (hk_store::ml::ShadowStore, CRC-line NDJSON with one segment per capture-time hour, 256 MiB / 30 days, per-(model, consumer, family, SNR-bin) agreement aggregates kept per segment, non-shadow records refused); StoreShadowSink as the production ShadowSink; hk_pipeline::ml::MlStage (registry, one ModelHost per provider, modes persisted in <data>/ml/modes.json and restored, active only with section 4.6 evidence plus a conformant provider or an audited force); the producer at the fsk chain's single C15 call site, run after the published row is written and outside the repository lock; the three /api/ml routes (hk-api/src/ml.rs plus an hk-cli adapter), docs/api.md and an api_contract test; the hk-ml dormancy prose rewritten and no_production_caller.rs removed; m3_ml.rs now reads the run's real mode table and counts records from hk-store on disk. WIP fixes: records were keyed on the wall clock and are now keyed on the subject's capture time; served JSON obeys the API time law (t_s/t_ns, verified by the time-law sweep); the racy observe return count is fixed; dead code, clippy and fmt are fixed. The branch is NOT ready to land, and it is blocked by the ticket's own rule against a vacuous producer. hk_ml::gate::admit correctly refuses a subject whose classical family is 'unknown', and every scene I ran through the mock SDR is classified 'unknown' at the call site. That covers fsk_burst_train at 15/20/25/30 dB, 23-430 ms bursts, 2400/4800/9600 Bd, and trunk_control_channel; pocsag, lora, multipath, acars and retune produced no classification rows at all. Open-set is about 1.0 throughout, and at 20 dB the row is flagged BelowGate with spectrum_too_few_segments and low_snr at a measured 18.7 dB. So no real run ever writes a shadow record. The wiring half of the non-vacuity pair, crates/hk-pipeline/tests/ml_shadow.rs, is written and fails on its precondition assertion ('the scene must produce fsk classifications'). The sink half is proven: swapping in MemoryShadowSink turns a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage red (left 0, right 1). The routes are proven the same way: unrouting /api/ml turns the contract test red (404 vs 200). Everything else passes. Do not queue this branch until ml_shadow.rs passes.
+    depends_on: [T-852]
+    notes: |
+      2026-09-23 (coordinator): code complete on task-t844 (ad29641b: sink, producer, three /api/ml routes, tests green except ml_shadow) but NOT queued - the ticket forbids landing a producer that never fires, and through the mock SDR the classifier calls every row unknown, so the C38 gate never admits one. Now todo behind T-852; when it lands, re-run crates/hk-pipeline/tests/ml_shadow.rs unchanged and queue.
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
@@ -24655,7 +24775,7 @@ tasks:
   - id: T-848
     milestone: MAUTO
     title: "MAUTO M-1: hk-synth scaffold (Stage/Evidence/candidate/skeleton/template types, modules and stubs) and the ADR-0015 -> ACCEPTED review"
-    status: todo
+    status: done
     priority: medium
     deps:
     - T-206
@@ -24677,11 +24797,21 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 18:03).
+      New crate hk-synth (ADR-0015 §9 deps pre-added): types, modules and stubs, no engine. It covers stage/evidence (S0-S6 ladder, default caps and floors, a NodeScore whose rank key cannot see the prior, prior_bits clipping, the look-elsewhere charge), calibration (the §13.2 Score/Threshold/Unexpressible answer types, with the loader left to T-660, and §13.3's fail-closed fill bucket), candidate/skeleton/template/proposal (§1.2 candidate = recipe prefix + free params, checked against the real hk-blocks catalogue; hackriff.template/1 with §15 fact provenance), and search/result/trace/seed/objective (profiles, budgets, stop reasons, job states, the NodeHeuristic slot, the Verdict ladder, PipelineResult, ADR-0021's TraceNode/Outcome/Resolution/Reason, and the one adapter over ADR-0016's SearchSeed). Each module names the M-n ticket that fills it.
+      The evidence vocabulary (Stage, MetricId, GroupId, Evidence, EvidenceSet) lives in hk_model::synth and hk-synth re-exports it. hk-blocks needs these types for Block::evidence (M-2), and hk-synth depends on hk-blocks, so ADR-0015 §9 as written was a dependency cycle.
+      The ADR-0015 -> ACCEPTED review is prepared as ADR-0015 §16 and is NOT accepted; the status stays PROVISIONAL. It lists 8 engineering corrections found while implementing, and three open items: docs/20 U2, U3 and U5 are still unanswered (U1 is answered via ADR-0022; U4's PSK half is moot because T-609 landed psk_demod), T-619's fill-bucket amendment is pending for T-660, and it proposes to waive the ADR-0016 dependency (hk-synth only consumes ADR-0016 §8's SearchSeed, which is landed code). USER DECISION NEEDED: §16.7 'the ask'. M-2..M-7 can start now.
+      Tests: cargo build -p hk-synth -> exit 0 (builds); cargo nextest run -p hk-synth -> exit 0 (27 passed (24 unit + 3 candidate_is_a_recipe)); cargo nextest run -p hk-model -E 'kind(lib) and test(/^synth::/)' -> exit 0 (4 passed); RUSTDOCFLAGS='-D warnings' cargo doc -p hk-synth --no-deps -> exit 0 (clean)
+      precheck exit 0
+      Commits: a3ece799
+      Observed, not chased: ADR-0015 §4.2 says a family with posterior < 0.02 is deferred; ADR-0016 §8/T-215 says only the likelihood prunes. hk-synth follows ADR-0016 (correction C2 in §16.2); the ADR-0015 text needs the fold-in on acceptance. | ADR-0015 §11.7 proposes a 'new docs/07 §2.28 CandidatePipeline', but docs/07 §2.28 is TrunkSystem (T-266). CP-1 should take §2.33. | T-206 records M3 NOT closing (unknown recall 0.778 vs 0.80; no end-to-end classification row) while its status is done. Relevant to the ADR-0016-accepted dependency; §16.5 proposes waiving it for ADR-0015. | T-552 (the quick/standard/deep budget measurement) is still todo; hk-synth carries §3.3's unverified numbers in Profile::budget().
+      Resources: 101 CPU-s, peak 1.0 GB
+    commit: 6d25fa00
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
-    status: in-progress
-    branch: task-t849
+    status: done
     priority: normal
     deps: []
     parallel_group: M4B
@@ -24703,6 +24833,92 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (T-330 blocker review, user request).
     tier_reason: "novel DSP on the real-time path: blind P25 C4FM/CQPSK LDU1/LDU2 demodulation and deframing on a followed channel, with LC/encryption-sync field recovery"
+    branch: task-t849
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 18:17).
+      P25 Phase 1 LDU1/LDU2 now decode blind from IQ on a followed voice channel, so the call's own ALGID is reachable. New hk-detect trunk::ldu: frame sync, status-symbol strip, BCH(63,16,23) NID (ML search within t=11), Hamming(10,6,3) hexbits, RS(24,12,13)/RS(24,16,9) over GF(64) (errors-only BM, refuses beyond t) -> LinkControl (LCO/MFID, group-voice svc/talkgroup/source) and EncryptionSync (MI, ALGID, key id, plus encryption() via algid_encryption). IMBE is skipped by position: no vocoder, no audio, nothing decrypted. The trunk follower demodulates each followed FDMA channel (same DDC and integrate ladder as CC confirmation, picked by decoded-LDU count) and records LC/ES on the call's call-start grant_event as detail.voice_frames, in capture time and attributed by LDU midpoint. New counters: cc_voice_frame_demods, cc_ldu1, cc_ldu2. call.encryption is deliberately NOT changed: letting the ALGID override the grant through VoicePermit is T-330's job. hkpy.synth has a separately written LDU encoder and a new trunk_voice_frames_control_channel scene: two calls whose grants state nothing, one clear and one AES-256 by ALGID. Every existing trunk fixture's IQ is byte-identical. Provenance is stated plainly in the module docs: the layouts are recalled, not checked against a real capture (none exists in the repo). Two independent derivations of the BCH generator agree (GF(64) LCM and the published octal 6331 1413 6723 5453).
+      Tests: just test-crate hk-detect -> exit 0 (220 passed, 1 skipped (incl. 11 new trunk::ldu tests)); cargo nextest run -p hk-pipeline -E 'test(/chains::trunk::/)' -> exit 0 (12 passed); HK_E2E_REQUIRE_SYNTH=1 cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)' -> exit 0 (9 passed (t267..t345 unchanged + new t849_voice_frames)); cd py && uv run --locked pytest tests/test_synth.py -q -> exit 0 (81 passed, 2 skipped); cd py && uv run --locked ruff check . -> exit 0 (clean)
+      precheck exit 0
+      Commits: 2c6a3d52
+      Observed, not chased: Only an LDU whose call gets a call-start event is recorded. A call continued across passes (T-308) emits no call-start, so its later LDUs are counted but not written to any event. Continuation normally does not fire on the built-in duty cycle (9.5 s gap). T-330 writes to CallRecord directly, so it can close this gap. | hk-detect now carries its own small GF(64) Reed-Solomon decoder (trunk::ldu::Rs64). hk-blocks' general GF(2^m) kernel (T-611) is pub(crate), and hk-detect sits below hk-blocks. Exposing that kernel from a lower crate would remove the duplication. | A single 0.5 s hunt window holds only 1-2 complete LDUs, so on a real long call one pass can see only the LC or only the ES. The synthetic scene keys its superframe inside the first window. T-330 may need to accumulate ES across passes or calls. | The LDU decode is unverified against real off-air P25 (none in repo; T-299/T-544). The HDU, which also carries the ALGID at call start, and the TDULC are not decoded.
+      Resources: 150 CPU-s, peak 3.4 GB
+    commit: 4be23ed9
+  - id: T-850
+    milestone: MAUTO
+    title: C4FM synthetic generator lacks the check parameterisation (CRC width/searched/random polynomial, BCH, constant payload) that T-622 gave 2FSK
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MAUTOD
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      Filed 2026-09-23 from the MAUTO coverage-manifest refresh (task-mauto-manifest, a4336ee5): the seven
+      4fsk-c4fm cells on the manifest's check axis (A1xA7) are UNFILED because T-622 added CRC width,
+      off-catalogue polynomial and constant payload to the 2-level `fsk_burst_train` generator only
+      (py/hkpy/synth/scenarios.py:118-125, FSK_DEFAULTS) - the C4FM trunk scenes carry only the fixed P25
+      framing, although docs/22 §9's T-622 row says "the generic generators".
+      DELIVER: the same check parameterisation on the C4FM generator/scenes - CRC-8/24/32, a searched CRC,
+      a random polynomial, BCH, constant payload - with hidden truth in the scene metadata, then point the
+      manifest's 4fsk-c4fm check cells at the rows that run them (or at their engine owner if no engine
+      consumes them yet). Blind: the truth never reaches the system under test.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+  - id: T-851
+    milestone: MAUTO
+    title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: MAUTOD
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      Filed 2026-09-23 from the MAUTO coverage-manifest refresh (task-mauto-manifest, a4336ee5): the
+      calibrated-bit discount for CSS (LoRa chirp spread spectrum) was never measured. docs/21 §10 closes
+      T-619 with AM/OOK and C4FM only; docs/22 §7.2 lists P9 (CSS) as report-only "until T-619 extends the
+      measurement", and T-619 is done, so that measurement has no owner.
+      DELIVER: extend the T-547/T-619 ladder measurement to CSS (the evidence bits a CSS candidate can earn
+      under quantisation, per docs/21's method), record the table, and move P9 off report-only if the
+      measurement supports it (state the numbers either way). RESEARCH/MEASUREMENT; no engine code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+  - id: T-852
+    milestone: M3
+    title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-23 by the T-844 worker (task-t844, ad29641b; handback ~/.hackriff-ops/work/T-844/handback.json),
+      through the MOCK SDR (the device interface, not direct file feeding):
+      - `fsk_burst_train` at 15/20/25/30 dB (bursts 23-430 ms, 2400/4800/9600 Bd) and `trunk_control_channel`: the
+        classical classifier (the fsk chain is its only call site) calls EVERY row `unknown`, open-set score ~1.0.
+      - At 20 dB the row is BelowGate with `spectrum_too_few_segments` although the measured SNR is 18.7 dB against a
+        gate of 0.0; at 30 dB fsk is the runner-up with open-set 0.99999.
+      - pocsag, lora, multipath, acars and retune scenes produce NO classification rows at all.
+      So through the device the M3 classifier never names a family for synthetic scenes it was built for - the device-path
+      analogue of the T-238/T-240 over-the-air gaps. It blocks T-844 (the C38 ML shadow producer is correctly refused for
+      `unknown` rows, so it never fires) and M3's own claim.
+      DELIVER: root-cause why the classification path, fed through the mock SDR, abstains/unknowns on these scenes
+      (segment count for the spectrum dimension vs burst length and FFT/segmentation settings; which dimensions abstain;
+      why pocsag/lora/... never reach a classifier call) and fix the cause - never by lowering the open-set threshold or
+      the gate to make a number pass (detection thresholds are core_interface). Blind: hidden truth only in assertions.
+      ASSERT through the mock SDR: fsk_burst_train at >=20 dB classifies as fsk in top-1 with open-set below the unknown
+      threshold on a stated majority of rows; state the per-scene numbers before/after. Then T-844's
+      crates/hk-pipeline/tests/ml_shadow.rs should pass unchanged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-844 worker 2026-09-23 (observed through the mock SDR).
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

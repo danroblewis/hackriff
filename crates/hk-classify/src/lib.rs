@@ -79,7 +79,7 @@ pub use harness::{
     CoverageGap, FamilyCoverage, GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Snippet,
     Split, VerifierRow, VerifierUnaccounted,
 };
-pub use structure::{ENVELOPE_SNR_UNCERTAINTY_DB, modulation_structure};
+pub use structure::{ENVELOPE_SNR_UNCERTAINTY_DB, ModulationStructure, modulation_structure};
 pub use symbols::{SymbolEstimator, SymbolWindow};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
 pub use verify::{

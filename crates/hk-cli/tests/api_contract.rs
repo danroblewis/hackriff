@@ -68,6 +68,7 @@ fn start_server_retaining(retention_s: Option<f64>) -> (TempDataDirGuard, Servin
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
             spec: format!("mock:{}", fixture_path().display()),
+            extra: Vec::new(),
             live: LiveArgs::default(),
         },
         data_dir: Some(dir),
@@ -6989,6 +6990,7 @@ fn coverage_survives_a_refused_iq_ring_and_never_calls_the_lost_evidence_grey() 
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
             spec: format!("mock:{}", fixture_path().display()),
+            extra: Vec::new(),
             live: LiveArgs::default(),
         },
         data_dir: Some(dir),

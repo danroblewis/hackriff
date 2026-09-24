@@ -1,6 +1,6 @@
 # ADR-0015 — Decoder synthesis contracts: candidate pipelines, stage evidence, search, templates, region analyze
 
-**Status:** PROVISIONAL (T-208, core interface, planning only). MAUTO is unscheduled until after M3. No code comes from this ADR until then.
+**Status:** PROVISIONAL (T-208, core interface). **Acceptance review prepared, not accepted — §16 (T-848, 2026-09-23); the decision is the user's.** The M-1 scaffold (`crates/hk-synth`, `hk_model::synth`: types and stubs, no engine) exists; the engine lands in M-2…M-12.
 **Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning); **§14 below** (T-557, 2026-09-22 — template fact provenance, the fact/implementation line, bulk import).
 **Touches:** C13/C14 estimation, C15 classifier, C18 signatures, C20 digital demod, C21 bit framing, C22 decoders, C27 inventory; Emitter, Decode ([docs/07 §2.11, §2.15](../07-data-model.md)).
 **Builds on:** [docs/15](../15-decoder-synthesis.md) (the design brief), [ADR-0011](0011-decoder-workbench-contracts.md) (blocks, recipes, stream), [ADR-0012](0012-attention-memory-contracts.md) (chain tiers), ADR-0014 (IQ capture ring; T-178, `docs/adr/0014-iq-capture-ring.md` lands with it), ADR-0016 (M3 classification; T-198, written in parallel).
@@ -1480,3 +1480,101 @@ rtl_433_tests, sigidwiki and rtlamr (to be read from their files); the §15.7 pr
 the rtl_433 decoder and flex-conf counts; and whether a handful of templates really suffices on a
 well-classified burst for §15.4's charge to stay small. That last point is measured by the templates-on
 runs in §7.*
+
+---
+
+## 16. Acceptance review (T-848 = MAUTO M-1, 2026-09-23) — prepared for the user, **not accepted**
+
+**Status of this section:** a review, not a decision. Accepting an ADR is the user's call; this ADR
+stays **PROVISIONAL** until the user says otherwise. What follows is everything the review found,
+each item either **resolved** (an engineering correction, applied in code and proposed for the ADR
+text) or **for the user** (with a proposal). The M-1 scaffold it was checked against is the new
+`hk-synth` crate plus `hk_model::synth`.
+
+### 16.1 What was checked, and against what
+
+Every contract type ADR-0015 and its amendments name was written down as Rust and tested for
+shape: `Stage`, `MetricId`, `GroupId`, `Evidence`, `EvidenceSet` (§1.1, §2.1, §13.1);
+`NodeScore`, `prior_bits`, the look-elsewhere charge, default caps and floors (§1.3, §13.2);
+`Score` / `Threshold` / `Unexpressible` and the fill buckets (§13.2–§13.3); `Candidate`,
+`FreeParam`, `Domain`, `SeedSource` (§1.2); `Skeleton` (§1.2); `Template` with §15's fact
+provenance and validation (§4.1, §15); `ProposalOp` (§3.2); `Profile`, `SynthBudget`,
+`StopReason`, `JobState`, `NodeHeuristic` (§3.3, §5.2); `Verdict`, `PipelineResult` (§3.4, with
+ADR-0022's `analytic_holdout_bits` and ADR-0021's `characterisation`); and ADR-0021's
+`TraceNode`, `Outcome`, `Resolution`, `Reason` (ADR-0021 §12's M-1 amendment). A candidate prefix
+validates against the real `hk_blocks::Registry::builtin()` catalogue
+(`crates/hk-synth/tests/candidate_is_a_recipe.rs`), so "a candidate is a recipe" is checked, not
+asserted. **No engine behaviour exists**: M-2…M-12 fill the modules, each named in
+`crates/hk-synth/src/lib.rs`.
+
+### 16.2 Resolved while implementing (engineering corrections; proposed for the ADR text)
+
+| # | Where | Finding | Resolution in the scaffold |
+|---|---|---|---|
+| **D1** | §9 crate placement, §2.1 | `Evidence`/`EvidenceSet`/`Stage` must be nameable by `hk-blocks` (`Block::evidence`, M-2), but §9 has `hk-synth` depend on `hk-blocks` — as written, a dependency cycle. | The evidence vocabulary lives in **`hk_model::synth`** and `hk-synth` re-exports it (`hk_synth::Stage` still resolves). Same pattern as ADR-0016's types in `hk_model::classify`. |
+| **C2** | §4.2 "a family with posterior < 0.02 is deferred" | Contradicts ADR-0016 §8 / T-215: **only the likelihood** prunes; a prior may reorder, never defer. §4.2's own "priors never veto evidence" agrees with ADR-0016. | `hk_synth::seed` defers exactly when ADR-0016's `Hypothesis::prune` says so. A test pins a family with posterior 0.01 and likelihood 0.3 staying active. ADR-0021's `deferred_prior` detail keeps reporting the posterior. |
+| **C3** | ADR-0021 §1 rule 3 vs §2.2 | Rule 3: a memoised hit "carries no measurement"; §2.2's tried table: every tried node's `measured` is non-null. | `TraceNode::check` requires a measurement on every tried node **except** `memoised`, which may carry none. |
+| **C4** | §4.1 example `output_policy.metadata_keys` | Written as a list; the recipe `output_policy` it is "read the same way" as (and that §4.3 clamps) is a typed **map** (`recipes/pocsag.recipe.json`). | `Template.output_policy` is `hk_recipe::OutputPolicy`; the list form is treated as shorthand. |
+| **C5** | §1.1 catalogue gap, §10 M-14, docs/20 §U4 | "There is no `psk_demod`/Costas block" is stale: **T-609 landed `psk_demod`** and superseded M-14. | No scaffold change. docs/20 §U4's PSK half is already funded; only the SSB/CW half remains a question (§16.3). |
+| **C6** | §11.7 "new §2.28 CandidatePipeline" | docs/07 §2.28 is now `TrunkSystem` (T-266). | CP-1 takes the next free docs/07 number (§2.33 today). |
+| **C7** | §1.3 floors | S6 has no stated floor. | `default_floor_bits(S6) = None`: S6 evidence ranks only (§4.1 "plausibility … ranking evidence only"). |
+| **C8** | §13.2 levels vs §1.3 floor | None; noted for T-660. | `Threshold` snaps **up** and refuses; a floor above `admissible_bits` is `floor_unreachable`, never lowered. |
+
+### 16.3 For the user — the questions docs/20 left open
+
+docs/20 put five questions to the user. The repo records an answer to **one**:
+
+| # | Question | Recorded answer / proposal |
+|---|---|---|
+| **U1** | Single-burst confirm, and the false-confirm budget | **Answered** — the budget line (≤ 1 wrong Confirmed emitter per unattended week) is recorded in ADR-0022, whose single inequality subsumes the single-burst branch (ADR-0022 §4.2). Nothing further needed for ADR-0015. |
+| **U2** | May the device start analyze jobs itself; may `deep` run on battery? | **Unanswered.** Proposal (docs/20): auto-queue at `quick` only, mains only, one job at a time; `deep` stays user-triggered. Blocks M-3's `auto_profile` default only — M-3 can start with it off. |
+| **U3** | User label vs a CRC-valid decode that disagrees | **Unanswered.** Proposal: the user wins (rank 0); the decode is recorded and shown beside the label. Also closes ADR-0016 Q3. Matches today's code. |
+| **U4** | Fund PSK / SSB / CW blocks? | **PSK: moot** (C5 — T-609 done). Remaining: **SSB/CW stay on the legacy Listen chain permanently** (proposal). |
+| **U5** | Stereo audio? | **Unanswered.** Proposal: no. |
+
+The two numbers docs/20 sent to measurement stay provisional **by design** and do not block
+acceptance: the 4-bit supersession margin / 0.6 overlap (T-547, done — still first guesses for
+§11.3) and the `quick`/`standard`/`deep` budgets (**T-552, todo**). §7's thresholds are "fixed
+before implementation" and may only tighten.
+
+### 16.4 For the user — one amendment the measurement has already triggered
+
+**§13.3's single `nominal` bucket is falsified on paper.** §13.5 item 4 named its own trigger, and
+**T-619 fired it** (docs/21 §10): the AM/OOK metrics over-claim 5–6 bits at high clip, the measured
+safe region is σ ≥ 1.0 LSB **and** clip ≤ 10 %, and the runtime rule must read the **noise
+floor's** fill, not the window's. §13.5 records this and says "that amendment is not taken here".
+The scaffold implements §13.3 as written (`hk_synth::calibration::FillBucket`) and says so.
+**Proposal:** accept ADR-0015 with this listed as a pending amendment owned by **T-660** (the
+calibration loader and generator), which must take it before M-2 generates any table — no
+calibration table exists yet, so nothing is invalidated by deferring the text.
+
+### 16.5 For the user — the ADR-0016 dependency
+
+§10 makes M-1 depend on "ADR-0016 accepted". ADR-0016 is **PROVISIONAL** with open questions 1
+(M3 exit floors / OTA captures), 2 (tract in the default build), 3 (= U3), 4 (cluster novelty →
+ADR-0012) and 5 (answered by docs/20 D1: local only). T-206's gate result also records M3 **not
+closing** on two blockers (unknown recall 0.778 vs 0.80; no end-to-end classification row).
+
+What `hk-synth` actually consumes from ADR-0016 is **§8's `SearchSeed` only**, which is landed code
+(T-215, `hk_model::classify::seed`) and is read by the one adapter (`hk_synth::seed`). Priors only
+order the search, so M3's accuracy floors cannot change any hk-synth contract — a weaker classifier
+costs search budget, not correctness.
+**Proposal: waive the ADR-0016 dependency for ADR-0015 acceptance**, keeping ADR-0016's own review
+separate (its Q1/Q2/Q4 are M3 decisions, not MAUTO ones).
+
+### 16.6 Not blocking, listed for completeness
+
+- ADR-0021's five open questions (false-label budget, null-control cost, 8-bit null margin, trace
+  retention, auto-retry) and ADR-0022's Q1 are parameters of M-3/M-9/M-12, not of the contracts
+  M-1 fixes. Proposal: they stay with those ADRs.
+- The §9 deltas (docs/07 §2.11 `synthesis`, §2.15 Decode `provenance`, a Template object; docs/api
+  "Analyze"; stream `hackriff.analyze/1`; recipe `schema_version` 3) are still unwritten; each lands
+  with the ticket that first serves or stores it (M-8, M-9, M-7, CP-1), per the T-079 rule.
+
+### 16.7 The ask
+
+> **"Accept ADR-0015"** — with U2, U3 and U5 answered (or "take the recommendations"), SSB/CW as
+> proposed, §16.4's amendment deferred to T-660, and the ADR-0016 dependency **waived** (or ADR-0016
+> accepted). On that word the status line changes to ACCEPTED and §16.2's corrections are folded
+> into the sections they amend. Until then M-2…M-7 can start against the scaffold: none of them
+> needs an answer above except M-3's `auto_profile` default, which starts off.

@@ -17,6 +17,14 @@ struct Args {
     /// scheduler's retunes go through the mock device too, so frequencies stay truthful).
     #[arg(long, default_value = "hackrf")]
     source: String,
+    /// A device to run (repeatable, T-512); the first is the primary. Replaces `--source` when
+    /// given. `--center-hz`/`--rate`/gains are the defaults for every device.
+    #[arg(long = "device", value_name = "SPEC", conflicts_with = "loop_replay")]
+    devices: Vec<String>,
+    /// Per-device setting `SPEC:KEY=VALUE` (repeatable): center-hz, rate, lna, vga, amp,
+    /// baseband-filter-hz, gain.STAGE. SPEC must be one of the `--device`s.
+    #[arg(long = "device-set", value_name = "SPEC:KEY=VALUE")]
+    device_sets: Vec<String>,
     #[command(flatten)]
     live: LiveArgs,
     /// Replay the recording again when it ends; the stream continues (recordings only).
@@ -67,9 +75,12 @@ fn main() -> anyhow::Result<()> {
         .into_iter()
         .find(|p| p.is_dir())
     });
+    let (source, live, extra_devices) =
+        hk_cli::pipeline::resolve_primary(a.source, &a.devices, &a.device_sets, &a.live)?;
     hk_cli::pipeline::run_daemon(&hk_cli::pipeline::DaemonArgs {
-        source: a.source,
-        live: a.live,
+        source,
+        live,
+        extra_devices,
         loop_replay: a.loop_replay,
         data_dir: a.data_dir,
         plan: a.plan,

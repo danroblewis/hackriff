@@ -73,6 +73,14 @@ enum Command {
         /// (the mock SDR device replaying a recording as live air).
         #[arg(long, default_value = "hackrf")]
         source: String,
+        /// A device to run (repeatable, T-512); the first is the primary. Replaces `--source`
+        /// when given. `--center-hz`/`--rate`/gains are the defaults for every device.
+        #[arg(long = "device", value_name = "SPEC")]
+        devices: Vec<String>,
+        /// Per-device setting `SPEC:KEY=VALUE` (repeatable): center-hz, rate, lna, vga, amp,
+        /// baseband-filter-hz, gain.STAGE. SPEC must be one of the `--device`s.
+        #[arg(long = "device-set", value_name = "SPEC:KEY=VALUE")]
+        device_sets: Vec<String>,
         #[command(flatten)]
         live: LiveArgs,
         /// Stop after this many seconds (default: until Ctrl-C).
@@ -179,8 +187,13 @@ enum Command {
         /// `mock:<file.sigmf-meta>` (the mock SDR: the recording as live air, in real time and
         /// looping, retunable through the live controls). Tuning and gains not given explicitly
         /// take the recording's own.
+        /// Repeatable (T-512): several devices run in one pipeline, the first is the primary.
         #[arg(long, conflicts_with_all = ["replay", "hackrf"])]
-        device: Option<String>,
+        device: Vec<String>,
+        /// Per-device setting `SPEC:KEY=VALUE` (repeatable): center-hz, rate, lna, vga, amp,
+        /// baseband-filter-hz, gain.STAGE. SPEC must be one of the `--device`s.
+        #[arg(long = "device-set", value_name = "SPEC:KEY=VALUE")]
+        device_sets: Vec<String>,
         #[command(flatten)]
         live: LiveArgs,
         /// Replay this `.sigmf-meta` recording in real time instead of the live radio.
@@ -303,6 +316,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Run {
             source,
+            devices,
+            device_sets,
             live,
             duration,
             data_dir,
@@ -317,9 +332,12 @@ fn main() -> anyhow::Result<()> {
             compute,
         } => {
             hk_cli::signal::install()?;
+            let (source, live, extra_devices) =
+                hk_cli::pipeline::resolve_primary(source, &devices, &device_sets, &live)?;
             let summary = hk_cli::pipeline::run_live(&hk_cli::pipeline::RunArgs {
                 source,
                 live,
+                extra_devices,
                 duration_s: duration,
                 data_dir,
                 plan,
@@ -336,6 +354,7 @@ fn main() -> anyhow::Result<()> {
         Command::Serve {
             hackrf,
             device,
+            device_sets,
             live,
             replay,
             loop_replay,
@@ -350,20 +369,23 @@ fn main() -> anyhow::Result<()> {
             iq_buffer,
         } => {
             hk_cli::signal::install()?;
-            let source = match (replay, device) {
-                (Some(path), _) => hk_cli::serve::ServeSource::Replay {
+            let source = if let Some(path) = replay {
+                if !device_sets.is_empty() {
+                    anyhow::bail!("--device-set needs a live --device, not --replay");
+                }
+                hk_cli::serve::ServeSource::Replay {
                     path,
                     loop_replay,
                     realtime: true,
-                },
-                (None, Some(spec)) => hk_cli::serve::ServeSource::HackRf { spec, live },
-                (None, None) => hk_cli::serve::ServeSource::HackRf {
-                    spec: match hackrf.as_deref() {
-                        None | Some("") => "hackrf".into(),
-                        Some(serial) => format!("hackrf:{serial}"),
-                    },
-                    live,
-                },
+                }
+            } else {
+                let default_spec = match hackrf.as_deref() {
+                    None | Some("") => "hackrf".to_string(),
+                    Some(serial) => format!("hackrf:{serial}"),
+                };
+                let (spec, live, extra) =
+                    hk_cli::pipeline::resolve_primary(default_spec, &device, &device_sets, &live)?;
+                hk_cli::serve::ServeSource::HackRf { spec, live, extra }
             };
             hk_cli::serve::run(hk_cli::serve::ServeOptions {
                 source,

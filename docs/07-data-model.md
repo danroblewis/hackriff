@@ -86,7 +86,7 @@ The trust record attached to every SweepFrame, SpectrumFrame, Detection and Reco
 - **Note (from docs/06 §5):** timestamp method is host-arrival-time + running sample count, optionally GNSS-tagged; there is **no hardware 1PPS** on HackRF One, so sub-µs timing needs a GPSDO into CLKIN. Error budget is a spike (Phase 4).
 
 ### 2.7 CalibrationState  [C05]
-Versioned calibration: frequency `ppm` + method (LTE PSS / FM pilot / GNSS) + time, power-cal table ref (dBFS→dBm over frequency×gain), validity window / temperature.
+Versioned calibration: frequency `ppm` (positive = oscillator fast) + method (LTE PSS / FM pilot / GNSS / LMR raster — the trunk hunt's blind raster fit with its alias settled by granted-channel energy, *added T-560*) + time, power-cal table ref (dBFS→dBm over frequency×gain), validity window / temperature.
 - **Identity & lifecycle:** `cal_id`, versioned; a new measurement supersedes; provenance rows pin the version used.
 - **Relationships:** referenced by Provenance; produced by C05.
 - **Retention & size:** tiny; keep all versions (audit).

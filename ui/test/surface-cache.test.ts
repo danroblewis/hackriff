@@ -1404,6 +1404,39 @@ test("T-630: the client operates at the SHARE the route states, and gets it back
   assert.equal(h.cache.inFlightLimit, 1, "but permission to use it is still earned, never granted");
 });
 
+test("T-630: an answer states the share even when its tile is not kept, and the share carries its age", async () => {
+  // The share is a fact about this client's ADMISSION, not about the tile the answer carries. The
+  // surface-contention browser spec read "share 4" off a tab with two clients up: the only answers
+  // it had since the second client arrived were ones whose tile was not uploaded, and the share was
+  // adopted on upload alone. Here the answer is overtaken by a retune — its tile is dropped and asked
+  // for again — and the share it states must still be this client's share from then on.
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  assert.equal(h.cache.inFlightShareStatedAt, null, "nothing has been stated before any answer");
+  assert.equal(h.cache.inFlightShareAgeMs, null);
+  await live(h, clock, 1_500);
+  clock.t += 2_000;
+  h.cache.refreshEdge(LAT, edgeAt(clock.t), [edgeView(0, edgeAt(clock.t))]);
+  await flush();
+  assert.equal(h.cache.inFlightCount, 1, "a refresh should be in flight to be overtaken");
+  assert.equal(h.cache.invalidateEdge(LAT, edgeAt(clock.t)), 1);
+  const uploads = h.uploads();
+  const statedAt = clock.t;
+  await h.settle2(edgeTile(), { serverInFlightLimit: 4, serverInFlightShare: 2 });
+  assert.equal(h.uploads(), uploads, "the overtaken tile must still be dropped");
+  assert.equal(h.cache.inFlightCeiling, 2, "the share the answer stated was not adopted because its tile was not kept");
+  assert.equal(h.cache.inFlightShareStatedAt, statedAt);
+  clock.t += 12_000;
+  assert.equal(h.cache.inFlightShareAgeMs, 12_000, "an idle tab's share is as old as the answer that stated it");
+});
+
+test("T-630: a readout states the share with its age, and says so when the route never stated one", async () => {
+  const { shareText } = await import("../src/surface/tilecache");
+  assert.equal(shareText(4, null), "share 4, assumed (the route has not stated one)");
+  assert.equal(shareText(2, 400), "share 2, stated 0.4 s ago");
+  assert.equal(shareText(4, 38_200), "share 4, stated 38 s ago");
+});
+
 // ——— T-538: speculation is about where the view is GOING, and it never aborts ———
 //
 // T-471's standing ring was reverted off `main` for two measured reasons, and the tests below are

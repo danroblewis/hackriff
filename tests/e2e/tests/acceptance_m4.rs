@@ -43,6 +43,10 @@
 //!   read — and **none of them resolving to a frequency**, because the air interface carries a
 //!   channel *number* and defines no mapping from one to hertz. Two baited frequencies carry real
 //!   emissions and neither is ever reported.
+//! - [`t849_voice_frames`] proves the **voice frames** of a followed channel are read: each call's
+//!   own LDU1 link control (talkgroup, source) and LDU2 encryption sync (ALGID, key id), blind from
+//!   IQ — on two channels whose grants state nothing about encryption, one clear and one AES-256
+//!   by their ALGIDs — while unframed 4FSK on another followed channel yields no frame at all.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -76,3 +80,9 @@ mod t272_p25p2;
 
 #[path = "acceptance/t345_nxdn.rs"]
 mod t345_nxdn;
+
+#[path = "acceptance/t849_voice_frames.rs"]
+mod t849_voice_frames;
+
+#[path = "acceptance/t330_algid.rs"]
+mod t330_algid;

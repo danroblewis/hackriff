@@ -68,6 +68,7 @@ pub mod repo;
 pub mod retune; // T-586 (AWARE-011): retune diversity, absolute vs LO-relative
 pub mod sigmf;
 pub mod signature; // T-218 (ADR-0016 §5)
+pub mod synth; // T-848 (ADR-0015 §2.1, MAUTO M-1): the evidence vocabulary hk-blocks and hk-synth share
 pub mod time;
 pub mod trunking; // T-266 (C23 trunking metadata; metadata only, no call audio)
 
@@ -78,8 +79,8 @@ pub use cluster::{
     Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
     IdentityAccess, IdentityClaim, IdentityConflictReport, IdentityReclassification,
     InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord,
-    MeasurementKey, ModulationStructure, PriorVerdict, RecordedClassification, Resolution,
-    Sighting, TAG_VOCABULARY, Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
+    MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, TAG_VOCABULARY,
+    Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
 pub use content::{ContentClass, content_gating_enabled, set_content_gating};
 pub use context::{
