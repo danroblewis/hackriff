@@ -20379,7 +20379,7 @@ tasks:
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
-    status: todo
+    status: done
     priority: low
     parallel_group: CANVAS-FE
     model: sonnet
@@ -20404,6 +20404,9 @@ tasks:
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: 8ba822cb
+    notes: |
+      2026-09-23 (coordinator): verified DONE-BY T-598 (8ba822cb, 2026-09-21), worker proposed cancel. crates/hk-model/src/repo/retune.rs builds the backend prose into relation.reason on every active RetuneSiblingOf claim (the same slope receiver artefact as emitter X, seen from a different tuning centre: both sit on the invariant coordinate f - k*f_LO over N centres), and ui/src/app/explore/inventory.ts renders reason as visible text beside the short retune-artefact chip - exactly this ticket.
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
