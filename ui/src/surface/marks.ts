@@ -85,7 +85,14 @@ export interface MarkBox {
   readonly rgba: readonly [number, number, number, number];
   /** Mark the newest edge as the live edge rather than a measured end. */
   readonly open: boolean;
+  /** Per-box edge thickness (device px), overriding the style's: a Confirmed box is the stronger
+   * claim and is drawn heavier than a Candidate (T-808). Presentation only. */
+  readonly strokePx?: number;
 }
+
+/** Confirmed edge / Candidate-and-artifact edge thickness, device px (T-808). */
+export const CONFIRMED_STROKE_PX = 3;
+export const CANDIDATE_STROKE_PX = 1;
 
 /** A row as this file reads it — the shape `GET /api/inventory` serves, narrowed to what a
  * rectangle needs. Nothing is derived: `open` and the interval bounds are the API's own. */
@@ -148,6 +155,7 @@ export function signalMarkBoxes(rows: readonly MarkRow[], focusedId: string | nu
       t1Ns: iv.open ? null : iv.t_end_s * S_TO_NS,
       rgba: r.id === focusedId ? withAlpha(base, FOCUS_ALPHA) : base,
       open: iv.open,
+      strokePx: base === CONFIRMED_MARK ? CONFIRMED_STROKE_PX : CANDIDATE_STROKE_PX,
     });
   }
   return out;
@@ -217,13 +225,14 @@ export function markQuads(
   const strokePx = style.strokePx ?? 2;
   const openPx = style.openPx ?? 3;
   const minPx = style.minPx ?? 2;
-  const sx = (2 * strokePx) / Math.max(1, rect.w);
-  const sy = (2 * strokePx) / Math.max(1, rect.h);
   const minW = (2 * minPx) / Math.max(1, rect.w);
   const minH = (2 * minPx) / Math.max(1, rect.h);
   const out: OverlayQuad[] = [];
   for (const b of boxes) {
     const t1Ns = b.t1Ns ?? edgeNs;
+    const spx = b.strokePx ?? strokePx;
+    const sx = (2 * spx) / Math.max(1, rect.w);
+    const sy = (2 * spx) / Math.max(1, rect.h);
     if (!(b.f1Hz > b.f0Hz) || !(t1Ns > b.t0Ns)) continue;
     let [x0, y0, x1, y1] = toClip({ f0Hz: b.f0Hz, f1Hz: b.f1Hz, t0Ns: b.t0Ns, t1Ns }, paneBox);
     // The drawing floor. Widened about the centre, and never read back as a measurement.
@@ -241,7 +250,7 @@ export function markQuads(
       // The newest edge. Open → this *is* the live edge, and it says so by being marked
       // differently from a measured end (ADR-0019's open cap, expressed as an edge rather than a
       // fill because this pass can only stroke).
-      const h = (2 * (b.open ? openPx : strokePx)) / Math.max(1, rect.h);
+      const h = (2 * (b.open ? Math.max(openPx, spx) : spx)) / Math.max(1, rect.h);
       edge([cx0, Math.max(y1 - h, cy0), cx1, y1], b.open ? OPEN_EDGE_MARK : b.rgba);
     }
   }
