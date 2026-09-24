@@ -110,7 +110,7 @@ fn enc_from_columns(
 
 const CALL_COLUMNS: &str = "call_id, trunk_system_id, t_start, t_end, talkgroup, unit_id, \
      channel, slot, f_hz, encryption, encryption_evidence, algid, key_id, late_entry, \
-     emitter_id, reasons";
+     emitter_id, reasons, observed_until";
 
 struct RawCall {
     id: [u8; 16],
@@ -129,6 +129,7 @@ struct RawCall {
     late_entry: i64,
     emitter_id: Option<[u8; 16]>,
     reasons: String,
+    observed_until: Option<i64>,
 }
 
 fn raw_call(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawCall> {
@@ -149,6 +150,7 @@ fn raw_call(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawCall> {
         late_entry: r.get(13)?,
         emitter_id: r.get(14)?,
         reasons: r.get(15)?,
+        observed_until: r.get(16)?,
     })
 }
 
@@ -172,6 +174,7 @@ fn call_from(raw: RawCall) -> Result<CallRecord, RepoError> {
             .emitter_id
             .map(|b| EmitterId::from_uuid(Uuid::from_bytes(b))),
         reasons: serde_json::from_str(&raw.reasons)?,
+        observed_until: raw.observed_until.map(ts),
     })
 }
 
@@ -547,15 +550,16 @@ impl Repository {
         self.conn.execute(
             "INSERT INTO call_record (call_id, trunk_system_id, t_start, t_end, talkgroup, \
              unit_id, channel, slot, f_hz, encryption, encryption_evidence, algid, key_id, \
-             late_entry, emitter_id, reasons) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+             late_entry, emitter_id, reasons, observed_until) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
              ON CONFLICT (call_id) DO UPDATE SET \
              t_end = excluded.t_end, talkgroup = excluded.talkgroup, unit_id = excluded.unit_id, \
              channel = excluded.channel, slot = excluded.slot, f_hz = excluded.f_hz, \
              encryption = excluded.encryption, \
              encryption_evidence = excluded.encryption_evidence, algid = excluded.algid, \
              key_id = excluded.key_id, late_entry = excluded.late_entry, \
-             emitter_id = excluded.emitter_id, reasons = excluded.reasons",
+             emitter_id = excluded.emitter_id, reasons = excluded.reasons, \
+             observed_until = excluded.observed_until",
             params![
                 blob(c.id),
                 blob(c.system),
@@ -573,6 +577,7 @@ impl Repository {
                 i64::from(c.late_entry),
                 opt_blob(c.emitter_id),
                 serde_json::to_string(&c.reasons)?,
+                c.observed_until.map(|t| t.as_unix_nanos()),
             ],
         )?;
         Ok(())
@@ -622,7 +627,9 @@ impl Repository {
         raws.into_iter().map(call_from).collect()
     }
 
-    /// Calls with no observed end, oldest first.
+    /// Calls with no observed end, oldest first — **three different things** until each row's
+    /// [`CallRecord::ending`] is read: still running, truncated when observation stopped, or never
+    /// observed at all (T-308). Use [`truncated_calls`](Self::truncated_calls) for the middle set.
     pub fn open_calls(&self, system: TrunkSystemId) -> Result<Vec<CallRecord>, RepoError> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {CALL_COLUMNS} FROM call_record WHERE trunk_system_id = ?1 AND t_end IS NULL \
@@ -634,10 +641,32 @@ impl Repository {
         raws.into_iter().map(call_from).collect()
     }
 
+    /// Calls the receiver was **watching when it stopped watching**, oldest first (T-308): present
+    /// at `observed_until`, with nothing claimed after it. Each one's duration is a lower bound,
+    /// and none of them ended as far as anything measured.
+    pub fn truncated_calls(&self, system: TrunkSystemId) -> Result<Vec<CallRecord>, RepoError> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {CALL_COLUMNS} FROM call_record WHERE trunk_system_id = ?1 \
+             AND t_end IS NULL AND observed_until IS NOT NULL ORDER BY observed_until, t_start"
+        ))?;
+        let raws = stmt
+            .query_map(params![blob(system)], raw_call)?
+            .collect::<Result<Vec<_>, _>>()?;
+        raws.into_iter().map(call_from).collect()
+    }
+
     /// Records a call's end (a silence timeout or an explicit release).
+    ///
+    /// Closing is itself an **observation of the end**, so `observed_until` advances to it when it
+    /// lagged (T-308): a row may not simultaneously say "the end was seen at T" and "observation
+    /// stopped before T". A truncated call closed by a later pass therefore stops being truncated,
+    /// which is the only direction that transition may go — an observed end never reverts to "we
+    /// stopped looking".
     pub fn close_call(&mut self, id: CallRecordId, t_end: Timestamp) -> Result<(), RepoError> {
         let changed = self.conn.execute(
-            "UPDATE call_record SET t_end = ?2 WHERE call_id = ?1 AND t_end IS NULL",
+            "UPDATE call_record SET t_end = ?2, \
+             observed_until = MAX(COALESCE(observed_until, ?2), ?2) \
+             WHERE call_id = ?1 AND t_end IS NULL",
             params![blob(id), t_end.as_unix_nanos()],
         )?;
         if changed == 0 {
@@ -736,7 +765,7 @@ mod tests {
     use super::*;
     use crate::cluster::{Fingerprint, Sighting};
     use crate::ids::TrackId;
-    use crate::trunking::P25_ALGID_CLEAR;
+    use crate::trunking::{CallEnding, P25_ALGID_CLEAR};
     use crate::{LinkTarget, TimeRange};
 
     fn t(sec: i64) -> Timestamp {
@@ -938,6 +967,70 @@ mod tests {
                 .is_err()
         );
         assert!(r.call(call.id).unwrap().encryption.is_encrypted());
+    }
+
+    /// T-308: a call still running when observation stopped persists as **truncated** — an
+    /// observation boundary, never an end — and the schema refuses a row that contradicts itself.
+    #[test]
+    fn a_truncated_call_persists_its_observation_boundary_and_never_an_end() {
+        let mut r = Repository::open_in_memory().unwrap();
+        let s = a_system(&mut r);
+
+        let mut grant = GrantEvent::new(s.id, GrantKind::Grant, t(20));
+        grant.f_hz = Some(851.2125e6);
+        r.append_grant(&grant).unwrap();
+
+        // The follower watched to t(25) and the channel was still keyed there.
+        let mut call = CallRecord::from_grant(&grant, false);
+        call.observed_until = Some(t(25));
+        call.reasons = vec!["window-ended".into()];
+        r.put_call(&call).unwrap();
+
+        let back = r.call(call.id).unwrap();
+        assert_eq!(
+            back.ending(),
+            CallEnding::Truncated {
+                observed_until: t(25)
+            }
+        );
+        assert_eq!(
+            back.t_end, None,
+            "the window edge was not written as an end"
+        );
+        assert_eq!(back.observed_duration_ns(), Some(5_000_000_000));
+        assert!(back.duration_is_lower_bound());
+        assert_eq!(r.truncated_calls(s.id).unwrap(), vec![back.clone()]);
+
+        // A grant that could not be followed at all is a different row, and is NOT truncated:
+        // nothing was ever watched.
+        let mut outside = GrantEvent::new(s.id, GrantKind::OutsideWindow, t(21));
+        outside.f_hz = Some(866.0e6);
+        let never = CallRecord::from_grant(&outside, false);
+        r.put_call(&never).unwrap();
+        assert_eq!(r.call(never.id).unwrap().ending(), CallEnding::Unobserved);
+        assert_eq!(r.open_calls(s.id).unwrap().len(), 2, "both lack an end");
+        assert_eq!(
+            r.truncated_calls(s.id).unwrap().len(),
+            1,
+            "only the watched one is truncated"
+        );
+
+        // Closing it later is an observation of the end, so the boundary moves with it rather
+        // than leaving the row claiming an end it had stopped watching for.
+        r.close_call(call.id, t(31)).unwrap();
+        let closed = r.call(call.id).unwrap();
+        assert_eq!(closed.ending(), CallEnding::Observed(t(31)));
+        assert_eq!(closed.observed_until, Some(t(31)));
+        assert!(r.truncated_calls(s.id).unwrap().is_empty());
+
+        // And the schema refuses the contradiction directly.
+        let mut bad = CallRecord::from_grant(&grant, false);
+        bad.t_end = Some(t(30));
+        bad.observed_until = Some(t(25));
+        assert!(
+            r.put_call(&bad).is_err(),
+            "an end later than the observation that measured it"
+        );
     }
 
     #[test]

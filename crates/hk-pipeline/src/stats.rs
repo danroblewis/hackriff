@@ -383,20 +383,54 @@ counter_group!(
         /// Followed channels that carried no transmission at all inside the window. The grant row
         /// still stands; no call is invented for an observation that was not made.
         cc_follow_silent,
+        /// T-628: passes whose receiver **alias** was resolved — the absolute offset behind the
+        /// modulo-raster grid fit, chosen by the crystal's bound alone or by which admissible
+        /// alias put energy on the most granted channels. Following needs it: a grant is an
+        /// absolute frequency.
+        cc_alias_resolved,
+        /// T-628: passes that TRIED the alias and could not settle it (a tie, nothing occupied, or
+        /// no alias inside the bound). Distinct from never trying, which counts in neither.
+        cc_alias_unresolved,
+        /// T-628: in-window grants NOT followed because the alias was unresolved. The grant rows
+        /// stand; no call is filed from a guessed offset.
+        cc_follow_unresolved,
         /// `CallRecord` rows written (metadata only: who, where, when, on what channel — never
         /// audio, never content).
         cc_calls,
         /// Calls whose end was **observed**, by a silence timeout on the granted channel. The
         /// rest carry `t_end = NULL`, which the model defines as "still open, or never observed".
         cc_calls_closed,
+        /// T-308: calls still keyed when the buffered window ended — written **open and
+        /// truncated** (`t_end` NULL, `observed_until` set), never closed at the window's edge.
+        /// Each one's duration is a lower bound, and the count is how often the dwell, not the
+        /// radio, decided where a call stopped being measured.
+        cc_calls_truncated,
+        /// T-308: truncated calls a later pass **continued** — the same row grown across an
+        /// unobserved gap no longer than the silence timeout itself. Counted apart from
+        /// `cc_calls`, because a continuation is not a new call. Ordinarily zero: the built-in
+        /// hunt's gap between passes is 9.5 s, 105x the bound.
+        cc_calls_continued,
         /// T-270: calls a decoded encryption indication flagged as **encrypted**. Metadata about
         /// the call, never its content — nothing is decrypted, and no audio exists to suppress.
         cc_calls_encrypted,
         /// Calls the encryption check refused a voice path (`VoicePermit`): encrypted, or — just
-        /// as firmly — **unknown**. In M4 this is every followed call, because no ALGID is
-        /// reachable and nothing may say "clear" without one. The check sits where a vocoder
-        /// would, so a later audio path cannot skip it by forgetting to ask.
+        /// as firmly — **unknown**. Only a call whose own LDU2 ALGID said clear escapes it
+        /// (T-330). The check sits where a vocoder would, so a later audio path cannot skip it by
+        /// forgetting to ask.
         cc_voice_refused,
+        /// T-330: followed calls whose encryption state was decided by their **own** LDU2 ALGID
+        /// rather than by the grant — the authoritative statement, folded in by `CallHeader`.
+        cc_calls_algid,
+        /// T-849: followed FDMA channels demodulated for P25 Phase 1 voice frames — one DDC and
+        /// at most two C4FM demodulations each, over the window already held. Metadata only: the
+        /// IMBE voice codewords are skipped by position and no audio exists.
+        cc_voice_frame_demods,
+        /// T-849: LDU1s whose link control decoded (NID within the BCH bound, Reed–Solomon
+        /// valid) on followed channels.
+        cc_ldu1,
+        /// T-849: LDU2s whose encryption sync — the call's own ALGID and key id — decoded on
+        /// followed channels. Folded into each call's encryption state (T-330).
+        cc_ldu2,
         /// T-297: characterising chains attached ([`crate::chains::sweep`]).
         ///
         /// Counted **apart from** `attached`, which has always meant a chain attached to

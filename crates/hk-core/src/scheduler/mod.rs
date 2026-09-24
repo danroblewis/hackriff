@@ -70,6 +70,13 @@
 //! scheduled-plan dwells ([`Scheduler::schedule_dwell`]), the bandit/WRR dwell slots, the
 //! background sweep. Without the bandit the v1 policy above is unchanged.
 //!
+//! # Reserved windows (T-276)
+//!
+//! [`Scheduler::reserve`] books a pinned lease for a predicted future window — a satellite pass
+//! computed from cached TLEs by `hk_context::passes`, or a launch window. The scheduler keeps the
+//! window free by clipping lower-tier steps at its start, begins it as a lease there and ends it at
+//! its predicted end; the full pre-emption statement is on [`Reservation`].
+//!
 //! # Not implemented
 //!
 //! Cron plan syntax and hackrf_sweep firmware sweep mode.
@@ -107,7 +114,7 @@ pub mod observe; // T-115
 pub use apply::{AppliedChanges, StepApplier};
 pub use bandit::{
     ArmStatus, AttentionStatus, BanditCounters, BanditKind, BanditStatus, CoverageVisit, Lease,
-    RegionPoi, ScheduledDwell,
+    MAX_LEASES, MAX_RESERVATIONS, RegionPoi, Reservation, ScheduledDwell,
 };
 pub use clock::{AnchoredClock, Clock, SyntheticClock, WallClock};
 pub use config::{HACKRF_ONE_RF_PATH_BOUNDARIES_HZ, MAX_GAIN_STEP_PAIRS, SchedulerConfig};

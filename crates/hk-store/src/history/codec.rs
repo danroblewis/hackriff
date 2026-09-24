@@ -729,6 +729,89 @@ fn encode_payload(tile: &Tile, buf: &mut Vec<u8>) {
     encode_histograms(tile, buf);
 }
 
+/// **T-585: one committed row footprint in stored form.** Encodes cells `[lo, hi)` of `src` into
+/// `buf` (cleared first) exactly as the tile payload stores a cell — observed bitmap, then one
+/// column per statistic over the observed cells in bitmap order: `max` i16 · `mean` i16 ·
+/// `occupancy` u16 · `occupancy_max` u16 · `coverage` u16 · `frames` varint — minus the two
+/// percentile columns, which no row fold ever writes (`docs/16` §6.2). Quantised to the same
+/// grid, so re-encoding the decoded cells at the seal is idempotent.
+///
+/// This form never reaches disk. It is what a coarse node holds a committed row as while the
+/// tile it belongs to is still filling, so the node's residency is one row of accumulator and not
+/// `nt` of them ([`super::live::LiveTile`]).
+pub(crate) fn encode_row_cells(
+    src: &super::tile::RowSrc<'_>,
+    lo: usize,
+    hi: usize,
+    buf: &mut Vec<u8>,
+) {
+    buf.clear();
+    let m = hi.saturating_sub(lo);
+    buf.resize(m.div_ceil(8), 0);
+    let mut observed = 0usize;
+    for (j, f) in (lo..hi).enumerate() {
+        if src.count[f] > 0 {
+            buf[j / 8] |= 1 << (j % 8);
+            observed += 1;
+        }
+    }
+    buf.reserve(observed * 13);
+    let cells = || (lo..hi).filter(|&f| src.count[f] > 0);
+    for f in cells() {
+        buf.extend_from_slice(&q_db(src.max[f]).to_le_bytes());
+    }
+    for f in cells() {
+        let mean = super::stats::db(src.sum_lin[f] / f64::from(src.count[f]));
+        buf.extend_from_slice(&q_db(mean).to_le_bytes());
+    }
+    for f in cells() {
+        let (obs, occ) = src.cell_obs(f);
+        let ratio = if obs > 0.0 { occ / obs } else { 0.0 };
+        buf.extend_from_slice(&q_frac(ratio).to_le_bytes());
+    }
+    for f in cells() {
+        buf.extend_from_slice(&q_frac(f64::from(src.occ_max[f])).to_le_bytes());
+    }
+    for f in cells() {
+        let (obs, _) = src.cell_obs(f);
+        buf.extend_from_slice(&q_frac(obs / src.t_cell_s).to_le_bytes());
+    }
+    for f in cells() {
+        put_varint(buf, u64::from(src.count[f]));
+    }
+}
+
+/// [`encode_row_cells`]'s inverse over `m` cells: calls `cell(j, frames, max_db, mean_db,
+/// occupancy, occupancy_max, coverage)` for each observed cell `j` in `0..m`. `None` if the
+/// bytes do not parse, in which case nothing (or a prefix) was delivered.
+pub(crate) fn decode_row_cells(
+    bytes: &[u8],
+    m: usize,
+    mut cell: impl FnMut(usize, u32, f32, f32, f32, f32, f32),
+) -> Option<()> {
+    let mut c = Cur { b: bytes, p: 0 };
+    let bitmap = c.take(m.div_ceil(8))?;
+    let observed = |j: usize| bitmap[j / 8] & (1 << (j % 8)) != 0;
+    let k = (0..m).filter(|&j| observed(j)).count();
+    let cols: Vec<&[u8]> = (0..5)
+        .map(|_| c.take(k.checked_mul(2)?))
+        .collect::<Option<_>>()?;
+    let at = |col: usize, i: usize| [cols[col][2 * i], cols[col][2 * i + 1]];
+    for (i, j) in (0..m).filter(|&j| observed(j)).enumerate() {
+        let count = u32::try_from(c.varint()?).ok()?;
+        cell(
+            j,
+            count,
+            dq_db(i16::from_le_bytes(at(0, i))),
+            dq_db(i16::from_le_bytes(at(1, i))),
+            dq_frac(u16::from_le_bytes(at(2, i))),
+            dq_frac(u16::from_le_bytes(at(3, i))),
+            dq_frac(u16::from_le_bytes(at(4, i))),
+        );
+    }
+    (c.p == bytes.len()).then_some(())
+}
+
 /// Serialises `tile` into `buf` (cleared first) as format [`FORMAT_VERSION`], compressing the
 /// payload with zstd at `compression` when that shrinks it. `payload` is scratch. Returns the size
 /// the file would have had with a raw payload (for the compression-ratio counter).
@@ -1032,6 +1115,9 @@ pub(crate) fn decode_bytes(bytes: &[u8], g: &LevelGeometry, bins: usize) -> Opti
         tile.col_done = (0..g.nt)
             .rev()
             .find(|&t| (0..nf).any(|f| tile.count[t * nf + f] > 0));
+        // T-584: every row this tile carries is folded upwards by the reopen rebuild (see
+        // `Pyramid::open`), so live maintenance must not fold them a second time.
+        tile.folded_through = tile.col_done;
     }
     Some(tile)
 }

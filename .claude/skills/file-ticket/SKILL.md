@@ -25,6 +25,7 @@ Do one of, don't file a duplicate and don't just say "it exists":
 **Only the coordinator allocates an id (T-841).** Any other session describes the ticket in prose, with the exact evidence, in its result/handback and lets the coordinator file it — `max+1` over the board *your branch* can see collides with whatever another session is filing at the same instant (five times on 2026-09-22, once 26 ids wide). Amending an existing ticket is unaffected.
 - Append an ID (never renumber): `T-<max+1>`, computed over **`main`'s board plus every branch tip the coordinator has out** (`git show main:docs/tasks.yaml`), never over one worktree's copy. Keep `docs/05` + `use-cases.yaml` in sync if it adds a use case (append an ID, never renumber).
 - Set `milestone`, `status: todo`, `priority`, `model`, and — per `docs/06 §3` / `docs/10 §2` — `capabilities` / `hardware_fit` / `accessory` / `fit_flags` / `test_tier`. Use-case IDs are the definition of done.
+- **Cite a large ADR by section (T-620):** an ADR over ~300 lines (`wc -l docs/adr/*.md`; today 0011–0013, 0015–0017, 0021, 0022) is named with the section the ticket needs — `ADR-0016 §6`, not `ADR-0016` — so the worker reads ~1–8k tokens instead of 11–28k.
 - **`blocked` requires `blocked_on`** — what specifically unblocks it (a user decision, hardware, or another ticket). No real blocker → `todo`/`deferred`, not `blocked`. Enforced by `py/tests/test_task_board.py`.
 - **Quote any value containing a colon** (e.g. a `blocked_on` with "floor: 0" inside) — an unquoted colon breaks the YAML and the task map.
 

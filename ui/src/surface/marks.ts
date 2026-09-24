@@ -53,6 +53,10 @@ export const OPEN_EDGE_MARK: readonly [number, number, number, number] = [0.98, 
  * own mark rather than as a claim about the air, and cannot be mistaken for the amber a selection
  * that exists is drawn in. */
 export const PENDING_MARK: readonly [number, number, number, number] = [1, 1, 1, 0.9];
+/** A saved measurement (T-822 / MAP-22): sky blue, distinct from every other ink on the surface —
+ * a measurement is a claim about a **span the user marked**, not a detection (teal/lavender), a
+ * selection (amber) or an explained artifact (grey). */
+export const MEASUREMENT_MARK: readonly [number, number, number, number] = [0.365, 0.686, 0.937, 0.9];
 
 export interface MarkStyle {
   /** Edge thickness, device px. */
@@ -72,7 +76,7 @@ export interface MarkStyle {
  * came off the API, and `t1Ns === null` means *open at the live edge*, never *unknown*. */
 export interface MarkBox {
   readonly id: string;
-  readonly kind: "signal-box" | "selection-box" | "pending-region";
+  readonly kind: "signal-box" | "selection-box" | "pending-region" | "measurement-box";
   readonly f0Hz: number;
   readonly f1Hz: number;
   readonly t0Ns: number;
@@ -173,6 +177,30 @@ export function selectionMarkBoxes(
     });
   }
   return out;
+}
+
+/** A saved measurement as this file reads it (`GET /api/measurements`, T-822 / MAP-22), narrowed to
+ * what a rectangle needs. A measurement with zero extent on an axis (a pure `delta_t` or a pure
+ * `delta_f`) draws no box — the same rule a zero-width selection or signal box already follows —
+ * and is still readable from the list/hover path, never fabricated a floor width to be seen. */
+export interface MarkMeasurement {
+  readonly id: string;
+  readonly f_lo_hz: number;
+  readonly f_hi_hz: number;
+  readonly t0_s: number;
+  readonly t1_s: number;
+}
+
+/** The rectangles for saved measurements. Never open: a measurement is two cursors the user placed,
+ * with nothing left to grow at a live edge. */
+export function measurementMarkBoxes(items: readonly MarkMeasurement[], focusedId: string | null): MarkBox[] {
+  return items.map((m) => ({
+    id: m.id, kind: "measurement-box",
+    f0Hz: m.f_lo_hz, f1Hz: m.f_hi_hz,
+    t0Ns: m.t0_s * S_TO_NS, t1Ns: m.t1_s * S_TO_NS,
+    rgba: m.id === focusedId ? withAlpha(MEASUREMENT_MARK, FOCUS_ALPHA) : MEASUREMENT_MARK,
+    open: false,
+  }));
 }
 
 /**

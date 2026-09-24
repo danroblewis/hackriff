@@ -207,6 +207,12 @@ impl Fixture {
         let state = ApiState {
             history: Some(Arc::new(Mutex::new(p))),
             observations: Some(obs),
+            // T-572: the hot-tile cache ON, as a served run has it — so this file's 304 assertions
+            // are made against a server that may answer a sealed tile from RAM. A cache that
+            // changed the body between a miss and a hit would turn the re-read back into a 200,
+            // which is the one thing T-574 exists to prevent, and it is asserted here rather than
+            // argued for.
+            tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
             ..ApiState::default()
         };
         Fixture {
@@ -390,4 +396,116 @@ fn sealed_flag_in_body_matches_header_treatment() {
     let bv: serde_json::Value = serde_json::from_slice(&b.body).unwrap();
     assert_eq!(bv["sealed"], serde_json::json!(true));
     assert!(b.header("etag").is_some());
+}
+
+/// **T-700 / T-533: the transfer coding must not disturb the validator, and `Vary` is ONE header.**
+///
+/// `/api/tiles` answers itself rather than through the generic JSON tail (T-574 gives a sealed tile
+/// an `ETag` and an immutable cache), so the gzip of T-533 is applied on this route's own path —
+/// and that is exactly where the two features could have collided. Two rules are asserted:
+///
+///  1. **gzip is a transfer coding, so the `ETag` is the same tag either way.** A cache that stored
+///     the identity form and revalidates over a gzip-accepting hop must still get its `304`, and a
+///     `304` carries no body and therefore no content coding.
+///  2. **`Vary` names both negotiation axes in one header.** `Origin` was already stated and T-533
+///     negotiates content; a second `Vary:` line beside the first is a cache-correctness bug — a
+///     cache reading only the first keys on `Origin` alone and can hand the gzipped body to a
+///     client that refused gzip. `header()` returns the FIRST match, so this fails on that shape.
+///
+/// The sealed tile this fixture builds is small (8 cells, a few hundred bytes), so the `ETag` rules
+/// are asserted there and the *compression* rules on a 256-cell read of the same store — whose
+/// extent runs past the watermark and is therefore live, which is why it is checked for the absence
+/// of an `ETag` rather than for one. Counts and status codes only, never wall clock.
+#[test]
+fn gzip_does_not_change_a_tiles_validator_and_vary_is_one_header() {
+    let fx = Fixture::build(CELLS as i64);
+    let server = serve(fx.state);
+    let addr = server.local_addr();
+
+    // ---- 1. the sealed tile: the ETag is the same tag whatever coding was negotiated -----------
+    let plain = get(addr, &path_a(), &[]);
+    assert_eq!(plain.status, 200, "{:?}", plain.headers);
+    assert_eq!(
+        plain.header("content-encoding"),
+        None,
+        "a request that asked for no coding must not be given one"
+    );
+    let etag = plain
+        .header("etag")
+        .expect("sealed tile must carry an ETag")
+        .to_string();
+
+    let zipped = get(addr, &path_a(), &[("Accept-Encoding", "gzip")]);
+    assert_eq!(zipped.status, 200, "{:?}", zipped.headers);
+    assert_eq!(
+        zipped.header("etag"),
+        Some(etag.as_str()),
+        "the ETag is over the REPRESENTATION, so a transfer coding may not change it: \
+         {:?} against {etag:?}",
+        zipped.header("etag")
+    );
+
+    // The validator still validates over a gzip-accepting hop, and the 304 carries nothing at all.
+    let revalidated = get(
+        addr,
+        &path_a(),
+        &[("If-None-Match", &etag), ("Accept-Encoding", "gzip")],
+    );
+    assert_eq!(
+        revalidated.status, 304,
+        "an unchanged sealed tile must still be a 304 when gzip is offered"
+    );
+    assert_eq!(revalidated.body.len(), 0, "a 304 transfers no body");
+    assert_eq!(
+        revalidated.header("content-encoding"),
+        None,
+        "a bodyless 304 must name no content coding"
+    );
+    assert_eq!(revalidated.header("etag"), Some(etag.as_str()));
+
+    // ---- 2. a body past the floor: it really is compressed, and Vary really is one header ------
+    let big =
+        format!("/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=256&device={DEVICE}");
+    let big_plain = get(addr, &big, &[]);
+    assert_eq!(big_plain.status, 200, "{:?}", big_plain.headers);
+    assert!(
+        big_plain.body.len() >= 4096,
+        "this half's premise is a body past the compression floor, got {} B",
+        big_plain.body.len()
+    );
+    let big_zipped = get(addr, &big, &[("Accept-Encoding", "gzip")]);
+    assert_eq!(
+        big_zipped.header("content-encoding"),
+        Some("gzip"),
+        "a {} B body was not compressed",
+        big_plain.body.len()
+    );
+    assert!(
+        big_zipped.body.len() < big_plain.body.len(),
+        "{} B gzipped against {} B",
+        big_zipped.body.len(),
+        big_plain.body.len()
+    );
+    for r in [&plain, &zipped, &big_plain, &big_zipped] {
+        let vary = r.header("vary").expect("every answer must state Vary");
+        let v = vary.to_ascii_lowercase();
+        assert!(
+            v.contains("origin") && v.contains("accept-encoding"),
+            "Vary must name both negotiation axes in ONE header, got {vary:?}"
+        );
+    }
+    eprintln!(
+        "T-700: 256-cell tile {} B -> {} B gzipped; sealed 8-cell ETag unchanged across codings",
+        big_plain.body.len(),
+        big_zipped.body.len()
+    );
+
+    // A caller that says it CANNOT read gzip is not sent gzip, even past the floor.
+    let refused = get(addr, &big, &[("Accept-Encoding", "gzip;q=0")]);
+    assert_eq!(refused.status, 200);
+    assert_eq!(
+        refused.header("content-encoding"),
+        None,
+        "`gzip;q=0` is a refusal and must be honoured"
+    );
 }

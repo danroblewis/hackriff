@@ -26,7 +26,7 @@
 use std::sync::OnceLock;
 
 use hk_e2e::blind::{matches_truth, matching, truth_emissions};
-use hk_e2e::{Fixture, TruthItem};
+use hk_e2e::{Checks, Fixture, TruthItem};
 use hk_model::detection::SpurReason;
 use hk_model::{
     Detection, FreqRange, IdentityScheme, InventoryEntry, InventoryIdentity, InventoryQuery,
@@ -98,9 +98,7 @@ fn strongest_for(dets: &[Detection], t: &TruthItem) -> f64 {
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
-#[test]
-fn fm_band_every_measured_emission_is_found_blind() {
-    let Some(r) = run() else { return };
+fn fm_band_every_measured_emission_is_found_blind(r: &FmBandRun) {
     assert_eq!(r.summary.always_on_lost_samples, 0);
     assert!(
         r.summary.counter("/chains/attached") >= 1,
@@ -122,9 +120,7 @@ fn fm_band_every_measured_emission_is_found_blind() {
     );
 }
 
-#[test]
-fn fm_band_confirmed_emitters_are_the_measured_emissions() {
-    let Some(r) = run() else { return };
+fn fm_band_confirmed_emitters_are_the_measured_emissions(r: &FmBandRun) {
     let confirmed = confirmed(r);
     let truth = truth_emissions(&r.fx);
     for t in &truth {
@@ -175,9 +171,7 @@ fn fm_band_confirmed_emitters_are_the_measured_emissions() {
 /// Measured when the fixture was annotated: 9.3 dB at 100.3 MHz and 6.2 dB at 101.42–101.49 MHz.
 const SILENCE_MARGIN_DB: f64 = 5.0;
 
-#[test]
-fn fm_band_measured_silence_is_not_catalogued() {
-    let Some(r) = run() else { return };
+fn fm_band_measured_silence_is_not_catalogued(r: &FmBandRun) {
     let scenario =
         r.fx.scenario()
             .unwrap_or_else(|| panic!("[{SIGNAL_062}] the fixture has no scenario truth"));
@@ -255,9 +249,7 @@ fn fm_band_measured_silence_is_not_catalogued() {
 /// suite uses, carried over unchanged rather than tightened to today's output.
 const SILENT_WINDOW_MAX_DETECTIONS: usize = 2;
 
-#[test]
-fn fm_band_measured_silence_stays_within_the_designed_false_alarm_rate() {
-    let Some(r) = run() else { return };
+fn fm_band_measured_silence_stays_within_the_designed_false_alarm_rate(r: &FmBandRun) {
     let scenario =
         r.fx.scenario()
             .unwrap_or_else(|| panic!("[{SIGNAL_062}] the fixture has no scenario truth"));
@@ -333,9 +325,7 @@ fn fm_band_measured_silence_stays_within_the_designed_false_alarm_rate() {
     assert!(failures.is_empty(), "[{SIGNAL_062}] {failures:#?}");
 }
 
-#[test]
-fn fm_band_wfm_rds_decoded_from_a_second_real_capture() {
-    let Some(r) = run() else { return };
+fn fm_band_wfm_rds_decoded_from_a_second_real_capture(r: &FmBandRun) {
     // The station the analysis pass measured with a 19 kHz pilot and an RDS PI. Its PI was
     // decoded independently on a different capture of the same station 2.5 days earlier
     // (`fm_100p8M_2p4M_l32g30a1_t1p5_5s`, py/fixtures/rds_ref.py), so it is truth and not this
@@ -413,9 +403,7 @@ fn fm_band_wfm_rds_decoded_from_a_second_real_capture() {
     );
 }
 
-#[test]
-fn fm_band_receiver_artefacts_are_flagged_not_catalogued() {
-    let Some(r) = run() else { return };
+fn fm_band_receiver_artefacts_are_flagged_not_catalogued(r: &FmBandRun) {
     let dets = detections(r);
     let confirmed = confirmed(r);
     let artefacts = r.fx.artefacts();
@@ -470,4 +458,36 @@ fn fm_band_receiver_artefacts_are_flagged_not_catalogued() {
             at.len()
         );
     }
+}
+
+/// The module's six assertions, over **one** replay of the 216 MB capture.
+///
+/// They were six `#[test]`s sharing a `static OnceLock`, which shares nothing under nextest —
+/// every test is its own process, so the recording was replayed six times per gate for one run
+/// (`docs/test-speed-review-2026-09-22.md` §2.4). Each is still a separately named check that runs
+/// even if an earlier one fails; see [`hk_e2e::Checks`].
+#[test]
+fn fm_band_2026_09_15() {
+    let Some(r) = run() else { return };
+    let mut c = Checks::new("fm_band_2026_09_15");
+    c.check("every_measured_emission_is_found_blind", || {
+        fm_band_every_measured_emission_is_found_blind(r)
+    });
+    c.check("confirmed_emitters_are_the_measured_emissions", || {
+        fm_band_confirmed_emitters_are_the_measured_emissions(r)
+    });
+    c.check("measured_silence_is_not_catalogued", || {
+        fm_band_measured_silence_is_not_catalogued(r)
+    });
+    c.check(
+        "measured_silence_stays_within_the_designed_false_alarm_rate",
+        || fm_band_measured_silence_stays_within_the_designed_false_alarm_rate(r),
+    );
+    c.check("wfm_rds_decoded_from_a_second_real_capture", || {
+        fm_band_wfm_rds_decoded_from_a_second_real_capture(r)
+    });
+    c.check("receiver_artefacts_are_flagged_not_catalogued", || {
+        fm_band_receiver_artefacts_are_flagged_not_catalogued(r)
+    });
+    c.finish();
 }

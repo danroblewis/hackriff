@@ -30,8 +30,13 @@ from hkpy.synth.__main__ import main as cli_main
 #: Small parameter sets so the suite stays fast.
 SMALL: dict[str, dict] = {
     "tone": {},
+    "nbfm_voice": {"duration_s": 0.3},
+    "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
+    # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
+    # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
+    "multipath_echo": {"duration_s": 0.6},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
@@ -44,12 +49,16 @@ SMALL: dict[str, dict] = {
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
     "trunk_p25p2_control_channel": {"duration_s": 0.2},
+    "trunk_voice_frames_control_channel": {"duration_s": 0.5},
     "trunk_dmr_control_channel": {"duration_s": 0.2},
     "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
     "mismatched_hypothesis": {"duration_s": 0.3},
+    "ofdm_nonstandard_cp": {"duration_s": 0.1},
+    "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
+    "qam16_unframed": {"duration_s": 0.1},
 }
 
 
@@ -523,6 +532,81 @@ def test_encrypted_trunk_scene_stages_an_encrypted_grant_and_a_late_entry_channe
     # All four granted frequencies are distinct, so no assertion can be satisfied by the wrong one.
     assert len({e["encrypted_target_hz"], e["late_entry_target_hz"],
                 t["follow_target_hz"], t["grant_target_hz"]}) == 4
+
+
+def test_p25_voice_frame_codes_have_the_properties_the_decoder_relies_on():
+    """T-849: the NID, hexbit and Reed-Solomon codes this encoder writes are the codes they claim.
+
+    Checked by property rather than by a second copy of the same arithmetic: every NID codeword is
+    a multiple of the BCH generator (and the generator divides x^63 + 1, as a cyclic code's must);
+    the Hamming code has minimum distance 3; and every RS codeword vanishes at alpha^1..alpha^(n-k).
+    """
+    from hkpy.synth import trunking as tk
+
+    g = tk.P25_NID_BCH_GENERATOR
+    assert g.bit_length() - 1 == 47
+
+    def polymod(a: int, m: int) -> int:
+        while a.bit_length() >= m.bit_length():
+            a ^= m << (a.bit_length() - m.bit_length())
+        return a
+
+    assert polymod((1 << 63) | 1, g) == 0, "a BCH(63,16) generator divides x^63 + 1"
+    for nac, duid in ((0x293, tk.P25_DUID_LDU1), (0xF7E, tk.P25_DUID_LDU2), (0, 0), (0xFFF, 0xF)):
+        nid = tk.p25_nid(nac, duid)
+        assert nid >> 48 == (nac << 4) | duid, "systematic: NAC and DUID lead"
+        assert polymod(nid >> 1, g) == 0
+        assert bin(nid).count("1") % 2 == 0, "trailing even parity"
+
+    words = [tk.hamming_10_6(d) for d in range(64)]
+    assert min(bin(a ^ b).count("1") for i, a in enumerate(words) for b in words[i + 1:]) == 3
+
+    rng = np.random.default_rng(849)
+    for k in (12, 16):
+        data = [int(v) for v in rng.integers(0, 64, k)]
+        cw = data + tk.rs64_parity(data, 24)
+        for j in range(1, 24 - k + 1):
+            acc = 0
+            for s in cw:  # Horner, first symbol = highest power
+                acc = tk._gf_mul(acc, tk._GF_EXP[j % 63]) ^ s
+            assert acc == 0, f"RS(24,{k}) codeword is not zero at alpha^{j}"
+
+    ldu = tk.p25_ldu_dibits(tk.P25_DUID_LDU1, tk.p25_lc_group_voice(1, 2), rng)
+    assert len(ldu) == tk.P25_LDU_DIBITS
+    assert list(ldu[:24]) == list(tk.sync_dibits())
+    assert all(ldu[i] == 0b10 for i in range(35, tk.P25_LDU_DIBITS, 36)), "status dibits"
+
+
+def test_voice_frames_scene_stages_a_clear_and_an_encrypted_call_the_grants_cannot_tell_apart(
+        tmp_path):
+    """T-849: two granted channels whose LDU2 ALGIDs differ while their grants say nothing."""
+    manifest = gen(tmp_path, "trunk_voice_frames_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]["tsbk"]
+    vf = t["voice_frames"]
+    chans = {c["name"]: c for c in vf["channels"]}
+    assert set(chans) == {"clear", "encrypted"}
+    assert chans["clear"]["algid"] == 0x80 and chans["encrypted"]["algid"] != 0x80
+    for name, c in chans.items():
+        assert t["base_hz"] + t["spacing_hz"] * c["channel"] == c["target_hz"]
+        assert c["channel_16bit"] == (t["iden"] << 12) | c["channel"]
+        assert c["grant_service_options"] == 0, "the grant must state nothing about encryption"
+        assert t["counts"][f"grant-voice-frames-{name}"] >= 1
+        assert abs(c["offset_hz"]) < 0.4 * t["sample_rate_hz"], "inside the window"
+        # The first keying holds a whole LDU1 and a whole LDU2 inside the hunt's first 0.5 s.
+        duids = [u["duid"] for u in c["ldus"] if u["start_s"] + 0.18 <= 0.5]
+        assert "ldu1" in duids and "ldu2" in duids, c["ldus"]
+        assert c["keyings_s"][0][1] + 0.09 < 0.5, "its end is observable inside the window"
+    assert chans["clear"]["target_hz"] != chans["encrypted"]["target_hz"]
+    assert len({c["target_hz"] for c in chans.values()}
+               | {t["follow_target_hz"], t["grant_target_hz"]}) == 4
+
+
+def test_trunk_scenes_without_voice_frames_carry_none(tmp_path):
+    """The voice-frame branch is off by default: no earlier scene grows voice-frame truth."""
+    manifest = gen(tmp_path, "trunk_tsbk_control_channel")
+    _, meta, _ = load(manifest)
+    assert "voice_frames" not in scenario_truth(meta)["trunking"]["tsbk"]
 
 
 def test_tsbk_trunk_scene_is_unchanged_by_the_encryption_branch(tmp_path):

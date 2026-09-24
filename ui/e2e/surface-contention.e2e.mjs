@@ -27,6 +27,21 @@
 //   - and the run is rejected as INCONCLUSIVE if the second tab was never made to wait, so a race
 //     that did not happen cannot bank a green.
 //
+// **What this file got wrong until 2026-09-23, and it was not the assertions.** It failed three
+// times in one day's merge gate — always in the 13-spec run at three lanes, never alone — on the
+// first tab's readout: "its share is 4 of 4 with two clients up". The cause was that **the second
+// tab was opened in the same browser window, which makes the first one `hidden`, and a hidden page
+// is given no `requestAnimationFrame`** (measured: 26 frames/s before, 0 after, with Chrome's
+// background-timer and renderer-backgrounding flags already off). The surface asks for tiles from
+// its render pass, so from that line on the first tab was not competing for anything — the route
+// saw only the tail of its earlier queue draining, three requests on a bad day, and never had to
+// tell it a share. The readout then honestly stated the last share it was given, 4, and the
+// assertion turned the *absence* of a race into a red. Two fixes, both here: the second page opens
+// in its **own window** so both stay `visible` and both keep asking, and the storm is **waited for**
+// on the first tab's own readout instead of assumed to have started. The readout assertion is now
+// gated on a wire fact — that the route answered the first tab a read it began after the second
+// client registered — and waited for rather than sampled once.
+//
 // **The red baseline is real and is one environment variable**: `HK_TILE_FAIR_SHARE=off` restores
 // the first-come-first-served route, and the peak-share assertion below goes red against it (the
 // first tab holds all four while the second boots). `cost.fair_share` reaches this spec as
@@ -90,13 +105,35 @@ test("a second tab can open /surface while the first is saturating the tile rout
   // second, and on a young record the first tab's zoom is finished inside that — so a spec that
   // creates the tab and then navigates measures a route nobody is competing for, which is exactly
   // how a first-come-first-served route passes a fairness test. Created here, navigated below with
-  // nothing in between.
-  const second = await browser.page();
+  // only a readiness wait in between.
+  //
+  // **In its OWN WINDOW, and that is the whole contention** (2026-09-23). A second target in the
+  // same window becomes that window's active tab, which makes the first page `hidden`, and a hidden
+  // page gets no `requestAnimationFrame` — measured 26 frames/s before, **0 after**. The surface
+  // asks for tiles from its render pass, so as a same-window tab this line stopped the first tab's
+  // fetching *before* the storm below was even clicked: what the route then saw was the tail of the
+  // first tab's earlier queue draining through completion callbacks, three requests on a bad day.
+  // That is the flake this file failed under three times in the 2026-09-23 gate ("its share is 4 of
+  // 4 with two clients up"): with the first tab no longer asking, the route never had to tell it a
+  // share, and the readout honestly kept the last one it was given. A separate window keeps both
+  // pages `visible`, which is what two tabs competing for a route actually means.
+  const second = await browser.page(undefined, { newWindow: true });
 
-  // Four viewports and a ten-level jump: the worst tile storm this page has, started in the same
-  // step as the navigation so the two overlap.
+  // Four viewports and a ten-level jump: the worst tile storm this page has.
+  const PANES = `(${STATUS}.match(/(\\d+) panes? \\+ map/)?.[1] | 0)`;
+  const panesBefore = Number(await first.eval(PANES));
   await first.eval(`(${BUTTON("Split ⇔")})?.click(), (${BUTTON("Split ⇕")})?.click(), ` +
     `(${BUTTON("Whole surface")})?.click(), 1`);
+  // **And the storm is WAITED FOR, not assumed** (2026-09-23). A click only moves the viewports;
+  // the tiles they want are enumerated by the next render pass, so "click, then navigate" asks the
+  // machine's scheduling whether there was anything to contend with — and the answer was sometimes
+  // no. Both facts are read off the first tab's own readout, which it prints every 500 ms: the new
+  // panes are *drawn* (the pane count it states has grown), and it has at least the route's whole
+  // cap of tile work outstanding between flight and queue. That is the state the title claims
+  // ("while the first is saturating the tile route"), read from the page rather than hoped for.
+  await first.waitFor("the first tab to have drawn its new panes and be saturating the tile route",
+    `${PANES} > ${panesBefore} && ((${STATUS}.match(/(\\d+)\\+\\d+\\/\\d+ in flight/)?.[1] | 0) + ` +
+    `(${STATUS}.match(/queue (\\d+)/)?.[1] | 0)) >= ${limit}`, { timeoutMs: 60000 });
 
   // Tab two, opened into that. No settling, no waiting for the first to go quiet: the whole point
   // is that the route is busy. Everything the first tab does from HERE is what has to leave room.
@@ -161,10 +198,42 @@ test("a second tab can open /surface while the first is saturating the tile rout
     r.status !== 503 && r.startedMs <= contentionTo && (r.respondedMs ?? r.endedMs ?? Date.now()) >= contentionFrom);
   const peak = peakConcurrency(during, Date.now());
   // And from the page's own status line, which is what a user can see: `2+0/2 in flight (share 2)`.
-  const statusLine = (await first.$text('[data-slot="status"]')) ?? "";
-  const m = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)\)/.exec(statusLine);
+  //
+  // **Waited for, and what it may conclude is decided by the first tab's own REQUESTS** (2026-09-23).
+  // A client
+  // learns its share from the route's answers and nowhere else (`tilecache.ts`'s `serverInFlightShare`
+  // on every response, and on every `503`), so the readout can only state the new share once the
+  // route has answered a read the first tab BEGAN after the second client was in the table. Sampled
+  // once, the assertion was really asking the machine's scheduling whether that had happened yet —
+  // docs/10 §3.6 kind 1, and three reds in the 2026-09-23 gate ("its share is 4 of 4"). So: poll
+  // until the readout agrees, with `timeoutMs` as a failure bound rather than the wait (a run where
+  // it is already right returns on the first sample), and decide fail-vs-inconclusive below from
+  // the wire rather than from the clock.
+  // T-630 deflake (2026-09-23, kept with main's harness/spec): the status line now states the
+  // share's AGE too — "share 2, stated 0.4 s ago" or "share 4, assumed (the route has not stated
+  // one)" — so the regex reads up to the share digits and stops there, rather than requiring the
+  // closing paren to follow them immediately.
+  const readShare = (s) => {
+    const mm = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/.exec(s ?? "");
+    return mm ? Number(mm[4]) : null;
+  };
+  const settled = await first.waitForValue("the first tab's status line to state the share the route gave it",
+    STATUS, (s) => readShare(s) !== null && readShare(s) <= share, { timeoutMs: 30000 });
+  const statusLine = String(settled.value ?? "");
+  const m = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/.exec(statusLine);
+  // **The wire fact that decides whether the readout CAN be asserted on.** The route fixes a
+  // client's share when it admits the request, so a read the first tab started only after the route
+  // had already answered the second tab's first one is certain to have been decided with two
+  // clients registered. Count those, from the two pages' own records: one or more of them and the
+  // first tab was told its share and had every chance to say so; none of them and it was never
+  // told, which is a fact about this run and not a defect in the client.
+  const secondAnsweredAt = tiles(second).find((r) => r.respondedMs !== null)?.respondedMs ?? null;
+  const told = secondAnsweredAt === null ? [] : tiles(first).filter(
+    (r) => r.startedMs >= secondAnsweredAt && r.respondedMs !== null);
   t.diagnostic(`first tab: peak ${peak} admitted tile reads over ${during.length} requests the route ` +
-    `served it while the second tab booted; status line "${m ? m[0] : statusLine}"`);
+    `served it while the second tab booted; the route answered it ${told.length} read(s) begun after ` +
+    `the second tab was registered; status line "${m ? m[0] : statusLine}" ` +
+    `(settled after ${settled.polls} sample(s), ${settled.ms} ms)`);
   // **Non-vacuity, before the assertion rather than after it**: a peak measured over a window in
   // which the first tab asked for nothing proves nothing about who the route would have preferred.
   // Say so, and do not assert on it — a green banked on a race that did not happen is the failure
@@ -180,8 +249,23 @@ test("a second tab can open /surface while the first is saturating the tile rout
     `booting; its share is ${share}. This is the defect T-630 exists for: the cap was ` +
     "first-come-first-served, so a tab that re-asks the instant a slot frees never gives one up.");
   assert.ok(m, `the first tab's status line must state its in-flight share: "${statusLine}"`);
-  assert.ok(Number(m[4]) <= share,
-    `the first tab still believes its share is ${m[4]} of ${limit} with two clients up: "${m[0]}"`);
+  // Gated on the wire, exactly as the peak above is gated on `contested`: what the readout states
+  // is only the client's to get right **once the route has told it**. The gate is one-sided, and
+  // that matters — a readout that already agrees is a pass on its own terms and needs no excuse,
+  // so the escape hatch is reachable only by a run where the number is wrong AND the route was
+  // never asked again to say otherwise. Note that the wait above is what makes that rare: a run
+  // whose readout disagrees spends its whole failure bound with the first tab still reading, which
+  // is exactly how the `HK_TILE_FAIR_SHARE=off` baseline reaches this line with the evidence to be
+  // red (measured 2026-09-23: 3 reads answered, 199 readouts, over 30 s).
+  assert.ok(Number(m[4]) <= share || told.length === 0,
+    `the first tab still believes its share is ${m[4]} of ${limit} with two clients up: "${m[0]}". ` +
+    `The route answered ${told.length} of its reads begun after the second tab registered, so it ` +
+    `was told; it had ${settled.polls} readout(s) over ${settled.ms} ms to say so.`);
+  if (Number(m[4]) > share) {
+    t.diagnostic("INCONCLUSIVE: the route answered the first tab no read begun after the second tab " +
+      `registered, so it was never told its share; the readout's "share ${m[4]}" is the last number ` +
+      "the route gave it and is honest. The boot bounds and the peak above still hold.");
+  }
   assert.ok(Number(m[1]) + Number(m[2]) <= Number(m[3]),
     `the first tab reports more reads out than its own operating cap: "${m[0]}"`);
 

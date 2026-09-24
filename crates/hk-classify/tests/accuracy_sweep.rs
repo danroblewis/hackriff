@@ -269,7 +269,7 @@ fn out_of_taxonomy_generators_come_back_unknown() {
     let recall = f64::from(unknown) / f64::from(total);
     let adr_recall = f64::from(adr_unknown) / f64::from(adr_total);
     eprintln!(
-        "[T-199] held-out unknown recall {recall:.2} of {total} ({adr_recall:.2} over ADR-0016 §7's own six of {adr_total}): {per_class:?}"
+        "[T-199] accuracy_sweep.rs OWN-SEEDS draw (NOT the acceptance-m3 gate's 396-snippet draw; see ADR-0016 §7.2) held-out unknown recall {recall:.2} of {total} ({adr_recall:.2} over ADR-0016 §7's own six of {adr_total}): {per_class:?}"
     );
     // The ADR's floor, over the ADR's population, unchanged. Measured 1.000: all six abstain at
     // every seed.

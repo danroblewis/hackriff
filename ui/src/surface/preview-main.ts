@@ -18,6 +18,7 @@ import {
   viewportScaleButton, type ContrastButton,
 } from "./contrast";
 import { newClientId, setTileClientId } from "./clientid";
+import { shareText } from "./tilecache";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
 import { SurfacePreview, isBackpressure, probeSurface } from "./preview";
@@ -209,10 +210,18 @@ async function main(): Promise<void> {
       // aborted request keeps costing the route a slot until its read finishes (T-454).
       // T-630: and the SHARE this client is allowed of the route's slots, which is the difference
       // between "this tab is backing off" and "another client is reading tiles too".
-      `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight (share ${preview.view.surface.cache.inFlightCeiling})`,
+      // The share is the route's word as of its LAST answer to this tab, decided when that read was
+      // admitted — the route tells a client nothing between answers. So it is stated with its age:
+      // an idle tab keeps the number it was last told while other tabs come and go, and "share 4"
+      // with no age would claim a current fact this page cannot know.
+      `${preview.view.surface.cache.inFlightCount}+${preview.view.surface.cache.abandonedSlots}/${preview.view.surface.cache.inFlightLimit} in flight (${shareText(preview.view.surface.cache.inFlightCeiling, preview.view.surface.cache.inFlightShareAgeMs)})`,
       `queue ${preview.view.surface.cache.queueDepth}`,
       `~${preview.view.surface.cache.serverEstimateMs.toFixed(0)} ms/tile`,
       `${s.uploads} uploads · ${s.evictions} evicted · ${s.cancelled} cancelled · ${s.abandoned} abandoned · ${s.busyRefusals} backpressure · ${s.failures} failed`,
+      // What the T-538 look-ahead lane cost and what it bought, side by side: a guess that is never
+      // drawn is waste, and the only honest way to say whether the lane earns its slot is to show
+      // both numbers rather than the one that flatters it.
+      `${s.speculativeIssued} guessed (${s.speculativeHits} drawn)`,
       f ? rangeLabel(preview.range) : "",
     ].filter(Boolean).join("  ·  "));
     // Auto-contrast moves the range every frame, so the key's scale row follows it here rather than

@@ -48,7 +48,7 @@ import { TileCache } from "../src/surface/tilecache";
 import type { TileData } from "../src/surface/tile";
 import {
   HOLD_INK, LiveRow, SHADOW_ALPHA, TRACE_SUBDIV, levelFrac, liveFrameFits, maxHoldColumns, peakOf,
-  persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
+  afterglowAbsence, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths,
   type LiveFrame, type TracePath,
 } from "../src/surface/trace";
 import { cmap } from "../src/cmap";
@@ -469,6 +469,44 @@ test("the glow FADES, and a row nothing answered for does not glow at all", () =
   // No tile resident: the honest answer is no glow. A floor, or the newest row repeated, would each
   // be a claim about a row nobody has.
   assert.deepEqual(persistenceSlices(LAT, peeker(new Map()) as never, ROW_BOX, 0, 0, "any", 4, 20 * S), []);
+});
+
+test("an absent afterglow says NOT LOADED when the pane is not in hand, and 'no earlier row' only when it is", () => {
+  // `persistenceSlices` reads resident tiles only, so "no glow" is either a fact about the radio
+  // (everything in hand, nothing observed before this instant) or a fact about memory and latency.
+  // The gate read "no earlier row in this window" off a pane still fetching most of its window.
+  assert.equal(afterglowAbsence({ pending: 0, fallbacks: 0, refused: 0 }), "afterglow — no earlier row in this window");
+  for (const r of [{ pending: 3, fallbacks: 0, refused: 0 }, { pending: 0, fallbacks: 1, refused: 0 }, { pending: 0, fallbacks: 0, refused: 2 }]) {
+    const said = afterglowAbsence(r);
+    assert.doesNotMatch(said, /no earlier row/, `a pane with ${JSON.stringify(r)} not in hand claimed there was nothing before`);
+    assert.match(said, /not loaded is not unobserved/);
+  }
+  assert.equal(afterglowAbsence({ pending: 3, fallbacks: 1, refused: 0 }),
+    "afterglow — the rows before this instant are not all in hand yet (3 pending, 1 coarse stand-in) — not loaded is not unobserved");
+  // In hand, but answered only up to an instant before the afterglow's cells (T-532's horizon).
+  assert.match(afterglowAbsence({ pending: 0, fallbacks: 0, refused: 0 }, 1),
+    /not all in hand yet \(0 pending, 0 coarse stand-ins, 1 answered only up to an earlier instant\)/);
+});
+
+test("an afterglow cell a resident copy's HORIZON does not reach is counted as not in hand", () => {
+  // Tile 0 spans 0..20 s in four 5 s rows. A slice at 20 s is the cell [15, 20); its afterglow is the
+  // cells [0, 15). A copy answered only up to 10 s cannot speak about [10, 15) — the tile-boundary
+  // case, where the rows before a slice sit at the END of a tile fetched while it was live.
+  const a: TileAddr = { device: "any", scheme: "view", levelF: 0, levelT: 0, fIndex: 0, tIndex: 0, cells: 4 };
+  const withHorizon = (asOfNs: number | null) => {
+    const v: number[] = [];
+    for (const db of ROWS) for (let c = 0; c < 4; c++) v.push(db);
+    return peeker(new Map([[keyOf(a), { ...tileOf(a, 4, 4, v), asOfNs }]])) as never;
+  };
+  const short = (asOfNs: number | null, tAtNs = 20 * S, box = ROW_BOX) =>
+    persistenceShortTiles(LAT, withHorizon(asOfNs), box, 0, 0, "any", tAtNs);
+  assert.equal(short(10 * S), 1, "a copy answered to 10 s was counted as reaching the afterglow's cells up to 15 s");
+  assert.equal(short(15 * S), 0, "a copy that reaches the slice's own cell covers every afterglow cell");
+  assert.equal(short(null), 0, "no stated horizon reaches everywhere, as in the renderer's clip");
+  assert.equal(short(10 * S, 10 * S), 0, "a slice at 10 s has its afterglow in [0, 5): the horizon reaches it");
+  assert.equal(short(10 * S, 5 * S), 0, "the oldest row has no afterglow inside the window at all");
+  assert.equal(persistenceShortTiles(LAT, peeker(new Map()) as never, ROW_BOX, 0, 0, "any", 20 * S), 0,
+    "a tile not in hand is the PaneReport's pending/stand-in count, not this one's");
 });
 
 // ---------------------------------------------------------------------------

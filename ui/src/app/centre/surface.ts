@@ -43,9 +43,11 @@ import type { NavigationGrid } from "../../navigation";
 import { newClientId, setTileClientId } from "../../surface/clientid";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
-  markAt, markQuads, normalizeRegion, pendingMarkBox, pointOn, selectionMarkBoxes, signalMarkBoxes,
-  type MarkBox, type MarkRegion, type MarkRow, type MarkSelection,
+  markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
+  selectionMarkBoxes, signalMarkBoxes,
+  type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
+import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import {
@@ -62,7 +64,7 @@ import {
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
-  peakOf, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
+  afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
 import { liveRow } from "./live-edge";
@@ -74,6 +76,7 @@ import { h } from "../dom";
 import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
+import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { reviewAt, setNavigation, toast } from "../state";
 
@@ -119,11 +122,14 @@ export function paneMarkBoxes(
   rows: readonly MarkRow[], focusId: string | null,
   sels: readonly MarkSelection[], selId: string | null, paneBox: Box,
   pendingRegion: MarkRegion | null, showSignals: boolean,
+  measurements: readonly MarkMeasurement[] = [], measureId: string | null = null,
+  pendingMeasure: MarkRegion | null = null,
 ): MarkBox[] {
   return [
     ...(showSignals ? signalMarkBoxes(rows, focusId) : []),
     ...selectionMarkBoxes(sels, selId, paneBox),
-    ...pendingMarkBox(pendingRegion),
+    ...measurementMarkBoxes(measurements, measureId),
+    ...pendingMarkBox(pendingRegion ?? pendingMeasure),
   ];
 }
 
@@ -167,7 +173,18 @@ function mount(el: HTMLElement, ctx: AppContext) {
     title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
   }, "Signals");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn,
+  // T-822 / MAP-22: measurement mode. A toggle beside `Signals`, not a modifier competing with the
+  // shift+drag region gesture (T-458) — the two are mutually exclusive per `surface/input.ts`, and a
+  // button (rather than a held key) is what lets a measurement be taken with one hand, the way
+  // inspectrum's own ruler tool works. `aria-pressed` styles it through `base.css`'s generic
+  // `.mini[aria-pressed="true"]` rule; the canvas is already drawn with a crosshair cursor
+  // (`centre.css`'s `.sf-canvas`), which reads correctly for this mode with no change needed.
+  const measureBtn = h("button", {
+    class: "mini sf-measurebtn", type: "button", "aria-pressed": "false",
+    title: "Measure: drag on the surface to read Δf/Δt between two points and save it "
+      + "(GET/POST /api/measurements, docs/25 §4). Esc exits.",
+  }, "Measure");
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn, measureBtn,
     recordIqButton(ctx),
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
@@ -181,6 +198,16 @@ function mount(el: HTMLElement, ctx: AppContext) {
    * frame callback like the marks are, never mirrored into the store: it is pointer state for the
    * duration of one gesture, and the store is where things that outlive a gesture live. */
   let pending: { pane: string; region: MarkRegion } | null = null;
+  // ---- measurement mode (T-822 / MAP-22) ----
+  // Whether a plain drag marks out a measurement instead of panning. Read live by
+  // `attachSurfaceInput` through the getter below, exactly the pointer-state discipline `pending`
+  // above already follows: not store state, because it is meaningless once the mode is off.
+  let measureMode = false;
+  let pendingMeasure: { pane: string; region: MarkRegion } | null = null;
+  /** Saved measurements, this session. A durable object once `POST /api/measurements` answers
+   * (docs/25 §4/§10); kept here rather than in the store because no other surface reads it yet —
+   * T-821's collections panel is where a shared, fetched, cross-window list belongs. */
+  let measurements: MarkMeasurement[] = [];
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
   store.select((s) => s.device, (d) => {
@@ -229,7 +256,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     if (p && pane.id === p.activePane) {
       const following = p.view.panes.isFollowing(pane.id);
       const posS = pane.box.t1Ns / S_TO_NS;
-      const backing = iqBackingAt(posS, following, rules);
+      // T-464: the wider audio horizon (ring + recordings), from `state.iqAvailability`; `null` (not
+      // polled yet) falls back inside `iqBackingAt` to the ring-only `rules` this pane already reads.
+      const backing = iqBackingAt(posS, following, rules, s.iqAvailability);
       const w = s.captureWindow;
       const held = w?.buffered ? Math.max(0, w.buffered.t1S - (rules?.iqS ?? w.buffered.t0S)) : null;
       setText(ringEl, !rules
@@ -242,6 +271,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
       const d = ringEl.dataset;
       d.retentionS = rules ? String(rules.retentionS) : "";
       d.iqS = rules?.iqS != null ? String(rules.iqS) : "";
+      // What those two rules were derived FROM, this frame: the edge the panes are drawn to and the
+      // ring window as last polled. The server's ring moves on between that poll and any later
+      // question, so a claim about the rules is only checkable against the snapshot they came from.
+      d.edgeS = rules ? String(rules.retentionS + rules.spanS) : "";
+      d.ringT0S = w?.buffered ? String(w.buffered.t0S) : "";
+      d.ringT1S = w?.buffered ? String(w.buffered.t1S) : "";
+      // T-845: the oldest sample the ring's scheduled drops leave, where one is applied this frame.
+      d.dropT0S = rules?.dropT0S != null ? String(rules.dropT0S) : "";
       d.backing = backing;
       d.paneT0S = String(pane.box.t0Ns / S_TO_NS);
       d.paneT1S = String(pane.box.t1Ns / S_TO_NS);
@@ -264,7 +301,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // The rubber band goes through the same pass on the same frame as everything else it is being
     // drawn over, and only on the pane it is being stroked on (T-458).
     const pendingRegion = pending && pending.pane === pane.id ? pending.region : null;
-    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, showSignals);
+    const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region : null;
+    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, showSignals, measurements, null, pendingMeasureRegion);
   };
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
@@ -391,7 +429,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // ticket asks for and the one a live-only persistence buffer could not make.
         shadows.length
           ? `afterglow ${shadows.length} × ${fmtDur((win.t1Ns - win.t0Ns) / S_TO_NS)} back to ${at(shadows[shadows.length - 1].tAtNs - (win.t1Ns - win.t0Ns))}`
-          : "afterglow — no earlier row in this window",
+          : afterglowAbsence(report,
+            persistenceShortTiles(lat, s.cache, pane.box, report.levelF, report.levelT, dev, tAtNs)),
         // T-470: one scale for the trace's y axis and the ramp, and it says which of the two ways it
         // was decided. It used to read "measured from the served tiles" — true of the viewport-
         // tracking range, and exactly what stopped being true when the scale stopped following the
@@ -608,6 +647,49 @@ function mount(el: HTMLElement, ctx: AppContext) {
     return normalizeRegion(clamp(r.a), clamp(r.b));
   };
 
+  // ---- measurement mode (T-822 / MAP-22) ----
+  //
+  // A toggle, not a modifier: `surface/input.ts` reads `measureMode` live (the getter below) at
+  // every press, the same "decided once, at the press" discipline the shift+drag region above
+  // already follows. Escape exits it, matching the mockup (`ui/mockups/map-ui-v1.html`'s `#mode`
+  // banner) and every other modal affordance on this surface (the row/selection context menu).
+  const setMeasureMode = (on: boolean) => {
+    measureMode = on;
+    measureBtn.setAttribute("aria-pressed", String(on));
+    if (!on) { pendingMeasure = null; hoverEl.textContent = ""; }
+  };
+  measureBtn.addEventListener("click", () => setMeasureMode(!measureMode));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && measureMode) setMeasureMode(false); });
+
+  /** The `view` a measurement is stamped with (docs/25 §10.2): what the pane was showing at the
+   * instant of the drag, read from the very frame the stroke landed on.
+   *
+   * `PaneReport.tier` (`surface/lattice.ts`'s `ViewTier`) is only `"detail"` or `"overview"` — the
+   * live chain's own lattice versus the folded spectrum-history pyramid — because both `live-iq` and
+   * `spectrum-history` answer from the SAME detail-tier lattice, differing only in *where on the
+   * time axis* the pane sits (docs/16 §8's "live is the finest growing edge, not a separate mode").
+   * So the three-way honesty tier `MeasurementProvenance` wants is `overview` → `survey-overview`,
+   * and otherwise whether this pane is following the live edge right now
+   * (`preview.view.panes.isFollowing`, the same call `renderLive` reads). No report yet (nothing
+   * drawn) falls to the least detailed claim rather than the most, per the project's fail-closed
+   * convention for an honesty tier — a measurement should never overstate detail it cannot show.
+   */
+  const measureViewOf = (paneId: string): MeasureView | null => {
+    const v = paneById(paneId);
+    const p = preview;
+    if (!v || !p) return null;
+    const report = p.lastFrame?.reports.find((r) => r.id === paneId) ?? null;
+    const tier: MeasureView["tier"] = report === null
+      ? "survey-overview"
+      : report.tier === "overview" ? "survey-overview" : p.view.panes.isFollowing(paneId) ? "live-iq" : "spectrum-history";
+    return {
+      center_hz: (v.box.f0Hz + v.box.f1Hz) / 2,
+      span_hz: v.box.f1Hz - v.box.f0Hz,
+      t_capture: [v.box.t0Ns / S_TO_NS, v.box.t1Ns / S_TO_NS],
+      tier,
+      device_id: v.device ?? null,
+    };
+  };
 
   // ---- boot ----
   void (async () => {
@@ -665,12 +747,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
       onHover: (p) => {
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
-        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${hit.mark ? ` · ${hit.mark.kind === "signal-box" ? "signal" : "selection"} ${hit.mark.id.slice(0, 8)}` : ""}` : "";
+        const markLabel = hit?.mark
+          ? hit.mark.kind === "signal-box" ? "signal"
+            : hit.mark.kind === "measurement-box" ? "measurement"
+              : hit.mark.kind === "pending-region" ? null : "selection"
+          : null;
+        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
       },
       onClick: (p) => {
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
-        store.set(hit.mark.kind === "signal-box" ? focusSignal(hit.mark.id) : focusSelection(hit.mark.id));
+        if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
+        else if (hit.mark.kind === "selection-box") store.set(focusSelection(hit.mark.id));
+        // A measurement box has no focus target yet (T-821's collections panel is where a click
+        // through to it belongs); a click on one does nothing rather than mis-focusing a selection.
       },
       onRegionDrag: (r) => {
         const region = r ? regionOf(r) : null;
@@ -681,6 +771,28 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const region = regionOf(r);
         if (region) commitRegion(ctx, region, fmtHz);
       },
+      get measureMode() { return measureMode; },
+      onMeasureDrag: (r) => {
+        const region = r ? regionOf(r) : null;
+        pendingMeasure = r && region ? { pane: r.pane, region } : null;
+        if (region) hoverEl.textContent = fmtMeasureReadout(measureReadout(region));
+      },
+      onMeasure: (r) => {
+        pendingMeasure = null;
+        const region = regionOf(r);
+        const view = region ? measureViewOf(r.pane) : null;
+        if (region && view) {
+          void commitMeasurement(ctx, region, view, (rg) => fmtMeasureReadout(measureReadout(rg))).then((saved) => {
+            if (saved.length > 0) {
+              measurements = [...measurements, {
+                id: saved[0].id, f_lo_hz: region.f0Hz, f_hi_hz: region.f1Hz,
+                t0_s: region.t0Ns / S_TO_NS, t1_s: region.t1Ns / S_TO_NS,
+              }];
+            }
+          });
+        }
+        setMeasureMode(false);
+      },
       onContext: (p, e) => {
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
@@ -688,7 +800,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (hit.mark.kind === "signal-box") {
           const row = s.inventory.rows[hit.mark.id];
           if (row) openSignalMenu(ctx, row, e.clientX, e.clientY);
-        } else {
+        } else if (hit.mark.kind === "selection-box") {
           const sel = s.selections.list.find((x) => x.id === hit.mark!.id);
           if (sel) openSelectionMenu(ctx, sel, e.clientX, e.clientY);
         }

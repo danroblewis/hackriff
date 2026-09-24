@@ -69,6 +69,73 @@ def test_the_same_ticket_edited_on_both_sides_is_refused():
     assert merge(BASE, ours, theirs) is None
 
 
+def test_the_same_ticket_changed_in_DIFFERENT_fields_on_each_side_merges_field_by_field():
+    """The work runner's own two writes (2026-09-23): `status`+`branch` on main at dispatch,
+    `result:` on the branch at hand-back. Seven landings that day conflicted on exactly this,
+    and every resolution a person typed was the union of the two edits."""
+    ours = _with(T1, "  - id: T-002\n    title: second\n    status: in-progress\n    branch: task-t002\n")
+    theirs = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n    result: |\n      DONE (work-runner).\n      Tests: just test-crate hk-blocks -> exit 0\n")
+    out = merge(BASE, ours, theirs)
+    assert out is not None
+    block = split(out)[1]["T-002"]
+    # A split block ends where the next `- id:` (or the trailer) begins: no trailing newline.
+    assert block == ("  - id: T-002\n    title: second\n    status: in-progress\n    branch: task-t002\n"
+                     "    result: |\n      DONE (work-runner).\n      Tests: just test-crate hk-blocks -> exit 0"), block
+
+
+def test_a_multi_line_field_moves_verbatim_through_a_field_merge():
+    """A `result: |` and its continuation lines are one field: folding and indentation survive."""
+    res = "    result: |\n      line one\n\n      line three, after a blank\n      # and a comment\n"
+    ours = _with(T1, "  - id: T-002\n    title: second\n    status: review\n")
+    theirs = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n" + res)
+    out = merge(BASE, ours, theirs)
+    assert out is not None and res.rstrip("\n") in out and "status: review" in split(out)[1]["T-002"]
+
+
+def test_the_same_field_changed_two_ways_is_still_refused():
+    """Field-level merging does not make a status disagreement disappear."""
+    ours = _with(T1, "  - id: T-002\n    title: second\n    status: done\n    branch: x\n")
+    theirs = _with(T1, "  - id: T-002\n    title: second\n    status: blocked\n    result: r\n")
+    assert merge(BASE, ours, theirs) is None
+
+
+def test_a_field_removed_on_one_side_and_untouched_on_the_other_is_removed():
+    base = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n    branch: old\n")
+    ours = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n")  # branch: dropped
+    theirs = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n    branch: old\n    result: r\n")
+    out = merge(base, ours, theirs)
+    assert out is not None
+    assert split(out)[1]["T-002"] == "  - id: T-002\n    title: second\n    status: todo\n    result: r"
+
+
+def test_a_field_removed_on_one_side_and_changed_on_the_other_is_refused():
+    base = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n    branch: old\n")
+    ours = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n")
+    theirs = _with(T1, "  - id: T-002\n    title: second\n    status: todo\n    branch: new\n")
+    assert merge(base, ours, theirs) is None
+
+
+def test_a_field_merge_of_a_real_ticket_on_the_real_board_validates():
+    """The 2026-09-23 shape against the actual file: a dispatch flip on main, a hand-back result on
+    the branch, for the same ticket - and the result must pass the driver's own validation."""
+    from pathlib import Path
+
+    from hkpy.boardmerge import _validate
+
+    board = Path(__file__).resolve().parents[2] / "docs" / "tasks.yaml"
+    base = board.read_text(encoding="utf-8")
+    head, blocks, order, tail = split(base)
+    tid = next(t for t in order if "\n    status: todo\n" in blocks[t] and "\n    result:" not in blocks[t])
+    flipped = blocks[tid].replace("\n    status: todo\n", "\n    status: in-progress\n    branch: task-x\n", 1)
+    resulted = blocks[tid] + "\n    result: |\n      DONE (work-runner, from handback.json).\n      Tests: exit 0"
+    join = lambda b: head + "\n" + "\n".join(b[t] for t in order) + "\n" + tail  # noqa: E731
+    out = merge(base, join({**blocks, tid: flipped}), join({**blocks, tid: resulted}))
+    assert out is not None
+    got = split(out)[1][tid]
+    assert "status: in-progress" in got and "branch: task-x" in got and "DONE (work-runner" in got
+    assert _validate(out, set(order)) is None
+
+
 def test_a_deleted_ticket_is_refused():
     ours = _with(T1)  # T-002 removed
     theirs = _with(T1, T2, "  - id: T-003\n    title: theirs\n    status: todo\n")

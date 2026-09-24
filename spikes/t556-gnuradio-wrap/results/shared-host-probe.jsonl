@@ -1,0 +1,8 @@
+{"what": "bare", "started_s": 0.229, "maxrss_mib": 38.5, "threads": 3}
+{"what": "lora", "started_s": 0.264, "maxrss_mib": 41.8, "threads": 11}
+{"what": "sat", "started_s": 1.513, "maxrss_mib": 78.2, "threads": 12}
+{"what": "both", "started_s": 1.662, "maxrss_mib": 78.8, "threads": 22}
+{"what": "bare", "started_s": 0.561, "maxrss_mib": 38.8, "threads": 3}
+{"what": "lora", "started_s": 0.485, "maxrss_mib": 41.3, "threads": 11}
+{"what": "sat", "started_s": 1.545, "maxrss_mib": 77.7, "threads": 12}
+{"what": "both", "started_s": 1.753, "maxrss_mib": 78.8, "threads": 22}
