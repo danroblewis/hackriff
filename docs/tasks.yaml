@@ -25069,6 +25069,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): M-2's scope must NAME psk_demod - its evidence() metric and calibration table (T-609 landed the block without them).
     core_interface: true
   - id: T-854
     milestone: MAUTO
@@ -25146,6 +25148,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): the template/skeleton library and seeding must include a PSK option at the demodulation stage - section 4.1's built-in skeleton list has none, so PSK cannot reach bits inside a search.
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
@@ -25353,6 +25357,229 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+  - id: T-865
+    milestone: MAUTO
+    title: "LP-1: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-1 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-1 in the ADR maps to this ticket. DELIVER: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over).
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-866
+    milestone: MAUTO
+    title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
+    status: todo
+    priority: normal
+    deps:
+    - T-865
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-2 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-2 in the ADR maps to this ticket. DELIVER: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Depends on the M1 recipe runtime (landed).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-867
+    milestone: MAUTO
+    title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-3 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-3 in the ADR maps to this ticket. DELIVER: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Sonnet output is reviewed by Opus before merge.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-868
+    milestone: MAUTO
+    title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
+    status: todo
+    priority: normal
+    deps:
+    - T-867
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-4 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-4 in the ADR maps to this ticket. DELIVER: parity harness: legacy Listen chain versus the recipe, on the same IQ.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-869
+    milestone: MAUTO
+    title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
+    status: todo
+    priority: normal
+    deps:
+    - T-868
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-5 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-5 in the ADR maps to this ticket. DELIVER: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-870
+    milestone: MAUTO
+    title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-6 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-6 in the ADR maps to this ticket. DELIVER: refine.objective.builtin + refinement applied as a hot edit.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-871
+    milestone: MAUTO
+    title: "LP-7: MUI: one output model across the dock and the per-signal panels"
+    status: todo
+    priority: normal
+    deps:
+    - T-869
+    parallel_group: LP
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-7 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-7 in the ADR maps to this ticket. DELIVER: MUI: one output model across the dock and the per-signal panels.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Thin client over docs/api.md.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-872
+    milestone: MAUTO
+    title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
+    status: todo
+    priority: normal
+    deps:
+    - T-869
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-8 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-8 in the ADR maps to this ticket. DELIVER: retire ChainKind::Listen for cut-over modes; listener-budget mapping.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Only after LP-5 is live-tested. U4: SSB and CW stay on the legacy Listen chain permanently.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-873
+    milestone: MAUTO
+    title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-9 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-9 in the ADR maps to this ticket. DELIVER: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      U5 (user 2026-09-23): stereo is part of decoding the signal. Honesty: labelled stereo only while the pilot is locked; losing lock mid-stream is reported, never hidden.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-874
+    milestone: MAUTO
+    title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
+    status: todo
+    priority: normal
+    deps:
+    - T-873
+    - T-865
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-10 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-10 in the ADR maps to this ticket. DELIVER: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Clients: UI dock/AudioSession, py/examples/hk_audio_wav.py, the documented TCP one-liners; docs/api.md + api_contract tests together. A client that ignores channels still gets mono unless it asks for stereo (opt-in).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-875
+    milestone: MAUTO
+    title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
+    status: todo
+    priority: normal
+    deps:
+    - T-609
+    parallel_group: MAUTOD
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 PSK-BURST (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      PSK-BURST in the ADR maps to this ticket. DELIVER: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      M-14 residue found at the ADR-0015 acceptance (U4: psk_demod funded, M-14 required). Acquire from the burst start (preamble-aided or reverse/forward pass) so a burst shorter than the loop's window still yields its first symbols; state the shortest burst decoded before/after. Blind: no known-signal lookup.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    tier_reason: "real-time-path DSP: carrier/timing acquisition on short PSK bursts"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
