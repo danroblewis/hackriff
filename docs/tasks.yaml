@@ -18848,6 +18848,8 @@ tasks:
       actually delivers the budget, and A2 is the only part of it with any statistical power.
       Runs after T-568 builds the populations; do not rebuild them.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator, from the MAUTO manifest refresh): this ticket's acceptance text is word-for-word T-576's (acceptance_mauto::false_confirm_budget) and its notes say 'Runs after T-568 builds the populations' - i.e. the body was copied from its dependant. By its title T-568 is the negative-control guard suite that BUILDS the four populations (N1-N4: ofdm_nonstandard_cp, dsss_m_sequence, qam16_unframed, nbfm_voice/am_voice scenes now exist via T-623/T-624). Rewrite the acceptance from docs/22 before dispatching; the manifest now cites T-568 for the ofdm/dsss/16qam and voice negatives.
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
@@ -24830,6 +24832,50 @@ tasks:
       Observed, not chased: Only an LDU whose call gets a call-start event is recorded. A call continued across passes (T-308) emits no call-start, so its later LDUs are counted but not written to any event. Continuation normally does not fire on the built-in duty cycle (9.5 s gap). T-330 writes to CallRecord directly, so it can close this gap. | hk-detect now carries its own small GF(64) Reed-Solomon decoder (trunk::ldu::Rs64). hk-blocks' general GF(2^m) kernel (T-611) is pub(crate), and hk-detect sits below hk-blocks. Exposing that kernel from a lower crate would remove the duplication. | A single 0.5 s hunt window holds only 1-2 complete LDUs, so on a real long call one pass can see only the LC or only the ES. The synthetic scene keys its superframe inside the first window. T-330 may need to accumulate ES across passes or calls. | The LDU decode is unverified against real off-air P25 (none in repo; T-299/T-544). The HDU, which also carries the ALGID at call start, and the TDULC are not decoded.
       Resources: 150 CPU-s, peak 3.4 GB
     commit: 4be23ed9
+  - id: T-850
+    milestone: MAUTO
+    title: C4FM synthetic generator lacks the check parameterisation (CRC width/searched/random polynomial, BCH, constant payload) that T-622 gave 2FSK
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MAUTOD
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      Filed 2026-09-23 from the MAUTO coverage-manifest refresh (task-mauto-manifest, a4336ee5): the seven
+      4fsk-c4fm cells on the manifest's check axis (A1xA7) are UNFILED because T-622 added CRC width,
+      off-catalogue polynomial and constant payload to the 2-level `fsk_burst_train` generator only
+      (py/hkpy/synth/scenarios.py:118-125, FSK_DEFAULTS) - the C4FM trunk scenes carry only the fixed P25
+      framing, although docs/22 §9's T-622 row says "the generic generators".
+      DELIVER: the same check parameterisation on the C4FM generator/scenes - CRC-8/24/32, a searched CRC,
+      a random polynomial, BCH, constant payload - with hidden truth in the scene metadata, then point the
+      manifest's 4fsk-c4fm check cells at the rows that run them (or at their engine owner if no engine
+      consumes them yet). Blind: the truth never reaches the system under test.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+  - id: T-851
+    milestone: MAUTO
+    title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
+    status: todo
+    priority: low
+    deps: []
+    parallel_group: MAUTOD
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      Filed 2026-09-23 from the MAUTO coverage-manifest refresh (task-mauto-manifest, a4336ee5): the
+      calibrated-bit discount for CSS (LoRa chirp spread spectrum) was never measured. docs/21 §10 closes
+      T-619 with AM/OOK and C4FM only; docs/22 §7.2 lists P9 (CSS) as report-only "until T-619 extends the
+      measurement", and T-619 is done, so that measurement has no owner.
+      DELIVER: extend the T-547/T-619 ladder measurement to CSS (the evidence bits a CSS candidate can earn
+      under quantisation, per docs/21's method), record the table, and move P9 off report-only if the
+      measurement supports it (state the numbers either way). RESEARCH/MEASUREMENT; no engine code.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
