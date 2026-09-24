@@ -25184,7 +25184,7 @@ tasks:
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25215,6 +25215,7 @@ tasks:
       Commits: 4f030620
       Observed, not chased: The §6 search changes (S0 seed from the burst's short-FFT centre, preamble-driven S2 seeds, ppm_demod-first skeletons) and per-burst evidence n accumulation are the engine's (M-3/M-7), not acquisition; nothing consumes Acquisition yet. | `source: live` acquisition (collect live_s from a ring reader, §5.3) and targeting a pinned clip on re-run are M-8's job routing; AcquiredWindow.source is fixed to `ring` here. | Where to get burst sightings (T-075 burst detections, emitter/cluster links) for a job target is M-8's query; BurstSighting::from_detection is the adapter.
       Resources: 124 CPU-s, peak 2.4 GB
+    commit: ba88980a
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
