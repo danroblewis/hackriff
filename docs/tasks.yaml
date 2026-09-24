@@ -6767,6 +6767,15 @@ tasks:
     depends_on: [T-849]
     notes: |
       2026-09-23 (coordinator, user request): was blocked on a missing capability with no ticket; now todo depending on T-849 (P25 voice-frame LDU1/LDU2 demodulation, filed today).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 20:03).
+      The call's own LDU2 ALGID (read from IQ by T-849) now decides its encryption state. New hk_detect::trunk::CallHeader::fold folds the ALGIDs of the LDU2s attributed to a call (T-849's midpoint rule, shared via VoiceFrames::inside) with Encryption::refine and applies them to the grant's state: the header replaces an Unknown grant and names the algorithm/key behind a service-options Encrypted one; a clear header never walks back an encrypted grant (kept encrypted, reason algid-contradicts-grant) - the safer-answer rule the repository/schema already enforce on rewrites. The fold produces an Encryption, never a permit: the follower still asks VoicePermit::open, the only door, so a call clear by its own ALGID 0x80 earns the first permit and nothing else can; no bypass added. Follower also drops a continued call's stale refusal reason before re-asking; call-start detail gains encryption_evidence and header_encryption; new counter cc_calls_algid. New e2e acceptance_m4::t330_algid (blind, mock SDR, T-849's scene whose grants state nothing): clear call -> Clear{Algid,0x80} permitted, AES-256 call -> Encrypted{Algid,0x84,key id} refused, unframed control channel stays Unknown and refused. C23 card updated.
+      Tests: cargo nextest run -p hk-detect -E 'test(/trunk::/)' -> exit 0 (90 passed (incl. 2 new CallHeader tests)); cargo nextest run -p hk-pipeline -E 'test(/chains::trunk::/)' -> exit 0 (12 passed); HK_E2E_REQUIRE_SYNTH=1 cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)' -> exit 0 (10 passed (t267..t849 unchanged + new t330_algid))
+      precheck exit 0
+      Commits: bd8503ff
+      Observed, not chased: Design choice for review: grant Encrypted (service options) + header ALGID 0x80 stays Encrypted (fail closed, reason algid-contradicts-grant) rather than letting the header lower it to Clear; the repo's put_call and schema trigger already refuse encrypted->clear rewrites, so the stronger override would be inconsistent across passes. Not staged in e2e (scene grants state nothing); pinned by CallHeader unit tests. | cc_calls_algid counts per write, so a T-308 continued call decided by ALGID on two passes is counted twice (continuations are rare on the built-in 9.5 s duty cycle). | HDU (which also carries ALGID at call start) is still not decoded (T-849 note); a call whose transmission window holds no LDU2 stays at the grant's state.
+      Use cases: AWARE-067
+      Resources: 135 CPU-s, peak 2.6 GB
   - id: T-331
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into

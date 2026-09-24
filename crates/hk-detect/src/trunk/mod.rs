@@ -96,4 +96,4 @@ pub use tsbk::{
     Unmapped, algid_encryption, algid_name, channel_type_slots, is_algid_evidence, protocol_of,
     scan_blocks,
 };
-pub use voice::{VoicePermit, VoiceRefused};
+pub use voice::{CallHeader, VoicePermit, VoiceRefused};

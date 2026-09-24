@@ -108,26 +108,28 @@
 //!
 //! # The encryption check (T-270)
 //!
-//! A grant's service-options octet is read, and it is the only encryption indication that sets a
-//! call's state today. A P25 ALGID lives in the voice frames on the *granted* channel (docs/04
-//! §8.3); since T-849 those are demodulated and the ALGID is recorded on the call's `call-start`
-//! event (see [`voice_frames`]), but it is **not yet** folded into `call.encryption` — whether the
-//! call's own ALGID overrides its grant is T-330's decision. So a grant with the verified encryption
-//! bit set
-//! produces [`hk_model::Encryption::Encrypted`], and **every other path stays `Unknown`** — a grant
-//! update carries no such octet at all, a bit that is clear is a grant-time announcement rather
-//! than the call's own statement, and a call joined in progress never saw either. Nothing this
-//! module writes into an encryption state can say `clear`, because saying it needs an ALGID and
-//! no ALGID is wired into one yet.
+//! A grant's service-options octet is read first: with the verified encryption bit set it produces
+//! [`hk_model::Encryption::Encrypted`], and every other grant path is `Unknown` — a grant update
+//! carries no such octet, a clear bit is a grant-time announcement rather than the call's own
+//! statement, and a call joined in progress never saw either. [`CallRecord::from_grant`] carries
+//! that verbatim.
 //!
-//! [`CallRecord::from_grant`] carries the grant's state verbatim, so a call inherits exactly what
-//! its grant said and no branch here sharpens it.
+//! The authoritative statement is the call's own ALGID, in the LDU2s on the *granted* channel
+//! (docs/04 §8.3). Those are demodulated per followed FDMA channel (T-849, [`voice_frames`]), and
+//! the ALGIDs of the LDU2s attributed to a call are folded into its state by
+//! [`CallHeader::fold`] (T-330): the header replaces an `Unknown` grant, and replaces a grant-time
+//! `Encrypted` with its own `Encrypted` naming the algorithm and key — but a clear header never
+//! walks back an encrypted grant; that contradiction stays encrypted and is recorded as
+//! `algid-contradicts-grant`. So the only thing here that can make a call `clear` is its own ALGID
+//! `0x80`, which is also the only thing that should — a late entry becomes known as soon as an
+//! LDU2 of the call is heard.
 //!
 //! Before each followed call, [`VoicePermit::open`] is consulted at the point a voice path would be
-//! opened, and its refusal is recorded on the call. M4 opens no voice path at all — there is no
-//! vocoder and no `CallAudio` — so today the permit always refuses and nothing consumes a sample
-//! for voice. That is the point: the check is in place *before* the thing it checks, so the thing
-//! cannot arrive without it.
+//! opened, and its refusal is recorded on the call. The ALGID fold produces an `Encryption`, never
+//! a permit, so a call that is clear by its own ALGID earns one the same way as any other — by
+//! asking. M4 opens no voice path at all — there is no vocoder and no `CallAudio` — so even a
+//! permitted call consumes no sample for voice. That is the point: the check is in place *before*
+//! the thing it checks, so the thing cannot arrive without it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -136,12 +138,12 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, measure_fm_structure};
 use hk_detect::trunk::{
-    AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CcCandidate,
-    CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, GridFit, LDU_DIBITS, LduPayload, LduScan,
-    MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM,
-    Resolved, VoicePermit, algid_name, best_lmr_raster, dmr_protocol_of, fit_grid_offset,
-    grid_aliases, nxdn_protocol_of, protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks,
-    scan_ldus,
+    AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CallHeader, CcCandidate,
+    CcConfirmer, CcFraming, ChannelMap, DmrGrant, EncryptionSync, Grant, GridFit, LDU_DIBITS,
+    LduPayload, LduScan, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ,
+    RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit, VoiceRefused, algid_name, best_lmr_raster,
+    dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of, protocol_of, resolve_alias,
+    scan_blocks, scan_cacs, scan_csbks, scan_ldus,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
@@ -281,6 +283,16 @@ const TDMA_SHARED_ENVELOPE: &str = "tdma-shared-envelope";
 /// across an unobserved gap short enough that no end could have happened in it
 /// ([`CONTINUATION_GAP_S`], T-308).
 const CONTINUED: &str = "continued-across-passes";
+/// T-330: the grant announced encrypted and the call's own ALGID said clear. The call stays
+/// encrypted (the safer answer); this reason is how the disagreement stays visible.
+const ALGID_CONTRADICTS_GRANT: &str = "algid-contradicts-grant";
+/// Every reason [`VoicePermit::open`] can refuse with, so a call re-asked on a later pass carries
+/// only the current answer.
+const VOICE_REFUSALS: [&str; 3] = [
+    VoiceRefused::Encrypted { algid: None }.reason(),
+    VoiceRefused::Unknown.reason(),
+    VoiceRefused::UnauthoritativeClear.reason(),
+];
 
 /// How long an **unobserved** gap may be and still be crossed by one call, s (T-308).
 ///
@@ -1545,10 +1557,7 @@ impl VoiceFrames {
     /// transmission that carried it (a decoded LDU is 180 ms of continuous signal, and a
     /// transmission only ends after [`SILENCE_TIMEOUT_S`] of silence).
     fn detail(&self, start: Timestamp, end: Timestamp) -> serde_json::Value {
-        let inside = |i: usize| {
-            let mid = self.times[i].saturating_add_nanos(self.ldu_ns / 2);
-            mid >= start && mid < end
-        };
+        let inside = |i: usize| self.inside(i, start, end);
         let mut lcs = Vec::new();
         let mut ess = Vec::new();
         for (i, f) in self
@@ -1605,6 +1614,29 @@ impl VoiceFrames {
                 "frames": self.scan.frames.len(),
             },
         })
+    }
+}
+
+impl VoiceFrames {
+    /// Whether frame `i`'s midpoint lies in `[start, end)` — the one attribution rule, shared by
+    /// the recorded detail and the encryption fold so the two can never disagree about which
+    /// frames were this call's.
+    fn inside(&self, i: usize, start: Timestamp, end: Timestamp) -> bool {
+        let mid = self.times[i].saturating_add_nanos(self.ldu_ns / 2);
+        mid >= start && mid < end
+    }
+
+    /// This transmission's LDU2 encryption syncs, in stream order (T-330).
+    fn syncs(&self, start: Timestamp, end: Timestamp) -> impl Iterator<Item = &EncryptionSync> {
+        self.scan
+            .frames
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| self.inside(*i, start, end))
+            .filter_map(|(_, f)| match &f.payload {
+                LduPayload::EncryptionSync(es) => Some(es),
+                LduPayload::LinkControl(_) => None,
+            })
     }
 }
 
@@ -1879,6 +1911,28 @@ fn follow_grants(
                 if call.slot.is_some() {
                     push_reason(&mut call.reasons, TDMA_SHARED_ENVELOPE);
                 }
+                // ---- The call's own header (T-330): the ALGIDs its LDU2s carried, folded into
+                // what the grant announced. The header outranks the grant, except that a clear
+                // header never walks back an encrypted grant — see `CallHeader`. This yields an
+                // `Encryption`, not a permit: the permit below is asked for like any other.
+                let call_end = end.unwrap_or(observed_until);
+                let header = heard
+                    .as_ref()
+                    .map(|v| CallHeader::fold(call.encryption, v.syncs(start, call_end)));
+                if let Some(h) = &header {
+                    call.encryption = h.call;
+                    if h.decided_by_algid() {
+                        inc(&c.cc_calls_algid);
+                    }
+                    if h.contradicts_grant {
+                        push_reason(&mut call.reasons, ALGID_CONTRADICTS_GRANT);
+                    }
+                }
+                // A continued call is re-asked every pass, so last pass's refusal must not outlive
+                // the evidence that produced it.
+                call.reasons
+                    .retain(|r| !VOICE_REFUSALS.contains(&r.as_str()));
+
                 // ---- The encryption check, at the point a voice path would be opened (C23
                 // §Methods "encryption check before the vocoder", T-270).
                 //
@@ -1935,12 +1989,25 @@ fn follow_grants(
                     "receiver_alias": plan.alias.evidence,
                 });
                 open.detail["continued_across_passes"] = json!(is_continuation);
-                // What this transmission's own voice frames said (T-849) — recorded as the
-                // call's statement about itself, and deliberately NOT folded into
-                // `call.encryption`: whether an LDU2's ALGID overrides what the grant announced is
-                // T-330's decision, made through the `VoicePermit` above like every other.
+                // Where the call's encryption state came from (T-330): the header's own
+                // statement, and whether it disagreed with the grant.
+                open.detail["encryption_evidence"] =
+                    json!(call.encryption.evidence().map(|e| e.as_str()));
+                open.detail["header_encryption"] = match &header {
+                    Some(h) => json!({
+                        "read": h.read,
+                        "state": h.header.state(),
+                        "algid": h.header.algid(),
+                        "algid_name": h.header.algid().and_then(algid_name),
+                        "key_id": h.header.key_id(),
+                        "contradicts_grant": h.contradicts_grant,
+                    }),
+                    None => serde_json::Value::Null,
+                };
+                // What this transmission's own voice frames said (T-849), frame by frame. Their
+                // ALGIDs were folded into `call.encryption` above (T-330).
                 open.detail["voice_frames"] = match &heard {
-                    Some(v) => v.detail(start, end.unwrap_or(observed_until)),
+                    Some(v) => v.detail(start, call_end),
                     None if g.slot.is_some() => json!({
                         "attempted": false,
                         "why": "tdma-carrier: phase 2 voice is not LDU-framed",
