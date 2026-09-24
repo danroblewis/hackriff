@@ -1014,7 +1014,20 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // BLOCK about as wide as whatever drew it. The one recorded failure was 147 of 586 columns —
   // a quarter of a band this pane cuts into four tiles — and there was no record of which.
   const missAt = [];
-  for (let x = 0; x < s.w; x++) {
+  // **Only where the SURFACE is on top** (T-801's rule, carried to this check). The inventory panel
+  // floats over the full-bleed canvas's left side, and its own text and background were being read
+  // as "trace ink" over "cells": every run's first misses were column 51, ink [212,221,225] over
+  // eight identical [20,28,33] — the panel's lettering on the panel. Those are not the trace's
+  // pixels or the waterfall's, so they are neither compared nor counted, exactly as the extent
+  // check does with the same `obs.unocc`.
+  const vis = obs.unocc && obs.unocc.w > 0
+    ? { lo: Math.max(0, Math.round(obs.unocc.x - obs.rect.x)),
+        hi: Math.min(s.w - 1, Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1) }
+    : { lo: 0, hi: s.w - 1 };
+  const visW = vis.hi - vis.lo + 1;
+  t.diagnostic(`comparing uncovered columns ${vis.lo}..${vis.hi} of ${s.w} ` +
+    `(${obs.unocc?.occluded ?? 0} under floating chrome)`);
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
     const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
@@ -1052,9 +1065,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // strip is one colour, or the waterfall is — this would score as well as the real comparison, and
   // the test would be measuring the ramp's coarseness rather than the trace's colour.
   let shuffled = 0;
-  for (let x = 0; x < s.w; x++) {
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
-    const far = (x + Math.floor(s.w / 3)) % s.w;
+    // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
+    const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
     if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(obs.img, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
