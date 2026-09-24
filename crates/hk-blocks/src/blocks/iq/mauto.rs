@@ -87,6 +87,15 @@ pub fn planned() -> Vec<BlockDescriptor> {
                     "Largest carrier offset the coarse estimator removes; absent: \
                      symbol_rate/4; 0: off.",
                 ),
+                param(
+                    "burst",
+                    boolean(),
+                    "Burst mode: find each burst by energy, confirm and measure it blind over \
+                     its own samples (carrier, phase, timing, level) and decode it from its \
+                     first symbol; only burst symbols are emitted, each burst's first item \
+                     marked DISCONTINUITY. Off: one continuous stream.",
+                )
+                .default_value(false),
             ],
             true,
         ),
