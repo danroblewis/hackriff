@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, clipToUnoccluded, tileAsks, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, tileAsks } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -237,22 +237,49 @@ async function waitForCoverage(backend, timeoutMs) {
  * half-drawn frame to measure brightness in — which is exactly how phase 2's live baseline came out
  * dimmer than the shadow it is the baseline for.
  *
- * **Bounded by whether the pane is still WORKING, not by 20 s** (the deflake, 2026-09-22). A fixed
- * deadline here is the same bet `draw()`'s note above already refuses, one layer down: the tile
- * route's service rate moves more than twenty-fold between a quiet box and the gate's pooled lanes,
- * so on a busy box this returned `resident: false` on a pane that was simply mid-fill and the
- * caller then measured a half-drawn frame. `waitWhileWorking` keeps waiting while the pane's own
- * report changes or its requests are on the wire, and gives up when both have been quiet — which is
- * the state "it will not converge" actually looks like.
+ * **Bounded by EVENTS, never by a clock** (T-894, after T-889 did the same to [[draw]]). It first
+ * gave up at a fixed 20 s, then (the deflake, 2026-09-22) after 10 s with neither the pane's report
+ * nor the tile wire moving — both bets on the tile route's service rate, which moves more than
+ * twenty-fold between a quiet box and the gate's pooled lanes. The second bet also failed the other
+ * way: in T-889's red run (band-A tiles refused) the refusals' retries kept the wire busy, so the
+ * wait sat out its whole 120 s backstop on a pane that could never become resident.
+ *
+ * So the unit is `stallOn` — a counter of the answers that move THIS pane, in practice
+ * [[paneAnswers]] for its own band (plus the survey's answers where `surveyMayAnswer`, since there
+ * the survey is what draws it). The wait gives up once `stallAnswers` of them have landed without
+ * the pane's RESIDENT part — its tile and stand-in counts — changing. `pending` is left out of that
+ * on purpose: a refused tile flips it on every retry, which is exactly the churn that kept the old
+ * wait alive. A busy route slows the wait down with it; a refused one runs it out in `stallAnswers`
+ * refusals. `timeoutMs` is only the backstop for a pane whose wire went silent.
  */
-async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 10000, surveyMayAnswer = false } = {}) {
-  const r = await waitWhileWorking(page, async () => (await pane0(page)).counts, (counts) => {
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
+async function waitForResident(page, {
+  stallOn, stallAnswers = STALL_ANSWERS, timeoutMs = 120000, everyMs = 400, surveyMayAnswer = false,
+} = {}) {
+  if (!stallOn) throw new Error("waitForResident(): needs an event bound `stallOn` (e.g. paneAnswers) — never a wall-clock stall (T-894)");
+  const t0 = Date.now();
+  const parse = (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts ?? "");
     // `· N never sampled` is the pane saying the survey answered the place — see `draw()`.
-    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(counts);
-    return !!m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0;
-  }, { everyMs, stallMs, timeoutMs });
-  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
+    const surveyed = surveyMayAnswer && /· (\d+) never sampled/.test(counts ?? "");
+    return {
+      done: !!m && (Number(m[1]) > 0 || surveyed) && Number(m[2]) === 0 && Number(m[3]) === 0,
+      resident: m ? `${m[1]}/${m[2]}/${surveyed}` : null,
+    };
+  };
+  const events0 = stallOn.count();
+  let counts = (await pane0(page)).counts, p = parse(counts), movedAt = events0, why = "resident";
+  while (!p.done) {
+    const n = stallOn.count();
+    if (n - movedAt >= stallAnswers) { why = `not resident after ${n - movedAt} ${stallOn.what} with no change`; break; }
+    if (Date.now() - t0 > timeoutMs) { why = `backstop ${timeoutMs} ms`; break; }
+    await new Promise((r) => setTimeout(r, everyMs));
+    const was = p.resident;
+    counts = (await pane0(page)).counts; p = parse(counts);
+    if (p.resident !== was) movedAt = stallOn.count();
+  }
+  const d = stallOn.detail?.() ?? { answered: stallOn.count() - events0 };
+  why += ` · ${d.answered} ${stallOn.what} in the wait` + (d.ok !== undefined ? ` (${d.ok} tile(s), ${d.refused} refused)` : "");
+  return { resident: p.done, counts, ms: Date.now() - t0, why };
 }
 
 /**
@@ -1285,8 +1312,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // nothing on it. The baseline was measured there and the run failed as "band A at boot is not a
   // real render", which reads as a product defect and is not one: the pane cannot hold data the
   // server does not have yet.
-  const res0 = await waitForResident(page);
-  t.diagnostic(`pane resident after ${res0.ms} ms: "${res0.counts}"${res0.resident ? "" : " — NEVER became resident, measuring anyway"}`);
+  const res0 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`pane resident after ${res0.ms} ms: "${res0.counts}" (${res0.why})${res0.resident ? "" : " — NEVER became resident, measuring anyway"}`);
   // **`needsRender`, and the rectangle read with the pixels.** This is the phase the file was
   // quarantined on: "band A at boot is not a real render (only 0 distinct colours)" at ~8 s, with
   // the pane itself reporting tiles drawn. Zero distinct colours is not a flat pane — it is a
@@ -1352,7 +1379,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceB = Date.now() / 1000;
   t.diagnostic(`retuned away: said ${MHz(toB.said.centerHz)} MHz, radio now at ${MHz(toB.tuned.centerHz)} ± ${MHz(toB.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(toB.tuned.centerHz - A_HZ) > 100e6, "the retune to band B did not actually leave band A's neighbourhood");
-  await waitForResident(page);
+  const resB = await waitForResident(page, { stallOn: paneAnswers(page, B_HZ, 200e3) });
+  t.diagnostic(`band B pane resident: ${resB.resident} after ${resB.ms} ms, "${resB.counts}" (${resB.why})`);
   // Wait for the SERVER to say the radio is really producing at B — the premise "we moved away and
   // are now recording somewhere else" — rather than sleeping a constant and hoping (T-690). The
   // shadow search over band A needs a live edge that has moved on; this is that, measured.
@@ -1367,7 +1395,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceMoveIdx = page.requests.length;
   await gotoFreq(page, at, A_HZ, A_VIEW_SPAN_HZ); // a VIEW pan only, never a device call
   assertNoDeviceCalls(page, sinceMoveIdx, "panning back to look at departed band A");
-  await waitForResident(page);
+  const resA1 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`departed band A pane resident: ${resA1.resident} after ${resA1.ms} ms, "${resA1.counts}" (${resA1.why})`);
   // **The shadow's brightness is measured the way the live baseline is: over its own cells**
   // (review of the deflake, 2026-09-24). Every brightness claim below compares the shadow with a
   // live band measured over its MEASURED cells only, so a shadow averaged over its not-loaded
@@ -1437,7 +1466,15 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   // The one call site where T-580's short-circuit is the expected answer: this pane's whole window
   // is spectrum the radio never visited, so `0 tiles` here is the product working, not a pane that
   // has not loaded.
-  await waitForResident(page, { surveyMayAnswer: true });
+  // Its events are the pane's tile answers over C (none, if T-580 fires) PLUS the survey's answers,
+  // which are what draw a never-sampled pane.
+  const tilesC = paneAnswers(page, C_HZ, C_VIEW_SPAN_HZ), surveyIdx0 = page.requests.length;
+  const surveyC = () => page.requests.slice(surveyIdx0).filter((r) => r.url.includes("/api/coverage") && r.endedMs !== null).length;
+  const resC = await waitForResident(page, {
+    surveyMayAnswer: true,
+    stallOn: { count: () => tilesC.count() + surveyC(), what: "pane tile + survey answers" },
+  });
+  t.diagnostic(`band C pane resident: ${resC.resident} after ${resC.ms} ms, "${resC.counts}" (${resC.why})`);
   // **Wait for the survey's grey to be ON the pane, counted in survey answers** (the deflake,
   // 2026-09-23). T-580's rule 4 draws a skipped place grey only as far forward as the survey's
   // `as_of`, and the surface re-asks every `SURVEY_EVERY_MS` (2 s), so the grey's top trails the
@@ -1563,7 +1600,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const sinceResweep = Date.now() / 1000;
   t.diagnostic(`re-swept: said ${MHz(back.said.centerHz)} MHz, radio now at ${MHz(back.tuned.centerHz)} ± ${MHz(back.tuned.spanHz / 2)} MHz`);
   assert.ok(Math.abs(back.tuned.centerHz - A_HZ) < 3e6, `re-sweeping did not bring the radio back near band A: ${JSON.stringify(back.tuned)}`);
-  await waitForResident(page);
+  const resA2 = await waitForResident(page, { stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ) });
+  t.diagnostic(`re-swept band A pane resident: ${resA2.resident} after ${resA2.ms} ms, "${resA2.counts}" (${resA2.why})`);
   // `edgeRowsCoverage` below looks at a real-seconds-wide window ending at the tile's own fold
   // horizon (`shadow.edge_s`), so it needs real capture at the re-swept band to have accumulated
   // and been folded. That used to be a 10 s sleep, tuned up from 3 s when 3 s measured 7/26 = 27 %
