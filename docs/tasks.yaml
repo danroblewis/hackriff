@@ -25899,6 +25899,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+
+      Gate attempt 1 (09-24 05:49) went red in test-py, not in T-879 code: two tests in py/tests/test_work_accounting.py read the LIVE main-checkout .git/MERGE_HEAD through release_stale_claims (the REPO global was not isolated in the df fixture or in test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed), so they fail only inside gate-merge's staged merge. Reproduced by simulating that path present (2 of 60 fail) and fixed by setting REPO=tmp_path in both (60 of 60 pass). Merged main in; T-879 target test, hk-model 371, test-py 762 all green.
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 05:47).
       m3_repeated_unknowns_form_one_visible_cluster failed alone because of two independent real defects. Each one alone is enough to fail it: the test is green with both fixed and red with either reverted (identity fix off: 5 emitters, 0 clusters; retune fix off: 1 visible emitter, a cluster of 1).
