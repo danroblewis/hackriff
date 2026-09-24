@@ -26023,6 +26023,28 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-356 HIL capture-agent 2026-09-24.
+  - id: T-893
+    milestone: MLIVE
+    title: "Following panes still poll for new rows: wire /ws/tiles/rows (rowfeed.ts is parsed but unused), refresh coarse stand-ins, look ahead on still-pending columns (T-890 residue)"
+    status: todo
+    priority: high
+    deps:
+    - T-890
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-890 worker (task-t890 c2160635; handback ~/.hackriff-ops/work/T-890/handback.json). T-890 stopped a following pane going blank when its live edge crosses into a new time row (a low-priority look-ahead request in ui/src/surface/tilecache.ts). Three residual gaps against the live-rendering invariant ("rows append in real time as they are recorded; live is NEVER gated on tile generation"):
+      1. NEW ROWS STILL ARRIVE BY POLLING. On a busy tile route the refresh lags by more than a short pane's span, so the TOP of a following pane can still be empty with no row crossing at all (the gate run's pane was drawn only to 2.3 s short of its 2.8 s top before the crossing). The server already has a row-feed route, /ws/tiles/rows, and ui/src/surface/rowfeed.ts parses it, but nothing uses it. Wire it into following panes so rows append as recorded.
+      2. COARSE STAND-INS ARE NEVER REFRESHED, and the stand-in search ignores finer tiles already in hand: a time zoom-out on a following pane goes blank until the coarser level arrives.
+      3. WIDE PANES: at full width a pane is 6 tile columns; the look-ahead only extends columns already loaded, so columns still pending when the row starts get none.
+      DELIVER each with a regression test that goes red on the old code (ui/test and/or an e2e through the mock SDR with a slowed tile route, as T-890's live-edge.e2e.mjs case does). Thin client: presentation/residency in ui/src; any serving change in the backend (docs/api.md + api_contract.rs together if a route changes, T-079).
+      WHAT THE USER WILL SEE ON STAGING: a pane following live has its newest row at the very top within a frame or two of it being recorded, at any zoom and width, on a busy box.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-890 worker 2026-09-24.
+    effort_reason: "real-time display path: wiring a live row stream into tile residency without regressing T-890's look-ahead or the thin-client rule"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
