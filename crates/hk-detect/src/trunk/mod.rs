@@ -41,8 +41,14 @@
 //!    frequency and two talkgroups, which is C23's TDMA slot mix-up pitfall read the right way
 //!    round.
 
+//! 8. **P25 Phase 1 voice frames** ([`ldu`], T-849). The granted channel's LDU1 link control and
+//!    LDU2 encryption sync — the talkgroup and source the call itself states, and the **ALGID**
+//!    that T-270's permit needs before it may ever say *clear*. The IMBE voice codewords are
+//!    skipped, never decoded: no vocoder, no audio, nothing decrypted.
+
 pub mod confirm;
 pub mod dmr;
+pub mod ldu;
 pub mod nxdn;
 pub mod raster;
 pub mod support;
@@ -61,6 +67,10 @@ pub use dmr::{
     DMR_BS_DATA_SYNC_DIBITS, DMR_BS_VOICE_SYNC_DIBITS, DmrGrant, DmrPrivacyHeader, DmrResolved,
     MAX_CSBK_PER_WINDOW, MIN_DMR_CSBKS, csbk_crc, csbk_crc_ok, csbko_name, dmr_pi_encryption,
     dmr_protocol_of, is_voice_grant, scan_csbks,
+};
+pub use ldu::{
+    DUID_LDU1, DUID_LDU2, EncryptionSync, GroupVoiceLc, LDU_DIBITS, LduFrame, LduPayload, LduScan,
+    LinkControl, MAX_LDU_PER_WINDOW, Nid, scan_ldus,
 };
 pub use nxdn::{
     Cac, CacScan, MAX_CAC_PER_WINDOW, MIN_NXDN_CACS, MSG_DCALL_ASSGN, MSG_DCALL_ASSGN_DUP,

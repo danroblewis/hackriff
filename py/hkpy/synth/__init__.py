@@ -101,6 +101,12 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         "whose channel type names two slots per carrier, and two talkgroups granted on "
         "ALTERNATING SLOTS of one frequency -- consecutive channel numbers that an FDMA reading "
         "would turn into two different, wrong frequencies"),
+    "trunk_voice_frames_control_channel": ScenarioSpec(
+        trunk_scene.trunk_control_channel, trunk_scene.TRUNK_VOICE_FRAMES_DEFAULTS, (),
+        "the TSBK scene plus two granted voice channels whose keyings carry real P25 Phase 1 "
+        "voice frames (T-849): LDU1 link control naming the call's talkgroup and source, and LDU2 "
+        "encryption sync whose ALGID says clear on one channel and AES-256 on the other -- while "
+        "both grants carry service options 0 and so state nothing about encryption at all"),
     "trunk_dmr_control_channel": ScenarioSpec(
         trunk_scene.trunk_dmr_control_channel, trunk_scene.TRUNK_DMR_DEFAULTS, (),
         "a DMR Tier III control channel (BS-data frame sync + CSBKs with the 0xA5A5-masked CRC) "

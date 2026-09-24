@@ -33,6 +33,7 @@ Edges (docs/06 §5/§2.1): C23 depends on **C11 (channelizer) + C12 (occupancy)*
   - **A call still keyed when the dwell ends is truncated, never closed at the window edge** (T-308, docs/07 §2.29): `t_end` stays NULL and `observed_until` records where watching stopped, so the duration reads as a lower bound. A later pass continues it only across a gap ≤ the silence timeout (90 ms) — the duty cycle's gap is ~9.5 s, so ordinarily it does not, and the row stays truncated.
 - **Encryption check before the vocoder** (docs/04 §8.3):
   - P25 ALGID 0x80 = clear; 0x81 DES-OFB, 0x84 AES-256, 0xAA ADP/RC4.
+  - The ALGID and key id live in each call's LDU2 encryption sync (talkgroup/source in its LDU1 link control). `hk_detect::trunk::ldu` (T-849) reads both off a followed FDMA channel — status symbols, BCH(63,16) NID, Hamming(10,6,3) hexbits, RS(24,12)/RS(24,16) over GF(64), IMBE skipped — and the follower records them on the call's `call-start` event (`detail.voice_frames`). Recalled, not verified against a real capture; folding the ALGID into the call's encryption is T-330.
   - Grant service-options bit; DMR privacy indicators in LC/PI headers.
   - Encrypted calls are labelled and skipped. **Never** decrypt others' traffic; own system with own keys only.
 - **Simulcast:** CQPSK/LSM needs coherent QPSK with equalization (docs/04 §8.1).

@@ -50,8 +50,10 @@
 //!
 //! The chain writes a [`TrunkSystem`] row — a protocol, the measured control-channel frequency and
 //! times — plus, since T-268, the band plan its identifier updates announced and the grants it
-//! issued, plus, since T-269, the calls it followed. All of it metadata: no demodulated audio, no
-//! voice frames, no message payload, no recording, no stream, and nothing decrypted. There is no
+//! issued, plus, since T-269, the calls it followed, plus, since T-849, what each followed call's
+//! own voice-frame *headers* said (LDU1 link control, LDU2 encryption sync). All of it metadata: no
+//! demodulated audio — the IMBE voice codewords are skipped by position — no message payload, no
+//! recording, no stream, and nothing decrypted. There is no
 //! `CallAudio` in the workspace and no column that could hold one (docs/07 §2.29), so this is a
 //! property of the data model rather than a habit of this module. That is what lets it run under
 //! the fail-closed `metadata-only` class a 12.5 kHz LMR band derives, and the validator in
@@ -106,13 +108,17 @@
 //!
 //! # The encryption check (T-270)
 //!
-//! A grant's service-options octet is now read, and it is the only encryption indication this
-//! milestone can reach: a P25 ALGID lives in the voice frames on the *granted* channel (docs/04
-//! §8.3), and nothing here demodulates those. So a grant with the verified encryption bit set
+//! A grant's service-options octet is read, and it is the only encryption indication that sets a
+//! call's state today. A P25 ALGID lives in the voice frames on the *granted* channel (docs/04
+//! §8.3); since T-849 those are demodulated and the ALGID is recorded on the call's `call-start`
+//! event (see [`voice_frames`]), but it is **not yet** folded into `call.encryption` — whether the
+//! call's own ALGID overrides its grant is T-330's decision. So a grant with the verified encryption
+//! bit set
 //! produces [`hk_model::Encryption::Encrypted`], and **every other path stays `Unknown`** — a grant
 //! update carries no such octet at all, a bit that is clear is a grant-time announcement rather
 //! than the call's own statement, and a call joined in progress never saw either. Nothing this
-//! module writes can say `clear`, because saying it needs an ALGID and no ALGID is reachable yet.
+//! module writes into an encryption state can say `clear`, because saying it needs an ALGID and
+//! no ALGID is wired into one yet.
 //!
 //! [`CallRecord::from_grant`] carries the grant's state verbatim, so a call inherits exactly what
 //! its grant said and no branch here sharpens it.
@@ -131,10 +137,11 @@ use hk_core::{Discontinuity, ProvenanceHandle};
 use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, measure_fm_structure};
 use hk_detect::trunk::{
     AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CcCandidate,
-    CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, GridFit, MIN_CC_FCO, NXDN_L3_BYTES,
-    NxdnAssignment, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit,
-    best_lmr_raster, dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of, protocol_of,
-    resolve_alias, scan_blocks, scan_cacs, scan_csbks,
+    CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant, GridFit, LDU_DIBITS, LduPayload, LduScan,
+    MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM,
+    Resolved, VoicePermit, algid_name, best_lmr_raster, dmr_protocol_of, fit_grid_offset,
+    grid_aliases, nxdn_protocol_of, protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks,
+    scan_ldus,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
 use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
@@ -967,20 +974,13 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         // targets, the noise reference and — the new part — which absolute receiver offset the
         // modulo-raster grid fit really is. It is DSP over the window in hand, and its answer is
         // receiver provenance the analysis row below records.
-        let plan = plan_follow(
-            shared,
-            node,
-            &FollowWindow {
-                buf,
-                base,
-                t_start,
-                prov,
-            },
-            &ks,
-            &fco,
-            &events,
-            grid_offset,
-        );
+        let win = FollowWindow {
+            buf,
+            base,
+            t_start,
+            prov,
+        };
+        let plan = plan_follow(shared, node, &win, &ks, &fco, &events, grid_offset);
 
         // Metadata only: a protocol, the measured frequency, when it was heard, the band plan it
         // announced and the grants it issued. No audio, no payload, no recording.
@@ -1058,7 +1058,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         // The truncated-call tails live on the system, across passes: continuing a call is a
         // statement about one channel of one system, and the borrow ends with this call (T-308).
         if let Some(tails) = known.get_mut(&key).map(|k| &mut k.tails) {
-            follow_grants(shared, node, t_start, base, prov, &plan, system_id, tails);
+            follow_grants(shared, node, &win, &plan, system_id, tails);
         }
     }
 }
@@ -1520,6 +1520,172 @@ fn plan_follow<'e>(
     plan
 }
 
+/// Most voice frames of each kind one call-start event lists (T-849). A 0.5 s window holds at
+/// most three LDUs, so this bounds a pathological window rather than trimming an ordinary one.
+const VOICE_FRAMES_LISTED: usize = 16;
+
+/// One followed channel's P25 Phase 1 voice frames over the buffered window (T-849).
+struct VoiceFrames {
+    /// What the scan found, frames in stream order.
+    scan: LduScan,
+    /// Capture time of each frame's first sync symbol, parallel to `scan.frames`.
+    times: Vec<Timestamp>,
+    /// One LDU's duration on the air, ns (864 symbols at the demodulated symbol rate).
+    ldu_ns: i64,
+}
+
+impl VoiceFrames {
+    /// One transmission's frames as `grant_event` detail: those whose **midpoint** lies in
+    /// `[start, end)`. Link control and encryption sync are listed field by field; the message
+    /// indicator is carried verbatim and used for nothing.
+    ///
+    /// The midpoint, not the first symbol: the transmission's boundaries come from the channel
+    /// envelope in [`FOLLOW_FRAME_S`] steps, so a keying's first LDU can begin a step or two
+    /// before the measured start, while its midpoint — 90 ms in — can only lie inside the
+    /// transmission that carried it (a decoded LDU is 180 ms of continuous signal, and a
+    /// transmission only ends after [`SILENCE_TIMEOUT_S`] of silence).
+    fn detail(&self, start: Timestamp, end: Timestamp) -> serde_json::Value {
+        let inside = |i: usize| {
+            let mid = self.times[i].saturating_add_nanos(self.ldu_ns / 2);
+            mid >= start && mid < end
+        };
+        let mut lcs = Vec::new();
+        let mut ess = Vec::new();
+        for (i, f) in self
+            .scan
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| inside(*i))
+        {
+            let t = self.times[i].as_unix_nanos();
+            match &f.payload {
+                LduPayload::LinkControl(lc) => {
+                    let gv = lc.group_voice();
+                    lcs.push(json!({
+                        "t_ns": t,
+                        "nac": f.nid.nac,
+                        "lco": lc.lco(),
+                        "mfid": lc.mfid(),
+                        "protected": lc.protected(),
+                        "talkgroup": gv.map(|g| g.talkgroup),
+                        "source": gv.map(|g| g.source),
+                        "service_options": gv.map(|g| g.service_options),
+                        "raw_hex": hex(&lc.bytes),
+                        "rs_corrected": f.rs_corrected,
+                    }));
+                }
+                LduPayload::EncryptionSync(es) => {
+                    ess.push(json!({
+                        "t_ns": t,
+                        "nac": f.nid.nac,
+                        "algid": es.algid,
+                        "algid_name": algid_name(es.algid),
+                        "key_id": es.key_id,
+                        "mi_hex": hex(&es.mi),
+                        "rs_corrected": f.rs_corrected,
+                    }));
+                }
+            }
+        }
+        json!({
+            "attempted": true,
+            "decoder": "p25-phase1-ldu",
+            "ldu1": lcs.len(),
+            "ldu2": ess.len(),
+            "link_control": lcs.into_iter().take(VOICE_FRAMES_LISTED).collect::<Vec<_>>(),
+            "encryption_sync": ess.into_iter().take(VOICE_FRAMES_LISTED).collect::<Vec<_>>(),
+            // The whole window's scan, so a channel whose frames all fell outside this
+            // transmission (or never decoded) is legible rather than an empty list.
+            "window": {
+                "sync_hits": self.scan.sync_hits,
+                "nid_valid": self.scan.nid_valid,
+                "other_duid": self.scan.other_duid,
+                "rs_failed": self.scan.rs_failed,
+                "frames": self.scan.frames.len(),
+            },
+        })
+    }
+}
+
+/// Lower-case hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Demodulates one granted channel of the window and reads its P25 Phase 1 voice frames (T-849).
+///
+/// The same down-conversion and C4FM demodulation the control-channel confirmation uses, at the
+/// resolved receiver alias, and the same [`DEMOD_INTEGRATE_LADDER`] chosen by the decode: the
+/// fraction yielding the most Reed–Solomon-valid LDUs is kept, ties to the earlier. `None` only
+/// when the channel could not be down-converted or demodulated at all.
+///
+/// Cost per followed FDMA channel, bounded a priori: one DDC over the window already held, at most
+/// `DEMOD_INTEGRATE_LADDER.len()` C4FM demodulations of it, and one LDU scan per demodulation —
+/// a frame-sync correlation per symbol plus, per sync hit only, a 2^16-codeword NID search. The
+/// IMBE voice codewords are skipped by position: nothing here produces audio.
+fn voice_frames(win: &FollowWindow<'_>, offset_hz: f64, raster_hz: f64) -> Option<VoiceFrames> {
+    let fs = win.prov.tune.sample_rate_hz;
+    let demod_cfg = C4fmConfig::default();
+    let decim = (fs / (DEMOD_SPS * demod_cfg.symbol_rate_bd))
+        .floor()
+        .max(1.0);
+    let mut spec = DdcSpec::new(offset_hz, 2.0 * raster_hz);
+    spec.output_rate_hz = Some(fs / decim);
+    let mut ddc = Ddc::new(spec, fs).ok()?;
+    let info = InputInfo {
+        time: SampleTime {
+            sample_index: win.base,
+            host_time: win.t_start,
+        },
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: win.prov,
+    };
+    let (baseband, src0, spo): (Vec<Complex32>, f64, f64) = {
+        let blk = ddc.process(info, win.buf).ok()?;
+        (
+            blk.samples.to_vec(),
+            blk.header.time.source_index,
+            blk.header.time.source_per_output,
+        )
+    };
+    let rate = ddc.output_rate_hz();
+    let mut best: Option<(usize, LduScan, C4fmSymbols)> = None;
+    for integrate_fraction in DEMOD_INTEGRATE_LADDER {
+        let cfg = C4fmConfig {
+            integrate_fraction,
+            ..C4fmConfig::default()
+        };
+        let Ok(symbols) = C4fmDemod::new(cfg).demodulate(&baseband, rate, 0.0) else {
+            continue;
+        };
+        let scan = scan_ldus(&symbols.dibits);
+        let n = scan.frames.len();
+        if best.as_ref().is_none_or(|(b, _, _)| n > *b) {
+            best = Some((n, scan, symbols));
+        }
+    }
+    let (_, scan, symbols) = best?;
+    let sps = rate / symbols.rate_bd;
+    let ldu_ns = (LDU_DIBITS as f64 * 1e9 / symbols.rate_bd) as i64;
+    let times = scan
+        .frames
+        .iter()
+        .map(|f| {
+            let out_idx = symbols.timing_phase + f.start_dibit as f64 * sps;
+            let src = src0 + out_idx * spo;
+            win.t_start
+                .saturating_add_nanos(((src - win.base as f64).max(0.0) * 1e9 / fs) as i64)
+        })
+        .collect();
+    Some(VoiceFrames {
+        scan,
+        times,
+        ldu_ns,
+    })
+}
+
 /// A channel envelope's transmissions over `threshold`, and the frame length in seconds.
 fn keyings(ch: &ChannelFrames, threshold: f64, fs: f64) -> (Vec<(usize, usize, bool)>, f64) {
     let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
@@ -1532,17 +1698,15 @@ fn keyings(ch: &ChannelFrames, threshold: f64, fs: f64) -> (Vec<(usize, usize, b
 
 /// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
 /// channels outside it. See the module docs and [`plan_follow`].
-#[allow(clippy::too_many_arguments)]
 fn follow_grants(
     shared: &Shared,
     node: &TrunkCcNode,
-    t_start: Timestamp,
-    base: u64,
-    prov: &ProvenanceHandle,
+    win: &FollowWindow<'_>,
     plan: &FollowPlan<'_>,
     system: TrunkSystemId,
     tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
 ) {
+    let (t_start, base, prov) = (win.t_start, win.base, win.prov);
     let c = &shared.counters.chains;
     let fs = prov.tune.sample_rate_hz;
     let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
@@ -1618,6 +1782,20 @@ fn follow_grants(
                 let src = ch.source_index + (frame * ch.frame_len) as f64 * ch.source_per_output;
                 t_start.saturating_add_nanos(((src - base as f64).max(0.0) * 1e9 / fs) as i64)
             };
+            // ---- The voice frames the granted channel carried (T-849): its LDU1 link control and
+            // LDU2 encryption sync, demodulated from the same window at the same resolved alias.
+            // An FDMA channel only — a P25 Phase 2 carrier's voice is TDMA bursts, not LDUs, and
+            // reading its two slots as one LDU stream would attribute frames to no slot at all.
+            let heard = members
+                .iter()
+                .all(|g| g.slot.is_none())
+                .then(|| voice_frames(win, f - tune_center + offset_hz, raster))
+                .flatten();
+            if let Some(v) = &heard {
+                inc(&c.cc_voice_frame_demods);
+                add(&c.cc_ldu1, v.scan.ldu1().count() as u64);
+                add(&c.cc_ldu2, v.scan.ldu2().count() as u64);
+            }
             // Where observation of THIS channel stopped: the end of the last frame measured. It
             // is a fact about the receiver's schedule, not about the call, and it is what lets a
             // call with no observed end say "truncated here" instead of nothing at all (T-308).
@@ -1757,6 +1935,18 @@ fn follow_grants(
                     "receiver_alias": plan.alias.evidence,
                 });
                 open.detail["continued_across_passes"] = json!(is_continuation);
+                // What this transmission's own voice frames said (T-849) — recorded as the
+                // call's statement about itself, and deliberately NOT folded into
+                // `call.encryption`: whether an LDU2's ALGID overrides what the grant announced is
+                // T-330's decision, made through the `VoicePermit` above like every other.
+                open.detail["voice_frames"] = match &heard {
+                    Some(v) => v.detail(start, end.unwrap_or(observed_until)),
+                    None if g.slot.is_some() => json!({
+                        "attempted": false,
+                        "why": "tdma-carrier: phase 2 voice is not LDU-framed",
+                    }),
+                    None => json!({ "attempted": false, "why": "channel did not demodulate" }),
+                };
                 if !is_continuation {
                     evs.push(open);
                 }

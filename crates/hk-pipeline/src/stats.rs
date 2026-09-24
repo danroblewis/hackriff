@@ -414,10 +414,21 @@ counter_group!(
         /// the call, never its content — nothing is decrypted, and no audio exists to suppress.
         cc_calls_encrypted,
         /// Calls the encryption check refused a voice path (`VoicePermit`): encrypted, or — just
-        /// as firmly — **unknown**. In M4 this is every followed call, because no ALGID is
-        /// reachable and nothing may say "clear" without one. The check sits where a vocoder
+        /// as firmly — **unknown**. In M4 this is every followed call: an LDU2's ALGID is read
+        /// (T-849) but not yet wired into a call's state (T-330), and nothing may say "clear"
+        /// without one. The check sits where a vocoder
         /// would, so a later audio path cannot skip it by forgetting to ask.
         cc_voice_refused,
+        /// T-849: followed FDMA channels demodulated for P25 Phase 1 voice frames — one DDC and
+        /// at most two C4FM demodulations each, over the window already held. Metadata only: the
+        /// IMBE voice codewords are skipped by position and no audio exists.
+        cc_voice_frame_demods,
+        /// T-849: LDU1s whose link control decoded (NID within the BCH bound, Reed–Solomon
+        /// valid) on followed channels.
+        cc_ldu1,
+        /// T-849: LDU2s whose encryption sync — the call's own ALGID and key id — decoded on
+        /// followed channels. Read and recorded; whether it overrides the grant is T-330's.
+        cc_ldu2,
         /// T-297: characterising chains attached ([`crate::chains::sweep`]).
         ///
         /// Counted **apart from** `attached`, which has always meant a chain attached to
