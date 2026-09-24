@@ -22,13 +22,26 @@ document `crates/hk-synth/src/calibration.rs`'s loader reads, including §13.1's
 
 The Rust mirror of every constant here is `hk_synth::calibration`; `py/tests/test_calibrate.py`
 keeps the two in step.
+
+**Generating the shipped tables (T-853 = MAUTO M-2).** :func:`document_from_draws` turns one
+block's null draws — printed by the Rust ``calibration_draws`` example, which runs the block's
+canonical noise chain (``hk_synth::nullchain``) through the real blocks — into a
+``hackriff.calibration/1`` document: one cell per (metric, ``noise`` null, support), §13.1's
+``correlation`` and ``groups`` for any stage the block publishes more than one metric at (groups
+whose members correlate at ``|rho| >= 0.3`` are merged, never split), and the conditioning
+bounds passed explicitly. ``python -m hkpy.calibrate generate`` runs the example and writes
+``synth/calibration/<block>.json``; it passes :data:`TIGHT_NOMINAL_BOUNDS` because ADR-0015 §16.4
+requires it of the first real generation while the T-619 fill amendment is pending. This module
+does statistics only; every raw value comes from the Rust blocks.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -223,3 +236,204 @@ def write_calibration_file(path: str | Path, document: Mapping[str, Any]) -> Pat
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(document, indent=2) + "\n")
     return out
+
+
+#: Two metrics a block declared in different groups stay separate only below this |rho| in
+#: the shipped matrix (ADR-0015 §13.1). At or above it the generator merges their groups.
+GROUP_SPLIT_MAX_RHO = 0.3
+
+#: The null every shipped table is drawn under. The mismatched-parameter nulls (§13.3's other
+#: two) need per-block signal corpora and are not generated yet; a cell for them is `NoTable`.
+NOISE_NULL = "noise"
+
+
+def support_slack(n: int) -> int:
+    """How far above a cell's support `n` its windows may run: `n // 50 + 16`. Mirror of
+    `hk_synth::calibration::support_matches`; a window outside `[n, n + slack]` is not scored
+    against the cell, and a generated cell whose draws were is refused."""
+    return n // 50 + 16
+
+
+def _ranks(x: np.ndarray) -> np.ndarray:
+    """Average ranks (ties share the mean rank), as Spearman needs."""
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(len(x), dtype=np.float64)
+    ranks[order] = np.arange(len(x), dtype=np.float64)
+    _, inv, counts = np.unique(x, return_inverse=True, return_counts=True)
+    sums = np.zeros(len(counts))
+    np.add.at(sums, inv, ranks)
+    return sums[inv] / counts[inv]
+
+
+def spearman_matrix(columns: Sequence[np.ndarray]) -> list[list[float]]:
+    """Spearman's rho between every pair of equally long columns. A constant column has no rank
+    information; its correlations are reported as 1.0 (fail closed: it cannot justify a split)."""
+    r = [_ranks(np.asarray(c, dtype=np.float64)) for c in columns]
+    k = len(r)
+    out = [[1.0] * k for _ in range(k)]
+    for i in range(k):
+        for j in range(i + 1, k):
+            a, b = r[i] - r[i].mean(), r[j] - r[j].mean()
+            den = math.sqrt(float(np.dot(a, a)) * float(np.dot(b, b)))
+            rho = float(np.dot(a, b)) / den if den > 0 else 1.0
+            out[i][j] = out[j][i] = round(rho, 4)
+    return out
+
+
+def _evidence_direction(raw: Sequence[float], direction: str) -> np.ndarray:
+    arr = np.asarray(raw, dtype=np.float64)
+    return -arr if direction == "smaller" else arr
+
+
+def document_from_draws(
+    draws: Mapping[str, Any],
+    *,
+    nominal_bounds: Mapping[str, float],
+    ask_bits: Sequence[float] = DEFAULT_ASK_BITS,
+    generated_utc: str | None = None,
+) -> dict[str, Any]:
+    """One block's `calibration_draws` output -> a `hackriff.calibration/1` document.
+
+    `nominal_bounds` has no default on purpose: the caller states which fill bucket the tables
+    are conditioned on (ADR-0015 §16.4).
+    """
+    tables: list[dict[str, Any]] = []
+    stage_metrics: dict[str, dict[str, str]] = {}
+    for cell in draws["cells"]:
+        n = int(cell["n"])
+        lo, hi = cell.get("min_n", n), cell.get("max_n", n)
+        if not (n <= lo and hi - n <= support_slack(n)):
+            # A cell keyed on n whose windows had another support is not that cell (§13.2).
+            raise ValueError(
+                f"{draws['block']}: draws at n in [{lo}, {hi}] for a cell at n = {n}"
+            )
+        for metric, m in sorted(cell["metrics"].items()):
+            samples = _evidence_direction(m["raw"], m["direction"])
+            cal = calibrate_cell(samples, ask_bits=ask_bits)
+            tables.append(
+                {"metric": metric, "null": NOISE_NULL, "n": int(cell["n"]), **cal}
+            )
+            stage_metrics.setdefault(m["stage"], {})[metric] = m["group"]
+
+    correlation = None
+    groups: dict[str, dict[str, list[str]]] = {}
+    multi = {st: ms for st, ms in stage_metrics.items() if len(ms) > 1}
+    if len(multi) > 1:
+        raise ValueError(
+            "more than one stage with several metrics: one correlation block only"
+        )
+    for stage, metric_groups in multi.items():
+        names = sorted(metric_groups)
+        # The largest support's windows: the tables' own corpus, at the file's own n.
+        cell = max(draws["cells"], key=lambda c: c["n"])
+        cols = [
+            _evidence_direction(
+                cell["metrics"][n]["raw"], cell["metrics"][n]["direction"]
+            )
+            for n in names
+        ]
+        if len({len(c) for c in cols}) != 1:
+            raise ValueError(f"{stage}: metrics not present in every window")
+        rho = spearman_matrix(cols)
+        correlation = {
+            "method": "spearman",
+            "windows": len(cols[0]),
+            "n": int(cell["n"]),
+            "corpus": f"{NOISE_NULL}: {draws.get('corpus', '')}",
+            "metrics": names,
+            "rho": rho,
+        }
+        # Union-find over the declared groups; `undeclared` is one group (§13.1's default).
+        parent = {n: metric_groups[n] for n in names}
+
+        def find(g: str) -> str:
+            while parent.get(g, g) != g:
+                g = parent[g]
+            return g
+
+        for g in set(metric_groups.values()):
+            parent.setdefault(g, g)
+        for i, a in enumerate(names):
+            for j in range(i + 1, len(names)):
+                b = names[j]
+                ga, gb = find(metric_groups[a]), find(metric_groups[b])
+                if ga != gb and abs(rho[i][j]) >= GROUP_SPLIT_MAX_RHO:
+                    keep, drop = sorted((ga, gb))
+                    parent[drop] = keep
+        merged: dict[str, list[str]] = {}
+        for n in names:
+            merged.setdefault(find(metric_groups[n]), []).append(n)
+        groups[stage] = {g: sorted(ms) for g, ms in sorted(merged.items())}
+
+    doc = calibration_document(
+        block=draws["block"],
+        bucket="nominal",
+        tables=tables,
+        nominal_bounds=nominal_bounds,
+        correlation=correlation,
+        groups=groups or None,
+        generated_utc=generated_utc,
+    )
+    doc["null_corpus"] = draws.get("corpus", "")
+    doc["null_fill"] = draws.get("fill", {})
+    return doc
+
+
+def _run_draws(
+    blocks: Sequence[str], windows: int, threads: int
+) -> list[dict[str, Any]]:
+    root = Path(__file__).resolve().parents[2]
+    cmd = [
+        "cargo",
+        "run",
+        "--quiet",
+        "--release",
+        "-p",
+        "hk-synth",
+        "--example",
+        "calibration_draws",
+        "--",
+        "--windows",
+        str(windows),
+        "--threads",
+        str(threads),
+        *blocks,
+    ]
+    out = subprocess.run(cmd, cwd=root, check=True, capture_output=True, text=True)
+    return json.loads(out.stdout)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="python -m hkpy.calibrate")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    gen = sub.add_parser(
+        "generate", help="draw nulls through the Rust blocks and write tables"
+    )
+    gen.add_argument(
+        "blocks", nargs="*", help="block names (default: every null chain)"
+    )
+    gen.add_argument("--windows", type=int, default=WINDOWS_PER_CELL_FLOOR)
+    gen.add_argument("--threads", type=int, default=6)
+    gen.add_argument(
+        "--draws", type=Path, help="read draws JSON instead of running cargo"
+    )
+    gen.add_argument(
+        "--out",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / "synth" / "calibration",
+    )
+    args = ap.parse_args(argv)
+    if args.draws:
+        all_draws = json.loads(args.draws.read_text())
+    else:
+        all_draws = _run_draws(args.blocks, args.windows, args.threads)
+    for d in all_draws:
+        name = d["block"].split("@", 1)[0]
+        doc = document_from_draws(d, nominal_bounds=TIGHT_NOMINAL_BOUNDS)
+        path = write_calibration_file(args.out / f"{name}.json", doc)
+        print(f"{path}: {len(doc['tables'])} cells", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

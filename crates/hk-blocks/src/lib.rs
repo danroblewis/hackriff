@@ -12,6 +12,10 @@
 //! - [`registry`]: [`BlockFactory`] and the [`Registry`] (an [`hk_recipe::Catalogue`]).
 //! - [`catalogue`]: the M1 library's pinned descriptors ([`catalogue::planned`]).
 //! - [`blocks`]: implementations, one module per group (ownership in ADR-0011 §7).
+//! - [`evidence`]: the per-block evidence accumulators behind [`Block::evidence`] (ADR-0015
+//!   §2.1, T-853).
+//! - [`window`]: [`run_window`], the batch driver the synthesis search evaluates a recipe prefix
+//!   with (ADR-0015 §3.1, T-853).
 //!
 //! # Real-time rules (ADR-0011 §1.4)
 //! 1. `init` may allocate and design filters; `process` on a sample-rate port must not allocate
@@ -45,13 +49,17 @@ pub mod block;
 pub mod blocks;
 pub mod buffer;
 pub mod catalogue;
+pub mod evidence;
 pub mod registry;
 pub mod schema;
 pub mod status;
+pub mod window;
 
 pub use block::{Block, BlockError, Io, ParamUpdate, PortInfo, TapMask};
 pub use buffer::{
     ChunkFlags, ChunkMeta, Frame, FrameBuf, FrameInfo, Input, Output, PortSlice, PortVec,
 };
+pub use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
 pub use registry::{BlockFactory, BuildCtx, Registry};
 pub use status::{Extras, Lock, MAX_EXTRAS, Status};
+pub use window::{NodeEvidence, WindowError, WindowRun, run_window};

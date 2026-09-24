@@ -9,8 +9,11 @@ use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::blocks::framing::common::{
     P, RateMeter, combine, extend_bits, frames_io, frames_port, one_input, read_bits, update_hot,
 };
+use crate::evidence::CheckTally;
 use crate::registry::BuildCtx;
 use crate::status::Status;
+use hk_model::CrcStatus;
+use hk_model::synth::EvidenceSet;
 
 const HOT: &[&str] = &["drop_invalid"];
 const AMBIGUOUS: u64 = u64::MAX;
@@ -72,6 +75,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         words_corrected: 0,
         words_bad: 0,
         corrected_bits: 0,
+        ev: CheckTally::default(),
         status: Status::default(),
     };
     bch.fill_table();
@@ -96,6 +100,8 @@ pub struct Bch {
     words_corrected: u64,
     words_bad: u64,
     corrected_bits: u64,
+    /// Evidence (T-853), since `reset()`.
+    ev: CheckTally,
     status: Status,
 }
 
@@ -181,8 +187,16 @@ impl Block for Bch {
             extend_bits(&mut self.bits, f.bytes, 0, f.info.bit_len as usize);
             let words = self.bits.len() / self.word_bits;
             let (mut all, mut corrected) = (words > 0, 0);
+            let upstream_clean = !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
+            let width = (self.r + usize::from(self.parity != Parity::None)) as f64;
             for w in 0..words {
                 let (ok, c) = self.word(f.bytes, w * self.word_bits);
+                let at = w * self.word_bits;
+                self.ev.record(
+                    &self.bits[at..at + self.word_bits],
+                    ok && c == 0 && upstream_clean,
+                    width,
+                );
                 self.meter.push(!ok);
                 match (ok, c) {
                     (false, _) => self.words_bad += 1,
@@ -216,7 +230,16 @@ impl Block for Bch {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev.clear();
+    }
+
+    /// S5 `check_distinct_valid` (ADR-0015 §2.2, ADR-0022 §4.2, analytic) per **codeword**:
+    /// distinct codewords valid with no bit corrected, each passing by chance at
+    /// `2^−(parity bits)` (T-210: corrected words are 0 bits).
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
+    }
 
     fn update_params(
         &mut self,

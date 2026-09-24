@@ -29,8 +29,15 @@ use serde_json::Value;
 
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkFlags, ChunkMeta, Frame, FrameBuf, FrameInfo, PortSlice, PortVec};
+use crate::evidence::{DistinctSet, emit, hash_bits, saturate};
 use crate::registry::{BlockFactory, BuildCtx};
 use crate::status::Status;
+use hk_model::synth::null::field_fit_bits;
+use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
+
+/// Chance that a uniformly random 8-bit code is printable ASCII (0x20–0x7E): `text`'s
+/// `field_fit` null (ADR-0015 §2.2, "binomial against random frames").
+const PRINTABLE_CHANCE: f64 = 95.0 / 256.0;
 
 /// Builds [`Text`].
 pub struct TextFactory {
@@ -158,6 +165,11 @@ pub struct Text {
     clean: Vec<bool>,
     emitted: u64,
     codes: Vec<u8>,
+    /// Evidence (T-853), since `reset()`: distinct clean strings seen, and their characters
+    /// and printable characters.
+    ev_strings: DistinctSet,
+    ev_chars: u64,
+    ev_printable: u64,
     status: Status,
 }
 
@@ -176,6 +188,9 @@ impl Text {
             clean: vec![true; segments],
             emitted: 0,
             codes: Vec::with_capacity(64),
+            ev_strings: DistinctSet::default(),
+            ev_chars: 0,
+            ev_printable: 0,
             status: Status::default(),
         }
     }
@@ -301,6 +316,12 @@ impl Text {
             src.check
         };
         let bytes = &self.chars[..len];
+        if !matches!(check, CrcStatus::Corrected | CrcStatus::Invalid)
+            && self.ev_strings.insert(hash_bits(bytes))
+        {
+            self.ev_chars += len as u64;
+            self.ev_printable += bytes.iter().filter(|b| (0x20..=0x7e).contains(*b)).count() as u64;
+        }
         let bit_len = (len * 8) as u32;
         let text = decode_chars(self.cfg.charset, bytes);
         let mut nodes = vec![LayerNode {
@@ -431,6 +452,29 @@ impl Block for Text {
         self.key = None;
         self.reset_value = None;
         self.restart();
+        self.ev_strings = DistinctSet::default();
+        self.ev_chars = 0;
+        self.ev_printable = 0;
+    }
+
+    /// S6 `field_fit` (analytic): printable characters among the characters of the window's
+    /// **distinct**, uncorrected strings, against a random code's 95/256 chance of being
+    /// printable ASCII. S6 has no floor: this only ranks (ADR-0015 §1.3, C7).
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_chars == 0 {
+            return;
+        }
+        emit(
+            out,
+            Evidence::new(
+                Stage::S6,
+                MetricId::FieldFit,
+                GroupId::Undeclared,
+                self.ev_printable as f32,
+                saturate(self.ev_chars),
+                field_fit_bits(self.ev_printable, self.ev_chars, PRINTABLE_CHANCE),
+            ),
+        );
     }
 
     fn update_params(

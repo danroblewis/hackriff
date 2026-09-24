@@ -22,5 +22,6 @@ hk-estimate.workspace = true
 hk-demod.workspace = true
 # The shared evidence vocabulary (`hk_model::synth`) and the M3 seed (`hk_model::classify`).
 hk-model.workspace = true
+num-complex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,264 @@
+{
+  "schema": "hackriff.calibration/1",
+  "block": "clock_recovery@1",
+  "generated_utc": "2026-09-24T07:01:35Z",
+  "generator": "py/hkpy/calibrate.py@e1efe1cb7ad8",
+  "conditioning": {
+    "key": "adc_fill_sigma_lsb",
+    "bucket": "nominal",
+    "sigma_lsb_range": [
+      1.0,
+      77.0
+    ],
+    "clip_fraction_max": 0.1
+  },
+  "tables": [
+    {
+      "metric": "eye_open",
+      "null": "noise",
+      "n": 256,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 4089,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": 0.662656843662262,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": 0.6750298738479614,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": 0.6831355690956116,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": 0.6899550557136536,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": 0.6992061138153076,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    },
+    {
+      "metric": "timing_var",
+      "null": "noise",
+      "n": 256,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 4093,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": -0.45394471287727356,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": -0.4360395669937134,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": -0.4237876236438751,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": -0.413696825504303,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": -0.3998560607433319,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    },
+    {
+      "metric": "eye_open",
+      "null": "noise",
+      "n": 1024,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 4077,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": 0.6624028086662292,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": 0.6681724786758423,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": 0.6726498007774353,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": 0.676654577255249,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": 0.6821856498718262,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    },
+    {
+      "metric": "timing_var",
+      "null": "noise",
+      "n": 1024,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 4085,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": -0.4555664360523224,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": -0.44745901226997375,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": -0.4413784146308899,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": -0.4363575279712677,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": -0.42950960993766785,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    }
+  ],
+  "correlation": {
+    "method": "spearman",
+    "windows": 4096,
+    "n": 1024,
+    "corpus": "noise: noise sigma=8LSB 8-bit @48000Hz via lowpass>fsk_demod>clock_recovery",
+    "metrics": [
+      "eye_open",
+      "timing_var"
+    ],
+    "rho": [
+      [
+        1.0,
+        0.056
+      ],
+      [
+        0.056,
+        1.0
+      ]
+    ]
+  },
+  "groups": {
+    "S2": {
+      "eye": [
+        "eye_open"
+      ],
+      "soft_quality": [
+        "timing_var"
+      ]
+    }
+  },
+  "null_corpus": "noise sigma=8LSB 8-bit @48000Hz via lowpass>fsk_demod>clock_recovery",
+  "null_fill": {
+    "clip_fraction": 0.0,
+    "sigma_lsb": 8.0
+  }
+}
