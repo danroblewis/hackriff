@@ -23407,11 +23407,59 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
     result: |
-      DONE (work-runner, from handback.json, 2026-09-23 19:23).
-      Review fix 2: the .centre canvas box is padded 56px top / 70px bottom so .sf-bar and bottom rows clear the floating bar and dock (app-surface hit test); phone override sets a single 1fr row and separates the side/focus sheets with overflow:auto. Caveat: the canvas is inset by the chrome rather than drawn beneath it; ui e2e and just precheck were not run.
-      Tests: node test/run.mjs app-map-layout app-shell -> exit 0 (2/2 files passed)
-      Commits: decf3dad
-      Resources: 37 CPU-s, peak 0.3 GB
+      Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
+      siblings of `.centre` which is z-index:auto) painted above `.centre`
+      regardless of DOM order, and the surface's own toolbar (`.sf-bar`, mounted
+      inside `.centre`, spanning the full-bleed canvas width) sits in the same
+      top row the panels occupy — so its `.sf-actions` buttons (Live/Trace/
+      Signals/Measure/...) rendered under the panels. Round 2 had only cleared
+      the *outer* `.bar` vertically; this inner toolbar was untouched.
+
+      Fix (ui/src/app/chrome/map-layout.css): inset `.sf-bar` horizontally past
+      both panel columns via shared `--panel-w`/`--panel-gap` custom properties
+      (also used by `.side`/`.focus`'s own width, so the two can't drift apart),
+      scoped to above the 900px breakpoint — below it the panels drop to the
+      bottom of the screen and no longer share a row with the bar. The full-bleed
+      canvas drawing itself is untouched (still edge-to-edge, per MAP-01's
+      intent); only the toolbar's chrome moves. T-528's existing wrap-not-overflow
+      rule for `.sf-bar` handles narrow windows: it grows down instead of hiding
+      a button.
+
+      Also fixed reviewer's minor #3: `.focus:empty` never applied because
+      `render()` in ui/src/app/explore/index.ts always fills the slot with
+      something (real focus / "not found" text / placeholder sentence). Added an
+      `is-empty` class set only in the placeholder-only branch and cleared in the
+      other two; CSS now targets `.focus.is-empty`. No change to what Explore
+      shows.
+
+      Merged main first (git merge main, commit 3efd710e) — clean, no conflicts;
+      the TS2741 the previous round hit on `surface.ts` is fixed on main.
+
+      Tests run, real output:
+      - `just test-ui`: 56/56 test files passed, 0 failures.
+      - `node e2e/run.mjs app-surface` (run 1): 3/3 pass, including the T-528
+        hit-test assertion ("GET / mounts the unified surface in the app, under
+        the product CSP" — 1321ms).
+      - `node e2e/run.mjs app-surface` (run 2): 3/3 pass again (1205ms for the
+        same test).
+      - `node e2e/run.mjs surface-nav`: 5/5 pass (61.4s total).
+      - `just precheck` not run: this diff touches only `ui/src/app/chrome/
+        map-layout.css` and `ui/src/app/explore/index.ts` (no Rust crates),
+        and precheck is Rust-only per the task brief.
+
+      Waited ~50 min for a bulk merge gate (`~/.hackriff-ops/bulk-in-progress`,
+      pid 49109/61866) to clear before running any e2e specs, per the hard rule;
+      confirmed clear (no bulk-in-progress, no MERGE_HEAD, no `just gate`
+      process) immediately before each e2e run.
+
+      Process check after all runs: `ps -axo pid,ppid,pcpu,command | grep -Ei
+      "8791|t801|chrome-mac-arm64"` returned nothing — no Chrome for Testing,
+      node or hk serve instance left running from this session's e2e runs (the
+      two `hk serve` processes found running belong to other unrelated sessions/
+      the shared demo, not this worktree).
+
+      Commit: 7a5d243f "T-801 round 3: inset the surface's own toolbar past the
+      floating panels" on task-t801. Worktree clean.
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
