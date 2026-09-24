@@ -55,37 +55,30 @@ pub use param::{
 };
 pub use port::PortType;
 pub use recipe::{
-    ChannelsSpec, DecodeMapping, Edge, Endpoint, EvidenceTarget, FOLLOW_HOPS_BLOCK,
-    IdentityMapping, InputSpec, MatchHints, NodeSpec, ObjectiveForm, OutputKind, OutputPolicy,
-    OutputSpec, PortRef, Recipe, RecipeError, RefineGoal, RefineObjective, RefineSpec, Resolved,
-    StageView, parse_param_path,
+    AUDIO_OUT_BLOCK, AudioChannels, AudioProfile, ChannelsSpec, DEFAULT_LIVE_EDGE_BACKLOG_S,
+    DecodeMapping, Edge, Endpoint, EvidenceTarget, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec,
+    Liveness, LivenessMode, LivenessSpec, MAX_LIVE_EDGE_BACKLOG_S, MatchHints, NodeSpec,
+    ObjectiveForm, OutputKind, OutputPolicy, OutputSpec, PortRef, Recipe, RecipeError, RefineGoal,
+    RefineObjective, RefineSpec, Resolved, StageView, parse_param_path,
 };
 
 /// `schema` value of every recipe document.
 pub const RECIPE_SCHEMA: &str = "hackriff.recipe";
-/// The current recipe format version: what this crate writes for a new document, and the newest
-/// it reads.
+/// Recipe format version this crate writes for a new document, and the newest it reads.
 ///
 /// - **2** (T-085 review, before any release): variable-length framing params, field-map
 ///   `char_bits: 4`/`pocsag-bcd`/`parity`/`skip_bits`/`scale`/`add`/`value_unit`. Version 1 was
 ///   never released and is not read.
-/// - **3** (T-858 = MAUTO M-7, ADR-0015 §2.3, ADR-0011 §8.6): `refine.objective.evidence`, and
-///   node-parameter paths in `refine.tune` under it. ADR-0011 §8.6 puts the audio amendment's
-///   `audio` output kind, `input.liveness` and `refine.objective.builtin` in the same version
-///   ("one bump, three keys"); they join 3 when they land, as T-111 joined 2, since no version-3
-///   document has been released.
-///
-/// Version 2 documents stay valid and are read unchanged ([`is_supported_schema_version`]); a
-/// schema-3 key in a version-2 document is a validation error.
+/// - **3** (ADR-0011 §8.6, "one bump, three keys"): the `audio` output kind and `input.liveness`
+///   (T-866); `refine.objective.evidence` (T-858 = MAUTO M-7, ADR-0015 §2.3), with node-parameter
+///   paths in `refine.tune` under it. The same bump reserves `refine.objective.builtin`
+///   (ADR-0011 §8.7) for the ticket that serves it. Schema 3 only adds optional keys, so a
+///   version-2 document is still read unchanged; a schema-3 key in a version-2 document is an
+///   error, exactly as an unknown field was.
 pub const RECIPE_SCHEMA_VERSION: u32 = 3;
 
-/// The oldest recipe format version still read.
-pub const RECIPE_SCHEMA_VERSION_MIN: u32 = 2;
-
-/// Whether `v` is a format version this crate reads (2 or 3).
-pub const fn is_supported_schema_version(v: u32) -> bool {
-    v >= RECIPE_SCHEMA_VERSION_MIN && v <= RECIPE_SCHEMA_VERSION
-}
+/// Every recipe format version this crate reads.
+pub const RECIPE_SCHEMA_VERSIONS: [u32; 2] = [2, 3];
 
 /// A short identifier: `[a-z0-9_-]{1,64}` starting with a letter or digit (recipe, node, output
 /// and field-map ids; they appear in stream ids and API paths).

@@ -931,9 +931,14 @@ def release_stale_claims(claims, tasks_by_id):
     # A `queued` claim whose branch is already on main is finished: the merge runner landed it
     # (or a hand-merge did) and nothing flipped the claim. 24 of 39 "queued" claims were such
     # on 2026-09-23 01:40, inflating the dashboard's IN QUEUE count and every throughput read.
+    # Not while main is provisional: a batch commits each merge before gating (and a single merge is
+    # staged), so every branch in it reads "on main" and was closed - T-866 at 03:33:46 on 2026-09-24,
+    # 16 s before that batch failed, which left its red with no claim to resume. The reaper has the
+    # same guard for the same reason.
+    provisional = os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
     for tid, c in list(claims.items()):
         b = c.get("branch")
-        if c.get("state") == "queued" and b:
+        if c.get("state") == "queued" and b and not provisional:
             try:
                 if sh(["git", "rev-parse", "-q", "--verify", b]).strip() and \
                    int(sh(["git", "rev-list", "--count", f"main..{b}"]).strip() or 0) == 0:
@@ -1870,6 +1875,12 @@ def main():
         open(p, "a").close()
     import launchpath
     launchpath.check(__file__, log)
+    # Workers inherit this process's environment. Restarted from a role session, it carried that
+    # session's HACKRIFF_ROLE into every worker, and ops/watchdog.py (which names a role session by
+    # that variable before looking at claims) charged 5 workers' load to role:pipeline-manager -
+    # 665 % and an over-budget alarm on 2026-09-24 03:20. The runner is no role: drop it.
+    if os.environ.pop("HACKRIFF_ROLE", None):
+        log("ENV: dropped an inherited HACKRIFF_ROLE - workers are owned by their claims, not by a role")
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
     # What this process is actually running with - `just knobs show` reads it back as "effective".

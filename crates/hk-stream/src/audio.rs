@@ -123,6 +123,18 @@ pub struct AudioInfo {
     /// Output-driven refinement of the channel (T-070), when it ran and locked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refinement: Option<AudioRefinement>,
+    /// Recipe pipeline serving this audio (ADR-0011 §8.2, T-866; absent on Listen's own chain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_id: Option<String>,
+    /// That pipeline's recipe, `<id>@<version>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
+    /// The recipe's `audio` output id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<String>,
+    /// The pipeline's edit revision when the stream was offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_rev: Option<u32>,
 }
 
 /// A status record's fields.

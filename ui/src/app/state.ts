@@ -2,6 +2,7 @@
 // actions) lives in its owning area's `slice.ts`, so panel tasks never edit this file. Every slice
 // is plain data from docs/api.md (or UI-only interaction state); no slice holds a derived signal
 // measurement computed in the browser. Actions are pure `(state) => patch` functions.
+import { analyzeInitial, type AnalyzeState } from "./explore/analyze-slice";
 import { captureInitial, type CaptureState } from "./centre/capture-slice";
 import { centreInitial, type CentreState } from "./centre/slice";
 import { inspectorInitial, type InspectorState } from "./decode/inspector-slice";
@@ -19,12 +20,13 @@ export * from "./centre/slice";
 export * from "./decode/slice";
 export * from "./decode/inspector-slice";
 export * from "./review/slice";
+export * from "./explore/analyze-slice";
 
-export interface AppState extends ShellState, CaptureState, DockState, ExploreState, CentreState, DecodeState, InspectorState, ReviewState {}
+export interface AppState extends ShellState, CaptureState, DockState, ExploreState, CentreState, DecodeState, InspectorState, ReviewState, AnalyzeState {}
 
 export function initialState(prefs: Prefs = parsePrefs(null)): AppState {
   return {
     ...shellInitial(prefs), ...captureInitial(), ...dockInitial(), ...exploreInitial(),
-    ...centreInitial(), ...decodeInitial(), ...inspectorInitial(), ...reviewInitial(),
+    ...centreInitial(), ...decodeInitial(), ...inspectorInitial(), ...reviewInitial(), ...analyzeInitial(),
   };
 }
