@@ -37,11 +37,33 @@ export interface PaneControl {
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
 export interface GotoOffer { why: string; enabled: boolean; press(): void }
 
-/** A layer the layers menu can switch. Until MAP-06's per-pane registry lands these proxy the
- * surface's existing overlay toggles (found-signal boxes, the spectrum trace) — display only. */
-export interface LayerToggle { id: string; label: string; on(): boolean; toggle(): void }
+/** One row of the layers menu: a base style (radio) or an overlay (checkbox). Display only. */
+export interface LayerRow { id: string; label: string; hint: string; on: boolean }
 
-export interface MapControlHost {
+/**
+ * What the layers menu shows (T-806 / MAP-06, docs/24 §4): two independent axes for the ACTIVE
+ * pane — exactly one base style, any number of overlays in paint order — plus the few switches that
+ * are view-wide rather than per pane (the spectrum-trace strip), stated as such. Built fresh from
+ * the registry each time the menu renders; the rows are data, and every press goes back through
+ * the host, which writes presentation state and reaches no route.
+ */
+export interface LayerMenu {
+  /** How the menu names the pane it acts on ("pane 2 of 3"). */
+  pane: string;
+  bases: LayerRow[];
+  overlays: LayerRow[];
+  viewWide: LayerRow[];
+}
+
+/** The menu's writes. Every one is presentation state; none can reach a route. */
+export interface LayerMenuHost {
+  layerMenu(): LayerMenu;
+  setBase(id: string): void;
+  toggleOverlay(id: string): void;
+  toggleViewWide(id: string): void;
+}
+
+export interface MapControlHost extends LayerMenuHost {
   zoom(factor: number): void;
   followLive(): void;
   isFollowing(): boolean;
@@ -51,7 +73,6 @@ export interface MapControlHost {
   centreHz(): number | null;
   /** The retune offer for the active pane when no tuned window covers it, else null. */
   gotoOffer(): GotoOffer | null;
-  layers(): LayerToggle[];
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
@@ -165,7 +186,7 @@ const svg = (...shapes: Shape[]): SVGSVGElement => {
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
  * has now left, so it is withdrawn), and `syncFollow()` when the follow state may have changed.
  */
-export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewMoved(): void; syncFollow(): void } {
+export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void } {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
     inputmode: "decimal", autocomplete: "off", spellcheck: "false",
@@ -189,7 +210,7 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn);
   const layersList = h("div", { class: "map-layers-rows" });
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
-    h("h4", {}, "Overlays · this view"), layersList,
+    layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
   const zoomIn = h("button", { type: "button", class: "map-ibtn map-zoom-in", "aria-label": "Zoom in", title: "Zoom in (both axes)" },
@@ -245,12 +266,37 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   offerX.addEventListener("click", hideOffer);
 
   const renderLayers = () => {
-    layersList.replaceChildren(...host.layers().map((l) => {
-      const box = h("input", { type: "checkbox", "data-layer": l.id }) as HTMLInputElement;
-      box.checked = l.on();
-      box.addEventListener("change", () => { l.toggle(); box.checked = l.on(); });
-      return h("label", { class: "map-row" }, box, l.label);
-    }));
+    const m = host.layerMenu();
+    // A re-render replaces the inputs; keep keyboard focus on the one that was pressed.
+    const act = document.activeElement as HTMLElement | null;
+    const refocus = act && layersList.contains(act)
+      ? (act.dataset.base ? `[data-base="${act.dataset.base}"]` : act.dataset.layer ? `[data-layer="${act.dataset.layer}"]`
+        : act.dataset.viewLayer ? `[data-view-layer="${act.dataset.viewLayer}"]` : null)
+      : null;
+    const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
+      input.checked = l.on;
+      input.addEventListener("change", () => { press(); renderLayers(); });
+      return h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+    };
+    layersList.replaceChildren(
+      h("div", { class: "map-layers-axis", "data-axis": "base", role: "radiogroup", "aria-label": `Base style, ${m.pane}` },
+        h("h4", {}, `Base style · ${m.pane} · one at a time`),
+        ...m.bases.map((l) => row(l,
+          h("input", { type: "radio", name: "map-base", value: l.id, "data-base": l.id }) as HTMLInputElement,
+          () => host.setBase(l.id)))),
+      h("div", { class: "map-layers-axis", "data-axis": "overlays", role: "group", "aria-label": `Overlays, ${m.pane}` },
+        h("h4", {}, `Overlays · ${m.pane} · paint order ↓`),
+        ...m.overlays.map((l) => row(l,
+          h("input", { type: "checkbox", "data-layer": l.id }) as HTMLInputElement,
+          () => host.toggleOverlay(l.id)))),
+      ...(m.viewWide.length ? [h("div", { class: "map-layers-axis", "data-axis": "view-wide", role: "group", "aria-label": "Every pane" },
+        h("h4", {}, "Every pane"),
+        ...m.viewWide.map((l) => row(l,
+          h("input", { type: "checkbox", "data-view-layer": l.id }) as HTMLInputElement,
+          () => host.toggleViewWide(l.id))))] : []),
+      h("div", { class: "map-layers-note" }, "Unknowns are never hidden by default. Toggling a layer changes this pane's picture only — never what is captured or detected."),
+    );
+    if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
   };
   let layersOpen = false;
   const setLayersOpen = (open: boolean) => {
@@ -272,5 +318,7 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   fab.addEventListener("click", () => { host.followLive(); host.viewChanged(); syncFollow(); });
 
   syncFollow();
-  return { el, viewMoved: hideOffer, syncFollow };
+  /** Re-render an open menu — the active pane changed, or a toolbar button toggled a layer. */
+  const syncLayers = () => { if (layersOpen) renderLayers(); };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers };
 }

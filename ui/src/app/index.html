@@ -39,7 +39,9 @@
 
   <!-- EXPLORE -->
   <div class="main" id="view-explore">
-    <aside class="side" aria-label="Inventory and selections">
+    <!-- T-895 (P1): collapsed to a chip with the lists' counts by default; `chrome/side-chip.ts` adds
+         the chip and the open overlay's close (×) around the two slots without touching them. -->
+    <aside class="side" data-slot="side" aria-label="Inventory and selections">
       <div class="side-inv" data-slot="inventory"></div>
       <div class="side-sel" data-slot="selections"></div>
     </aside>

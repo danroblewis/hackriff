@@ -31,6 +31,8 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitFor("the sheet to mount collapsed",
     "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 60000 });
+  // T-895: the lists are a chip by default; a real click on a row needs them open.
+  await page.click("document.querySelector('.side-chip')");
   await page.waitFor("blind detection to list a signal", ROW_PRESENT, { timeoutMs: 120000, everyMs: 1000 });
 
   const rowF = (await page.$text(".side-inv .row[data-id] .f")) ?? "";

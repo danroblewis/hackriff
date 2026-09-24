@@ -123,8 +123,12 @@ test("T-522: the toggle is pure presentation — the source names no route, and 
   const handler = src.slice(src.indexOf("signalsBtn.addEventListener"), src.indexOf("signalsBtn.addEventListener") + 400);
   for (const [what, region] of [["the preference helpers", helpers], ["the click handler", handler]] as const) {
     assert.ok(!/\/api\//.test(region), `no route is named in ${what}`);
-    assert.ok(!/store\.set/.test(region), `${what} writes no store state — it flips a local var only`);
+    assert.ok(!/store\.set/.test(region), `${what} writes no store state directly`);
   }
+  assert.ok(!/s\.inventory|inventory:/.test(handler), "the click handler touches no inventory state");
+  // T-806: the button is now the ACTIVE pane's `detections` layer, so its one write is the
+  // per-pane layer registry (presentation state, `app/map/layers-slice.ts`) — nothing else.
+  assert.match(handler, /editLayers\(setPaneLayer\(id, "detections", on, seedFor\(id\)\), id\)/);
 });
 
 test("T-522: the button carries an accessible label and a pressed state", () => {

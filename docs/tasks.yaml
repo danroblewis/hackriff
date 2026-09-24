@@ -23683,7 +23683,6 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): clicking a pin or box slides up a detail sheet for that signal (its centre, bandwidth, time extent and explanations) without leaving the canvas. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Selected tab holds the most device actions in the largest surface - invert that: device actions (Listen, Record clip, Stream out, Analyze, Promote/Delete, any retune) are a COMPACT action cluster of small buttons, not a large surface, and no device route is bound to the sheet body. P1: the sheet has a visible dismiss (T-900).
-    branch: task-t804
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 13:23).
       MAP-04: the focus panel inside the T-803 bottom sheet is now the detail sheet from ui/mockups/map-ui-v1.html. Selecting a signal (clicking its box on the canvas or its inventory row) raises the sheet from peek to half. The sheet shows: the big frequency, the state and liveness in one line (from presence: on air since HH:MM:SS, or ended and marked provisional, reopens if it resumes); a Measured block with centre, bandwidth, and SNR/peak from /api/inventory's `measured` object, followed by a 'measured at HH:MM:SS UTC over N s' line (a level never appears without its time; 'No level measured yet' when there is none); the time extent (an open interval reads 'start -> live'); the ranked explanations, labelled 'ranked suggestions, never truth'; and an action row (Listen, Decode/RDS, Record clip, Stream out, Analyze, Promote, Delete) built from the context menu's own items. The peek strip names the selected frequency. Front end only, existing routes only. The new view-model explore/detail.ts is pure and imports types only. TO SEE IT ON STAGING: open Explore, wait for a signal box or inventory row to appear, then click the box (or the row). The sheet at the bottom right slides up to half height showing that signal's frequency, liveness, Measured-with-time, explanations and actions, while the canvas beside it still pans.
@@ -23693,6 +23692,7 @@ tasks:
       Observed, not chased: Clicking the box of the signal that is ALREADY focused, while the sheet is collapsed, does not re-open the sheet. focus-sheet.ts only reveals on a focus CHANGE (T-803 design, asserted in app-sheet.test.ts: 're-asserting the same focus does not reopen it'). The ticket did not ask for this; it would need the surface's onClick to call a reveal directly. | The mockup's 'Seen by' line (device, centre/span, gains) is not shown: /api/inventory rows carry no per-row device/gain provenance. | The canvas has no pins yet, only signal boxes; the pin click path belongs to the ticket that adds pins. The e2e selects through the inventory row, which calls the same focusSignal the canvas box click calls (centre/surface.ts onClick). It does not click a WebGL box, because the spec cannot locate one.
       Use cases: AWARE-053
       Resources: 99 CPU-s, peak 2.3 GB
+    branch: task-t804
     commit: e6f34ff2
   - id: T-805
     milestone: MMAP
@@ -23742,7 +23742,6 @@ tasks:
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
     status: in-progress
-    branch: task-t806
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
@@ -23772,6 +23771,16 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a layers menu that lists base styles and overlays per pane; toggling one changes that pane only. Say in your handback exactly what to open on staging to see it.
+    branch: task-t806
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:29).
+      Built the per-pane layer registry from docs/24 §13 (ui/src/surface/layers.ts). Each layer has a fixed plane (data/overlay/dom) and a z value that only orders it within its plane. Defaults follow §13.4: detections, including Candidate and unknown ones, start visible. The registries live in the store as state.layers (ui/src/app/map/layers-slice.ts). A split pane starts with a copy of its creator's registry and then changes independently. Each pane's registry is saved in localStorage under its pane id, and the page still works when storage is unavailable. The ring rules and the found-signal boxes are now the `rules` and `detections` overlay layers. The visible overlay layers are combined in z order into the one existing marks hook, so there is still a single overlay path (no sampler, no ramp) and the byte-identical-with-overlays-off guard is unchanged. The layers menu from T-802 now has two axes for the active pane: base style (Amplitude ramp or Phosphor, radios) and overlays in paint order (checkboxes), headed 'this pane' or 'pane N of M'. It also has one 'Every pane' switch for the spectrum-trace strip. Phosphor draws that pane's spectrum trace and afterglow in one green ink that is not on the waterfall's colour ramp. The toolbar Signals button now toggles the active pane's detections layer. TO SEE IT ON STAGING: open the app, click the Layers button (top-right of the canvas), then click 'Split ⇔' in the surface toolbar. The menu header changes to 'pane 2 of 2'. Choose Phosphor and untick Detections and Capture rules: only the new pane changes (green trace, no boxes, no ring lines, and the readouts say so). Click 'Close' and pane 1 is exactly as it was.
+      Tests: just test-ui -> exit 0 (build + typecheck + 60/60 test files passed (incl. 7 new MAP-06 tests)); cd ui && node e2e/run.mjs app-surface -> exit 0 (5/5 incl. new T-806 browser test; last 4 consecutive runs green)
+      precheck exit 0
+      Commits: e4dd8926
+      Observed, not chased: ui/e2e/app-surface.e2e.mjs 'a drag on the app's surface moves the view…' timed out ('waiting for the per-viewport readout to change after a drag') in 3 of the first 4 runs, at load averages of 21 to 27. main's code passed it 2/2 at a similar load, and my branch then passed 4/4 in a row once load dropped to about 15-20. The drag starts 0.6 s after the canvas is >200 px wide, which looks like a readiness race under load. This is a flake for the deflaker, not a product failure. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff touches no crate, and `just precheck` with no crate list runs clippy over the whole workspace, which was skipped. | docs/24 §13.4 says the `research` layer (saved measurements) is hidden by default. T-822's saved measurements, selections and in-progress gestures are still drawn as always-on interaction marks after the registry overlays, to avoid hiding a measurement right after it is saved. When MAP-20/22 take `research`, they should decide whether to move measurements into it. | The `coverage` and `tier` data layers and the other overlays (artifacts, priors, collection:*, pins) are defined in the registry but not yet offered in the menu. The menu lists only layers that have a renderer, and MAP-07/08/11/12/21 each add one to `overlayFns` in surface.ts. Phosphor currently changes the spectrum trace only; a phosphor tile ramp would be a data-plane change to the one ramp module.
+      Use cases: AWARE-042
+      Resources: 264 CPU-s, peak 2.4 GB
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
@@ -26274,7 +26283,6 @@ tasks:
     milestone: MMAP
     title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
     status: in-progress
-    branch: task-t895
     priority: high
     deps:
     - T-801
@@ -26290,6 +26298,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    branch: task-t895
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:03).
+      The Explore left inventory column (.side: Candidate/Confirmed lists + selections) is now COLLAPSED BY DEFAULT on every width: a left-edge, vertically-centred chip (max-height 56 px; drawn 44 px) stating both lists' counts, taken from the same renderedInventory collection the lists render (new ui/src/app/chrome/side-chip.ts, mounted on a new data-slot="side"). Pressing it opens the lists as a floating column with a visible close (x; Escape too); closed, the lists take no pixels (display:none, not a fade). The open column starts below the measured top chrome (bar, surface toolbar, Go-to -> --side-top), ends above the sheet peek, and below 900 px stops short of the zoom/FAB gutter, so it never covers Go-to, zoom, FAB, the sheet handle or T-528's toolbar; the toolbar and floating cluster no longer reserve the old 316 px left inset. Fixed, not draggable; presentation only (spy-client test: no route). docs/23 section 11 gains the left column's row (reads the inventory routes it reads today, writes nothing new). New e2e extends T-528's hit test to 1440/1000/920/420 px, collapsed and open; app-detail.e2e opens the chip before clicking a row.
+      Tests: just test-ui -> exit 0 (build + typecheck + 66/66 unit test files passed); HK_E2E_CONCURRENCY=1 npm run e2e -- app-side-chip app-detail app-sheet (HK_E2E_PORT=14336) -> exit 0 (3/3 files, 10 tests passed); HK_E2E_CONCURRENCY=1 npm run e2e -- app-surface (HK_E2E_PORT=14336) -> exit 0 (1/1 file, 5 tests passed (T-528 + T-802 hit tests))
+      precheck exit 0
+      Commits: 8057e3f8
+      Observed, not chased: No Rust touched, so precheck was run as its fmt half only (`cargo fmt --all --check`, exit 0); clippy with no crate list would lint the whole workspace. | Load flake (not a failure of the change): one earlier run of app-side-chip.e2e at 920 px timed out after 60 s in its initial 'surface/controls/sheet/chip mounted' wait at load avg ~30; the identical run passed right after (9.6 s). A separate first attempt died in run.mjs startLane -> backend.mjs tileCost with UND_ERR_HEADERS_TIMEOUT before any spec ran. | Pre-existing, not caused by this ticket (same with the side collapsed, and app-sheet.e2e already filters these to bySheet): at 420 px, 10 of the surface toolbar's .sf-actions buttons can't be clicked. Live is covered by another .mini, Trace/Auto-contrast/Viewport scale are under the wrapped top .bar, and Signals/Measure/Record IQ/Split/Close/Whole surface are off-screen (elementFromPoint returns nothing). The toolbar overflows at phone width instead of wrapping below the bar.
+      Resources: 892 CPU-s, peak 5.5 GB
   - id: T-896
     milestone: MMAP
     title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
