@@ -1,0 +1,58 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "adsb",
+  "version": 1,
+  "name": "ADS-B: aircraft positions",
+  "description": "Built-in template for the shipped adsb recipe; priors copied from its match block. Orders the search, never ranks or confirms.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families",
+          "priors.symbol_rate_bd",
+          "priors.bursty",
+          "priors.bands_hz"
+        ],
+        "basis": "spec",
+        "source": {
+          "kind": "standard",
+          "ref": "ICAO Annex 10 Vol IV",
+          "locator": "as transcribed in recipes/adsb.recipe.json match (UNVERIFIED against the standard)"
+        }
+      }
+    ]
+  },
+  "recipe": {
+    "id": "adsb",
+    "version": 1
+  },
+  "priors": {
+    "families": {
+      "ook": 1.0,
+      "ppm": 1.0
+    },
+    "symbol_rate_bd": [
+      [
+        1000000,
+        1000000
+      ]
+    ],
+    "bursty": true,
+    "bands_hz": [
+      [
+        1089000000,
+        1091000000
+      ]
+    ]
+  },
+  "output_policy": {
+    "content_class": "unrestricted"
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ]
+}
