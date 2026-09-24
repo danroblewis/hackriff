@@ -97,7 +97,7 @@ test("non-modal by construction: no backdrop, fixed to its own box, content refl
     "width-capped, docked right, clear of the zoom/FAB column (T-802)");
   assert.match(css, /@media \(max-width: 900px\) \{\s*\.sheet \{ left: 8px; width: auto; \}/, "full width on a phone");
   const html = readFileSync("src/app/index.html", "utf8");
-  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<aside class="focus" data-slot="focus"/,
+  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<div class="drawer" data-slot="drawer"><\/div>\s*<aside class="focus" data-slot="focus"/,
     "the focus panel is the sheet's body");
   assert.doesNotMatch(html, /<dialog|aria-modal/, "no modal anywhere in the shell");
   const src = readFileSync("src/app/chrome/sheet.ts", "utf8");

@@ -34,3 +34,14 @@
   .sheet { left: 8px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+
+/* T-814 (MAP-14): the Explore drawer inside the sheet body (mockup `.poi`). */
+.explore-drawer { padding: 12px 16px 8px; }
+.explore-drawer .drawer-peek { margin: 0 0 8px; color: var(--muted); font-size: 11.5px; }
+.explore-drawer h4 { margin: 12px 0 6px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.explore-drawer ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+.explore-drawer li button { width: 100%; text-align: left; border: 1px solid var(--line); background: var(--panel-2, none); color: inherit; border-radius: 8px; padding: 8px 10px; display: grid; gap: 2px; cursor: pointer; }
+.explore-drawer li button:hover { border-color: var(--muted); }
+.explore-drawer .f { font-family: var(--mono, monospace); }
+.explore-drawer .why { color: var(--muted); font-size: 11.5px; }
+.explore-drawer .tag { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }
