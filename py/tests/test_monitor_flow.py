@@ -202,3 +202,13 @@ def test_heavy_builds_run_in_a_child_and_errors_surface(monitor):
         assert "the board is not strict YAML" in str(e)
     else:
         raise AssertionError("a failing child must raise")
+
+
+
+def test_the_dashboard_re_executes_itself_above_its_rss_limit(monitor):
+    seen = {}
+    readings = iter([400.0, 900.0, 1300.0])
+    out = monitor._rss_guard(limit_mb=1200, every_s=0, rss=lambda: next(readings),
+                             execv=lambda exe, argv: seen.update(exe=exe, argv=argv) or "re-executed",
+                             sleep=lambda s: None)
+    assert out == "re-executed" and seen["argv"][0] == seen["exe"]
