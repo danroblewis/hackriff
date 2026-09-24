@@ -202,9 +202,15 @@ _COMMAND_ORDER = (
 #:                                               concurrently building worktrees exactly as an
 #:                                               agent that skipped the cap would.
 #:
-#: Deliberately NOT here: nextest's `--test-threads` — T-436 already pins that in
-#: `.config/nextest.toml` for every nextest invocation, gate included, so repeating it here would
-#: be a second, driftable copy of a rule that already lives in the runner.
+#: nextest's test-threads is NOT set here - `.config/nextest.toml` (T-436) is its one home - but an
+#: INHERITED `NEXTEST_TEST_THREADS` is removed, because that variable beats the profile. On
+#: 2026-09-23 02:11 `.claude/settings.json` gave every Claude session NEXTEST_TEST_THREADS=2 (a
+#: per-session build bound, f2fc783b); the merge runner restarted from a session at 04:05 inherited
+#: it, and from the 04:14 gate on every `just test` ran at a measured concurrency of exactly 2.0
+#: (JUnit: ~3300 test-seconds in ~1650 s wall, against 4.5-7 and ~780 s before) - about +870 s per
+#: full gate, all day, with no line anywhere saying so. The only way to change the gate's thread
+#: count is now the knob store (`just knobs set NEXTEST_TEST_THREADS=N`), which is deliberate and
+#: logged; a session's ambient bound never reaches the gate.
 GATE_BUILD_ENV: dict[str, str] = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_DEV_DEBUG": "line-tables-only",
@@ -212,14 +218,33 @@ GATE_BUILD_ENV: dict[str, str] = {
 }
 
 
-def suite_env(base: dict[str, str]) -> dict[str, str]:
-    """`base` (normally `os.environ`) with `GATE_BUILD_ENV` applied on top.
+def suite_env(base: dict[str, str], store: dict[str, str] | None = None) -> dict[str, str]:
+    """`base` (normally `os.environ`) with `GATE_BUILD_ENV` applied on top, and the test-thread
+    count taken from the knob `store` or else left to the nextest profile - never inherited.
 
-    A pure function of its input so it's testable without touching the real environment or
-    spawning anything: it must add exactly the T-144 flags and change nothing else, in
-    particular never removing or overriding an unrelated variable the caller already set.
+    A pure function of its inputs so it's testable without touching the real environment or
+    spawning anything: it adds exactly the T-144 flags, drops an inherited NEXTEST_TEST_THREADS,
+    and changes nothing else.
     """
-    return {**base, **GATE_BUILD_ENV}
+    env = {**base, **GATE_BUILD_ENV}
+    env.pop("NEXTEST_TEST_THREADS", None)
+    if (store or {}).get("NEXTEST_TEST_THREADS"):
+        env["NEXTEST_TEST_THREADS"] = store["NEXTEST_TEST_THREADS"]
+    return env
+
+
+def knob_store() -> dict[str, str]:
+    """`$HACKRIFF_OPS/env` (`just knobs`) as a dict; empty when absent (CI, a fresh box)."""
+    path = os.path.join(os.environ.get("HACKRIFF_OPS") or os.path.expanduser("~/.hackriff-ops"), "env")
+    out: dict[str, str] = {}
+    try:
+        for ln in open(path, encoding="utf-8"):
+            k, sep, v = ln.strip().partition("=")
+            if sep and k and not k.startswith("#"):
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
 
 
 _GATE_SELF = "the gate itself — it must not be able to weaken itself"
@@ -943,10 +968,12 @@ def main(argv: list[str] | None = None) -> int:
     # T-400: the suites the gate itself launches get T-144's build flags (env only — this
     # changes nothing about *which* commands run or what they assert, only how cargo builds
     # while they run). Printed so the override is visible, not a silent side effect.
-    env = suite_env(dict(os.environ))
+    env = suite_env(dict(os.environ), knob_store())
     print(
         "gate: build env = "
         + " ".join(f"{k}={v}" for k, v in GATE_BUILD_ENV.items())
+        + f" NEXTEST_TEST_THREADS={env.get('NEXTEST_TEST_THREADS', '(profile)')}"
+        + (f" (inherited {os.environ['NEXTEST_TEST_THREADS']} dropped)" if "NEXTEST_TEST_THREADS" in os.environ else "")
         + " (T-400, this process only)",
         flush=True,
     )

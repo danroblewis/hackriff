@@ -387,6 +387,28 @@ def test_suite_env_overrides_a_conflicting_value_from_the_caller():
     assert suite_env({"CARGO_INCREMENTAL": "1"})["CARGO_INCREMENTAL"] == "0"
 
 
+def test_an_inherited_test_thread_count_never_reaches_the_gate():
+    """2026-09-23: a Claude session's NEXTEST_TEST_THREADS=2 (.claude/settings.json) reached the gate
+    through a runner restarted from a session, and every full gate ran its tests two at a time."""
+    from hkpy.gate import suite_env
+
+    base = {"PATH": "/usr/bin", "NEXTEST_TEST_THREADS": "2"}
+    assert "NEXTEST_TEST_THREADS" not in suite_env(base)                       # the profile governs
+    assert suite_env(base, {"NEXTEST_TEST_THREADS": "6"})["NEXTEST_TEST_THREADS"] == "6"   # the knob does
+    assert "NEXTEST_TEST_THREADS" not in suite_env(base, {"WORK_CAP": "6"})
+    assert base["NEXTEST_TEST_THREADS"] == "2"                                 # still pure
+
+
+def test_knob_store_reads_key_value_lines(monkeypatch, tmp_path):
+    from hkpy.gate import knob_store
+
+    (tmp_path / "env").write_text("# comment\nWORK_CAP=6\n NEXTEST_TEST_THREADS = 6 \nbad line\n")
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    assert knob_store() == {"WORK_CAP": "6", "NEXTEST_TEST_THREADS": "6"}
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "nowhere"))
+    assert knob_store() == {}
+
+
 def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tmp_path):
     # Full round-trip through `main()`, but with subprocess.run faked out so this stays a
     # targeted, in-process test rather than an actual build. Asserts two independent things
