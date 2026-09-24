@@ -207,6 +207,109 @@ impl hk_api::IqBufferControl for PipelineIqBuffer {
     }
 }
 
+/// Region-analyze jobs (T-859, MAUTO M-8; ADR-0015 §5) over the pipeline's job manager. The
+/// request arrives validated and resolved to a band and window; this only converts names.
+pub struct PipelineAnalyze(pub Arc<hk_pipeline::synth::jobs::AnalyzeJobs>);
+
+fn analyze_failure(f: hk_pipeline::synth::jobs::JobFailure) -> hk_api::AnalyzeFailure {
+    hk_api::AnalyzeFailure {
+        status: f.status,
+        code: f.code.into(),
+        message: f.message,
+    }
+}
+
+fn analyze_invalid(message: &str) -> hk_api::AnalyzeFailure {
+    hk_api::AnalyzeFailure {
+        status: 400,
+        code: "invalid".into(),
+        message: message.into(),
+    }
+}
+
+fn analyze_json(job: hk_pipeline::synth::jobs::AnalyzeJob) -> Value {
+    serde_json::to_value(job).unwrap_or(Value::Null)
+}
+
+fn unix_s(s: f64) -> hk_model::Timestamp {
+    hk_model::Timestamp::from_unix_nanos((s * 1e9).round() as i64)
+}
+
+impl hk_api::AnalyzeControl for PipelineAnalyze {
+    fn start(&self, r: &hk_api::AnalyzeStart) -> Result<Value, hk_api::AnalyzeFailure> {
+        use hk_pipeline::synth::jobs::{JobRequest, TemplateFilter, parse_name};
+        let window = match (r.t_lo_s, r.t_hi_s) {
+            (Some(a), Some(b)) => Some(hk_model::TimeRange::new(unix_s(a), unix_s(b))),
+            _ => None,
+        };
+        let request = JobRequest {
+            target: r.target.clone(),
+            emitter_id: r.emitter_id,
+            band: hk_model::FreqRange::new(r.f_lo_hz, r.f_hi_hz),
+            window,
+            window_explicit: r.window_explicit,
+            profile: parse_name(r.profile).ok_or_else(|| analyze_invalid("unknown profile"))?,
+            max_wall_s: r.max_wall_s,
+            source: parse_name(r.source).ok_or_else(|| analyze_invalid("unknown source"))?,
+            live_s: r.live_s,
+            templates: TemplateFilter {
+                only: r.templates.only.clone(),
+                exclude: r.templates.exclude.clone(),
+                off: r.templates.off,
+            },
+            attach: r.attach,
+        };
+        self.0
+            .start(request)
+            .map(analyze_json)
+            .map_err(analyze_failure)
+    }
+
+    fn list(&self, state: Option<&str>) -> Result<Value, hk_api::AnalyzeFailure> {
+        let state = match state {
+            None => None,
+            Some(s) => Some(
+                hk_pipeline::synth::jobs::parse_name(s)
+                    .ok_or_else(|| analyze_invalid("state names no job state"))?,
+            ),
+        };
+        Ok(json!({ "jobs": self.0.list(state) }))
+    }
+
+    fn get(&self, id: &str) -> Result<Value, hk_api::AnalyzeFailure> {
+        self.0.get(id).map(analyze_json).map_err(analyze_failure)
+    }
+
+    fn cancel(&self, id: &str) -> Result<(Value, bool), hk_api::AnalyzeFailure> {
+        self.0
+            .cancel(id)
+            .map(|(job, forgotten)| (analyze_json(job), forgotten))
+            .map_err(analyze_failure)
+    }
+
+    fn trace(
+        &self,
+        id: &str,
+        q: &hk_api::AnalyzeTraceQuery,
+    ) -> Result<Value, hk_api::AnalyzeFailure> {
+        use hk_pipeline::synth::jobs::{TraceQuery, parse_name};
+        let query = TraceQuery {
+            stage: match &q.stage {
+                None => None,
+                Some(s) => Some(parse_name(s).ok_or_else(|| analyze_invalid("unknown stage"))?),
+            },
+            outcome: match &q.outcome {
+                None => None,
+                Some(o) => Some(parse_name(o).ok_or_else(|| analyze_invalid("unknown outcome"))?),
+            },
+            family: q.family.clone(),
+            tried: q.tried,
+            limit: q.limit,
+        };
+        self.0.trace(id, &query).map_err(analyze_failure)
+    }
+}
+
 /// Labelled-capture dataset export (T-205) over the pipeline's IQ capture buffer (for snippet
 /// export, reusing the same clip writer as `/api/iqbuffer/clip`) and its own repository handle,
 /// opened fresh per call like [`hk_pipeline::iqbuffer::IqBufferService`]'s own `Recording` writer
