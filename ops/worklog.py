@@ -264,10 +264,14 @@ PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 .bn .dg i{color:var(--dim);font-style:normal}
 .bn .foot{color:var(--dim);font:11.5px var(--mono);margin-top:4px}
 .bn .warn{color:var(--coral)}
+.bn td.c{font:11px var(--mono);white-space:nowrap}
+.c-REVIEW_FAIL{color:var(--amber)}.c-GATE_FAIL{color:var(--coral)}.c-CONFLICT{color:#B69CF0}.c-UNCOMMITTED{color:var(--teal)}.c-OTHER{color:var(--dim)}
+.bn .tl{font:11.5px var(--mono);color:var(--mut);margin:0 0 6px}.bn .tl b{color:var(--txt);font-weight:400}
 </style></head><body>
 <div class=top><span class=nm>hack<b>riff</b> · role work log</span><a href="/">← dashboard</a><span class=sub id=sub>loading…</span></div>
 <div class=wrap>
-<div class=bn id=bn></div>
+<a id=leverage></a><div class=bn id=bn></div>
+<a id=fixes></a><div class=bn id=fx></div>
 <div class=tabs id=tabs></div>
 <div class=ctl><label><input type=checkbox id=flowonly> <code>flow:</code> lines only</label><span class=sess id=sess></span></div>
 <div id=list></div>
@@ -333,6 +337,21 @@ document.addEventListener('click',e=>{
   const s=e.target.closest('#bn .sort span'); if(s){ lvSort=s.dataset.s; try{localStorage.setItem('lv-sort',lvSort);}catch(x){} lvRender(); return; }
   if(e.target.closest('#bn [data-more]')){ lvAll=!lvAll; lvRender(); }
 });
-tick(); setInterval(tick,30000); bn(); setInterval(bn,60000);
+// Fix runs (hkpy.fixes, user 2026-09-24): why each ticket was handed back to its worker.
+let FX=null, fxAll=false;
+function fxRender(){
+  const b=FX, el=document.getElementById('fx'); if(!b) return;
+  if(b.error){ el.innerHTML='<h3>Fix runs</h3><div class=foot>'+esc(b.error)+'</div>'; return; }
+  const rows=b.rows||[], shown=fxAll?rows:rows.slice(0,10);
+  const days=Object.entries(b.tally||{}).map(([d,c])=>`<div><b>${esc(d)}</b> ${Object.entries(c).map(([k,v])=>`<span class="c-${esc(k)}">${esc(k)} ${v}</span>`).join(' · ')}</div>`).join('');
+  const tr=r=>`<tr><td class=ms>${esc(when(r.ts*1000))}</td><td class=id>${esc(r.ticket)}</td><td class=n>${esc(r.attempt==null?'':r.attempt)}</td><td class="c c-${esc(r.reason_class)}">${esc(r.reason_class)}</td><td class=t>${esc(r.reason)}${r.backfilled?' <i style="color:var(--dim)" title="recorded before the runner stored reasons; recovered from the work-runner log / attention files">(backfilled)</i>':''}</td><td class=ms>${esc(r.outcome||'')}</td><td class=n>${r.minutes==null?'':esc(r.minutes)+' m'}</td></tr>`;
+  el.innerHTML=`<h3>Fix runs · why tickets were handed back (last 7 days)</h3><div class=tl>${days||'none'}</div>`+
+    `<table><tr><td class=ms>started</td><td class=ms>ticket</td><td class=ms>#</td><td class=ms>class</td><td class=ms>reason</td><td class=ms>outcome</td><td class=ms>min</td></tr>${shown.map(tr).join('')||'<tr><td colspan=7 class=ms>no fix runs</td></tr>'}</table>`+
+    (rows.length>10?`<span class=more data-fxmore=1>${fxAll?'▾ newest 10 only':'▸ show all '+rows.length}</span>`:'')+
+    `<div class=foot>${esc(b.line||'')} · ops/work-runner.py fix runs, work-done.jsonl</div>`;
+}
+async function fx(){ try{ FX=await (await fetch('/fixes.json',{cache:'no-store'})).json(); }catch(e){ FX={error:String(e)}; } fxRender(); }
+document.addEventListener('click',e=>{ if(e.target.closest('#fx [data-fxmore]')){ fxAll=!fxAll; fxRender(); } });
+tick(); setInterval(tick,30000); bn(); setInterval(bn,60000); fx(); setInterval(fx,60000);
 </script></body></html>
 """

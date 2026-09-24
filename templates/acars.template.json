@@ -1,0 +1,62 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "acars",
+  "version": 1,
+  "name": "ACARS: aircraft messages",
+  "description": "Built-in template for the shipped acars recipe; priors copied from its match block. Orders the search, never ranks or confirms.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families",
+          "priors.symbol_rate_bd",
+          "priors.bandwidth_hz",
+          "priors.bursty",
+          "priors.bands_hz"
+        ],
+        "basis": "spec",
+        "source": {
+          "kind": "standard",
+          "ref": "ARINC 618",
+          "locator": "as transcribed in recipes/acars.recipe.json match (UNVERIFIED against the standard)"
+        }
+      }
+    ]
+  },
+  "recipe": {
+    "id": "acars",
+    "version": 1
+  },
+  "priors": {
+    "families": {
+      "am": 1.0
+    },
+    "symbol_rate_bd": [
+      [
+        2400,
+        2400
+      ]
+    ],
+    "bandwidth_hz": [
+      2000,
+      8000
+    ],
+    "bursty": true,
+    "bands_hz": [
+      [
+        129000000,
+        137000000
+      ]
+    ]
+  },
+  "output_policy": {
+    "content_class": "unrestricted"
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ]
+}

@@ -1273,6 +1273,61 @@ pub struct Clip {
     pub t1_ns: i64,
 }
 
+impl Clip {
+    /// Describes chunks already read into memory ([`IqBuffer::read`]) as one clip, renumbering
+    /// each piece's `sample_start` so the chunks laid end to end are the clip's data — what an
+    /// analysis job pins after reading its windows (ADR-0015 §6 "pin on analyze"), so the pinned
+    /// file holds **exactly** the samples the search read. Refused when `chunks` is empty, spans
+    /// two runs or two sample rates (one rate per SigMF file), or a chunk's data length does not
+    /// match its piece.
+    pub fn from_chunks(chunks: &[ReadChunk]) -> Result<Self, ClipError> {
+        let Some(first) = chunks.first() else {
+            return Err(ClipError::Empty);
+        };
+        let (run, rate) = (first.piece.run, first.piece.provenance.tune.sample_rate_hz);
+        let mut pieces = Vec::with_capacity(chunks.len());
+        let mut sample_start = 0u64;
+        for c in chunks {
+            if c.piece.run != run {
+                return Err(ClipError::MixedRuns { t_ns: c.piece.t_ns });
+            }
+            if c.piece.provenance.tune.sample_rate_hz != rate {
+                return Err(ClipError::MixedRates { t_ns: c.piece.t_ns });
+            }
+            if c.data.len() as u64 != c.piece.samples * BYTES_PER_SAMPLE {
+                return Err(ClipError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a read chunk's data does not match its piece",
+                )));
+            }
+            let mut p = c.piece.clone();
+            p.sample_start = sample_start;
+            sample_start += p.samples;
+            pieces.push(p);
+        }
+        let last = &pieces[pieces.len() - 1];
+        Ok(Self {
+            samples: sample_start,
+            sample_rate_hz: rate,
+            t0_ns: pieces[0].t_ns,
+            t1_ns: last.t1_ns,
+            pieces,
+        })
+    }
+}
+
+/// One contiguous piece of buffered IQ read **into memory** ([`IqBuffer::read`], ADR-0015 §5.3):
+/// the piece's provenance, stream index and sample-clock times, and its ci8 bytes. A chunk never
+/// spans a segment boundary (a retune, a rate or gain change, a gap), so the reader turns each
+/// chunk boundary into a `DISCONTINUITY` rather than splicing across it.
+#[derive(Clone, Debug)]
+pub struct ReadChunk {
+    /// Where the samples are: `sample_start` is their offset within this read.
+    pub piece: ClipPiece,
+    /// ci8 IQ, `2 × piece.samples` bytes.
+    pub data: Vec<u8>,
+}
+
 /// Why a clip was not exported.
 #[derive(Debug)]
 pub enum ClipError {
@@ -1348,26 +1403,54 @@ impl ClipPlan {
         self.samples * BYTES_PER_SAMPLE
     }
 
-    /// Writes the clip's ci8 data to `out` and describes it.
-    pub fn write(self, out: &mut dyn Write) -> Result<Clip, ClipError> {
+    /// The pieces the clip will hold, in order.
+    pub fn pieces(&self) -> impl Iterator<Item = &ClipPiece> {
+        self.plan.iter().map(|(p, _)| p)
+    }
+
+    /// Reads `reads` from the ring file into `out`, checking every block against the eviction
+    /// floor **after** reading it, so data the ring overwrote meanwhile is refused, never served.
+    fn copy(&self, reads: &[Span], out: &mut dyn Write) -> Result<(), ClipError> {
         let inner = &self.buffer.inner;
         let mut buf = vec![0u8; 1 << 20];
-        for (_, reads) in &self.plan {
-            for &(offset, len, log) in reads {
-                let mut done = 0;
-                while done < len {
-                    let n = (len - done).min(buf.len() as u64) as usize;
-                    inner
-                        .read
-                        .read_exact_at(&mut buf[..n], offset + done)
-                        .map_err(ClipError::Io)?;
-                    if lock(&inner.state).log_floor > log + done {
-                        return Err(ClipError::Evicted);
-                    }
-                    out.write_all(&buf[..n]).map_err(ClipError::Io)?;
-                    done += n as u64;
+        for &(offset, len, log) in reads {
+            let mut done = 0;
+            while done < len {
+                let n = (len - done).min(buf.len() as u64) as usize;
+                inner
+                    .read
+                    .read_exact_at(&mut buf[..n], offset + done)
+                    .map_err(ClipError::Io)?;
+                if lock(&inner.state).log_floor > log + done {
+                    return Err(ClipError::Evicted);
                 }
+                out.write_all(&buf[..n]).map_err(ClipError::Io)?;
+                done += n as u64;
             }
+        }
+        Ok(())
+    }
+
+    /// Reads the clip **into memory**, one [`ReadChunk`] per piece (ADR-0015 §5.3's
+    /// `IqBufferService::read`): the same plan, eviction check and provenance as
+    /// [`Self::write`], without writing a file.
+    pub fn read(self) -> Result<Vec<ReadChunk>, ClipError> {
+        let mut chunks = Vec::with_capacity(self.plan.len());
+        for (piece, reads) in &self.plan {
+            let mut data = Vec::with_capacity((piece.samples * BYTES_PER_SAMPLE) as usize);
+            self.copy(reads, &mut data)?;
+            chunks.push(ReadChunk {
+                piece: piece.clone(),
+                data,
+            });
+        }
+        Ok(chunks)
+    }
+
+    /// Writes the clip's ci8 data to `out` and describes it.
+    pub fn write(self, out: &mut dyn Write) -> Result<Clip, ClipError> {
+        for (_, reads) in &self.plan {
+            self.copy(reads, out)?;
         }
         out.flush().map_err(ClipError::Io)?;
         let pieces: Vec<ClipPiece> = self.plan.into_iter().map(|(p, _)| p).collect();
@@ -2056,6 +2139,25 @@ impl IqBuffer {
             });
         }
         plan.write(out)
+    }
+
+    /// Reads the buffered samples in `range` (segments whose tuned window overlaps `band` when
+    /// given) **into memory**, one [`ReadChunk`] per segment piece with its provenance — the
+    /// in-memory read ADR-0015 §5.3 adds beside [`Self::export_clip`] for the analysis engine.
+    /// At most `max_bytes` of data; nothing is written and no recording is made.
+    pub fn read(
+        &self,
+        range: ClipRange,
+        band: Option<(f64, f64)>,
+        max_bytes: u64,
+    ) -> Result<Vec<ReadChunk>, ClipError> {
+        let plan = self.plan_clip_run(range, band, None)?;
+        if plan.bytes() > max_bytes {
+            return Err(ClipError::TooLarge {
+                bytes: plan.bytes(),
+            });
+        }
+        plan.read()
     }
 
     /// Selects the buffered samples in `range` (and `band`) without reading them
@@ -3152,6 +3254,95 @@ mod tests {
             (Some(1.0), Some(3.0), 1500),
             "{r:?}"
         );
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// T-857 (ADR-0015 §5.3): the in-memory read returns one chunk per segment piece with its
+    /// provenance, bytes identical to a clip export of the same range; a retune is a chunk
+    /// boundary, never spliced; an evicted range reads as empty; chunks re-describe as one clip
+    /// with consecutive `sample_start`s.
+    #[test]
+    fn t857_read_returns_segment_chunks_with_provenance_and_exact_bytes() {
+        let dir = tmp("read");
+        let fs_hz = 1000.0;
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(2.0, Some(1 << 20))).unwrap();
+        w.begin_segment(start(0, 0, 100e6, fs_hz));
+        w.append(&ramp(0, 1500)).unwrap();
+        w.begin_segment(start(2000, 2_000_000_000, 101e6, fs_hz));
+        w.append(&ramp(2000, 1000)).unwrap();
+        let range = ClipRange::Time {
+            t0_ns: 1_200_000_000,
+            t1_ns: 2_300_000_000,
+        };
+        let chunks = buf.read(range, None, u64::MAX).unwrap();
+        assert_eq!(chunks.len(), 2, "a retune is a chunk boundary");
+        assert_eq!(
+            (chunks[0].piece.global_index, chunks[0].piece.samples),
+            (1200, 300)
+        );
+        assert_eq!(chunks[0].piece.provenance.tune.center_hz, 100e6);
+        assert_eq!(chunks[0].piece.t_ns, 1_200_000_000);
+        assert_eq!(chunks[0].piece.t1_ns, 1_500_000_000);
+        assert_eq!(chunks[0].data, ramp(1200, 300));
+        assert_eq!(
+            (chunks[1].piece.global_index, chunks[1].piece.samples),
+            (2000, 300)
+        );
+        assert_eq!(chunks[1].piece.provenance.tune.center_hz, 101e6);
+        assert_eq!(chunks[1].data, ramp(2000, 300));
+        // The same bytes a clip export of the range writes.
+        let joined: Vec<u8> = chunks.iter().flat_map(|c| c.data.clone()).collect();
+        assert_eq!(joined, export(&buf, range, None).unwrap());
+        // The band selects one segment's chunk only.
+        let only = buf.read(range, Some((100.9e6, 101.1e6)), u64::MAX).unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].piece.global_index, 2000);
+        // Size guard, then eviction: [0, 1.0) s left the 2 s window.
+        assert!(matches!(
+            buf.read(range, None, 100),
+            Err(ClipError::TooLarge { bytes: 1200 })
+        ));
+        assert!(matches!(
+            buf.read(
+                ClipRange::Time {
+                    t0_ns: 0,
+                    t1_ns: 900_000_000
+                },
+                None,
+                u64::MAX
+            ),
+            Err(ClipError::Empty)
+        ));
+        // Two disjoint reads re-described as one clip: consecutive sample starts, one rate.
+        let a = buf
+            .read(
+                ClipRange::Time {
+                    t0_ns: 1_000_000_000,
+                    t1_ns: 1_100_000_000,
+                },
+                None,
+                u64::MAX,
+            )
+            .unwrap();
+        let mut both = a.clone();
+        both.extend(chunks.clone());
+        let clip = Clip::from_chunks(&both).unwrap();
+        let starts: Vec<u64> = clip.pieces.iter().map(|p| p.sample_start).collect();
+        assert_eq!(starts, vec![0, 100, 400]);
+        assert_eq!(clip.samples, 700);
+        assert_eq!((clip.t0_ns, clip.t1_ns), (1_000_000_000, 2_300_000_000));
+        assert!(matches!(Clip::from_chunks(&[]), Err(ClipError::Empty)));
+        let mut bad = a[0].clone();
+        bad.data.pop();
+        assert!(matches!(Clip::from_chunks(&[bad]), Err(ClipError::Io(_))));
+        let mut other_rate = a[0].clone();
+        other_rate.piece.provenance.tune.sample_rate_hz = 2000.0;
+        assert!(matches!(
+            Clip::from_chunks(&[a[0].clone(), other_rate]),
+            Err(ClipError::MixedRates { .. })
+        ));
         drop(w);
         drop(buf);
         let _ = fs::remove_dir_all(&dir);

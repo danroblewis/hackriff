@@ -1,0 +1,55 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "rds",
+  "version": 1,
+  "name": "RDS: data on FM",
+  "description": "Built-in template for the shipped rds recipe; priors copied from its match block. Orders the search, never ranks or confirms.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families",
+          "priors.bandwidth_hz",
+          "priors.bursty",
+          "priors.bands_hz"
+        ],
+        "basis": "spec",
+        "source": {
+          "kind": "standard",
+          "ref": "IEC 62106",
+          "locator": "as transcribed in recipes/rds.recipe.json match (UNVERIFIED against the standard)"
+        }
+      }
+    ]
+  },
+  "recipe": {
+    "id": "rds",
+    "version": 1
+  },
+  "priors": {
+    "families": {
+      "wfm": 1.0
+    },
+    "bandwidth_hz": [
+      100000,
+      300000
+    ],
+    "bursty": false,
+    "bands_hz": [
+      [
+        65800000,
+        108000000
+      ]
+    ]
+  },
+  "output_policy": {
+    "content_class": "unrestricted"
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ]
+}

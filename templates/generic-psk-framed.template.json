@@ -1,0 +1,233 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "generic-psk-framed",
+  "version": 1,
+  "name": "Generic framed PSK",
+  "description": "Generic skeleton: structure alternatives per stage slot, in ADR-0011 blocks. Priors are search-ordering tolerances, never claims.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families"
+        ],
+        "basis": "tolerance",
+        "source": {
+          "kind": "user"
+        }
+      }
+    ]
+  },
+  "skeleton": {
+    "slots": {
+      "S1": [
+        {
+          "id": "bpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "bpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "dbpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "dbpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "qpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "qpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "dqpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "dqpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "oqpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "oqpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "pi4-dqpsk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "pi4-dqpsk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "8psk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "8psk"
+              }
+            }
+          ],
+          "family": "psk"
+        },
+        {
+          "id": "d8psk",
+          "nodes": [
+            {
+              "id": "psk",
+              "block": "psk_demod",
+              "params": {
+                "modulation": "d8psk"
+              }
+            }
+          ],
+          "family": "psk"
+        }
+      ],
+      "S2": [
+        {
+          "id": "clock",
+          "nodes": [
+            {
+              "id": "clock",
+              "block": "clock_recovery"
+            }
+          ]
+        }
+      ],
+      "S3": [
+        {
+          "id": "none",
+          "nodes": []
+        },
+        {
+          "id": "diff",
+          "nodes": [
+            {
+              "id": "diff",
+              "block": "diff_decode"
+            }
+          ]
+        },
+        {
+          "id": "nrzi",
+          "nodes": [
+            {
+              "id": "nrzi",
+              "block": "nrzi"
+            }
+          ]
+        }
+      ],
+      "S4": [
+        {
+          "id": "sync",
+          "nodes": [
+            {
+              "id": "sync",
+              "block": "sync_search"
+            }
+          ]
+        }
+      ],
+      "S5": [
+        {
+          "id": "none",
+          "nodes": []
+        },
+        {
+          "id": "crc",
+          "nodes": [
+            {
+              "id": "crc",
+              "block": "crc"
+            }
+          ]
+        },
+        {
+          "id": "bch",
+          "nodes": [
+            {
+              "id": "bch",
+              "block": "bch"
+            }
+          ]
+        },
+        {
+          "id": "parity",
+          "nodes": [
+            {
+              "id": "parity",
+              "block": "parity"
+            }
+          ]
+        },
+        {
+          "id": "checksum",
+          "nodes": [
+            {
+              "id": "checksum",
+              "block": "checksum"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "priors": {
+    "families": {
+      "psk": 1.0
+    }
+  },
+  "output_policy": {
+    "content_class": "unrestricted"
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ]
+}
