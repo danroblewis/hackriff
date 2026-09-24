@@ -24008,7 +24008,7 @@ tasks:
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24039,6 +24039,8 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
+
+      2026-09-24 coordinator: landed on main inside task-t804 (merge e6f34ff2), which merged task-t814 to share one sheet dismiss. task-t814's own gate (14:26) was red only on fog-of-war T-521's server shadow-plane check (intermittent, unrelated to this UI-only branch; deflaker on task-deflake-fog-shadow-race). Includes the P4 fix (61529629): a bare row click highlights, a small per-row Go button pans; the sheet has a x dismiss.
     branch: task-t814
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 13:12).
@@ -24049,6 +24051,7 @@ tasks:
       Observed, not chased: No e2e/spy-client DOM test of clicking a drawer item; covered by source guard only. Drawer polls every 30 s and only once live.edgeTS/view exist.
       Use cases: AWARE-042
       Resources: 49 CPU-s, peak 0.6 GB — LEAKED 5 processes (killed at reap)
+    commit: e6f34ff2
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
@@ -26173,7 +26176,7 @@ tasks:
   - id: T-890
     milestone: MLIVE
     title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI
@@ -26190,6 +26193,9 @@ tasks:
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
     effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
     branch: task-t890
+    commit: 78b92378
+    result: |
+      DONE 2026-09-24: landed on main via task-t893 (merge 78b92378), which is built on task-t890 (c2160635). Root cause: a following pane only requested tiles inside its own box (which ends at the live edge), so the next time row was asked for only after the edge entered it, behind coarser parents; coarse stand-ins (never refreshed) drew nothing -> 8-10+ s blank live edge. Fix: low-priority look-ahead for the next row in ui/src/surface/tilecache.ts; T-893 then added the /ws/tiles/rows push. task-t890's OWN gate (14:09) went red on canvas-journey #1 (14-18 % of the live-edge zone grey during aggressive pan/zoom, failed alone); with T-893's row feed on top the same spec passed in T-893's gate (265 s). A 3x alone run of canvas-journey on main is being done to confirm; a residual would be filed separately.
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
@@ -26445,7 +26451,7 @@ tasks:
   - id: T-903
     milestone: MLIVE
     title: live-edge T-523 + T-890 cases red together 1 in 6 on task-t890 in file order (own-level probe never re-asked) - establish the rate, then root-cause
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-890
@@ -26459,7 +26465,10 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator live-edge triage deflaker 2026-09-24.
+
+      2026-09-24 coordinator: dispatched by the coordinator (supervisor/user priority 14:55). Sibling: the canvas-journey live-edge-zone grey (14-30 % during aggressive pan/zoom; the 13:39 batch and task-t890's gate) is being triaged/fixed by the T-890 worker on task-t890-cj - coordinate, do not duplicate.
     effort_reason: an unexplained intermittent starvation on the tile-probe path; needs a quiet-box rate measurement and hard debugging
+    branch: task-t903
   - id: T-904
     milestone: M2-hardening
     title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
