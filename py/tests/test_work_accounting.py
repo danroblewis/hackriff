@@ -683,3 +683,22 @@ def test_a_conflict_on_a_deflake_branch_takes_the_conflict_skip_path(reaped, mon
     R.handle_gate_failures(claims, dry=False)
     assert fixes == [] and [k for _, k, _ in seen] == ["DEFLAKE_CONFLICT"]     # where a ticket gets launch_fix
     assert claims["DEFLAKE:deflake-a"]["state"] == "conflict" and claims["DEFLAKE:deflake-a"]["ended"]
+
+
+
+def test_board_sync_runs_under_one_lock(tmp_path, monkeypatch):
+    """The daemon and the merge runner's --sync-board both see main safe at one instant."""
+    import fcntl
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    held = []
+
+    def inner(claims, dry):
+        with open(tmp_path / "board-sync.lock", "a") as other:
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)                       # we could take it: the wrapper did not hold it
+            except OSError:
+                held.append(True)
+        return "synced"
+    monkeypatch.setattr(R, "_sync_board", inner)
+    assert R.sync_board({}, False) == "synced" and held == [True]

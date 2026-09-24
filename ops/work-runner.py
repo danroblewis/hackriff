@@ -1153,6 +1153,17 @@ def dead_outcomes():
 
 
 def sync_board(claims, dry):
+    """Flip statuses on main in one small commit - under `$S/board-sync.lock`, because two
+    processes now do this: the daemon every tick, and the merge runner's `--sync-board` right
+    after a landing (review, 2026-09-23: both see main safe at the same instant, and an unlocked
+    read-modify-write would commit a board that undoes the other's flips)."""
+    import fcntl
+    with open(f"{S}/board-sync.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _sync_board(claims, dry)
+
+
+def _sync_board(claims, dry):
     """Flip statuses on main in ONE small commit, only when main is safe. Never edits anything else."""
     if not main_safe_to_commit():
         return
@@ -1222,17 +1233,17 @@ def sync_board(claims, dry):
     try:
         yaml.safe_load(text)
     except yaml.YAMLError as e:
-        sh(["git", "checkout", "--", "docs/tasks.yaml"])
+        sh(["git", "checkout", "HEAD", "--", "docs/tasks.yaml"])
         attention("board", "main", "SYNC_YAML_BROKEN", str(e)[:200])
         return
     if gate_running():  # re-check right before committing: a bulk may have started during the edit
-        sh(["git", "checkout", "--", "docs/tasks.yaml"])
+        sh(["git", "checkout", "HEAD", "--", "docs/tasks.yaml"])
         return
     sh(["git", "add", "docs/tasks.yaml"])
     msg = "Board: work-runner status sync - " + ", ".join(f"{a} {b}" for a, b, _ in flips)
     r = subprocess.run(["git", "commit", "-q", "-m", msg], cwd=REPO, capture_output=True, text=True)
     if r.returncode != 0:
-        sh(["git", "checkout", "--", "docs/tasks.yaml"])
+        sh(["git", "checkout", "HEAD", "--", "docs/tasks.yaml"])
         attention("board", "main", "SYNC_COMMIT_FAILED", r.stderr.strip()[:200])
     else:
         log("BOARD " + msg)
