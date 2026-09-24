@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 from datetime import datetime
 
 from hkpy import experiment
@@ -100,3 +101,14 @@ def test_status_and_list_do_not_crash_on_an_empty_ledger(tmp_path, capsys):
     ops, _ = _ops(tmp_path)
     assert experiment.cmd_status(ops) == 0 and experiment.cmd_list(ops) == 0
     assert "none open" in capsys.readouterr().out
+
+
+def test_the_ledger_is_never_written_into_the_main_checkout(tmp_path):
+    """2026-09-24 14:26: E-002's block appended to main's docs/ops-experiments.md, uncommitted, held the
+    merge runner on 'main tree dirty' until moved to a branch (invariant 19)."""
+    ops, root = _ops(tmp_path)
+    os.makedirs(os.path.join(root, ".git"), exist_ok=True)                 # a main checkout: .git is a directory
+    assert experiment.cmd_new(ops, root, _args(), now=datetime(2026, 9, 23, 13, 30)) == 0
+    md = os.path.join(root, "docs", "ops-experiments.md")
+    assert not os.path.exists(md) or "## E-1" not in open(md).read()
+    assert "## E-1" in open(os.path.join(ops, "ledger-pending", "E-1.md")).read()

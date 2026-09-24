@@ -32,6 +32,25 @@ LEDGER_MD = "docs/ops-experiments.md"
 _GUARD = re.compile(r"^\s*([a-z_0-9]+)\s*(<=|>=|<|>)\s*(baseline\s*\*\s*([0-9.]+)|[0-9.]+)\s*$")
 
 
+def _write_md(ops: str, root: str, exp_id: str, text: str) -> str:
+    """Append `text` to the markdown ledger - never in the MAIN checkout (invariant 19: 2026-09-24 14:26
+    E-002's block, appended there uncommitted, held the merge runner on 'main tree dirty'). There `.git`
+    is a directory; a linked worktree's is a file. In main the block goes to $HACKRIFF_OPS/ledger-pending/
+    to be committed on a branch. Returns where it went."""
+    if os.path.isdir(os.path.join(root, ".git")):
+        pend = os.path.join(ops, "ledger-pending", f"{exp_id}.md")
+        os.makedirs(os.path.dirname(pend), exist_ok=True)
+        with open(pend, "a", encoding="utf-8") as fh:
+            fh.write(text)
+        print(f"experiment: NOT writing {LEDGER_MD} in the main checkout (invariant 19) - the block is in {pend}; "
+              f"append it to {LEDGER_MD} on a pm branch in a worktree and queue that branch", file=sys.stderr)
+        return pend
+    md = os.path.join(root, LEDGER_MD)
+    with open(md, "a", encoding="utf-8") as fh:
+        fh.write(text)
+    return md
+
+
 def _root(root: str | None) -> str:
     if root:
         return root
@@ -194,8 +213,7 @@ def cmd_new(ops: str, root: str, a: argparse.Namespace, now: datetime | None = N
              f"- **Duration:** {a.gates} gates or {a.hours} h\n- **Decision rule:** {a.rule}\n"
              f"- **Rollback:** `{a.rollback}`\n- **Status:** open\n- **Result:** —\n")
     try:
-        with open(md, "a", encoding="utf-8") as fh:
-            fh.write(block)
+        _write_md(ops, root, a.id, block)
     except OSError as e:
         print(f"experiment: ledger jsonl written; could not append to {md}: {e}", file=sys.stderr)
     print(f"experiment: {a.id} opened; baseline {baseline['window']}: landings/h {baseline['landings_per_h_24h']}, "
@@ -245,14 +263,12 @@ def cmd_close(ops: str, root: str, decision: str, note: str, now: datetime | Non
     rec = {"event": "close", "id": cur["id"], "ts": now.timestamp(), "closed": now.strftime("%Y-%m-%d %H:%M"),
            "decision": decision, "note": note, "result": m, "guards": [t for _, t in checks], "blocked_minutes": m["blocked_minutes"]}
     _append(ops, rec)
-    md = os.path.join(root, LEDGER_MD)
     metric = cur["metric"].split()[0]
     line = (f"\n**{cur['id']} closed {rec['closed']} — {decision.upper()}.** {metric}: {cur['baseline'].get(metric)} → {m.get(metric)} "
             f"over {m['gates']} gates / {m['hours']} h; real reds {m['real_reds_24h']}/{m['gates']}; full-gate p50 {m['full_gate_p50_min']} min; "
             f"blocked {m['blocked_minutes']} min; guards: {'; '.join(t for _, t in checks) or 'none'}. {note}\n")
     try:
-        with open(md, "a", encoding="utf-8") as fh:
-            fh.write(line)
+        _write_md(ops, root, cur["id"], line)
     except OSError:
         pass
     print(line.strip())
