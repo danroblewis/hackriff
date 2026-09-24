@@ -25153,6 +25153,14 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
 
       2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): the template/skeleton library and seeding must include a PSK option at the demodulation stage - section 4.1's built-in skeleton list has none, so PSK cannot reach bits inside a search.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:38).
+      Added hk-synth::library (ADR-0015 §4.1/§4.2/§15.6 level 1): TemplateLibrary loader (builtin(), load_dir, add_text; duplicate id@version refused, unknown keys refused), consistency validation with machine-coded errors (schema, exactly-one structure, recipe resolves, free-path node exists, ranges/weights, S4 sync_bits vs recipe sync_search, builtin fact_unsourced, skeleton coherence), and inert templates (skeleton naming a block the catalogue lacks is loaded but never seeded, reported via inert()). Built-ins in templates/*.template.json: rds, pocsag, acars, adsb (priors copied from recipe match; standard refs marked UNVERIFIED) plus generic-fsk-framed, -ook-manchester, -ook-pwm (inert: no pwm_decode block), -msk, -ppm and a new generic-psk-framed (psk_demod alternatives bpsk..d8psk) so PSK reaches bits. Seeding: TemplateLibrary::seed(BudgetHint, MeasuredParams) gives prior_bits = log2(P_class x match x band_factor), match demotes by 0.25 per contradicted measured prior (never drops), band_factor 1.5 only for an already-detected centre, full-signature fast path first, deferred (likelihood only) last, open skeletons always listed with share >= 0.2. Not done (need pieces not landed): CRC check-value round trip, field-map width sums, protocol-class free-param check (ParamSchema.class), partial-signature range narrowing, cluster warm-start; skeleton nodes carry no required params yet (M-3 fills when candidates instantiate).
+      Tests: cargo nextest run -p hk-synth -> exit 0 (44 passed)
+      precheck exit 0
+      Commits: c0dcec02
+      Observed, not chased: Skeleton psk_demod node lacks required symbol_rate_bd param; candidates (M-3) must supply it | Built-in standard refs (ITU-R M.584-2, ARINC 618, ICAO Annex 10, IEC 62106) are unverified transcriptions from recipes
+      Resources: 49 CPU-s, peak 0.6 GB
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
