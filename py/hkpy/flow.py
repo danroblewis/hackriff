@@ -439,6 +439,7 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
             f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
             f"{exp} · holding: {_holding(ops, now)}"
+            + (f" · {s['open_graph']['short']}" if (s.get("open_graph") or {}).get("short") else "")
             + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min)"
                if s.get("flake_accepts_24h") else ""))
 
@@ -533,6 +534,38 @@ def eta_line(ops: str, now: datetime, repo: str | None = None) -> str:
     return eta.digest_line(now, q_eta, len(queue), ticket, t_eta, why)
 
 
+def open_graph(ops: str, now: datetime, s: dict, record: bool = False, repo: str | None = None) -> dict:
+    """hkpy.graphclear over main's committed board: {line, short, n, at}; with `record`, one ETA-ledger
+    line each for "queue clears" and "open graph clears". Never raises."""
+    from hkpy import eta, graphclear
+    repo = repo or os.environ.get("HACKRIFF_REPO") or "/Users/daniellewis/hackriff"
+    try:
+        r = graphclear.gather(ops, repo, now, float(s.get("landings_per_h_6h") or 0), float(s.get("landings_per_h_24h") or 0))
+    except Exception as e:
+        return {"line": f"open graph: no estimate ({type(e).__name__}: {e})"[:200], "short": ""}
+    at = (r.get("eta", {}).get("p50") or {}).get("at")
+    out = {"line": r["line"], "n": r.get("n"), "at": at, "chain": r.get("chain"), "bound": r.get("bound"),
+           "short": f"graph clears ~{graphclear._when(at, now)} ({r.get('n')})" if at else ""}
+    if record:
+        try:
+            queue = [ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines() if ln.strip()]
+            gating = os.path.exists(os.path.join(ops, "bulk-in-progress")) or os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD"))
+            full = sorted(g["minutes"] for g in gate_rows(ops, now - timedelta(hours=24), now)
+                          if g["class"] == "full" and g["verdict"] == "green" and g["minutes"])
+            gate_min = float(full[len(full) // 2]) if full else 25.0
+            started = None
+            for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+                if ln.startswith("started="):
+                    try:
+                        started = datetime.strptime(ln.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+            graphclear.record(ops, now, r, eta.queue_clears(now, len(queue), started, gate_min), len(queue), gating)
+        except Exception:
+            pass
+    return out
+
+
 def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[str]:
     """Post the tick line when due, and each trend break at once. Returns what was posted (keys).
     `send(level, title, body, key)` defaults to ops/alert.py, which dedupes by key for 30 min and
@@ -571,7 +604,11 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
             except Exception:
                 body += f"\n\nlanded since last digest: {len(landed)}"
         try:
-            body = body.replace(line, line + "\n" + eta_line(ops, now), 1)
+            extra = eta_line(ops, now)
+            if (s.get("open_graph") or {}).get("line"):
+                from hkpy import graphclear
+                extra += "\n" + s["open_graph"]["line"] + "\n" + graphclear.accuracy_line(ops)
+            body = body.replace(line, line + "\n" + extra, 1)
         except Exception:
             pass
         send("green", "pipeline digest", body, "flow:digest")
@@ -623,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.hourly or not views:
         views.insert(0, ("hourly", hourly(a.ops, since, now)))
     s = summary(a.ops, now)
+    if a.record or a.digest:
+        s["open_graph"] = open_graph(a.ops, now, s, record=a.record)
     if a.json:
         print(json.dumps({"summary": s, **{k: v for k, v in views}}, indent=1))
     else:
