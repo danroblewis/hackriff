@@ -493,12 +493,13 @@ async function replay(url, backend) {
 const tileRequests = (page, sinceIdx) => page.requests.slice(sinceIdx)
   .filter((r) => r.url.includes("/api/tiles") && !r.url.includes("/api/tiles/events"));
 
-async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanHz = 80e6 } = {}) {
+async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanHz = 80e6, holdingEdge = false } = {}) {
   const reqs = tileRequests(page, sinceIdx);
   // Counted in ANSWERS, not requests: since T-573/T-700 one batch request carries many tiles, so
   // "18 covered other spectrum" out of "15 requests" would otherwise read as an arithmetic error
   // in the very message someone reads when this goes red.
-  const why = { answers: 0, refused: 0, failed: 0, shapeless: 0, tooWide: 0, elsewhere: 0 };
+  const why = { answers: 0, refused: 0, failed: 0, shapeless: 0, tooWide: 0, elsewhere: 0,
+    ahead: 0, behind: 0, newestEdgeS: null, tileS: null };
   for (let i = reqs.length - 1; i >= 0; i--) {
     let json = null;
     // **A 503 is the route saying "ask again", not "this tile does not cover your band"** (T-690).
@@ -520,7 +521,17 @@ async function findPaneTileFor(page, backend, targetHz, { sinceIdx = 0, maxSpanH
       const spanHz = g.nf * g.f_cell_hz;
       if (spanHz > maxSpanHz) { why.tooWide++; continue; }
       if (targetHz < g.f_lo_hz || targetHz >= g.f_lo_hz + spanHz) { why.elsewhere++; continue; }
-      hit = { url: reqs[i].url, json: tile, spanHz };
+      if (holdingEdge) {
+        // See [[findPaneEdgeTileFor]]: only the answer whose time extent holds the server's own
+        // data edge has "rows at the live edge" to read.
+        const edgeS = tile?.shadow?.edge_s;
+        if (Number.isFinite(edgeS)) why.newestEdgeS = Math.max(why.newestEdgeS ?? -Infinity, edgeS);
+        why.tileS = Math.max(why.tileS ?? 0, g.nt * g.t_cell_s);
+        const hold = edgeHold(g, edgeS);
+        if (hold === "ahead") { why.ahead++; continue; }
+        if (hold !== "holds") { why.behind++; continue; }
+      }
+      hit = { url: reqs[i].url, json: tile, spanHz, why };
       break;
     }
     if (hit) return hit;
@@ -535,9 +546,94 @@ function tileOrWhy(found, label) {
     `${found?.why?.refused ?? 0} the route would not answer even after retrying its 503; of the ` +
     `${found?.why?.answers ?? 0} tile answer(s) they carried, ${found?.why?.shapeless ?? 0} had no ` +
     `usable grid, ${found?.why?.tooWide ?? 0} were wider than a pane's and ` +
-    `${found?.why?.elsewhere ?? 0} covered other spectrum. A route that was busy and a band that ` +
-    "was never drawn are different findings.");
+    `${found?.why?.elsewhere ?? 0} covered other spectrum` +
+    (found?.why?.ahead || found?.why?.behind
+      ? `; of those over the band, ${found.why.ahead} lay wholly AHEAD of the server's data edge and ` +
+        `${found.why.behind} wholly behind it (newest edge_s ${found.why.newestEdgeS}` +
+        (found.edgeWait ? `, ${found.edgeWait}` : "") + ")"
+      : "") +
+    ". A route that was busy and a band that was never drawn are different findings.");
   return found;
+}
+
+/**
+ * Where a tile answer's time extent lies against the server's data edge (`shadow.edge_s`, the
+ * store's newest folded frame, stated in that very answer): `"holds"` when the edge falls inside
+ * it, `"ahead"` when the whole tile starts at or after the edge, `"behind"` when it ended before.
+ */
+function edgeHold(grid, edgeS) {
+  if (!Number.isFinite(edgeS) || !Number.isFinite(grid?.t0_s)) return "unknown";
+  if (edgeS <= grid.t0_s) return "ahead";
+  if (edgeS > grid.t0_s + grid.nt * grid.t_cell_s) return "behind";
+  return "holds";
+}
+
+/** One line on which tile [[findPaneEdgeTileFor]] chose, and how many newer answers it passed over. */
+function describeEdgeTile(found) {
+  const g = found.json.grid, e = found.json.shadow.edge_s;
+  return `the tile [${g.t0_s.toFixed(2)}, ${(g.t0_s + g.nt * g.t_cell_s).toFixed(2)}) s holding edge_s ${e.toFixed(2)} ` +
+    `(${found.earlier ? "an address the pane asked for before this phase" : "the pane's own request this phase"}; ` +
+    `${found.why.ahead} newer answer(s) over the band lay wholly ahead of the edge, ${found.why.behind} wholly behind; ` +
+    `${found.replays} replay round(s))`;
+}
+
+/** Consecutive replays in which the server's data edge did not advance before
+ * [[findPaneEdgeTileFor]] reports that the store stopped folding. */
+const EDGE_STILL_REPLAYS = 20;
+
+/**
+ * The pane's own tile answer over `targetHz` **whose time extent holds the server's data edge** —
+ * the only tile that has "rows at the live edge" for [[edgeRowsCoverage]] / [[shadowNearEdge]] to
+ * read.
+ *
+ * **Why the newest answer is not enough (2026-09-24, the deflake after T-889/T-893).** The file
+ * used to read the pane's NEWEST answer over band A, and a following pane can hold a tile that
+ * starts AFTER the store's newest frame: T-890's next-row look-ahead (which T-893 widened to every
+ * column the renderer has asked for, queued and in flight included) asks for it before the edge
+ * arrives, and under load the store's fold can trail the capture clock the pane addresses by. The
+ * server's shadow plane rightly carries no run there — docs/api.md: "rows at or after `edge_s` (the
+ * newest frame) are never covered" — and `rowAt` clamps the edge to row 0, so the file read ONE
+ * future row and reported `{"col":85,"edgeRow":0,"from":0,"to":0,"hits":[]}` as "ADR-0020's
+ * last-known tier did not fire" (the 14:24 gate of task-t814, and its second isolated re-run). It
+ * had fired: replaying the NEXT time row of the tile this function picks reproduces that exact
+ * object, `edge row 0, window [0,0] unobserved 1/1`, in the same run whose edge-holding tile
+ * carries the band's shadow run. Rare alone — no ahead answer was the newest in 28 selections over
+ * 16 isolated runs, while 12 of them passed over a newer answer wholly BEHIND the edge, which the
+ * old reading clamped to its last row — because it takes the edge landing within the look-ahead's
+ * lead (8 x the route's service time) of the end of a 256 x 40 ms = 10.27 s tile, and a busy gate
+ * makes that lead longer.
+ *
+ * So: newest-first over the pane's requests since `sinceIdx`, then over all of them (a replay is
+ * the server's CURRENT answer for that address, so an address the pane asked for earlier still
+ * reads the departed state now), taking the first answer that holds the edge. If none does — every
+ * answer over the band is ahead of the edge (the store trails the pane's addressing) or behind it
+ * (the edge has crossed into a row the pane has not asked for yet) — it **waits on the server**:
+ * re-replays until an answer holds the edge, bounded by the server's own progress. It gives up when
+ * the edge has advanced a whole tile height without any pane answer holding it, or has not advanced
+ * at all over [[EDGE_STILL_REPLAYS]] consecutive replays (the store stopped folding — a finding,
+ * reported with its numbers by [[tileOrWhy]]). Never a clock.
+ */
+async function findPaneEdgeTileFor(page, backend, targetHz, { sinceIdx = 0, everyMs = 250 } = {}) {
+  let firstEdge = null, lastEdge = -Infinity, still = 0, replays = 0;
+  for (;;) {
+    replays++;
+    const recent = await findPaneTileFor(page, backend, targetHz, { sinceIdx, holdingEdge: true });
+    if (!recent.none) return { ...recent, replays, earlier: false };
+    const all = sinceIdx > 0
+      ? await findPaneTileFor(page, backend, targetHz, { sinceIdx: 0, holdingEdge: true })
+      : recent;
+    if (!all.none) return { ...all, replays, earlier: true };
+    const edge = all.why?.newestEdgeS;
+    if (!Number.isFinite(edge)) return all; // nothing over the band at all: tileOrWhy says why
+    firstEdge ??= edge;
+    if (edge > lastEdge) { lastEdge = edge; still = 0; } else still++;
+    const tileS = all.why.tileS ?? 0;
+    if (still >= EDGE_STILL_REPLAYS || (tileS > 0 && edge - firstEdge > tileS)) {
+      return { ...all, edgeWait: `waited ${replays} replay(s): the edge moved ` +
+        `${(edge - firstEdge).toFixed(2)} s (tile height ${tileS.toFixed(2)} s), ${still} replay(s) without moving` };
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
 }
 
 /**
@@ -1251,6 +1347,18 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const note = (await page.$text(".sf-note")) ?? "";
   assert.ok(!/could not be addressed|WebGL2 is unavailable/.test(note), `the surface refused to mount: ${note}`);
   await page.waitFor("the per-pane retune control to be on the page", `!!document.querySelector('${PANE_ACTION}')`, { timeoutMs: 20000 });
+  // **The HUD's axis labels are screen-space TEXT over the canvas, not the surface** (T-805), and
+  // every claim in this file is about what the SURFACE drew — the same reason `paneGeometry` narrows
+  // to the columns the floating panels leave uncovered (T-801). The frequency labels sit ~30 px above
+  // the pane's bottom edge, inside every ROI, as ~5 900 px of #d5dee2 text and its dark text-shadow
+  // whatever the pane shows. Measured 2026-09-24 (the deflake after T-889/T-893), band C's
+  // non-grey residue was that same ~5 900 px in every run at every drawn height, so its grey share
+  // was a function of how tall the survey's sawtooth left the drawn part: 346 px read 98.4 % grey,
+  // 85 px 93.4 %, 40 px 86.0 % and 31 px 82.0 % — and the last two failed "band C (never swept)
+  // does not read as mostly grey" with the product drawing THE grey on every surface pixel. So the
+  // labels are hidden for the shots; the canvas-stroked ticks under them are surface pixels and stay.
+  await page.eval(`(() => { const s = document.createElement('style');
+    s.textContent = '.sf-hud { visibility: hidden !important; }'; document.head.appendChild(s); return true; })()`);
   await page.frames(4);
 
   const at = await centre(page);
@@ -1394,8 +1502,12 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     ` · its own cells ${(shadowLumaA.share * 100).toFixed(1)}% of the pane at meanLuma ${shadowLumaA.meanLuma.toFixed(1)} ` +
     `after ${imgA1.renderWaitMs} ms (${imgA1.acceptedWhy})`);
 
-  const tileA1 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx }),
-    "no pane tile response covers band A after the move — cannot check the server's shadow plane");
+  // The pane's answer that holds the server's data edge, not merely its newest one: the newest is
+  // often the look-ahead row, which lies wholly in the future (see [[findPaneEdgeTileFor]]).
+  const tileA1 = tileOrWhy(await findPaneEdgeTileFor(page, backend, A_HZ, { sinceIdx: sinceMoveIdx }),
+    "no pane tile response over band A holds the server's data edge after the move — cannot check the server's shadow plane");
+  t.diagnostic(`SERVER band A (departed) read from ${describeEdgeTile(tileA1)}`);
+
   const covA1 = decodeCoveragePlane(tileA1.json.coverage);
   const edgeS1 = tileA1.json.shadow.edge_s;
   const nrA1 = edgeRowsCoverage(covA1, A_HZ, edgeS1);
@@ -1602,8 +1714,9 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     ` · measured cells ${(reswptLumaA.share * 100).toFixed(1)}% of the pane at meanLuma ${reswptLumaA.meanLuma.toFixed(1)} ` +
     `after ${imgA2.renderWaitMs} ms (${imgA2.acceptedWhy})`);
 
-  const tileA2 = tileOrWhy(await findPaneTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx }),
-    "no pane tile response covers band A after re-sweeping");
+  const tileA2 = tileOrWhy(await findPaneEdgeTileFor(page, backend, A_HZ, { sinceIdx: sinceReswIdx }),
+    "no pane tile response over band A holds the server's data edge after re-sweeping");
+  t.diagnostic(`SERVER band A (re-swept) read from ${describeEdgeTile(tileA2)}`);
   const covA2 = decodeCoveragePlane(tileA2.json.coverage);
   const nrA2 = edgeRowsCoverage(covA2, A_HZ, tileA2.json.shadow.edge_s);
   t.diagnostic(`SERVER band A (re-swept): edge row ${nrA2.edgeRow}, window [${nrA2.from},${nrA2.to}] observed ${nrA2.observed}/${nrA2.total}`);
