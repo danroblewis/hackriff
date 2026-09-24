@@ -25113,7 +25113,7 @@ tasks:
   - id: T-855
     milestone: MAUTO
     title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25143,6 +25143,7 @@ tasks:
       precheck exit 0
       Commits: 0b4ede6f
       Resources: 42 CPU-s, peak 0.4 GB
+    commit: a29f7496
   - id: T-856
     milestone: MAUTO
     title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
