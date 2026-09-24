@@ -409,7 +409,10 @@ def df(tmp_path, monkeypatch):
                       ("LOG", str(tmp_path / "work-runner.log")), ("NEEDS", str(tmp_path / "work-needs-attention.txt")),
                       ("DONE", str(tmp_path / "work-done.jsonl")), ("MERGE_QUEUE", str(tmp_path / "merge-queue.txt")),
                       ("MERGE_NEEDS", str(tmp_path / "merge-needs-attention.txt")),
-                      ("BULKMARK", str(tmp_path / "bulk-in-progress"))]:
+                      ("BULKMARK", str(tmp_path / "bulk-in-progress")),
+                      # Never the live .git/MERGE_HEAD: the merge gate runs these tests INSIDE a
+                      # staged merge of main, where release_stale_claims correctly holds back (T-879).
+                      ("REPO", str(tmp_path))]:
         monkeypatch.setattr(R, name, val)
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
@@ -831,6 +834,7 @@ def test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed(tmp_path, mon
     monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
     monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
     monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))                     # never the live .git/MERGE_HEAD (T-879)
     monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")     # branch not on main
     (tmp_path / "merge-queue.txt").write_text("task-t2\n")
     (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-t3 task-t4\n")
