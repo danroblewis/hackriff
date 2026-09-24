@@ -608,6 +608,7 @@ mod tests {
             identity: None,
             content_class: ContentClass::MetadataOnly,
             t,
+            provenance: None,
         })
         .unwrap();
         demod.id

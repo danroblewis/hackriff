@@ -76,7 +76,21 @@ pub struct SynthBudget {
     pub threads: u32,
 }
 
+/// Most of a job's evaluation cap the shuffled-null control may spend (ADR-0021 §8.2: "≤ 5 % of
+/// `max_evaluations`").
+pub const NULL_CONTROL_SHARE: f64 = 0.05;
+
 impl Profile {
+    /// `K`, the null windows ADR-0021 §8.2's shuffled-null control runs at this profile: `quick`
+    /// 0 (quick never confirms), `standard` 2, `deep` 8.
+    pub const fn null_windows(self) -> u32 {
+        match self {
+            Profile::Quick => 0,
+            Profile::Standard => 2,
+            Profile::Deep => 8,
+        }
+    }
+
     /// The profile's default budget (§3.3 table for wall/CPU/threads; T-854's count caps).
     pub const fn budget(self) -> SynthBudget {
         let (wall_s, cpu_s, threads, evals, calls, ops) = match self {

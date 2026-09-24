@@ -88,7 +88,8 @@ pub use context::{
     CorrelationType, Evidence, Explanation, ExternalEvent, Geo,
 };
 pub use decode::{
-    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeEvidence, DecodeView,
+    Bitstream, BitstreamPayload, BitstreamTransport, CrcStatus, Decode, DecodeEvidence,
+    DecodeProvenance, DecodeView,
     Demodulation, EstimatedParams, Framing, WITHHELD_LABEL,
 };
 pub use detection::{

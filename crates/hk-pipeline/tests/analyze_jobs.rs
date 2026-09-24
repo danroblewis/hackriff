@@ -222,7 +222,9 @@ impl Evaluator for World {
     type Output = Sig;
 
     fn evaluate(&self, req: &EvalRequest<'_, Sig>) -> Result<Evaluated<Sig>, EvalError> {
-        let upstream = req.parent.is_none_or(|p| p.on_truth);
+        // ADR-0021 §8.2's null windows keep the PSD and destroy the structure after S0.
+        let null = matches!(req.window, hk_synth::engine::EvalWindow::Null(_));
+        let upstream = req.parent.is_none_or(|p| p.on_truth) && !(null && req.stage > Stage::S0);
         let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
         let last = nodes.last().expect("nodes");
         let p = |k: &str| last.params.get(k).cloned().unwrap_or(Value::Null);
@@ -291,6 +293,32 @@ impl Evaluator for World {
             }
             _ => (EvidenceSet::new(), upstream),
         };
+        let check = (req.stage == Stage::S5).then(|| hk_synth::result::CheckSummary {
+            kind: "crc".into(),
+            model: "CRC-16/0x8005".into(),
+            width: 16,
+            pass_rate: if on { 1.0 } else { 0.0 },
+            distinct_valid: if on { 12 } else { 0 },
+            corrected_excluded: 0,
+            tested: 12,
+            holdout,
+        });
+        // The hold-out run's decoded frames: what the attach step stores (ADR-0015 §5.5).
+        let frames = if holdout && on && req.stage == Stage::S5 {
+            (0..12)
+                .map(|i| hk_synth::result::HoldoutFrame {
+                    t_ns: T0_NS + 5 * S + 700_000_000 + i * 10_000_000,
+                    check_valid: true,
+                    corrected: false,
+                    frame_model: "hk-framing".into(),
+                    identity: None,
+                    metadata: json!({ "frame_bits": 64, "i": i }),
+                    content: Some(json!({ "payload_hex": format!("{i:04x}") })),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Evaluated {
             evidence: vec![NodeEvidence {
                 node: last.id.clone(),
@@ -298,7 +326,8 @@ impl Evaluator for World {
             }],
             output: Sig { on_truth: on },
             output_bytes: 256,
-            check: None,
+            check,
+            frames,
         })
     }
 }
@@ -346,6 +375,7 @@ fn root(sk: Skeleton, prior_bits: f32) -> Root {
         seed_source: hk_synth::candidate::SeedSource::Open,
         family: None,
         deferred: None,
+        check_origin: hk_synth::result::CheckOrigin::Searched,
     }
 }
 
@@ -846,4 +876,239 @@ fn only_the_last_fifty_finished_jobs_are_kept_and_the_rest_answer_gone() {
         Some(Stage::S3)
     );
     assert_eq!(hk_pipeline::synth::jobs::parse_name::<Stage>("S9"), None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// MAUTO M-9 (T-860): attach, synthesized decode provenance, ConfirmPolicy.synthesized
+// ---------------------------------------------------------------------------------------------
+
+mod m9 {
+    use super::*;
+    use hk_model::repo::synthesis::Verdict as RowVerdict;
+    use hk_model::{
+        CrcStatus, DecodeProvenance, Fingerprint, LifecycleAuthor, LifecycleState,
+        LinkTarget, Repository, Sighting, Track, TrackId, TrackState,
+    };
+    use hk_pipeline::inventory::{CONFIRM_SYNTH_RULE, SynthesizedConfirm};
+    use hk_pipeline::synth::jobs::{Attacher, RepoAttacher};
+
+    /// A fresh directory under the system temp dir.
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A candidate emitter on the analysed channel, seen across the analysed window — found by
+    /// blind detection upstream, never looked up by the test's truth.
+    fn seed_emitter(db: &std::path::Path) -> EmitterId {
+        let mut repo = Repository::open(db).unwrap();
+        let track = Track {
+            id: TrackId::new(),
+            state: TrackState::Closed,
+            split_from: None,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(T0_NS + 4 * S),
+                Timestamp::from_unix_nanos(T0_NS + 7 * S),
+            ),
+            f_center_hz: CENTER_HZ,
+            bandwidth_hz: 12e3,
+            detection_count: 20,
+            timing: Default::default(),
+            updated_at: Timestamp::from_unix_nanos(T0_NS + 7 * S),
+        };
+        repo.upsert_track(&track).unwrap();
+        let s = Sighting::track(&track, Fingerprint::new(CENTER_HZ, 12e3));
+        repo.record_sighting(&s, None).unwrap().emitter_id
+    }
+
+    fn attaching(ring: &Arc<Ring>, db: &std::path::Path) -> AnalyzeJobs {
+        AnalyzeJobs::with_attacher(
+            Arc::new(Env::new(Arc::clone(ring))),
+            Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
+            PowerPolicy::Mains,
+            Some(Arc::new(RepoAttacher::new(db, SynthesizedConfirm::default())) as Arc<dyn Attacher>),
+        )
+    }
+
+    /// ADR-0015 §5.4–§5.5 end to end at the job level: a blind open search solves the hidden
+    /// sensor on hold-out, attaches to the inventory emitter already on that channel in that
+    /// window, stores its hold-out frames as synthesized decodes, appends the `emitter_synthesis`
+    /// row, and confirms through ADR-0022's gate — with the arithmetic in the reason.
+    #[test]
+    fn a_solved_job_attaches_stores_synthesized_decodes_and_confirms() {
+        let dir = tempdir("t860-attach");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        assert_eq!(done.results[0].verdict, Verdict::Solved);
+
+        // The job says where its results went and what they did.
+        assert_eq!(done.emitter_id, Some(emitter.to_string()));
+        assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        let confirm = done.confirm.clone().expect("a finished job states its confirm outcome");
+        assert_eq!(confirm["rule"], json!(CONFIRM_SYNTH_RULE));
+        assert_eq!(confirm["outcome"], json!("confirmed"), "{confirm}");
+        let reason = confirm["reason"].as_str().unwrap();
+        assert!(reason.starts_with("decoded by synthesized pipeline"), "{reason}");
+        assert!(reason.contains("12 differing frame(s)"), "{reason}");
+        assert!(reason.contains("against a 24-bit threshold"), "{reason}");
+        assert!(reason.contains("null control passed"), "{reason}");
+
+        let repo = Repository::open(&db).unwrap();
+        // The irreversible transition, by the synthesized rule and no other.
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Confirmed
+        );
+        let last = repo.emitter_lifecycle_history(emitter).unwrap().pop().unwrap();
+        assert_eq!(last.author, LifecycleAuthor::Auto);
+        assert_eq!(last.actor, CONFIRM_SYNTH_RULE);
+        assert_eq!(last.reason, reason);
+
+        // The append-only row: the job, the recipe inline with its hash, the hold-out evidence,
+        // the trace summary and replay key, the null control; the emitter's measured values
+        // untouched.
+        let row = repo.synthesis(emitter).unwrap().expect("attach appends a row");
+        assert_eq!(row.verdict, RowVerdict::Solved);
+        assert!(row.resolution.is_none());
+        let job = row.job.as_ref().expect("a job row");
+        assert_eq!(job.job_id, "a1");
+        assert_eq!(job.profile, "standard");
+        assert!(job.recipe_hash.starts_with("sha256:"));
+        assert_eq!(job.recipe["nodes"].as_array().map(Vec::len).is_some(), true);
+        assert!(job.analytic_holdout_bits.unwrap() >= 24.0);
+        assert!(job.trace_summary.is_some());
+        assert!(job.replay_key.as_ref().unwrap()["window"].get("clip_id").is_some());
+        assert_eq!(job.null_control.as_ref().unwrap()["capped"], json!(false));
+        assert_eq!((job.decodes_stored, job.decodes_valid), (12, 12));
+        assert_eq!(job.confirm.as_ref().unwrap()["outcome"], json!("confirmed"));
+        let e = repo.emitter(emitter).unwrap();
+        assert_eq!(e.f_center_hz, CENTER_HZ, "measured values are never overwritten");
+
+        // Each stored decode is linked, CRC-valid, and carries the arithmetic the gate read.
+        let decodes: Vec<_> = repo
+            .emitter_links(emitter)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l.target {
+                LinkTarget::Decode(id) => Some(repo.decode(id).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decodes.len(), 12);
+        for d in &decodes {
+            assert_eq!(d.decoder_id, "synth:open");
+            assert!(d.decoder_version.starts_with(&format!("{}+sha256:", hk_synth::ENGINE)));
+            assert_eq!(d.crc_status, CrcStatus::Valid);
+            let id = d.identity.as_ref().expect("the structural identity");
+            assert_eq!(id.scheme.as_string(), "other:hk-framing");
+            match d.provenance.as_ref().expect("synthesized provenance") {
+                DecodeProvenance::Synthesized {
+                    job_id,
+                    holdout,
+                    analytic_holdout_bits,
+                    check_bits,
+                    l_check,
+                    check_searched,
+                    template_provenance,
+                    ..
+                } => {
+                    assert_eq!(job_id, "a1");
+                    assert!(*holdout && *check_searched);
+                    assert!(*analytic_holdout_bits >= 24.0);
+                    assert!(check_bits.unwrap() >= 16.0);
+                    assert!(l_check.unwrap() > 0.0);
+                    assert!(template_provenance.is_none());
+                }
+            }
+        }
+        // …and never counts toward the identity route: only the synthesized rule confirms it.
+        assert_eq!(repo.identity_decode_evidence(emitter).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `quick` never confirms (ADR-0022 §6 step 6), a user delete wins, and a job with no
+    /// emitter in its window and nothing solved attaches nowhere — each said on the job.
+    #[test]
+    fn quick_never_confirms_a_user_delete_wins_and_nothing_found_is_not_attached() {
+        let dir = tempdir("t860-quick");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Quick)).unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let confirm = done.confirm.clone().unwrap();
+        assert_ne!(confirm["outcome"], json!("confirmed"), "{confirm}");
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate
+        );
+        drop(repo);
+
+        // The user deletes the entry; a later standard job may not resurrect it.
+        let mut repo = Repository::open(&db).unwrap();
+        repo.change_emitter_lifecycle(
+            emitter,
+            LifecycleState::Deleted,
+            LifecycleAuthor::User,
+            "test-user",
+            "not interesting",
+            Timestamp::from_unix_nanos(T0_NS + 8 * S),
+        )
+        .unwrap();
+        drop(repo);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a2");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_ne!(done.emitter_id, Some(emitter.to_string()), "never attach to a deleted row");
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Deleted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without an inventory emitter in the window, the solved job's decodes create the candidate
+    /// through ordinary ingestion, and the results attach to it (ADR-0015 §5.4's third case).
+    #[test]
+    fn with_no_emitter_the_decodes_create_the_candidate() {
+        let dir = tempdir("t860-new");
+        let db = dir.join("hackriff.db");
+        drop(Repository::open(&db).unwrap());
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let id: EmitterId = done
+            .emitter_id
+            .as_deref()
+            .expect("the decodes created an emitter")
+            .parse()
+            .unwrap();
+        let repo = Repository::open(&db).unwrap();
+        let row = repo.synthesis(id).unwrap().expect("attached to the new candidate");
+        assert_eq!(row.job.as_ref().unwrap().job_id, "a1");
+        assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

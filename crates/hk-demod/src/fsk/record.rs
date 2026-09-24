@@ -357,6 +357,7 @@ pub fn write_framed_bursts(
             identity: identity.clone(),
             content_class: class,
             t: burst.timestamp_of_symbol(sync_bit),
+            provenance: None,
         };
         repo.insert_decode(&d)?;
         decode_ids.push((i, d.id));
