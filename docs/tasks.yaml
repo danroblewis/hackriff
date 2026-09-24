@@ -5133,6 +5133,8 @@ tasks:
       model-selection.md names for Sonnet/medium, not new capability design."
     notes: |
       2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
+
+      Review: PROP-019 sign was inverted vs track_carrier e^{-jwt} convention; negated dpath, test now asserts phase advance => lower reflection.
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
