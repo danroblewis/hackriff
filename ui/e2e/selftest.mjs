@@ -193,6 +193,49 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // **The fourth: a re-swept band that stays shadow** (review of the deflake, 2026-09-24). Phase 5
+    // waits for the shadow's ink to leave a re-swept pane and then asserts it has; this is the
+    // defect that assertion is for. The client remembers every frequency it has drawn as last-known
+    // since the radio was first retuned, and from then on keeps drawing that frequency's FRESH
+    // measurements as last-known too: the level is there, dimmed and scanlined as if it were an
+    // earlier time's, so a re-sweep never visibly restores the band.
+    //
+    // Armed by the retune rather than by the tiles' own contents, deliberately. Three versions keyed
+    // on what a tile holds (any shadow; measured-then-shadow in one column; that, before the tile's
+    // `as_of_s`) either armed at boot — a live band carries short shadow runs of its own (the rows
+    // between a tile's `as_of_s` and `shadow.edge_s`, clipped from the screen) — or never armed at
+    // all, so they tested phase 1 or nothing. The count of `POST /api/control/{window,center}` is
+    // read from a wrapper round the page's own `fetch`, which the API client calls lazily. Only the
+    // client changes; every server-side claim still passes.
+    name: "t520-reswept-band-stays-shadow",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-520/ADR-0020: a band the radio has come back to keeps being drawn as last-known — its " +
+      "fresh measurements dimmed and scanlined — so re-sweeping never visibly restores it.",
+    file: "surface/tile.ts",
+    patch: (src) => {
+      const shadowAt = "      if (Number.isFinite(sv)) { state[i] = CELL.SHADOW; value[i] = sv; } else { state[i] = CELL.UNOBSERVED; value[i] = NaN; }";
+      const levelAt = '    if (typeof v === "number" && Number.isFinite(v)) {\n';
+      const loop = "  for (let i = 0; i < n; i++) {\n    const s = cov(i);\n";
+      for (const a of [shadowAt, levelAt, loop]) {
+        if (!src.includes(a)) throw new Error(`selftest: anchor not found in surface/tile.ts: ${a.trim().slice(0, 60)}`);
+      }
+      const key = "Math.round(((__g.f_lo_hz ?? 0) + ((i % nf) + 0.5) * (__g.f_cell_hz ?? 0)) / 5e3)";
+      const prelude =
+        "// injected by ui/e2e/selftest.mjs — last-known sticks to a frequency once the radio has moved\n" +
+        "let __retunes = 0;\n" +
+        "{ const __f = globalThis.fetch.bind(globalThis);\n" +
+        "  globalThis.fetch = ((input: any, init?: any) => { if (/\\/api\\/control\\/(window|center)/.test(String(input?.url ?? input))) __retunes++; return __f(input, init); }) as typeof fetch; }\n" +
+        "const __departed = new Set<number>();\n";
+      return src
+        .replace("export function decodeTile(", prelude + "export function decodeTile(")
+        .replace(loop, "  const __g = (resp as any).grid ?? {};\n" + loop)
+        .replace(shadowAt, shadowAt.replace("state[i] = CELL.SHADOW; value[i] = sv;",
+          `state[i] = CELL.SHADOW; value[i] = sv; if (__retunes > 0) __departed.add(${key});`))
+        .replace(levelAt, levelAt +
+          `      if (__departed.has(${key})) { state[i] = CELL.SHADOW; value[i] = v; continue; }\n`);
+    },
+  },
+  {
     // **T-532, and the first standing fault for `canvas-journey.e2e.mjs`** (T-690). Same hole: the
     // file carries the live-edge grey claim and the grey-tracks-coverage claim and nothing ever
     // put either defect back.
