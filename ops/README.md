@@ -305,10 +305,12 @@ kill is logged to `watchdog.log` with its full command line. Everything else is 
 and "no watchdog running" when the file is missing or stale.
 **Role-session liveness (incident 2026-09-24 04:07: a `pkill` took `dev` and `flow` down unnoticed
 for 5.5 h).** At most once a minute it checks each `LIVE_ROLES` session in `ops/roles.py` (coordinator
-`dev`, pipeline manager `flow`): alive = `tmux has-session -t =<s>` and a `claude` process at or below
-a pane pid (a `remain-on-exit` pane with claude gone is dead). Each miss is red (`watchdog:liveness:<role>`);
-the 2nd consecutive miss kills a claude-less session and runs `ops/launch.sh <role>` (red
-`watchdog:relaunch:<role>`, output tail in `watchdog.log`), at most once per role per 10 min. `--dry-run` only logs it.
+`dev`, pipeline manager `flow`): alive = `tmux has-session -t =<s>` and a `claude` process at or below a
+live pane pid; `#{pane_dead}`=1 is dead, a pane pid missing from ps is unknown (skipped). Each miss is red
+(`watchdog:liveness:<role>`); the 2nd consecutive miss re-reads ps, logs the pane's last 40 lines, kills a
+claude-less session and runs `ops/launch.sh <role>` (red `watchdog:relaunch:<role>`), at most once per role
+per 10 min and never while `$HACKRIFF_OPS/roles-stopped` or `dispatch-paused` exists (a deliberate stop:
+alert only). After 3 relaunches that came back dead it gives up and keeps alerting. `--dry-run` only logs.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/watchdog.py >/dev/null 2>&1 & disown
 python3 ops/watchdog.py --once --print --dry-run   # one tick to stdout; never kills, never alerts
