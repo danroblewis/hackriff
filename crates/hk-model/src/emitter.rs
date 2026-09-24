@@ -24,6 +24,10 @@ use crate::ids::{
 use crate::region::{FreqRange, TimeRange};
 use crate::time::Timestamp;
 
+/// Name of the blind framer's structural identity scheme (`other:hk-framing`): a framing signature,
+/// not a transmitter ([`IdentityScheme::is_structural`]).
+pub const FRAMING_IDENTITY_SCHEME: &str = "hk-framing";
+
 /// The namespace of a decoded identity.
 ///
 /// Serialised as a string: the kebab-case variant name, or `other:<name>` for [`Self::Other`].
@@ -64,6 +68,22 @@ impl IdentityScheme {
     /// Unknown schemes are treated as shared (the conservative choice, avoiding over-merging).
     pub fn shares_channel(&self) -> bool {
         !matches!(self, IdentityScheme::RdsPi)
+    }
+
+    /// Whether this scheme describes **structure, not a transmitter** (T-879): the blind framer's
+    /// `other:hk-framing` signature (sync word, CRC, payload length) is what every unit of one
+    /// device type sends, so it cannot say *which* unit was heard.
+    ///
+    /// Entity resolution therefore never uses it as a key: a sighting carrying one resolves by its
+    /// ledger or re-measurement, and otherwise starts its own entry (it still [shares a
+    /// channel](Self::shares_channel), so neither a context nor a fingerprint folds it into
+    /// another), which the pipeline's same-emission link joins to the track it came from. The
+    /// identity is stored on that entry when no other emitter already holds it (the identity
+    /// index is unique), and a structural claim is never an identity *conflict*. Before
+    /// T-879 three units of one sensor type on three channels, 1.5 MHz apart, all resolved to the
+    /// first unit's emitter by this signature — one emitter over three appearances.
+    pub fn is_structural(&self) -> bool {
+        matches!(self, IdentityScheme::Other(name) if name == FRAMING_IDENTITY_SCHEME)
     }
 
     /// The canonical value of an identity read from an unsigned field of `bits` bits (0 when the

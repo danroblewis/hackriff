@@ -109,7 +109,7 @@ pub fn declared(recipe: &Recipe) -> Option<Builtin> {
     recipe
         .refine
         .as_ref()
-        .and_then(|r| r.objective.builtin())
+        .and_then(|r| r.objective.builtin_name())
         .and_then(Builtin::named)
 }
 
