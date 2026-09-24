@@ -488,6 +488,51 @@ def _last_sent(ops: str, key: str) -> float:
     return last
 
 
+def eta_line(ops: str, now: datetime, repo: str | None = None) -> str:
+    """"ETA: queue clears ~HH:MM; T-801 lands ~HH:MM" (hkpy.eta) from measured medians. Never raises."""
+    import statistics
+    from hkpy import eta, taskorder
+    repo = repo or os.environ.get("HACKRIFF_REPO") or "/Users/daniellewis/hackriff"
+    queue = [ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines()
+             if ln.strip() and not ln.lstrip().startswith("#")]
+    started = None
+    for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+        if ln.startswith("started="):
+            try:
+                started = datetime.strptime(ln.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+    if started is None and os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD")):
+        started = datetime.fromtimestamp(os.path.getmtime(os.path.join(repo, ".git", "MERGE_HEAD")))
+    full = sorted(r["minutes"] for r in gate_rows(ops, now - timedelta(hours=24), now)
+                  if r["class"] == "full" and r["verdict"] == "green" and r["minutes"])
+    gate_min = float(statistics.median(full)) if full else 25.0
+    done = _jsonl(os.path.join(ops, "work-done.jsonl"))
+    work = [float(o["minutes"]) for o in done if o.get("kind") == "work" and o.get("outcome") in ("done", "done-to-review") and o.get("minutes")][-40:]
+    review = [float(o["minutes"]) for o in done if o.get("kind") == "review" and o.get("minutes")][-40:]
+    work_min = statistics.median(work) if work else 25.0
+    review_min = statistics.median(review) if review else 2.0
+    q_eta = eta.queue_clears(now, len(queue), started, gate_min)
+    ticket, t_eta, why = None, None, ""
+    try:
+        tasks, _ = taskorder.committed_tasks(repo, ops)
+        a = taskorder.analyse(tasks)
+        if a["roots"]:
+            top = a["roots"][0]
+            ticket = top["id"]
+            try:
+                claim = json.load(open(os.path.join(ops, "work-claims.json"))).get(ticket)
+            except Exception:
+                claim = None
+            branch = "task-t" + ticket.split("-", 1)[1].lstrip("0")
+            t_eta, why = eta.ticket_lands(now, ticket, branch, queue, claim, started, gate_min, work_min,
+                                          review_min, board_status=top["status"])
+            why = f"unblocks {top['unblocks']}; {why}"
+    except Exception as e:
+        ticket, why = None, f"({type(e).__name__})"
+    return eta.digest_line(now, q_eta, len(queue), ticket, t_eta, why)
+
+
 def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[str]:
     """Post the tick line when due, and each trend break at once. Returns what was posted (keys).
     `send(level, title, body, key)` defaults to ops/alert.py, which dedupes by key for 30 min and
@@ -519,6 +564,10 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
                                                   [str(o.get("branch")) for o in landed], ops=ops, limit=1900 - len(body))
             except Exception:
                 body += f"\n\nlanded since last digest: {len(landed)}"
+        try:
+            body = body.replace(line, line + "\n" + eta_line(ops, now), 1)
+        except Exception:
+            pass
         send("green", "pipeline digest", body, "flow:digest")
         posted.append("flow:digest")
     return posted
