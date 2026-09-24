@@ -7,11 +7,14 @@
 //! | `squelch` | real → real | emits **no items** while closed (not silence); the first chunk after it re-opens carries `DISCONTINUITY` |
 //! | `agc` | real → real | peak-envelope AGC to a target, gain capped |
 //! | `deemphasis` | real → real | single-pole de-emphasis, `tau_s` hot |
+//! | `stereo_decode` | real → real (`left`), real (`right`) | FM multiplex → L/R: 19 kHz pilot PLL, 38 kHz L−R demodulation, matrix; **mono (L = R) whenever the pilot is absent or unlocked**, `stereo` status 1 only while locked (ADR-0015 §12.13, T-873) |
 //! | `audio_out` | real → (sink) | resample to 48 kS/s, 960-sample `ri16_le` frames for the `audio` output kind |
 //!
 //! **Order in an FM chain:** `fm_demod` (no de-emphasis) → `squelch` (`fm-noise`) → `deemphasis`
 //! → `agc` → `audio_out`. The FM noise squelch measures the discriminator's out-of-band noise,
-//! which de-emphasis would already have removed.
+//! which de-emphasis would already have removed. **Stereo:** `fm_demod` → `stereo_decode` (fed
+//! the whole multiplex, ≥ 110 kS/s) → `deemphasis` on each of `left` and `right` (the standard
+//! de-emphasises L and R, not the multiplex).
 
 use hk_recipe::PortType::Real;
 use hk_recipe::{BlockDescriptor, PortSpec};
@@ -24,6 +27,7 @@ mod agc;
 mod deemphasis;
 mod out;
 mod squelch;
+mod stereo;
 #[cfg(test)]
 mod tests;
 
@@ -148,6 +152,34 @@ pub fn planned() -> Vec<BlockDescriptor> {
             true,
         ),
         descriptor(
+            "stereo_decode",
+            "audio",
+            "FM stereo decoder: the multiplex (an fm_demod output without de-emphasis, at ≥ 110 kS/s) to left and right audio. A PLL locks to the 19 kHz pilot; while it is locked the 38 kHz L−R subcarrier (the pilot's second harmonic) is demodulated and matrixed with the mono sum, L = M + S, R = M − S. While the pilot is absent or the PLL unlocked the L−R channel is not decoded at all and left = right = the mono sum: an honest mono fallback, never mono labelled stereo. Status: lock, pilot_locked, stereo (1 only while L−R is decoded), lock_losses (every locked → unlocked transition, so a mid-stream loss is reported), pilot_hz, pilot_amplitude; quality = pilot phase coherence. Evidence: S1 pilot_lock. De-emphasise each output afterwards.",
+            vec![PortSpec::new("in", Real)],
+            vec![PortSpec::new("left", Real), PortSpec::new("right", Real)],
+            vec![
+                param(
+                    "output_rate_hz",
+                    float(40_000.0, 192_000.0, "Hz"),
+                    "Output rate of both channels (at most the input rate).",
+                )
+                .default_value(48_000.0),
+                param(
+                    "audio_bandwidth_hz",
+                    float(5_000.0, 15_000.0, "Hz"),
+                    "Audio band kept in each channel (broadcast stereo carries 15 kHz).",
+                )
+                .default_value(15_000.0),
+                param(
+                    "pll_bandwidth_hz",
+                    float(1.0, 100.0, "Hz"),
+                    "Pilot PLL natural frequency.",
+                )
+                .default_value(10.0),
+            ],
+            true,
+        ),
+        descriptor(
             "audio_out",
             "audio",
             "Audio sink (no output port): anti-aliased resampling to 48 kS/s (15 kHz audio band, the 19 kHz pilot rejected), optional loudness normalisation, clamp to ±1, 960-sample ri16_le frames — the stream contract §12.2 audio profile, served by an `audio` output. Needs an input rate ≥ the output rate.",
@@ -192,5 +224,6 @@ pub fn register(r: &mut Registry) {
     add("squelch", squelch::build);
     add("agc", agc::build);
     add("deemphasis", deemphasis::build);
+    add("stereo_decode", stereo::build);
     add("audio_out", out::build);
 }
