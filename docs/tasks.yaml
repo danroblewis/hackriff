@@ -23684,7 +23684,6 @@ tasks:
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
     status: in-progress
-    branch: task-t805
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23714,6 +23713,16 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): floating frequency ruler along the bottom and time ruler along the left edge, with ticks that track pan and zoom, instead of the old framed axes. Say in your handback exactly what to open on staging to see it.
+    branch: task-t805
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:18).
+      HUD axes (MAP-05, finishes T-459). New ui/src/surface/hud.ts: per-pane rulers (frequency along each pane's bottom edge, time down its left) built every frame in SurfaceView.frame() from the PaneView the data pass drew and the (cellHz, cellS) its PaneStatus reported. Ticks are band 0: hud-tick strokes drawn by the existing overlay program after the data pass, which stays byte-identical with the HUD on/off. Labels are band 2: a pooled DOM layer (.sf-hud inside .sf-stage, pointer-events none) placed in the same frame from the same ruler. Tick values are nice multiples of absolute Hz / capture ns, so pan, zoom and the advancing live edge move them with the rows. The major step and any minor mark are floored at the drawn cell (honesty). Labels state units: '100.5 MHz'; time as age behind the live edge ('−10 s', 'live edge') with the UTC instant beside it. The minimap gets no ruler. Ticks (alpha 0.45) and labels (CSS opacity .45) fade on body.chrome-idle, but nothing sets that class yet: idle detection is MAP-24's (T-824) job. The T-459 chrome readout sentence is kept. TO SEE IT ON STAGING: open the app (/) on the Explore view. The bottom edge of the spectrum canvas, just above the minimap strip, has a floating MHz ruler with major+minor ticks, and the left edge has a time ruler (−N s + HH:MM:SSZ). Drag to pan and wheel to zoom: the ticks and labels move with the waterfall rows, and in a following pane the time ticks scroll down as the live edge advances. Split ⇔ gives each viewport its own pair of rulers.
+      Tests: just test-ui -> exit 0 (build + typecheck + 57/57 node test files passed (new surface-hud.test.ts: 12 tests))
+      precheck exit 0
+      Commits: 5337e78f
+      Observed, not chased: Nothing sets the chrome idle-fade class yet (no body.chrome-idle in ui/src). The HUD reads that class, so it will fade as soon as MAP-24/T-824 (or MAP-02) adds the idle timer. | #view-explore > .centre still has 56px top / 70px bottom padding (map-layout.css), so the canvas stage is not fully edge-to-edge. The rulers sit on the pane edges inside that stage. | No browser/e2e run was made (targeted protocol). The label CSS offsets (freq 30px above the pane bottom, time 14px right of the left edge) were checked only by unit geometry, not by eye. | The /surface.html preview (preview-main.ts) does not pass a hud element, so it has no rulers. Only the app's Explore surface was wired.
+      Use cases: AWARE-042
+      Resources: 72 CPU-s, peak 0.4 GB
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
