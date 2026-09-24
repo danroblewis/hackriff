@@ -44,6 +44,16 @@ in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — 
 the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
 "source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
 
+**`/metrics` — code metrics** (`ops/metricspage.py` + `py/hkpy/codemetrics.py`, linked "metrics ↗"
+in the top bar): lines per language / crate / area (product vs test), churn per area over 24h/7d/30d
+and the hottest files, tests and test-seconds per crate from the gate's kept JUnit (seconds per 1k
+lines), the largest files and longest Rust functions (a brace-depth proxy), hygiene (unsafe,
+TODO/FIXME/XXX, the last lint's clippy warnings, `#[ignore]` by reason, quarantine) and daily
+trends. All of it at committed main (the bulk base while a batch gates), rebuilt in a child
+process only when that sha moves, cached in `$HACKRIFF_OPS/metrics-cache.json`; the first build
+each day appends a sample to `$HACKRIFF_OPS/metrics.jsonl`. Each section prints its method's caveat.
+`python -m hkpy.codemetrics` prints the same summary. Data: `/metrics.json`.
+
 **`/flow` — the Flow panel** (linked from the top bar) gives the pipeline manager throughput
 visibility without waiting on `flow.jsonl` to accumulate: landings/h as a rolling 6h/24h line
 chart backfilled hourly from `hkpy.flow.hourly()` (with any real `flow.jsonl` ticks overlaid as
