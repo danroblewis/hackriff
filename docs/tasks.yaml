@@ -25422,7 +25422,8 @@ tasks:
   - id: T-860
     milestone: MAUTO
     title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
-    status: todo
+    status: in-progress
+    branch: task-t860
     priority: normal
     deps:
     - T-859
