@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, neverLookedItems, fetchObservations, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, surveyWindowItems, neverLookedItems, SurveyLog, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
 import type { AppContext } from "../src/app/context";
@@ -59,17 +59,79 @@ test("T-815: past surveys are observed-then windows from the log, merged per ban
   assert.deepEqual(pastSurveyItems(null, 0), []);
 });
 
-test("T-815: observations are paged by next_cursor so the newest surveys are not cut off", async () => {
-  const seen: string[] = [];
-  const get = async <T,>(path: string): Promise<T | null> => {
-    seen.push(path);
-    const c = Number(/cursor=(\d+)/.exec(path)?.[1]);
-    return (c === 0 ? { records: [{ record: "old" }], next_cursor: 1000 } : { records: [{ record: "new" }], next_cursor: null }) as T;
+/** A fake `GET /api/observations` over an oldest-first log, with the route's own paging rules
+ * (docs/api.md: records overlapping the box, in log order; `limit` ≤ 10000; `next_cursor` offset). */
+type Rec = { record: string; window: { usable: { lo_hz: number; hi_hz: number } }; observed: { start_ns: number; end_ns: number } };
+function fakeObsServer(log: Rec[]) {
+  const calls: { t0: number; t1: number; cursor: number; limit: number }[] = [];
+  const serve = (path: string) => {
+    const q = new URLSearchParams(path.split("?")[1]);
+    const t0 = Number(q.get("t0")), t1 = Number(q.get("t1")), cursor = Number(q.get("cursor") ?? 0);
+    const limit = Math.min(Number(q.get("limit") ?? 1000), 10_000);
+    calls.push({ t0, t1, cursor, limit });
+    const hit = log.filter((r) => r.observed.end_ns / 1e9 > t0 && r.observed.start_ns / 1e9 < t1);
+    const next = cursor + limit < hit.length ? cursor + limit : null;
+    return { records: hit.slice(cursor, cursor + limit), next_cursor: next };
   };
-  const r = await fetchObservations(get, "/api/observations?f_lo=1&f_hi=2&t0=0&t1=9");
-  assert.deepEqual(r?.records.map((x) => x.record), ["old", "new"]);
-  assert.equal(seen.length, 2);
-  assert.match(seen[1], /cursor=1000/);
+  return { calls, serve };
+}
+/** An iterative scan at a 10 s dwell (docs/api.md: ~8,600 records/day): one band per hour, five bands
+ * in rotation, so every band-hour is its own survey window. */
+const T0 = 1_789_000_000;
+function scanLog(fromS: number, toS: number): Rec[] {
+  const out: Rec[] = [];
+  for (let t = fromS; t < toS; t += 10) {
+    const lo = 100e6 + (Math.floor((t - T0) / 3600) % 5) * 10e6;
+    out.push({ record: "dwell", window: { usable: { lo_hz: lo, hi_hz: lo + 2e6 } }, observed: { start_ns: t * 1e9, end_ns: (t + 10) * 1e9 } });
+  }
+  return out;
+}
+
+test("T-815 review: with a 7-day, 60k-record oldest-first log the NEWEST surveys are listed, newest first", async () => {
+  const edge = T0 + 7 * 86400;
+  const log = scanLog(T0, edge);
+  assert.ok(log.length >= 60_000);
+  const srv = fakeObsServer(log);
+  const { store, el } = await mountedDrawer({ edge, obs: srv.serve });
+  const survey = el.all().filter((e) => e.tag === "li" && e.children[0]?.children[0]?.textContent === "survey · observed then");
+  assert.equal(survey.length, 4);
+  const got: number[] = [];
+  for (const li of survey) { li.children[1].fire("click"); got.push(store.get().time.tS!); }
+  assert.deepEqual(got, [edge, edge - 3600, edge - 7200, edge - 10800], "the four newest band-hours, newest first — never the oldest pages' windows");
+  assert.deepEqual(store.get().time, { live: false, tS: edge - 10800, spanS: 3600 });
+  assert.ok(srv.calls.every((c) => c.limit === 10_000), "the documented max page");
+  assert.equal(srv.calls[0].t1, edge, "the newest slice is read first");
+  assert.ok(!el.all().some((e) => e.textContent === "survey · not fully loaded"), "a complete read claims no truncation");
+});
+
+test("T-815 review: a refresh reads only what is new since the last read, not the whole 7 days", async () => {
+  const edge = T0 + 7 * 86400;
+  let log = scanLog(T0, edge);
+  const calls: string[] = [];
+  const m = await mountedDrawer({ edge, obs: (p) => { calls.push(p); return fakeObsServer(log).serve(p); } });
+  const first = calls.length;
+  log = scanLog(T0, edge + 30);
+  m.store.set(() => ({ live: { ...m.store.get().live, edgeTS: edge + 30 } }));
+  await m.tick();
+  const again = calls.slice(first).map((p) => new URLSearchParams(p.split("?")[1]));
+  assert.equal(again.length, 1, "one request for the new 30 s");
+  assert.equal(Number(again[0].get("t1")), edge + 30);
+  assert.equal(Number(again[0].get("t0")), edge - 120, "from the last edge, less a short re-read margin");
+});
+
+test("T-815 review: a log too dense for the page budget is STATED as truncated, and the newest still leads", async () => {
+  const edge = T0 + 3 * 86400;
+  const srv = fakeObsServer(scanLog(T0, edge));
+  const log = new SurveyLog(3, 5000); // 3 pages of 5000: the newest day (8,640) fits, the next does not
+  await log.refresh(async <T,>(p: string) => srv.serve(p) as T, edge);
+  assert.equal(log.readThrough, edge);
+  assert.equal(log.truncatedBefore, edge - 86400, "the second-newest slice was cut");
+  const items = surveyWindowItems(log.wins, edge, 4, log.truncatedBefore);
+  assert.equal(items[0].time?.t1, edge, "newest first even when truncated");
+  const note = items.at(-1)!;
+  assert.equal(note.tag, "survey · not fully loaded");
+  assert.equal(note.note, true, "a statement, with no go-to");
+  assert.match(note.why, /may be missing/);
 });
 
 test("thin client: the drawer source reaches no device route and only GETs", () => {
@@ -98,12 +160,13 @@ class FakeEl {
   all(): FakeEl[] { return this.children.flatMap((c) => [c, ...c.all()]); }
 }
 
-async function mountedDrawer() {
+async function mountedDrawer(opts: { edge?: number; obs?: (path: string) => unknown } = {}) {
   const g = globalThis as Record<string, unknown>;
   // The fake document stays installed: row clicks re-render. Nothing else in this file needs a DOM.
   const saved = { setInterval: g.setInterval };
   g.document = { createElement: (t: string) => new FakeEl(t) };
-  g.setInterval = () => 0; // the 30 s refresh must not keep node alive
+  let every: (() => void) | null = null;
+  g.setInterval = (fn: () => void) => { every = fn; return 0; }; // the 30 s refresh must not keep node alive
   const calls: string[] = [];
   const replies: Record<string, unknown> = {
     "/api/events": {
@@ -112,9 +175,10 @@ async function mountedDrawer() {
     },
     "/api/coverage": { window: { t0_s: 40, t1_s: 100 }, grid: { cells: 2, f_lo_hz: 400e6, f_cell_hz: 1e6 }, any: { cells: [{ state: "observed" }, { state: "unobserved" }] } },
   };
-  const client = { get: async (path: string) => { calls.push(path); const r = replies[path.split("?")[0]]; if (!r) throw new Error("none"); return r; } };
+  if (opts.obs) replies["/api/observations"] = opts.obs;
+  const client = { get: async (path: string) => { calls.push(path); const f = replies[path.split("?")[0]]; const r = typeof f === "function" ? f(path) : f; if (!r) throw new Error("none"); return r; } };
   const store = createStore(initialState());
-  store.set(() => ({ live: { ...store.get().live, edgeTS: 100, view: { loHz: 400e6, hiHz: 500e6 } } }));
+  store.set(() => ({ live: { ...store.get().live, edgeTS: opts.edge ?? 100, view: { loHz: 400e6, hiHz: 500e6 } } }));
   const el = new FakeEl("div");
   try {
     mountExploreDrawer(el as unknown as HTMLElement, { store, client, token: "t" } as unknown as AppContext);
@@ -122,7 +186,9 @@ async function mountedDrawer() {
   } finally { g.setInterval = saved.setInterval; }
   const rows = el.all().filter((e) => e.className === "row");
   const gos = el.all().filter((e) => e.className === "go");
-  return { store, calls, el, rows, gos };
+  const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+  const tick = async () => { every?.(); await flush(); };
+  return { store, calls, el, rows, gos, tick };
 }
 
 /** Everything the surface reads to move a pane's view (centre/span/time window) or offer a retune. */

@@ -26,6 +26,8 @@ export interface DrawerItem {
   hz: number; time?: { t0: number; t1: number };
   /** The emitter this row is, if any: a row-body click focuses (highlights) its box on the map. */
   emitterId?: string;
+  /** A statement, not a place (e.g. "older surveys not loaded"): no go-to button. */
+  note?: true;
 }
 
 /** A row's stable identity across refreshes, so a selection survives the 30 s re-list. */
@@ -125,27 +127,15 @@ export interface ObservationsResp {
     observed?: { start_ns: number; end_ns: number } }[];
   next_cursor?: number | null;
 }
-/** The log is served oldest-first and pages by `next_cursor`; a single page would miss the newest
- * surveys, so follow the cursor (bounded) and keep every record. */
-export async function fetchObservations(
-  get: <T>(path: string) => Promise<T | null>, base: string, maxPages = 20,
-): Promise<ObservationsResp | null> {
-  let all: ObservationsResp["records"] = [], cursor: number | null | undefined = 0, got = false;
-  for (let i = 0; i < maxPages && cursor !== null && cursor !== undefined; i++) {
-    const r: ObservationsResp | null = await get<ObservationsResp>(`${base}&limit=1000&cursor=${cursor}`);
-    if (!r) break;
-    got = true; all = all.concat(r.records); cursor = r.next_cursor;
-  }
-  return got ? { records: all } : null;
-}
-const fmtAgo = (s: number): string => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 129600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 86400)} d`;
+type Get = <T>(path: string) => Promise<T | null>;
 
-/** Observed-then windows: dwell records of the log, same band merged when their times touch. The
- * backend's own record extents; this only groups and words them. Newest first. */
-export function pastSurveyItems(r: ObservationsResp | null, edgeS: number, max = 4, joinS = 120): DrawerItem[] {
-  if (!r) return [];
-  const wins: { lo: number; hi: number; t0: number; t1: number }[] = [];
-  for (const rec of r.records) {
+/** One observed-then window: a band and the time the log says it was looked at. */
+export interface SurveyWindow { lo: number; hi: number; t0: number; t1: number }
+
+/** Fold dwell records into windows, same band merged when their times touch (within `joinS`).
+ * Idempotent: folding a record twice (overlapping reads) changes nothing. */
+export function foldSurveyRecords(wins: SurveyWindow[], records: ObservationsResp["records"], joinS = 120): SurveyWindow[] {
+  for (const rec of records) {
     if (rec.record !== "dwell" || !rec.window || !rec.observed) continue;
     const t0 = rec.observed.start_ns / 1e9, t1 = rec.observed.end_ns / 1e9;
     if (!(t1 > t0)) continue;
@@ -153,11 +143,100 @@ export function pastSurveyItems(r: ObservationsResp | null, edgeS: number, max =
     const m = wins.find((w) => Math.abs(w.lo - lo) < 1 && Math.abs(w.hi - hi) < 1 && t0 <= w.t1 + joinS && t1 >= w.t0 - joinS);
     if (m) { m.t0 = Math.min(m.t0, t0); m.t1 = Math.max(m.t1, t1); } else wins.push({ lo, hi, t0, t1 });
   }
-  return wins.sort((a, b) => b.t1 - a.t1).slice(0, max).map((w) => ({
+  return wins;
+}
+
+/** The documented maximum page (docs/api.md: `limit` at most 10000). */
+export const OBS_PAGE_LIMIT = 10_000;
+export const SURVEY_LOOKBACK_S = 7 * 86400;
+/** The log is served oldest-first with no newest-first order, so it is read in time slices from the
+ * live edge backwards: each slice is paged to its end before the next-older one starts. */
+export const SURVEY_SLICE_S = 86400;
+/** Re-reads start this far before the last read's edge, so a record sealed late is not missed. */
+export const SURVEY_REREAD_S = 120;
+
+/**
+ * The past-survey windows of the last 7 days, kept across refreshes.
+ *
+ * Correctness (T-815 review): the route returns records oldest first in log order, and a scheduled
+ * scan writes ~8,600 dwell records a day, so reading from the start of a 7-day box and stopping at a
+ * page cap listed days-old surveys as "newest". Here the newest slice is always read first and in
+ * full; a page budget exists only as a guard against a pathological log, and when it binds the
+ * drawer says so (`truncatedBefore`) instead of silently mislabelling what it did read.
+ *
+ * Cost: after the first load a refresh reads only `[last edge − SURVEY_REREAD_S, edge]`, not the
+ * whole window again.
+ */
+export class SurveyLog {
+  wins: SurveyWindow[] = [];
+  /** The live edge the log has been read up to, or null before the first successful read. */
+  readThrough: number | null = null;
+  /** Set when the page budget bound: surveys that ended before this time may be missing. */
+  truncatedBefore: number | null = null;
+  private busy: Promise<void> | null = null;
+
+  constructor(private readonly maxPages = 40, private readonly pageLimit = OBS_PAGE_LIMIT) {}
+
+  refresh(get: Get, edge: number): Promise<void> {
+    this.busy ??= this.read(get, edge).finally(() => { this.busy = null; });
+    return this.busy;
+  }
+
+  private async read(get: Get, edge: number): Promise<void> {
+    if (this.readThrough !== null && edge < this.readThrough - SURVEY_REREAD_S) this.reset(); // a new run / clock
+    const floor = edge - SURVEY_LOOKBACK_S;
+    const from = this.readThrough === null ? floor : Math.max(floor, this.readThrough - SURVEY_REREAD_S);
+    if (!(edge > from)) return;
+    let pages = 0;
+    for (let t1 = edge; t1 > from; t1 -= SURVEY_SLICE_S) {
+      const t0 = Math.max(from, t1 - SURVEY_SLICE_S);
+      let cursor: number | null | undefined = 0;
+      while (cursor !== null && cursor !== undefined) {
+        const r: ObservationsResp | null = pages >= this.maxPages ? null : await get<ObservationsResp>(
+          `/api/observations?f_lo=1000000&f_hi=6000000000&t0=${t0}&t1=${t1}&limit=${this.pageLimit}&cursor=${cursor}`);
+        if (!r) {
+          // The newest slice failed outright: keep what we had and read it again next refresh.
+          if (t1 === edge && pages === 0) return;
+          // Otherwise this slice (and everything older) is not fully read: say so, stop here.
+          this.truncatedBefore = Math.max(this.truncatedBefore ?? -Infinity, t1);
+          if (t1 === edge) this.readThrough = null; // not even the newest slice is whole: redo it
+          break;
+        }
+        pages++;
+        foldSurveyRecords(this.wins, r.records);
+        cursor = r.next_cursor;
+      }
+      if (cursor !== null && cursor !== undefined) break; // truncated above
+      if (t1 === edge) this.readThrough = edge; // the newest slice is in full; older ones fold in after
+    }
+    this.wins = this.wins.filter((w) => w.t1 >= floor);
+    if (this.truncatedBefore !== null && this.truncatedBefore < floor) this.truncatedBefore = null;
+  }
+
+  private reset() { this.wins = []; this.readThrough = null; this.truncatedBefore = null; }
+}
+
+const fmtAgo = (s: number): string => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 129600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 86400)} d`;
+
+/** Observed-then windows as rows, newest first. The backend's own record extents; this only
+ * groups and words them. A truncated read is stated as its own row (no go-to: nowhere to go). */
+export function surveyWindowItems(wins: SurveyWindow[], edgeS: number, max = 4, truncatedBefore: number | null = null): DrawerItem[] {
+  const rows: DrawerItem[] = [...wins].sort((a, b) => b.t1 - a.t1).slice(0, max).map((w) => ({
     group: "surveys" as const, tag: "survey · observed then", title: `${fmtHz(w.lo)} – ${fmtHz(w.hi)}`,
-    why: `looked at ${fmtAgo(Math.max(0, edgeS - w.t1))} ago for ${fmtAgo(w.t1 - w.t0)}; outside this band and window nothing was looked at`,
+    why: `the log records this band looked at ${fmtAgo(Math.max(0, edgeS - w.t1))} ago for ${fmtAgo(w.t1 - w.t0)}`,
     hz: (w.lo + w.hi) / 2, time: { t0: w.t0, t1: w.t1 },
   }));
+  if (truncatedBefore !== null) {
+    rows.push({ group: "surveys", tag: "survey · not fully loaded", title: "Older surveys not loaded",
+      why: `the observation log is too dense to read in full here: surveys before ${fmtAgo(Math.max(0, edgeS - truncatedBefore))} ago may be missing`,
+      hz: Number.NaN, note: true });
+  }
+  return rows;
+}
+
+/** One-shot form over a single response (kept for callers holding records already). */
+export function pastSurveyItems(r: ObservationsResp | null, edgeS: number, max = 4, joinS = 120): DrawerItem[] {
+  return r ? surveyWindowItems(foldSurveyRecords([], r.records, joinS), edgeS, max) : [];
 }
 
 /** The widest never-looked run of the coverage plane — an honest gap, distinct from observed-then. */
@@ -197,6 +276,7 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
   let items: DrawerItem[] = [];
   let selected: string | null = null;
   let seq = 0;
+  const surveys = new SurveyLog();
 
   const render = () => {
     listEl.replaceChildren();
@@ -231,7 +311,8 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
           ctx.store.set(gotoItem(it));
           render();
         });
-        li.append(b, go); ul.append(li);
+        if (it.note) li.append(b); else li.append(b, go);
+        ul.append(li);
       }
       listEl.append(h, ul);
     }
@@ -249,15 +330,15 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
     if (edge === null || !v) return;
     const t0 = edge - 1800;
     const band = `f_lo=${v.loHz}&f_hi=${v.hiHz}`;
-    const [ev, st, sch, cov, obs] = await Promise.all([
+    const [ev, st, sch, cov] = await Promise.all([
       get<EventsResp>(`/api/events?${band}&t0=${t0}&t1=${edge}&limit=200`),
       get<StrongestResp>(`/api/analysis/strongest?${band}&window_s=30`),
       get<SchedulerResponse>(`/api/scheduler${schedulerQuery({ fLoHz: v.loHz, fHiHz: v.hiHz, t0, t1: edge })}`),
       get<CoverageResp>(`/api/coverage?f_lo=1000000&f_hi=6000000000&cells=64&t0=${t0}&t1=${edge}`),
-      fetchObservations(get, `/api/observations?f_lo=1000000&f_hi=6000000000&t0=${edge - 7 * 86400}&t1=${edge}`),
+      surveys.refresh(get, edge),
     ]);
     if (my !== seq) return;
-    items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...pastSurveyItems(obs, edge), ...surveyItems(cov, 2), ...neverLookedItems(cov)];
+    items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...surveyWindowItems(surveys.wins, edge, 4, surveys.truncatedBefore), ...surveyItems(cov, 2), ...neverLookedItems(cov)];
     render();
   };
   render();
