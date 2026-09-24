@@ -182,6 +182,71 @@ test("a drag on the app's surface moves the view and still reaches no device rou
   assert.deepEqual(page.exceptions, [], "uncaught exception while dragging");
 });
 
+test("T-802: the floating controls are pressable, move only the view, and offer (never command) a retune", async (t) => {
+  // MAP-02 in a real browser: Go-to, layers, zoom and the follow-live FAB float over the canvas,
+  // each is clickable at its own centre (T-528's hit test — a control a user can see is a control a
+  // user can press), each changes the SCREEN, and none reaches a device route. A Go-to to spectrum
+  // no tuned window covers shows the retune offer; the test does not press it, and asserts that
+  // showing it commanded nothing.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the surface to draw and the floating controls to mount",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
+     !!document.querySelector('.map-ctl .map-fab') &&
+     / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+    { timeoutMs: 60000 });
+
+  const covered = JSON.parse(await page.eval(`JSON.stringify(
+    ['.map-goto input', '.map-layers-btn', '.map-zoom-in', '.map-zoom-out', '.map-fab'].map((sel) => {
+      const el = document.querySelector(sel); const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { sel, w: r.width, h: r.height, on: top ? (top.className?.baseVal ?? top.className ?? top.tagName) : 'nothing',
+               ok: !!top && (top === el || el.contains(top)) && r.width >= 24 && r.height >= 24 };
+    }).filter((b) => !b.ok))`));
+  assert.deepEqual(covered, [], "a floating control is not pressable at its own centre, or is under 24 px");
+
+  const headline = `document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? ""`;
+  // Zoom in: the pane's stated window changes.
+  let before = await page.eval(headline);
+  await page.click("document.querySelector('.map-zoom-in')");
+  await page.waitFor("zoom-in to change the pane's window", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
+  before = await page.eval(headline);
+  await page.click("document.querySelector('.map-zoom-out')");
+  await page.waitFor("zoom-out to change the pane's window", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
+
+  // Pause through the toolbar, then the FAB re-pins the pane to the growing edge.
+  await page.click("document.querySelector('.sf-live')");
+  await page.waitFor("the FAB to say the pane is frozen", `document.querySelector('.map-fab').classList.contains('frozen')`, { timeoutMs: 10000 });
+  await page.click("document.querySelector('.map-fab')");
+  await page.waitFor("the FAB to follow the live edge again",
+    `document.querySelector('.map-fab').classList.contains('following') && document.querySelector('.sf-live').textContent === 'Live'`,
+    { timeoutMs: 10000 });
+
+  // Layers opens a menu and closes again.
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden &&
+    document.querySelectorAll('#map-layers input[type=checkbox]').length >= 2`, { timeoutMs: 5000 });
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to close", `document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
+
+  // Go-to, far outside any tuned window: the view moves and the OFFER appears — nothing is sent.
+  before = await page.eval(headline);
+  await page.click("document.querySelector('.map-goto input')");
+  await page.eval(`(() => { const i = document.querySelector('.map-goto input'); i.value = '2400M';
+    document.querySelector('.map-goto').requestSubmit(); })()`);
+  await page.waitFor("go-to to move the pane", `(${headline}) !== ${JSON.stringify(before)}`, { timeoutMs: 15000 });
+  await page.waitFor("the retune offer to appear beside Go-to",
+    `!document.querySelector('.map-offer').hidden && (document.querySelector('.map-offer-why').textContent ?? '').length > 0`,
+    { timeoutMs: 5000 });
+  await page.frames(3);
+
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "a floating view control reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while using the floating controls");
+});
+
 test("T-506: the canvas draws the IQ horizon and the retention bound where the ring window says", async (t) => {
   // The retired Capture panel was the only place either boundary was drawn. This measures them on
   // the canvas in a real browser: the ink is found in the screenshot, row by row, and its position

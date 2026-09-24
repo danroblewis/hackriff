@@ -525,7 +525,9 @@ export class Page {
    * `y0` and `y1` (CSS px, page coordinates; default the whole box): a column is **occluded** if
    * any of those points lands on an element outside the element's own mount (`.surface`, or its
    * parent where there is none) — the surface's own overlays (boxes, labels, the capture banner)
-   * are part of what it draws and never count. Nothing about any panel's size is assumed: a panel
+   * are part of what it draws and never count — except screen-space chrome mounted inside it and
+   * marked `data-band="chrome"` (T-802's floating controls), which occludes like any panel.
+   * Nothing about any panel's size is assumed: a panel
    * that moves, collapses (`.focus.is-empty`) or is absent (the harness pages) is simply not hit.
    *
    * Returns the widest contiguous unoccluded run as `{ x, w }` in page CSS px (plus the element's
@@ -547,7 +549,9 @@ export class Page {
         let clear = true;
         for (const y of ys) {
           const hit = document.elementFromPoint(x + 0.5, y);
-          if (hit && !root.contains(hit)) { clear = false; break; }
+          // T-802: screen-space chrome mounted inside the surface (the floating control cluster,
+          // \`data-band="chrome"\`) is still chrome — its pixels are not the surface's.
+          if (hit && (!root.contains(hit) || hit.closest('[data-band="chrome"]'))) { clear = false; break; }
         }
         if (clear) { run = run ?? { x, w: 0 }; run.w++; if (run.w > best.w) best = { ...run }; }
         else { occluded++; run = null; }
