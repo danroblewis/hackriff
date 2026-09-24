@@ -6,7 +6,7 @@
 use std::f64::consts::{PI, TAU};
 
 use hk_recipe::PortType;
-use num_complex::Complex32;
+use num_complex::{Complex32, Complex64};
 use serde_json::{Value, json};
 
 use super::super::testkit::*;
@@ -629,4 +629,483 @@ fn parameters_are_checked_and_the_ambiguity_knobs_are_hot() {
         }])
         .is_err()
     );
+}
+
+// ------------------------------------------------------------------------------ burst (T-875)
+
+/// A burst placed in a stream: (start sample, transmission, bits).
+type Placed = (usize, Tx, Vec<u8>);
+
+/// Places clean transmissions (`gain_db` over the first, after `gap` symbols of silence each)
+/// in one stream, then adds noise at the first one's `es_n0_db`. Returns the samples and each
+/// burst's (start sample, transmission, bits).
+fn burst_stream(parts: &[(Tx, f64, usize)], tail: usize) -> (Vec<Complex32>, Vec<Placed>) {
+    let mut x = Vec::new();
+    let mut placed = Vec::new();
+    let mut ref_power = None;
+    for &(tx, gain_db, gap) in parts {
+        x.extend(std::iter::repeat_n(
+            Complex32::new(0.0, 0.0),
+            (gap as f64 * SPS) as usize,
+        ));
+        let (bits, clean) = transmit(Tx {
+            es_n0_db: 300.0,
+            ..tx
+        });
+        let p = clean.iter().map(|z| f64::from(z.norm_sqr())).sum::<f64>() / clean.len() as f64;
+        ref_power.get_or_insert(p);
+        let g = 10f64.powf(gain_db / 20.0) as f32;
+        placed.push((x.len(), tx, bits));
+        x.extend(clean.iter().map(|z| z * g));
+    }
+    x.extend(std::iter::repeat_n(
+        Complex32::new(0.0, 0.0),
+        (tail as f64 * SPS) as usize,
+    ));
+    let noise = ref_power.unwrap_or(1.0) * SPS / 10f64.powf(parts[0].0.es_n0_db / 10.0);
+    let mut rng = Lcg::new(parts[0].0.seed ^ 0x5eed);
+    for v in &mut x {
+        *v += rng.cnoise(noise);
+    }
+    (x, placed)
+}
+
+/// Bits of the burst transmitted at sample `start`, read from the output **by its time map**
+/// (ADR-0011 §1.1: every item carries its capture time), not by searching for a lag: symbol
+/// `n` is the item whose stamped centre is nearest `start + (n + tau)·SPS` (OQPSK: bit `b` at
+/// `(b/2 + tau)·SPS`, each rail at its own strobe). Returns (bits missing or wrong, worst
+/// time-map error in samples over the matched symbols).
+fn errors_by_time(c: &Chain, start: usize, tx: Tx, truth: &[u8]) -> (usize, f64) {
+    let kb = bits_per_symbol(tx.modulation);
+    let oqpsk = tx.modulation == "oqpsk";
+    let out = c.out(0, 0);
+    let mut got: Vec<Option<u8>> = vec![None; truth.len()];
+    let mut worst = 0.0f64;
+    let mut at = 0;
+    for (meta, &len) in out.metas.iter().zip(&out.lens) {
+        for i in 0..len {
+            let v = u8::from(out.real[at + i] > 0.0);
+            let src = if oqpsk {
+                meta.source_index + i as f64 * meta.source_per_item
+            } else {
+                meta.source_index + (i / kb * kb) as f64 * meta.source_per_item
+            };
+            let pos = (src - start as f64) / SPS - tx.tau;
+            let (b, off) = if oqpsk {
+                let b = (2.0 * pos).round();
+                (b as isize, (pos - b / 2.0) * SPS)
+            } else {
+                let n = pos.round();
+                (
+                    (n as isize) * kb as isize + (i % kb) as isize,
+                    (pos - n) * SPS,
+                )
+            };
+            if b >= 0 && (b as usize) < truth.len() && got[b as usize].is_none() {
+                got[b as usize] = Some(v);
+                worst = worst.max(off.abs());
+            }
+        }
+        at += len;
+    }
+    let errors = truth
+        .iter()
+        .zip(&got)
+        .filter(|(t, g)| g.is_none_or(|g| g != **t))
+        .count();
+    (errors, worst)
+}
+
+/// Fewest bit errors over the phase ambiguity (as a consumer's sync word resolves it), for
+/// the burst at `start`.
+fn burst_errors_by_time(
+    params: &Value,
+    x: &[Complex32],
+    chunk: usize,
+    burst: &Placed,
+) -> (usize, f64) {
+    let (start, tx, truth) = burst;
+    rotations(tx.modulation)
+        .into_iter()
+        .map(|rot| {
+            let p = with(params.clone(), json!({"rotation_deg": rot}));
+            errors_by_time(&run(&p, x, chunk), *start, *tx, truth)
+        })
+        .min_by_key(|e| e.0)
+        .unwrap()
+}
+
+/// Bits a differential mode cannot know (the first symbol has no reference), and OQPSK's
+/// half-symbol rail ambiguity (one bit).
+fn allowance(m: &str) -> usize {
+    match m {
+        "dbpsk" | "dqpsk" | "pi4-dqpsk" | "d8psk" => bits_per_symbol(m),
+        "oqpsk" => 1,
+        _ => 0,
+    }
+}
+
+/// T-875 (ADR-0015 §10 M-14 residue; SIGNAL-034/033/024/027/025/028/019/004/054/069, SPACE-081
+/// families): a **16-symbol** burst of every constellation — 1/32 of the streaming path's
+/// 512-symbol acquisition window — decodes whole from its first symbol in burst mode, blind,
+/// through the same 600 Hz carrier offset, phase, timing offset and resampling as the
+/// streaming test, at the same Es/N0. Bits are matched by the output's time map. RRC OQPSK is
+/// the exception that needs 64 symbols (its x⁴ line is weak; measured in the module docs).
+/// The streaming path, on the same 64-symbol QPSK burst, loses its start: the gap this closes.
+#[test]
+fn burst_mode_decodes_short_bursts_from_their_first_symbol() {
+    let cases: [(&str, f64, Value, usize); 9] = [
+        ("bpsk", 9.0, json!({}), 16),
+        ("dbpsk", 11.0, json!({}), 16),
+        ("qpsk", 13.0, json!({}), 16),
+        ("dqpsk", 15.0, json!({}), 16),
+        ("pi4-dqpsk", 15.0, json!({}), 16),
+        ("8psk", 19.0, json!({}), 16),
+        ("d8psk", 21.0, json!({}), 16),
+        ("oqpsk", 12.0, json!({"pulse": "half-sine"}), 16),
+        ("oqpsk", 13.0, json!({}), 64),
+    ];
+    for (m, snr, extra, n) in cases {
+        let shape = if extra.get("pulse").is_some() {
+            Shape::HalfSine
+        } else {
+            Shape::Rrc(0.35)
+        };
+        let tx = Tx {
+            symbols: n,
+            shape,
+            ..Tx::new(m, snr)
+        };
+        let (x, placed) = burst_stream(&[(tx, 0.0, 300)], 300);
+        let params = with(
+            json!({"modulation": m, "symbol_rate_bd": RS, "burst": true}),
+            extra,
+        );
+        let (e, worst) = burst_errors_by_time(&params, &x, 1_000, &placed[0]);
+        assert!(
+            e <= allowance(m),
+            "{m} ({n} symbols at {snr} dB): {e} of {} bits missing or wrong",
+            placed[0].2.len()
+        );
+        assert!(worst < 0.25 * SPS, "{m}: time map off by {worst} samples");
+    }
+    // The streaming path on a 64-symbol QPSK burst: its acquisition window is still filling.
+    let tx = Tx {
+        symbols: 64,
+        ..Tx::new("qpsk", 13.0)
+    };
+    let (x, placed) = burst_stream(&[(tx, 0.0, 300)], 3_000);
+    let stream = json!({"modulation": "qpsk", "symbol_rate_bd": RS});
+    let (e, _) = burst_errors_by_time(&stream, &x, 1_000, &placed[0]);
+    assert!(
+        e > 32,
+        "the streaming path decoded the burst's start ({e} errors)"
+    );
+}
+
+/// ADR-0011 §9.2 burst boundaries: three bursts from three blind transmitters (each its own
+/// carrier offset, phase, timing and level, one 6 dB above another) are each decoded, each
+/// starts an output chunk flagged DISCONTINUITY, no item is emitted between them, and the
+/// status counts them. The whole stream arrives in one input chunk, so the second and third
+/// wait for later calls (one burst per output chunk).
+#[test]
+fn burst_mode_marks_each_burst_and_emits_nothing_between() {
+    let base = Tx::new("qpsk", 15.0);
+    let a = Tx {
+        symbols: 40,
+        ..base
+    };
+    let b = Tx {
+        symbols: 200,
+        cfo_hz: -400.0,
+        phase: -2.0,
+        tau: 0.8,
+        seed: 21,
+        ..base
+    };
+    let c = Tx {
+        symbols: 24,
+        cfo_hz: 150.0,
+        phase: 0.3,
+        tau: 0.1,
+        seed: 33,
+        ..base
+    };
+    let (x, placed) = burst_stream(&[(a, 0.0, 80), (b, 6.0, 30), (c, -3.0, 50)], 3_000);
+    let params = json!({"modulation": "qpsk", "symbol_rate_bd": RS, "burst": true});
+    let chunk = 10_000;
+    for burst in &placed {
+        let (e, worst) = burst_errors_by_time(&params, &x, chunk, burst);
+        assert_eq!(
+            e, 0,
+            "burst at sample {}: {e} bits missing or wrong",
+            burst.0
+        );
+        assert!(worst < 0.25 * SPS, "time map off by {worst} samples");
+    }
+    let run = run(&params, &x, chunk);
+    let out = run.out(0, 0);
+    let starts: Vec<f64> = out
+        .metas
+        .iter()
+        .zip(&out.lens)
+        .filter(|(m, len)| **len > 0 && m.flags.contains(ChunkFlags::DISCONTINUITY))
+        .map(|(m, _)| m.source_index)
+        .collect();
+    assert_eq!(starts.len(), 3, "one DISCONTINUITY per burst: {starts:?}");
+    // Every item lies inside a burst (plus the edge margin of a few symbols).
+    let mut at = 0;
+    for (meta, &len) in out.metas.iter().zip(&out.lens) {
+        for i in 0..len {
+            let t = meta.source_index + i as f64 * meta.source_per_item;
+            let inside = placed.iter().any(|(s, tx, _)| {
+                let lo = *s as f64 - 4.0 * SPS;
+                let hi = *s as f64 + (tx.symbols as f64 + 4.0) * SPS;
+                t >= lo && t <= hi
+            });
+            assert!(
+                inside,
+                "item {} at sample {t} is outside every burst",
+                at + i
+            );
+        }
+        at += len;
+    }
+    for ((s, _, _), got) in placed.iter().zip(&starts) {
+        let first = *s as f64;
+        assert!(
+            *got >= first - 4.0 * SPS && *got <= first + 0.5 * SPS,
+            "a burst at sample {s} starts its chunk at {got}"
+        );
+    }
+    let st = run.block(0).status();
+    let bursts = st.extra.iter().find(|(k, _)| *k == "bursts").unwrap().1;
+    assert_eq!(bursts, 3.0);
+    assert!(st.extra.iter().all(|(k, _)| k != "bursts_dropped"));
+}
+
+/// ADR-0011 §1.6: burst mode's items are identical however the input is chunked — the FIFO,
+/// the detector's blocks and the deferral of a second burst to the next call never move an
+/// item or change a value. (At 4 096 both bursts arrive in one call, so the second waits for
+/// the next. A single chunk holding the whole stream and `END` cannot emit two bursts: the
+/// second is counted in `bursts_dropped`, see the module docs.)
+#[test]
+fn burst_mode_output_is_chunking_invariant() {
+    let base = Tx::new("qpsk", 15.0);
+    let b = Tx {
+        symbols: 120,
+        cfo_hz: -300.0,
+        seed: 5,
+        ..base
+    };
+    let (x, _) = burst_stream(
+        &[
+            (
+                Tx {
+                    symbols: 30,
+                    ..base
+                },
+                0.0,
+                60,
+            ),
+            (b, 3.0, 20),
+        ],
+        400,
+    );
+    let params = json!({"modulation": "qpsk", "symbol_rate_bd": RS, "burst": true});
+    let c = assert_chunk_invariant(
+        || vec![build("psk_demod", params.clone(), PortType::Iq)],
+        PortType::Iq,
+        FS,
+        &PortVec::Iq(x.clone()),
+        &[4_096, 1_000, 37, 1],
+    );
+    assert!(c.out(0, 0).real.len() >= 2 * 150, "both bursts emitted");
+}
+
+/// Blind means no false bursts: noise alone, and a burst of noise 10 dB up (energy, but no
+/// PSK line), emit nothing. (Below about a dozen symbols no blind test separates the two,
+/// and a rise is taken on its energy — see the module docs.)
+#[test]
+fn burst_mode_emits_nothing_for_noise_or_a_burst_of_noise() {
+    for m in ["qpsk", "8psk", "oqpsk"] {
+        for seed in 0..3 {
+            let mut rng = Lcg::new(700 + seed);
+            let x: Vec<Complex32> = (0..14_000)
+                .map(|i| {
+                    rng.cnoise(if (5_000..6_500).contains(&i) {
+                        10.0
+                    } else {
+                        1.0
+                    })
+                })
+                .collect();
+            let params = json!({"modulation": m, "symbol_rate_bd": RS, "burst": true});
+            let c = run(&params, &x, 1_000);
+            assert!(
+                c.out(0, 0).real.is_empty(),
+                "{m} seed {seed}: items from noise"
+            );
+            let s = c.block(0).status();
+            assert_eq!(s.lock, Lock::Searching);
+            let bursts = s.extra.iter().find(|(k, _)| *k == "bursts").unwrap().1;
+            assert_eq!(bursts, 0.0, "{m} seed {seed}");
+        }
+    }
+}
+
+/// A capture cut to a burst (a region at a detection's own time extent) that ends with it: no
+/// rise is ever seen, so the stream start's own candidate must take the burst, and `END`
+/// closes it and flushes the resampler, so it decodes whole to its last symbol. (A 6-symbol
+/// lead: the resampler's first output lands a filter span into the stream, about 4 symbols
+/// here, on either path.)
+#[test]
+fn burst_mode_decodes_a_capture_that_starts_and_ends_on_the_burst() {
+    let tx = Tx {
+        symbols: 100,
+        ..Tx::new("qpsk", 13.0)
+    };
+    let (x, placed) = burst_stream(&[(tx, 0.0, 6)], 0);
+    let params = json!({"modulation": "qpsk", "symbol_rate_bd": RS, "burst": true});
+    let (e, _) = burst_errors_by_time(&params, &x, 1_000, &placed[0]);
+    assert!(e <= 2, "{e} bits missing or wrong");
+}
+
+/// The constant burst mode's timing seed rests on: after a (flushed) reset, liquid's tracker
+/// strobes feed sample `(j − 9)·k` exactly, at every k.
+#[test]
+fn liquid_strobes_nine_symbols_behind_the_feed_after_a_reset() {
+    use super::{Symtrack, TRACK_M};
+    use hk_liquid_sys as lq;
+    for k in [3u32, 5] {
+        let kf = f64::from(k);
+        let scheme = lq::scheme_id(lq::liquid_getopt_str2mod, "qpsk").unwrap();
+        let mut rng = Lcg::new(11);
+        let n_sym = 80usize;
+        let pts: Vec<Complex64> = (0..n_sym)
+            .map(|_| Complex64::from_polar(1.0, PI / 4.0 + TAU * (rng.next_u64() % 4) as f64 / 4.0))
+            .collect();
+        let mut best = (f64::INFINITY, 0.0, 0usize);
+        for step in 0..20 {
+            let tau = step as f64 / 20.0 - 0.5;
+            let x: Vec<Complex32> = (0..((n_sym as f64 + 12.0) * kf) as usize)
+                .map(|s| {
+                    let t = s as f64 / kf - tau;
+                    let v: Complex64 = pts
+                        .iter()
+                        .enumerate()
+                        .filter(|(n, _)| (t - *n as f64).abs() < 9.0)
+                        .map(|(n, p)| p * rrc(t - n as f64, 0.35))
+                        .sum();
+                    Complex32::new(v.re as f32, v.im as f32)
+                })
+                .collect();
+            let mut t = Symtrack::new(k, 0.35, scheme, 0.2).unwrap();
+            let mut zeros = vec![Complex32::new(0.0, 0.0); 4 * k as usize * TRACK_M as usize + 64];
+            let mut y = vec![Complex32::new(0.0, 0.0); 2 * x.len().max(zeros.len())];
+            t.reset(&mut zeros, &mut y);
+            let ny = t.execute(&mut x.clone(), &mut y);
+            for d in 7..12 {
+                let js = d + 4..(d + 50).min(ny);
+                let yy = |j: usize| Complex64::new(f64::from(y[j].re), f64::from(y[j].im));
+                let g: Complex64 = js
+                    .clone()
+                    .map(|j| yy(j) * pts[j - d].conj())
+                    .sum::<Complex64>()
+                    / js.len() as f64;
+                let err = js
+                    .clone()
+                    .map(|j| (yy(j) / g - pts[j - d]).norm_sqr())
+                    .sum::<f64>()
+                    / js.len() as f64;
+                if err < best.0 {
+                    best = (err, tau, d);
+                }
+            }
+        }
+        assert_eq!(best.2, 9, "k {k}: delay {best:?}");
+        assert!(best.1.abs() < 0.03, "k {k}: strobe {best:?}");
+    }
+}
+
+/// The measurement behind the module docs' before/after table: the shortest burst each mode
+/// decodes whole (the streaming path with `HK_PSK_REPORT_STREAM=1`). Run with
+/// `--run-ignored only --no-capture`.
+#[test]
+#[ignore = "T-875 measurement, not a guard (≈90 s)"]
+fn burst_mode_shortest_burst_report() {
+    let burst = std::env::var("HK_PSK_REPORT_STREAM").is_err();
+    for (m, snr, extra) in [
+        ("bpsk", 9.0, json!({})),
+        ("dbpsk", 11.0, json!({})),
+        ("qpsk", 13.0, json!({})),
+        ("dqpsk", 15.0, json!({})),
+        ("pi4-dqpsk", 15.0, json!({})),
+        ("8psk", 19.0, json!({})),
+        ("d8psk", 21.0, json!({})),
+        ("oqpsk", 13.0, json!({})),
+        ("oqpsk", 12.0, json!({"pulse": "half-sine"})),
+    ] {
+        let shape = if extra.get("pulse").is_some() {
+            Shape::HalfSine
+        } else {
+            Shape::Rrc(0.35)
+        };
+        let mut line = format!("{m} {extra} @ {snr} dB:");
+        for n in [8usize, 12, 16, 24, 32, 48, 64, 128, 256, 512, 1024, 2048] {
+            let tx = Tx {
+                symbols: n,
+                shape,
+                ..Tx::new(m, snr)
+            };
+            let (x, placed) = burst_stream(&[(tx, 0.0, 300)], if burst { 300 } else { 3_000 });
+            let params = with(
+                json!({"modulation": m, "symbol_rate_bd": RS, "burst": burst}),
+                extra.clone(),
+            );
+            let (e, _) = burst_errors_by_time(&params, &x, 1_000, &placed[0]);
+            line.push_str(&format!(" {n}:{e}/{}", placed[0].2.len()));
+        }
+        eprintln!("{line}");
+    }
+}
+
+/// The measurement behind `MARGIN_RISE`: bursts of pure noise 10 dB up (energy, no PSK line)
+/// and noise-only streams, 40 seeds each; how many burst mode takes for PSK.
+#[test]
+#[ignore = "T-875 measurement, not a guard (≈60 s)"]
+fn burst_mode_false_accept_report() {
+    for m in ["bpsk", "qpsk", "8psk", "oqpsk"] {
+        let mut line = format!("{m}:");
+        for len in [0usize, 12, 24, 64, 150, 400] {
+            let mut accepted = 0;
+            let trials = 40;
+            for seed in 0..trials {
+                let mut rng = Lcg::new(1000 + seed);
+                let n = 8_000 + len * 10;
+                let x: Vec<Complex32> = (0..n)
+                    .map(|i| {
+                        rng.cnoise(if i >= 4_000 && i < 4_000 + len * 10 {
+                            10.0
+                        } else {
+                            1.0
+                        })
+                    })
+                    .collect();
+                let p = json!({"modulation": m, "symbol_rate_bd": RS, "burst": true});
+                let c = run(&p, &x, 1_000);
+                let s = c.block(0).status();
+                let b = s
+                    .extra
+                    .iter()
+                    .find(|(k, _)| *k == "bursts")
+                    .map_or(0.0, |v| v.1);
+                if b > 0.0 {
+                    accepted += 1;
+                }
+            }
+            line.push_str(&format!(" {len}: {accepted}/{trials};"));
+        }
+        eprintln!("{line}");
+    }
 }
