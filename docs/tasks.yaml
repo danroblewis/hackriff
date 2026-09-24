@@ -26286,7 +26286,7 @@ tasks:
   - id: T-894
     milestone: M2-hardening
     title: fog-of-war.e2e.mjs waitForResident still gives up on a 10 s wall-clock stall (T-889 residue)
-    status: in-progress
+    status: done
     branch: task-t894
     priority: normal
     deps: []
@@ -26300,6 +26300,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-889 deflaker 2026-09-24.
+    commit: d52ebcd6
   - id: T-895
     milestone: MMAP
     title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
