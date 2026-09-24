@@ -16045,6 +16045,15 @@ tasks:
     notes: |
       Filed 2026-09-18, MSDR track (B0.690). Well-specified CLI plumbing over T-510/T-511.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 19:31).
+      hk serve/hk run/hackriffd accept a repeatable --device (first = primary; --device replaces --source on run/hackriffd). Per-device settings via repeatable --device-set SPEC:KEY=VALUE (center-hz, rate, lna, vga, amp, baseband-filter-hz, gain.STAGE); shared --center-hz/--rate/gains are defaults. resolve_devices/resolve_primary refuse empty/duplicate devices, unknown device in --device-set and unknown keys. start_live opens extras and composes them via Pipeline::start_multi (T-510) and offers LiveControls (T-511) with one SourceLiveControl per device (none under the scheduler, as before). One device / no --device keeps behaviour unchanged. Covered by a unit test; no two-mock end-to-end CLI test added. Review fix: extra devices' SourceLiveControl is now built with_fixed_rate(), so an API rate change is refused as the pipeline refuses it (FixedRate). Merged main 8c98e822 (tasks.yaml conflict took main).
+      Tests: cargo nextest run -p hk-cli -E 'test(device_flags_resolve)' -> exit 0 (1 passed)
+      precheck exit 0
+      Commits: 5ff9027b
+      Observed, not chased: docs/api.md untouched (CLI-only change); hk-cli full test binaries only compile-checked, not run
+      Use cases: AWARE-011
+      Resources: 38 CPU-s, peak 1.2 GB
   - id: T-513
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
