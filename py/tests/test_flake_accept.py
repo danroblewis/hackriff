@@ -99,3 +99,12 @@ def test_the_record_carries_the_reds_own_time(tmp_path):
     _, recs = run(tmp_path, "     Summary [1.0s] 9 tests run: 8 passed, 1 failed\ngate: just test took 900s (exit 100)\n",
                   t0="2026-09-23T17:00:05")
     assert recs[-1]["ts"] == "2026-09-23T17:00:05"
+
+
+def test_the_main_is_red_rerun_treats_a_test_main_lacks_as_green():
+    """09-24 10:15: T-870's own new test was re-run on the rewound main, where it does not exist;
+    nextest's "no tests to run" exit (4) read as red -> MAIN IS RED, and T-870 was never isolated."""
+    text = RUNNER.read_text()
+    i = text.index("TRIAGE: is main itself red? re-running the failing tests alone on the rewound main")
+    rerun = next(ln for ln in text[i:].splitlines() if "cargo nextest run" in ln)
+    assert "--no-tests=pass" in rerun
