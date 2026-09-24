@@ -5133,6 +5133,8 @@ tasks:
       model-selection.md names for Sonnet/medium, not new capability design."
     notes: |
       2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
+
+      2026-09-24 coordinator: a stale cancel-proposed claim held this ticket out of dispatch; the cancel stays REJECTED (see 09-22 note: the deliverable is the accessory-fed HF/VLF front ends + analyses, tested on synthetic/recorded IQ; the needs-accessory tags constrain it). Released and redispatched 11:04.
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -19481,6 +19483,8 @@ tasks:
       avoid. Re-measure first, then decide, and state the false-label cost either way.
       Relates to ADR-0016's exit gates and to T-306's confidently-wrong analysis.
       ASSERT WITH COUNTS, NOT WALL-CLOCK (user, 2026-09-21).
+    notes: |
+      2026-09-24 coordinator: the 09-22 worker's untested WIP (hk-classify/src/verify.rs, +138/-32) is kept on branch task-t590-wip-0922 (f59e52cf), renamed off task-t590 so the runner could redispatch. The 11:04 run starts fresh from main; compare against that WIP only if useful. T-877 (blocked) also edits verify.rs - expect an overlap there.
   - id: T-583
     milestone: MLIVE
     title: A coarse node trails the live edge by 2^j - 1 finest rows, because the live cascade propagates only on commit
