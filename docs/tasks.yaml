@@ -26213,6 +26213,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-893 worker 2026-09-24.
+
+      2026-09-24 coordinator: T-893's live-edge e2e case had a wall-clock bound (median live-edge shortfall <= 0.5 s under a slowed tile route) that measured THIS server push cadence, not the client; it was removed from the gated suite (task-t893 5ca4ce59, still printed as a diagnostic) because the 'timing' tier (docs/10 §3.6) only runs Rust tests via nextest - there is no browser-spec timing home. This ticket owns that bound now: restore it as a timing-tier measurement once the push stall is fixed (a Rust-side push-cadence bound in the timing tier, and/or a browser timing-tier runner if the pipeline manager adds one - the gap is reported to them).
     effort_reason: "hard debugging of a periodic stall on the live serving path shared with navigation (T-453: measure, do not assume)"
   - id: T-902
     milestone: MLIVE
