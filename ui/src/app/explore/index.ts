@@ -8,6 +8,7 @@ import { sameCursor, toast } from "../state";
 import { centreView, centreViewKey } from "../centre/view";
 import { mountFocusSheet } from "../chrome/focus-sheet";
 import { mountExploreDrawer } from "../chrome/explore-drawer";
+import { mountSideChip } from "../chrome/side-chip";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu, signalMenuItems } from "../menu";
@@ -490,4 +491,4 @@ const mountFocus: MountFn = (el, ctx) => {
 
 // T-803: `sheet` wraps `focus` (index.html nests the slot), so it mounts after it and never replaces
 // the focus panel's subtree.
-export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus, sheet: mountFocusSheet, drawer: mountExploreDrawer };
+export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus, sheet: mountFocusSheet, drawer: mountExploreDrawer, side: mountSideChip };
