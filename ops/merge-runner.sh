@@ -366,11 +366,31 @@ main_ready(){
 
 # print, one per line, the args that exist as branches AND are ahead of main
 ready_filter(){
-  local b a
+  local b a why
+  : > "$S/pm-held"   # task-pm-* branches this pass held for a person; the loop re-queues them
   for b in "$@"; do
     git -C "$REPO" rev-parse --verify "$b" >/dev/null 2>&1 || { log "SKIP $b: no such branch"; continue; }
     a=$(git -C "$REPO" rev-list --count "main..$b" 2>/dev/null || echo 0)
     [ "${a:-0}" -eq 0 ] && { log "SKIP $b: nothing ahead of main (already merged?)"; continue; }
+    # THE PIPELINE MANAGER'S SCOPE CHECK (user, 2026-09-23 17:30: "a lot of changes is fine; not
+    # weird changes that aren't warranted - stick to the directive"; hkpy.pmbudget, tested). A
+    # task-pm-* branch merges only with a `Serves:` line (an experiment, an incident, a user ask,
+    # or a MEASURED cost) and only inside pipeline paths - product code or the board holds it.
+    # Volume is reported, never capped. A held branch is re-queued, said once per tip here and in
+    # the attention file, and alerted once; a person releases it with `just pm-budget release`.
+    case "$b" in task-pm-*)
+      why=$(cd "$REPO" && uv run --locked --project py python -m hkpy.pmbudget check "$b" --base main 2>&1 | tail -1)
+      if [ "$?" -ne 0 ] || printf '%s' "$why" | grep -q ' HELD - '; then
+        tip=$(git -C "$REPO" rev-parse --short "$b" 2>/dev/null)
+        case " ${PM_HELD_SAID:-} " in *" $b@$tip "*) ;; *)
+          PM_HELD_SAID="${PM_HELD_SAID:-} $b@$tip"
+          log "PM-BUDGET HELD $b: ${why#pm-budget $b: HELD - }"
+          printf '%s  %s  %s  PM-BUDGET(held: %s)\n' "$(date '+%m-%d %H:%M')" "$b" "$(ticket_of "$b")" "${why#pm-budget $b: HELD - }" >> "$NEEDS"
+          alert amber "pipeline branch held by the code budget" "$b: ${why#pm-budget $b: HELD - }. Release: just pm-budget release $b" --key "pm-budget:$b" ;;
+        esac
+        echo "$b" >> "$S/pm-held"; continue
+      fi ;;
+    esac
     printf '%s\n' "$b"
   done
 }
@@ -788,6 +808,8 @@ while true; do
     ready=$(printf '%s\n' $ready | awk '!seen[$0]++' | tr '\n' ' ')
     # drop the non-comment lines we're about to act on (keep comments); transient branches get requeued
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
+    # A task-pm-* branch the scope check held stays queued (it merges by itself once released).
+    [ -s "$S/pm-held" ] && cat "$S/pm-held" >> "$QUEUE"
     # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
     # hold it until the queue changes (a fix branch appears, a branch is withdrawn, or a queued
     # branch's tip moves - a fix pushed to the branch itself releases the hold too).

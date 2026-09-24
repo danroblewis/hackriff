@@ -136,6 +136,11 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Under pytest the record above is all a test may produce: never alert or type into a live
+    # tmux pane from a test (2026-09-23: test_work_accounting's fake CONFLICT_ESCALATE lines were
+    # being send-keys'd, with Enter, into the coordinator's session on every test-py run).
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
     # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
     # coordinator's routine and stay in the file only.
@@ -931,12 +936,33 @@ def conflict_skip(c, branch, line, statuses):
         return "the line predates the claim's latest run"
     if branch in queued_branches():
         return "queued again"
+    if branch in merging_branches():
+        return "being merged now"
     target = merge_target()
     if commits_ahead(branch, target) == 0:
         return "nothing ahead of main"
     if merges_cleanly(branch, target):
         return "clean"
     return None
+
+
+def merging_branches():
+    """Branches the merge runner holds right now: a batch's (bulk marker `branches=`) or the single
+    merge staged in main (MERGE_HEAD's tip). Such a branch is not in merge-queue.txt, so without
+    this the conflict rule re-queued task-t613 at 17:06 while its own gate was running."""
+    out = set()
+    try:
+        for ln in open(BULKMARK):
+            if ln.startswith("branches="):
+                out.update(ln.split("=", 1)[1].split())
+    except OSError:
+        pass
+    try:
+        head = open(f"{REPO}/.git/MERGE_HEAD").read().split()[0]
+        out.update(b for b in sh(["git", "branch", "--format=%(refname:short)", "--points-at", head]).split())
+    except (OSError, IndexError):
+        pass
+    return out
 
 
 def queued_branches():
@@ -1050,6 +1076,58 @@ def handle_gate_failures(claims, dry):
 
 
 # ---------- board sync ----------
+def has_work(tid):
+    """A branch with commits ahead of main, or a dirty worktree: someone's work (same test as candidates)."""
+    try:
+        if sh(["git", "rev-parse", "--verify", "-q", branch_of(tid)]).strip() and \
+           int(sh(["git", "rev-list", "--count", f"main..{branch_of(tid)}"]).strip() or 0) > 0:
+            return True
+        wt = worktree_of(tid)
+        return os.path.isdir(wt) and any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+    except Exception:
+        return True                       # cannot tell: treat as work, never revert
+
+
+def dead_dispatches(claims, tasks, now, has_work=has_work, busy=None, prior=None):
+    """([revert], [skipped]) - tickets THIS runner flipped to in-progress whose run ended with nothing
+    to show: no-work, error or timeout, RELEASE_AFTER_H ago, no commits, no edits. They go back to
+    todo; release_stale_claims then frees the claim and dispatch sees them again.
+    Before this rule the flip was one-way: release_stale_claims only frees a claim whose ticket is
+    `todo`, so a dispatch killed two minutes in (T-801, 2026-09-22 14:38, the stop-kill pattern)
+    held its ticket in-progress for 26 h and with it the 19 MMAP tickets that depend on it.
+    Guards (review): `busy` = {ticket: latest agent-registry ts} - an agent spawned on the ticket
+    after the claim started is someone's work; a board `branch:` other than the runner's own means
+    a person took it; and one revert per ticket - `prior` counts its earlier dead outcomes in
+    work-done.jsonl, and a second dead run is `skipped` for a person rather than looped."""
+    busy, prior = busy or {}, prior or {}
+    revert, skipped = [], []
+    for tid, c in claims.items():
+        t = tasks.get(tid)
+        if not (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout")
+                and now - c.get("started", 0) > RELEASE_AFTER_H * 3600):
+            continue
+        if busy.get(tid, 0) > c.get("started", 0) or t.get("branch") not in (None, branch_of(tid)) or has_work(tid):
+            continue
+        (revert if prior.get(tid, 0) <= 1 else skipped).append(tid)
+    return revert, skipped
+
+
+def dead_outcomes():
+    """{ticket: n} of work runs that ended no-work/error/timeout, from work-done.jsonl."""
+    n = {}
+    try:
+        for line in open(DONE):
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if o.get("kind") == "work" and o.get("outcome") in ("no-work", "error", "timeout"):
+                n[o.get("ticket")] = n.get(o.get("ticket"), 0) + 1
+    except OSError:
+        pass
+    return n
+
+
 def sync_board(claims, dry):
     """Flip statuses on main in ONE small commit, only when main is safe. Never edits anything else."""
     if not main_safe_to_commit():
@@ -1066,16 +1144,34 @@ def sync_board(claims, dry):
     # Agents the coordinator or supervisor spawned with the Agent tool are not claims, but the
     # PreToolUse(Agent) hook registered them (agent-registry.jsonl, user 2026-09-23): a ticket
     # with a registered agent spawned in the last 30 min and still `todo` is in progress too.
+    agents_on = {}          # ticket -> latest spawn of an agent that does ticket work, within a worker's lifetime
     try:
         cut = time.time() - 1800
+        life = time.time() - MAX_MINUTES * 60
         with open(f"{S}/agent-registry.jsonl") as f:
-            for line in f.readlines()[-200:]:
-                o = json.loads(line)
-                t = tasks.get(o.get("ticket") or "")
-                if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
-                    flips.append((o["ticket"], "in-progress", None))
+            lines = f.readlines()
+        for line in lines[-200:]:
+            o = json.loads(line)
+            t = tasks.get(o.get("ticket") or "")
+            if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
+                flips.append((o["ticket"], "in-progress", None))
+        for line in lines[-2000:]:
+            o = json.loads(line)
+            # a reviewer or an Explore that merely NAMES a ticket is not working it (this rule's own
+            # review registered against T-801)
+            if o.get("ticket") and o.get("type") in ("worker", "deflaker", "general-purpose", "claude") and o.get("ts", 0) > life:
+                agents_on[o["ticket"]] = max(agents_on.get(o["ticket"], 0), o["ts"])
     except Exception:
         pass
+    revert, skipped = dead_dispatches(claims, tasks, time.time(), has_work, agents_on, dead_outcomes())
+    flips += [(tid, "todo", None) for tid in revert]
+    for tid in skipped:
+        try:
+            already = f"  {tid}  REVERT_SKIPPED" in open(NEEDS).read()
+        except OSError:
+            already = False
+        if not already:
+            attention(tid, branch_of(tid), "REVERT_SKIPPED", "a second dispatch ended with nothing; left in-progress for a person (re-scope, block or cancel)")
     for tid, sha in landed.items():
         t = tasks.get(tid)
         if t and t.get("status") in ("todo", "in-progress"):

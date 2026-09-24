@@ -161,7 +161,7 @@ def _ready(t: dict, by_id: dict[str, dict]) -> bool:
         return False
     if t.get("needs") in ("user", "hardware"):
         return False
-    for dep in t.get("deps") or []:
+    for dep in t.get("depends_on") or t.get("deps") or []:  # the runner reads both spellings
         dep_t = by_id.get(str(dep))
         if dep_t is None or dep_t.get("status") not in ("done", "cancelled"):
             return False
@@ -252,10 +252,70 @@ def _set_scalar_field(block: str, key: str, value: str) -> str:
                 "use `just task note`/`result` for block fields, or edit it by hand and re-run "
                 "`just task validate`"
             )
-        lines[i] = f"    {key}: {scalar(value)}"
+        lines[i] = f"    {key}: {_field_value(value)}"
         return "\n".join(lines)
-    lines.append(f"    {key}: {scalar(value)}")
+    lines.append(f"    {key}: {_field_value(value)}")
     return "\n".join(lines)
+
+
+def _field_value(value: str) -> str:
+    """`value` as YAML: a `[a, b]` flow list (each item quoted only when it must be) or a scalar.
+
+    A list is written only for the bracketed form, so `depends_on=[T-1, T-2]` reads back as a real
+    list (the runner's `deps_of` calls `list()` on it — a quoted string would become its characters)
+    while every other value keeps `scalar`'s auto-quoting. `[]` writes an empty list.
+    """
+    v = value.strip()
+    if v in ("true", "false"):
+        return v  # a real boolean, as the board writes core_interface / is_hil (never the string)
+    if v.startswith("[") and v.endswith("]"):
+        items = [x.strip() for x in v[1:-1].split(",") if x.strip()]
+        return "[" + ", ".join(scalar(x) for x in items) + "]"
+    return scalar(value)
+
+
+def _unset_field(block: str, key: str) -> tuple[str, bool]:
+    """Remove `key` and every continuation line under it (a `|`/`>` block or a wrapped scalar)."""
+    lines = block.split("\n")
+    pattern = re.compile(rf"^    {re.escape(key)}:(\s|$)")
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            # The field ends at the next line indented at key level (4 spaces then text); a blank
+            # line inside a `|` block belongs to the field only if the block continues after it.
+            j = i + 1
+            while j < len(lines):
+                if lines[j].startswith("      "):
+                    j += 1
+                elif lines[j].strip() == "" and any(
+                    ln.startswith("      ") for ln in lines[j + 1:j + 2]
+                ):
+                    j += 1
+                else:
+                    break
+            return "\n".join(lines[:i] + lines[j:]), True
+    return block, False
+
+
+def cmd_unset(args: argparse.Namespace) -> int:
+    original = args.file.read_text(encoding="utf-8")
+    try:
+        header, blocks, order, trailer = find_block(original, args.id)
+    except KeyError:
+        return die(f"no such ticket: {args.id}")
+    block = blocks[args.id]
+    for key in args.keys:
+        if key in ("id", "title", "status"):
+            return die(f"refusing to unset {key!r} (every ticket carries it)")
+        block, found = _unset_field(block, key)
+        if not found:
+            return die(f"{args.id} has no {key!r}")
+    status_m = re.search(r"^    status: (.*)$", block, re.M)
+    if status_m and status_m.group(1).strip() == "blocked" and not re.search(r"^    blocked_on:", block, re.M):
+        return die("refusing to remove blocked_on from a blocked ticket (set its status first)")
+    blocks[args.id] = block
+    write_checked(args.file, original, reassemble(header, blocks, order, trailer))
+    print(f"task: updated {args.id}")
+    return 0
 
 
 def cmd_set(args: argparse.Namespace) -> int:
@@ -538,11 +598,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_file_arg(p)
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("set", help="replace or add scalar fields on a ticket")
+    p = sub.add_parser("set", help="replace or add fields on a ticket (key=[a, b] writes a list)")
     p.add_argument("id")
     p.add_argument("assignments", nargs="+", metavar="key=value")
     add_file_arg(p)
     p.set_defaults(func=cmd_set)
+
+    p = sub.add_parser("unset", help="remove fields (and their continuation lines) from a ticket")
+    p.add_argument("id")
+    p.add_argument("keys", nargs="+", metavar="key")
+    add_file_arg(p)
+    p.set_defaults(func=cmd_unset)
 
     p = sub.add_parser("result", help="set the `result:` block (replaces any existing one)")
     p.add_argument("id")

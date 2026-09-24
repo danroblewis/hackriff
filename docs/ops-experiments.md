@@ -20,6 +20,8 @@ Baseline for the first week: 2026-09-23 00:00–13:00 (alone mode): landings 49 
 - **Status:** open — overlap live since 2026-09-23 14:44; registered in the machine ledger (`$HACKRIFF_OPS/experiments.jsonl`) 2026-09-23 15:32 by the pipeline manager, so `just experiment status` counts gates from 15:32 (the 14:44–15:32 overlap stretch is outside the count). **Measured baseline** over 00:00..13:00: landings/h **0.92**, real reds 2/15, full-gate p50 47 min, dispatch-hours 5, blocked 0 min — not the ~1.3/h assumed above, so the +30 % bar is **≥ 1.20 landings/h**. Registered guards: `real_reds_24h <= baseline*1.25`, `full_gate_p50_min <= 56`, `blocked_minutes < 30`; 8 gates or 8 h.
 - **Result:** —
 
+- **Incident 2026-09-23 (confounds E-001):** from the 04:14 gate every full gate ran its tests at a measured concurrency of exactly **2.0** (JUnit: ~3300 test-seconds in ~1650 s wall; 4.5-7.2 and ~620-870 s before), because the merge runner, restarted from a Claude session at 04:05, inherited that session's `NEXTEST_TEST_THREADS=2` (`.claude/settings.json`, f2fc783b) and an environment variable beats the nextest profile's `test-threads = 8`. Cost ≈ **+870 s per full gate**. Fixed by `task-pm-gate-threads` (the gate drops an inherited thread count; only the knob store may set one). From the gate that carries it, E-001's `full_gate_p50_min` and landings/h move for a reason that is not overlap mode — compare E-001 on gates before that point, or read both halves separately.
+
 ---
 
 ## E-002 — (planned) UI e2e lanes 2 vs 3 under overlap mode

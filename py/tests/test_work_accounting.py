@@ -18,6 +18,7 @@ Two things here are easy to get wrong in ways no one would notice until they mat
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -185,6 +186,7 @@ def conflicts(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))                     # never the live .git/MERGE_HEAD
     monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
     monkeypatch.setattr(R, "NEEDS", str(tmp_path / "work-needs-attention.txt"))
     monkeypatch.setattr(R.os.path, "isdir", lambda p: True)
@@ -285,11 +287,57 @@ def test_dispatch_counts_fix_runs_against_the_cap():
     assert R.busy_workers(claims) == 2
 
 
+# --------------------------------------------------------------------- dead dispatches (2026-09-23)
+def test_a_dispatch_that_ended_with_nothing_goes_back_to_todo_after_the_release_window():
+    now, old = 1_000_000.0, 1_000_000.0 - (R.RELEASE_AFTER_H + 1) * 3600
+    tasks = {t: {"id": t, "status": s} for t, s in
+             [("T-801", "in-progress"), ("T-512", "in-progress"), ("T-9", "in-progress"), ("T-10", "in-progress"),
+              ("T-11", "in-progress"), ("T-12", "todo"), ("T-13", "in-progress"), ("T-14", "in-progress"),
+              ("T-15", "in-progress")]}
+    tasks["T-14"]["branch"] = "fix/my-own-take"                          # a person took it by hand
+    claims = {"T-801": {"state": "no-work", "started": old},          # killed 2 min in: revert
+              "T-512": {"state": "timeout", "started": old},          # revert
+              "T-9": {"state": "no-work", "started": now - 600},      # inside the window: wait
+              "T-10": {"state": "no-work", "started": old},           # has commits: someone's work
+              "T-11": {"state": "blocked", "started": old},           # a person's call, never automatic
+              "T-12": {"state": "no-work", "started": old},           # already todo: release handles it
+              "T-13": {"state": "error", "started": old},             # an agent took it up since
+              "T-14": {"state": "no-work", "started": old},
+              "T-15": {"state": "no-work", "started": old}}           # its SECOND dead run: a person
+    revert, skipped = R.dead_dispatches(claims, tasks, now, has_work=lambda t: t == "T-10",
+                                        busy={"T-13": old + 60, "T-801": old - 60}, prior={"T-801": 1, "T-15": 2})
+    assert sorted(revert) == ["T-512", "T-801"] and skipped == ["T-15"]
+
+
+def test_dead_outcomes_counts_only_dead_work_runs(tmp_path, monkeypatch):
+    done = tmp_path / "work-done.jsonl"
+    rows = [("T-1", "work", "no-work"), ("T-1", "work", "timeout"), ("T-1", "review", "no-work"),
+            ("T-2", "work", "done"), ("T-3", "work", "error")]
+    done.write_text("".join(json.dumps({"ticket": t, "kind": k, "outcome": o}) + "\n" for t, k, o in rows) + "garbage\n")
+    monkeypatch.setattr(R, "DONE", str(done))
+    assert R.dead_outcomes() == {"T-1": 2, "T-3": 1}
+
+
+def test_no_branch_means_no_work_and_an_error_means_work(monkeypatch):
+    assert R.has_work("T-does-not-exist-anywhere") is False
+    monkeypatch.setattr(R, "sh", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git gone")))
+    assert R.has_work("T-801") is True                                  # cannot tell: never revert
+
+
+def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflicts):
+    tmp, launched = conflicts
+    (tmp / "bulk-in-progress").write_text("base=abc\nbranches=task-t627 task-x\n")
+    assert R.merging_branches() == {"task-t627", "task-x"}
+    claims = {"T-627": _claim("T-627", "task-t627")}
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and claims["T-627"]["gate_fails_seen"]
+    assert not (tmp / "merge-queue.txt").exists()
+
+
 # --------------------------------------------------------------------- deflake dispatch (2026-09-23)
 # The user's decision: the 3rd isolation-pass of one test within 7 days auto-spawns a deflaker.
 # py/hkpy/flakes.py appends the request; the work runner dispatches it as a worker whose claim is
 # keyed DEFLAKE:<slug> - not a board ticket, so no ticket-shaped path may act on it.
-import json  # noqa: E402
 
 DAY = 86400.0
 

@@ -11,6 +11,7 @@ use crate::Registry;
 use crate::blocks::iq::common;
 use crate::schema::{ParamExt, boolean, descriptor, float, one_of, param};
 
+pub mod bitstuff;
 mod clock;
 mod descramble;
 mod line;
@@ -163,4 +164,5 @@ pub fn register(r: &mut Registry) {
     let mauto = mauto::planned();
     common::register_pinned(r, &mauto, "descramble", descramble::build);
     common::register_pinned(r, &mauto, "mlevel_slicer", mlevel::build);
+    common::register_pinned(r, &mauto, "bitstuff", bitstuff::build);
 }

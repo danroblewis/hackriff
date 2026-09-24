@@ -6668,6 +6668,7 @@ tasks:
     blocked_on: "user HIL session: an active GNSS antenna (datasheet 3.0-3.3 V, <50 mA) on the HackRF bias-tee, a DC-safe splitter to a u-blox reference, and the HackRF free of the demo"
     notes: |
       2026-09-22 (coordinator): code on task-t326 (f6f8f7c7: Doppler search covers the receiver clock + a real-capture harness) is held unqueued - T-326 is on the 09-22 defer list; queue it with the capture session.
+    branch: task-t326
   - id: T-327
     milestone: M3
     title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
@@ -6747,12 +6748,7 @@ tasks:
     milestone: M4
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
-    status: blocked
-    blocked_on: >-
-      a capability that does not exist: ALGID lives in the voice frames on the granted channel
-      and nothing demodulates those yet (T-270 said so at the time). Unblocked by a voice-frame
-      decode existing - not by a slot, and not by anyone deciding anything. Was sitting as todo
-      and making the unblocked-work census lie until 2026-09-16.
+    status: todo
     priority: normal
     deps:
     - T-270
@@ -6768,6 +6764,9 @@ tasks:
       and never lower to Clear. The VoicePermit seam already exists (hk-detect/src/trunk/voice.rs): a future
       vocoder must take one in its signature and the only way to get one is to ask. Keep that property -
       do not add a bypass for the decode path that reads the ALGID'
+    depends_on: [T-849]
+    notes: |
+      2026-09-23 (coordinator, user request): was blocked on a missing capability with no ticket; now todo depending on T-849 (P25 voice-frame LDU1/LDU2 demodulation, filed today).
   - id: T-331
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
@@ -7527,6 +7526,7 @@ tasks:
     blocked_on: "a HIL session with the HackRF free: stop the user demo on :8899 (it holds the radio), run two hk serve --device hackrf processes back to back, then restore the demo. Deferred per the 09-22 directive - schedule after the 09-23 burndown with the user."
     notes: |
       2026-09-22 (coordinator): worker handed back BLOCKED - the test needs the real HackRF, which the :8899 demo holds. Not run: T-356 is on the 09-22 defer list (speculative, no observed failure), and taking the demo down is the user's call. needs: hardware so the runner stops dispatching it.
+    branch: task-t356
   - id: T-357
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
@@ -20379,7 +20379,7 @@ tasks:
   - id: T-601
     milestone: M2-hardening
     title: A retune-sibling artefact reads as a generic "retune artefact" while an image reads as prose
-    status: todo
+    status: done
     priority: low
     parallel_group: CANVAS-FE
     model: sonnet
@@ -20404,6 +20404,9 @@ tasks:
       ASSERT ON THE RENDERED TEXT AND THE REQUEST THE CLIENT BUILDS, not wall-clock.
       Prove the test goes RED without the fix.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    commit: 8ba822cb
+    notes: |
+      2026-09-23 (coordinator): verified DONE-BY T-598 (8ba822cb, 2026-09-21), worker proposed cancel. crates/hk-model/src/repo/retune.rs builds the backend prose into relation.reason on every active RetuneSiblingOf claim (the same slope receiver artefact as emitter X, seen from a different tuning centre: both sit on the invariant coordinate f - k*f_LO over N centres), and ui/src/app/explore/inventory.ts renders reason as visible text beside the short retune-artefact chip - exactly this ticket.
   - id: T-602
     milestone: M2-hardening
     title: POI and occupancy still ask "was it covered?" and never "was it analysed?", so the tuned centre is silently a blind spot to them
@@ -20952,7 +20955,7 @@ tasks:
   - id: T-613
     milestone: MAUTO
     title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -20987,6 +20990,18 @@ tasks:
       catalogue row.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): rebuilt on main after a conflict in hk-blocks symbol/mod.rs registration (kept main's descramble + mlevel_slicer, added bitstuff through the shared mauto::planned()); result re-applied. Old tip old/task-t613.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:14).
+      Added hk-blocks `bitstuff` (symbol group, bits|frames -> same): HDLC zero destuff/stuff with stuff_after=5, abort_ones=7, direction, flag documented (framing stays sync_search's). State is only the run-of-ones counter, so chunk-boundary stuffed zeros are handled identically. Bits mode passes flags/abort runs through and counts aborts; frames mode restarts per frame and truncates at an abort run. Descriptor pinned (params_pinned true) and registered; the T-606 catalogue row is now built by bitstuff::descriptor. Unit tests: known AIS-style frame, stuff/destuff round trip, chunking invariance 1..N incl. boundary zero, frames mode + abort. They fail without the block (it is not registered, so mk() panics).
+      Tests: cargo nextest run -p hk-blocks --no-fail-fast -> exit 0 (126 passed)
+      precheck exit 0
+      Commits: f2fb44c4
+      Observed, not chased: ADR-0011 section 1.5/9 table row for bitstuff not updated to say params pinned
+      Use cases: SIGNAL-015, SIGNAL-036, SIGNAL-004, AWARE-007, AWARE-012, PROP-024, PROP-025
+      Resources: 58 CPU-s, peak 0.5 GB
+    commit: 42bf4b69
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
@@ -22051,6 +22066,17 @@ tasks:
     notes: |
       Filed 2026-09-21 by T-551 (docs/22 section 9). This is the instrumentation that makes
       docs/22 section 6's sufficiency argument checkable; without it the argument is prose.
+
+      2026-09-23 (coordinator): rebuilt on main after additive conflicts in tests/e2e (lib.rs: checks + corpus modules; acceptance_mauto.rs: signal_085 + mauto_corpus); result re-applied. Old tip old/task-t627.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:37).
+      Built the docs/22 section 6.4 coverage manifest and the section 4.5 sealed hold-out, plus the section 6.2 item 3 expected-failure rows. New tests/e2e/src/corpus.rs (hk_e2e::corpus) holds the section 2 axes, the declared planes (A1xA2xA4 recall grid, A1 x each other axis, an EF plane), three marks (populated n / declared unreachable with reason + ticket / UNMARKED), a byte-stable render, and the hold-out rule sha256(utf8(scene_id) || be_u64(seed)) mod 5 == 0, unsealed only by HK_MAUTO_UNSEAL=M-12. The new acceptance_mauto::mauto_corpus fails on any UNMARKED cell and diffs the manifest against the committed tests/e2e/mauto-coverage-manifest.txt (re-bless with HK_BLESS_MANIFEST=1). It checks that every populated row names a real, non-ignored test in the binary, and that every declaration cites an OPEN ticket, or UNFILED when there is no owner. It pins the hold-out with a hash vector and a 10 000-seed rate check. The expected-failure rows cover 2-FSK, C4FM and MSK at 6 dB / 112 symbols. They run the real structure::measure and C4FM framing blocks and assert an honest failure: below framed, nothing-scored, no over-claim. A predicate test is RED on every dishonest outcome, and a 20 dB / 4096-symbol control must reach clocked. First manifest: 492 cells, 19 populated, 473 declared (41 UNFILED), 0 unmarked. The EF rows are component-tier: they move behind the mock device when T-567 makes the engine write a sealed nothing-scored Resolution.
+      Tests: cargo nextest run -p hk-e2e -E 'kind(lib) | (binary(acceptance_mauto) & test(/mauto_corpus/))' -> exit 0 (24 passed (11 mauto_corpus + 13 hk-e2e lib incl. 4 corpus unit tests))
+      precheck exit 0
+      Commits: 20556bd2
+      Observed, not chased: ENGINE OVER-CLAIM in hk_demod::fsk::structure::measure: a clean 20 dB, 4096-symbol, h=1 2-FSK emission (4800 Bd, +/-2400 Hz, fs 48 kHz, rectangular CPFSK) is measured as Levels::Four (inner fraction 0.50-0.52, valley 0.20-0.22, 5.8 clock bits) on seeds 2 and 3 when channel_bandwidth_hz is the emission's own Carson width (9600 Hz). The same draw at 12 500 Hz reads Two (inner 0.00). At the Carson width, 2-FSK at +/-1800 Hz (8400 Hz) and MSK at +/-1200 Hz (7200 Hz) read Indeterminate. Today's trunk chain hands 12.5 kHz, so this is latent, but a generic S0 that hands a measured occupied bandwidth would get a confident wrong modulation order. Reproduce: in mauto_corpus, generate(&EF_2FSK, 2, 20.0, 4096) then analyse(&iq, lead, 9600.0). The rows use CHANNEL_BW_HZ = 12 500 so the control does not test this defect. | docs/22 section 9 names T-621 as the owner of the OOK/ASK generator (S2), but T-621 on the board is an unrelated, done M2-hardening ticket (two coverage contract tests on low disk). The OOK generator has no ticket. The manifest marks all 41 OOK cells unreachable UNFILED, and docs/22 section 9 now flags the collision. Someone needs to file the real ticket and swap Ticket::Unfiled for it in mauto_corpus::declarations(). | P-087 (signal_087, scene trunk_encrypted_control_channel) runs fixed seed 545, and that seed hashes into the sealed set (sha256 mod 5 == 0). It is kept in the open and marked in the manifest as a fixed pre-seal seed rather than silently sealed. At M-12, decide whether P rows get fresh sealed draws. | Deliberate tripwire: manifest_declarations_cite_open_tickets fails once a cited ticket (T-565, T-568, T-619, T-622, T-623, T-624) is marked done. Whoever closes one of those must then fill or re-declare its cells and re-bless the manifest.
+      Use cases: RESEARCH-002, SIGNAL-052
+      Resources: 40 CPU-s, peak 2.8 GB
   - id: T-631
     milestone: M2-hardening
     title: The nextest heavy-serial group pins package(hk-e2e), but hk-e2e never runs under nextest - the override has never applied to anything
@@ -22260,11 +22286,11 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: blocked
+    status: todo
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
-    depends_on: [T-616, T-617, T-618]
+    depends_on: [T-616, T-617, T-618, T-848]
     use_cases: [RESEARCH-008]
     acceptance: |
       CODE, and it cannot start before `hk-synth` exists (ADR-0015 section 9) - there is no crate to
@@ -22298,7 +22324,9 @@ tasks:
       the contract it implements is ADR-0015 section 13, which is already written.
 
       2026-09-22 (coordinator): worker handed back BLOCKED (branch task-t660, T-660-result.md): crates/ has no hk-synth; T-616/617/618 are measurement-only and scaffold nothing. Do not re-dispatch until M-1 lands.
-    blocked_on: MAUTO M-1 (hk-synth crate scaffold) has not started and ADR-0015 is PROVISIONAL; MAUTO is unscheduled until after M3. No M-1 ticket exists yet.
+
+      2026-09-23 (coordinator, user request): was blocked on a prerequisite, not a person - now todo depending on T-848 (MAUTO M-1 hk-synth scaffold, filed today) plus T-616..T-618. Branch task-t660 holds only the earlier blocked-report commit.
+    branch: task-t660
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
@@ -24607,6 +24635,56 @@ tasks:
 
       2026-09-23 (coordinator): verified and closed as DONE (worker proposed cancel). flaky.jsonl holds exactly 2 app-surface entries, 2026-09-22T21:26:07 and 21:55:54 - both before task-deflake-appsurface (9e08619d) landed at 23:38; none across the ~12 batch merges logged 2026-09-23 00:00-14:33. commit = the fix that ended it.
     commit: 9e08619d
+  - id: T-848
+    milestone: MAUTO
+    title: "MAUTO M-1: hk-synth scaffold (Stage/Evidence/candidate/skeleton/template types, modules and stubs) and the ADR-0015 -> ACCEPTED review"
+    status: todo
+    priority: medium
+    deps:
+    - T-206
+    parallel_group: SYN-0
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-1 from ADR-0015 section 10's work breakdown, filed 2026-09-23 because T-660 (and every other
+      hk-synth engine ticket) waits on it and no ticket existed.
+      DELIVER: the `hk-synth` crate scaffold - the Stage / Evidence / candidate / skeleton / template types,
+      the pre-added modules and stubs ADR-0015 names, wired into the workspace (no engine behaviour yet), and
+      the ADR-0015 -> ACCEPTED review (with ADR-0016 accepted or its dependency explicitly waived by the user).
+      Accepting an ADR is a user decision: prepare the review (open questions answered or listed with a
+      proposal each) and put it to the user; do not self-accept.
+      DONE WHEN: `cargo build -p hk-synth` and its unit tests pass; the public types match ADR-0015's
+      contracts; M-2..M-14 (T-660 among them) can start against it.
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
+    core_interface: true
+  - id: T-849
+    milestone: M4
+    title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M4B
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      Filed 2026-09-23 so T-330 can depend on a ticket instead of sitting `blocked` on a capability.
+      T-330's ALGID parser is correct and unit-tested but unreachable from IQ: ALGID (and the encryption
+      signalling around it) is carried in the P25 voice frames (LDU1/LDU2) on the GRANTED channel, and nothing
+      demodulates those today - the trunk follower (T-269/T-272/T-308/T-628) follows grants and records calls
+      but stops short of the voice-frame layer.
+      DELIVER: demodulate and deframe P25 Phase 1 LDU1/LDU2 on a followed voice channel far enough to expose
+      their link-control and encryption-sync fields (no vocoder / no audio decode is required), blind from IQ
+      through the mock SDR, so T-330 can assert ALGID from a real or synthetic capture.
+      ASSERT on a synthetic LDU stream with known LC/ES fields (hidden truth) and on the recorded fixture if
+      one carries voice frames. core_interface only if it changes the chain/stream contracts.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (T-330 blocker review, user request).
+    tier_reason: "novel DSP on the real-time path: blind P25 C4FM/CQPSK LDU1/LDU2 demodulation and deframing on a followed channel, with LC/encryption-sync field recovery"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

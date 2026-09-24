@@ -26,26 +26,7 @@ pub fn planned() -> Vec<BlockDescriptor> {
     vec![
         super::mlevel::descriptor(),
         super::descramble::descriptor(dsc_in, dsc_out),
-        descriptor(
-            "bitstuff",
-            "symbol",
-            "HDLC zero-bit (de)stuffing; flags pass through in bits mode so sync_search still \
-             frames on them.",
-            stf_in,
-            stf_out,
-            vec![
-                param("flag", hex(8), "Flag octet.").default_value("0x7E"),
-                param("stuff_after", int(1, 16), "Ones before a stuffed zero.").default_value(5),
-                param(
-                    "direction",
-                    one_of(&["destuff", "stuff"]),
-                    "Remove stuffed zeros (receive) or insert them.",
-                )
-                .default_value("destuff"),
-                param("abort_ones", int(2, 32), "Ones that mean abort/idle.").default_value(7),
-            ],
-            false,
-        ),
+        super::bitstuff::descriptor(stf_in, stf_out),
         descriptor(
             "codeword_map",
             "symbol",

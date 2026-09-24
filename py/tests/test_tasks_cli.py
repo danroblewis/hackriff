@@ -425,3 +425,73 @@ def test_real_board_show_list_validate() -> None:
     assert tasks.main(["show", some_id, "--file", str(REAL_BOARD)]) == 0
     assert tasks.main(["list", "--ready", "--file", str(REAL_BOARD)]) == 0
     assert tasks.main(["validate", "--file", str(REAL_BOARD)]) == 0
+
+
+# --------------------------------------------------------------------------------------------
+# set key=[a, b] (lists) and unset — 2026-09-23: turning a `blocked` ticket into `todo` with
+# `depends_on` needed both, and `set` alone wrote `depends_on` as a quoted string (whose `list()`
+# is its characters, so the runner saw no real dependency) and `blocked_on=null` as the string
+# 'null' (truthy, so the runner still treated the ticket as blocked).
+# --------------------------------------------------------------------------------------------
+
+
+def _t(board: Path, tid: str) -> dict:
+    return next(t for t in yaml.safe_load(_text(board))["tasks"] if t["id"] == tid)
+
+
+def test_set_writes_a_bracketed_value_as_a_real_list(board: Path) -> None:
+    assert run(["set", "T-002", "depends_on=[T-001, T-003]", "--file", str(board)]) == 0
+    assert _t(board, "T-002")["depends_on"] == ["T-001", "T-003"]
+
+
+def test_set_writes_an_empty_list(board: Path) -> None:
+    assert run(["set", "T-002", "depends_on=[]", "--file", str(board)]) == 0
+    assert _t(board, "T-002")["depends_on"] == []
+
+
+def test_set_list_items_are_quoted_only_when_they_must_be(board: Path) -> None:
+    assert run(["set", "T-002", "tags=[plain, 0123, a: b]", "--file", str(board)]) == 0
+    assert _t(board, "T-002")["tags"] == ["plain", "0123", "a: b"]
+
+
+def test_unset_removes_a_scalar_field(board: Path) -> None:
+    assert run(["unset", "T-002", "priority", "--file", str(board)]) == 0
+    assert "priority" not in _t(board, "T-002")
+
+
+def test_unset_removes_a_block_field_and_its_continuation(board: Path) -> None:
+    assert run(["unset", "T-002", "acceptance", "--file", str(board)]) == 0
+    t2 = _t(board, "T-002")
+    assert "acceptance" not in t2 and t2["effort"] == "low"
+    assert _t(board, "T-003")["blocked_on"] == "user decision"  # neighbours untouched
+
+
+def test_blocked_to_todo_with_depends_on_in_two_calls(board: Path) -> None:
+    assert run(["set", "T-003", "status=todo", "depends_on=[T-001]", "--file", str(board)]) == 0
+    assert run(["unset", "T-003", "blocked_on", "--file", str(board)]) == 0
+    t3 = _t(board, "T-003")
+    assert t3["status"] == "todo" and t3["depends_on"] == ["T-001"] and "blocked_on" not in t3
+
+
+def test_unset_refuses_blocked_on_while_still_blocked(board: Path, capsys) -> None:
+    assert run(["unset", "T-003", "blocked_on", "--file", str(board)]) != 0
+    assert _t(board, "T-003")["blocked_on"] == "user decision"
+
+
+def test_unset_refuses_required_keys_and_missing_keys(board: Path) -> None:
+    assert run(["unset", "T-002", "status", "--file", str(board)]) != 0
+    assert run(["unset", "T-002", "no_such_key", "--file", str(board)]) != 0
+
+
+def test_set_true_and_false_are_real_booleans(board: Path) -> None:
+    assert run(["set", "T-002", "core_interface=true", "is_hil=false", "--file", str(board)]) == 0
+    t2 = _t(board, "T-002")
+    assert t2["core_interface"] is True and t2["is_hil"] is False
+
+
+def test_ready_honours_depends_on_as_well_as_deps(board: Path, capsys) -> None:
+    assert run(["set", "T-003", "status=todo", "depends_on=[T-002]", "--file", str(board)]) == 0
+    assert run(["unset", "T-003", "blocked_on", "--file", str(board)]) == 0
+    capsys.readouterr()
+    assert run(["list", "--ready", "--file", str(board)]) == 0
+    assert "T-003" not in capsys.readouterr().out  # T-002 is still todo
