@@ -26251,6 +26251,29 @@ tasks:
     notes: |
       FOUND BY coordinator live-edge triage deflaker 2026-09-24.
     effort_reason: an unexplained intermittent starvation on the tile-probe path; needs a quiet-box rate measurement and hard debugging
+  - id: T-904
+    milestone: M2-hardening
+    title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: STORE
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 on staging (supervisor; the user asked 13:55 how big the DB gets): 2.4 Msps, live HackRF - hackriff.db grew to 96 MB + 6 MB WAL in 41 min. The detection table holds 161,533 rows for t_start 13:11..13:51 (~65 rows/s, ~530 B/row including 4 indexes) = ~125 MB/h, ~3 GB/day, ~90 GB/month at this rate, and ~8x that at 20 Msps. A grep of crates/hk-model and crates/hk-store finds NO prune/retention/rollup for the detection or track_detection tables; only the history tiles have a retention trim (T-126). On a portable handheld (CLAUDE.md product constraints) this fills the device.
+      DELIVER: a retention policy for per-frame DETECTION rows, designed against docs/07 (read the detection/track/emitter sections only) and ADR-0017/0019's model:
+      - Tracks, emitters and observations stay DURABLE - they are the history catalogue (workflow #3), and every small burst stays as a track, so one-off events (POCSAG-like) are never lost.
+      - Per-frame detection rows (and their track_detection links) age out after a configurable N days, or roll up into a per-track segment summary (e.g. track_segment: time extent, f/bw envelope, peak/mean power, counts) before deletion - whichever keeps every query the API serves answerable; state which, and why.
+      - Nothing a Confirmed emitter's presence track, the time-scoped inventory, the overlap re-analysis or decode provenance needs may be deleted; prove it by the existing API/contract tests plus a test that a pruned window still answers /api/inventory and presence for its tracks.
+      - Configurable (retention days / rollup on), reported in GET /api/status (storage: db bytes, WAL bytes, detection rows, oldest detection, next prune) - docs/api.md + api_contract.rs together (T-079).
+      - Pruning never blocks the capture/ring thread or holds the write lock long enough to stall ingest (T-453: measure per-arriving-row cost, don't assume): batched, off the hot path.
+      - MEASURE bytes/h before and after through the mock SDR replay at 2.4 and 20 Msps and report it in the result.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor, staging DB measurement 2026-09-24 (user asked 13:55).
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
