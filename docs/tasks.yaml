@@ -24068,7 +24068,7 @@ tasks:
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24110,6 +24110,7 @@ tasks:
       Use cases: AWARE-042
       Resources: 56 CPU-s, peak 0.9 GB
     branch: task-t815
+    commit: d2b324ef
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
