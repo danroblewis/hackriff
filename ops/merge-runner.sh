@@ -155,6 +155,16 @@ flip_done(){ # ticket merge_sha
   fi
 }
 
+# The work runner's own board flips (a dead dispatch back to todo, a dispatch to in-progress) need
+# main to be safe to commit, and during back-to-back gates the work runner almost never sees that:
+# on 2026-09-23 18:30-19:10 T-801 and T-512 waited to go back to todo while 19 tickets queued behind
+# T-801 and dispatch sat at 0 of 6. Right after a landing - merge committed, no batch marker - is the
+# one moment this runner KNOWS main is safe, so it lends it: one `work-runner.py --sync-board`, best
+# effort, never able to fail the merge.
+board_sync_now(){
+  ( cd "$REPO" && python3 ops/work-runner.py --sync-board ) >>"$LOG" 2>&1 || true
+}
+
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
@@ -237,6 +247,7 @@ process(){
     record_landed "$branch"
     clear_attempts "$branch"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MERGED" >> "$DONELOG"
+    board_sync_now
     local wt; wt=$(worktree_of "$branch")
     if [ -n "$wt" ] && [ "$(cd "$wt" && pwd -P)" != "$(cd "$REPO" && pwd -P)" ]; then
       git worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
@@ -603,6 +614,7 @@ try_bulk(){
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
     rm -f "$BULKMARK"
+    board_sync_now
     notify_ok "MERGED batch ($tickets); queue now $(grep -vcE '^[[:space:]]*(#|$)' "$QUEUE" 2>/dev/null || echo 0) waiting."
     return 0
   fi

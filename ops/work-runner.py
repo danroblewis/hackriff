@@ -1411,7 +1411,17 @@ def main():
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--poll", type=int, default=30)
+    ap.add_argument("--sync-board", action="store_true",
+                    help="one board sync (sync_board) and exit - the merge runner calls it right after a landing, "
+                         "the one moment it knows main is safe to commit")
     a = ap.parse_args()
+    if a.sync_board:
+        try:
+            claims = json.load(open(CLAIMS)) if os.path.exists(CLAIMS) else {}
+            sync_board(claims, False)
+        except Exception as e:
+            log(f"sync-board (from the merge runner) error: {e}")
+        return
     os.makedirs(WORKDIR, exist_ok=True)
     for p in (NEEDS, DONE):
         open(p, "a").close()

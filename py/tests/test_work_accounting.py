@@ -332,3 +332,28 @@ def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflict
     R.handle_gate_failures(claims, dry=False)
     assert launched == [] and claims["T-627"]["gate_fails_seen"]
     assert not (tmp / "merge-queue.txt").exists()
+
+
+
+# --------------------------------------------------------------------- the merge runner lends its safe moment
+def test_sync_board_flag_runs_one_board_sync_and_exits(tmp_path, monkeypatch):
+    (tmp_path / "claims.json").write_text('{"T-801": {"state": "no-work"}}')
+    monkeypatch.setattr(R, "CLAIMS", str(tmp_path / "claims.json"))
+    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
+    seen = []
+    monkeypatch.setattr(R, "sync_board", lambda claims, dry: seen.append((claims, dry)))
+
+    def no_tick(dry):
+        raise AssertionError("no tick, no dispatch")
+    monkeypatch.setattr(R, "tick", no_tick)
+    monkeypatch.setattr(sys, "argv", ["work-runner.py", "--sync-board"])
+    R.main()
+    assert seen == [({"T-801": {"state": "no-work"}}, False)]
+
+
+def test_the_merge_runner_syncs_the_board_only_after_main_is_safe():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    bulk = text[text.index('log "BULK MERGED'):]
+    assert bulk.index('rm -f "$BULKMARK"') < bulk.index("board_sync_now")     # marker gone first
+    single = text[text.index('log "MERGED $branch'):]
+    assert single.index("board_sync_now") < single.index("worktree_of")      # after the commit, at landing
