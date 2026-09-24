@@ -259,10 +259,9 @@ fn declarations() -> Vec<Unreachable> {
         family: "4fsk-c4fm",
         planes: &["A1xA7"],
         when: &[],
-        reason: "check/payload parameterisation (CRC width, off-catalogue polynomial, constant \
-                 payload) is on the 2-level FSK generator only (T-622); the C4FM trunk scenes \
-                 carry the fixed P25 framing and nothing else",
-        ticket: Ticket::Filed("T-850"),
+        reason: "check parameterisation exists on c4fm_burst_train (T-850) but no row runs it: no \
+                 generic synthesis engine binds or refuses a check on a C4FM emitter",
+        ticket: Ticket::Filed("T-565"),
     });
     for fam in ["2fsk", "4fsk-c4fm", "msk"] {
         // The F ladder: the generator is built (hkpy.synth.fill, T-625) and T-619 measured the
