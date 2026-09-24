@@ -10,8 +10,11 @@ use super::common::{Clock, P, RateMeter, drops_history, one_input, update_hot};
 use super::length::{FrameLength, LengthState};
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::{ChunkFlags, ChunkMeta, FrameBuf, FrameInfo, PortSlice, PortVec};
+use crate::evidence::{emit, saturate};
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::null::{check_bits, sync_excess_bits};
+use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
 
 const HOT: &[&str] = &["max_errors"];
 
@@ -79,6 +82,9 @@ struct WordSearch {
     frames_cut: u64,
     last_end: Option<u64>,
     sync_ber: Option<f32>,
+    /// Evidence (T-853): positions the word was tested at, and syncs, since `reset()`.
+    ev_positions: u64,
+    ev_hits: u64,
 }
 
 impl WordSearch {
@@ -118,6 +124,8 @@ impl WordSearch {
             frames_cut: 0,
             last_end: None,
             sync_ber: None,
+            ev_positions: 0,
+            ev_hits: 0,
         })
     }
 
@@ -174,6 +182,7 @@ impl WordSearch {
             let Some(direct) = self.corr.push(b) else {
                 return;
             };
+            self.ev_positions += 1;
             let sync_bits = self.corr.bits();
             let complemented = sync_bits - direct;
             let (errors, invert) = if self.either && complemented < direct {
@@ -185,6 +194,7 @@ impl WordSearch {
                 return;
             }
             self.invert = invert;
+            self.ev_hits += 1;
             self.in_frame = true;
             self.errors = errors;
             let ber = errors as f32 / sync_bits as f32;
@@ -282,6 +292,12 @@ struct OffsetSearch {
     blocks_bad: u64,
     acquisitions: u64,
     frames: u64,
+    /// Check-word width (syndrome bits).
+    check_bits: u32,
+    /// Evidence (T-853): blocks tested **while locked**, and those that matched, since
+    /// `reset()`. Acquisition hits are excluded: they were found by searching every position.
+    ev_tested: u64,
+    ev_ok: u64,
 }
 
 impl OffsetSearch {
@@ -376,6 +392,9 @@ impl OffsetSearch {
             blocks_bad: 0,
             acquisitions: 0,
             frames: 0,
+            check_bits,
+            ev_tested: 0,
+            ev_ok: 0,
         })
     }
 
@@ -474,6 +493,8 @@ impl OffsetSearch {
         let pos = self.next_pos;
         self.next_pos = (pos + 1) % len;
         let ok = self.matches(self.syndrome(), pos);
+        self.ev_tested += 1;
+        self.ev_ok += u64::from(ok);
         self.window.push(!ok);
         if ok {
             self.blocks_ok += 1;
@@ -596,10 +617,70 @@ impl Block for SyncSearch {
 
     fn reset(&mut self) {
         match &mut self.mode {
-            Mode::Word(w) => w.reset(),
-            Mode::Offsets(o) => o.reset(),
+            Mode::Word(w) => {
+                w.reset();
+                w.ev_positions = 0;
+                w.ev_hits = 0;
+            }
+            Mode::Offsets(o) => {
+                o.reset();
+                o.ev_tested = 0;
+                o.ev_ok = 0;
+            }
         }
         self.refresh_status();
+    }
+
+    /// S4 `sync_excess` (ADR-0015 §2.2, analytic). **Sync word:** the Poisson tail of the syncs
+    /// over the positions searched, minus the word's width (`null::sync_excess_bits`); `raw` =
+    /// syncs, `n` = syncs. **Offset words:** blocks tested on the locked lattice are at
+    /// positions the lattice fixes (no search), each matching one of the allowed offsets by
+    /// chance with probability `offsets · 2^−check_bits`; the binomial tail over them, `raw` =
+    /// matching blocks, `n` = blocks tested.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        match &self.mode {
+            Mode::Word(w) => {
+                if w.ev_positions == 0 {
+                    return;
+                }
+                let bits = sync_excess_bits(
+                    w.ev_hits,
+                    w.ev_positions,
+                    w.corr.bits(),
+                    w.max_errors,
+                    w.either,
+                );
+                emit(
+                    out,
+                    Evidence::new(
+                        Stage::S4,
+                        MetricId::SyncExcess,
+                        GroupId::Undeclared,
+                        w.ev_hits as f32,
+                        saturate(w.ev_hits),
+                        bits,
+                    ),
+                );
+            }
+            Mode::Offsets(o) => {
+                if o.ev_tested == 0 {
+                    return;
+                }
+                let most = o.sequence.iter().map(Vec::len).max().unwrap_or(1).max(1);
+                let width = f64::from(o.check_bits) - (most as f64).log2();
+                emit(
+                    out,
+                    Evidence::new(
+                        Stage::S4,
+                        MetricId::SyncExcess,
+                        GroupId::Undeclared,
+                        o.ev_ok as f32,
+                        saturate(o.ev_tested),
+                        check_bits(o.ev_ok, o.ev_tested, width),
+                    ),
+                );
+            }
+        }
     }
 
     fn update_params(

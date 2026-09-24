@@ -95,8 +95,10 @@ use num_complex::{Complex32, Complex64};
 use super::common::*;
 use super::filter::Rate;
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
+use crate::evidence::calibrated;
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 /// Parameters applied in place (the descriptor's `hot` keys).
 const HOT: &[&str] = &["rotation_deg", "iq_swap", "loop_bandwidth"];
@@ -812,6 +814,8 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         power: 0.0,
         evm: 0.0,
         symbols: 0,
+        ev_err: 0.0,
+        ev_n: 0,
         locked: false,
         origin: 0.0,
         need_origin: true,
@@ -868,6 +872,9 @@ struct Psk {
     power: f64,
     evm: f64,
     symbols: u64,
+    /// Evidence (T-853): Σ squared symbol error (normalised) and the symbols, since `reset()`.
+    ev_err: f64,
+    ev_n: u64,
     locked: bool,
     /// Source index of resampled sample 0 of the current segment.
     origin: f64,
@@ -961,6 +968,10 @@ impl Psk {
             self.track_table.nearest(y)
         };
         self.evm += (err - self.evm) * alpha;
+        if err.is_finite() {
+            self.ev_err += err;
+            self.ev_n += 1;
+        }
         // The lock detector runs per symbol, so the re-acquisition it drives is
         // chunking-invariant.
         let q = self.quality();
@@ -1374,7 +1385,26 @@ impl Block for Psk {
     fn reset(&mut self) {
         self.restart();
         self.pending_restart = true;
+        self.ev_err = 0.0;
+        self.ev_n = 0;
         self.update_status();
+    }
+
+    /// S1 `evm` (ADR-0015 §10 M-14: `psk_demod`'s S1 metric): RMS error vector over the
+    /// window ÷ the decision radius the EVM is scored against. **Smaller is evidence.**
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_n > 0 {
+            let rms = (self.ev_err / self.ev_n as f64).max(0.0).sqrt();
+            let raw = rms / self.score_radius().max(1e-12);
+            calibrated(
+                out,
+                Stage::S1,
+                MetricId::Evm,
+                GroupId::Undeclared,
+                raw,
+                self.ev_n,
+            );
+        }
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {

@@ -1,5 +1,6 @@
 //! The block contract (ADR-0011 §1). **Core interface.**
 
+use hk_model::synth::EvidenceSet;
 use hk_recipe::{Params, PortType};
 
 use crate::buffer::{Input, Output};
@@ -174,5 +175,17 @@ pub trait Block: Send {
     /// published; every other block answers `None` (the default).
     fn audio_frames(&mut self) -> Option<&mut AudioFrames> {
         None
+    }
+
+    /// Synthesis evidence (ADR-0015 §2.1, T-853): at most four [`hk_model::synth::Evidence`]
+    /// summaries of everything processed since the last [`Block::reset`], appended to `out`.
+    /// Called between chunks; must not allocate. **Optional**: the default emits nothing, and a
+    /// block with nothing to say is scored as zero evidence, never as a failure.
+    ///
+    /// Analytic metrics carry their bits; calibrated metrics carry `raw` and `n` with `bits =
+    /// 0.0`, which `hk-synth` scores against the block's calibration table (see
+    /// [`crate::evidence`]). Not a port: diagnostic outputs stay the visual path.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        let _ = out;
     }
 }

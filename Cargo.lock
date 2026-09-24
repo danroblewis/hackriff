@@ -1108,6 +1108,7 @@ dependencies = [
  "hk-estimate",
  "hk-model",
  "hk-recipe",
+ "num-complex",
  "serde",
  "serde_json",
 ]

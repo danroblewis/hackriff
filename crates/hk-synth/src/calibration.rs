@@ -1,8 +1,9 @@
 //! Calibrated nulls: what a `hackriff.calibration/1` table may answer, and the ADC-fill
 //! conditioning key (ADR-0015 §13.2, §13.3).
 //!
-//! **The loader, the two accessors and the generator are T-660's.** This module fixes their
-//! answer types so every caller is written against the refusal from day one:
+//! **The loader, the two accessors and the generator are T-660's; the shipped tables, the
+//! built-in set and window scoring are T-853's (MAUTO M-2).** This module fixes their answer
+//! types so every caller is written against the refusal from day one:
 //!
 //! > A calibration table never answers a question it cannot answer. Asked for a level it does not
 //! > hold, it returns [`Threshold::Shortfall`]; asked for a cell it does not have, it returns
@@ -15,12 +16,12 @@
 //! read the **noise floor's** fill, not the window's; that amendment is not taken in ADR-0015, so
 //! the thresholds below are §13.3's as written (ADR-0015 §16.4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::evidence::MetricId;
-use crate::stage::CALIBRATED_CLAIM_CAP_BITS;
+use crate::evidence::{GroupId, MetricId};
+use crate::stage::{CALIBRATED_CLAIM_CAP_BITS, Stage};
 
 /// Schema name of a calibration file (`synth/calibration/<block>.json`).
 pub const CALIBRATION_SCHEMA: &str = "hackriff.calibration/1";
@@ -274,7 +275,9 @@ struct Conditioning {
     clip_fraction_max: Option<f32>,
 }
 
-/// The file as written to disk (§13.2's schema, `synth/calibration/<block>.json`).
+/// The file as written to disk (§13.2's schema, `synth/calibration/<block>.json`). Unknown
+/// top-level fields (the generator's `null_corpus` / `null_fill` provenance) are carried, not
+/// read.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RawFile {
     schema: String,
@@ -287,7 +290,7 @@ struct RawFile {
     #[serde(default)]
     correlation: Option<serde_json::Value>,
     #[serde(default)]
-    groups: Option<serde_json::Value>,
+    groups: Option<BTreeMap<Stage, BTreeMap<GroupId, Vec<MetricId>>>>,
     tables: Vec<RawCell>,
 }
 
@@ -316,13 +319,54 @@ impl std::fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+/// A window's ADC fill, as recorded (`Provenance.noise_sigma_lsb` and the clip share, §13.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Fill {
+    /// Per-component noise σ, ADC LSB. `None` is **under-filled** (§13.3).
+    pub sigma_lsb: Option<f32>,
+    /// Clipped-sample share. `None` reads as no clipping ([`FillBucket::classify`]).
+    pub clip_fraction: Option<f32>,
+}
+
+impl Fill {
+    /// A known fill.
+    pub const fn new(sigma_lsb: f32, clip_fraction: f32) -> Self {
+        Self {
+            sigma_lsb: Some(sigma_lsb),
+            clip_fraction: Some(clip_fraction),
+        }
+    }
+
+    /// The §13.3 bucket.
+    pub fn bucket(&self) -> FillBucket {
+        FillBucket::classify(self.sigma_lsb, self.clip_fraction)
+    }
+}
+
+/// A window's support matches a table's support `cell_n` when it lies in `[cell_n, cell_n +
+/// cell_n/50 + 16]` — the overshoot the generator's draws themselves have
+/// (`nullchain::NullChain::samples_for`). Nothing smaller and nothing further above is the
+/// same statistic: measured on the shipped `psk_demod` table, the null EVM's location moves
+/// with the support (its 1-bit threshold is 1.23 at 256 symbols and 1.06 at 1024), so scoring a
+/// longer window against a shorter support's table would over-claim. Supports are enumerated,
+/// never interpolated or borrowed (§13.2); the engine sizes its windows to land on one.
+pub const fn support_matches(cell_n: u32, n: u32) -> bool {
+    n >= cell_n && n - cell_n <= cell_n / 50 + 16
+}
+
 /// A loaded `hackriff.calibration/1` file: one `(block, fill bucket)` pair, indexed by
 /// `(metric, null, n)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalibrationTable {
     block: String,
     bucket: FillBucket,
+    /// The file's own conditioning bounds (`sigma_lsb_range[0]`, `clip_fraction_max`): a window
+    /// outside them is not in the population the table was drawn for, whatever §13.3's
+    /// runtime bucket says (the first generation used T-619's tighter bounds, ADR-0015 §16.4).
+    sigma_min_lsb: f32,
+    clip_max: f32,
     cells: HashMap<(MetricId, NullKind, u32), RawCell>,
+    groups: Option<BTreeMap<Stage, BTreeMap<GroupId, Vec<MetricId>>>>,
 }
 
 impl CalibrationTable {
@@ -341,8 +385,83 @@ impl CalibrationTable {
         Ok(CalibrationTable {
             block: raw.block,
             bucket,
+            sigma_min_lsb: raw
+                .conditioning
+                .sigma_lsb_range
+                .map_or(FILL_SIGMA_MIN_LSB, |r| r[0].max(FILL_SIGMA_MIN_LSB)),
+            clip_max: raw
+                .conditioning
+                .clip_fraction_max
+                .map_or(CLIP_FRACTION_MAX, |c| c.min(CLIP_FRACTION_MAX)),
             cells,
+            groups: raw.groups,
         })
+    }
+
+    /// Whether a window of this fill is in the table's population: §13.3's bucket is the
+    /// table's, **and** the window lies inside the file's own declared bounds. Unknown σ never
+    /// is (under-filled).
+    pub fn admits(&self, fill: Fill) -> bool {
+        if fill.bucket() != self.bucket {
+            return false;
+        }
+        let sigma_ok = fill.sigma_lsb.is_some_and(|s| s >= self.sigma_min_lsb);
+        let clip_ok = fill.clip_fraction.is_none_or(|c| c <= self.clip_max);
+        sigma_ok && clip_ok
+    }
+
+    /// The cell a window of support `n` is scored against: the calibrated support `n` matches
+    /// ([`support_matches`]), or `None`.
+    pub fn cell_for(&self, metric: MetricId, null: NullKind, n: u32) -> Option<CellId> {
+        self.cells
+            .keys()
+            .filter(|(m, k, c)| *m == metric && *k == null && support_matches(*c, n))
+            .map(|(_, _, c)| *c)
+            .max()
+            .map(|c| CellId {
+                block: self.block.clone(),
+                metric,
+                null,
+                n: c,
+                bucket: self.bucket,
+            })
+    }
+
+    /// Every cell the file carries.
+    pub fn cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.cells.keys().map(|&(metric, null, n)| CellId {
+            block: self.block.clone(),
+            metric,
+            null,
+            n,
+            bucket: self.bucket,
+        })
+    }
+
+    /// The expressible levels of a cell (ascending), for checks and display.
+    pub fn levels(&self, cell: &CellId) -> Option<&[Level]> {
+        self.lookup(cell).map(|c| c.levels.as_slice())
+    }
+
+    /// A cell's `admissible_bits`.
+    pub fn admissible_bits(&self, cell: &CellId) -> Option<f32> {
+        self.lookup(cell).map(|c| c.admissible_bits)
+    }
+
+    /// The dependence group the **file** assigns `metric` at `stage` (§13.1): the declared
+    /// partition when the file carries one for that stage; [`GroupId::Undeclared`] — one group
+    /// — when the file publishes more than one metric at the stage without a partition; `None`
+    /// (keep the block's own declaration) when the file publishes only this metric there.
+    pub fn group_of(&self, stage: Stage, metric: MetricId) -> Option<GroupId> {
+        if let Some(stage_groups) = self.groups.as_ref().and_then(|g| g.get(&stage)) {
+            return Some(
+                stage_groups
+                    .iter()
+                    .find(|(_, ms)| ms.contains(&metric))
+                    .map_or(GroupId::Undeclared, |(g, _)| *g),
+            );
+        }
+        None
     }
 
     /// The block this table was generated for (`name@version`).
@@ -396,6 +515,29 @@ impl CalibrationTable {
                 bits: level.bits,
                 level: level.bits,
             },
+        }
+    }
+
+    /// raw → bits for a window's evidence record: looks up the cell for `(metric, noise, n)`,
+    /// puts `raw` into the evidence direction, and scores it; [`Score::NoTable`] when the window
+    /// is outside the table's population ([`Self::admits`]) or no support matches. The table
+    /// stores thresholds in the evidence direction (ADR-0015 §13.1's convention).
+    pub fn score_raw(&self, metric: MetricId, raw: f32, n: u32, fill: Fill) -> Score {
+        let missing = |n| Score::NoTable {
+            cell: CellId {
+                block: self.block.clone(),
+                metric,
+                null: NullKind::Noise,
+                n,
+                bucket: fill.bucket(),
+            },
+        };
+        if !self.admits(fill) {
+            return missing(n);
+        }
+        match self.cell_for(metric, NullKind::Noise, n) {
+            Some(cell) => self.score(&cell, crate::nullchain::evidence_direction(metric, raw)),
+            None => missing(n),
         }
     }
 
