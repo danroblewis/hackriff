@@ -13,6 +13,7 @@ pub mod shadow;
 
 pub use shadow::{
     Agreement, AgreementRow, ClassicalDecision, DEFAULT_MAX_AGE_NS, DEFAULT_MAX_BYTES,
-    DEFAULT_SHADOW_LIMIT, MAX_SHADOW_LIMIT, SHADOW_SCHEMA, SNR_BIN_DB, ShadowPrediction, ShadowQuery,
-    ShadowRecord, ShadowStore, ShadowStoreConfig, ShadowStoreStats, ShadowSubject, snr_bin_db,
+    DEFAULT_SHADOW_LIMIT, MAX_SHADOW_LIMIT, SHADOW_SCHEMA, SNR_BIN_DB, ShadowPrediction,
+    ShadowQuery, ShadowRecord, ShadowStore, ShadowStoreConfig, ShadowStoreStats, ShadowSubject,
+    snr_bin_db,
 };

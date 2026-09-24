@@ -47,6 +47,7 @@
 //! | `/api/taxonomy` | GET | token | T-218 the modulation taxonomy `hk-mod@1` and `thresholds@1`, as data ([`crate::taxonomy`]). Reference data, never a measurement |
 //! | `/api/signatures/match` | GET | token | T-201 an emitter's C18 signature match and its history ([`crate::signatures`]). Ranked evidence, never an identity |
 //! | `/api/clusters[/<id>[/promote]]` | GET, POST | token (header only for mutating) | T-202 C18 clusters of unknown emissions — "the same thing I saw before" ([`crate::clusters`]). A *type* above emitters; evidence, never an identity |
+//! | `/api/ml/models`, `/api/ml/models/<id>/mode`, `/api/ml/shadow[?…]` | GET, PUT | token (header only for mutating) | T-844 C38 model registry and `(model, consumer)` modes (audited; `active` needs §4.6 evidence or `force`), and the durable shadow log's per-SNR agreement ([`crate::ml`]). Shadow never decides |
 //! | `/ws/<stream_id>` | GET | token | WebSocket bridge ([`crate::bridge`]) |
 //! | `/ws/open/<name>?…` | GET | token | On-demand stream, e.g. `listen` (T-043, [`crate::ondemand`]) |
 //! | `/ws/tiles/rows?…` | GET | token | Rows pushed over a tile-lattice address range (T-468, [`crate::rows`]) |
@@ -223,6 +224,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/clusters"),
     ("GET", "/api/clusters/{id}"),
     ("POST", "/api/clusters/{id}/promote"),
+    // T-844 C38 model registry, modes and the durable shadow log (ADR-0016 §6, §9)
+    ("GET", "/api/ml/models"),
+    ("PUT", "/api/ml/models/{id}/mode"),
+    ("GET", "/api/ml/shadow"),
     ("GET", "/ws/{stream_id}"),
     ("GET", "/ws/open/{name}"),
     // T-468 rows pushed to a subscription over an address range of the tile lattice
@@ -414,6 +419,8 @@ pub struct ApiState {
     /// T-205: labelled-capture dataset export for `/api/datasets*` ([`crate::datasets`]); `None`
     /// answers 503.
     pub datasets: Option<Arc<dyn crate::datasets::DatasetControl>>,
+    /// T-844: the C38 stage for `/api/ml/*` ([`crate::ml`]); `None` answers 503.
+    pub ml: Option<Arc<dyn crate::ml::MlControl>>,
     /// T-469: the persisted IQ recordings behind `GET /api/recordings`
     /// ([`crate::recordings`]) - the half of the audio horizon the IQ ring is not. `None`
     /// answers 503.
@@ -1268,6 +1275,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::analyze::route(state, &ctl)) // T-190
         .or_else(|| crate::iqbuffer::route(state, &ctl)) // T-157
         .or_else(|| crate::datasets::route(state, &ctl)) // T-205
+        .or_else(|| crate::ml::route(state, &ctl)) // T-844
         .or_else(|| crate::recordings::route(state, &ctl)) // T-469
         .or_else(|| crate::playback::route(state, &ctl)) // T-463
         // Decoder workbench (ADR-0011 §7): one line per owning task, pre-added by T-085.

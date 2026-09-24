@@ -46,6 +46,7 @@ pub mod inventory;
 pub mod iqbuffer; // T-157
 pub mod live_control;
 pub mod measurements; // T-818 MAP-18
+pub mod ml; // T-844: C38 models, modes and the durable shadow log
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
@@ -90,6 +91,7 @@ pub use live_control::{
     LiveControls, LiveControlsError, LiveTuning, SelectError, SourceLiveControl, WindowPolicy,
     WindowRetuner, validate_gains,
 };
+pub use ml::{MlControl, MlFailure, MlModeChange, MlModeWanted};
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
 pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};
 pub use recordings::{RecordingCatalog, RecordingsFailure};

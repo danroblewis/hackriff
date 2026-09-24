@@ -1735,6 +1735,30 @@ The path from live captures to a training/evaluation set: normalised IQ snippets
 - **`DatasetSample`**: `{emitter_id, session, recording_id, annotation_id, label: {taxonomy, label, source, provenance, confidence}, snr_db, sample_rate_hz, center_offset_hz, t, split}`.
 - **Errors** `{"error", "code"}`: `400 invalid` (bad filter/split/padding/`max_samples`, unknown field), `404 not_found` (no such manifest), `503 unavailable` (this server has no dataset export, e.g. no IQ capture buffer), `500 failed` (storage), `405` other methods.
 
+## ML models, modes and the shadow log (T-844, ADR-0016 §6/§9)
+
+The operator surface of C38's learned stage. A model is **data** an operator installs under `<data dir>/models/<id>/<version>/` (`manifest.json` + `model.json`/`model.onnx`, produced by `py/hkpy/ml/train_amc`; nothing is shipped in the tree), and it runs only after an audited `PUT` puts its `(model, consumer)` in `shadow`. Code: `hk_pipeline::ml` (the stage and producer), `hk_store::ml` (the durable log), `crates/hk-api/src/ml.rs` (routes).
+
+- **Shadow means shadow.** The pipeline calls the model once per classification at the classifier's single call site, **after** the classical row is written, within the family that row named and only for a stored CFAR detection (`hk_ml::gate::admit`). What the model said is appended to the shadow log next to the classical decision; it never writes a `Classification` row, never changes one, and no route here reads it back into a decision. **`active`** is accepted per ADR-0016 §4.6 — it needs the manifest's `enable_evidence` **and** a conformant provider, or `"force": true` (recorded on the mode and in the audit entry) — but this build has no consumer that acts on a model, so an `active` model is observed exactly like a shadow one; §7's exit gate reports a forced `active` without evidence as a violation.
+- **The shadow log** is `<data dir>/ml/shadow/YYYY/MM/DD/HH.log`: one CRC-checked NDJSON line per record (`<crc32-hex8> <json>`), one segment per hour of **capture time** (the classification's `t`, not the wall clock), bounded at **256 MiB** and **30 days** of capture time, whole hours dropped oldest first. A torn or corrupt line is skipped and counted, never guessed at. Aggregates are kept per segment, so they always describe the records still on disk, never an all-time tally.
+- **Modes persist** in `<data dir>/ml/modes.json` and are re-established when the next run opens; a model that has since vanished, fails its hash or lost the evidence its `active` needed is reported in `restore_errors` and left off.
+- **Low power** (ADR-0016 §6) turns shadow and active off; the stage is then reported, not silently skipped.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | `/api/ml/models` | – | `{registry, models: [Model], hosts: [Host], producer, restore_errors: [{model, error}]}` |
+| PUT | `/api/ml/models/{id}/mode` | `{"mode": "off" \| "shadow" \| "active", "version"?, "consumer"?, "force"?}` | `{"mode": {model, key, consumer, mode, previous, forced, provider}}` (audited `ml_mode`) |
+| GET | `/api/ml/shadow` | `?model&consumer&family&t0&t1&limit` | `{records: [ShadowRecord], aggregates: [Agreement], store}` |
+
+- **`Model`**: `{id, version, ref, task, consumer, family, labels, precision, format ("hk-mlp@1" \| "onnx"), metrics_ref, enable_evidence, loaded, provider, conformant, modes: [{consumer, mode, forced}]}` — every installed model, loaded or not.
+- **`Host`**: `{provider, conformant, loaded, stats: {submitted, inferred, dropped_queue_full, deadline_missed, batches, mean_batch, largest_batch, errors, shadow_records, mean_latency_ms, latency_ms_max}}` — one per provider (`cpu-mlp`, `cpu-tract`). **`producer`**: `{consumer: "hk-classify/dl", input: "dl_input@N", offered, observed, not_admitted, no_input, no_detection, errors}` — what the classifier call site did.
+- **`PUT` fields**: `version` may be omitted when exactly one version of `id` is installed; `consumer` defaults to (and must equal) the manifest's. `off` unloads a model nothing else uses.
+- **`ShadowRecord`**: `{schema, t_s, t_ns, model ("id@version#sha8"), consumer, subject: {kind: "detection", detection}, snr_db, snr_bin_db, prediction: {label, p, energy, unknown_score, provider, precision, latency_ms, batch_size, mode: "shadow"}, classical: {family, class, class_p, confidence, open_set_score, stage}, agrees}`, newest first. `agrees` is `null` when the classical stage named no class (not a disagreement).
+- **`Agreement`**: one per `(model, consumer, family, snr_bin_db)`: `{model, consumer, family, snr_bin_db, n, compared, agree, model_unknown, agreement_rate}`. Bins are `floor(snr/5)·5` dB (the dev report's binning), `null` for an unmeasured SNR; `model_unknown` counts `unknown_score ≥ 0.5`. With `t0`/`t1` the aggregates are recomputed over exactly that window.
+- **Query**: `model` matches `id`, `id@version` or the full ref; `t0`/`t1` Unix s (`t0 < t1`); `limit` 1–1000 (default 100) bounds `records` only.
+- **`store`**: `{segments, bytes, records, corrupt_lines, segments_deleted, oldest_s, newest_s, max_bytes, max_age_s}`.
+- **Errors** `{"error", "code"}`: `400 invalid` (bad body/query, unknown field, ambiguous version, wrong consumer), `404 not_found` (no such model installed), `409 needs_evidence` / `409 not_conformant` (`active` without §4.6 evidence / a conformant provider, and no `force`), `409 failed` (the model does not load), `503 unavailable` (this server has no ML stage), `405` other methods.
+
 ## Streams: WebSocket, TCP and on-demand openers
 
 Full framing, header fields, binary record layout, drop markers, backpressure and `content_class` egress gating are the versioned wire contract: **[`docs/stream-contract.md`](stream-contract.md)**. This section covers only the HTTP/WS-level *endpoints* that open or discover a stream.

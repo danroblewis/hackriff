@@ -113,8 +113,7 @@ pub fn classify_box<T: IqSample>(
     request: &SnippetRequest,
     t: Timestamp,
 ) -> Option<Classification> {
-    classify_box_observed(classifier, c14, survey, info, iq, request, t, None)
-        .map(|(c, _)| c)
+    classify_box_observed(classifier, c14, survey, info, iq, request, t, None).map(|(c, _)| c)
 }
 
 /// [`classify_box`], plus the learned stage's input (`hk_classify::dl_input`) of the **same**
@@ -219,6 +218,11 @@ pub fn classify_and_record<T: IqSample>(
     .map(|(c, written, _)| (c, written)))
 }
 
+/// What [`classify_and_record_observed`] returns: the classification, whether it was written (a
+/// better-informed row may already hold the emitter), and the learned stage's input when a model
+/// wanted it.
+pub type Recorded = (Classification, bool, Option<Vec<f32>>);
+
 /// [`classify_and_record`], also returning the learned stage's input for `ml`
 /// ([`classify_box_observed`]). The caller hands both to [`crate::ml::MlStage::observe`] **after**
 /// releasing the repository lock: the host batches, and a batch must never stall other writers.
@@ -234,7 +238,7 @@ pub fn classify_and_record_observed<T: IqSample>(
     request: &SnippetRequest,
     t: Timestamp,
     ml: Option<&crate::ml::MlStage>,
-) -> Result<Option<(Classification, bool, Option<Vec<f32>>)>, RepoError> {
+) -> Result<Option<Recorded>, RepoError> {
     let Some((classification, input)) =
         classify_box_observed(classifier, c14, survey, info, iq, request, t, ml)
     else {

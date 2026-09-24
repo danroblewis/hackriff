@@ -140,7 +140,8 @@ pub struct ClassicalDecision {
 pub struct ShadowRecord {
     /// [`SHADOW_SCHEMA`].
     pub schema: u16,
-    /// Sample-clock time the prediction was made at.
+    /// Capture time of the subject (the classification's `t`), not the wall clock the host
+    /// stamped the prediction with: retention and time filters are on the run's own time axis.
     pub t: Timestamp,
     /// `id@version#sha8` of the model.
     pub model: String,
@@ -576,7 +577,7 @@ impl ShadowStore {
             .clamp(1, MAX_SHADOW_LIMIT);
         let inner = self.lock();
         let mut out = Vec::new();
-        for (&hour, _) in inner.segments.iter().rev() {
+        for &hour in inner.segments.keys().rev() {
             if !q.hour_in_range(hour) {
                 continue;
             }
@@ -609,7 +610,7 @@ impl ShadowStore {
         let mut cells: BTreeMap<AggKey, Agreement> = BTreeMap::new();
         let inner = self.lock();
         if q.timed() {
-            for (&hour, _) in &inner.segments {
+            for &hour in inner.segments.keys() {
                 if !q.hour_in_range(hour) {
                     continue;
                 }
@@ -626,14 +627,16 @@ impl ShadowStore {
         }
         Ok(cells
             .into_iter()
-            .map(|((model, consumer, family, snr_bin_db), counts)| AgreementRow {
-                model,
-                consumer,
-                family,
-                snr_bin_db,
-                agreement_rate: counts.agreement_rate(),
-                counts,
-            })
+            .map(
+                |((model, consumer, family, snr_bin_db), counts)| AgreementRow {
+                    model,
+                    consumer,
+                    family,
+                    snr_bin_db,
+                    agreement_rate: counts.agreement_rate(),
+                    counts,
+                },
+            )
             .collect())
     }
 
@@ -692,7 +695,13 @@ mod tests {
     /// 2026-09-13T12:00:00Z.
     const T0: i64 = 1_789_300_800_000_000_000;
 
-    fn record(t_ns: i64, model: &str, snr: Option<f64>, label: &str, classical: Option<&str>) -> ShadowRecord {
+    fn record(
+        t_ns: i64,
+        model: &str,
+        snr: Option<f64>,
+        label: &str,
+        classical: Option<&str>,
+    ) -> ShadowRecord {
         ShadowRecord {
             schema: SHADOW_SCHEMA,
             t: Timestamp::from_unix_nanos(t_ns),
@@ -741,10 +750,14 @@ mod tests {
         let a = "amc-fsk@0.1.0#0123abcd";
         {
             let s = ShadowStore::open(&dir.0).unwrap();
-            s.append(&record(T0, a, Some(22.0), "2fsk", Some("2fsk"))).unwrap();
-            s.append(&record(T0 + 1_000, a, Some(23.0), "gfsk", Some("2fsk"))).unwrap();
-            s.append(&record(T0 + 2_000, a, Some(12.0), "2fsk", None)).unwrap();
-            s.append(&record(T0 + HOUR_NS, a, None, "2fsk", Some("2fsk"))).unwrap();
+            s.append(&record(T0, a, Some(22.0), "2fsk", Some("2fsk")))
+                .unwrap();
+            s.append(&record(T0 + 1_000, a, Some(23.0), "gfsk", Some("2fsk")))
+                .unwrap();
+            s.append(&record(T0 + 2_000, a, Some(12.0), "2fsk", None))
+                .unwrap();
+            s.append(&record(T0 + HOUR_NS, a, None, "2fsk", Some("2fsk")))
+                .unwrap();
             assert_eq!(s.stats().segments, 2);
         }
         let s = ShadowStore::open(&dir.0).unwrap();
@@ -759,7 +772,10 @@ mod tests {
         let rows = s.aggregates(&ShadowQuery::default()).unwrap();
         let cell = |bin: Option<i64>| rows.iter().find(|r| r.snr_bin_db == bin).unwrap();
         let b20 = cell(Some(20));
-        assert_eq!((b20.counts.n, b20.counts.compared, b20.counts.agree), (2, 2, 1));
+        assert_eq!(
+            (b20.counts.n, b20.counts.compared, b20.counts.agree),
+            (2, 2, 1)
+        );
         assert_eq!(b20.counts.model_unknown, 1);
         assert_eq!(b20.agreement_rate, Some(0.5));
         // No classical class: counted, not compared, and not a disagreement.
@@ -785,8 +801,10 @@ mod tests {
         let a = "amc-fsk@0.1.0#0123abcd";
         {
             let s = ShadowStore::open(&dir.0).unwrap();
-            s.append(&record(T0, a, Some(22.0), "2fsk", Some("2fsk"))).unwrap();
-            s.append(&record(T0 + 1, a, Some(22.0), "2fsk", Some("2fsk"))).unwrap();
+            s.append(&record(T0, a, Some(22.0), "2fsk", Some("2fsk")))
+                .unwrap();
+            s.append(&record(T0 + 1, a, Some(22.0), "2fsk", Some("2fsk")))
+                .unwrap();
         }
         let path = segment_path(&dir.0, hour_of(Timestamp::from_unix_nanos(T0)));
         let mut text = fs::read_to_string(&path).unwrap();
@@ -801,7 +819,8 @@ mod tests {
         assert_eq!(st.records, 1, "only the intact line survives");
         assert_eq!(st.corrupt_lines, 2, "the flipped line and the torn tail");
         assert!(fs::read_to_string(&path).unwrap().ends_with('\n'));
-        s.append(&record(T0 + 2, a, Some(22.0), "2fsk", Some("2fsk"))).unwrap();
+        s.append(&record(T0 + 2, a, Some(22.0), "2fsk", Some("2fsk")))
+            .unwrap();
         assert_eq!(s.query(&ShadowQuery::default()).unwrap().len(), 2);
     }
 
@@ -818,14 +837,31 @@ mod tests {
         )
         .unwrap();
         for h in 0..5 {
-            s.append(&record(T0 + h * HOUR_NS, a, Some(22.0), "2fsk", Some("2fsk")))
-                .unwrap();
+            s.append(&record(
+                T0 + h * HOUR_NS,
+                a,
+                Some(22.0),
+                "2fsk",
+                Some("2fsk"),
+            ))
+            .unwrap();
         }
         let st = s.stats();
-        assert_eq!(st.segments, 3, "hours 2, 3 and 4 are within 2 h of the newest");
+        assert_eq!(
+            st.segments, 3,
+            "hours 2, 3 and 4 are within 2 h of the newest"
+        );
         assert_eq!(st.oldest.unwrap().as_unix_nanos(), T0 + 2 * HOUR_NS);
-        let agg: u64 = s.aggregates(&ShadowQuery::default()).unwrap().iter().map(|r| r.counts.n).sum();
-        assert_eq!(agg, 3, "aggregates describe what is on disk, never an all-time tally");
+        let agg: u64 = s
+            .aggregates(&ShadowQuery::default())
+            .unwrap()
+            .iter()
+            .map(|r| r.counts.n)
+            .sum();
+        assert_eq!(
+            agg, 3,
+            "aggregates describe what is on disk, never an all-time tally"
+        );
 
         let line = encode_line(&record(T0, a, Some(22.0), "2fsk", Some("2fsk"))).len() as u64;
         let dir2 = TempDir::new("retain-bytes");
@@ -838,8 +874,14 @@ mod tests {
         )
         .unwrap();
         for h in 0..4 {
-            s.append(&record(T0 + h * HOUR_NS, a, Some(22.0), "2fsk", Some("2fsk")))
-                .unwrap();
+            s.append(&record(
+                T0 + h * HOUR_NS,
+                a,
+                Some(22.0),
+                "2fsk",
+                Some("2fsk"),
+            ))
+            .unwrap();
         }
         let st = s.stats();
         assert_eq!(st.segments, 2);
@@ -851,12 +893,27 @@ mod tests {
     fn only_shadow_predictions_are_kept_here() {
         let dir = TempDir::new("mode");
         let s = ShadowStore::open(&dir.0).unwrap();
-        let mut r = record(T0, "amc-fsk@0.1.0#0123abcd", Some(22.0), "2fsk", Some("2fsk"));
+        let mut r = record(
+            T0,
+            "amc-fsk@0.1.0#0123abcd",
+            Some(22.0),
+            "2fsk",
+            Some("2fsk"),
+        );
         r.prediction.mode = "active".into();
         assert!(s.append(&r).is_err());
-        let mut r2 = record(T0, "amc-fsk@0.1.0#0123abcd", Some(22.0), "2fsk", Some("2fsk"));
+        let mut r2 = record(
+            T0,
+            "amc-fsk@0.1.0#0123abcd",
+            Some(22.0),
+            "2fsk",
+            Some("2fsk"),
+        );
         r2.snr_bin_db = Some(0);
-        assert!(s.append(&r2).is_err(), "a bin that is not the SNR's bin is refused");
+        assert!(
+            s.append(&r2).is_err(),
+            "a bin that is not the SNR's bin is refused"
+        );
         let st = s.stats();
         assert_eq!((st.records, st.refused), (0, 2));
     }
@@ -865,9 +922,30 @@ mod tests {
     fn model_filters_accept_an_id_a_version_or_the_full_reference() {
         let dir = TempDir::new("filter");
         let s = ShadowStore::open(&dir.0).unwrap();
-        s.append(&record(T0, "amc-fsk@0.1.0#0123abcd", Some(22.0), "2fsk", Some("2fsk"))).unwrap();
-        s.append(&record(T0 + 1, "amc-fsk@0.2.0#89abcdef", Some(22.0), "2fsk", Some("2fsk"))).unwrap();
-        s.append(&record(T0 + 2, "amc-fskx@0.1.0#00000000", Some(22.0), "2fsk", Some("2fsk"))).unwrap();
+        s.append(&record(
+            T0,
+            "amc-fsk@0.1.0#0123abcd",
+            Some(22.0),
+            "2fsk",
+            Some("2fsk"),
+        ))
+        .unwrap();
+        s.append(&record(
+            T0 + 1,
+            "amc-fsk@0.2.0#89abcdef",
+            Some(22.0),
+            "2fsk",
+            Some("2fsk"),
+        ))
+        .unwrap();
+        s.append(&record(
+            T0 + 2,
+            "amc-fskx@0.1.0#00000000",
+            Some(22.0),
+            "2fsk",
+            Some("2fsk"),
+        ))
+        .unwrap();
         let n = |m: &str| {
             s.query(&ShadowQuery {
                 model: Some(m.into()),

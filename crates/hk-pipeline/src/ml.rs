@@ -47,14 +47,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+/// The mode vocabulary, re-exported so the composition can name it without depending on `hk-ml`.
+pub use hk_ml::MlMode;
 use hk_ml::exit_gate::{MlAttributedRow, MlGateSnapshot, ModeInForce};
 use hk_ml::host::{
     ConsumerId, HostConfig, InferenceRequest, ModelHost, ShadowEntry, ShadowSink, model_key,
 };
 use hk_ml::registry::ModelRegistry;
-use hk_ml::{MlError, MlMode, MlProvider, ModelManifest, ModelRef, ModelTask, Tensor};
-use hk_model::Detection;
+use hk_ml::{MlError, MlProvider, ModelManifest, ModelRef, ModelTask, Tensor};
 use hk_model::classify::Classification;
+use hk_model::{Detection, Timestamp};
 use hk_store::ml::{
     ClassicalDecision, SHADOW_SCHEMA, ShadowPrediction, ShadowQuery, ShadowRecord, ShadowStore,
     ShadowSubject, snr_bin_db,
@@ -108,9 +110,15 @@ impl StoreShadowSink {
                 serde_json::from_value(v)
                     .map_err(|e| MlError::Invalid(format!("classical decision: {e}")))
             })?;
+        let t = entry
+            .extra
+            .as_ref()
+            .and_then(|v| v.get("subject_t_ns"))
+            .and_then(Value::as_i64)
+            .map_or(entry.t, Timestamp::from_unix_nanos);
         Ok(ShadowRecord {
             schema: SHADOW_SCHEMA,
-            t: entry.t,
+            t,
             model: entry.model.clone(),
             consumer: entry.consumer.clone(),
             subject: ShadowSubject {
@@ -375,7 +383,8 @@ impl MlStage {
 
     /// **The producer.** Runs every model in a non-`off` mode for the family `classical` named,
     /// over `input` (`hk_classify::dl_input` of the same normalised snippet), and records what it
-    /// said through the host's durable sink. Returns how many predictions were recorded.
+    /// said through the host's durable sink. Returns how many models ran (each one's record is
+    /// appended by the sink; a sink that fails is counted by the host, never fails inference).
     ///
     /// `classical` is borrowed and never returned: nothing here can change the published row.
     pub fn observe(
@@ -408,20 +417,21 @@ impl MlStage {
             self.stats.no_input.fetch_add(1, Ordering::Relaxed);
             return 0;
         };
-        let extra = json!({ "classical": classical_decision(classical) });
+        // The record is keyed on the subject's capture time (the classification's `t`), not on
+        // the wall clock the host stamps a prediction with: retention and the time filters of
+        // `GET /api/ml/shadow` are on the same axis as every other record of the run.
+        let extra = json!({
+            "classical": classical_decision(classical),
+            "subject_t_ns": classical.t.as_unix_nanos(),
+        });
         let mut recorded = 0;
         for (host, model, _mode) in models {
-            let req = InferenceRequest::new(
-                subject.clone(),
-                DL_CONSUMER,
-                tensor.clone(),
-                SHADOW_BUDGET,
-            );
-            let before = host.stats().shadow_records;
+            let req =
+                InferenceRequest::new(subject.clone(), DL_CONSUMER, tensor.clone(), SHADOW_BUDGET);
             match host.observe(&model, &req, Some(extra.clone())) {
                 Ok(Some(_)) => {
                     self.stats.observed.fetch_add(1, Ordering::Relaxed);
-                    recorded += host.stats().shadow_records.saturating_sub(before) as usize;
+                    recorded += 1;
                 }
                 Ok(None) => {}
                 Err(_) => {
@@ -443,8 +453,14 @@ impl MlStage {
                 404,
                 "not_found",
                 match version {
-                    Some(v) => format!("{id}@{v} is not installed in {}", self.registry.root().display()),
-                    None => format!("{id} is not installed in {}", self.registry.root().display()),
+                    Some(v) => format!(
+                        "{id}@{v} is not installed in {}",
+                        self.registry.root().display()
+                    ),
+                    None => format!(
+                        "{id} is not installed in {}",
+                        self.registry.root().display()
+                    ),
                 },
             )),
             1 => Ok(candidates.remove(0).clone()),
@@ -464,12 +480,6 @@ impl MlStage {
         }
     }
 
-    fn host_for(&self, key: &str) -> Option<&ModelHost> {
-        self.hosts()
-            .into_iter()
-            .find(|h| h.loaded().iter().any(|m| model_key(&m.model) == key))
-    }
-
     /// Sets a `(model, consumer)` mode, loading the model out of the registry when it needs to
     /// run and unloading it when nothing uses it any more. Persists the result.
     ///
@@ -484,7 +494,10 @@ impl MlStage {
     fn apply(&self, req: &ModeRequest) -> Result<Value, MlStageFailure> {
         let _changes = lock(&self.changes);
         let manifest = self.resolve(&req.id, req.version.as_deref())?;
-        let consumer = req.consumer.clone().unwrap_or_else(|| manifest.consumer.clone());
+        let consumer = req
+            .consumer
+            .clone()
+            .unwrap_or_else(|| manifest.consumer.clone());
         if consumer != manifest.consumer {
             return Err(MlStageFailure::new(
                 400,
@@ -706,7 +719,11 @@ impl MlStage {
             .into_iter()
             .map(|r| {
                 let mut v = serde_json::to_value(&r).unwrap_or_default();
+                // The API's time law (docs/api.md): seconds under a bare name, nanoseconds only
+                // under `_ns` — so the stored `t` (ns) is served as `t_s` and `t_ns`.
                 if let Some(o) = v.as_object_mut() {
+                    o.remove("t");
+                    o.insert("t_ns".into(), json!(r.t.as_unix_nanos()));
                     o.insert("t_s".into(), json!(r.t.as_unix_nanos() as f64 / 1e9));
                     o.insert("agrees".into(), json!(r.agrees()));
                 }
@@ -752,10 +769,358 @@ impl MlStage {
     }
 }
 
+/// Installs an **untrained probe model** for `family` into the registry under `data_dir` and
+/// returns its reference: a fixed-weight `hk-mlp@1` network over [`hk_classify::dl::DL_INPUT_DIM`]
+/// inputs with the given within-family `labels`, consumer [`DL_CONSUMER`], and no metrics or
+/// enable evidence.
+///
+/// It exists to exercise this stage's **plumbing** — registry, mode, producer, durable sink,
+/// routes — end to end, in tests and as an operator smoke check. Its outputs are deterministic
+/// and meaningless: it is not a classifier, it can only ever be put in `shadow` (no evidence, and
+/// the MLP provider is never conformant), and its id (`probe-<family>`) says so on every record.
+pub fn install_probe_model(
+    data_dir: &Path,
+    family: &str,
+    labels: &[&str],
+) -> Result<ModelRef, MlError> {
+    let dim = hk_classify::dl::DL_INPUT_DIM;
+    let k = labels.len();
+    // A deterministic LCG in (-0.5, 0.5): fixed weights, so every run of a test sees the same
+    // numbers, and nothing about them is learned.
+    let mut state: u32 = 0x5eed_0844;
+    let mut next = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+    };
+    let weight: Vec<f32> = (0..dim * k).map(|_| next() * 0.2).collect();
+    let weights = json!({
+        "format": hk_ml::mlp::MLP_FORMAT,
+        "input_dim": dim,
+        "mean": vec![0.0_f32; dim],
+        "scale": vec![1.0_f32; dim],
+        "layers": [{
+            "in_dim": dim,
+            "out_dim": k,
+            "weight": weight,
+            "bias": vec![0.0_f32; k],
+            "activation": "identity",
+        }],
+        "trained_on": "untrained probe (hk_pipeline::ml::install_probe_model)",
+    });
+    let bytes = serde_json::to_vec(&weights)
+        .map_err(|e| MlError::Invalid(format!("probe weights do not serialise: {e}")))?;
+    let sha256 = hk_ml::registry::sha256_hex(&bytes);
+    let manifest = ModelManifest {
+        schema: hk_ml::ML_SCHEMA,
+        model: ModelRef {
+            id: format!("probe-{family}"),
+            version: "0.0.1".into(),
+            sha8: sha256[..8].to_owned(),
+        },
+        sha256,
+        task: ModelTask::FamilyClass,
+        consumer: DL_CONSUMER.into(),
+        taxonomy: Some(hk_model::classify::TaxonomyRef::current()),
+        family: Some(family.to_owned()),
+        labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+        open_set: hk_ml::OpenSetSpec {
+            method: hk_ml::OpenSetMethod::Energy,
+            temperature: 1.0,
+            threshold: -5.0,
+            calibrated_on: "uncalibrated probe".into(),
+        },
+        precision: hk_ml::Precision::Fp32,
+        metrics_ref: None,
+        enable_evidence: None,
+    };
+    ModelRegistry::new(registry_dir(data_dir)).install(&manifest, &bytes)?;
+    Ok(manifest.model)
+}
+
 fn host_conformant(host: &ModelHost) -> bool {
     match host.provider() {
         hk_ml::MlProviderKind::CpuMlp => hk_ml::mlp::MlpProvider.conformant(),
         hk_ml::MlProviderKind::CpuTract => hk_ml::tract_provider::TractProvider.conformant(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hk_ml::exit_gate::GateViolation;
+    use hk_model::classify::{
+        CLASSIFICATION_SCHEMA, ClassCall, ClassProvenance, Coarse, HK_MOD_V1, LabelP, Stage,
+        SuspectFlags, TaxonomyRef, UNKNOWN, entropy_norm,
+    };
+    use hk_model::{DetectionFlags, DetectionId, ProvenanceId, SurveyId, TimeRange};
+
+    const FSK: [&str; 4] = ["2fsk", "gfsk", "msk", "4fsk"];
+    /// 2026-09-13T12:00:20Z — a capture time well away from the wall clock.
+    const T_NS: i64 = 1_789_300_820_000_000_000;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "hk-pipeline-ml-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn detection() -> Detection {
+        Detection {
+            id: DetectionId::new(),
+            survey_id: SurveyId::new(),
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(T_NS),
+                Timestamp::from_unix_nanos(T_NS + 1_000_000_000),
+            ),
+            f_center_hz: 915e6,
+            obw_hz: 40e3,
+            xdb_bandwidth_hz: None,
+            xdb_level_db: None,
+            snr_peak_db: 24.0,
+            snr_mean_db: 21.0,
+            peak_level_dbfs: -18.0,
+            peak_level_dbm: None,
+            sk: None,
+            clip_count: 0,
+            detector_version: "hk-detect/cfar@0.1.0;pfa=1e-6".into(),
+            provenance_ref: ProvenanceId::new(),
+            flags: DetectionFlags::default(),
+        }
+    }
+
+    fn classification(family: &str) -> Classification {
+        let posterior = vec![
+            LabelP {
+                label: family.to_owned(),
+                p: 0.8,
+            },
+            LabelP {
+                label: UNKNOWN.to_owned(),
+                p: 0.2,
+            },
+        ];
+        Classification {
+            schema: CLASSIFICATION_SCHEMA,
+            t: Timestamp::from_unix_nanos(T_NS),
+            taxonomy: TaxonomyRef::current(),
+            input: None,
+            coarse: Coarse::Digital,
+            entropy_norm: entropy_norm(&posterior, HK_MOD_V1.families.len() + 1),
+            likelihood: posterior.clone(),
+            posterior,
+            prior: None,
+            family: family.to_owned(),
+            confidence: 0.8,
+            class: Some(ClassCall {
+                label: "2fsk".into(),
+                p: 0.7,
+                dist: Vec::new(),
+                stage: Stage::FeatureTree,
+            }),
+            open_set_score: 0.2,
+            stage: Stage::FeatureTree,
+            provenance: ClassProvenance {
+                rules: "hk-classify/tree@1".into(),
+                features_version: hk_classify::FEATURES_VERSION,
+                features_ref: None,
+                ml: None,
+                snr_db: Some(24.0),
+                snr_gate_db: 20.0,
+                gated: false,
+                thresholds: "thresholds@1".into(),
+                suspect: SuspectFlags::default(),
+                power_mode: None,
+            },
+            flags: Vec::new(),
+            reasons: Vec::new(),
+        }
+    }
+
+    fn input() -> Vec<f32> {
+        (0..hk_classify::dl::DL_INPUT_DIM)
+            .map(|i| (i as f32 * 0.37).sin())
+            .collect()
+    }
+
+    fn shadow(id: &str) -> ModeRequest {
+        ModeRequest {
+            id: id.into(),
+            mode: MlMode::Shadow,
+            ..ModeRequest::default()
+        }
+    }
+
+    /// **The sink half of T-844's non-vacuity pair.** A prediction the producer makes is on disk
+    /// in hk-store's shadow log, readable by a store opened afresh — not in a buffer that dies
+    /// with the stage. Swap [`StoreShadowSink`] for `hk_ml::host::MemoryShadowSink` in
+    /// [`MlStage::open`] and this fails; the pipeline's wiring is not involved (that half is
+    /// `tests/ml_shadow.rs`).
+    #[test]
+    fn a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage() {
+        let dir = TempDir::new("durable");
+        let probe = install_probe_model(&dir.0, "fsk", &FSK).unwrap();
+        let det = detection();
+        let c = classification("fsk");
+        {
+            let stage = MlStage::open(&dir.0).unwrap();
+            assert!(
+                stage.is_idle(),
+                "installed is not on: nothing runs until a mode is set"
+            );
+            assert!(!stage.wants("fsk"));
+            stage.set_mode(&shadow(&probe.id)).unwrap();
+            assert!(stage.wants("fsk"));
+            assert_eq!(stage.observe(Some(&det), &c, Some(&input())), 1);
+            assert_eq!(stage.stats.observed.load(Ordering::Relaxed), 1);
+        }
+
+        let store = ShadowStore::open(shadow_dir(&dir.0)).unwrap();
+        let recs = store.query(&ShadowQuery::default()).unwrap();
+        assert_eq!(recs.len(), 1, "the record is in hk-store, not in memory");
+        let r = &recs[0];
+        assert!(r.model.starts_with("probe-fsk@0.0.1#"), "{}", r.model);
+        assert_eq!(r.consumer, DL_CONSUMER);
+        assert_eq!(r.prediction.mode, "shadow");
+        assert!(FSK.contains(&r.prediction.label.as_str()));
+        assert_eq!(r.subject.detection, det.id.to_string());
+        assert_eq!(r.classical.family, "fsk");
+        assert_eq!(r.classical.class.as_deref(), Some("2fsk"));
+        assert_eq!(r.classical.stage, "feature-tree");
+        assert_eq!((r.snr_db, r.snr_bin_db), (Some(24.0), Some(20)));
+        assert_eq!(
+            r.t.as_unix_nanos(),
+            T_NS,
+            "keyed on the subject's capture time, not the wall clock"
+        );
+
+        // The mode was persisted: a new stage over the same data directory runs the model again
+        // without anyone re-issuing the PUT, and serves the record it finds.
+        let stage = MlStage::open(&dir.0).unwrap();
+        assert!(stage.wants("fsk"));
+        let v = stage.shadow_json(&ShadowQuery::default()).unwrap();
+        assert_eq!(v["records"].as_array().unwrap().len(), 1);
+        assert_eq!(v["aggregates"][0]["n"], 1);
+        assert_eq!(v["aggregates"][0]["family"], "fsk");
+        let m = stage.models_json();
+        assert_eq!(m["models"][0]["modes"][0]["mode"], "shadow");
+        assert_eq!(m["models"][0]["loaded"], true);
+    }
+
+    /// Shadow runs within the family the classical cascade named, on an admitted CFAR subject,
+    /// and nowhere else — and an idle stage computes nothing.
+    #[test]
+    fn a_model_runs_only_inside_the_family_the_cascade_named() {
+        let dir = TempDir::new("scope");
+        let probe = install_probe_model(&dir.0, "fsk", &FSK).unwrap();
+        let stage = MlStage::open(&dir.0).unwrap();
+        let det = detection();
+        assert_eq!(
+            stage.observe(Some(&det), &classification("fsk"), Some(&input())),
+            0
+        );
+        assert_eq!(
+            stage.stats.offered.load(Ordering::Relaxed),
+            0,
+            "idle: nothing offered"
+        );
+
+        stage.set_mode(&shadow(&probe.id)).unwrap();
+        assert!(!stage.wants("analog"));
+        assert!(!stage.wants(UNKNOWN), "a model never chooses the family");
+        assert_eq!(
+            stage.observe(Some(&det), &classification("analog"), Some(&input())),
+            0
+        );
+        assert_eq!(
+            stage.observe(Some(&det), &classification(UNKNOWN), Some(&input())),
+            0
+        );
+        // A classification from a learned stage is never a model's input.
+        let mut from_dl = classification("fsk");
+        from_dl.stage = Stage::Dl;
+        assert_eq!(stage.observe(Some(&det), &from_dl, Some(&input())), 0);
+        assert_eq!(stage.stats.not_admitted.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            stage.observe(None, &classification("fsk"), Some(&input())),
+            0
+        );
+        assert_eq!(stage.stats.no_detection.load(Ordering::Relaxed), 1);
+        assert_eq!(stage.observe(Some(&det), &classification("fsk"), None), 0);
+        assert_eq!(stage.stats.no_input.load(Ordering::Relaxed), 1);
+        assert_eq!(stage.store().stats().records, 0);
+    }
+
+    /// `active` needs ADR-0016 §4.6's evidence **and** a conformant provider; `force` gets past
+    /// both, is recorded on the mode, and is exactly the state §7's exit gate reports.
+    #[test]
+    fn active_is_refused_without_evidence_and_a_forced_active_fails_the_exit_gate() {
+        let dir = TempDir::new("active");
+        let probe = install_probe_model(&dir.0, "fsk", &FSK).unwrap();
+        let stage = MlStage::open(&dir.0).unwrap();
+        let active = ModeRequest {
+            mode: MlMode::Active,
+            ..shadow(&probe.id)
+        };
+        let e = stage.set_mode(&active).unwrap_err();
+        assert_eq!((e.status, e.code), (409, "needs_evidence"), "{}", e.message);
+        assert!(stage.is_idle(), "a refused change leaves nothing on");
+
+        let e = stage
+            .set_mode(&ModeRequest {
+                id: "no-such-model".into(),
+                ..shadow("x")
+            })
+            .unwrap_err();
+        assert_eq!((e.status, e.code), (404, "not_found"));
+        let e = stage
+            .set_mode(&ModeRequest {
+                consumer: Some("someone-else".into()),
+                ..shadow(&probe.id)
+            })
+            .unwrap_err();
+        assert_eq!((e.status, e.code), (400, "invalid"));
+
+        let v = stage
+            .set_mode(&ModeRequest {
+                force: true,
+                ..active
+            })
+            .unwrap();
+        assert_eq!(
+            (v["mode"].as_str(), v["forced"].as_bool()),
+            (Some("active"), Some(true))
+        );
+        let snap = stage.gate_snapshot(Vec::new(), 0);
+        assert!(
+            snap.check()
+                .iter()
+                .any(|v| matches!(v, GateViolation::ActiveWithoutEnableEvidence { .. })),
+            "{}",
+            snap.summary()
+        );
+
+        // Off unloads it and the persisted table no longer names it.
+        stage
+            .set_mode(&ModeRequest {
+                mode: MlMode::Off,
+                ..shadow(&probe.id)
+            })
+            .unwrap();
+        assert!(stage.is_idle());
+        assert!(MlStage::open(&dir.0).unwrap().is_idle());
     }
 }

@@ -91,6 +91,16 @@ const MAX_RETAIN_SAMPLES: usize = 16 << 20;
 /// about to lose anyway.
 const MAX_PENDING_GROUPS: usize = 4096;
 
+/// The burst the C15 cascade runs on at detach (T-247): its samples, time, provenance and snippet
+/// request — and (T-844) the CFAR detection it came from, which the C38 gate needs.
+type BestBurst = (
+    Vec<Complex<i8>>,
+    SampleTime,
+    ProvenanceHandle,
+    SnippetRequest,
+    DetectionId,
+);
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     shared: Arc<Shared>,
@@ -130,13 +140,7 @@ pub(crate) fn run(
     // is deterministic and blind). Kept as an owned copy of that burst's samples alone, bounded by
     // one burst, because `buf` is drained as the chain advances.
     // T-844: with the CFAR detection that burst came from, which the C38 gate needs.
-    let mut best: Option<(
-        Vec<Complex<i8>>,
-        SampleTime,
-        ProvenanceHandle,
-        SnippetRequest,
-        DetectionId,
-    )> = None;
+    let mut best: Option<BestBurst> = None;
     // Bursts already offered to burst taps (T-060) and when framing was last inferred for them.
     let mut streamed = 0usize;
     let mut last_stream: Option<Instant> = None;
@@ -288,7 +292,7 @@ pub(crate) fn run(
     // an idle stage adds no wait to the chain.
     let ml = shared.ml.as_deref().filter(|m| !m.is_idle());
     let ml_detection = ml
-        .and_then(|_| best.as_ref())
+        .and(best.as_ref())
         .and_then(|b| super::stored_detection(&shared, Some(b.4)));
     let mut shadow: Option<(hk_model::classify::Classification, Option<Vec<f32>>)> = None;
     let written = {
