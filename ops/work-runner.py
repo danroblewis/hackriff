@@ -347,6 +347,11 @@ TESTING PROTOCOL (CLAUDE.md): targeted tests only - `just test-crate <crate>`, `
 -E 'binary(<name>)'`, `just test-ui`. NEVER `just gate`, `just acceptance` or the full suite (a hook blocks
 them). Never end a turn waiting on a background command; block on its output file instead.
 
+READING ADRs (T-620): read the capability cards and ADRs the ticket names, but an ADR over ~300 lines
+(0011-0013, 0015-0017, 0021, 0022: 11-28k tokens each) is read BY SECTION - where the ticket cites one
+("ADR-0016 section 6"), read that; otherwise list them with `grep -n '^##' docs/adr/<file>` and read only
+the ones your change touches. Never read docs/01-05 end to end.
+
 FILING RULE (user, 2026-09-22): do not file new tickets for things you merely suspect. An OBSERVED failure
 you cannot fix in scope goes in your result: text with the exact evidence; the coordinator decides.
 
