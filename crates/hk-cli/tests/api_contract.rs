@@ -2883,61 +2883,162 @@ fn outputs_list_and_unknown_file_answer_as_documented() {
     stop_server(serving);
 }
 
-/// T-190/T-546: `POST /api/analyze` validates its target — a selection, an inventory emitter
-/// (merged ids resolve to the live entity like `/api/inventory/{id}`), or an ad-hoc band.
-///
-/// A **selection or band** still answers `501`: the general region-analyze engine over acquired
-/// IQ (ADR-0015 §5.1) is not built. An **emitter** answers `200` with its analysis, and an
-/// emitter nothing has analysed answers `200` with `resolution.kind: "not-searched"` — which is
-/// *un-looked-at*, a different fact from *looked at and found nothing*, and the two must never be
-/// served alike (ADR-0021 §7A.4). The 101.3 MHz station here is analogue and has no synthesis
-/// row, so it is exactly that case.
-#[test]
-fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
-    let (_dir_guard, serving, addr) = start_server();
+/// A POST that keeps the response head: `(status, head, body)`.
+fn post_with_head(addr: SocketAddr, path: &str, body: &str) -> (u16, String, Value) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(
+        s,
+        "POST {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+    let status = head[9..12].parse().unwrap();
+    (
+        status,
+        head.to_owned(),
+        serde_json::from_str(body).unwrap_or(Value::Null),
+    )
+}
 
-    // A valid band target: 501 not_implemented once it validates. No engine runs.
-    let (st, v) = post(
+/// Polls `GET /api/analyze/{id}` until the job has finished; the finished job.
+fn wait_job(addr: SocketAddr, id: &str) -> Value {
+    let mut last = Value::Null;
+    wait_for(
+        "the analyze job to finish",
+        Duration::from_secs(120),
+        || {
+            let (st, v) = get(addr, &format!("/api/analyze/{id}"));
+            assert_eq!(st, 200, "{v}");
+            let done = v["ended"].is_number()
+                && matches!(v["state"].as_str(), Some("done" | "failed" | "cancelled"));
+            last = v;
+            done
+        },
+    );
+    last
+}
+
+/// T-190/T-546/T-859 (MAUTO M-8, ADR-0015 §5.1–§5.2, ADR-0021 §4, §7A.4): `/api/analyze` jobs over
+/// the served run's IQ ring, and an emitter's persisted analysis.
+///
+/// - A **band** or **selection** target (or an emitter plus a job field) answers `202 {"job"}`
+///   with `Location: /api/analyze/{id}`; the job acquires from the ring — its `window` is what was
+///   read — and, because stage evaluation over IQ (MAUTO M-2) is not built, ends `failed` with
+///   `error.code: "no_evaluator"` and `resolution.kind: "not-searched"`, never `unknown`.
+/// - A bare **`{"emitter_id"}`** still answers `200` with the persisted analysis (T-546), and an
+///   emitter nothing has analysed says `not-searched`.
+/// - `GET /api/analyze` lists newest first; `GET /api/analyze/{id}/trace` is the trace fetch;
+///   `DELETE` cancels or forgets, audited `analyze_cancel`; a forgotten id is `410 gone`, an
+///   unissued one `404 not_found`; a window older than the ring is `410 evicted`.
+/// - `/ws/analyze/{id}` streams `hackriff.analyze/1` and ends with the `done` record.
+#[test]
+fn analyze_jobs_run_over_the_ring_and_the_emitter_read_distinguishes_not_searched() {
+    let (_dir_guard, serving, addr) = start_server();
+    let (lo, hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
+
+    // ---- a band job: 202, Location, then acquire → no_evaluator ----
+    let (st, head, v) = post_with_head(
         addr,
         "/api/analyze",
-        r#"{"band": {"f_lo": 101.2e6, "f_hi": 101.4e6}}"#,
+        &json!({ "band": { "f_lo": lo, "f_hi": hi }, "profile": "quick", "live_s": 1.0 })
+            .to_string(),
     );
-    assert_eq!(
-        (st, v["code"].as_str()),
-        (501, Some("not_implemented")),
-        "{v}"
-    );
+    assert_eq!(st, 202, "{v}");
+    let id = v["job"]["id"].as_str().unwrap().to_owned();
     assert!(
-        v["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("not implemented")),
-        "{v}",
+        head.lines()
+            .any(|l| l == format!("Location: /api/analyze/{id}")),
+        "{head}"
     );
+    assert_eq!(v["job"]["profile"], json!("quick"));
+    assert_eq!(
+        v["job"]["target"],
+        json!({ "band": { "f_lo": lo, "f_hi": hi } })
+    );
+    // The stream, opened while the job is young, ends with `done`.
+    let mut ws = connect_ws(addr, &format!("/ws/analyze/{id}?token={TOKEN}")).unwrap();
+    let header: Value = match ws.read().unwrap() {
+        Message::Text(t) => serde_json::from_str(t.as_str()).unwrap(),
+        other => panic!("expected the header, got {other:?}"),
+    };
+    assert_eq!(header["kind"], json!("messages"));
+    assert_eq!(header["message_schema"], json!("hackriff.analyze/1"));
+    let job = wait_job(addr, &id);
+    assert_eq!(job["state"], json!("failed"), "{job}");
+    assert_eq!(job["error"]["code"], json!("no_evaluator"), "{job}");
+    assert_eq!(job["window"]["source"], json!("live"), "{job}");
+    assert!(
+        job["window"]["samples"].as_u64().is_some_and(|n| n > 0),
+        "coverage is what was read: {job}"
+    );
+    assert_eq!(job["resolution"]["kind"], json!("not-searched"), "{job}");
+    assert!(
+        job["channel"]["center_hz"]
+            .as_f64()
+            .is_some_and(|c| (c - STATION_HZ).abs() < 1.0),
+        "{job}"
+    );
+    let mut kinds = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline && kinds.last() != Some(&"done".to_owned()) {
+        match ws.read() {
+            Ok(Message::Text(t)) => {
+                let r: Value = serde_json::from_str(t.as_str()).unwrap();
+                if let Some(k) = r["metadata"]["type"].as_str() {
+                    assert_eq!(r["metadata"]["job_id"], json!(id), "{r}");
+                    kinds.push(k.to_owned());
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(kinds.last().map(String::as_str), Some("done"), "{kinds:?}");
+    let _ = ws.close(None);
 
-    // A band target with a history time window: still just a stub answer.
+    // The trace fetch answers for a job that searched nothing: no nodes, and it says so.
+    let (st, t) = get(addr, &format!("/api/analyze/{id}/trace?limit=10"));
+    assert_eq!(st, 200, "{t}");
+    assert_eq!(t["nodes"], json!([]), "{t}");
+    assert_eq!(t["job_id"], json!(id), "{t}");
+    let (st, t) = get(addr, &format!("/api/analyze/{id}/trace?stage=S9"));
+    assert_eq!((st, t["code"].as_str()), (400, Some("invalid")), "{t}");
+
+    // ---- an explicit window older than the ring: 410 evicted, and no job ----
     let (st, v) = post(
         addr,
         "/api/analyze",
         r#"{"band": {"f_lo": 101.2e6, "f_hi": 101.4e6, "t_lo": 0.0, "t_hi": 10.0}}"#,
     );
-    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+    assert_eq!((st, v["code"].as_str()), (410, Some("evicted")), "{v}");
 
-    // A valid selection target: also 501, not a validation error.
+    // ---- a selection job ----
     let (st, s) = post(
         addr,
         "/api/selections",
-        r#"{"name": "analyze target", "f_lo": 101.2e6, "f_hi": 101.4e6}"#,
+        &json!({ "name": "analyze target", "f_lo": lo, "f_hi": hi }).to_string(),
     );
     assert_eq!(st, 201, "{s}");
     let selection_id = s["id"].as_str().unwrap().to_owned();
     let (st, v) = post(
         addr,
         "/api/analyze",
-        &json!({ "selection_id": selection_id }).to_string(),
+        &json!({ "selection_id": selection_id, "live_s": 1.0 }).to_string(),
     );
-    assert_eq!((st, v["code"].as_str()), (501, Some("not_implemented")));
+    assert_eq!(st, 202, "{v}");
+    let sel_job = v["job"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        v["job"]["profile"],
+        json!("standard"),
+        "the default profile"
+    );
 
-    // A valid emitter target (the blind-detected station, no frequency lookup).
+    // ---- the emitter: the bare read, and a job ----
     let emitter_id = {
         let mut found = None;
         wait_for(
@@ -2982,9 +3083,73 @@ fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
         json!(null),
         "an aborted-or-absent look rules nothing out: {v}"
     );
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        &json!({ "emitter_id": emitter_id, "profile": "quick", "source": "live", "live_s": 1.0 })
+            .to_string(),
+    );
+    assert_eq!(st, 202, "{v}");
+    let em_job = v["job"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(v["job"]["emitter_id"], json!(emitter_id), "{v}");
 
-    // 400 invalid: zero target forms, several target forms, an unknown field, a malformed band,
-    // f_lo >= f_hi.
+    // ---- list, newest first; a state filter; a bad state ----
+    let (st, l) = get(addr, "/api/analyze");
+    assert_eq!(st, 200, "{l}");
+    let ids: Vec<&str> = l["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|j| j["id"].as_str())
+        .collect();
+    assert_eq!(ids, [em_job.as_str(), sel_job.as_str(), id.as_str()], "{l}");
+    let (st, l) = get(addr, "/api/analyze?state=failed");
+    assert_eq!(st, 200, "{l}");
+    assert!(
+        l["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["state"] == json!("failed")),
+        "{l}"
+    );
+    let (st, v) = get(addr, "/api/analyze?state=sleeping");
+    assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{v}");
+
+    // ---- cancel: a queued or running job becomes `cancelled` at once ----
+    let (st, v) = delete(addr, &format!("/api/analyze/{em_job}"));
+    assert_eq!(st, 200, "{v}");
+    if v["forgotten"] == json!(false) {
+        // Queued or running when the DELETE landed: cancelled, finally, at once.
+        assert_eq!(v["job"]["state"], json!("cancelled"), "{v}");
+        assert_eq!(wait_job(addr, &em_job)["state"], json!("cancelled"));
+    }
+    wait_job(addr, &sel_job);
+    // A finished job is forgotten by DELETE: then it is `410 gone`, never `404`.
+    let (st, v) = delete(addr, &format!("/api/analyze/{id}"));
+    assert_eq!((st, v["forgotten"].as_bool()), (200, Some(true)), "{v}");
+    let (st, v) = get(addr, &format!("/api/analyze/{id}"));
+    assert_eq!((st, v["code"].as_str()), (410, Some("gone")), "{v}");
+    let (st, v) = get(addr, &format!("/api/analyze/{id}/trace"));
+    assert_eq!((st, v["code"].as_str()), (410, Some("gone")), "{v}");
+    for unissued in ["a999", "x1", "a0"] {
+        let (st, v) = get(addr, &format!("/api/analyze/{unissued}"));
+        assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+    }
+
+    // ---- the audit log names the actions ----
+    let audit = std::fs::read_to_string(serving.handle.data_dir().join("control-audit.jsonl"))
+        .unwrap_or_default();
+    let actions: Vec<String> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|e| e["action"].as_str().map(str::to_owned))
+        .collect();
+    for want in ["analyze_start", "analyze_cancel", "analyze"] {
+        assert!(actions.iter().any(|a| a == want), "{want}: {actions:?}");
+    }
+
+    // ---- 400 invalid ----
     for bad in [
         r#"{}"#,
         r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "emitter_id": "x"}"#,
@@ -2993,7 +3158,12 @@ fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
         r#"{"band": {"f_lo": 1e6, "f_hi": 1e6}}"#,
         r#"{"band": {"f_hi": 1e6}}"#,
         r#"{"band": {"f_lo": 1e6, "f_hi": 2e6, "extra": 1}}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6, "t_lo": 5.0}}"#,
         r#"{"band": "nope"}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "profile": "turbo"}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "source": "tape"}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "live_s": 60}"#,
+        r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}, "templates": {"only": "x"}}"#,
     ] {
         let (st, v) = post(addr, "/api/analyze", bad);
         assert_eq!(
@@ -3003,8 +3173,8 @@ fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
         );
     }
 
-    // 404 not_found: an unknown (but well-formed) selection/emitter id, and a malformed one (the
-    // same shape a malformed `/api/inventory/{id}` path answers with).
+    // ---- 404 not_found: an unknown (but well-formed) selection/emitter id, and a malformed one
+    // (the same shape a malformed `/api/inventory/{id}` path answers with) ----
     for bad in [
         json!({ "selection_id": SelectionId::new().to_string() }),
         json!({ "emitter_id": EmitterId::new().to_string() }),
@@ -3019,7 +3189,19 @@ fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
         );
     }
 
-    // 401: no token, and the query-string token (mutating requests need the header).
+    // ---- 409 outside_window: a live job whose band the tuned window cannot contain ----
+    let (st, v) = post(
+        addr,
+        "/api/analyze",
+        r#"{"band": {"f_lo": 2.0e9, "f_hi": 2.001e9}, "source": "live"}"#,
+    );
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (409, Some("outside_window")),
+        "{v}"
+    );
+
+    // ---- 401: no token; mutating requests need the header ----
     let (st, v) = call(
         addr,
         "POST",
@@ -3028,9 +3210,19 @@ fn analyze_validates_targets_and_distinguishes_not_searched_from_unknown() {
         Some(r#"{"band": {"f_lo": 1e6, "f_hi": 2e6}}"#),
     );
     assert_eq!(st, 401, "{v}");
+    let (st, v) = call(
+        addr,
+        "DELETE",
+        &format!("/api/analyze/{sel_job}"),
+        None,
+        None,
+    );
+    assert_eq!(st, 401, "{v}");
 
-    // Wrong method: 405 with Allow.
-    let (st, v) = get(addr, "/api/analyze");
+    // ---- wrong method: 405 with Allow ----
+    let (st, v) = put(addr, "/api/analyze", "{}");
+    assert_eq!(st, 405, "{v}");
+    let (st, v) = post(addr, &format!("/api/analyze/{sel_job}"), "{}");
     assert_eq!(st, 405, "{v}");
 
     stop_server(serving);

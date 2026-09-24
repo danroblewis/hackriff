@@ -46,8 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback, PipelineRecordings,
-    PipelineRetuner, PipelineRunControl,
+    PipelineAnalyze, PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback,
+    PipelineRecordings, PipelineRetuner, PipelineRunControl,
 };
 use crate::signal;
 
@@ -1112,6 +1112,23 @@ pub fn serve_api(
         )),
         hk_pipeline::playback::PlaybackConfig::default(),
     ));
+    // T-859 (MAUTO M-8): region-analyze jobs over the run's IQ ring. No search backend yet —
+    // stage evaluation over IQ is MAUTO M-2 — so a job acquires and then says it searched nothing.
+    let analyze = {
+        let tuned_ctl = controller.clone();
+        Arc::new(hk_pipeline::synth::jobs::AnalyzeJobs::new(
+            Arc::new(hk_pipeline::synth::jobs::RingJobEnv::new(
+                handle.iq_buffer(),
+                Box::new(move || {
+                    let s = tuned_ctl.status();
+                    (!s.finished)
+                        .then(|| hk_model::FreqRange::centered(s.center_hz, s.sample_rate_hz))
+                }),
+            )),
+            None,
+            hk_pipeline::synth::jobs::PowerPolicy::Mains,
+        ))
+    };
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
@@ -1122,7 +1139,13 @@ pub fn serve_api(
         .with(
             "playback",
             Arc::clone(&playback) as Arc<dyn hk_api::stream::StreamOpener>,
-        ); // T-463
+        ) // T-463
+        .with(
+            "analyze",
+            Arc::new(hk_pipeline::synth::jobs::AnalyzeOpener(Arc::clone(
+                &analyze,
+            ))) as Arc<dyn hk_api::stream::StreamOpener>,
+        ); // T-859
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
@@ -1186,6 +1209,7 @@ pub fn serve_api(
         watch: Some(Arc::new(PipelineWatch(Arc::clone(&alarms)))),        // T-166
         anomalies: Some(Arc::new(PipelineAnomalies(alarms))),             // T-122
         iq_buffer: Some(Arc::new(PipelineIqBuffer(handle.iq_buffer()))),  // T-157
+        analyze: Some(Arc::new(PipelineAnalyze(analyze))),                // T-859
         datasets: Some(Arc::new(PipelineDatasets::new(
             handle.data_dir().join("hackriff.db"),
             handle.iq_buffer(),

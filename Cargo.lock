@@ -1026,6 +1026,7 @@ dependencies = [
  "hk-recipe",
  "hk-store",
  "hk-stream",
+ "hk-synth",
  "libc",
  "num-complex",
  "rusqlite",
