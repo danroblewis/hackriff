@@ -7521,7 +7521,7 @@ tasks:
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
       been tried'
-    status: blocked
+    status: todo
     priority: normal
     deps:
     - T-343
@@ -7537,9 +7537,10 @@ tasks:
       that is a real defect: a half-opened stream would produce frames nobody can attribute, and the provenance
       work (T-302, T-303, T-304, T-305, T-325) all assumes a device is opened once or not at all'
     needs: hardware
-    blocked_on: "a HIL session with the HackRF free: stop the user demo on :8899 (it holds the radio), run two hk serve --device hackrf processes back to back, then restore the demo. Deferred per the 09-22 directive - schedule after the 09-23 burndown with the user."
     notes: |
       2026-09-22 (coordinator): worker handed back BLOCKED - the test needs the real HackRF, which the :8899 demo holds. Not run: T-356 is on the 09-22 defer list (speculative, no observed failure), and taking the demo down is the user's call. needs: hardware so the runner stops dispatching it.
+
+      2026-09-24 11:55 USER (via supervisor): approves taking the HackRF anytime. Status todo; stays needs: hardware so the work runner does not dispatch it - the coordinator runs it as a capture-agent HIL slot: stop the :8899 demo (exact pid, never a broad pkill), start two hk serve --device hackrf back to back, assert the second gets a clean device-in-use (not a libusb error or a half-open stream), then release the radio; the supervisor restores the demo.
     branch: task-t356
   - id: T-357
     milestone: M2-hardening
@@ -17070,9 +17071,8 @@ tasks:
     commit: a3f9c0e9
   - id: T-544
     milestone: MAUTO
-    title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
-    status: blocked
-    blocked_on: "user - BART is not receivable at 1177 Market St, San Francisco with the current antenna position (docs/19 section 7; re-measured 2026-09-20 at the corrected amp-ON gain, with a CFAR local floor: 0 of 16 BART channels above +4 dB while neighbours 12.5 kHz away run 43-93% duty). Location is confirmed in range, so the fix is a physical RF change - antenna to a window/outdoors/higher, or a proper 850 MHz antenna - which is reserved to the user. Alternative: approve the blind wideband 100%-duty hunt as SIGNAL-087's first instance instead of BART."
+    title: "SIGNAL-087 first real instance: blind wideband hunt for a continuously-keyed (100%-duty) channel, captured as a SigMF fixture with HIDDEN ground truth (BART skipped)"
+    status: todo
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -17105,6 +17105,8 @@ tasks:
     notes: |
       Filed 2026-09-20. Phases: T-544 research+capture, T-545 failing blind tests, T-546 make them pass.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 11:55 USER (via supervisor): 'skip BART' - BART was only an idea from a friend's capture. RE-SCOPED to the alternative the blocked_on already named: the blind wideband 100%-duty hunt as SIGNAL-087's first instance. NEW DEFINITION OF DONE: (a) BLIND hunt, no database lookup: sweep the trunked-LMR family the HackRF can reach (VHF 136-174, UHF 380-512, 700 MHz 769-775, 800 MHz 851-869 MHz; docs/19 section 7 already found max duty 88% in 850.9-862.1, so do not stop there) for an emission keyed continuously (duty ~100% over >=30 s) with digital structure; record every sweep setting and each band's max-duty result, including negatives. (b) CAPTURE the best candidate as SigMF with every setting (LNA 32 / VGA 40 / AMP ON is docs/19's validated 800 MHz setting; re-derive for other bands), receiver clock ppm estimated and recorded (T-560). (c) Only AFTER the blind find, research what it is (cite sources, mark unverified) and ANNOTATE the hidden ground truth (time-frequency extents, modulation, decoded content where established). If no 100%-duty digital emitter exists anywhere reachable, the hunt's negative map IS the deliverable, stated plainly - never manufacture a fixture. Receive only; one agent on the radio; the coordinator hands it over. T-545/T-546's blind suite then gains this real instance (T-318, still blocked, keeps the BART-specific hardware half).
     result: |
       CAPTURE TAKEN 2026-09-20 AND NEGATIVE. Research half DONE (docs/19 sections 1-6, SIGNAL-087
       minted). Capture half CANNOT BE COMPLETED HERE - no fixture produced, and none should be
@@ -17161,6 +17163,7 @@ tasks:
       but because the one continuous thing is not four-level digital. BART is also not hiding on an
       unlisted channel in this band.
 
+    needs: hardware
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
@@ -17190,6 +17193,8 @@ tasks:
     notes: |
       Filed 2026-09-20. Depends on T-544's fixture and truth list.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 coordinator: user skipped BART (11:55). This ticket's blind SIGNAL-087 suite stands on the synthetic trunk_encrypted_control_channel scene; its first REAL instance now comes from T-544's re-scoped blind wideband 100%-duty hunt - when that fixture exists, point the suite at it as a second scene (same blind assertions, no lookup-and-tune).
     result: |
       DONE 2026-09-21 on branch task-t545. `tests/e2e/tests/acceptance_mauto.rs` +
       `tests/e2e/tests/acceptance/signal_087.rs`: SEVEN tests, FIVE RED (`#[ignore]`d, each
@@ -17374,6 +17379,8 @@ tasks:
     notes: |
       Filed 2026-09-20.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-24 coordinator: user skipped BART (11:55). This ticket's blind SIGNAL-087 suite stands on the synthetic trunk_encrypted_control_channel scene; its first REAL instance now comes from T-544's re-scoped blind wideband 100%-duty hunt - when that fixture exists, point the suite at it as a second scene (same blind assertions, no lookup-and-tune).
   - id: T-558
     milestone: M2-hardening
     title: A sustained sweep accumulates threads, RSS and a growing occupancy accumulator
