@@ -39,13 +39,15 @@
 //! - the channeliser is **flat and fixed**: [`ChannelSearch::occupancy`] of the prefix rate
 //!   (0.9: ±21.6 kHz at 48 kHz); the bandwidth axis moves the S0 filter behind it, kept so its
 //!   support (width plus transitions) stays inside that flat passband;
-//! - **S0 is reported (`b_S0`) but not counted** in `quality` or the lock: its `snr` is a
-//!   whiteness test of the input the objective itself produced. A prefix that reaches only S0
-//!   has nothing to refine on ([`ObjectiveError::NothingToMeasure`]).
+//! - **not implemented, for the user to decide:** leaving S0 out of `quality` and refusing
+//!   S0-only prefixes (its `snr` is a whiteness test of the input the objective itself
+//!   produced). The code follows the accepted text: S0 is counted, and an S0-only prefix locks
+//!   on S0's floor — which a flat-noise window can clear through the channeliser's band-edge
+//!   roll-off. Deeper prefixes lock on their deepest stage and are unaffected.
 //!
 //! # What a measurement is
 //!
-//! - **`quality`** = `Σ_j min(b_j, cap_j)` over S1 … the prefix's deepest stage:
+//! - **`quality`** = `Σ_j min(b_j, cap_j)` over S0 … the prefix's deepest stage (§1.3):
 //!   `evidence_bits` **before** the look-elsewhere charge `L_j`. Every tuning the loop compares
 //!   is the same hypothesis, so `L_j` is common to all of them and cannot change a comparison;
 //!   charging it for the extra measurements a refinement makes is the engine's job, from
@@ -245,9 +247,6 @@ pub enum ObjectiveError {
     NotEvidence,
     /// A tuned parameter path is malformed, names no node, or its value is not a number.
     BadParam(String),
-    /// The prefix reaches only S0: the channel the objective itself provides, so there is no
-    /// evidence about the emission to refine on.
-    NothingToMeasure,
 }
 
 impl std::fmt::Display for ObjectiveError {
@@ -267,9 +266,6 @@ impl std::fmt::Display for ObjectiveError {
             }
             ObjectiveError::BadParam(p) => {
                 write!(f, "tuned parameter {p}: no such numeric node parameter")
-            }
-            ObjectiveError::NothingToMeasure => {
-                write!(f, "the prefix reaches only S0, the channel itself")
             }
         }
     }
@@ -377,9 +373,6 @@ impl EvidenceObjective {
         (tune_center, tune_bandwidth): (bool, bool),
         ctx: EvidenceContext,
     ) -> Result<Self, ObjectiveError> {
-        if target < Stage::S1 {
-            return Err(ObjectiveError::NothingToMeasure);
-        }
         let rate_hz = recipe
             .input
             .sample_rate_hz
@@ -441,7 +434,7 @@ impl EvidenceObjective {
             .copied()
             .filter(|&s| s <= self.target)
             .find(|&s| default_floor_bits(s).is_some())
-            .unwrap_or(Stage::S1)
+            .unwrap_or(Stage::S0)
     }
 
     /// The channeliser's flat passband for a window at `rate_hz`, Hz.
@@ -592,7 +585,7 @@ impl EvidenceObjective {
         let at_lock = m.ladder.stage_bits(lock);
         let quality: f32 = Stage::ALL
             .iter()
-            .filter(|&&s| s >= Stage::S1 && s <= self.target)
+            .filter(|&&s| s <= self.target)
             .filter_map(|&s| m.ladder.capped(s))
             .sum();
         let mut mode_params = BTreeMap::new();

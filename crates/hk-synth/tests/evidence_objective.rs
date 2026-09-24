@@ -318,7 +318,6 @@ fn noise_never_locks() {
     // groups of up to 6 bits each clear 6 on noise a few per cent of the time, and the loop
     // looks at dozens of tunings); the hold-out is independent, and it alone vouches.
     assert!(!o.locked, "{o:#?}");
-    assert!(o.quality < 6.0, "{o:#?}");
 }
 
 #[test]
@@ -365,6 +364,13 @@ fn every_calibrated_stage_scores_on_a_window_of_arbitrary_length() {
         assert!(m.mode_params[s] > 0.0, "{s}: {m:?}");
     }
     assert!(m.mode_params["support_runs"] > 1.0, "{m:?}");
+    // ADR-0015 §2.3 / §1.3 as accepted: quality is evidence_bits over S0 … the deepest stage.
+    // (each stage here is below its cap, so capped = raw b_j).
+    let summed: f64 = ["b_S0", "b_S1", "b_S2"]
+        .iter()
+        .map(|k| m.mode_params.get(*k).copied().unwrap_or(0.0))
+        .sum();
+    assert_eq!(m.quality, summed, "S0 is counted: {m:?}");
     assert!(m.locked, "{m:?}");
 
     // 0.01 s: under every table's smallest support.
@@ -450,4 +456,14 @@ fn s6_has_no_floor_so_a_full_chain_locks_on_s5() {
     let obj = EvidenceObjective::for_candidate(&c, &[], ctx(NOMINAL)).unwrap();
     assert_eq!(obj.target(), Stage::S6);
     assert_eq!(obj.lock_stage(), Stage::S5);
+}
+
+#[test]
+fn an_s0_only_prefix_is_accepted_and_locks_on_s0() {
+    // §2.3 as accepted refuses no prefix (the S0 exception is only proposed, pending the user).
+    let mut c = candidate();
+    c.choices = BTreeMap::from([(Stage::S0, "lowpass".to_owned())]);
+    let obj = EvidenceObjective::for_candidate(&c, &[], ctx(NOMINAL)).unwrap();
+    assert_eq!(obj.target(), Stage::S0);
+    assert_eq!(obj.lock_stage(), Stage::S0);
 }
