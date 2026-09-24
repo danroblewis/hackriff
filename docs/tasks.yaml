@@ -25763,7 +25763,7 @@ tasks:
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-866
@@ -25791,6 +25791,7 @@ tasks:
       Use cases: SIGNAL-062
       Resources: 43 CPU-s, peak 1.7 GB
     branch: task-t873
+    commit: ecb8b25d
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
