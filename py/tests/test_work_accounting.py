@@ -769,6 +769,55 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     assert not any("fatal" in m for m in said)
 
 
+@pytest.fixture
+def killed_run(df, monkeypatch, tmp_path):
+    """A ticket worker whose process is gone and left no out.json result and no handback.json."""
+    monkeypatch.setenv("HK_ALERT_OFF", "1")
+    wt = tmp_path / "wt-t802"
+    wt.mkdir()
+    (tmp_path / "work" / "T-802").mkdir(parents=True)
+    (tmp_path / "work" / "T-802" / "out.json").write_text("")            # killed: claude never wrote its result
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        "2\n" if args[:3] == ["git", "rev-list", "--count"] else (" M ui/src/a.ts\n" if args[:2] == ["git", "status"] else ""))
+    fixes, alerts = [], []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "alert", lambda *a: alerts.append(a))
+
+    def claim(**kw):
+        return {"T-802": dict({"ticket": "T-802", "branch": "task-t802", "wt": str(wt), "pid": 1, "started": 0,
+                               "kind": "work", "state": "running", "model": "opus"}, **kw)}
+    return claim, fixes, alerts, df[3]
+
+
+def test_a_killed_worker_is_resumed_in_its_worktree(killed_run):
+    """04:07 on 2026-09-24: a pkill took five workers; each was logged "NO_HANDBACK ... (done)", parked
+    as uncommitted/no-work, and never ran again."""
+    claim, fixes, alerts, seen = killed_run
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("KILLED") and "1 modified files and 2 commits" in fixes[0]
+    assert claims["T-802"]["state"] == "running" and seen == []
+    assert alerts[0][0] == "amber" and "T-802 (resumed)" in alerts[0][2]
+
+
+def test_a_killed_worker_with_no_session_is_named_for_a_redispatch(killed_run):
+    claim, fixes, alerts, seen = killed_run
+    claims = claim()                                                       # launched before --session-id
+    R.reap(claims, dry=False)
+    assert fixes == [] and claims["T-802"]["state"] == "killed"
+    assert [k for _, k, _ in seen] == ["KILLED"] and "T-802 (needs a redispatch)" in alerts[0][2]
+
+
+def test_a_worker_that_wrote_its_result_is_not_killed(killed_run, tmp_path):
+    claim, fixes, alerts, seen = killed_run
+    (tmp_path / "work" / "T-802" / "out.json").write_text(json.dumps({"result": "done", "session_id": "abc"}))
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert alerts == [] and not any("KILLED" in f for f in fixes)
+
+
 def test_only_regenerable_is_strict():
     assert R.only_regenerable([".githooks/", "target/"])
     assert not R.only_regenerable([".githooks/", "src/new.rs"])

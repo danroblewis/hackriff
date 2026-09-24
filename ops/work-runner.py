@@ -42,6 +42,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 import yaml
 
@@ -399,8 +400,11 @@ def launch(t, dry):
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
     open(f"{d}/brief.md", "w").write(brief)
+    # The session id is chosen here, not read from out.json at the end: a run killed by a signal
+    # writes no out.json, and without the id it could never be resumed (incident 2026-09-24 04:07).
+    session = str(uuid.uuid4())
     cmd = ["claude", "-p", "--agent", "worker", "--model", model, "--dangerously-skip-permissions",
-           "--output-format", "json", "--max-budget-usd", BUDGET_USD]
+           "--output-format", "json", "--max-budget-usd", BUDGET_USD, "--session-id", session]
     if effort in EFFORTS:
         cmd += ["--effort", effort]
     # The build-target clone (`cp -c`, an APFS clone) walks main's whole target tree and takes
@@ -425,7 +429,7 @@ def launch(t, dry):
     log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {wt} (target clone then exec claude; {'cpulimit ' + str(WORKER_CORES * 100) + '% + ' if cmd_prefix else ''}background QoS, jobs={WORKER_JOBS}, test-threads={WORKER_TEST_THREADS})")
     return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
             "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
-            "review": needs_review(t)}
+            "review": needs_review(t), "session_id": session}
 
 
 def launch_review(claim):
@@ -710,8 +714,18 @@ def enqueue(branch, wt=None):
         log(f"RECLAIM {wt}/target (branch queued)")
 
 
+def alert(level, title, body, key):
+    """ops/alert.py (Discord, deduped per key); never raises."""
+    try:
+        subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"), level, title, body, "--key", key],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+
+
 def reap(claims, dry):
     changed = False
+    killed = []
     for tid, c in list(claims.items()):
         if c.get("state") != "running":
             continue
@@ -796,6 +810,22 @@ def reap(claims, dry):
         if hb and outcome in ("done", "cancel") and ahead > 0 and not dirty:
             write_result(c, hb)                    # the board line the worker used to write by hand
             ahead = int(sh(["git", "rev-list", "--count", f"main..{c['branch']}"]).strip() or 0)
+        if not hb and not res:
+            # No result JSON and no handback: the run did not finish, it was KILLED (a signal - 04:07
+            # on 2026-09-24 a pkill took five workers; they were logged "NO_HANDBACK ... (done)", parked
+            # as uncommitted/no-work and never run again). Keep the worktree and resume the session.
+            record_done(c, "killed", res)
+            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+                claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
+                                         f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
+                                         f"are in {c['wt']}: check them and continue the ticket from there")
+                killed.append(f"{tid} ({'fix held' if claims[tid].get('state') == 'fix-held' else 'resumed'})")
+            else:
+                c["state"] = "killed"
+                attention(tid, c["branch"], "KILLED", f"killed after {age_min:.0f} min with no session to resume; "
+                          f"worktree kept ({len(dirty)} modified files, {ahead} commits) - redispatch it")
+                killed.append(f"{tid} (needs a redispatch)")
+            continue
         if res.get("is_error"):
             c["state"] = "error"
             attention(tid, c["branch"], "ERROR", f"claude -p reported an error after {age_min:.0f} min; see {d}/run.log")
@@ -832,6 +862,8 @@ def reap(claims, dry):
             c["state"] = "queued"
             record_done(c, "done", res)
             enqueue(c["branch"], c.get("wt"))
+    if killed:
+        alert("amber", f"{len(killed)} worker(s) killed", ", ".join(killed) + " - worktrees kept", "wr:killed:" + ",".join(sorted(killed)))
     changed |= handle_gate_failures(claims, dry)
     return changed
 
