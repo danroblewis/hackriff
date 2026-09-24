@@ -24878,9 +24878,11 @@ tasks:
       landing a vacuous half.
     result: |
       I kept the WIP and corrected it. What is built: the durable sink (hk_store::ml::ShadowStore, CRC-line NDJSON with one segment per capture-time hour, 256 MiB / 30 days, per-(model, consumer, family, SNR-bin) agreement aggregates kept per segment, non-shadow records refused); StoreShadowSink as the production ShadowSink; hk_pipeline::ml::MlStage (registry, one ModelHost per provider, modes persisted in <data>/ml/modes.json and restored, active only with section 4.6 evidence plus a conformant provider or an audited force); the producer at the fsk chain's single C15 call site, run after the published row is written and outside the repository lock; the three /api/ml routes (hk-api/src/ml.rs plus an hk-cli adapter), docs/api.md and an api_contract test; the hk-ml dormancy prose rewritten and no_production_caller.rs removed; m3_ml.rs now reads the run's real mode table and counts records from hk-store on disk. WIP fixes: records were keyed on the wall clock and are now keyed on the subject's capture time; served JSON obeys the API time law (t_s/t_ns, verified by the time-law sweep); the racy observe return count is fixed; dead code, clippy and fmt are fixed. The branch is NOT ready to land, and it is blocked by the ticket's own rule against a vacuous producer. hk_ml::gate::admit correctly refuses a subject whose classical family is 'unknown', and every scene I ran through the mock SDR is classified 'unknown' at the call site. That covers fsk_burst_train at 15/20/25/30 dB, 23-430 ms bursts, 2400/4800/9600 Bd, and trunk_control_channel; pocsag, lora, multipath, acars and retune produced no classification rows at all. Open-set is about 1.0 throughout, and at 20 dB the row is flagged BelowGate with spectrum_too_few_segments and low_snr at a measured 18.7 dB. So no real run ever writes a shadow record. The wiring half of the non-vacuity pair, crates/hk-pipeline/tests/ml_shadow.rs, is written and fails on its precondition assertion ('the scene must produce fsk classifications'). The sink half is proven: swapping in MemoryShadowSink turns a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage red (left 0, right 1). The routes are proven the same way: unrouting /api/ml turns the contract test red (404 vs 200). Everything else passes. Do not queue this branch until ml_shadow.rs passes.
-    depends_on: [T-852]
+    depends_on: [T-852, T-876, T-877]
     notes: |
       2026-09-23 (coordinator): code complete on task-t844 (ad29641b: sink, producer, three /api/ml routes, tests green except ml_shadow) but NOT queued - the ticket forbids landing a producer that never fires, and through the mock SDR the classifier calls every row unknown, so the C38 gate never admits one. Now todo behind T-852; when it lands, re-run crates/hk-pipeline/tests/ml_shadow.rs unchanged and queue.
+
+      2026-09-24 (coordinator): T-852 landed a partial fix (5/16 above-gate device rows now fsk); T-844's ml_shadow scene (seed 844, 20 dB) is still held by the SNR gate and unknown at 25 dB. It now also waits on T-876 (burst-extent overrun) and T-877 (fsk density tail), per the T-852 worker's diagnosis.
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
@@ -25771,6 +25773,69 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     tier_reason: "real-time-path DSP: carrier/timing acquisition on short PSK bursts"
+  - id: T-876
+    milestone: M3
+    title: "Burst-extent estimate overruns the burst (hk_estimate::params step 6b): 24.8-28.8 ms for a 23.5 ms burst, so noise-only samples push FSK envelope features out of every class"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. 4 of the 11 misses: the extent estimate runs past the burst end, and the appended noise-only samples move the envelope features far outside any FSK class. DELIVER: an extent estimate that ends at the burst's real end (measured, blind), with a test on the device-path scene asserting the estimated extent within a stated tolerance of the truth and the 4 rows no longer unknown for this reason. Never widen a class or lower a threshold to absorb the overrun.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    tier_reason: estimation on the real-time classification path; blind extent recovery
+  - id: T-877
+    milestone: M3
+    title: The fsk class density is one Gaussian over modulation index 0.4-5, so real device FSK at h~4 sits in its tail and reads unknown
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. 7 of the 11 misses: the fsk model is a single Gaussian spanning h 0.4-5, so this scene (h=4) lands in the tail just past the unknown threshold. DELIVER: a class model that represents narrow and wide FSK honestly (e.g. split by modulation-index regime, or a mixture), refitted by the project's own fit-densities generator, with the open-set/unknown behaviour unchanged for genuinely unknown signals. Guard: hk-classify's accuracy/open-set sweeps before/after (T-852 recorded the baseline). core_interface - the classification contract; reviewed by Opus.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    core_interface: true
+  - id: T-878
+    milestone: M3
+    title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. Probe through the mock SDR: pocsag and acars - no decode chain matched their tracks, so the fsk chain (the classifier's only call site, chains/fsk.rs, after it wrote demodulated bursts) never ran; retune - only the FM-broadcast chains attached, which never classify; lora - the fsk chain attached but got <4 bursts and stopped before classifying; multipath - classified 3 times but should_record dropped every row (the chain's unconfirmed label ties the classifier's rank and keeps the emitter's family). DELIVER: a classifier call site that does not depend on a decode chain succeeding (ADR-0016 section 4: where classification runs), and resolve the same-rank tie in should_record. Blind; through the mock SDR assert each of those scenes produces classification rows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    core_interface: true
+  - id: T-879
+    milestone: M3
+    title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker: in hk-e2e acceptance_m3, m3_repeated_unknowns_form_one_visible_cluster fails when run alone WITH THE OLD DENSITIES TOO (so not caused by T-852): 1 emitter over 3 appearances and no cluster. It also saw a multipath snippet normalised from 17,920 samples down to 124, which looks wrong. DELIVER: root-cause both (triage-first: it fails alone, so it is a real defect), fix, and prove the test goes red without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
