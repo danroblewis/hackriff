@@ -24685,7 +24685,7 @@ tasks:
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: M4B
@@ -24716,6 +24716,7 @@ tasks:
       Commits: 2c6a3d52
       Observed, not chased: Only an LDU whose call gets a call-start event is recorded. A call continued across passes (T-308) emits no call-start, so its later LDUs are counted but not written to any event. Continuation normally does not fire on the built-in duty cycle (9.5 s gap). T-330 writes to CallRecord directly, so it can close this gap. | hk-detect now carries its own small GF(64) Reed-Solomon decoder (trunk::ldu::Rs64). hk-blocks' general GF(2^m) kernel (T-611) is pub(crate), and hk-detect sits below hk-blocks. Exposing that kernel from a lower crate would remove the duplication. | A single 0.5 s hunt window holds only 1-2 complete LDUs, so on a real long call one pass can see only the LC or only the ES. The synthetic scene keys its superframe inside the first window. T-330 may need to accumulate ES across passes or calls. | The LDU decode is unverified against real off-air P25 (none in repo; T-299/T-544). The HDU, which also carries the ALGID at call start, and the TDULC are not decoded.
       Resources: 150 CPU-s, peak 3.4 GB
+    commit: 4be23ed9
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
