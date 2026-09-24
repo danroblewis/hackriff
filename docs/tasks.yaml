@@ -23578,7 +23578,7 @@ tasks:
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23613,6 +23613,7 @@ tasks:
       2026-09-24 coordinator: the relaunched worker (7c2ee1c3) found the dead worker's 6 staged files were a REVERT of the branch's own two commits, and discarded them. DoD line 'the old toolbar row is gone' is NOT met (T-528's hit test + Split/Whole-surface e2e specs drive that row): rehoming it is T-882.
     branch: task-t802
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
+    commit: 2a2085a5
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
