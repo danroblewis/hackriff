@@ -316,7 +316,7 @@ process(){
       MAIN_RED_STOP=1
       # Parked until main moves: re-gating it against the same red main only re-proves the red
       # (review, 2026-09-24: a lone branch re-queued here re-gated every tick until main was fixed).
-      echo "$branch $(git -C "$REPO" rev-parse HEAD)" >> "$S/main-red-parked"
+      echo "$branch $(git -C "$REPO" rev-parse HEAD) $tip" >> "$S/main-red-parked"
       return 1
     fi
     record_attempt "$branch" "$tip"
@@ -570,7 +570,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -938,7 +938,10 @@ while true; do
     # A branch whose red main shares (main_is_red in process) waits for main to change - any landing
     # releases it for one more gate. Before the CHEAP FIRST split, so a fix for main still gates.
     if [ -s "$S/main-red-parked" ]; then
-      parked=$(awk -v h="$(git -C "$REPO" rev-parse HEAD)" '$2 == h {print $1}' "$S/main-red-parked")
+      # Keyed on main's HEAD AND the branch's tip: a fix pushed to the branch itself releases it too.
+      parked=$(while read -r pb ph pt; do
+        [ "$ph" = "$(git -C "$REPO" rev-parse HEAD)" ] && [ "$pt" = "$(git -C "$REPO" rev-parse --verify --quiet "$pb")" ] && echo "$pb"
+      done < "$S/main-red-parked")
       if [ -z "$parked" ]; then
         rm -f "$S/main-red-parked"; PARK_SAID=""; log "PARK: main moved - parked branches gate again"
       else

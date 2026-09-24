@@ -207,7 +207,7 @@ set -u
 S={tmp_path}; QUEUE={q}; REPO={tmp_path}
 log(){{ echo "LOG $*"; }}
 sleep(){{ :; }}
-git(){{ echo {head}; }}
+git(){{ case "$*" in *"rev-parse HEAD"*) echo {head};; *) echo tipA;; esac; }}
 ready="{ready}"; GATED=none
 for _ in 1; do
 {_park_block()}
@@ -223,9 +223,11 @@ echo "GATED=[$GATED]"
 def test_a_branch_main_is_red_on_waits_until_main_moves(tmp_path):
     """Review 2026-09-24: re-queued on MAIN IS RED, a lone branch re-gated every tick until main was
     fixed. Parked, it waits; the rest of the queue (a fix for main among it) still gates."""
-    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "aaa", "task-t802 task-fix")
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "aaa", "task-t802 task-fix")
     assert "GATED=[task-fix]" in out and queued == ["task-t802"] and still
-    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "aaa", "task-t802")
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "aaa", "task-t802")
     assert "GATED=[none]" in out and queued == ["task-t802"]                 # nothing else: no gate at all
-    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "bbb", "task-t802")
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipA\n", "bbb", "task-t802")
     assert "GATED=[task-t802]" in out and queued == [] and not still          # main moved: it gates again
+    out, queued, still = _park(tmp_path, "task-t802 aaa tipOLD\n", "aaa", "task-t802")
+    assert "GATED=[task-t802]" in out and queued == []                         # its own tip moved: a fix, it gates
