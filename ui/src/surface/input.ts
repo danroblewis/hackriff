@@ -44,6 +44,28 @@ export interface SurfaceInputOptions {
   /** A region stroke that **committed**: shift was held at the press, the pointer travelled far
    * enough not to be a tap, and the rectangle is non-degenerate. */
   onRegion?: (r: SurfaceRegion) => void;
+  /**
+   * **Measurement mode is a toggle elsewhere, not a modifier** (T-822 / MAP-22, docs/23 §10.4's
+   * "tool mode" table): while `true`, a BARE (unmodified) drag on a pane marks out a measurement
+   * instead of panning it. It is sampled once, at the press, exactly like `dragIntent` reads shift
+   * for a region — the same T-407 discipline: a mode flipped mid-stroke must not turn the
+   * measurement being marked out into a pan of the view it is being marked out on.
+   *
+   * **`Shift + drag` never changes meaning, in any tool mode** (docs/23 §10.4: "`Shift + drag`
+   * therefore never changes meaning") — it always marks a region, mode or no mode, and is checked
+   * BEFORE this flag. A tool mode re-binds only what a bare drag does.
+   */
+  measureMode?: boolean;
+  /** A measurement stroke in progress, every move; `null` when it ended or was abandoned. Same
+   * shape and the same "not a commit" rule as [[onRegionDrag]]. */
+  onMeasureDrag?: (r: SurfaceRegion | null) => void;
+  /**
+   * A measurement stroke that **committed**. Unlike a region, whose two corners must be apart on
+   * BOTH axes to describe a rectangle worth selecting, a measurement is meaningful with extent on
+   * just ONE axis (a pure Δt or a pure Δf, inspectrum-style) — so only the tap/drag distance gate
+   * applies here, never `SurfaceRegion`'s degenerate-axis refusal.
+   */
+  onMeasure?: (r: SurfaceRegion) => void;
   /** **Ctrl+Shift+wheel adjusts the shadow's brightness instead of zooming** (T-526) — a client-only
    * display preference, never a view or device change. `notches` is the gesture's own signed count
    * (positive brightens); the host clamps and persists (`./shadow-gain.ts`) and calls
@@ -98,10 +120,16 @@ export function attachSurfaceInput(
   const moved = () => opts.onView?.();
 
   let dragging:
-    | { x: number; y: number; x0: number; y0: number; map: boolean; pane: string | null; travel: number; region: SurfaceRegion | null }
+    | {
+      x: number; y: number; x0: number; y0: number; map: boolean; pane: string | null; travel: number;
+      region: SurfaceRegion | null; measuring: SurfaceRegion | null;
+    }
     | null = null;
 
-  const endRegion = () => { if (dragging?.region) opts.onRegionDrag?.(null); };
+  const endRegion = () => {
+    if (dragging?.region) opts.onRegionDrag?.(null);
+    if (dragging?.measuring) opts.onMeasureDrag?.(null);
+  };
 
   // **What the press means is decided ONCE, at the press, and it is decided by `dragIntent`.**
   //
@@ -123,9 +151,15 @@ export function attachSurfaceInput(
     const map = preview.onMap(p);
     const pane = map ? null : preview.paneAt(p);
     if (pane) preview.activePane = pane;
+    // **`Shift + drag` never changes meaning, in any tool mode** (docs/23 §10.4's gesture table): it
+    // is checked FIRST, so entering measurement mode re-binds only the BARE drag/click — exactly as
+    // `dragIntent`'s own modifier check already read it, mode or no mode. Only when shift is not the
+    // press's own intent does a tool mode get to claim a bare drag for itself.
     const region = dragIntent(e) === "region" && pane && opts.onRegion ? { pane, a: p, b: p } : null;
-    dragging = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region };
+    const measuring = !region && opts.measureMode === true && pane && opts.onMeasure ? { pane, a: p, b: p } : null;
+    dragging = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring };
     if (region) opts.onRegionDrag?.(region);
+    if (measuring) opts.onMeasureDrag?.(measuring);
     canvas.setPointerCapture(e.pointerId);
   };
 
@@ -141,6 +175,11 @@ export function attachSurfaceInput(
       opts.onRegionDrag?.(dragging.region);
       return; // a region stroke is not a pan: the view must not move under the rectangle
     }
+    if (dragging.measuring) {
+      dragging.measuring = { ...dragging.measuring, b: point(e) };
+      opts.onMeasureDrag?.(dragging.measuring);
+      return; // a measurement stroke is not a pan either
+    }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
     moved();
@@ -153,8 +192,8 @@ export function attachSurfaceInput(
   // well as an up, because a stroke the browser takes away still ended — leaving a pane frozen one
   // pixel off live because the pointer was captured elsewhere is the reported bug with a different
   // cause. A region stroke never panned, so there is nothing to commit for one.
-  const settle = (d: { map: boolean; pane: string | null; region: SurfaceRegion | null }) => {
-    if (d.region) return;
+  const settle = (d: { map: boolean; pane: string | null; region: SurfaceRegion | null; measuring: SurfaceRegion | null }) => {
+    if (d.region || d.measuring) return;
     if (d.map) preview.endDragMap();
     else if (d.pane) preview.endDrag(d.pane);
     else return;
@@ -178,6 +217,15 @@ export function attachSurfaceInput(
       const r: SurfaceRegion = { ...d.region, b: point(e) };
       const far = Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= DRAG_PX;
       if (far && r.a.x !== r.b.x && r.a.y !== r.b.y) opts.onRegion?.(r);
+      return;
+    }
+    if (d.measuring) {
+      opts.onMeasureDrag?.(null);
+      // Same tap/distance gate as a region, minus the both-axes rule: a measurement with extent on
+      // only one axis (a vertical Δt stroke, a horizontal Δf stroke) is still a real measurement.
+      const r: SurfaceRegion = { ...d.measuring, b: point(e) };
+      const far = Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= DRAG_PX;
+      if (far) opts.onMeasure?.(r);
       return;
     }
     if (d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);

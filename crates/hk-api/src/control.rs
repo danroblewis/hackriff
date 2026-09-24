@@ -25,9 +25,33 @@
 //! | GET, POST | `/api/bookmarks` | create: `{"name", "f_center_hz", "kind"?, "bandwidth_hz"?, "note"?}` | list / the created bookmark (201) |
 //! | GET, PUT, DELETE | `/api/bookmarks/<id>` | update (rename included): any create field (`null` clears optional ones) | the bookmark / `{"deleted": ...}` |
 //!
+//! Since T-817 the bookmark routes are a **compatibility facade** over the reserved `Bookmarks`
+//! marker collection ([`crate::collections`], docs/25 §10.6): a bookmark is that collection's
+//! frequency-only marker, the same row, so `/api/bookmarks` and `/api/collections` never disagree.
+//!
 //! Device endpoints (centre, rate, gains, bias tee, baseband filter) need a live source
-//! ([`crate::ApiState::live_control`]); on a replayed recording they answer 409 `not_live`, while
+//! ([`crate::ApiState::live_controls`]); on a replayed recording they answer 409 `not_live`, while
 //! display, recording and bookmarks keep working.
+//!
+//! # Which radio (T-511)
+//!
+//! A run may hold several front ends ([`crate::LiveControls`]), so every route that reaches one
+//! takes an optional `"device_id"` body field: **the device selector**.
+//!
+//! - **Omitted** means "the device", and that is defined only when the run holds exactly one. With
+//!   one SDR nothing about these requests changes. With several, omitting it answers 400
+//!   `device_required` listing the ids — the server never moves whichever radio was composed
+//!   first on a client's behalf, for the same reason `Coverage::Unobserved` is not "quiet": a
+//!   defensible default here would be a fabricated answer to a question the caller did not ask.
+//! - **An unknown id** answers 404 `unknown_device`, again listing what this run does hold.
+//! - The response's and audit entry's `device.id` is the front end the selector **resolved to**.
+//! - `GET /api/control/state` carries `devices`, the list to pick a selector from; its singular
+//!   `device`/`tuning` are `null` when the run holds more than one, because then there is no
+//!   "the" device.
+//!
+//! **One capture at a time is per device, not per server**: each front end carries its own
+//! [`crate::live_control::DeviceGate`], so a retune of one radio is never refused because another
+//! is busy, and two radios can be moved concurrently.
 //!
 //! # There is no pause here (T-347)
 //!
@@ -143,7 +167,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hk_core::source::{BasebandFilters, SampleRates, SourceKind};
@@ -749,6 +773,11 @@ impl Fail {
         Self::new(400, "invalid", message)
     }
 
+    /// The human-readable message.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn response(&self) -> CtlResponse {
         CtlResponse {
             status: self.status,
@@ -897,11 +926,36 @@ enum Reach {
 /// `id` is `null` when the source reports no identity. That is "nothing said", not a device: it is
 /// never filled with a placeholder or with the driver name, so an audit line can never be read as
 /// naming a front end that never said which one it was (the T-325 rule for device identity).
-fn device_json(state: &ApiState, action: DeviceAction) -> Value {
+fn device_json(lc: &dyn LiveControl, action: DeviceAction) -> Value {
     json!({
         "action": action.as_str(),
-        "id": state.live_control.as_deref().and_then(LiveControl::device_id),
+        // T-511: the front end the selector **resolved to**, not "the server's device". With one
+        // front end these are the same string; with several, only the resolved one is true.
+        "id": lc.device_id(),
     })
+}
+
+/// The audit entry's `device` object for a device route, resolved **from the request** (T-511).
+///
+/// The audit is written whether or not the action succeeded, and it is written before the body is
+/// validated, so the selector is read best-effort: the `device_id` the caller asked for, resolved
+/// against this run's front ends. When it does not resolve — an unknown id, an ambiguous omission
+/// on a multi-device run, an unparseable body — `id` is `null`, and the entry's own `status` and
+/// `error` say why. Nothing is guessed: a selector that named nothing must never be logged as
+/// having moved the default radio.
+fn audit_device_json(state: &ApiState, req: &CtlRequest<'_>, action: DeviceAction) -> Value {
+    let want = parse_body(req).ok().and_then(|b| {
+        b.get("device_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let id = state
+        .live_controls
+        .select(want.as_deref())
+        .ok()
+        .and_then(|c| c.device_id())
+        .map(str::to_owned);
+    json!({ "action": action.as_str(), "id": id })
 }
 
 /// Resolves `(method, path)`: `Ok(action)`, `Err(Some(allow))` for a known path with another
@@ -1036,10 +1090,11 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
     // (T-452) names the device it commits to a programme of retunes, with `commissions` rather
     // than `action`, so the log never reads as if the request itself moved the radio.
     let device = match action.reach() {
-        Reach::Device(d) => Some(device_json(state, d)),
+        Reach::Device(d) => Some(audit_device_json(state, req, d)),
         Reach::Commissions(d) => Some(commissioned_json(state, d)),
         Reach::View => None,
     };
+    let actor = req.caller.token_id.clone();
     Some(dispatch_device(
         state,
         req,
@@ -1047,7 +1102,7 @@ pub(crate) fn route(state: &ApiState, req: &CtlRequest<'_>) -> Option<CtlRespons
         action.mutating(),
         device,
         |s| read(s, action, req.query),
-        |s, body| apply(s, action, body),
+        |s, body| apply(s, action, body, actor),
     ))
 }
 
@@ -1254,15 +1309,35 @@ pub(crate) fn no_fields(body: &Map<String, Value>) -> Result<(), Fail> {
     only(body, &[])
 }
 
-fn live(state: &ApiState) -> Result<&dyn crate::LiveControl, Fail> {
-    state.live_control.as_deref().ok_or_else(|| {
-        Fail::new(
-            409,
-            "not_live",
-            "device settings apply to a live source; this server is not running one (a replayed \
-             recording accepts display, recording and bookmark requests only)",
-        )
-    })
+/// **Resolves the device selector** on a device route (T-511).
+///
+/// `device_id` is an optional body field on every route that reaches a front end. Omitting it
+/// means "the device", which is only defined when this run holds exactly one — so a single-SDR
+/// client's bodies are unchanged, and a multi-SDR one is told to name a radio (400
+/// `device_required`) rather than having whichever was composed first moved on its behalf. An
+/// unknown id is 404 `unknown_device`; no front end at all is still 409 `not_live`.
+///
+/// The gate a device action then takes is **that handle's own** ([`crate::DeviceGate`]), so a
+/// retune of one radio is never refused because another is busy.
+fn live<'a>(
+    state: &'a ApiState,
+    body: &Map<String, Value>,
+) -> Result<&'a dyn crate::LiveControl, Fail> {
+    let want = match body.get("device_id") {
+        None => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(_) => {
+            return Err(Fail::invalid(
+                "device_id must be a string naming a live front end (omit it when this run holds \
+                 exactly one)",
+            ));
+        }
+    };
+    state
+        .live_controls
+        .select(want)
+        .map(|c| c.as_ref())
+        .map_err(|e| Fail::new(e.http_status(), e.code(), e.to_string()))
 }
 
 fn run(state: &ApiState) -> Result<&dyn RunControl, Fail> {
@@ -1407,13 +1482,19 @@ fn caps_json(c: &SourceCapabilities, device_id: Option<&str>) -> Value {
 fn commissioned_json(state: &ApiState, action: DeviceAction) -> Value {
     json!({
         "commissions": action.as_str(),
-        "id": state.live_control.as_deref().and_then(LiveControl::device_id),
+        // The sweep drives the front end the runner was composed over, which is this run's
+        // default one (`crate::scan`); it is not re-selected per request.
+        "id": state
+            .live_controls
+            .primary()
+            .and_then(|l| l.device_id())
+            .map(str::to_owned),
     })
 }
 
 /// The scan runner, or the reason there is none.
 fn scan_runner(state: &ApiState) -> Result<&std::sync::Arc<crate::scan::ScanRunner>, Fail> {
-    if state.live_control.is_none() {
+    if state.live_controls.is_empty() {
         return Err(Fail::new(
             409,
             "not_live",
@@ -1502,11 +1583,30 @@ fn bookmark_json(b: &Bookmark) -> Value {
 
 /// The `/api/control/state` body.
 pub(crate) fn state_json(state: &ApiState) -> Value {
-    let live = state.live_control.as_deref();
+    // T-511: `device`/`tuning` mean **the** front end, which is defined only when this run holds
+    // exactly one. With several, they are `null` and `devices` is the answer: a client must name
+    // a device to move one, so it must not be handed one radio's capabilities as if they were the
+    // server's. Reporting the first would be the same defect as a placeholder `device_id` (T-325)
+    // — a true-looking value for a question with no single answer.
+    let live = (state.live_controls.len() == 1)
+        .then(|| state.live_controls.primary().map(Arc::as_ref))
+        .flatten();
     json!({
-        "live": live.is_some(),
+        "live": !state.live_controls.is_empty(),
         "device": live.map(|l| caps_json(l.capabilities(), l.device_id())),
         "tuning": live.map(|l| tuning_json(&l.tuning())),
+        // Every front end this run holds, in composition order — the list a client picks a
+        // `device_id` selector from. `[]` on a replay, one entry on a single-SDR run (the same
+        // device as `device`/`tuning` above), N when N are composed.
+        "devices": state
+            .live_controls
+            .iter()
+            .map(|l| json!({
+                "device_id": l.device_id(),
+                "device": caps_json(l.capabilities(), l.device_id()),
+                "tuning": tuning_json(&l.tuning()),
+            }))
+            .collect::<Vec<_>>(),
         "run": state.run_control.as_deref().map(|r| run_json(&r.state())),
         // T-452: the survey sweep's state, beside the tuning it moves. The panel that polls this
         // sees a scan yield to the user's own tune without a second poll, which is what makes the
@@ -1607,7 +1707,12 @@ const BOOKMARK_FIELDS: &[&str] = &["kind", "name", "f_center_hz", "bandwidth_hz"
 ///   reaches the device, nothing took the radio, so [`crate::scan::ScanRunner::unyield`] puts the
 ///   sweep back exactly as it was — and only if the yield still standing is the one this request
 ///   caused.
-fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<Applied, Fail> {
+fn apply(
+    state: &ApiState,
+    action: Action,
+    body: &Map<String, Value>,
+    actor: Option<String>,
+) -> Result<Applied, Fail> {
     let yielded = match action.reach() {
         Reach::Device(d) => state
             .scan
@@ -1615,7 +1720,7 @@ fn apply(state: &ApiState, action: Action, body: &Map<String, Value>) -> Result<
             .and_then(|s| s.note_user_device_action(d)),
         Reach::Commissions(_) | Reach::View => None,
     };
-    let mut result = apply_action(state, action, body);
+    let mut result = apply_action(state, action, body, actor);
     match (&yielded, &mut result) {
         (Some(y), Ok(a)) => {
             if let Some(o) = a.body.as_object_mut() {
@@ -1636,6 +1741,7 @@ fn apply_action(
     state: &ApiState,
     action: Action,
     body: &Map<String, Value>,
+    actor: Option<String>,
 ) -> Result<Applied, Fail> {
     let run_body = |state: &ApiState| state.run_control.as_deref().map(|r| run_json(&r.state()));
     match action {
@@ -1645,9 +1751,9 @@ fn apply_action(
             } else {
                 "sample_rate_hz"
             };
-            only(body, &[key])?;
+            only(body, &[key, "device_id"])?;
             let hz = required(body, key)?;
-            let lc = live(state)?;
+            let lc = live(state, body)?;
             let old = tuning_json(&lc.tuning());
             let t = if action == Action::Center {
                 lc.set_center(hz)?
@@ -1658,7 +1764,7 @@ fn apply_action(
             // T-343: the answer says this was a device action and which front end it moved, so a
             // client cannot mistake a retune for the view change that a pan is.
             let device = device_json(
-                state,
+                lc,
                 if action == Action::Center {
                     DeviceAction::Retune
                 } else {
@@ -1676,13 +1782,13 @@ fn apply_action(
         // in force at the time. Nothing is filled in here; `LiveControl::set_window` hands both to
         // the pipeline, which derives one class and re-plumbs at most once.
         Action::Window => {
-            only(body, &["center_hz", "sample_rate_hz"])?;
+            only(body, &["center_hz", "sample_rate_hz", "device_id"])?;
             let center_hz = required(body, "center_hz")?;
             let sample_rate_hz = required(body, "sample_rate_hz")?;
-            let lc = live(state)?;
+            let lc = live(state, body)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_window(center_hz, sample_rate_hz)?);
-            let device = device_json(state, DeviceAction::Window);
+            let device = device_json(lc, DeviceAction::Window);
             Ok(ok(
                 json!({ "tuning": new, "run": run_body(state), "device": device }),
                 old,
@@ -1776,7 +1882,7 @@ fn apply_action(
             Ok(ok(json!({ "scan": new.clone() }), old, new))
         }
         Action::Gains => {
-            only(body, &["gains"])?;
+            only(body, &["gains", "device_id"])?;
             let obj = body
                 .get("gains")
                 .and_then(Value::as_object)
@@ -1799,31 +1905,31 @@ fn apply_action(
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let lc = live(state)?;
+            let lc = live(state, body)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_gains(&gains)?);
-            let device = device_json(state, DeviceAction::Gains);
+            let device = device_json(lc, DeviceAction::Gains);
             Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::BiasTee => {
-            only(body, &["enabled"])?;
+            only(body, &["enabled", "device_id"])?;
             let enabled = body
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| Fail::invalid("enabled must be true or false"))?;
-            let lc = live(state)?;
+            let lc = live(state, body)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_bias_tee(enabled)?);
-            let device = device_json(state, DeviceAction::BiasTee);
+            let device = device_json(lc, DeviceAction::BiasTee);
             Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::BasebandFilter => {
-            only(body, &["bandwidth_hz"])?;
+            only(body, &["bandwidth_hz", "device_id"])?;
             let hz = required(body, "bandwidth_hz")?;
-            let lc = live(state)?;
+            let lc = live(state, body)?;
             let old = tuning_json(&lc.tuning());
             let new = tuning_json(&lc.set_baseband_filter(hz)?);
-            let device = device_json(state, DeviceAction::BasebandFilter);
+            let device = device_json(lc, DeviceAction::BasebandFilter);
             Ok(ok(json!({ "tuning": new, "device": device }), old, new))
         }
         Action::Display => {
@@ -1875,7 +1981,11 @@ fn apply_action(
             );
             b.bandwidth_hz = nullable_number(body, "bandwidth_hz")?.flatten();
             b.note = text(body, "note")?.flatten().map(str::to_owned);
-            bookmarks(state)?.insert_bookmark(&b).map_err(repo_fail)?;
+            // T-817: stored as a frequency-only marker of the reserved `Bookmarks` collection, with
+            // the author's token id in its provenance like every other authored mark.
+            bookmarks(state)?
+                .insert_bookmark_authored(&b, actor)
+                .map_err(repo_fail)?;
             let new = bookmark_json(&b);
             Ok(Applied {
                 status: 201,

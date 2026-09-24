@@ -68,9 +68,14 @@
 //!    hk-store (`ml/shadow/`, hourly CRC-line NDJSON with per-SNR agreement aggregates) and §9
 //!    serves them at `GET /api/ml/shadow`, alongside `GET /api/ml/models` and
 //!    `PUT /api/ml/models/{id}/mode` — the operator surface that would read [`host::HostStats`].
-//!    §10 assigns all of it to T-203; none of it landed. [`host::MemoryShadowSink`] is the only
-//!    [`host::ShadowSink`] in the tree, and it is in-memory. Wiring [`host::ModelHost::observe`]
-//!    into the pipeline now would record into a buffer nobody drains.
+//!    [`host::MemoryShadowSink`] is the only [`host::ShadowSink`] in the tree, and it is
+//!    in-memory. Wiring [`host::ModelHost::observe`] into the pipeline now would record into a
+//!    buffer nobody drains. §10 used to assign that store and those routes to T-203, which reads
+//!    `done` — T-365 established that T-203's acceptance never contained them (the board's own
+//!    `scope_audit_2026_09_15` narrows it to the host, batching, provenance, CFAR gating and the
+//!    conformance suite, all of which landed), so it is the ADR that was stale, not the ticket
+//!    that closed early. ADR-0016 §10's amendment of 2026-09-22 moves them to **T-844**, which
+//!    owns the durable sink together with the producer that makes it non-vacuous.
 //!
 //! **What would change this.** Wiring becomes correct when a model is installed in a registry
 //! (1), a family's dev evaluation clears ADR-0016 §4.6 for at least `shadow` (2), and a durable
@@ -88,10 +93,15 @@
 //! CI runs it; the host is unwired, not untested. The *claim above* is guarded by
 //! `tests/no_production_caller.rs`, which fails the day a caller appears, so whoever wires it is
 //! told to come back here and delete this section rather than leaving it to mislead the next
-//! reader.
+//! reader. That same tripwire is the premise of ADR-0016 §7's ML exit-gate row as
+//! `tests/e2e/tests/acceptance/m3_ml.rs` measures it (T-366): the gate reports an empty
+//! `(model, consumer)` mode table because nothing here is constructed, so wiring the host means
+//! giving that gate a real enumeration ([`exit_gate::MlGateSnapshot::from_host`]) in the same
+//! change.
 
 #![deny(missing_docs)]
 
+pub mod exit_gate;
 pub mod gate;
 pub mod host;
 #[cfg(feature = "ml-mlp")]

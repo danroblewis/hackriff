@@ -20,11 +20,9 @@
 //! - **Synthetic** (`fm_broadcast_rds` with RadioText): PI, PTY, PS and RadioText exact.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hk_api::{
@@ -39,7 +37,7 @@ use hk_demod::{MPX_RATE_HZ, WfmConfig, WfmDemod};
 use hk_dsp::{Ddc, DdcSpec, InputInfo};
 use hk_e2e::{Fixture, SynthRequest, TruthItem};
 use hk_model::{Provenance, SampleTime, Timestamp};
-use hk_stream::{OpenerRegistry, Record, StreamReader};
+use hk_stream::OpenerRegistry;
 use num_complex::Complex32;
 use serde_json::{Value, json};
 
@@ -137,65 +135,7 @@ impl Served {
     }
 }
 
-/// A TCP consumer collecting a stream's JSON records until [`Tail::finish`].
-struct Tail {
-    sock: TcpStream,
-    join: JoinHandle<Vec<Value>>,
-}
-
-/// Opens a stage/inspector tap and returns it reading, re-issuing a refusal.
-///
-/// **T-632.** The header used to be read on the spawned thread and any failure carried to
-/// `finish()` as a panic, so a refusal frame failed the test at a point that said nothing about
-/// what refused or when. A tap open is refused for reasons that are not this test's subject —
-/// none of these files asserts a refusal at all: the TCP server's connection cap (`503 busy`), a
-/// chain/tap budget, or a `404` in the moment before the recipe pipeline finishes registering.
-/// So the header is read HERE, and a refusal is re-issued on a fresh connection a BOUNDED NUMBER
-/// of times (attempts, never wall clock), printing each. Running out is the failure, and it names
-/// the target.
-fn tail(tcp: SocketAddr, target: &str) -> Tail {
-    for attempt in 1..=OPEN_TRIES {
-        let mut s = TcpStream::connect(tcp).unwrap();
-        s.set_read_timeout(Some(LIMIT)).unwrap();
-        let sep = if target.contains('?') { '&' } else { '?' };
-        s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
-            .unwrap();
-        let sock = s.try_clone().unwrap();
-        let mut r = StreamReader::new(s);
-        if let Err(e) = r.read_header() {
-            eprintln!(
-                "[{TAG}] tail {target} attempt {attempt}/{OPEN_TRIES}: no stream header ({e:?}), \
-                 re-requesting"
-            );
-            let _ = sock.shutdown(Shutdown::Both);
-            continue;
-        }
-        let join = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            while let Ok(Some(rec)) = r.next_record() {
-                match rec {
-                    Record::Message(m) => out.push(m.value),
-                    Record::Unknown(b) => {
-                        if let Ok(v) = serde_json::from_slice(&b) {
-                            out.push(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out
-        });
-        return Tail { sock, join };
-    }
-    panic!("[{TAG}] tail {target}: {OPEN_TRIES} opens in a row produced no stream header");
-}
-
-impl Tail {
-    fn finish(self) -> Vec<Value> {
-        let _ = self.sock.shutdown(Shutdown::Both);
-        self.join.join().expect("the tail reader thread")
-    }
-}
+// --- Frame records (§14.2), flattened: leaf values by path ------------------------------------
 
 /// A §14.2 frame record, flattened: leaf values by path.
 #[derive(Debug)]
@@ -495,8 +435,8 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
     let s = serve(&meta, "t094-rds");
     let (emitter, f_center, bw) = found_blind(s.addr(), &truth, 0.0);
     let (id, _) = start_rds(&s, &emitter);
-    let groups = tail(s.tcp, &format!("inspector/{id}/groups"));
-    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"));
+    let groups = tail(s.tcp, &format!("inspector/{id}/groups"), TAG);
+    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"), TAG);
 
     // Two passes over the recording: every position decoded at least once after sync.
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
@@ -662,7 +602,7 @@ fn signal_062_rds_recipe_decodes_blind_through_the_mock_sdr_and_agrees_with_the_
         .cloned()
         .unwrap();
     assert_eq!(rt_plan["change"], json!("params-hot"), "[{TAG}] {edit}");
-    let rt = tail(s.tcp, &format!("open/stage?pipeline={id}&node=rt"));
+    let rt = tail(s.tcp, &format!("open/stage?pipeline={id}&node=rt"), TAG);
     let at = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     s.wait_samples(&id, at + n);
     let texts = strings(&frames(&rt.finish()), "radiotext");
@@ -720,8 +660,8 @@ fn signal_062_rds_real_air_acceptance_crc_valid_pi_and_complete_ps() {
     let s = serve(&meta, "t185-rds");
     let (emitter, f_center, _) = found_blind(s.addr(), &truth, 0.0);
     let (id, _) = start_rds(&s, &emitter);
-    let groups = tail(s.tcp, &format!("inspector/{id}/groups"));
-    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"));
+    let groups = tail(s.tcp, &format!("inspector/{id}/groups"), TAG);
+    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"), TAG);
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     s.wait_samples(&id, start + 3 * n);
     let status = s.pipeline(&id)["status"].clone();
@@ -806,9 +746,9 @@ fn signal_062_rds_recipe_synthetic_pi_pty_ps_and_radiotext_exact() {
     let s = serve(&fx.meta_path, "t094-syn");
     let (emitter, _, _) = found_blind(s.addr(), &truth, 0.0);
     let (id, _) = start_rds(&s, &emitter);
-    let groups = tail(s.tcp, &format!("inspector/{id}/groups"));
-    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"));
-    let rt = tail(s.tcp, &format!("open/stage?pipeline={id}&node=rt"));
+    let groups = tail(s.tcp, &format!("inspector/{id}/groups"), TAG);
+    let ps = tail(s.tcp, &format!("open/stage?pipeline={id}&node=ps"), TAG);
+    let rt = tail(s.tcp, &format!("open/stage?pipeline={id}&node=rt"), TAG);
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     s.wait_samples(&id, start + 3 * n);
     let status = s.pipeline(&id)["status"].clone();

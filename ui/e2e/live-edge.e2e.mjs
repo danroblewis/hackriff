@@ -25,7 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, tileAsks, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -80,21 +80,25 @@ const isRender = (c) => c.distinct >= 32 && c.dominantShare < 0.9;
  *
  * It **reports** rather than throws when the pane will not converge, so the assertion that follows
  * can describe the finding.
+ *
+ * **What it is bounded BY** (the deflake, 2026-09-22). It used to be bounded by a fixed 25 s / 40 s,
+ * and that is a bet on the tile route's service rate — measured in this repo at 167 ms a tile
+ * beside one other spec and 3612 ms a tile in the full suite. Under the gate's pooled lanes it lost
+ * that bet twice with the product working: *"the pane never became resident with a healthy tunnel
+ * (7 tiles · 21 coarse stand-ins · 0 pending)"*, green alone every time, which is a pane that was
+ * still filling being reported as one that had stopped. It is now bounded by whether the page is
+ * still WORKING — its own report changing, or its requests on the wire — which is exactly the
+ * distinction the assertions below turn on, and which makes the T-523 defect (a steady `0 tiles ·
+ * N coarse stand-ins · 0 pending` with nothing asked for again) report FASTER than the deadline did.
  */
-async function waitForResident(page, { timeoutMs = 25000, everyMs = 400 } = {}) {
+async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 12000 } = {}) {
   const COUNTS = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
     return v ? (v.querySelector('.hk-surface-counts')?.textContent ?? '') : ''; })()`;
-  const t0 = Date.now();
-  let last = "";
-  for (;;) {
-    last = await page.eval(COUNTS);
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(last);
-    if (m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0) {
-      return { resident: true, counts: last, ms: Date.now() - t0 };
-    }
-    if (Date.now() - t0 > timeoutMs) return { resident: false, counts: last, ms: Date.now() - t0 };
-    await new Promise((r) => setTimeout(r, everyMs));
-  }
+  const r = await waitWhileWorking(page, () => page.eval(COUNTS), (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
+    return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
+  }, { everyMs, stallMs, timeoutMs });
+  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
 }
 
 test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
@@ -145,9 +149,12 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // BEFORE the assertion, because a diagnostic that only appears when the claim PASSES is useless
   // exactly when it is needed — T-482 had to reorder this to find out which addresses a failing run
   // was asking for. The claim itself is unchanged.
-  const asked = page.requests.filter((r) => r.url.includes("/api/tiles"));
+  // Per ADDRESS (T-573): one batch request names many, and its URL carries no `level_f` of its own —
+  // read per request, every batched ask landed in one "null/null" bucket.
+  await page.settleBodies();
+  const asked = tileAsks(page.requests);
   const repeats = new Map();
-  for (const r of asked) repeats.set(r.url, (repeats.get(r.url) ?? 0) + 1);
+  for (const r of asked) repeats.set(r.key, (repeats.get(r.key) ?? 0) + 1);
   const top = [...repeats.values()].sort((a, b) => b - a)[0] ?? 0;
   t.diagnostic(`${asked.length} tile requests, the most-asked address ${top} times, peak ${tiles.peak} in flight`);
   // **Which addresses, by level, with how long each took on the wire.** A live pane that stopped
@@ -159,14 +166,12 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // level 0 went x68 @69 ms to x14 @183 ms when a coarse viewport came back to life beside it.
   const byLevel = new Map();
   for (const r of asked) {
-    const q = new URL(r.url).searchParams;
-    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    const k = `${r.levelF}/${r.levelT}`;
     byLevel.set(k, (byLevel.get(k) ?? 0) + 1);
   }
   const msByLevel = new Map();
   for (const r of asked) {
-    const q = new URL(r.url).searchParams;
-    const k = `${q.get("level_f")}/${q.get("level_t")}`;
+    const k = `${r.levelF}/${r.levelT}`;
     if (r.endedMs && r.startedMs) (msByLevel.get(k) ?? msByLevel.set(k, []).get(k)).push(r.endedMs - r.startedMs);
   }
   const med = (a) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : NaN);
@@ -183,10 +188,10 @@ test("a FOLLOWING pane keeps drawing rows as they are recorded", async (t) => {
   // ticket, 1.7 s after.)
   const again = new Map(), gapByLevel = new Map();
   for (const r of asked) {
-    const k = `${new URL(r.url).searchParams.get("level_f")}/${new URL(r.url).searchParams.get("level_t")}`;
-    const prev = again.get(r.url);
+    const k = `${r.levelF}/${r.levelT}`;
+    const prev = again.get(r.key);
     if (prev !== undefined) gapByLevel.set(k, Math.max(gapByLevel.get(k) ?? 0, r.startedMs - prev));
-    again.set(r.url, r.endedMs ?? r.startedMs);
+    again.set(r.key, r.endedMs ?? r.startedMs);
   }
   t.diagnostic(`longest gap between successive answers for ONE address, by level: ${[...gapByLevel]
     .sort((a, b) => b[1] - a[1]).map(([k, g]) => `${k} ${g}ms`).join("   ") || "no address was asked twice"}`);
@@ -236,16 +241,18 @@ test("a refused place is asked for ONCE: a 4xx is terminal, and the console stay
   // every 4xx, plus 500 and 501. 503 is backpressure and retryable; every other 5xx would have come
   // from a proxy, and none can reach this suite, which talks to `hk serve` over loopback.
   const terminal = (s) => s >= 400 && (s < 500 || s === 500 || s === 501);
-  const refused = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status !== null && terminal(r.status));
+  // Per ADDRESS: a batch carries each address's refusal inside its 200 (T-573).
+  await page.settleBodies();
+  const refused = tileAsks(page.requests).filter((r) => r.status !== null && terminal(r.status));
   const per = new Map();
-  for (const r of refused) per.set(r.url, (per.get(r.url) ?? 0) + 1);
+  for (const r of refused) per.set(r.key, (per.get(r.key) ?? 0) + 1);
   t.diagnostic(`${refused.length} permanent refusals over ${per.size} distinct place(s)`);
   for (const [url, n] of per) {
     assert.equal(n, 1, `${url} was refused ${n} times — asking again cannot change the answer, ` +
       "so a status the ROUTE can emit must be terminal (T-479, narrowed by T-523)");
   }
   // And the retryable one still is: a 503 is T-454's backpressure, a statement about *now*.
-  const busy = page.requests.filter((r) => r.status === 503).length;
+  const busy = tileAsks(page.requests).filter((r) => r.status === 503).length;
   t.diagnostic(`${busy} backpressure refusals (503), which stay retryable`);
   assert.deepEqual(page.exceptions, [], "uncaught exception while the surface ran");
 });
@@ -306,23 +313,95 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   // 1. Let the pane become fully resident with the tunnel healthy, so the counts below start from a
   //    known place and the addresses the zoom asks for are genuinely NEW.
   const before = await waitForResident(page);
-  t.diagnostic(`residency before the outage after ${before.ms} ms: ${before.counts}`);
+  t.diagnostic(`residency before the outage after ${before.ms} ms: ${before.counts}` +
+    (before.resident ? "" : ` — the page then made no progress and asked for nothing for ${before.stalledMs} ms`));
   assert.ok(before.resident, `the pane never became resident with a healthy tunnel (${before.counts}); ` +
     "nothing after this would be a claim about 502s");
 
-  // 2. The tunnel wedges, and the user zooms OUT — and the view STAYS there.
+  // 2. The tunnel wedges, and the user zooms IN — and the view STAYS there.
   //
-  //    Both halves are load-bearing. **Out**, because zooming out crosses to a coarser `level_f`,
-  //    whose addresses the client does not hold; zooming *in* only narrows the viewport onto tiles
-  //    it already has, and a 502 for a tile already in hand costs nothing visible. **Stays**,
-  //    because a place is only owed a redraw while the viewport still wants it — end the gesture
-  //    somewhere else and a stranded place is indistinguishable from one legitimately abandoned.
-  //    So after this block every refused address is a place the pane is still trying to draw, and
-  //    nothing below touches the wheel, the window size or the pane again.
+  //    **Stays**, because a place is only owed a redraw while the viewport still wants it — end the
+  //    gesture somewhere else and a stranded place is indistinguishable from one legitimately
+  //    abandoned. So nothing below touches the wheel, the window size or the pane again.
+  //
+  //    **In, by at least two frequency levels — and this used to say OUT** (T-846). Out was chosen
+  //    because a coarser `level_f` is addresses the client does not hold. But the tuned window is a
+  //    sliver of the surface, so a zoom out lands mostly on spectrum the radio never sampled, and
+  //    since T-580 those places are answered by the coverage survey and never requested at all;
+  //    what was left to fetch was the observed band's one or two tiles, one level out of which is
+  //    the fallback pin already in hand. With `t523-proxy-502-is-terminal` injected the pane
+  //    converged anyway (`2 tiles · 0 coarse stand-ins · 0 pending · 8 never sampled`). A zoom IN
+  //    from the opening view stays inside the tuned window, so every address at the new level is
+  //    OBSERVED spectrum T-580 cannot short-circuit, and FINER than anything the cache holds (it
+  //    keeps its own level and coarser pins, never finer) — so each one is a new place the pane
+  //    must fetch, and one a 502 makes terminal is drawn as a coarse stand-in for good.
+  const paneLevel = async () => {
+    const lv = await page.eval(`document.querySelector('.hk-surface-viewport[data-viewport="pane"] .hk-surface-level')?.textContent ?? ''`);
+    const m = /level (\d+)\/(\d+)/.exec(lv);
+    return m ? { f: Number(m[1]), t: Number(m[2]) } : { f: NaN, t: NaN };
+  };
+  const levelBefore = (await paneLevel()).f;
+  assert.ok(Number.isFinite(levelBefore), "the pane's readout states no level, so the zoom below cannot be measured");
   await page.eval("window.__t523.on = true");
-  for (let i = 0; i < 3; i++) { await page.wheel(at, 240, { shift: true }); await page.frames(4); }
-  await new Promise((r) => setTimeout(r, 3500));
+  let levelAfter = levelBefore, ticks = 0;
+  while (levelAfter > levelBefore - 2 && ticks < 16) {
+    await page.wheel(at, -240, { shift: true }); await page.frames(4); ticks++;
+    levelAfter = (await paneLevel()).f;
+  }
+  t.diagnostic(`zoomed in ${ticks} wheel tick(s): pane level_f ${levelBefore} -> ${levelAfter}`);
+  assert.ok(levelAfter <= levelBefore - 2,
+    `${ticks} shift-wheel ticks inward moved the pane only from level_f ${levelBefore} to ${levelAfter}, ` +
+    "so the zoom may have landed on addresses already in hand and this test would assert nothing");
+  // **The outage lasts as long as the zoom's own enumeration does, not 3500 ms.** The premise below
+  // is that the zoom's addresses were refused, and how long the client takes to put them on the
+  // wire is the route's service rate — the same twenty-fold-varying quantity `waitForResident`
+  // above was bounded wrongly by. So the wedge is held until the injector's own tally stops
+  // growing: every address the gesture wanted has been refused, and none is still to come.
+  const asked = await page.waitForValue("the wedged proxy to be asked for the zoom's new addresses",
+    "window.__t523.injected.length", (n) => n > 0, { timeoutMs: 30000 });
+  // **…and until the pane's OWN final addresses have been refused** (T-846). This is what the test
+  // was missing, and why `t523-proxy-502-is-terminal` stayed green. The first 502s arm T-499's
+  // silence gate, which asks for nothing at all until it opens (up to 30 s) — so every refusal the
+  // old wait saw landed in the first ~20 ms, on the FIRST wheel tick's addresses and its pins, and
+  // the tally then sat still for 4 s and the wedge was lifted before the client had asked for a
+  // single address at the level the pane ended on. Those were then fetched through a healthy
+  // tunnel, and the pane converged whatever a 502 did (measured with the fault in: `2 tiles · 0
+  // coarse stand-ins · 0 pending · 8 never sampled`, the 8 answered by T-580's survey). Holding the
+  // wedge until a refusal names the pane's final `level_f` is the premise the recovery claim
+  // needs: a place the pane still wants WAS answered 502. The deadline covers two openings of the
+  // gate at its 30 s ceiling; the correct client probes on each.
+  //
+  // **Its own level in BOTH axes.** A tile one step coarser in time (`level_t + 1`) at the same
+  // `level_f` is a fallback pin the pane asks for mid-zoom and never again once its own tiles are
+  // in hand — so a refusal there says nothing about whether a 502 is terminal. Measured: the first
+  // refusal "at level_f 5" arrived 1 ms into the outage and was exactly such a pin.
+  const own = await paneLevel();
+  const levelsOf = (url) => {
+    const q = new URL(url, "http://relative.invalid").searchParams;
+    return q.has("addresses")
+      ? q.get("addresses").split(",").filter(Boolean).map((sp) => sp.split(".").slice(0, 2).join("/"))
+      : [`${q.get("level_f")}/${q.get("level_t")}`];
+  };
+  const ownLevel = `${own.f}/${own.t}`;
+  const finalRefused = await page.waitForValue(
+    `the wedged proxy to refuse an address at the pane's own level ${ownLevel}`,
+    "window.__t523.injected.slice()", (urls) => urls.some((u) => levelsOf(u).includes(ownLevel)),
+    { timeoutMs: 75000 });
+  t.diagnostic(`a refusal named the pane's own level ${ownLevel} after ${finalRefused.ms} ms of outage ` +
+    `(levels refused so far: ${[...new Set(finalRefused.value.flatMap(levelsOf))].join(" ")})`);
+  assert.ok(finalRefused.ok,
+    `in ${finalRefused.ms} ms of outage the client never asked the wedged proxy for an address at the ` +
+    `pane's own level ${ownLevel} (levels refused: ${[...new Set(finalRefused.value.flatMap(levelsOf))].join(" ")}), ` +
+    "so no place the pane still wants was answered 502 and the recovery below would prove nothing");
+  const wedge = await waitWhileWorking(page, () => page.eval("window.__t523.injected.length"),
+    () => false, { stallMs: 4000, timeoutMs: 30000 });
+  t.diagnostic(`the wedged proxy was first asked after ${asked.ms} ms and stopped being asked at ` +
+    `${wedge.value} refusal(s), ${wedge.ms} ms into the outage`);
   await page.eval("window.__t523.on = false");
+  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
+  const winAtLift = await page.eval(PANE_WINDOW);
+  const liftedAt = Date.now();
   const injected = [...new Set(await page.eval("window.__t523.injected.slice()"))];
   t.diagnostic(`${injected.length} distinct tile addresses answered 502 by the injected proxy during the zoom`);
   assert.ok(injected.length > 0, "the zoom injected no 502s, so this test asserts nothing");
@@ -348,8 +427,38 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   //    stand-ins · 0 pending`. That is the defect's own signature, it is what the user saw as a
   //    stalled view, and re-addressing the tiles is exactly what their resize did. Nothing here
   //    resizes, and the counts are read straight off the page.
-  const after = await waitForResident(page, { timeoutMs: 40000 });
-  t.diagnostic(`residency after the outage after ${after.ms} ms: ${after.counts}`);
+  const after = await waitForResident(page);
+  t.diagnostic(`residency after the outage after ${after.ms} ms: ${after.counts}` +
+    (after.resident ? "" : ` — the page then made no progress and asked for nothing for ${after.stalledMs} ms, ` +
+      "which is the terminal-place signature rather than a slow route"));
+  // **Residency alone cannot see the defect on a FOLLOWING pane** (T-846), and this is why the
+  // claim below is not only the readout. A terminal place heals by scrolling away: the live edge
+  // carries every refused tile out of the bottom of the pane within one pane-span, after which the
+  // pane holds only addresses minted since the outage and converges whatever a 502 did. Measured
+  // with the fault in, the pane converged 52 s after the outage; with it out, 78 s — the correct
+  // client is not faster than the scroll, so no deadline separates them (the pane spans ~52 s).
+  const winAtResident = await page.eval(PANE_WINDOW);
+  const spanS = winAtLift ? (winAtLift[1] - winAtLift[0]) / 1e9 : NaN;
+  const advancedS = winAtLift && winAtResident ? (winAtResident[1] - winAtLift[1]) / 1e9 : NaN;
+  t.diagnostic(`the pane spans ${spanS.toFixed(1)} s; its live edge advanced ${advancedS.toFixed(1)} s ` +
+    "between the outage ending and the pane converging");
+  // **So the sharp claim is on the wire: a place the proxy refused AT THE PANE'S OWN LEVEL is asked
+  // for again once the tunnel is healthy.** The injected 502s never reach the network, so any
+  // request CDP sees for one of those addresses after the lift is a re-ask. The two ways this was
+  // unsound before do not apply here: the addresses are at the level the view STAYED at (not an
+  // intermediate zoom the client rightly abandoned), and none was ever resident (finer than any
+  // level the cache held), so T-460's refresh lane — which only revalidates a tile in hand — cannot be
+  // the one re-asking. With a 502 made terminal, `acquire` never schedules them again: zero.
+  // At least one, not all: the oldest of them may scroll out of the pane before T-499's gate
+  // opens, which is the client correctly no longer wanting them; the newest stays on screen for a
+  // whole pane-span, far longer than the gate's 30 s ceiling.
+  await page.settleBodies();
+  const refusedHere = new Set(tileAsks(injected.map((url) => ({ url: new URL(url, ORIGIN).href, status: 502, startedMs: 0, endedMs: null })))
+    .filter((a) => a.levelF === own.f && a.levelT === own.t).map((a) => a.key));
+  const reasked = new Set(tileAsks(page.requests)
+    .filter((a) => a.startedMs >= liftedAt && refusedHere.has(a.key)).map((a) => a.key));
+  t.diagnostic(`${refusedHere.size} distinct address(es) at the pane's own level ${ownLevel} were answered 502; ` +
+    `${reasked.size} of them asked for again after the outage`);
 
   const samples = [];
   for (let i = 0; i < 5; i++) {
@@ -360,6 +469,13 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   }
   for (const s of samples) t.diagnostic(`t+${s.at}s newest rows: ${s.c.distinct} distinct, dominant ` +
     `${(s.c.dominantShare * 100).toFixed(0)} % — ${s.ok ? "drawn" : "FLAT"}`);
+  assert.ok(refusedHere.size > 0, "no address at the pane's own level was refused, so nothing below is a claim about 502s");
+  assert.ok(reasked.size > 0,
+    `none of the ${refusedHere.size} place(s) at the pane's own level ${ownLevel} that the proxy answered ` +
+    "502 was ever asked for again once the tunnel was healthy, though the view stayed on them. A 502 is the " +
+    "proxy saying the route did not answer; reading it as the route's own refusal makes the place terminal " +
+    "for the session, and on a following pane that hides as a stall until the live edge scrolls it away " +
+    "(T-523: the user's view that only a resize brought back).");
   assert.ok(after.resident,
     `after a zoom whose tile requests the proxy answered 502, the pane never converged onto its own ` +
     `tiles again (${after.counts}) though nothing was resized and no gesture was made. A place a 502 ` +

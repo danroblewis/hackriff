@@ -22,10 +22,11 @@ pub enum CalibrationMethod {
     Gnss,
     /// A known reference tone or signal generator.
     ReferenceTone,
-    /// A land-mobile-radio channel raster (docs/19 §7.6a, T-560): the circular-mean offset of
-    /// occupied channels from an assumed grid, which is the receiver's own clock error because
-    /// every real emission on the grid shares it. Needs no known-frequency reference signal --
-    /// only that *some* of the detections it already has sit on a raster.
+    /// A land-mobile-radio channel raster (docs/19 §7.6a, T-560): every emission on a channel
+    /// grid shares the receiver's own clock error, so the grid fitted blind over the occupied
+    /// channels, with its modulo-raster ambiguity settled by the crystal's ppm bound and by which
+    /// alias finds energy on granted channels (T-628), measures the receiver. No known-frequency
+    /// reference and no band-plan lookup: the raster is an a-priori standard, not a truth table.
     LmrRaster,
     /// Entered by hand or a factory value.
     Manual,
@@ -86,11 +87,6 @@ pub struct CalibrationState {
     /// Power calibration table; empty when uncalibrated for power.
     #[serde(default)]
     pub power_table: Vec<PowerCalPoint>,
-    /// How concentrated the fit that produced `ppm` was, 0–1, when the method reports one (e.g.
-    /// [`CalibrationMethod::LmrRaster`]'s circular-mean concentration). `None` for methods that
-    /// have no analogous figure (a signal generator's tone, a manual entry).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<f64>,
 }
 
 /// One internal spur or image rule.

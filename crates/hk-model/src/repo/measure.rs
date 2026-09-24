@@ -303,7 +303,7 @@ impl Repository {
     ) -> Result<Option<CalibrationState>, RepoError> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT body FROM calibration_state WHERE device_id = ?1 \
-             ORDER BY measured_at DESC",
+             ORDER BY measured_at DESC, rowid DESC",
         )?;
         let mut rows = stmt.query(params![device_id])?;
         while let Some(row) = rows.next()? {

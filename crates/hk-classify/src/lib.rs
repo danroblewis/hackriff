@@ -77,12 +77,15 @@ pub use features::{FeatureInput, Features, features};
 // through the `hk_model::classify` re-export above (T-218).
 pub use harness::{
     CoverageGap, FamilyCoverage, GridSize, Harness, OtaTruth, Report, RunMeta, SeedGuard, Snippet,
-    Split,
+    Split, VerifierRow, VerifierUnaccounted,
 };
-pub use structure::{ENVELOPE_SNR_UNCERTAINTY_DB, modulation_structure};
+pub use structure::{ENVELOPE_SNR_UNCERTAINTY_DB, ModulationStructure, modulation_structure};
 pub use symbols::{SymbolEstimator, SymbolWindow};
 pub use thresholds::{FEATURES_VERSION, RULES_VERSION, THRESHOLDS_VERSION, thresholds_of};
-pub use verify::{SkipReason, VERIFIER_VERSION, VerifyInput, VerifyOutcome, verify};
+pub use verify::{
+    SkipReason, VERIFIER_CONFIRMED, VERIFIER_RERANKED, VERIFIER_VERSION, VerifyInput,
+    VerifyOutcome, verify,
+};
 
 #[cfg(test)]
 mod tests {

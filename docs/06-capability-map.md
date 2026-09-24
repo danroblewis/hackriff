@@ -140,13 +140,13 @@ All 391 use cases are mapped in `use-cases.yaml`. The five themes were mapped in
 | Fit | Count | Share | Reading |
 |---|---:|---:|---|
 | `native` | 197 | 50% | Receive-only on HackRF One + Jetson with an ordinary antenna, or data-only. Half the catalogue works on the base device. |
-| `needs-accessory` | 106 | 27% | One named add-on unlocks it. Dominated by three clusters (below). |
+| `needs-accessory` | 104 | 26% | One named add-on unlocks it. Dominated by three clusters (below). |
 | `needs-other-sdr` | 39 | 10% | Beyond a single HackRF: phase-coherent multi-channel, >20 MHz gap-free, or full duplex. |
 | `needs-tx` | 24 | 6% | Transmitting, for the user's own links/devices under authority. |
-| `out-of-band` | 4 | 1% | Above or below the HackRF's 1 MHz–6 GHz tuning ceiling with no realistic accessory to close the gap (T-258): X-band deep-space downlinks (SIGNAL-039, SIGNAL-040, SPACE-077) and 38–80 GHz E-band links (PROP-049). Distinct from `needs-accessory`, where a named downconverter/front-end genuinely works. |
+| `out-of-band` | 6 | 2% | Above or below the HackRF's 1 MHz–6 GHz tuning ceiling with no realistic accessory to close the gap (T-258): X-band deep-space downlinks (SIGNAL-039, SIGNAL-040, SPACE-077), 38–80 GHz E-band links (PROP-049), and ELF/ULF magnetometer science (SPACE-042 Schumann, SPACE-048 Alfvén resonator — user decision 2026-09-23, T-282). Distinct from `needs-accessory`, where a named downconverter/front-end genuinely works. |
 | `out-of-scope` | 21 | 5% | Own sensor networks, spacecraft-only data, non-radio instruments, or attacks on others (incl. jamming, RESEARCH-027). |
 
-`hardware_fit` gives the single most-limiting constraint; a separate **`fit_flags`** list carries orthogonal caveats that do not change the fit value, so the mapping stays queryable. Current flags: `marginal-hf` (HackRF HF sensitivity is poor below ~30 MHz; 27 use cases), `marginal-8bit` (8-bit dynamic range limits it in dense RF; 15), `exceeds-window` (the full signal/band is wider than one 20 MHz window, so the scheduler time-shares; 32), `metadata-only` (limited to metadata, never content; 13), `data-only` (no local radio needed; 41), `knowledge-item` (a paper/attack the device only observes receive-only; 15). A use case can carry several.
+`hardware_fit` gives the single most-limiting constraint; a separate **`fit_flags`** list carries orthogonal caveats that do not change the fit value, so the mapping stays queryable. Current flags: `marginal-hf` (HackRF HF sensitivity is poor below ~30 MHz; 27 use cases), `marginal-8bit` (8-bit dynamic range limits it in dense RF; 36), `exceeds-window` (the full signal/band is wider than one 20 MHz window, so the scheduler time-shares; 32), `metadata-only` (limited to metadata, never content; 13), `data-only` (no local radio needed; 41), `knowledge-item` (a paper/attack the device only observes receive-only; 15). A use case can carry several.
 
 **By theme** (native share tells you how self-contained each area is):
 

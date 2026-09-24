@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, tileUrl, type Lattice, type TileAddr } from "../src/surface/lattice";
-import { RECOVER_AFTER, RECOVER_QUIET, REFRESH_DUTY, TileCache, parseKey, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
+import { RECOVER_AFTER, RECOVER_QUIET, REFRESH_DUTY, TileCache, parseKey, type MovingViewport, type TileCacheOptions, type Viewport } from "../src/surface/tilecache";
 import { TileBusyError, TileDecodeError, type TileData } from "../src/surface/tile";
 
 const LAT: Lattice = { scheme: "view", cells: 256, f0Hz: 6250, t0Ns: 1e9, levelsF: 20, levelsT: 15 };
@@ -28,7 +28,7 @@ function data(a: TileAddr, bytes = BYTES, t1Ns: number | null = null): TileData 
     state: new Uint8Array([CELL.OBSERVED, CELL.UNOBSERVED, CELL.OBSERVED, CELL.UNKNOWN]),
     tier: "spectrum-history", answeredLevel: 1, fold: { frequency: "exact", time: "exact" },
     measured: { nf: 2, nt: 2 },
-    rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null,
+    rangeDb: { lo: -100, hi: -60 }, bytes, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 
@@ -61,6 +61,12 @@ function harness(opts: TileCacheOptions = {}) {
     cache, calls, urls, waiting,
     uploads: () => uploads,
     destroys: () => destroys,
+    /** Settle with a tile carrying the route's own `cost` numbers (T-630). */
+    async settle2(a: TileAddr, cost: { serverInFlightLimit: number | null; serverInFlightShare: number | null }) {
+      waiting.get(keyOf(a))!.resolve({ ...data(a), ...cost });
+      waiting.delete(keyOf(a));
+      await flush();
+    },
     async settle(a: TileAddr, bytes = BYTES) {
       waiting.get(keyOf(a))!.resolve(data(a, bytes));
       waiting.delete(keyOf(a));
@@ -1361,4 +1367,267 @@ test("ONE contended answer does not set the live lane's clock — the cadence su
   // And the bound it must not have traded away: a lane that is GENUINELY expensive still gets rarer
   // on its own. That is the run above ("a fixed share of MEASURED capacity"), where every answer
   // costs 600 ms, so the minimum over the window IS 600 ms and the duty cap still binds.
+});
+
+test("T-630: the client operates at the SHARE the route states, and gets it back when it grows", async () => {
+  // The share is this client's allowance of the server's four slots — `ceil(4 / clients)` — and it
+  // moves in both directions, because another tab arriving and another tab closing are both true.
+  // A monotonically-falling ceiling (the pre-T-630 rule, which only ever had a server-wide cap to
+  // read) would pin this cache at one slot for the rest of the session over a tab long gone.
+  let clock = 0;
+  const h = harness({ inFlight: 4, busyBackoffMs: 50, now: () => clock });
+  assert.equal(h.cache.inFlightCeiling, 4);
+
+  // A second client arrives; the refusal is how this one finds out.
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4, share 2)", 2));
+  assert.equal(h.cache.inFlightCeiling, 2, "the ceiling is the share, not the server-wide cap");
+  assert.equal(h.cache.inFlightLimit, 2, "…and the operating cap cannot exceed it");
+  assert.equal(h.cache.stats.busyRefusals, 1, "T-455's mechanism is untouched: a refusal was SEEN");
+
+  // An answer states it too, so a tab that is already drawn learns on its next tile — no refusal
+  // needed — that half the slots are no longer its to take.
+  clock = 1000;
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame();
+  await flush();
+  await h.settle2(addr(1), { serverInFlightLimit: 4, serverInFlightShare: 1 });
+  assert.equal(h.cache.inFlightCeiling, 1);
+
+  // The other clients go away: the share comes back, and with it the ceiling this cache may
+  // recover to. It is the CEILING that moves — the operating cap still only rises by AIMD.
+  clock = 2000;
+  h.cache.beginFrame(); h.cache.acquire(addr(2)); h.cache.endFrame();
+  await flush();
+  await h.settle2(addr(2), { serverInFlightLimit: 4, serverInFlightShare: 4 });
+  assert.equal(h.cache.inFlightCeiling, 4, "a share that grew is as true as one that shrank");
+  assert.equal(h.cache.inFlightLimit, 1, "but permission to use it is still earned, never granted");
+});
+
+test("T-630: an answer states the share even when its tile is not kept, and the share carries its age", async () => {
+  // The share is a fact about this client's ADMISSION, not about the tile the answer carries. The
+  // surface-contention browser spec read "share 4" off a tab with two clients up: the only answers
+  // it had since the second client arrived were ones whose tile was not uploaded, and the share was
+  // adopted on upload alone. Here the answer is overtaken by a retune — its tile is dropped and asked
+  // for again — and the share it states must still be this client's share from then on.
+  const clock = { t: 0 };
+  const h = harness({ inFlight: 4, now: () => clock.t, serverMsGuess: 20 });
+  assert.equal(h.cache.inFlightShareStatedAt, null, "nothing has been stated before any answer");
+  assert.equal(h.cache.inFlightShareAgeMs, null);
+  await live(h, clock, 1_500);
+  clock.t += 2_000;
+  h.cache.refreshEdge(LAT, edgeAt(clock.t), [edgeView(0, edgeAt(clock.t))]);
+  await flush();
+  assert.equal(h.cache.inFlightCount, 1, "a refresh should be in flight to be overtaken");
+  assert.equal(h.cache.invalidateEdge(LAT, edgeAt(clock.t)), 1);
+  const uploads = h.uploads();
+  const statedAt = clock.t;
+  await h.settle2(edgeTile(), { serverInFlightLimit: 4, serverInFlightShare: 2 });
+  assert.equal(h.uploads(), uploads, "the overtaken tile must still be dropped");
+  assert.equal(h.cache.inFlightCeiling, 2, "the share the answer stated was not adopted because its tile was not kept");
+  assert.equal(h.cache.inFlightShareStatedAt, statedAt);
+  clock.t += 12_000;
+  assert.equal(h.cache.inFlightShareAgeMs, 12_000, "an idle tab's share is as old as the answer that stated it");
+});
+
+test("T-630: a readout states the share with its age, and says so when the route never stated one", async () => {
+  const { shareText } = await import("../src/surface/tilecache");
+  assert.equal(shareText(4, null), "share 4, assumed (the route has not stated one)");
+  assert.equal(shareText(2, 400), "share 2, stated 0.4 s ago");
+  assert.equal(shareText(4, 38_200), "share 4, stated 38 s ago");
+});
+
+// ——— T-538: speculation is about where the view is GOING, and it never aborts ———
+//
+// T-471's standing ring was reverted off `main` for two measured reasons, and the tests below are
+// one per reason plus the property that made the defect visible at all.
+//
+//   1. a speculative read that a later viewport change ABORTS leaves `hk-api` producing a tile
+//      nobody will read and holding the slot while it does — 46-53 wire aborts against 6-8 — so
+//      other tenants of the four-slot budget were refused;
+//   2. "backing off means asking nothing" was gated on the BUDGET (`inflight < effectiveLimit`,
+//      still true at a halved cap) rather than on the CAP, so after one 503 the ring took the last
+//      remaining slot every 250 ms for ever;
+//   3. and it asked during a window in which NOTHING MOVED THE VIEW, which is what `surface-nav`'s
+//      steady-state partition catches: 27-33 re-asks of addresses already answered.
+//
+// Each is a shape here rather than a threshold: (1) the lane never calls `abort`, (2) the gate is
+// `limit >= ceiling`, (3) the input is displacement, so a still view has no direction to predict.
+
+/** A pane that can be differenced between frames: two tiles wide, one tall, at `f0` tile-widths. */
+const movingView = (f0: number, id = "pane"): MovingViewport =>
+  ({ id, box: { f0Hz: f0 * TILE_HZ, f1Hz: (f0 + 2) * TILE_HZ, t0Ns: 0, t1Ns: TILE_NS }, levelF: 0, levelT: 0 });
+
+/** Sit at `f0` for a frame, then pan half a tile to the right, and answer with **how many requests
+ * actually went out** — not with what the last call returned, because the lane allows only one
+ * outstanding guess and either frame of the pair may legitimately be the one that spends it. */
+function panRight(h: ReturnType<typeof harness>, f0 = 2): number {
+  const before = h.calls.length;
+  h.cache.prefetchAhead(LAT, [movingView(f0)]);
+  h.cache.prefetchAhead(LAT, [movingView(f0 + 0.5)]);
+  return h.calls.length - before;
+}
+
+test("a view that is not moving speculates NOTHING — it has no direction, not a silenced one", () => {
+  const h = harness();
+  // Fifty frames of a pane sitting exactly still, which is the `surface-nav` steady-state window
+  // (T-564 partitions it by re-asks; this lane cannot produce one because it never asks at all).
+  for (let i = 0; i < 50; i++) h.cache.prefetchAhead(LAT, [movingView(2)]);
+  assert.deepEqual(h.calls, [], "a frozen pane over recorded data is going nowhere: T-471's ring " +
+    "asked here anyway, every 250 ms, which is a poll with a story attached");
+  assert.equal(h.cache.stats.speculativeIssued, 0);
+});
+
+test("sub-cell wobble is not motion: the threshold is what the DATA can represent", () => {
+  const h = harness();
+  const nudged = (n: number): MovingViewport => {
+    const v = movingView(2), d = n * (LAT.f0Hz / 4); // a quarter-cell per frame, for ever
+    return { ...v, box: { ...v.box, f0Hz: v.box.f0Hz + d, f1Hz: v.box.f1Hz + d } };
+  };
+  for (let i = 0; i < 3; i++) h.cache.prefetchAhead(LAT, [nudged(i)]);
+  assert.deepEqual(h.calls, [], "the level is chosen so one cell is about one pixel, so below a " +
+    "cell nothing on screen has moved and there is no gesture to extrapolate");
+  // …and it is a floor, not a mute: one whole cell of movement IS motion.
+  const v = movingView(2), d = 2 * LAT.f0Hz;
+  h.cache.prefetchAhead(LAT, [{ ...v, box: { ...v.box, f0Hz: v.box.f0Hz + d, f1Hz: v.box.f1Hz + d } }]);
+  assert.equal(h.calls.length, 1, "a cell of movement is movement");
+});
+
+test("a pan asks for the ONE tile it is heading into, and nothing else", async () => {
+  const h = harness();
+  assert.equal(panRight(h), 1);
+  assert.deepEqual(h.calls, [keyOf(addr(5))],
+    "the box moved onto tiles 2-4; the tile a continued pan reaches next is 5");
+  assert.equal(h.cache.stats.speculativeIssued, 1);
+  // One at a time, ever: further frames of the same pan cannot stack a second guess on the budget.
+  for (let i = 1; i <= 4; i++) h.cache.prefetchAhead(LAT, [movingView(2 + 0.5 * i)]);
+  assert.deepEqual(h.calls, [keyOf(addr(5))], "at most one speculative read is outstanding");
+  await h.settle(addr(5));
+});
+
+test("a zoom is not a pan: a box that changed SIZE predicts nothing", () => {
+  const h = harness();
+  h.cache.prefetchAhead(LAT, [movingView(2)]);
+  const wider: MovingViewport = { id: "pane", box: { f0Hz: 1 * TILE_HZ, f1Hz: 5 * TILE_HZ, t0Ns: 0, t1Ns: TILE_NS }, levelF: 0, levelT: 0 };
+  h.cache.prefetchAhead(LAT, [wider]);
+  assert.deepEqual(h.calls, [], "a zoom replaces the working set wholesale and the ordinary queue " +
+    "is already enumerating it — a direction read off it would be noise");
+  // The level changing is the same thing said in the other unit, and is refused the same way.
+  h.cache.prefetchAhead(LAT, [{ ...movingView(2.5), levelF: 1 }]);
+  assert.deepEqual(h.calls, []);
+});
+
+test("the guess is NEVER aborted, whatever the viewport does next (T-471's mechanism 1)", async () => {
+  const h = harness();
+  assert.equal(panRight(h), 1);
+  const key = keyOf(addr(5));
+  assert.ok(h.waiting.has(key));
+  const cancelledBefore = h.cache.stats.cancelled;
+
+  // The user keeps going, and then jumps somewhere else entirely. `setViewports`' abort loop is the
+  // one that killed T-471: a speculative address is outside every viewport box BY CONSTRUCTION, so
+  // "not wanted" is true of it the instant it is issued.
+  h.cache.setViewports(LAT, [paneView(40, 42)]);
+  h.cache.setViewports(LAT, [paneView(80, 82)]);
+  assert.ok(h.waiting.has(key),
+    "the speculative read was aborted — which reaches the BROWSER, not hk-api, so the route keeps " +
+    "producing the tile and keeps the slot. That is the leak T-471 was reverted for; the answer " +
+    "is not to abort it more carefully, it is that there is nothing here worth aborting: it was " +
+    "issued only while this client held nothing at all, and finishing is what returns the slot.");
+  assert.equal(h.cache.stats.cancelled, cancelledBefore, "nothing of this lane's was cancelled");
+  assert.equal(h.cache.stats.abandoned, 0, "and nothing was charged to the abandoned-slot budget");
+
+  // It completes, normally, into the cache — a real address on the current lattice, kept.
+  await h.settle(addr(5));
+  assert.equal(h.cache.peek(addr(5)) !== null, true);
+});
+
+test("backing off means asking NOTHING: the gate is the CAP, not the budget (mechanism 2)", async () => {
+  let clock = 0;
+  const SERVER_MS = 400;
+  const h = harness({ inFlight: 4, busyBackoffMs: 200, serverMsGuess: SERVER_MS, now: () => clock });
+
+  // One completion, so the measured service time the quiet window is expressed in is this test's.
+  h.cache.beginFrame(); h.cache.acquire(addr(0)); h.cache.endFrame(); await flush();
+  clock += SERVER_MS;
+  await h.settle(addr(0));
+
+  // …then one 503. The cap halves; the budget does NOT fill — three of four slots are free, which
+  // is exactly the state T-471's `inflight < effectiveLimit` guard read as permission.
+  h.cache.beginFrame(); h.cache.acquire(addr(1)); h.cache.endFrame(); await flush();
+  await h.fail(addr(1), new TileBusyError(4, "too many tile reads in flight (limit 4)"));
+  h.cache.setViewports(LAT, []); // drop the requeued miss, so the client genuinely wants nothing
+  assert.equal(h.cache.inFlightLimit, 2, "the cap halved");
+  const after503 = h.calls.length;
+
+  clock += 1000; // past the busy backoff, so only the CAP can still be refusing
+  for (let i = 0; i < 20; i++) h.cache.prefetchAhead(LAT, [movingView(2 + 0.5 * i)]);
+  assert.equal(h.calls.length, after503,
+    "twenty frames of real panning while AIMD is backed off, and the client is at 1 of 4 slots the " +
+    "whole time. T-471 took that last slot every 250 ms for ever, and because the cap only rose in " +
+    "`succeeded()` back then, nothing it did could ever raise it again");
+
+  // And it comes back — T-539's elapsed-quiet recovery, which is what makes this gate free of the
+  // self-lock the first attempt at fixing T-471 had.
+  clock += 4 * RECOVER_QUIET * SERVER_MS;
+  assert.equal(h.cache.inFlightLimit, 4, "an idle client's cap climbs back on the clock");
+  const recovered = h.calls.length;
+  h.cache.prefetchAhead(LAT, [movingView(20)]);
+  assert.equal(h.calls.length, recovered + 1, "…and speculation resumes with it");
+});
+
+test("a guess is made at most ONCE per address, so panning back and forth cannot become a poll", async () => {
+  const h = harness();
+  // Each guess is answered and then dropped from the cache before the next frame, so NOTHING but
+  // the lane's own memory can stop it asking again: residency is gone, nothing is outstanding, the
+  // client is idle and at its ceiling. That is the regime T-471's ring lived in — it re-asked
+  // 27-33 addresses inside an 8 s window in which nothing moved — and it is the one `surface-nav`
+  // partitions its steady window by (T-564).
+  const answerAndForget = async () => {
+    for (const key of [...h.waiting.keys()]) {
+      const a = parseKey(key)!;
+      await h.settle(a);
+      h.cache.invalidate(a);
+    }
+  };
+  // Ten round trips over the same boundary. Left is a direction too, so the first trip legitimately
+  // discovers the tile behind as well — and that is the whole crop: two addresses, twenty frames.
+  for (let i = 0; i < 10; i++) {
+    h.cache.prefetchAhead(LAT, [movingView(2)]);
+    await answerAndForget();
+    h.cache.prefetchAhead(LAT, [movingView(2.5)]);
+    await answerAndForget();
+  }
+  assert.deepEqual(h.calls.slice().sort(), [keyOf(addr(1)), keyOf(addr(5))].sort(),
+    "ten passes over the same boundary must cost the two tiles either side of it and nothing more");
+  assert.equal(new Set(h.calls).size, h.calls.length, "and no address was asked for twice, ever");
+});
+
+test("it never takes a slot the VISIBLE path wants: anything outstanding and it is silent", async () => {
+  const h = harness({ inFlight: 4 });
+  h.cache.beginFrame(); h.cache.acquire(addr(9)); h.cache.endFrame(); await flush();
+  assert.deepEqual(h.calls, [keyOf(addr(9))]);
+  assert.equal(panRight(h), 0,
+    "one ordinary miss in flight is enough: `idle` is the precondition, and it is the same " +
+    "precondition that makes never-aborting affordable — the guess is the only thing on the budget");
+  await h.settle(addr(9));
+  assert.equal(panRight(h, 20), 1, "…and the moment the visible path is satisfied, it may");
+});
+
+test("what the lane BUYS: the pan lands on a resident tile, with no blocking miss", async () => {
+  const h = harness();
+  assert.equal(panRight(h), 1);
+  await h.settle(addr(5));
+  const calls = h.calls.length;
+
+  // The pan continues onto the tile that was guessed at. Without the lane this is `acquire`'s
+  // `pending` — a blocking miss, a request, and a frame drawn as AWAITING.
+  h.cache.beginFrame();
+  assert.equal(h.cache.acquire(addr(5)).kind, "resident");
+  h.cache.endFrame();
+  await flush();
+  assert.equal(h.calls.length, calls, "the tile was already in hand: zero further requests");
+  // Counted, not argued: `speculativeIssued - speculativeHits` is what the lane wasted.
+  assert.equal(h.cache.stats.speculativeIssued, 1);
+  assert.equal(h.cache.stats.speculativeHits, 1);
 });

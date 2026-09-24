@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 hk-model.workspace = true
 serde_json.workspace = true
+# T-627: the corpus hold-out rule is sha256(scene_id || seed) mod 5.
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -39,3 +41,7 @@ hk-sim = { path = "../../crates/hk-sim" }
 # acceptance grid, so the gate measures accuracy through the same runner T-199's sweep and T-204's
 # DL evaluation use rather than a second implementation of the same measurement.
 hk-classify.workspace = true
+# T-366 the M3 exit gate's ML row (tests/acceptance/m3_ml.rs): ADR-0016 §7's ML clauses as a
+# checkable predicate (`hk_ml::exit_gate`), so the gate row is asserted over a real run instead of
+# being satisfied by nothing checking it.
+hk-ml.workspace = true

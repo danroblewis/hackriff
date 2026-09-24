@@ -56,12 +56,24 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 # T-020: H3 cell → boundary for the gpsjam adapter. No default features (drops ahash).
 h3o = { version = "0.11", default-features = false }
+# T-533: `Content-Encoding: gzip` for hk-api's JSON responses. A live `/api/tiles` body is
+# measurement text that compresses ~9x, and the route answering 200 kB instead of 1.9 MB is the
+# cheap half of making the live edge trackable. Already in the lock file (a tract/ort dependency).
+# `zlib-rs` rather than the default `miniz_oxide` backend, and that is load-bearing, not taste:
+# `miniz_oxide`'s `CompressorOxide` is built BY VALUE on the caller's stack (~300 kB of Huffman
+# tables) and `hk-api` answers every request on a 256 kB connection thread, so the default backend
+# aborts the process with a stack overflow on the first compressed answer — measured, in the
+# contract test. `zlib-rs` keeps its state on the heap. Pure Rust either way, no C toolchain.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # T-022a: HTTP request-head parsing for the hk-api server (already a tungstenite dependency).
 httparse = "1.10"
 libc = "0.2"
 num-complex = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rustfft = "6.4"
+# T-607: the C build of the vendored liquid-dsp in hk-liquid-sys. Already in Cargo.lock (1.4.6,
+# build-only, via libsqlite3-sys) with `jobserver`/`libc` resolved, so `parallel` adds no crate.
+cc = { version = "1.4", features = ["parallel"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
@@ -95,3 +107,7 @@ hk-pipeline = { path = "crates/hk-pipeline" }
 # T-085 (ADR-0011): decoder workbench contracts.
 hk-recipe = { path = "crates/hk-recipe" }
 hk-blocks = { path = "crates/hk-blocks" }
+# T-848 (ADR-0015, MAUTO M-1): decoder synthesis — types and stubs; the engine lands in M-2..M-7.
+hk-synth = { path = "crates/hk-synth" }
+# T-607: FFI over vendored liquid-dsp 1.8.2 (MIT) — the ADR-0010 DSP-kernel library, now linked.
+hk-liquid-sys = { path = "crates/hk-liquid-sys" }

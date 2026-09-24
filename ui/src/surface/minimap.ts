@@ -159,7 +159,7 @@ export interface OverlayQuad {
    * (`./trace.ts`), drawn in the strip above a pane; `time-rule` is T-506's full-width line at one
    * capture instant (the IQ horizon and the retention bound); the remaining two are the map's own.
    * All are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
 }

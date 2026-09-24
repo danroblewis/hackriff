@@ -108,6 +108,12 @@ pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 pub const JOURNAL_COMPACT_MIN: u64 = 1 << 20;
 /// Newest sealed slots whose CRC recovery re-reads before trusting the older ones.
 pub const RECOVERY_VERIFY_SLOTS: usize = 4;
+/// How far past the write head, on the sample clock, a status schedules the ring's next slot
+/// evictions ([`IqBufferStatus::drops`]): long enough to span many client polls of the status.
+pub const DROP_LOOKAHEAD_S: f64 = 60.0;
+/// Most scheduled evictions a status lists; a longer schedule is thinned to this many, keeping
+/// the later of each group (a later eviction's oldest sample is never older than an earlier one's).
+pub const DROPS_MAX: usize = 32;
 /// Default and largest number of segments a status lists.
 pub const STATUS_SEGMENTS_DEFAULT: usize = 1000;
 /// Largest `limit` of a status.
@@ -587,6 +593,75 @@ fn ns_of(k: u64, mhz: i128) -> i128 {
     (2 * k as i128 * 1_000_000_000_000 + mhz) / (2 * mhz)
 }
 
+/// The ring's next whole-slot evictions ([`DropStatus`]), from the index alone.
+///
+/// Advance `m` (1-based) happens when the writer crosses logical byte `(head.l + m) · S`; the first
+/// `free` advances take unused positions and evict nothing, so eviction `j` is advance `free + j`
+/// and overwrites `slots[j − 1]`, leaving the floor at `slots[j].l · S`. Its time is the write
+/// head's (`t1`) plus the bytes still to write at the open segment's rate. Evictions that would not
+/// move `t0` (duration retention already trimmed past them) are left out.
+fn drop_schedule(st: &State, sb: u64) -> Vec<DropStatus> {
+    let (Some(head), Some(last)) = (
+        st.slots.back(),
+        st.segments.iter().rev().find(|g| g.samples > 0),
+    ) else {
+        return Vec::new();
+    };
+    let Some(first) = st.segments.iter().find(|g| g.samples > 0) else {
+        return Vec::new();
+    };
+    let t1_ns = last.t1_ns();
+    let mut t0_ns = first.t0_ns();
+    let mhz = last.mhz();
+    let lookahead = t1_ns.saturating_add((DROP_LOOKAHEAD_S * 1e9) as i64);
+    let free = st.free.len() as u64;
+    let mut out = Vec::new();
+    let mut segs = st.segments.iter().filter(|g| g.samples > 0).peekable();
+    for (j, slot) in st.slots.iter().enumerate().skip(1) {
+        let cross = (head.l + free + j as u64).saturating_mul(sb);
+        let ahead = cross.saturating_sub(st.log_end) / BYTES_PER_SAMPLE;
+        let at_ns = sat_i64(t1_ns as i128 + ns_of(ahead, mhz));
+        let floor = (slot.l * sb).max(st.log_floor);
+        // The first retained sample at or after `floor`: segments are in log order.
+        let mut after = None;
+        while let Some(g) = segs.peek() {
+            let end = g.log_start + g.samples * BYTES_PER_SAMPLE;
+            if end <= floor {
+                segs.next();
+                continue;
+            }
+            let k = floor.saturating_sub(g.log_start) / BYTES_PER_SAMPLE;
+            after = Some(g.t_ns(g.global_index + k));
+            break;
+        }
+        let Some(after) = after else { break };
+        if after > t0_ns {
+            t0_ns = after;
+            out.push((at_ns, after));
+        }
+        if at_ns > lookahead {
+            break;
+        }
+    }
+    thin_drops(out)
+}
+
+/// Thins a long schedule (small slots against a long lookahead, e.g. 64 MiB slots at 20 Msps) to
+/// at most [`DROPS_MAX`], keeping the *later* eviction of each group: an entry then never names an
+/// oldest sample older than the evictions it stands for would leave.
+fn thin_drops(out: Vec<(i64, i64)>) -> Vec<DropStatus> {
+    let step = out.len().div_ceil(DROPS_MAX).max(1);
+    let n = out.len();
+    out.into_iter()
+        .enumerate()
+        .filter(|(i, _)| (i + 1) % step == 0 || i + 1 == n)
+        .map(|(_, (a, t))| DropStatus {
+            at: a as f64 / 1e9,
+            t0: t as f64 / 1e9,
+        })
+        .collect()
+}
+
 /// What the writer knows about a new segment.
 #[derive(Clone, Debug)]
 pub struct SegmentStart {
@@ -945,6 +1020,24 @@ pub struct EvictedStatus {
     pub bytes: u64,
 }
 
+/// A scheduled whole-slot eviction (T-845): when the write head reaches `at`, the oldest slot is
+/// overwritten and the ring's oldest retained sample jumps to `t0`.
+///
+/// Byte-quota eviction drops a whole slot at a time (a sixteenth of the quota by default: 7.5 s
+/// of a 120 s ring), and can put the ring's oldest sample *ahead* of the retention bound; a client
+/// that polls `t0` every few seconds and draws it as the IQ horizon would otherwise promise IQ that
+/// was dropped since. `t0` is exact — it is the start of data already written. `at` is predicted
+/// at the open segment's rate: a retune, gap or pause only makes the real eviction *later* (no
+/// bytes are written meanwhile); a higher rate makes it earlier, which is why a client applies the
+/// next pending one ahead of time rather than waiting for `at`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct DropStatus {
+    /// Sample-clock time of the write head when the eviction happens, Unix s (predicted).
+    pub at: f64,
+    /// The oldest retained sample right after it, Unix s (exact).
+    pub t0: f64,
+}
+
 /// The buffer's status.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IqBufferStatus {
@@ -1010,6 +1103,11 @@ pub struct IqBufferStatus {
     pub t1: Option<f64>,
     /// `t1 − t0`, s (0 when empty).
     pub span_s: f64,
+    /// The next whole-slot evictions, oldest first (T-845): when each happens and where `t0` then
+    /// moves. Empty when the ring is not yet full within [`DROP_LOOKAHEAD_S`] of the write head,
+    /// or holds nothing. At most [`DROPS_MAX`] entries (a longer schedule is thinned, keeping the
+    /// later eviction of each group).
+    pub drops: Vec<DropStatus>,
     /// Retained IQ bytes.
     pub bytes: u64,
     /// Bytes of the buffer's files on disk (ring + journal).
@@ -1083,6 +1181,7 @@ impl IqBufferStatus {
             t0: None,
             t1: None,
             span_s: 0.0,
+            drops: Vec::new(),
             bytes: 0,
             disk_bytes: 0,
             samples: 0,
@@ -1903,6 +2002,7 @@ impl IqBuffer {
                 (Some(a), Some(b)) => s(b - a),
                 _ => 0.0,
             },
+            drops: drop_schedule(&st, sb),
             bytes,
             disk_bytes: allocated + inner.journal_len.load(Ordering::Relaxed),
             samples: bytes / BYTES_PER_SAMPLE,
@@ -3106,6 +3206,130 @@ mod tests {
         drop(w);
         drop(buf);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The client's rule (`ui/src/app/centre/capture-window.ts` `ringRules`): the horizon drawn
+    /// from a status polled earlier, at an edge that has moved on since, is the polled `t0` or the
+    /// oldest sample the next pending eviction leaves, whichever is newer.
+    fn horizon(polled: &IqBufferStatus, edge_s: f64) -> f64 {
+        let next = polled
+            .drops
+            .iter()
+            .find(|d| d.at > edge_s)
+            .or(polled.drops.last());
+        next.map_or(polled.t0.unwrap(), |d| d.t0.max(polled.t0.unwrap()))
+    }
+
+    #[test]
+    fn t845_drop_schedule_predicts_every_whole_slot_eviction() {
+        // A byte-full ring (quota 4 slots, retention never binding) evicts a whole slot at a time,
+        // so its oldest sample jumps by a slot's duration. The status schedules those jumps, and a
+        // horizon drawn from an earlier poll by the client's rule is never older than what the
+        // ring then holds — across several evictions per poll — while each `t0` is exact.
+        let dir = tmp("drops");
+        let slot = MIN_CHUNK_BYTES;
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(1e9, Some(4 * slot))).unwrap();
+        let fs_hz = 1e6;
+        let per_slot = slot / BYTES_PER_SAMPLE;
+        let slot_s = per_slot as f64 / fs_hz;
+        w.begin_segment(start(0, 1_000_000_000_000, 100e6, fs_hz));
+        let t_of = |k: u64| 1000.0 + k as f64 / fs_hz;
+        // Not full yet: the first eviction comes after the two free positions are used, and is
+        // scheduled at that future time.
+        w.append(&ramp(0, 2 * per_slot + 100)).unwrap();
+        let s = buf.status(None, None, 1);
+        assert_eq!(s.evicted.chunks, 0);
+        let d0 = s.drops[0];
+        assert!((d0.at - t_of(4 * per_slot)).abs() < 1e-6, "{:?}", s.drops);
+        assert!((d0.t0 - t_of(per_slot)).abs() < 1e-6, "{:?}", s.drops);
+        // Write in blocks of a third of a slot, polling every 4 blocks (more than one eviction per
+        // poll once full), and hold the last polls' horizons against the truth after every block.
+        let block = per_slot / 3;
+        let mut k = 2 * per_slot + 100;
+        let mut polls: Vec<IqBufferStatus> = vec![s];
+        let mut jumps = 0;
+        let mut last_t0 = polls[0].t0.unwrap();
+        for b in 0..60u64 {
+            w.append(&ramp(k, block)).unwrap();
+            k += block;
+            let now = buf.status(None, None, 1);
+            let t0 = now.t0.unwrap();
+            let t1 = now.t1.unwrap();
+            assert!((t1 - t_of(k)).abs() < 1e-6);
+            if t0 > last_t0 + 1e-9 {
+                jumps += 1;
+                // A whole-slot eviction lands exactly where the schedule said it would.
+                let prev = polls.last().unwrap();
+                assert!(
+                    prev.drops.iter().any(|d| (d.t0 - t0).abs() < 1e-6),
+                    "eviction to {t0} was not scheduled: {:?}",
+                    prev.drops
+                );
+                last_t0 = t0;
+            }
+            // The last two polls, each at the write head and at an edge lagging it by half a slot.
+            for p in polls.iter().rev().take(2) {
+                for edge in [t1, t1 - slot_s / 2.0] {
+                    let h = horizon(p, edge);
+                    assert!(
+                        h >= t0 - 1e-9,
+                        "block {b}: horizon {h} from a poll at t1 {:?} (edge {edge}) is older \
+                         than the ring's oldest sample {t0}",
+                        p.t1
+                    );
+                }
+            }
+            if b % 4 == 3 {
+                polls.push(now);
+            }
+        }
+        assert!(
+            jumps >= 15,
+            "the ring must have evicted many slots: {jumps}"
+        );
+        let s = buf.status(None, None, 1);
+        assert!(
+            s.drops
+                .windows(2)
+                .all(|p| p[0].at < p[1].at && p[0].t0 < p[1].t0),
+            "{:?}",
+            s.drops
+        );
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t845_a_duration_bound_ring_schedules_no_drop() {
+        // Retention trims to the sample well before the byte quota fills: no whole-slot eviction
+        // is within reach, so nothing is scheduled (the client's retention rule covers it).
+        let dir = tmp("drops-dur");
+        let (buf, mut w) = IqBuffer::open(&dir, cfg(0.01, Some(64 * MIN_CHUNK_BYTES))).unwrap();
+        w.begin_segment(start(0, 0, 100e6, 1e6));
+        w.append(&ramp(0, 3 * MIN_CHUNK_BYTES)).unwrap();
+        let s = buf.status(None, None, 1);
+        assert!(s.drops.is_empty(), "{:?}", s.drops);
+        drop(w);
+        drop(buf);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t845_a_long_drop_schedule_is_thinned_to_later_evictions() {
+        // More evictions inside the lookahead than DROPS_MAX: capped, the later of each group kept,
+        // and the furthest eviction always listed.
+        let all: Vec<(i64, i64)> = (1..=100).map(|k| (k * 10, k)).collect();
+        let d = thin_drops(all);
+        assert!(d.len() <= DROPS_MAX, "{d:?}");
+        assert_eq!(d[0].t0, 4e-9, "the later of the first group: {d:?}");
+        assert_eq!(d.last().unwrap().t0, 100e-9);
+        assert!(d.windows(2).all(|p| p[0].at < p[1].at));
+        assert_eq!(
+            thin_drops(vec![(1, 1), (2, 2)]).len(),
+            2,
+            "a short one is kept whole"
+        );
     }
 
     #[test]

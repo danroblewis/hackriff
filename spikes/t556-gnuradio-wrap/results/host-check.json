@@ -1,0 +1,51 @@
+{
+  "expected": 24,
+  "feed1_s": 0.002081166,
+  "first_byte_s": 0.806960709,
+  "first_decode_upper_bound_s": 0.926934875,
+  "found_blind": 22,
+  "log_tail": [
+    "host: plugin pid 57567 ended: exit code 0",
+    "plugin: {\"t556_stats\": {\"decodes\": 11, \"markers\": 0, \"samples_in\": 800428, \"first_sample_t\": 0.36649379099253565, \"first_decode_t\": 0.3707504160120152, \"header\": {\"sample_rate_hz\": 250000.0, \"center_hz\": 868100000.0, \"datatype\": \"cf32_le\"}}, \"import_s\": 0.23865750001277775, \"ready_s\": 0.2523437910131179}",
+    "[hk_gr_lora +0.483s] eof: 800428 samples, 11 decodes, 0 discontinuities, 0 markers",
+    "[hk_gr_lora +0.371s] first decode at +0.371s",
+    "[hk_gr_lora +0.252s] ready: import 0.239s, ready 0.252s (sf=7 bw=125000 rate=250000)",
+    "host: plugin reported ready; 0 records had been offered before that"
+  ],
+  "pass1_all": true,
+  "pass1_decodes": 11,
+  "pass2_all": true,
+  "ready_s": 0.862396334,
+  "realtime": false,
+  "records_dropped": 0,
+  "republished": 22,
+  "restart_to_ready_s": 0.908619917,
+  "restarted": true,
+  "sample_msg": {
+    "content": {
+      "payload_hex": "686b30302d6c64636f626d616a6f656d7064",
+      "payload_text": "hk00-ldcobmajoempd"
+    },
+    "content_class": "unrestricted",
+    "crc_status": "valid",
+    "decode_id": "01a0caf4-ecab-703f-8db7-2cfd4bd74f91",
+    "decoder": "gr-lora-sdr@0.0.1-spike",
+    "frame_model": "lora-phy-explicit",
+    "gated": false,
+    "metadata": {
+      "cr": 1,
+      "ldro_mode": 2,
+      "pay_len": 18,
+      "sf": 7
+    },
+    "seq": 0,
+    "t_ns": 1790111443411708000,
+    "type": "message"
+  },
+  "stats": "PluginStats { state: Stopped, ready: true, signs_of_life: true, records_offered_before_ready: 0, content_ceiling: Unrestricted, records_offered: 196, records_enqueued: 196, records_dropped_full: 0, records_dropped_detached: 0, starts: 2, restarts: 1, crashes: 1, clean_exits: 1, spawn_failures: 0, stall_kills: 0, startup_kills: 0, last_hang: None, decodes: 22, annotations: 0, class_clamped: 0, class_unknown: 0, content_gated: 0, metadata_sanitized: 0, sample_index_out_of_range: 0, log_lines_withheld: 0, stderr_lines_withheld: 0, readers_abandoned: 0, malformed: 0, store_errors: 0, last_exit: Some(\"exit code 0\") }",
+  "t_ns_err": {
+    "max": 0,
+    "min": -16000,
+    "tol": 512000
+  }
+}

@@ -31,12 +31,22 @@
 //!   run **reports** the systems no control-channel decoder can reach at all (Capacity Plus's
 //!   moving rest channel, NXDN Type-D's distributed trunking), since otherwise they are
 //!   indistinguishable from empty spectrum.
+//! - [`t272_p25p2`] proves the C23 **TDMA slot mix-up** pitfall is read the right way round: a
+//!   control channel announcing an `IDEN_UP_TDMA` band plan names the system P25 Phase 2, and two
+//!   talkgroups granted on **alternating slots of one frequency** become two distinct
+//!   `CallRecord`s with their own slots and talkgroups — while the two wrong frequencies an FDMA
+//!   reading of the same channel numbers would produce never appear anywhere in the run. The
+//!   boundaries are the shared carrier's, and every TDMA call says so.
 //! - [`t345_nxdn`] proves a **third** protocol, decoded through its real channel coding rather than
 //!   a flattened one: an NXDN Type-C outbound RCCH found blind, its CACs descrambled,
 //!   deinterleaved, depunctured, Viterbi decoded and CRC checked, its channel assignments fully
 //!   read — and **none of them resolving to a frequency**, because the air interface carries a
 //!   channel *number* and defines no mapping from one to hertz. Two baited frequencies carry real
 //!   emissions and neither is ever reported.
+//! - [`t849_voice_frames`] proves the **voice frames** of a followed channel are read: each call's
+//!   own LDU1 link control (talkgroup, source) and LDU2 encryption sync (ALGID, key id), blind from
+//!   IQ — on two channels whose grants state nothing about encryption, one clear and one AES-256
+//!   by their ALGIDs — while unframed 4FSK on another followed channel yields no frame at all.
 
 // The shared harness modules carry helpers only the other suites use.
 #![allow(dead_code)]
@@ -65,5 +75,14 @@ mod t270_encryption;
 #[path = "acceptance/t271_dmr.rs"]
 mod t271_dmr;
 
+#[path = "acceptance/t272_p25p2.rs"]
+mod t272_p25p2;
+
 #[path = "acceptance/t345_nxdn.rs"]
 mod t345_nxdn;
+
+#[path = "acceptance/t849_voice_frames.rs"]
+mod t849_voice_frames;
+
+#[path = "acceptance/t330_algid.rs"]
+mod t330_algid;

@@ -107,6 +107,66 @@ TRUNK_CC_DEFAULTS: dict[str, Any] = {
     # its traffic looks. 851.2 MHz is +187.5 kHz, raster channel 15, also inside the window.
     "late_entry_target_hz": 851.2e6,
     "late_entry_talkgroup": 4812,
+    # --- P25 Phase 2 (T-272). OFF by default, so the T-267/T-268/T-269/T-270 fixtures stay
+    # byte-identical: the branches guarded by it emit no extra TSBK and consume no randomness when
+    # it is off.
+    #
+    # A Phase 2 system's CONTROL channel is a Phase 1 channel -- the same C4FM, the same TSBKs --
+    # so what makes this scene Phase 2 is the band plan it announces: an IDEN_UP_TDMA entry whose
+    # channel type names two slots per carrier. Two talkgroups are then granted on ALTERNATING
+    # SLOTS of one frequency, which is C23's TDMA slot mix-up pitfall in its exact form: read as
+    # FDMA, the two channel numbers become two different (wrong) frequencies and the two
+    # talkgroups are attributed to channels that do not exist.
+    "phase2": False,
+    "p2_iden": 2,
+    # Channel type 3 = two slots per carrier.
+    "p2_channel_type": 3,
+    "p2_base_hz": 851.0e6,
+    "p2_spacing_hz": 12500.0,
+    # The ONE frequency both talkgroups share. Chosen as a frequency first, like every other target
+    # here; its channel number is derived from the TDMA band plan, so a decoder still has to divide
+    # by the slot count it read off the air to arrive at it. +162.5 kHz from the tuned centre is
+    # raster channel 13 -- inside the window, and clear of the control channel (3), the decoy (-5),
+    # the followed channel (5), the encrypted (9) and late-entry (15) channels and every NBFM
+    # neighbour.
+    "p2_target_hz": 851.175e6,
+    "p2_slot0_talkgroup": 7001,
+    "p2_slot0_source": 1111,
+    "p2_slot1_talkgroup": 7002,
+    "p2_slot1_source": 2222,
+    # --- P25 Phase 1 voice frames (T-849). OFF by default, so every earlier trunk fixture stays
+    # byte-identical: the branches guarded by it emit no extra TSBK and consume no randomness when
+    # it is off.
+    #
+    # Two more granted voice channels whose keyings carry REAL voice frames -- LDU1 link control
+    # and LDU2 encryption sync, coded as the decoder reads them -- instead of unframed 4FSK. Both
+    # grants carry service options 0, so the control channel says nothing about encryption for
+    # either (`unknown`); the ONLY thing separating the clear call from the encrypted one is the
+    # ALGID in its own LDU2, which is the whole point: that statement is only reachable by
+    # demodulating the granted channel.
+    "voice_frames": False,
+    # Raster channel 1 (+12.5 kHz) and 14 (+175 kHz): inside the window, clear of the control
+    # channel (3), the decoy (-5), the followed channel (5) and every NBFM neighbour, and -- like
+    # every other target -- chosen as a frequency first, its channel number derived from the band
+    # plan.
+    "vf_clear_target_hz": 851.025e6,
+    "vf_clear_talkgroup": 5150,
+    "vf_clear_source": 1_000_001,
+    "vf_encrypted_target_hz": 851.1875e6,
+    "vf_encrypted_talkgroup": 5151,
+    "vf_encrypted_source": 2_000_002,
+    # AES-256 and a key id; the clear call carries ALGID 0x80, key id 0 and an all-zero MI.
+    "vf_encrypted_algid": tk.P25_ALGID_AES256,
+    "vf_encrypted_key_id": 0x02A5,
+    "vf_nac": tk.P25_DEFAULT_NAC,
+    # Each keying is `vf_superframes` LDU1+LDU2 pairs (0.36 s each) starting at `vf_first_s`, then
+    # `vf_off_s` of silence. The trunk hunt holds the recording's first 0.5 s (it attaches at the
+    # ring's oldest sample), so the first keying -- [0.02, 0.38] s -- lies wholly inside it, with a
+    # silence after it longer than the follower's 90 ms timeout: a complete LDU1 AND a complete LDU2
+    # per channel, and a call with a measured start and end.
+    "vf_first_s": 0.02,
+    "vf_superframes": 1,
+    "vf_off_s": 0.14,
 }
 
 #: The same scene with TSBK content switched on (T-268).
@@ -114,6 +174,14 @@ TRUNK_TSBK_DEFAULTS: dict[str, Any] = {**TRUNK_CC_DEFAULTS, "tsbk": True}
 
 #: The TSBK scene plus the encrypted and late-entry granted channels (T-270).
 TRUNK_ENCRYPTED_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "encryption": True}
+
+#: The TSBK scene plus a P25 Phase 2 TDMA band plan and two talkgroups on alternating slots of one
+#: frequency (T-272).
+TRUNK_P25P2_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "phase2": True}
+
+#: The TSBK scene plus two granted voice channels carrying real P25 Phase 1 voice frames: one clear
+#: by its LDU2 ALGID, one encrypted by it, with grants that say nothing either way (T-849).
+TRUNK_VOICE_FRAMES_DEFAULTS: dict[str, Any] = {**TRUNK_TSBK_DEFAULTS, "voice_frames": True}
 
 
 def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dict[str, Any]], dict[str, Any]]:
@@ -220,6 +288,117 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
             },
         }
 
+    # --- P25 Phase 2 (T-272). A TDMA band plan, announced twice like every other identifier so it
+    # has to clear the same agreement gate, and two grants naming consecutive channel numbers on
+    # it: one frequency, two slots, two talkgroups.
+    p2_truth: dict[str, Any] | None = None
+    if bool(p.get("phase2", False)):
+        p2_iden = int(p["p2_iden"])
+        if p2_iden in (iden, u_iden):
+            raise ValueError("the TDMA identifier must differ from the FDMA and unannounced ones")
+        ctype = int(p["p2_channel_type"])
+        slots = tk.TDMA_SLOTS_PER_CHANNEL_TYPE[ctype]
+        if slots < 2:
+            raise ValueError("a Phase 2 scene needs a channel type with more than one slot")
+        p2_base, p2_spacing = float(p["p2_base_hz"]), float(p["p2_spacing_hz"])
+        p2_hz = float(p["p2_target_hz"])
+        steps = (p2_hz - p2_base) / p2_spacing
+        if steps != int(steps) or not 0 <= steps * slots <= 0xFFF:
+            raise ValueError(f"p2_target_hz {p2_hz} is not a channel of the TDMA band plan")
+        p2_channel = int(steps)
+        if p2_hz in {target_hz, follow_hz}:
+            raise ValueError("the Phase 2 channel must be a frequency of its own")
+        tdma_args = tk.iden_up_tdma_args(p2_iden, ctype, p2_base, p2_spacing)
+        tdma_block = tk.tsbk(tk.TSBK_OP_IDEN_UP_TDMA, tdma_args)
+        slot_tgs = [int(p["p2_slot0_talkgroup"]), int(p["p2_slot1_talkgroup"])]
+        slot_srcs = [int(p["p2_slot0_source"]), int(p["p2_slot1_source"])]
+        slot_chan16 = [tk.tdma_channel_number(p2_iden, p2_channel, k, slots) for k in (0, 1)]
+        # Inserted near the FRONT of the cycle, not appended to it. A hunt buffers a window and
+        # decodes the blocks it holds, so a message late in a long cycle can fall off the end of
+        # every window -- and the cycle length and the window period here happen to be
+        # commensurate, so "late" means late in *every* pass, not merely some. Both agreements for
+        # the TDMA identifier and both slot grants therefore sit in the first five frames, which
+        # keeps what this scene tests independent of how much of the cycle a window happens to
+        # span. The two agreements are adjacent for the same reason; the gate is that two messages
+        # agree bit for bit, not that they are spread out.
+        cycle[1:1] = [
+            ("iden-up-tdma", tdma_block),
+            ("iden-up-tdma", tdma_block),
+            ("grant-p2-slot0",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                     tk.grant_args(slot_chan16[0], slot_tgs[0], source=slot_srcs[0]))),
+            ("grant-p2-slot1",
+             tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                     tk.grant_args(slot_chan16[1], slot_tgs[1], source=slot_srcs[1]))),
+        ]
+        p2_truth = {
+            "iden": p2_iden,
+            "channel_type": ctype,
+            "slots": slots,
+            "base_hz": p2_base,
+            "spacing_hz": p2_spacing,
+            "target_hz": p2_hz,
+            "channel": p2_channel,
+            "slot_channel_16bit": slot_chan16,
+            "slot_talkgroups": slot_tgs,
+            "slot_sources": slot_srcs,
+            # What an FDMA reading of the SAME two channel numbers would produce: two different
+            # frequencies, both wrong, neither of which any row may ever report.
+            "wrong_frequencies_if_read_as_fdma_hz": [
+                p2_base + p2_spacing * (p2_channel * slots + k) for k in (0, 1)
+            ],
+            "expected": {
+                "protocol": "p25-phase2",
+                "calls": "two, on ONE frequency, attributed to slots 0 and 1 with their own "
+                         "talkgroups",
+                "timing": "both slots key one carrier, so call boundaries are the shared "
+                          "envelope's (`tdma-shared-envelope`), not per-slot",
+            },
+        }
+
+    # --- P25 Phase 1 voice frames (T-849). Two plain grants with service options 0: the control
+    # channel states NOTHING about either call's encryption, so the ALGID in each call's own LDU2 is
+    # the only place the difference lives.
+    vf_truth: dict[str, Any] | None = None
+    if bool(p.get("voice_frames", False)):
+        chans: list[dict[str, Any]] = []
+        for key, algid, key_id in (
+            ("clear", tk.P25_ALGID_CLEAR, 0),
+            ("encrypted", int(p["vf_encrypted_algid"]), int(p["vf_encrypted_key_id"])),
+        ):
+            hz = float(p[f"vf_{key}_target_hz"])
+            if hz in {target_hz, follow_hz}:
+                raise ValueError("each granted voice channel must be a distinct frequency")
+            chan = channel_of(hz, f"vf_{key}_target_hz")
+            chan16 = tk.channel_number(iden, chan)
+            v_tg, v_src = int(p[f"vf_{key}_talkgroup"]), int(p[f"vf_{key}_source"])
+            cycle.append((f"grant-voice-frames-{key}",
+                          tk.tsbk(tk.TSBK_OP_GRP_VCH_GRANT,
+                                  tk.grant_args(chan16, v_tg, source=v_src))))
+            chans.append({
+                "name": key,
+                "target_hz": hz,
+                "channel": chan,
+                "channel_16bit": chan16,
+                "talkgroup": v_tg,
+                "source": v_src,
+                "grant_service_options": 0,
+                "algid": algid,
+                "key_id": key_id,
+            })
+        if chans[0]["target_hz"] == chans[1]["target_hz"]:
+            raise ValueError("the clear and encrypted voice-frame channels must differ")
+        vf_truth = {
+            "nac": int(p["vf_nac"]),
+            "channels": chans,
+            "expected": {
+                "grants": "both unknown: service options 0 states nothing",
+                "voice_frames": "each channel's LDU1 carries its own talkgroup and source, and its "
+                                "LDU2 its own ALGID (0x80 clear / an algorithm) and key id",
+                "other_channels": "no voice frames: their keyings are unframed 4FSK",
+            },
+        }
+
     dibits = tk.frames_from_blocks([b for _, b in cycle], n_frames)
     frames = [{"index": i, "kind": cycle[i % len(cycle)][0],
                "block_hex": cycle[i % len(cycle)][1].hex()} for i in range(n_frames)]
@@ -260,6 +439,12 @@ def _tsbk_stream(p: dict[str, Any], n_frames: int) -> tuple[np.ndarray, list[dic
     }
     if enc_truth is not None:
         truth["encryption"] = enc_truth
+    if vf_truth is not None:
+        truth["voice_frames"] = vf_truth
+    if p2_truth is not None:
+        truth["phase2"] = p2_truth
+        # A system announcing a TDMA band plan is Phase 2, however Phase 1 its control channel is.
+        truth["expected"]["protocol"] = "p25-phase2"
     return dibits, frames, truth
 
 
@@ -415,7 +600,8 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
             raise ValueError("a keying needs a positive on and off time")
 
         def place_voice(target_hz: float, rng_name: str, talkgroup: int, chan16: int,
-                        what: str) -> tuple[list[tuple[float, float]], float]:
+                        what: str, *, tdma_slots: list[dict[str, Any]] | None = None
+                        ) -> tuple[list[tuple[float, float]], float]:
             """Repeated keyings on one granted voice channel, and the offset it sits at.
 
             Every granted channel in this scene is placed by this one function, so the encrypted
@@ -453,6 +639,9 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                             burst_start_s=b0, burst_duration_s=b1 - b0,
                             granted_by_channel_16bit=chan16,
                             talkgroup=talkgroup,
+                            # On a TDMA carrier one emission carries BOTH slots: the samples are
+                            # one keying, and which slot was talking is not separable from them.
+                            **({"tdma_slots": tdma_slots} if tdma_slots else {}),
                         ),
                     )
                 t_key += on_s + off_s
@@ -478,6 +667,22 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         tsbk_truth["expected"]["follow_grant"] = "followed: a call record with measured boundaries"
         tsbk_truth["expected"]["grant_target"] = "outside-window: logged, never followed"
 
+        # The Phase 2 channel: ONE emission on ONE frequency, carrying both slots. Placed by the
+        # same function as every other granted channel, so nothing in the samples says it is TDMA
+        # -- only the band plan the control channel announced does, which is the point of the test
+        # it serves (T-272).
+        p2 = tsbk_truth.get("phase2")
+        if p2 is not None:
+            p2_keyings, p2_off = place_voice(
+                float(p2["target_hz"]), "voice-p2",
+                int(p2["slot_talkgroups"][0]), int(p2["slot_channel_16bit"][0]),
+                "p2_target_hz",
+                tdma_slots=[{"slot": k, "talkgroup": int(tg)}
+                            for k, tg in enumerate(p2["slot_talkgroups"])],
+            )
+            p2["keyings_s"] = [[a, b] for a, b in p2_keyings]
+            p2["offset_hz"] = p2_off
+
         # The encrypted and late-entry channels, placed by the same function and therefore
         # indistinguishable in the samples (T-270).
         enc = tsbk_truth.get("encryption")
@@ -489,6 +694,71 @@ def trunk_control_channel(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                     f"{key}_target_hz")
                 enc[f"{key}_keyings_s"] = [[a, b] for a, b in ks]
                 enc[f"{key}_offset_hz"] = off_hz
+
+        # The voice-frame channels (T-849): the same power and modulation as every other granted
+        # channel, but each keying is a run of real LDU1/LDU2 superframes rather than unframed
+        # 4FSK -- link control in the LDU1, encryption sync in the LDU2.
+        vf = tsbk_truth.get("voice_frames")
+        if vf is not None:
+            first_s, off_s = float(p["vf_first_s"]), float(p["vf_off_s"])
+            n_sf = int(p["vf_superframes"])
+            if first_s < 0 or off_s <= 0 or n_sf < 1:
+                raise ValueError("a voice-frame keying needs a start, a silence and a superframe")
+            nac = int(vf["nac"])
+            for ch in vf["channels"]:
+                off_hz = float(ch["target_hz"]) - cap.center_hz
+                if abs(off_hz) + c4fm_bw / 2 > fs / 2:
+                    raise ValueError(f"voice-frame channel {ch['name']} does not fit")
+                rr = scene.rng("voice-frames", ch["name"])
+                lc = tk.p25_lc_group_voice(int(ch["talkgroup"]), int(ch["source"]))
+                keyings: list[list[float]] = []
+                ldus: list[dict[str, Any]] = []
+                t_key = first_s
+                while t_key < span_s:
+                    i0 = int(round(t_key * fs))
+                    frames: list[np.ndarray] = []
+                    for k in range(n_sf):
+                        # A clear call's MI is all zero; an encrypted call's changes every
+                        # superframe. Either way it is recorded, never used.
+                        mi = (bytes(9) if ch["algid"] == tk.P25_ALGID_CLEAR
+                              else bytes(int(v) for v in rr.integers(0, 256, 9)))
+                        es = tk.p25_es(mi, int(ch["algid"]), int(ch["key_id"]))
+                        frames.append(tk.p25_ldu_dibits(tk.P25_DUID_LDU1, lc, rr, nac=nac))
+                        frames.append(tk.p25_ldu_dibits(tk.P25_DUID_LDU2, es, rr, nac=nac))
+                        t_sf = t_key + 2 * k * tk.P25_LDU_S
+                        ldus.append({"duid": "ldu1", "start_s": t_sf})
+                        ldus.append({"duid": "ldu2", "start_s": t_sf + tk.P25_LDU_S,
+                                     "mi_hex": mi.hex()})
+                    iq = tk.c4fm(np.concatenate(frames), fs, rate)[: max(0, n - i0)]
+                    if len(iq) == 0:
+                        break
+                    phase0 = float(rr.uniform(0, 2 * math.pi))
+                    tt = scene.time(i0, len(iq))
+                    scene.add_samples(
+                        i0, v_amp * iq * np.exp(1j * (2 * math.pi * off_hz * tt + phase0)))
+                    b0, b1 = i0 / fs, (i0 + len(iq)) / fs
+                    keyings.append([b0, b1])
+                    vf_hz = cap.center_hz + off_hz
+                    scene.annotate(
+                        i0, len(iq), vf_hz - c4fm_bw / 2, vf_hz + c4fm_bw / 2,
+                        "trunk-voice-keying",
+                        scene.emission_truth(
+                            cap, off_hz, c4fm_bw, v_power,
+                            kind="trunk-voice-keying", modulation="c4fm", levels=4,
+                            symbol_rate_bd=rate, raster_hz=raster,
+                            raster_channel=int(round(off_hz / raster)),
+                            is_control_channel=False, confirmable=False,
+                            burst_start_s=b0, burst_duration_s=b1 - b0,
+                            granted_by_channel_16bit=int(ch["channel_16bit"]),
+                            talkgroup=int(ch["talkgroup"]),
+                            voice_frames="p25-phase1-ldu",
+                        ),
+                    )
+                    t_key += 2 * n_sf * tk.P25_LDU_S + off_s
+                ch["offset_hz"] = off_hz
+                ch["keyings_s"] = keyings
+                ch["ldus"] = [u for u in ldus if u["start_s"] + tk.P25_LDU_S <= span_s]
+                ch["lc_hex"] = lc.hex()
 
     scene.scenario_truth["trunking"] = {
         "raster_hz": raster,

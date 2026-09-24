@@ -106,7 +106,6 @@ fn sample_cal() -> CalibrationState {
             gain: None,
             uncertainty_db: None,
         }],
-        confidence: None,
     }
 }
 
@@ -733,7 +732,6 @@ fn latest_calibration_state_for_device_reads_back_the_newest_matching_row() {
     newest.method = CalibrationMethod::LmrRaster;
     newest.measured_at = t(-1);
     newest.ppm = -9.6;
-    newest.confidence = Some(0.6);
     repo.insert_calibration_state(&newest).unwrap();
 
     let got = repo
@@ -744,8 +742,11 @@ fn latest_calibration_state_for_device_reads_back_the_newest_matching_row() {
     assert_eq!(got.ppm, -9.6);
 
     assert_eq!(
-        repo.latest_calibration_state_for_device("synthetic:unknown", &CalibrationMethod::LmrRaster)
-            .unwrap(),
+        repo.latest_calibration_state_for_device(
+            "synthetic:unknown",
+            &CalibrationMethod::LmrRaster
+        )
+        .unwrap(),
         None,
         "a device with no calibration history gets None, not a guess"
     );

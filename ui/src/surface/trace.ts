@@ -669,3 +669,70 @@ export function persistenceSlices(
   }
   return out;
 }
+
+/**
+ * **Afterglow cells whose tile is in hand but whose ANSWER stops short of them** (T-532's horizon).
+ *
+ * A resident copy states how far forward its records reach (`asOfNs`); cells after that were
+ * recorded after the copy was built and read as not-observed in it. For the afterglow that is the
+ * tile-boundary case: a slice in the first rows of tile N has its earlier rows at the END of tile
+ * N-1, and a copy of N-1 fetched while it was still the live tile does not reach them. Counted per
+ * tile over the afterglow's own window (the `depth` cells before the slice's cell that lie inside the
+ * pane), with [[persistenceSlices]]'s bounds. A copy with no finite horizon reaches everywhere, as in
+ * the renderer's own horizon clip. Tiles not in hand at all are the PaneReport's business.
+ */
+export function persistenceShortTiles(
+  lat: Lattice,
+  cache: Pick<TileCache<TilePlanes>, "peek">,
+  box: Box,
+  levelF: number,
+  levelT: number,
+  device: string,
+  tAtNs: number,
+  depth = TRACE_PERSISTENCE,
+): number {
+  const cell = lat.t0Ns * 2 ** Math.max(0, levelT);
+  if (!(cell > 0) || !(depth > 0)) return 0;
+  const end = sliceWindow(lat, levelT, tAtNs).t0Ns;
+  const k = Math.min(depth, Math.floor((end - box.t0Ns) / cell));
+  if (!(k > 0)) return 0;
+  const win = { ...box, t0Ns: end - k * cell, t1Ns: end };
+  let n = 0;
+  for (const a of tilesFor(lat, win, levelF, levelT, device)) {
+    const e = cache.peek(a);
+    if (!e) continue;
+    const asOf = e.data.asOfNs;
+    if (asOf === null || !Number.isFinite(asOf)) continue;
+    if (asOf < Math.min(win.t1Ns, extentOf(lat, a).t1Ns)) n++;
+  }
+  return n;
+}
+
+/**
+ * **What the readout says when there is no afterglow to draw**, and it must not say more than it knows.
+ *
+ * [[persistenceSlices]] reads only what RESIDENT tiles answered, so an empty afterglow has two
+ * different causes: the rows before the pane's instant are in hand and none of them was observed —
+ * a fact about the radio — or they are not in hand: their tile is pending, drawn by a coarse
+ * stand-in or refused (the PaneReport's counts), or in hand but answered only up to a horizon short
+ * of them (`shortTiles`, [[persistenceShortTiles]]) — a fact about memory and latency. The slice and
+ * max-hold clauses beside it have always kept those apart ("not loaded is not unobserved"); the
+ * afterglow clause said "no earlier row in this window" in every case, and `ui/e2e/app-trace.e2e.mjs`
+ * read exactly that off a scrubbed pane whose max-hold over 45 s was its own one slice — the slice's
+ * tile freshly started, the rows before it in a tile drawn by a coarse stand-in.
+ *
+ * Conservative on purpose: any place of the pane not in hand withholds the claim, even one the
+ * afterglow's cells do not touch. Over-hedging costs a word; the other direction is a false
+ * statement that there was nothing there.
+ */
+export function afterglowAbsence(
+  report: { readonly pending: number; readonly fallbacks: number; readonly refused: number },
+  shortTiles = 0,
+): string {
+  const { pending, fallbacks, refused } = report;
+  if (pending + fallbacks + refused + shortTiles === 0) return "afterglow — no earlier row in this window";
+  const parts = [`${pending} pending`, `${fallbacks} coarse stand-in${fallbacks === 1 ? "" : "s"}`];
+  if (refused > 0) parts.push(`${refused} refused`);
+  if (shortTiles > 0) parts.push(`${shortTiles} answered only up to an earlier instant`);
+  return `afterglow — the rows before this instant are not all in hand yet (${parts.join(", ")}) — not loaded is not unobserved`;
+}

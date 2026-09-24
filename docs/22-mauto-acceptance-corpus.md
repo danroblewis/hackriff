@@ -256,7 +256,9 @@ The strongest available defence against "the corpus covers what someone happened
 - **declared unreachable** (with the reason and the ticket, e.g. "OOK: no generator, T-621"),
 - **unmarked** — which is a **failure of the manifest**, not of the engine.
 
-The third mark is the point. A cell nobody thought about shows up as unmarked; a cell somebody thought about and could not fill shows up as declared. The M-12 review reads the manifest before it reads any pass rate. This is the same discipline as the canvas's coverage map: **grey is genuinely unobserved, and it is the point** — an honest empty cell beats a silently absent one, and `Coverage::Unobserved` is not `quiet`.
+The third mark is the point. A cell nobody thought about shows up as unmarked; a cell somebody thought about and could not fill shows up as declared. The M-12 review reads the manifest before it reads any pass rate.
+
+**Built (T-627, 2026-09-23).** `hk_e2e::corpus` holds the axes of §2, the declared planes (the recall grid A1×A2×A4, A1 against each other axis, and an `EF` expected-failure plane — the stratified crossings the argument is made over, not the ~10⁵-cell full product) and the three marks; `acceptance_mauto::mauto_corpus` declares the rows and the unreachable regions, fails on any `UNMARKED` cell, checks every `populated` row names a test that exists in the binary and is not ignored, checks every declaration cites an **open** ticket (a done ticket means the gap is now fillable; no owner is spelled `UNFILED`, never a plausible wrong id), and diffs the rendered manifest against the committed `tests/e2e/mauto-coverage-manifest.txt` (re-bless with `HK_BLESS_MANIFEST=1`). The hold-out is `sha256(utf8(scene_id) ‖ be_u64(seed)) mod 5 == 0`, unsealed only by `HK_MAUTO_UNSEAL=M-12`. The expected-failure rows (2-FSK, C4FM, MSK at 6 dB / 112 symbols) drive the real `structure::measure` + C4FM framing blocks at component tier, each with a 20 dB / 4096-symbol control that must clock; they move behind the device interface when T-567 makes the engine write a sealed `nothing-scored` resolution. **First manifest: 492 cells, 19 populated, 473 declared, 0 unmarked** — the corpus is overwhelmingly declared-empty today, which is the honest reading. This is the same discipline as the canvas's coverage map: **grey is genuinely unobserved, and it is the point** — an honest empty cell beats a silently absent one, and `Coverage::Unobserved` is not `quiet`.
 
 ---
 
@@ -288,7 +290,7 @@ Every scene runs both. **They are reported in two separate columns and are never
 
 | Ticket | What | Rows blocked |
 |---|---|---|
-| **T-621** | A generic **OOK/ASK** sweep generator — the half of ADR-0015 §7's "FSK/OOK sweep" that never existed | S2 |
+| **T-621** ⚠ | *(id collision: T-621 on the board is an unrelated, done M2-hardening ticket, so this row has **no owner** — the T-627 manifest marks every OOK cell `UNFILED`)* A generic **OOK/ASK** sweep generator — the half of ADR-0015 §7's "FSK/OOK sweep" that never existed | S2 |
 | **T-622** | Check and payload parameterisation on the generic generators: arbitrary CRC width (8/16/24/32), an **arbitrary polynomial not in the RevEng catalogue**, and a **constant-payload** mode | P6, P7, A7, the random-polynomial negatives |
 | **T-623** | Out-of-catalogue structure generators: **OFDM with a non-standard CP**, **DSSS**, **16-QAM** | N3 |
 | **T-624** | Analog-voice negative scenes: **NBFM voice** and **AM voice** as standalone negatives (today they exist only as decoys inside the trunking scenes) | N2 |
