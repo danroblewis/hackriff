@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 hk-model.workspace = true
 serde_json.workspace = true
+# T-627: the corpus hold-out rule is sha256(scene_id || seed) mod 5.
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

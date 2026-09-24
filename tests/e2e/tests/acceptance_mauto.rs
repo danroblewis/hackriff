@@ -104,3 +104,6 @@ mod signal_087;
 
 #[path = "acceptance/signal_085.rs"]
 mod signal_085;
+// T-627: the coverage manifest, the sealed hold-out and the expected-failure rows (docs/22 §6).
+#[path = "acceptance/mauto_corpus.rs"]
+mod mauto_corpus;
