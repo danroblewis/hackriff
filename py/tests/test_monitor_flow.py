@@ -174,19 +174,31 @@ def test_hkpy_import_failure_degrades_to_an_error_body(monitor, tmp_path, monkey
 
 
 def test_flow_panel_cached_reuses_within_the_window(monitor, tmp_path):
+    """One build per window. The build runs in a child process since 2026-09-24 (the dashboard's
+    heap grew ~6 MB per in-process build), so the count is taken where every build goes through."""
     ops = _ops(tmp_path)
     monitor._FLOW_CACHE.update(at=0.0, data=None)
     calls = []
-    real = monitor.build_flow_panel
+    real = monitor._child_json
 
-    def counting(*a, **k):
+    def counting(code, timeout=90):
         calls.append(1)
-        return real(*a, **k)
-    monitor.build_flow_panel = counting
+        return {"built": len(calls)}
+    monitor._child_json = counting
     try:
         d1 = monitor.flow_panel_cached(ops, max_age=30.0)
         d2 = monitor.flow_panel_cached(ops, max_age=30.0)
         assert d1 is d2 and len(calls) == 1
     finally:
-        monitor.build_flow_panel = real
+        monitor._child_json = real
         monitor._FLOW_CACHE.update(at=0.0, data=None)
+
+
+def test_heavy_builds_run_in_a_child_and_errors_surface(monitor):
+    assert monitor._child_json("import json, os; print(json.dumps({'pid': os.getpid()}))")["pid"] != __import__("os").getpid()
+    try:
+        monitor._child_json("raise SystemExit('the board is not strict YAML')")
+    except RuntimeError as e:
+        assert "the board is not strict YAML" in str(e)
+    else:
+        raise AssertionError("a failing child must raise")

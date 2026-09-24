@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hkpy.synth import (
+    c4fm_burst,
     impairments,
     lora_scene,
     mismatch,
@@ -61,6 +62,10 @@ SCENARIOS: dict[str, ScenarioSpec] = {
                              "keyed AM voice, no symbols (N2 negative)"),
     "fsk_burst_train": ScenarioSpec(scenarios.fsk_burst_train, scenarios.FSK_DEFAULTS, ("AWARE-036",),
                                     "periodic 2-FSK sensor bursts: preamble, sync, payload, CRC-16"),
+    "c4fm_burst_train": ScenarioSpec(
+        c4fm_burst.c4fm_burst_train, c4fm_burst.C4FM_DEFAULTS, (),
+        "periodic C4FM bursts with a parameterised check: CRC-8/16/24/32, searched or random-"
+        "polynomial CRC, BCH(31,21), nocheck, constant payload (T-850)"),
     "noise_floor_rise": ScenarioSpec(scenarios.noise_floor_rise, scenarios.FLOOR_RISE_DEFAULTS,
                                      ("AWARE-006",), "GNSS L1 band with a known floor step at t0"),
     "injected_floor": ScenarioSpec(scenarios.injected_floor, scenarios.INJECTED_FLOOR_DEFAULTS,

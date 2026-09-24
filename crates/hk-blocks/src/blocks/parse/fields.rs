@@ -392,4 +392,51 @@ mod tests {
         };
         assert!(b.update_params(&params(), &ctx3).is_err());
     }
+
+    /// T-552 (ADR-0015 §3.3 measurement): S6 `fields` release timing over many frames with a
+    /// multi-field map (4 fields spanning 32 of a 64-bit frame).
+    /// `cargo test --release -p hk-blocks --lib blocks::parse::fields::tests::s6_fields_throughput_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing bench, release builds"]
+    fn s6_fields_throughput_bench() {
+        use std::time::Instant;
+
+        let m: FieldMap = serde_json::from_value(json!({
+            "unit": "bits",
+            "fields": [
+                {"name": "a", "type": "uint", "length": 8},
+                {"name": "b", "type": "uint", "length": 8},
+                {"name": "c", "type": "uint", "length": 8},
+                {"name": "d", "type": "uint", "length": 8},
+            ]
+        }))
+        .unwrap();
+        let maps = BTreeMap::from([("m".to_owned(), m)]);
+        let ctx = BuildCtx {
+            field_maps: &maps,
+            input_types: &[PortType::Frames],
+        };
+        let mut b = crate::Registry::builtin()
+            .build("fields", &params(), &ctx)
+            .unwrap();
+        b.init(&[frames_port()]).unwrap();
+
+        let n = 200_000;
+        let mut frames = FrameBuf::with_capacity(n, 8 * n);
+        for i in 0..n as u64 {
+            let mut info = FrameInfo::new(i, i * 64, 0);
+            info.check = CrcStatus::Valid;
+            let bits: Vec<u8> = (0..64).map(|b| ((i >> (b % 20)) & 1) as u8).collect();
+            frames.push_bits(&bits, info);
+        }
+        let t0 = Instant::now();
+        let out = run(b.as_mut(), &frames);
+        let secs = t0.elapsed().as_secs_f64();
+        assert_eq!(out.data.as_slice().len(), n);
+        eprintln!(
+            "fields 4x8bit over 64-bit frames: {:>12.3e} frames/s  {:.1} ns/frame",
+            n as f64 / secs,
+            secs * 1e9 / n as f64
+        );
+    }
 }

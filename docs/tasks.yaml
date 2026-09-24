@@ -18151,7 +18151,8 @@ tasks:
   - id: T-552
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: measure what one candidate evaluation actually costs on the M1 blocks, before quick/standard/deep are frozen into the /api/analyze contract'
-    status: todo
+    status: done
+    branch: task-t552
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -18195,6 +18196,35 @@ tasks:
       The point is that the profile names reach the API in the engine set's M-8; this ticket
       wants the numbers behind them to exist first.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      {
+        "ticket": "T-552",
+        "outcome": "done",
+        "summary": "Measured what one candidate evaluation costs on the real M1 blocks (S0-S6) plus the hk_estimate::assist proposal operators, on a Mac release build, load average ~10-11 (28-core M3 Ultra, quiet box, no gate/merge running). Finding: S0 channelisation (dominated by lowpass) costs ~80% of a from-scratch S0-S6 evaluation (~85ms of ~105-120ms per 3s window of 240kHz IQ), so ADR-0015's prefix memoisation pays off as designed and stage depth is cheap once the head is cached (S1 ~5ms, S2-S6 each <1ms once cached). But assist.sync/assist.codes/assist.fields calls cost 0.3-2.4s each (2-4 orders of magnitude above a full DSP pass), and THOSE are what a profile's wall-clock budget actually rations, not DSP re-evaluation. At that cost, quick's 3s buys only ~4-9 assist calls at the crate's default op-budget (~1-3 at its 'max' tier) -- too few to safely cover 'templates and the top-2 open skeletons' (Profile::Quick's doc comment) if either open skeleton needs a full sync+codes+fields sequence (a 3-call minimum). This directly contradicts treating ADR-0015 section 3.3's 3s/20s/120s wall-clock numbers as ready to freeze into the /api/analyze profile contract as specified. Recommendation: budget the proposal-operator calls by evaluation/op count (hk_estimate::assist::Budget{max_ops} already exists and is near machine-independent per the measured ns/op figures) rather than wall time, keep wall_s only as a human-meaningful backstop ceiling, and re-examine quick's 3s allowance specifically before it ships. Wrote crates/hk-blocks/src/blocks/fec/tests.rs (S5 bench), framing/tests.rs (S4 bench), parse/fields.rs (S6 bench) -- all re-verified running locally, numbers reproduce closely to what docs/27 reports (e.g. S5 crc 5.015e6 frames/s vs doc's 5.0e6). Reused pre-existing hk-blocks::blocks::iq::throughput_bench (S0-S3) and hk-estimate::assist::assist_bench_work_cap_timing (proposal operators) benches rather than duplicating them. Did NOT touch hk-synth's Profile::budget() (crates/hk-synth/src/search.rs) -- left it exactly as landed by T-848/T-660, with its comment already citing T-552 as the number's owner; the ADR-0015 acceptance step should apply the recommendation. Resolved a docs/README.md merge conflict against main (T-800/MMAP rows 23-26 landed since the WIP was parked) by keeping both sets of rows in table order. Merged main into task-t552 (worktree was recreated fresh; branch had been checked out clean before, no prior worktree existed).",
+        "commits": ["1bd61338131920b892a015dd597837ad34f2a5af"],
+        "files": [
+          "docs/27-synth-stage-cost-measurement.md",
+          "docs/README.md",
+          "crates/hk-blocks/src/blocks/fec/tests.rs",
+          "crates/hk-blocks/src/blocks/framing/tests.rs",
+          "crates/hk-blocks/src/blocks/parse/fields.rs"
+        ],
+        "tests": [
+          {"cmd": "just test-crate hk-blocks", "exit": 0, "summary": "150 passed, 4 skipped, 13.0s"},
+          {"cmd": "cargo test --release -p hk-blocks --lib fec::tests::s5_check_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; crc24 5.015e6 frames/s / 199.4 ns, bch(31,21) 1.142e7 frames/s / 87.5 ns -- matches docs/27 table within noise"},
+          {"cmd": "cargo test --release -p hk-blocks --lib framing::tests::s4_sync_search_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; rds sync 6.58e7 bits/s, pocsag sync 8.49e8 bits/s -- matches docs/27"},
+          {"cmd": "cargo test --release -p hk-blocks --lib blocks::parse::fields::tests::s6_fields_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; 1.939e6 frames/s / 515.6 ns/frame -- matches docs/27"}
+        ],
+        "precheck": {"exit": 0, "summary": "just precheck hk-blocks: fmt clean, clippy clean"},
+        "use_cases": ["RESEARCH-001", "SIGNAL-052"],
+        "load_at_measurement": "load average(1m) ~10.4-11.5 on a 28-core M3 Ultra (just builders confirmed 'safe to launch another builder', no gate/merge in progress, ~.hackriff-ops/bulk-in-progress absent, .git/MERGE_HEAD absent); all reported numbers are single-run release-build wall-clock/op-count figures, not statistically replicated -- consistent with docs/27's own stated confidence caveats (section 7)",
+        "budget_recommendation_vs_adr0015_3.3": "Contradicts the assumption that 3.3's wall_s numbers (quick 3s/standard 20s/deep 120s) are close to right as a rationing unit: they were sized apparently assuming DSP re-evaluation dominates cost, but DSP re-evaluation is cheap (memoisation works) while assist.sync/codes/fields proposal calls are the real cost driver at 0.3-2.4s each. Recommend switching the primary budget unit for the search to an evaluation/proposal-call count (near machine-independent per this measurement's stable ns/op figures) with wall_s retained only as a backstop ceiling for the power-policy/503-busy story, and specifically re-examining whether quick's 3s figure can complete even one open-skeleton sync+codes+fields sequence with margin. This change belongs to the ADR-0015 acceptance step, not this ticket -- Profile::budget() in crates/hk-synth/src/search.rs was left untouched.",
+        "observed_but_not_chased": [
+          "T-453's ring-safety question (does a synth chain at lower OS priority disturb the capture ring) cannot be measured until hk-synth's actual chain/engine exists -- explicitly out of scope per the ticket text and flagged in docs/27 section 5 as MAUTO M-3/M-13's job, not filed as a new ticket since the ADR's own task graph already owns it.",
+          "Jetson figures are out of scope per the ticket (MAUTO M-13); every number here is this Mac workstation's optimistic floor, stated as such in docs/27 section 0."
+        ]
+      }
+    commit: 261048d9
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
@@ -18585,12 +18615,12 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: in-progress
+    status: todo
     branch: task-t565
     priority: normal
     parallel_group: SYN-E
     model: opus
-    depends_on: [T-549]
+    depends_on: [T-549, T-854]
     use_cases: [RESEARCH-001, RESEARCH-003, RESEARCH-006]
     core_interface: true
     acceptance: |
@@ -18635,6 +18665,8 @@ tasks:
       ADR-0015 section 10 owned the search trace, and M-3 as specified actively discarded it.
       Scheduled with MAUTO, after the M3 exit - not before.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): now todo behind T-854 (MAUTO M-3 search engine, filed today from ADR-0015 section 10) - the trace is produced inside M-3's beam (ADR-0021). It was marked in-progress with no worker running.
   - id: T-566
     milestone: MAUTO
     title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
@@ -22401,7 +22433,7 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: in-progress
+    status: done
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
@@ -22442,6 +22474,83 @@ tasks:
 
       2026-09-23 (coordinator, user request): was blocked on a prerequisite, not a person - now todo depending on T-848 (MAUTO M-1 hk-synth scaffold, filed today) plus T-616..T-618. Branch task-t660 holds only the earlier blocked-report commit.
     branch: task-t660
+    result: |
+      **Landed** (branch `task-t660`, sha `289d9004`): the `hackriff.calibration/1` loader, the
+      generator, and the §13.1 combination.
+
+      (a) `hk_synth::calibration::CalibrationTable` (crates/hk-synth/src/calibration.rs): `load()` parses
+      the schema and refuses anything not carrying `hackriff.calibration/1`; `score()` (raw->bits) and
+      `threshold()` (bits->raw) implement §13.2's refusal exactly, including the ADR's own worked
+      example verbatim as a test: a table whose highest expressible level is 3.0 bits, asked for 6.0,
+      returns `Shortfall { requested_bits: 6.0, admissible_bits: 3.0, reason: Atom { realised_bits: 2.41
+      } }`, never a threshold. A missing cell returns `NoTable` and `Score::credited_bits()` is 0.0. A
+      `floor_j` (6.0, `default_floor_bits(S2)`) above a cell's `admissible_bits` returns `Shortfall`
+      (`floor_unreachable`), never lowered. 8 new tests in `calibration.rs`.
+
+      (b) `py/hkpy/calibrate.py`: `calibrate_cell()` computes a cell's `levels`/`unexpressible`/
+      `admissible_bits` from raw null draws by empirical order statistics, and **refuses** (into
+      `unexpressible`) any asked level whose realised significance misses the claim by more than 0.25
+      bits, is above `log2(windows)`, or is above the 6-bit calibrated claim cap — never rounds.
+      `calibration_document()`/`write_calibration_file()` assemble the full `hackriff.calibration/1`
+      JSON the Rust loader reads, including §13.1's `groups`/`correlation` blocks when supplied. 9 tests
+      in `py/tests/test_calibrate.py`, all passing; ruff clean.
+
+      (c) `hk_synth::evidence::combine_stage_bits()`: `b_j` = sum over declared groups of the max within
+      each group; `GroupId::Undeclared` defaults to one group. Test loads/builds evidence for two
+      metrics with no declared groups and asserts the stage scores max (5.5), not sum (9.5).
+
+      **Red/green proof:** stashed the diff, confirmed the crate's existing 26 tests still pass
+      unmodified (T-848's scaffold), then re-applied. For the Python side, temporarily replaced the
+      expressibility check with `if True` (round everything into `levels`) and reran
+      `test_the_generator_refuses_an_atom_it_cannot_express_rather_than_rounding` — it failed
+      (`assert 4.0 in refused_bits or 6.0 in refused_bits` — got `set()`); restored the real code and it
+      passed again. The Rust refusal test and the max-not-sum test have no code path to exercise before
+      this commit (`CalibrationTable`, `combine_stage_bits` didn't exist), which is the compile-time form
+      of red.
+
+      **T-619 fill-bucket amendment (noted, not applied):** ADR-0015 §16.4 proposes T-660 take the
+      tighter `nominal` bucket (σ >= 1.0 LSB, clip <= 0.10, docs/21 §10.10) before any real table is
+      generated. I did **not** change `hk_synth::calibration::FillBucket`'s constants (still the
+      as-written 0.5/0.30) — that module's own doc comment already records this as deliberately deferred
+      pending the ADR text amendment, and `hk_model::provenance::FillBucket` (T-625, the runtime rule
+      that actually gates windows) uses the same as-written bounds, so changing one without the other
+      would desync two crates over an unaccepted ADR amendment. Instead the **generator** takes the
+      bucket bounds as an explicit parameter (`ADR_NOMINAL_BOUNDS` default, `TIGHT_NOMINAL_BOUNDS`
+      available), so adopting the tightened bucket when the amendment lands is a call-site change, not a
+      rewrite. Flagging this for the coordinator/user: whoever runs M-2's first real calibration
+      generation should pass `TIGHT_NOMINAL_BOUNDS` explicitly, per docs/21 §10.10's recommendation,
+      since the AM/OOK over-claim (5-6 bits at high clip) is a validity defect, not a cosmetic one.
+
+      **§13.5 falsifier 2 — floor_j=6 at S2/S3 under the max rule — measured and reported, not tuned.**
+      docs/22's acceptance corpus and the hk-synth engine (M-2+) don't exist yet (docs/22 §9/§11: several
+      generators are unbuilt and "before the engine exists"), so this can't be a live corpus run. Instead
+      I combined docs/21 §2's **already-published** per-metric realised bits at a 6-bit claim (worst over
+      Null B1/B2 — wrong symbol rate / wrong centre; `realised = 6 - delta`) through §13.1's actual rule,
+      using the M1 FSK ladder's declared groups (ADR-0015 §13.1's own table):
+
+      | Stage | Group(s) | b_j, old sum | b_j, §13.1 max | Clears floor_j=6? |
+      |---|---|---|---|---|
+      | S2 | soft_quality{snr,evm,timing_var} + eye{eye_open} (admissible-capped 3.0) | 17.1 | 8.2 | yes |
+      | S3 | bit_shape{line_violations,bit_structure} — S3's **only** declared group | 8.8 | 4.5 | **no** |
+
+      S2 still clears the floor at these levels. **S3 does not**: it has exactly one declared group, so
+      its `b_j` is capped at whichever single metric realises more, and neither S3 metric clears 6 bits
+      alone at levels consistent with docs/21's own measurements. This matches ADR-0015 §13.1's own
+      prediction in words ("S2/S3 lose roughly 6-12 bits of headroom... some true-but-weak signals will
+      prune where they previously survived") with the arithmetic behind it. Recorded as a doc comment on
+      `hk_synth::stage::default_floor_bits` (not changed — floors stay ADR defaults per this ticket's
+      scope) with the explicit recommendation that a future amendment restate S3's floor to roughly 4-5
+      bits against this measurement, never revert to the sum. §1.3's "pruning is never total" means a
+      node missing the floor still survives as a partial result, so today's cost is search recall, not
+      silent loss.
+
+      Tests: `cargo nextest run -p hk-synth` 36/36 pass (was 26 before this ticket).
+      `cd py && uv run --locked pytest -q tests/test_calibrate.py` 8/8 pass. `just precheck hk-synth`:
+      fmt clean, clippy clean. ruff check + format clean on the two py files.
+
+      Worktree clean after commit; nothing left on disk outside the repo (target/ seeded via `cp -c -R
+      -p`, not touched by this diff).
+    commit: f860365a
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
@@ -23378,7 +23487,7 @@ tasks:
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: todo
+    status: in-progress
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
@@ -24844,6 +24953,8 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
+
+      ADR-0015 ACCEPTED 2026-09-23 on the user's docs/20 answers: U1 B, U2 B, U3 A, U4 A with M-14 required, U5 YES - stereo audio in scope against the recommendation, ADR-0015 §12.13 LP-9/LP-10. §16.2's 8 corrections folded into the ADR text; ADR-0016 dependency waived. Still OPEN per ADR-0015 §16.8: T-660 S3 floor 4.5 bits vs floor_j=6 under the max rule; T-552 op-count budgets, docs/27; T-619 fill-bucket amendment before M-2's first calibration table. M-14 residue beyond T-609 - psk_demod evidence and calibration, PSK S1 skeleton and seeding, burst acquisition - recorded in ADR-0015 §10. Branch task-adr15-accept, commit 671e0380.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-23 18:03).
@@ -24894,7 +25005,7 @@ tasks:
   - id: T-850
     milestone: MAUTO
     title: C4FM synthetic generator lacks the check parameterisation (CRC width/searched/random polynomial, BCH, constant payload) that T-622 gave 2FSK
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: MAUTOD
@@ -24914,10 +25025,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 22:03).
+      Added hkpy.synth.c4fm_burst (scenario c4fm_burst_train): periodic C4FM bursts with check_kind crc/bch/nocheck, check_width 8/16/24/32, crc_source template/searched(catalogue)/random(off-catalogue poly), check_poly_hex, constant_payload; hidden truth (check params, catalogue flag, frame, payload) in the annotations only. Tests added in py/tests/test_synth.py. The seven 4fsk-c4fm A1xA7 unreachable cells now point at T-565 (engine owner) in mauto_corpus.rs and the manifest text (edited by hand to match the declaration; Rust test not re-run).
+      Tests: pytest py/tests/test_synth.py -> exit 0 (88 passed, 2 skipped)
+      precheck exit 0
+      Commits: fd997456
+      Observed, not chased: mauto_corpus.rs manifest re-bless (HK_BLESS_MANIFEST=1) not run; manifest lines edited textually - the gate's mauto_corpus test will confirm
+      Resources: 44 CPU-s, peak 0.8 GB
+    commit: f88ce1c8
   - id: T-851
     milestone: MAUTO
     title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
-    status: todo
+    status: done
     priority: low
     deps: []
     parallel_group: MAUTOD
@@ -24935,10 +25055,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+
+      Review fix: wrong-SF null rebuilt as SF7 read at SF9, reran, docs/21 s11 corrected, ruff clean.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 22:20).
+      Review fix: the wrong-SF null was a matched SF9 chirp read at SF9; rebuilt as a true SF7 chirp read at SF9 and reran. Corrected docs/21 s11: peak_ratio worst delta at 6 bits is +1.94/+3.53 under the nominal bucket (NO-GO) and +0.73/+1.77 under the tight bucket (CONDITIONAL, grows with support); bin_run small delta but only 2-3 atoms, analytic-only. P9 stays report-only. Script cleaned: ruff check and format clean, mkdir for output, main guard, dead code removed.
+      Tests: cd py && uv run --locked ruff check . -> exit 0 (All checks passed); python3 py/scripts_t851_css_ladder.py -> exit 0 (ran to completion, tables in docs/21 s11)
+      precheck exit 0
+      Commits: 8391b63d
+      Resources: 116 CPU-s, peak 6.5 GB
+    commit: 1408923f
   - id: T-852
     milestone: M3
     title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
-    status: todo
+    status: in-progress
+    branch: task-t852
     priority: high
     deps: []
     parallel_group: M3A
@@ -24967,6 +25098,567 @@ tasks:
     notes: |
       FOUND BY T-844 worker 2026-09-23 (observed through the mock SDR).
     core_interface: true
+  - id: T-853
+    milestone: MAUTO
+    title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
+    status: in-progress
+    branch: task-t853
+    priority: normal
+    deps:
+    - T-848
+    parallel_group: SYN-B
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-2 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Absorbs T-618 (ADC-fill-conditioned calibration tables) and T-660 (loader), both landed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): M-2's scope must NAME psk_demod - its evidence() metric and calibration table (T-609 landed the block without them).
+    core_interface: true
+  - id: T-854
+    milestone: MAUTO
+    title: "MAUTO M-3: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle"
+    status: done
+    priority: normal
+    deps:
+    - T-848
+    parallel_group: SYN-E
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-3 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Owns the search trace produced inside the beam (ADR-0021; T-565 depends on this).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    tier_reason: novel search engine at the heart of MAUTO (beam, pruning, memoisation, budgets)
+    branch: task-t854
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:04).
+      MAUTO M-3 landed in hk-synth. hk_synth::engine::search runs ADR-0015 §3.1–§3.4's staged beam S0–S6 through an `Evaluator` trait; M-2's run_window/Block::evidence and M-4's assist adapters will implement that trait. The engine covers: beam widths 8/4 with at most 2 slots per (family, skeleton); continuous parameters swept on the §3.1 grid and folded into one trace node (ADR-0021 §1 rule 2); enum/hex/proposal parameters as child nodes; an LRU stage-output cache bounded by max_cache_bytes, where a recomputed output is charged as evaluations; prefix memoisation, including duplicates within one level; pruning by floor, by optimistic bound in rank terms and by beam width; look-elsewhere counted over the whole job, including hypotheses the proposal operators test; hold-out validation and the 64-bit / 3-frame solve rule; all seven stop reasons; a side queue for deferred families; ranked partial results; coverage; and the ADR-0021 §7A.3 reason. Budgets follow docs/27 §6, which settles ADR-0015 §16.8 item 2 in code: SynthBudget gains max_proposal_calls and a shared max_assist_ops pool (each call gets a fair share as assist::Budget{max_ops}), profiles get count caps, and wall_s/cpu_s are now only backstops. New admission module: a minimal PowerPolicy (battery refuses deep and halves threads; low allows quick only); one running job plus a queue of 4, then 503; the U2 auto-analyze rules, with auto_profile shipped as `none`; and a lock-free Control for cancel, the lost_samples throttle, the thermal pause and live power changes (refused_power). New trace_sink module (ADR-0021 §3): every node that leaves the frontier is recorded. Retention runs on insert, only leaf nodes can be dropped (so no node's ancestors are ever lost), not-tried nodes are never dropped, and elided buckets keep the accounting identity. Each job reports the trace's own wall and bytes cost. Given the same count-bounded spec, a job gives the same trace at 1 and 4 threads.
+      Tests: just test-crate hk-synth -> exit 0 (61 passed (13 new engine integration tests, 5 engine unit, 3 trace-sink unit, 4 admission unit; 5 repeat runs all green; one mutation (hold-out evaluations not charged) confirmed to turn the accounting-identity guard red))
+      precheck exit 0
+      Commits: 3cd7772e
+      Observed, not chased: ADR-0015 is ACCEPTED, so its text was not edited. The ADR still reads 'wall budget' in §3.3 and lists the budget unit as open in §16.8 item 2, while this ticket implemented docs/27 §6's count budgets (max_proposal_calls, a shared max_assist_ops pool, wall/CPU as backstops) and new count caps: quick 128 evals / 6 calls / 1e9 ops, standard 2048 / 40 / 8e9, deep 20000 / 240 / 5e10. Changing an accepted ADR needs Fable plus the user. quick's 6 calls exactly cover docs/27 §4's two skeletons x sync+codes+fields minimum, with no margin for a wrong first guess. | Not done in hk-synth because ADR-0015 §9 places them elsewhere: the `synth` chain kind and lower OS priority for search threads belong to hk-pipeline::synth (M-8); max_iq_samples is acquisition (M-6); the engine never produces refined_into (that is M-7's EvidenceObjective). | The negative reason is the engine's own reading (SearchOutcome.reason). M-9 still has to seal the Resolution, and should check its precedence order: unsupported, then no-signal, then budget-exhausted, then tied (complete candidates only), then nothing-scored. | A memoised node is recorded as `memoised {reused}` whatever its beam fate, because the trace can hold only one outcome per node. ADR-0021 §2.2 does not say which should win; the reviewer should confirm this reading. | stage.rs default_floor_bits still has S3 = 6, which T-660 showed is unreachable under the §13.1 maximum rule (ADR-0015 §16.8 item 1). The engine prunes at that floor, so real S3 recall will suffer until the floor amendment lands. | TraceCost is measured per job, but against a synthetic evaluator the fraction means nothing, because the evaluator is nearly free. The real trace-cost measurement (ADR-0021 §3 / T-453) needs M-2's real evaluator and a Jetson run (M-13).
+      Use cases: RESEARCH-002
+      Resources: 72 CPU-s, peak 0.7 GB
+    commit: d223e7f3
+  - id: T-855
+    milestone: MAUTO
+    title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
+    status: done
+    priority: normal
+    deps:
+    - T-848
+    parallel_group: SYN-P
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      MAUTO M-4 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: proposal operators over assist (sync/codes/fields) with budget charging.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Sonnet output is reviewed by Opus before merge (ADR-0015 section 10).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    branch: task-t855
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:09).
+      Added proposal adapters in hk-synth::proposal: propose_sync (analyze_stream), propose_codes (search_codes), propose_fields (suggest_fields). A ProposalLedger charges every call against ProposalBudget{max_ops, per_call_ops, wall_s}: budget is by operation count (assist::Budget), wall time only a backstop (docs/27). Calls are refused (Refused::OpsExhausted/WallExhausted) once spent; hypotheses and partial calls are tallied for look-elsewhere. Suggestion score feeds prior_bits only, never evidence_bits. Unit tests cover charging, per-call cap, refusal, wall backstop, partial.
+      Tests: cargo nextest run -p hk-synth -E 'test(/proposal/)' -> exit 0 (6 passed)
+      precheck exit 0
+      Commits: 0b4ede6f
+      Resources: 42 CPU-s, peak 0.4 GB
+    commit: a29f7496
+  - id: T-856
+    milestone: MAUTO
+    title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
+    status: in-progress
+    branch: task-t856
+    priority: normal
+    deps:
+    - T-848
+    parallel_group: SYN-T
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      MAUTO M-5 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Sonnet output is reviewed by Opus before merge. T-199 and T-201 are done.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): the template/skeleton library and seeding must include a PSK option at the demodulation stage - section 4.1's built-in skeleton list has none, so PSK cannot reach bits inside a search.
+  - id: T-857
+    milestone: MAUTO
+    title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
+    status: in-progress
+    branch: task-t857
+    priority: normal
+    deps:
+    - T-848
+    parallel_group: SYN-R
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      MAUTO M-6 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: ring read API + burst-set acquisition + pin-on-analyze clip.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      T-178 is done.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+  - id: T-858
+    milestone: MAUTO
+    title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
+    status: todo
+    priority: normal
+    deps:
+    - T-853
+    - T-854
+    parallel_group: SYN-E
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-7 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    core_interface: true
+  - id: T-859
+    milestone: MAUTO
+    title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
+    status: todo
+    priority: normal
+    deps:
+    - T-854
+    - T-857
+    parallel_group: API
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-8 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501).
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Route contract rule: docs/api.md and crates/hk-cli/tests/api_contract.rs together.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    core_interface: true
+  - id: T-860
+    milestone: MAUTO
+    title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
+    status: todo
+    priority: normal
+    deps:
+    - T-859
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-9 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    core_interface: true
+  - id: T-861
+    milestone: MAUTO
+    title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
+    status: todo
+    priority: normal
+    deps:
+    - T-856
+    - T-860
+    parallel_group: SYN-T
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      MAUTO M-10 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: save-as-template; label to C15, signature proposal to C18, snippets to T-205.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+  - id: T-862
+    milestone: MAUTO
+    title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
+    status: todo
+    priority: normal
+    deps:
+    - T-859
+    parallel_group: MUI-X1
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      MAUTO M-11 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Thin client over docs/api.md: no signal logic in ui/src.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+  - id: T-863
+    milestone: MAUTO
+    title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
+    status: todo
+    priority: normal
+    deps:
+    - T-855
+    - T-856
+    - T-858
+    - T-860
+    parallel_group: M-E
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-12 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/.
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Blind ground truth (hidden truth lists), through the mock SDR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    tier_reason: the blind acceptance suite that decides whether MAUTO works; hidden-truth design
+  - id: T-864
+    milestone: MAUTO
+    title: "MAUTO M-13: Jetson budget/power measurement and profile re-baseline (interactive, needs the Jetson)"
+    status: todo
+    priority: normal
+    deps:
+    - T-863
+    parallel_group: JETSON
+    needs: hardware
+    model: opus
+    effort: medium
+    acceptance: |
+      MAUTO M-13 from ADR-0015 section 10 (work-breakdown table), filed 2026-09-23 so the dependency chain
+      exists before the ADR-0015 -> ACCEPTED decision (T-848 prepared that review as ADR-0015 section 16; the
+      user decides). DELIVER: Jetson budget/power measurement and profile re-baseline (interactive, needs the Jetson).
+      Read ADR-0015 by SECTION (the section 10 row, the sections it names, section 16's corrections, and ADR-0021
+      for anything touching the search trace), not the whole ADR. Build on the landed hk-synth scaffold (T-848)
+      and calibration loader (T-660).
+      Budgets: T-552 measured that proposal-operator calls (0.3-2.4 s each) dominate a profile's wall-clock
+      budget, not DSP re-evaluation - budget proposal calls by count (assist::Budget{max_ops}) with wall time as
+      a backstop, per docs/27.
+      Needs the Jetson hardware (user purchase).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+  - id: T-865
+    milestone: MAUTO
+    title: "LP-1: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over)"
+    status: in-progress
+    branch: task-t865
+    priority: normal
+    deps: []
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-1 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-1 in the ADR maps to this ticket. DELIVER: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over).
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-866
+    milestone: MAUTO
+    title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
+    status: todo
+    priority: normal
+    deps:
+    - T-865
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-2 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-2 in the ADR maps to this ticket. DELIVER: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Depends on the M1 recipe runtime (landed).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-867
+    milestone: MAUTO
+    title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-3 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-3 in the ADR maps to this ticket. DELIVER: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Sonnet output is reviewed by Opus before merge.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-868
+    milestone: MAUTO
+    title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
+    status: todo
+    priority: normal
+    deps:
+    - T-867
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-4 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-4 in the ADR maps to this ticket. DELIVER: parity harness: legacy Listen chain versus the recipe, on the same IQ.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-869
+    milestone: MAUTO
+    title: "LP-5: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate"
+    status: todo
+    priority: normal
+    deps:
+    - T-868
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-5 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-5 in the ADR maps to this ticket. DELIVER: chooser (hk_pipeline::audio::choose), flagged opener switch, attach-don't-duplicate.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-870
+    milestone: MAUTO
+    title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-6 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-6 in the ADR maps to this ticket. DELIVER: refine.objective.builtin + refinement applied as a hot edit.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-871
+    milestone: MAUTO
+    title: "LP-7: MUI: one output model across the dock and the per-signal panels"
+    status: todo
+    priority: normal
+    deps:
+    - T-869
+    parallel_group: LP
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-7 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-7 in the ADR maps to this ticket. DELIVER: MUI: one output model across the dock and the per-signal panels.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Thin client over docs/api.md.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-872
+    milestone: MAUTO
+    title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
+    status: todo
+    priority: normal
+    deps:
+    - T-869
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      ADR-0015 LP-8 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-8 in the ADR maps to this ticket. DELIVER: retire ChainKind::Listen for cut-over modes; listener-budget mapping.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Only after LP-5 is live-tested. U4: SSB and CW stay on the legacy Listen chain permanently.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+  - id: T-873
+    milestone: MAUTO
+    title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
+    status: todo
+    priority: normal
+    deps:
+    - T-866
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-9 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-9 in the ADR maps to this ticket. DELIVER: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      U5 (user 2026-09-23): stereo is part of decoding the signal. Honesty: labelled stereo only while the pilot is locked; losing lock mid-stream is reported, never hidden.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-874
+    milestone: MAUTO
+    title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
+    status: todo
+    priority: normal
+    deps:
+    - T-873
+    - T-865
+    parallel_group: LP
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 LP-10 (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      LP-10 in the ADR maps to this ticket. DELIVER: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      Clients: UI dock/AudioSession, py/examples/hk_audio_wav.py, the documented TCP one-liners; docs/api.md + api_contract tests together. A client that ignores channels still gets mono unless it asks for stereo (opt-in).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    core_interface: true
+  - id: T-875
+    milestone: MAUTO
+    title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
+    status: in-progress
+    branch: task-t875
+    priority: normal
+    deps:
+    - T-609
+    parallel_group: MAUTOD
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      ADR-0015 PSK-BURST (section 12, legacy parity - Listen as an audio-output pipeline; stereo = section 12.13),
+      filed 2026-09-23 after the user accepted ADR-0015 (U1-U5; U5 = stereo audio IN scope). Placeholder id
+      PSK-BURST in the ADR maps to this ticket. DELIVER: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window.
+      Read ADR-0015 section 12 (12.9 stages, 12.13 stereo) and its named sections, not the whole ADR.
+      M-14 residue found at the ADR-0015 acceptance (U4: psk_demod funded, M-14 required). Acquire from the burst start (preamble-aided or reverse/forward pass) so a burst shorter than the loop's window still yields its first symbols; state the shortest burst decoded before/after. Blind: no known-signal lookup.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    tier_reason: "real-time-path DSP: carrier/timing acquisition on short PSK bursts"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
