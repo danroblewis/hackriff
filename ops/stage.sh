@@ -17,7 +17,7 @@ if [ -f "$S/hk-token-bears" ]; then TOKEN=$(cat "$S/hk-token-bears"); else
   TOKEN=$(openssl rand -hex 32); echo "$TOKEN" > "$S/hk-token-bears"; fi
 
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$S/stage.log"; }
-# Never from a worktree (ops/launch-guard.sh): logs PATH:, refuses before any side effect.
+# Never from a worktree (ops/launch-guard.sh): logs PATH:, refuses before any build or server start.
 . "$(dirname "${BASH_SOURCE[0]}")/launch-guard.sh"; launch_guard "${BASH_SOURCE[0]}"
 
 build(){  # $1 = commit

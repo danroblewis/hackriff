@@ -392,7 +392,8 @@ files: on 2026-09-24 the dashboard, started from `pm-dashmem`, answered /flow wi
 `FileNotFoundError: .../worktrees/pm-dashmem/ops/monitor.py`. Restart with `/dev-env restart
 <script>`, which runs `REPO/ops/<script>`; a change reaches the running script by landing first.
 Each script logs `PATH: <where it runs from>` at start, and refuses (exit 2, `REFUSED:`) under
-`.claude/worktrees/` (`ops/launchpath.py`, `ops/launch-guard.sh`).
+`.claude/worktrees/` (`ops/launchpath.py`, `ops/launch-guard.sh`). That includes the one-shot diagnostics (`watchdog.py --once --print`,
+`work-runner.py --once --dry-run`): run them from the repo too.
 
 ### 3. The coordinator, last
 ```bash
