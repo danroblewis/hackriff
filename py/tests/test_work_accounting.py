@@ -823,3 +823,32 @@ def test_a_red_proof_is_not_a_failing_test(reaped):
     hb("done", tests=[{"cmd": "x", "exit": 1, "expect": "red"}])     # a "proof" with no green run beside it
     R.reap(claim(), dry=False)
     assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"]
+
+
+def test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed(tmp_path, monkeypatch):
+    """task-t538 landed as task-t538-rl: its own branch is never on main, so the claim stayed
+    `queued` for 42 h (12 of 13 such on 2026-09-24). Board done + in no queue = closed."""
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")     # branch not on main
+    (tmp_path / "merge-queue.txt").write_text("task-t2\n")
+    (tmp_path / "bulk-in-progress").write_text("base=abc\nbranches=task-t3 task-t4\n")
+    claims = {t: {"ticket": t, "branch": f"task-t{t[2:]}", "state": "queued", "started": 0} for t in ("T-1", "T-2", "T-3", "T-5")}
+    board = {"T-1": {"status": "done"}, "T-2": {"status": "done"}, "T-3": {"status": "done"}, "T-5": {"status": "in-progress"}}
+    assert R.release_stale_claims(claims, board)
+    assert {t: c["state"] for t, c in claims.items()} == {"T-1": "merged", "T-2": "queued", "T-3": "queued", "T-5": "queued"}
+    assert "CLAIM T-1: the board says done and task-t1 is in no queue" in (tmp_path / "work-runner.log").read_text()
+
+
+def test_no_rebuilt_branch_close_while_a_single_merge_is_staged(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "MERGE_HEAD").write_text("abc\n")      # the runner is merging task-t1 alone
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "queued", "started": 0}}
+    R.release_stale_claims(claims, {"T-1": {"status": "done"}})
+    assert claims["T-1"]["state"] == "queued"
