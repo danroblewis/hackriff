@@ -110,6 +110,7 @@ mod tests {
             "squelch",
             "agc",
             "deemphasis",
+            "stereo_decode",
             "audio_out",
         ] {
             assert!(all.descriptor(name).is_some(), "{name} missing");
