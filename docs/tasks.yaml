@@ -25855,7 +25855,7 @@ tasks:
   - id: T-876
     milestone: M3
     title: "Burst-extent estimate overruns the burst (hk_estimate::params step 6b): 24.8-28.8 ms for a 23.5 ms burst, so noise-only samples push FSK envelope features out of every class"
-    status: in-progress
+    status: done
     branch: task-t876
     priority: high
     deps: []
@@ -25869,6 +25869,7 @@ tasks:
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
     tier_reason: estimation on the real-time classification path; blind extent recovery
+    commit: e199579d
   - id: T-877
     milestone: M3
     title: The fsk class density is one Gaussian over modulation index 0.4-5, so real device FSK at h~4 sits in its tail and reads unknown
