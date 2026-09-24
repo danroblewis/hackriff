@@ -2018,8 +2018,13 @@ h1{font-size:15px;margin:0;letter-spacing:.02em;white-space:nowrap}h1 b{color:va
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-right:5px}
 .top .counts{margin-left:auto}
 .cols{flex:1;min-height:0;display:grid;grid-template-columns:1.5fr 1fr 1.15fr;gap:10px;padding:10px}
-.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;min-height:0;min-width:0}
+/* REACHABILITY RULE (user, 2026-09-24): nothing on this page may be unreachable. Every card can
+   shrink (flex-shrink 1 - never an inline flex:0 0 auto, which is what hid #mergecard on 09-22 and
+   Work trees / Merge queue / Recent commits on 09-24), keeps a floor so it never collapses to its
+   border, and scrolls its own body (.bd) or itself; the column scrolls when the floors alone do not
+   fit. py/tests/test_monitor_layout.py enforces it on every card. */
+.col{display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow-y:auto;overflow-x:hidden}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;flex:0 1 auto;min-height:min(96px,100%);min-width:0;overflow:auto}
 .card.fill{flex:1}
 .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 8px;display:flex;justify-content:space-between;flex:0 0 auto}
 .card h2 em{font-style:normal;color:var(--dim)}
@@ -2092,7 +2097,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
 .boxline .ow{color:var(--teal)}.boxline .ow.hot{color:var(--amber)}
 .boxline .un{color:var(--coral)}
 .boxline .hd{color:var(--dim);letter-spacing:.06em;text-transform:uppercase;font-size:10px}
-@media(max-width:1000px){.cols{grid-template-columns:1fr 1fr}}
+@media(max-width:1000px){
+  body{overflow:auto;overflow-x:hidden}
+  .app{height:auto;min-height:100vh;overflow:visible}
+  .cols{grid-template-columns:1fr 1fr;flex:none}
+  .col{overflow:visible}
+  .card.fill{flex:none}
+  .bd{max-height:60vh}
+}
 @media(max-width:640px){
   body{overflow:auto;overflow-x:hidden;font-size:12px}
   .app{height:auto;overflow:visible}
@@ -2118,12 +2130,12 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   </div>
   <div class=col>
     <div class="card" id=mergecard><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
-    <div class="card" id=levcard style="flex:0 0 auto"><h2>Leverage <em><a class=maplink href="/worklog#leverage">all ↗</a></em></h2><div class=bd id=lev style="font-size:12px"></div></div>
-    <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
+    <div class="card" id=levcard><h2>Leverage <em><a class=maplink href="/worklog#leverage">all ↗</a></em></h2><div class=bd id=lev style="font-size:12px"></div></div>
+    <div class="card" id=queuecard style="max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
   <div class=col>
-    <div class="card" id=syscard style="flex:0 0 auto"><h2>System <em id=sys-sub></em></h2>
+    <div class="card" id=syscard style="flex-shrink:0.2"><h2>System <em id=sys-sub></em></h2>
       <div class="cpu-wrap"><div class="cores" id=cores></div></div>
       <div class="gauges">
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
@@ -2131,9 +2143,9 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
       </div>
       <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
-    <div class="card" style="flex:0 0 auto;max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
+    <div class="card" style="max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
-    <div class="card" style="flex:0 0 auto;height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
+    <div class="card" style="height:190px"><h2>Staging server <em id=stage-sub></em></h2><div class="bd log" id=stage></div></div>
   </div>
 </div></div>
 <script>
@@ -2301,6 +2313,7 @@ async function levTick(){ try{
   if(b.error){ el.innerHTML='<div style="color:var(--dim)">'+esc(String(b.error))+'</div>'; return; }
   const rows=(b.rows||[]).filter(r=>r.unblocks>0).slice(0,5);
   el.innerHTML=(e.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px">${esc(e.line)}</div>`:'')+
+    (e.graph&&e.graph.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px" title="max expected landing over every todo/in-progress ticket; deferred and blocked excluded (py/hkpy/graphclear.py)">${esc(e.graph.line)}</div>`:'')+
     rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline"><span style="font:12px var(--mono);color:var(--amber);min-width:2.2em;text-align:right" title="open tickets transitively behind it">${esc(String(r.unblocks))}</span><span class=tlink data-tid="${esc(r.id)}" style="font:12px var(--mono)">${esc(r.id)}</span><span style="color:var(--dim);font:11px var(--mono)">${esc(Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', '))}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.title)}</span></div>`).join('')+
     `<div style="color:var(--dim);font:11px var(--mono);margin-top:3px">${esc(String(b.open))} open · frontier ${esc(String((b.frontier||[]).length))} ready now${(b.self_deps||[]).length?' · <span style="color:var(--coral)">self-dependency '+esc(b.self_deps.join(' '))+'</span>':''}</div>`;
 }catch(x){} }
@@ -2966,16 +2979,19 @@ _TASKORDER = {"t": 0.0, "v": None}
 _ETA = {"t": 0.0, "v": None}
 
 
-def eta_cached(max_age=60.0):
+def eta_cached(max_age=300.0):
     """The digest's ETA line (hkpy.flow.eta_line: queue clears / top Leverage ticket lands), for the
-    main page's Leverage card - built in a child (_child_json), cached 60 s."""
+    main page's Leverage card, plus the open-graph line (hkpy.graphclear) - built in a child
+    (_child_json), cached 5 min: the graph estimate reads the board and the runner logs."""
     if _ETA["v"] is not None and time.time() - _ETA["t"] < max_age:
         return _ETA["v"]
     v = _child_json(f"""
 import json
 from datetime import datetime
 from hkpy import flow
-print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}}))
+now = datetime.now()
+s = flow.summary({SCRATCH!r}, now)
+print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": flow.open_graph({SCRATCH!r}, now, s, repo={REPO!r})}}))
 """)
     _ETA.update(t=time.time(), v=v)
     return v

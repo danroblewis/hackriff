@@ -23487,7 +23487,7 @@ tasks:
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: in-progress
+    status: done
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
@@ -23517,10 +23517,66 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+    result: |
+      Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
+      siblings of `.centre` which is z-index:auto) painted above `.centre`
+      regardless of DOM order, and the surface's own toolbar (`.sf-bar`, mounted
+      inside `.centre`, spanning the full-bleed canvas width) sits in the same
+      top row the panels occupy — so its `.sf-actions` buttons (Live/Trace/
+      Signals/Measure/...) rendered under the panels. Round 2 had only cleared
+      the *outer* `.bar` vertically; this inner toolbar was untouched.
+
+      Fix (ui/src/app/chrome/map-layout.css): inset `.sf-bar` horizontally past
+      both panel columns via shared `--panel-w`/`--panel-gap` custom properties
+      (also used by `.side`/`.focus`'s own width, so the two can't drift apart),
+      scoped to above the 900px breakpoint — below it the panels drop to the
+      bottom of the screen and no longer share a row with the bar. The full-bleed
+      canvas drawing itself is untouched (still edge-to-edge, per MAP-01's
+      intent); only the toolbar's chrome moves. T-528's existing wrap-not-overflow
+      rule for `.sf-bar` handles narrow windows: it grows down instead of hiding
+      a button.
+
+      Also fixed reviewer's minor #3: `.focus:empty` never applied because
+      `render()` in ui/src/app/explore/index.ts always fills the slot with
+      something (real focus / "not found" text / placeholder sentence). Added an
+      `is-empty` class set only in the placeholder-only branch and cleared in the
+      other two; CSS now targets `.focus.is-empty`. No change to what Explore
+      shows.
+
+      Merged main first (git merge main, commit 3efd710e) — clean, no conflicts;
+      the TS2741 the previous round hit on `surface.ts` is fixed on main.
+
+      Tests run, real output:
+      - `just test-ui`: 56/56 test files passed, 0 failures.
+      - `node e2e/run.mjs app-surface` (run 1): 3/3 pass, including the T-528
+        hit-test assertion ("GET / mounts the unified surface in the app, under
+        the product CSP" — 1321ms).
+      - `node e2e/run.mjs app-surface` (run 2): 3/3 pass again (1205ms for the
+        same test).
+      - `node e2e/run.mjs surface-nav`: 5/5 pass (61.4s total).
+      - `just precheck` not run: this diff touches only `ui/src/app/chrome/
+        map-layout.css` and `ui/src/app/explore/index.ts` (no Rust crates),
+        and precheck is Rust-only per the task brief.
+
+      Waited ~50 min for a bulk merge gate (`~/.hackriff-ops/bulk-in-progress`,
+      pid 49109/61866) to clear before running any e2e specs, per the hard rule;
+      confirmed clear (no bulk-in-progress, no MERGE_HEAD, no `just gate`
+      process) immediately before each e2e run.
+
+      Process check after all runs: `ps -axo pid,ppid,pcpu,command | grep -Ei
+      "8791|t801|chrome-mac-arm64"` returned nothing — no Chrome for Testing,
+      node or hk serve instance left running from this session's e2e runs (the
+      two `hk serve` processes found running belong to other unrelated sessions/
+      the shared demo, not this worktree).
+
+      Commit: 7a5d243f "T-801 round 3: inset the surface's own toolbar past the
+      floating panels" on task-t801. Worktree clean.
+    commit: "30401389"
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
-    status: todo
+    status: in-progress
+    branch: task-t802
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -25030,7 +25086,7 @@ tasks:
   - id: T-852
     milestone: M3
     title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
-    status: in-progress
+    status: done
     branch: task-t852
     priority: high
     deps: []
@@ -25060,6 +25116,15 @@ tasks:
     notes: |
       FOUND BY T-844 worker 2026-09-23 (observed through the mock SDR).
     core_interface: true
+    result: |
+      T-852 worker result, 2026-09-24 (commits caceb46d WIP + bea92f02 merge-main + 74b66601). FSK half PARTIALLY fixed; the acceptance majority is NOT met. Branch task-t852 can land as-is: it is a pure improvement with no regressions.
+      1. WIP VERIFIED. wide_deviation_fsk: 43/46 with the refit (green) and 16/46 with the pre-T-852 densities (red). The refit is reproducible: `cargo run --release -p hk-classify --bin fit-densities` rewrites both data/*.json files byte-identically (git diff empty).
+      2. REGRESSION CHECK (old -> new densities). T-199 top-1 at gate+5: 0.901 -> 0.917. By family: fsk 0.92 -> 0.98, analog 0.85 -> 0.87, ook-ask 0.79, psk-qam 0.90, ofdm/css/pulsed 1.00, noise-like 0.92 all unchanged. Wrong 0.000 before and after. Held-out unknown recall 1.00 -> 1.00. T-248 full grid unknown recall 0.9924 -> 0.9924. T-200 2fsk/gfsk class top-1 0.458 -> 0.486. `just test-crate hk-classify` 110/110. No threshold or gate was touched.
+      3. THROUGH THE DEVICE. New test crates/hk-pipeline/tests/device_fsk_classify.rs runs fsk_burst_train (h=4, 23.5 ms bursts) through the mock SDR, blind, over seeds 852-859 at 20/25/30 dB. Above-gate rows claimed fsk: 0/16 before, 5/16 after, and no row names a wrong family. That is not a majority. The 20 dB scene measures 18.3-19.1 dB SNR over OBW99 (scene SNR is per Carson bandwidth), which is below the 20 dB FSK gate, so BelowGate there is correct; the refit does not change it. spectrum_too_few_segments is a separate burst-length effect: 23.5 ms normalises to ~1400 samples, under the 2048 that FEATURE_FFT_LEN 1024 with 3 segments needs. It only drops 4 spectral dimensions and is not what causes the unknowns.
+         The 11 remaining misses have two causes, both outside the refit. (a) 4 rows: C13's extent (hk_estimate::params step 6b, first..last moving-average threshold crossing) overruns the burst, measuring 24.8-28.8 ms against 23.5 ms, so noise-only samples reach the classifier (low_fraction z 9-30, duty z -3..-10). (b) 7 rows: the one-Gaussian 2fsk density puts h=4 in its tail, with m 2.4-3.8 against 1.9-2.1 on the rows it claimed (sigma_aa z 2.4-4.3; blind_qpsk z 4.0 on every row; if_slope_r2 up to 5.2).
+         T-844 ml_shadow.rs will still fail unchanged. Its scene (seed 844, 20 dB) is BelowGate on every row. The same seed through the device gives unknown at 25 dB and fsk at 30 dB, so the test would need a >=25-30 dB scene, or (a) and (b) fixed.
+      4. NO-ROW SCENES (split out, not started). C15's only call site is chains/fsk.rs after a successful framed write. A probe through the mock SDR shows why each scene gets no row. pocsag_pagers: no ConfirmedTrack spec matched (3 unmatched; fsk-bursts needs bursty=true, 2-200 kHz, >=4 detections). acars_message: 0 attached, 1 unmatched. retune_diversity: only wfm-rds chains attached, and they never call C15. lora_ism_burst: fsk-bursts was selected, but classify_box was never reached because fewer than min_bursts=4 bursts demodulated as FSK. multipath_echo: classify_box ran 3 times, but classify::should_record suppressed every row, because the chain's non-CRC 2fsk row sits at rank 3 (Classifier) and wins the T-247 rank-3 tie. The fix is a C15 call site that does not depend on a decode chain succeeding (e.g. per confirmed track, or in the every-track sweep-char chain), plus a look at the rank-3 tie for non-locked chain labels. That is an ADR-0016 section-4 placement change, so it needs its own ticket.
+    commit: d7e8526b
   - id: T-853
     milestone: MAUTO
     title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
@@ -25246,7 +25311,7 @@ tasks:
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-853
@@ -25278,6 +25343,7 @@ tasks:
       Observed, not chased: Engine wiring not done (out of M-7's stated deliverable): hk_synth::engine never emits refined_into; calling EvidenceObjective from the beam (§3.1 step 6) needs a refine call on the Evaluator seam, which needs an IQ-backed Evaluator (none exists; only tests/search_engine.rs's synthetic World). Suggest folding into M-6/M-8 or a small follow-up. engine.rs module doc now says so. | Calibrated S1-S3 evidence saturates at 6 bits/metric, so refinement at S2 is flat for strong signals: with unshaped 2-FSK (h=1, 4800 Bd, ±2.4 kHz) and the lowpass>fsk_demod>clock_recovery prefix, S1=6 and S2=12 wherever one tone passes the S0 filter; at σ=0.7 the TRUE centre scored lower (q=7, b_S1=0) than a one-tone tuning 6 kHz off (q=18). fsk_demod's bimodality (1 - mean|dphi|/(π/2)) rewards 'tone-likeness', so a one-tone OOK view of FSK outscores the centred FSK. Worth weighing before M-3 calls refine at first S2 lock; only S4/S5 analytic evidence ranks finer tunings. Recorded in ADR-0015 §2.3 'As built'. | S0 lowpass@1 'snr' table credits 6 bits at +0.1 dB (n=16384), and its null is white noise at the prefix rate: ANY channeliser or front-end passband ripple in front of the prefix (e.g. a DDC passband of 0.9 x rate) makes pure noise score 6 bits at S0 (measured: b_S0=6 on noise at every centre). EvidenceObjective excludes S0 for this reason; the M-3 engine's real evaluator will face the same when it 'channelises once to the S0 seed' — an M-2 metric/null issue (ADR says S0 is 'in-band SNR vs guard bands', which would be robust to band-edge roll-off; the implemented metric compares against the whole-band input power). | Calibration tables are drawn with fixed null-chain parameters (chan cutoff 6000, clock 4800 Bd at 48 kHz); a mode axis moving e.g. the S0 cutoff or the symbol rate scores against a null drawn at other parameters (ADR §2.2's 'mismatched-parameter null' is not generated yet). Not measured here how far that over/under-claims.
       Use cases: RESEARCH-002, SIGNAL-062
       Resources: 192 CPU-s, peak 3.2 GB
+    branch: task-t858
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"

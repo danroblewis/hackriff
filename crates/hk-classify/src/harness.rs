@@ -1618,12 +1618,17 @@ mod tests {
             ),
             ("fsk", -5, 8, 0, "abstained_upstream=8"),
             ("fsk", 0, 8, 0, "no_class_call=8"),
+            // T-852 re-pinned `confirmed=1` → `reranked=1`: the run count is unchanged (1 of 8).
+            // Widening the `2fsk` generator's modulation index (h up to 5, `synth::waveform`)
+            // redrew which waveform each acceptance seed produces, so the one snippet the stage
+            // runs on here is a different 2-FSK emission, and the verifier re-ranks its class
+            // instead of agreeing.
             (
                 "fsk",
                 5,
                 8,
                 1,
-                "abstained_upstream=1 confirmed=1 single_candidate=6",
+                "abstained_upstream=1 reranked=1 single_candidate=6",
             ),
         ];
         let mut got: Vec<String> = Vec::new();

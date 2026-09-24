@@ -99,6 +99,22 @@ export async function until(what, ok, { timeoutMs = 30000, everyMs = 200 } = {})
 }
 
 /**
+ * Narrow a pane rect (page CSS px) to the columns `Page.unoccludedColumns` found clear of foreign
+ * chrome (T-801), and say WHICH SHARE of the canvas's width that is, so a spec comparing pixels
+ * against a server answer over the viewport can ask the server about the same frequency sub-range
+ * the pixels cover (the pane maps frequency linearly across the canvas's own full width — the
+ * panels float over the drawing; they do not reframe it). With `unocc` null (no such element) the
+ * pane is returned whole, `fracLo = 0`, `fracHi = 1`.
+ */
+export function clipToUnoccluded(pane, canvasRect, unocc) {
+  if (!unocc || !(unocc.w > 0)) return { ...pane, fracLo: 0, fracHi: 1, clipped: 0 };
+  const x0 = Math.max(pane.x, unocc.x), x1 = Math.min(pane.x + pane.w, unocc.x + unocc.w);
+  const w = Math.max(0, x1 - x0);
+  return { ...pane, x: x0, w, fracLo: (x0 - canvasRect.x) / canvasRect.w, fracHi: (x0 + w - canvasRect.x) / canvasRect.w,
+    clipped: pane.w - w };
+}
+
+/**
  * **Wait for a page-derived report to reach `done`, and keep waiting while the page is still
  * WORKING towards it.**
  *
@@ -495,6 +511,49 @@ export class Page {
     return this.eval(`(() => { const e = document.querySelector(${JSON.stringify(selector)});
       if (!e) return null; const r = e.getBoundingClientRect();
       return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
+  }
+
+  /**
+   * **The columns of an element nothing FOREIGN is painted over**, read from the page (T-801).
+   *
+   * Since MAP-01 the Explore canvas is full-bleed and the app's chrome (the inventory `.side`, the
+   * `.focus` panel, the top bar and the dock) floats OVER it by design — Google-Maps geometry. A
+   * spec that samples the canvas's whole box therefore also samples those panels' pixels, and a
+   * claim about what the surface drew ("this band is THE grey", "the trace starts at the band edge")
+   * silently becomes a claim about a panel's background. This asks the browser's own hit test,
+   * `elementFromPoint`, at every column of the element's box on `rows` evenly spaced rows between
+   * `y0` and `y1` (CSS px, page coordinates; default the whole box): a column is **occluded** if
+   * any of those points lands on an element outside the element's own mount (`.surface`, or its
+   * parent where there is none) — the surface's own overlays (boxes, labels, the capture banner)
+   * are part of what it draws and never count. Nothing about any panel's size is assumed: a panel
+   * that moves, collapses (`.focus.is-empty`) or is absent (the harness pages) is simply not hit.
+   *
+   * Returns the widest contiguous unoccluded run as `{ x, w }` in page CSS px (plus the element's
+   * box and the occluded-column count), or `null` if the element is absent.
+   */
+  async unoccludedColumns(selector, { y0 = null, y1 = null, rows = 7 } = {}) {
+    return this.eval(`(() => {
+      const e = document.querySelector(${JSON.stringify(selector)});
+      if (!e) return null;
+      const root = e.closest(".surface") ?? e.parentElement ?? e;
+      const r = e.getBoundingClientRect();
+      const top = ${y0 === null ? "r.top" : Number(y0)}, bot = ${y1 === null ? "r.bottom" : Number(y1)};
+      const n = ${Math.max(1, rows | 0)};
+      const ys = [];
+      for (let i = 0; i < n; i++) ys.push(Math.min(r.bottom - 0.5, Math.max(r.top + 0.5, top + (bot - top) * (i + 0.5) / n)));
+      const x0 = Math.ceil(r.left), x1 = Math.floor(r.right);
+      let best = { x: x0, w: 0 }, run = null, occluded = 0;
+      for (let x = x0; x < x1; x++) {
+        let clear = true;
+        for (const y of ys) {
+          const hit = document.elementFromPoint(x + 0.5, y);
+          if (hit && !root.contains(hit)) { clear = false; break; }
+        }
+        if (clear) { run = run ?? { x, w: 0 }; run.w++; if (run.w > best.w) best = { ...run }; }
+        else { occluded++; run = null; }
+      }
+      return { x: best.x, w: best.w, occluded, box: { x: r.x, y: r.y, w: r.width, h: r.height } };
+    })()`);
   }
 
   /** A decoded screenshot of the composited page. */
