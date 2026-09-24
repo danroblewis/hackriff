@@ -29,6 +29,10 @@
    own rule already covers the rest: the bar wraps rather than overflows when its row does not fit,
    so narrowing it between the panels grows it down instead of hiding a button under a neighbour,
    exactly as it already does on an ordinary narrow window. */
+/* T-802: in Explore, Go-to is the floating one docked over the canvas (`map-controls.ts`), which
+   submits through the same `requestGoto`; the bar's copy stays for Decode/History, where it
+   switches to Explore first. One Go-to on screen, not two. */
+.app:has(#view-explore:not([hidden])) > .bar #goto-form { display: none; }
 /* T-803: only the left column remains (the right-hand focus column became the bottom sheet, which
    sits at the bottom and whose `full` state stops below this toolbar), so only the left inset stays. */
 #view-explore > .centre .sf-bar { padding-left: calc(var(--panel-w) + var(--panel-gap) * 2); padding-right: 12px; box-sizing: border-box; }

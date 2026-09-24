@@ -93,7 +93,8 @@ test("non-modal by construction: no backdrop, fixed to its own box, content refl
   assert.doesNotMatch(css, /pointer-events/, "the sheet never reroutes pointer events");
   assert.match(css, /\.sheet \{ position: fixed;[^}]*bottom: var\(--sheet-bottom, 70px\)/, "docked above the dock");
   assert.match(css, /\.sheet \.sheet-body \{ flex: 1; min-height: 0; overflow: auto; \}/, "the body reflows to the snap height");
-  assert.match(css, /\.sheet \{ right: 8px; width: min\(520px/, "width-capped and edge-docked on wide screens");
+  assert.match(css, /\.sheet \{ --sheet-gutter: 64px; right: var\(--sheet-gutter\); width: min\(520px/,
+    "width-capped, docked right, clear of the zoom/FAB column (T-802)");
   assert.match(css, /@media \(max-width: 900px\) \{\s*\.sheet \{ left: 8px; width: auto; \}/, "full width on a phone");
   const html = readFileSync("src/app/index.html", "utf8");
   assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<aside class="focus" data-slot="focus"/,

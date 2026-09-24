@@ -21,11 +21,15 @@
 .sheet .sheet-body > .focus { border: 0; background: none; overflow: visible; min-height: 0; }
 .sheet[data-snap="peek"] .sheet-body { visibility: hidden; }
 .sheet[data-snap="peek"] .sheet-head { border-bottom-color: transparent; }
-/* Wide screens: width-capped and docked to one edge so the centre of the surface is never covered
-   (docs/23 §10.3). It takes the right edge, where the focus column it replaces used to float; the
-   inventory column still holds the left until MAP-14 moves it into this sheet's Explore tab. */
-.sheet { right: 8px; width: min(520px, calc(100vw - 16px)); }
-/* Narrow screens: full width, one-handed reach. */
+/* Wide screens: width-capped and docked to the right (docs/23 §10.3), where the focus column it
+   replaces used to float; the inventory column still holds the left until MAP-14 moves it into
+   this sheet's Explore tab.
+   T-802 x T-803: it stops short of the right edge by `--sheet-gutter`, the column the floating
+   zoom control and the follow-live FAB (`map-controls.css`: 8 px inset, the 48 px FAB the widest)
+   sit in, plus a gap. The sheet grows upward, so any overlap at the bottom-right would hide the FAB
+   at half and full; a gutter keeps both reachable at every snap height and on every width. */
+.sheet { --sheet-gutter: 64px; right: var(--sheet-gutter); width: min(520px, calc(100vw - 8px - var(--sheet-gutter))); }
+/* Narrow screens: as wide as the gutter allows, for one-handed reach. */
 @media (max-width: 900px) {
   .sheet { left: 8px; width: auto; }
 }
