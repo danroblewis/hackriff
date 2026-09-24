@@ -326,3 +326,13 @@ def test_a_failed_alone_red_never_counts_toward_a_deflake():
     e = flakes.Entry(test="t", first_seen=0, last_seen=0, recent_passed=2, failed_alone=5, recent_red=7)
     assert flakes.deflake_due({"t": e}) == []
     assert flakes.deflake_request(flakes.Entry(test="hk-cli::api_contract x", first_seen=0, last_seen=0), 0)["kind"] == "rust"
+
+
+
+def test_the_deflake_counter_follows_the_window_down():
+    e = flakes.Entry(test="t", first_seen=0, last_seen=0, recent_passed=3, deflaked_at=3)
+    assert flakes.deflake_due({"t": e}) == []                    # just filed at 3
+    e.recent_passed = 1                                           # week 1 aged out
+    flakes.deflake_due({"t": e})
+    e.recent_passed = 3                                           # three NEW flakes
+    assert flakes.deflake_due({"t": e}) == [e]

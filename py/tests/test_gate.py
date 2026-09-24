@@ -1087,3 +1087,12 @@ def test_resume_after_is_refused_for_a_suite_this_gate_does_not_run(monkeypatch,
 
     rc = gate.main(["--files", "py/hkpy/flow.py", "--resume-after", "test", "--dry-run"])
     assert rc == 2 and "refusing --resume-after 'test'" in capsys.readouterr().err
+
+
+
+def test_a_resumed_gate_is_never_a_whole_gate_duration():
+    from hkpy import cycletime
+
+    runs_ = [{"finished": True, "result": "pass", "seconds": 2400.0, "class": "full", "phase": "all"},
+             {"finished": True, "result": "pass", "seconds": 300.0, "class": "full", "phase": "resume:test"}]
+    assert cycletime.rolling_medians(runs_)["full"] == (2400.0, 1)

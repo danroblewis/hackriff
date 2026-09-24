@@ -1025,7 +1025,8 @@ def main(argv: list[str] | None = None) -> int:
             run_id,
             contended=contended,
             klass=decision.label,
-            phase=args.phase,
+            # A resumed gate ran only the suites after a stopped one: never a whole-gate duration.
+            phase=f"resume:{args.resume_after}" if args.resume_after else args.phase,
             source=source.description,
             n_files=len(decision.files),
             crates=list(selection.crates) if selection.crates else None,

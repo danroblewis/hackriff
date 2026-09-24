@@ -468,8 +468,12 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t0
   # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
-  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
+  # Every way nextest reports a red test - a crash (SIGSEGV/SIGABRT/...), a TIMEOUT, a leak - not
+  # only `FAIL [`: with fail-fast off, a flaky test and a crashing one can be red in the same run,
+  # and re-running only the first would accept the second (review, 2026-09-23).
+  tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?(FAIL|SIG[A-Z]+|TIMEOUT|ABORT|LEAK-FAIL) \[' | awk '{print $NF}' | sort -u)
   TRIAGE_KIND="test"
+  TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
   local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
@@ -492,10 +496,12 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
-  if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+  if ( cd "$REPO" && HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
     log "TRIAGE: first isolated run passed - running them alone once more (the rule is twice)"
     t0=$SECONDS
-    if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+    # The gate's strict env (test-rust / acceptance / e2e-harness export it): alone, a missing
+    # fixture or synth generator would SKIP-and-pass instead of failing as it did in the gate.
+    if ( cd "$REPO" && HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
       FLAKE_SECOND_S=$((SECONDS - t0)); flake_accept rust "$(echo $tests | tr '\n' ' ')" "$from" "$tickets" "$retry"; return $?
     fi
     log "TRIAGE: a test FAILS alone on the second isolated run -> flaky even alone: a real defect, not a load flake"
@@ -508,17 +514,30 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
 # The suite that stopped the gate passes on the isolation evidence; run what it never reached.
 flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the resumed remainder
   local kind=$1 names=$2 from=$3 tickets=$4 retry=$5 failed steps="" old saved rc seg
+  # The gate attempt's own output only: stop at the first TRIAGE line, before the isolated re-runs
+  # print their own nextest summaries into the same log (review, 2026-09-23: counted, they made a
+  # red in `acceptance` look as if `e2e-harness` had run too).
+  local att; att=$(tail -n +"$from" "$LOG" | awk '/^\[[0-9-]+ [0-9:]+\] TRIAGE:/{exit} {print}')
+  if [ "$kind" = rust ]; then
+    local counted rerun
+    counted=$(printf '%s\n' "$att" | grep -E '^ *Summary \[' | grep -oE '[0-9]+ (failed|timed out)' | awk '{s+=$1} END{print s+0}')
+    rerun=$(printf '%s\n' $names | grep -c .)
+    if [ "${counted:-0}" -gt "${rerun:-0}" ]; then
+      log "TRIAGE: they PASS alone twice, but the stopped run counted $counted failure(s) and only $rerun were re-run alone -> not accepted; a real red until every failure is accounted for"
+      return 1
+    fi
+  fi
   failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just ([a-z0-9-]+) took [0-9]+s \(exit [1-9][0-9]*\)$/\1/p' | tail -1)
   if [ -z "$failed" ]; then
     # Cannot tell which suite stopped the gate: do the old, safe thing (a full retry).
     log "TRIAGE: they PASS alone twice, but the stopped suite is not in the log -> full retry (the old path)"
-    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":false}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":false}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
     limited $retry; return $?
   fi
   # acceptance-ci runs two nextest steps (acceptance, then e2e-harness); a red in the first
   # leaves the second unrun - count the nextest summaries the stopped suite printed.
   if [ "$failed" = "acceptance-ci" ]; then
-    seg=$(tail -n +"$from" "$LOG" | awk '/^gate: running just acceptance-ci/{buf=""} {buf=buf"\n"$0} END{print buf}')
+    seg=$(printf '%s\n' "$att" | awk '/^gate: running just acceptance-ci/{buf=""; on=1} on{buf=buf"\n"$0} /^gate: just acceptance-ci took/{on=0} END{print buf}')
     [ "$(printf '%s' "$seg" | grep -cE '^\s+Summary \[')" -lt 2 ] && steps="e2e-harness"
   fi
   # What the OLD rule would have re-run: every suite of this attempt for a Rust red (a full gate
@@ -531,7 +550,7 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
   fi
   saved=$(( old - ${FLAKE_SECOND_S:-0} )); [ "$saved" -lt 0 ] && saved=0
   log "TRIAGE: they PASS alone twice -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
-  printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "$kind" "$failed" "$saved" >> "$FLAKY"
+  printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "$kind" "$failed" "$saved" >> "$FLAKY"
   alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone twice; the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
   limited $retry --resume-after "$failed" ${steps:+--resume-steps $steps}; rc=$?
   [ "$rc" -eq 0 ] && log "TRIAGE: resumed gate PASSED" || log "TRIAGE: resumed gate FAILED -> a red in a suite that had not run yet"

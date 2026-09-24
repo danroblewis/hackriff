@@ -389,6 +389,9 @@ def load_deflaked(path: str) -> dict[str, int]:
 
 def deflake_due(ledger: dict[str, Entry]) -> list[Entry]:
     """Tests whose passed-alone count in the window reached DEFLAKE_THRESHOLD, then each +DEFLAKE_STEP."""
+    for e in ledger.values():
+        if e.recent_passed < e.deflaked_at:      # the filed incidents aged out of the window
+            e.deflaked_at = 0
     out = [e for e in ledger.values()
            if e.recent_passed >= DEFLAKE_THRESHOLD and e.recent_passed >= e.deflaked_at + DEFLAKE_STEP
            and (e.deflaked_at == 0 or e.recent_passed > e.deflaked_at)]
