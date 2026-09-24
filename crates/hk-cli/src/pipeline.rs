@@ -2022,6 +2022,12 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
             source_control: Some(lp.control),
         });
     }
+    if let Some((spec, _)) = args.extra_devices.first() {
+        anyhow::bail!(
+            "--device {spec:?}: a sigmf: recording replays alone; further devices need the \
+             primary to be a live device"
+        );
+    }
     let Some(path) = args.source.strip_prefix("sigmf:").map(PathBuf::from) else {
         anyhow::bail!(
             "unsupported --source {:?}: use hackrf, hackrf:<serial>, rtlsdr, rtlsdr:<serial>, \
@@ -2119,6 +2125,15 @@ mod tests {
     use std::net::TcpStream;
 
     use super::*;
+
+    /// T-512: a replay primary refuses further devices rather than dropping them.
+    #[test]
+    fn daemon_replay_refuses_extra_devices() {
+        let mut a = daemon_args("sigmf:/nope.sigmf-meta".into(), temp_data_dir(), Some("t"));
+        a.extra_devices = vec![("rtlsdr".into(), LiveArgs::default())];
+        let err = start_daemon(&a).err().expect("must refuse");
+        assert!(err.to_string().contains("replays alone"), "{err:#}");
+    }
 
     /// T-512 (AWARE-011): per-device settings are addressable; bad devices are loud errors.
     #[test]
