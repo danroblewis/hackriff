@@ -26127,7 +26127,7 @@ tasks:
   - id: T-889
     milestone: M2-hardening
     title: "fog-of-war.e2e.mjs band-A wait gives up on a 10 s wall-clock stall: make it event-counted (load flake that sank the 10:15 batch)"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI-E2E
@@ -26141,6 +26141,7 @@ tasks:
     notes: |
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
     branch: task-t889
+    commit: 23ad9781
   - id: T-890
     milestone: MLIVE
     title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
