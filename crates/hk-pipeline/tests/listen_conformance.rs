@@ -11,10 +11,11 @@
 //!
 //! 1. **Discovery** — `GET /api/streams` `on_demand[listen]`: `kind`, `datatype`,
 //!    `sample_rate_hz`, and `params` exactly `emitter, detection, f_lo, f_hi` (no `mode`, ever).
-//! 2. **Header keys** — the header's top-level key set is exactly today's, plus only the additive
-//!    keys ADR-0011 §8.2 names (`pipeline_id`, `recipe`, `output_id`, `edit_rev`); the `audio`
-//!    profile's key set is exactly today's; `ri16_le` / 48000 Hz / 960-sample frames / **mono**
-//!    (`channels: 1`, which LP-10's stereo must keep unless a client opts in, §12.13).
+//! 2. **Header keys** — the header's top-level key set is exactly today's; the `audio` profile's
+//!    key set is exactly today's plus only the additive keys ADR-0011 §8.2 names inside it
+//!    (`pipeline_id`, `recipe`, `output_id`, `edit_rev` — T-866 serves them there, on a recipe's
+//!    `audio` output); `ri16_le` / 48000 Hz / 960-sample frames / **mono** (`channels: 1`, which
+//!    LP-10's stereo must keep unless a client opts in, §12.13).
 //! 3. **Records** — every binary message is a 32-byte record header plus payload; data records
 //!    carry exactly 960 samples (1920 bytes); `sample_index` counts audio samples and `t` advances
 //!    exactly `sample_index / 48000` s; `seq` has no gap except behind a drop marker.
@@ -128,8 +129,10 @@ const HEADER_KEYS: &[&str] = &[
     "t_start",
     "hackriff_version",
 ];
-/// Header keys a later stage may ADD (ADR-0015 §12.4, ADR-0011 §8.2). Nothing else may appear.
-const HEADER_ADDITIVE: &[&str] = &["pipeline_id", "recipe", "output_id", "edit_rev"];
+/// `audio` profile keys a later stage may ADD (ADR-0015 §12.4, ADR-0011 §8.2: "the `audio` object
+/// gains `pipeline_id`, `recipe`, `output_id`, `edit_rev`"). Nothing else may appear. (T-865 first
+/// allowed them at the header's top level; T-866, which serves them, aligned this with the ADR.)
+const AUDIO_ADDITIVE: &[&str] = &["pipeline_id", "recipe", "output_id", "edit_rev"];
 /// The `audio` profile's keys today, for a refined WFM station.
 const AUDIO_KEYS: &[&str] = &[
     "channels",
@@ -635,17 +638,10 @@ fn listen_freeze_discovery_header_records_status_squelch_and_detach() {
     let (mut ws, h) = open_admitted(addr, &station_query());
     eprintln!("[T-865] header: {h}");
     let k = keys(&h);
-    let allowed: BTreeSet<String> = set(HEADER_KEYS)
-        .union(&set(HEADER_ADDITIVE))
-        .cloned()
-        .collect();
     let missing: Vec<_> = set(HEADER_KEYS).difference(&k).cloned().collect();
-    let unknown: Vec<_> = k.difference(&allowed).cloned().collect();
+    let unknown: Vec<_> = k.difference(&set(HEADER_KEYS)).cloned().collect();
     assert!(missing.is_empty(), "header lost keys {missing:?}: {h}");
-    assert!(
-        unknown.is_empty(),
-        "header grew keys {unknown:?} that are not the named additive ones: {h}"
-    );
+    assert!(unknown.is_empty(), "header grew keys {unknown:?}: {h}");
     assert_eq!(h["schema"], "hackriff.stream");
     assert!(
         h["version"].as_str().is_some_and(|v| v.starts_with("1.")),
@@ -670,7 +666,18 @@ fn listen_freeze_discovery_header_records_status_squelch_and_detach() {
     assert!((50e3..=250e3).contains(&bw), "bandwidth_hz {bw}");
 
     let a = &h["audio"];
-    assert_eq!(keys(a), set(AUDIO_KEYS), "audio profile keys: {a}");
+    let ak = keys(a);
+    let allowed: BTreeSet<String> = set(AUDIO_KEYS)
+        .union(&set(AUDIO_ADDITIVE))
+        .cloned()
+        .collect();
+    let lost: Vec<_> = set(AUDIO_KEYS).difference(&ak).cloned().collect();
+    let grew: Vec<_> = ak.difference(&allowed).cloned().collect();
+    assert!(lost.is_empty(), "audio profile lost keys {lost:?}: {a}");
+    assert!(
+        grew.is_empty(),
+        "audio profile grew keys {grew:?} that are not the named additive ones: {a}"
+    );
     assert_eq!(a["channels"], 1, "mono unless a client opts in (§12.13)");
     assert_eq!(a["frame_samples"], FRAME);
     assert_eq!(

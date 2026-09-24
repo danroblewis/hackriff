@@ -580,6 +580,7 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
     - `mode` is chosen by auto-mode selection (`wfm`, `nbfm`, `am`, `usb`, `lsb`, `cw`); there is no manual mode.
     - `params` is docs/07 `EstimatedParams`.
     - `squelch` is `{open_snr_db, hysteresis_db, noise_dbfs}`; `agc` is `{enabled, target_dbfs, max_gain_db}`.
+    - Recipe audio (optional, additive; ADR-0011 §8.2, T-866): on a recipe pipeline's `audio` output (`audio/<pipeline>/<output>`) the `audio` object also carries `pipeline_id`, `recipe` (`<id>@<version>`), `output_id` and `edit_rev` (the revision the stream was offered at); its `mode` is the recipe's declared `profile.mode` with `mode_rules: "recipe-declared"` and `mode_confidence: 0` — a declaration, not an estimate. Listen's own chain omits the four keys. Readers that ignore unknown fields are unaffected.
     - `refinement` (optional, T-070): present when the channel was refined from the demodulator's own output (`hk_pipeline::refine`). `{provenance: "refined by output analysis", objective, center_hz, bandwidth_hz, start_center_hz, start_bandwidth_hz, quality, converged, iterations, evaluations, elapsed_s, mode_params, labels}`. The header's `center_hz`/`bandwidth_hz` and `params.bandwidth_hz`/`cfo_hz`/`pilot_hz` are then the refined values; the start values are the selection or detection. Readers that ignore unknown fields are unaffected.
 - **Data records** (type 1):
   - payload: `frame_samples` (960, i.e. 20 ms) `i16` LE samples;
@@ -590,10 +591,11 @@ Some streams exist only because a consumer asked for them, e.g. listening to one
   - 32-byte header; the payload is a flat JSON object of numbers, booleans and short tokens (`policy::metadata_is_allowlist_shaped`, enforced by `Publisher::publish_status`), so no free text rides on it.
   - Audio fields: `level_dbfs`, `snr_db`, `squelch_open`, `agc_gain_db`, `frames`, `squelched_frames`, `lost_samples`, `latency_ms`, `backlog_s`, sent about every 250 ms.
   - Refinement fields (T-070): `refined_center_hz` and `refined_bandwidth_hz` (the refined channel in force, absent when not refined) and `refine_updates` (background re-refinements that retuned the channel after passing the hysteresis).
+  - Recipe audio (T-866): the same record also carries the pipeline's per-node `<node>.<metric>` batch (§14.3 keys) on the same tick — one record, two vocabularies.
   - They take a `seq`. The reference `StreamReader` returns them as `Record::Unknown`; `record::parse_status_record` decodes them.
 - **Gating:**
   - Audio payloads are content: under a class that forbids content the egress gate withholds them (§6), as for any audio stream.
-  - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
+  - The listen opener refuses earlier, before a ring read; see `hk_pipeline::chains::listen` for the rule. A recipe with an `audio` output runs the same rule on its channel when it starts (T-866). Restricted bands are refused whatever the source class. Unclassified content (a fail-closed `metadata-only` source without a user classification rule) is refused.
 
 ### 12.3 IQ profile (T-165, ADR-0013 §4.9 gap 8)
 
@@ -1096,6 +1098,29 @@ a record to a row it already holds, and refuses (`ui/src/presence.ts`, ADR-0019 
 T-388's third refusal — *a span starting after the end held is refused, and the box waits for the
 poll* — is **removed**, replaced by REOPEN (§15.4). The silence is still never claimed; it is now
 drawn as a gap between two boxes rather than hidden behind a box that quietly stopped moving.
+
+## 16. The analyze stream: `hackriff.analyze/1` (T-859, ADR-0015 §5.2, ADR-0021 §4.3)
+
+**On-demand opener `analyze`**, served at `/ws/analyze/{id}` (and `/ws/open/analyze?id=<id>`, TCP
+`open/analyze?id=<id>`): one region-analyze job's progress (docs/api.md "Analyze"). A `messages`
+stream, `message_schema` **`hackriff.analyze/1`**, `content_class` `unrestricted`, published by
+`hk-pipeline` (`crates/hk-pipeline/src/synth/jobs.rs`). It is **additive** — a new opener name, a new
+schema — so it changes nothing an existing reader reads, and the document stays 1.4.
+
+- **Everything is metadata.** Each record's `metadata` is `{type, job_id, …}`; `content` is never set.
+  The one content-bearing field a job has, a result's `frames_preview`, is emptied **before** the job is
+  visible anywhere unless the acquired IQ's class permits content (ADR-0015 §5.3), so the stream cannot
+  carry it and needs no per-record gate.
+- **Records are idempotent snapshots and drop, never block** (ADR-0015 §5.2). Each subscriber has a
+  bounded queue (64 records) in front of the publisher's own §7 queue; a full queue loses the record,
+  never the job's time. `GET /api/analyze/{id}` is always authoritative.
+- **Record types** (`metadata.type`): `progress` (`{job}`; the first record of every stream, then on
+  each state change and at most once a second), `stage` (`{stage, job}` when the deepest stage reached
+  rises), `best` (`{results}`, the top 3), `trace` (`{stage, tried, not_tried, by_outcome, nodes}`, once
+  per stage, ≤ 8 nodes — ADR-0021 §4.3, never per decision), `done` (`{job}`, the final job).
+- **Lifetime.** The stream ends after `done`. Opening it for a finished job yields exactly one `done`.
+  An unknown id is refused `404 not_found`; a forgotten one `410 gone` (ADR-0021 §4.2: *we forgot* is
+  not *it never ran*).
 
 ## Sources
 

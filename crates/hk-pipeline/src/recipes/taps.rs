@@ -746,6 +746,9 @@ pub enum OutputSink {
     Stage(StageTap),
     /// A `messages` output: Decode rows through an off-thread writer (T-111).
     Messages(crate::recipes::messages::MessagesSink),
+    /// An `audio` output (T-866): published from the sink node's frames by the runner, not
+    /// from a port buffer, so [`OutputSink::publish`] passes it by.
+    Audio(crate::recipes::audio::AudioSink),
     /// Nothing served (a placeholder while an edit swaps sinks).
     Idle,
 }
@@ -762,7 +765,7 @@ impl OutputSink {
             OutputSink::Frames(s) => publish_frames(s, out, ctx, t_of),
             OutputSink::Stage(t) => t.publish(out, ctx, t_of),
             OutputSink::Messages(m) => m.publish(out, ctx, t_of),
-            OutputSink::Idle => 0,
+            OutputSink::Audio(_) | OutputSink::Idle => 0,
         }
     }
 }

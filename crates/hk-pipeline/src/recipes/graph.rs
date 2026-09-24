@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hk_blocks::{
-    Block, BlockError, BuildCtx, ChunkFlags, ChunkMeta, Input, Io, Output, PortInfo, PortSlice,
-    Registry, Status, TapMask,
+    AudioFrames, Block, BlockError, BuildCtx, ChunkFlags, ChunkMeta, Input, Io, Output, PortInfo,
+    PortSlice, Registry, Status, TapMask,
 };
 use hk_recipe::{
-    Catalogue, EditPlan, Endpoint, NodeChange, NodeSpec, OutputSpec, Params, PortRef, PortType,
-    Recipe, RecipeError, StageView,
+    Catalogue, EditPlan, Endpoint, NodeChange, NodeSpec, OutputKind, OutputSpec, Params, PortRef,
+    PortType, Recipe, RecipeError, StageView,
 };
 use serde_json::{Map, Value, json};
 
@@ -33,6 +33,12 @@ pub enum Src {
         pos: usize,
         /// Output index in the block descriptor's order.
         port: usize,
+    },
+    /// The sink node at `pos` itself (an `audio` output reads an `audio_out` node, which has
+    /// no output port; ADR-0011 §8.2). Never a node input.
+    Sink {
+        /// Node position.
+        pos: usize,
     },
 }
 
@@ -389,6 +395,22 @@ pub fn stage(
     for (k, o) in recipe.outputs.iter().enumerate() {
         let path = format!("outputs[{k}].from");
         let bad = || StageError::one(400, "invalid", path.clone(), "unresolvable source".into());
+        if o.kind == OutputKind::Audio {
+            // The sink itself: its product leaves through `Block::audio_frames` at the audio
+            // profile's rate, and its input type is the port type the output carries.
+            let Some(PortRef::Node { node, port: None }) = PortRef::parse(&o.from) else {
+                return Err(bad());
+            };
+            let p = *pos_of.get(node).ok_or_else(bad)?;
+            let ty = shapes[p].in_info.first().ok_or_else(bad)?.ty;
+            outputs.push(OutputBinding {
+                spec: o.clone(),
+                src: Src::Sink { pos: p },
+                ty,
+                rate_hz: hk_stream::audio::AUDIO_SAMPLE_RATE_HZ,
+            });
+            continue;
+        }
         let (src, info) = match PortRef::parse(&o.from).ok_or_else(bad)? {
             PortRef::Input => (Src::Input, input),
             PortRef::Node { node, port } => {
@@ -559,7 +581,7 @@ impl Graph {
             let mut arrived = ChunkFlags::NONE;
             for (k, src) in node.sources.iter().enumerate() {
                 let inp = match *src {
-                    Src::Input => input,
+                    Src::Input | Src::Sink { .. } => input,
                     Src::Node { pos: p, port } => {
                         let o = &before[p].outputs[port];
                         Input {
@@ -592,11 +614,19 @@ impl Graph {
         Ok(())
     }
 
-    /// The output buffer a source names (`None` for the recipe input).
+    /// The output buffer a source names (`None` for the recipe input and a sink).
     pub fn output(&self, src: Src) -> Option<&Output> {
         match src {
-            Src::Input => None,
+            Src::Input | Src::Sink { .. } => None,
             Src::Node { pos, port } => self.nodes.get(pos)?.outputs.get(port),
+        }
+    }
+
+    /// The finished audio frames of the sink a source names (`None` for anything else).
+    pub fn audio_frames(&mut self, src: Src) -> Option<&mut AudioFrames> {
+        match src {
+            Src::Sink { pos } => self.nodes.get_mut(pos)?.instance.audio_frames(),
+            _ => None,
         }
     }
 

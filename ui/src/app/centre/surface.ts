@@ -134,13 +134,21 @@ export function paneMarkBoxes(
   ];
 }
 
+/** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
+ * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
+const HUD_IDLE_ALPHA = 0.45;
+
 function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
 
   const canvas = h("canvas", { class: "sf-canvas", "aria-label": "The spectrum surface: frequency across, time down, with the whole-surface map below" }) as HTMLCanvasElement;
   // T-508: capture state, stated OVER the picture — a frozen edge that looks live is the defect.
   const captureEl = h("div", { class: "sf-capture", role: "alert", hidden: true });
-  const stage = h("div", { class: "sf-stage" }, canvas, captureEl);
+  // T-805 (MAP-05): the HUD axes' labels — band 2, screen-space DOM over the canvas, but placed
+  // every render frame by `SurfaceView` from the same ruler its ticks were stroked from. Never read
+  // by the pointer: a label must not steal a pan from the surface underneath it.
+  const hudEl = h("div", { class: "sf-hud", "aria-hidden": "true" });
+  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, captureEl);
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -734,6 +742,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The ring rules first, so a signal box or selection that crosses one is drawn over it.
         marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],
         trace: traceFor, tracePx: TRACE_PX,
+        // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
+        // signal (docs/23 §10.2), and the labels' CSS reads the same class.
+        hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
       });
     } catch (e) {
       say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);

@@ -641,6 +641,7 @@ impl ListenManager {
             deemphasis_s: plan.deemphasis_s,
             demod: LISTEN_DEMOD_VERSION.into(),
             refinement: refined.as_ref().map(crate::refine::audio_refinement),
+            ..AudioInfo::default()
         });
         let publisher = Publisher::new(
             header.clone(),

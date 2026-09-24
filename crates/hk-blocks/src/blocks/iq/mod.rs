@@ -10,7 +10,7 @@ use crate::schema::{ParamExt, descriptor, float, frame_length, hex, int, object,
 
 pub(crate) mod common;
 mod demod;
-mod filter;
+pub(crate) mod filter;
 pub mod mauto;
 mod ppm;
 mod psk;

@@ -37,6 +37,7 @@ import { PaneModel, levelDivergenceNote, paneStatuses, type FreqWindow, type Pan
 import { Surface, type PaneRect, type PaneReport, type PaneView, type SurfaceOptions, type TilePlanes } from "./surface";
 import type { TileCache, TileTextures } from "./tilecache";
 import { rulerLabel } from "./ticks";
+import { HudAxes, hudLabels, hudTickQuads, paneRuler, type HudLabel, type PaneRuler } from "./hud";
 
 export interface SurfaceViewOptions {
   canvas: HTMLCanvasElement;
@@ -105,6 +106,16 @@ export interface SurfaceViewOptions {
   trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 (the default) draws no trace and takes no space. */
   tracePx?: number;
+  /**
+   * **HUD axes** (T-805, `./hud.ts`): a frequency ruler along each pane's bottom edge and a time
+   * ruler down its left, re-derived every frame from the box the pane was drawn with and the cell
+   * its `PaneStatus` reports. `true` draws the ticks (band 0, the overlay program); an element also
+   * receives the labels (band 2, DOM). Off by default.
+   */
+  hudAxes?: boolean;
+  hud?: HTMLElement | null;
+  /** The chrome's fade, `0..1`, asked every frame; the ticks' ink is multiplied by it. Default 1. */
+  hudAlpha?: (() => number) | null;
 }
 
 /** One pane's trace strip this frame: where it is, and the window it is a trace across. */
@@ -129,6 +140,10 @@ export interface SurfaceFrame {
   /** The trace strips drawn this frame, one per pane; empty when no trace is configured. */
   readonly traces: readonly TraceRect[];
   readonly readout: Readout;
+  /** The HUD rulers laid out this frame, one per pane; empty when HUD axes are off (T-805). */
+  readonly rulers: readonly PaneRuler[];
+  /** Their tick strokes, as submitted to the overlay pass. */
+  readonly hudQuads: readonly OverlayQuad[];
 }
 
 export class SurfaceView {
@@ -154,11 +169,18 @@ export class SurfaceView {
   trace: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of the trace strip above each pane, device px. 0 hides it and returns the space. */
   tracePx: number;
+  /** Draw the HUD rulers (T-805). */
+  hudAxes: boolean;
+  private readonly hud: HudAxes | null;
+  private readonly hudAlpha: (() => number) | null;
 
   constructor(opts: SurfaceViewOptions) {
     this.marks = opts.marks ?? null;
     this.trace = opts.trace ?? null;
     this.tracePx = opts.tracePx ?? 0;
+    this.hudAxes = opts.hudAxes ?? !!opts.hud;
+    this.hud = opts.hud ? new HudAxes(opts.hud) : null;
+    this.hudAlpha = opts.hudAlpha ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
     this.overlay = new OverlayPass(this.surface.gl);
@@ -282,14 +304,38 @@ export class SurfaceView {
     );
     this.chrome?.update(readout);
 
+    // 4. the HUD rulers (T-805): per pane, from the SAME box and the SAME `(cellHz, cellS)` the
+    //    readout above was just built from — ticks through the overlay program (band 0), labels into
+    //    the DOM layer (band 2), both in this frame. The minimap has none: it is where you see where
+    //    the panes are, not a place to read a value off.
+    const rulers: PaneRuler[] = [];
+    const hudQuads: OverlayQuad[] = [];
+    if (this.hudAxes) {
+      const cssW = this.canvas.clientWidth;
+      const dpr = cssW > 0 ? w / cssW : 1;
+      const alpha = this.hudAlpha ? this.hudAlpha() : 1;
+      const labels: HudLabel[] = [];
+      for (const v of paneViews) {
+        const s = statusById.get(v.id);
+        if (!s) continue;
+        const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
+        rulers.push(r);
+        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
+        labels.push(...hudLabels(r, hPx, dpr));
+      }
+      this.hud?.update(labels);
+    }
+
     return {
       edgeNs, views, reports, statuses, note: levelDivergenceNote(statuses),
-      quads, overlaysDrawn, mapRect, mapBox: mapView?.box ?? null, traces, readout,
+      quads, overlaysDrawn, mapRect, mapBox: mapView?.box ?? null, traces, readout, rulers, hudQuads,
     };
   }
 
   dispose(): void {
     this.chrome?.dispose();
+    this.hud?.dispose();
     this.surface.dispose();
   }
 }

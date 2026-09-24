@@ -55,17 +55,29 @@ pub use param::{
 };
 pub use port::PortType;
 pub use recipe::{
-    ChannelsSpec, DecodeMapping, Edge, Endpoint, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec,
-    MatchHints, NodeSpec, OutputKind, OutputPolicy, OutputSpec, PortRef, Recipe, RecipeError,
-    RefineGoal, RefineObjective, RefineSpec, Resolved, StageView,
+    AUDIO_OUT_BLOCK, AudioChannels, AudioProfile, ChannelsSpec, DEFAULT_LIVE_EDGE_BACKLOG_S,
+    DecodeMapping, Edge, Endpoint, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec, Liveness,
+    LivenessMode, LivenessSpec, MAX_LIVE_EDGE_BACKLOG_S, MatchHints, NodeSpec, OutputKind,
+    OutputPolicy, OutputSpec, PortRef, Recipe, RecipeError, RefineGoal, RefineObjective,
+    RefineSpec, Resolved, StageView,
 };
 
 /// `schema` value of every recipe document.
 pub const RECIPE_SCHEMA: &str = "hackriff.recipe";
-/// Recipe format version this crate reads and writes. 2 (T-085 review, before any release):
-/// variable-length framing params, field-map `char_bits: 4`/`pocsag-bcd`/`parity`/`skip_bits`/
-/// `scale`/`add`/`value_unit`. Version 1 was never released and is not read.
-pub const RECIPE_SCHEMA_VERSION: u32 = 2;
+/// Recipe format version this crate writes for a new document.
+///
+/// - **2** (T-085 review, before any release): variable-length framing params, field-map
+///   `char_bits: 4`/`pocsag-bcd`/`parity`/`skip_bits`/`scale`/`add`/`value_unit`. Version 1 was
+///   never released and is not read.
+/// - **3** (ADR-0011 §8.6, T-866): the `audio` output kind and `input.liveness`. The same bump
+///   reserves `refine.objective.builtin` (ADR-0011 §8.7) and `refine.objective.evidence`
+///   (ADR-0015 §2.3) for the tickets that serve them. Schema 3 only adds optional keys, so a
+///   version-2 document is still read unchanged; a schema-3 key in a version-2 document is an
+///   error, exactly as an unknown field was.
+pub const RECIPE_SCHEMA_VERSION: u32 = 3;
+
+/// Every recipe format version this crate reads.
+pub const RECIPE_SCHEMA_VERSIONS: [u32; 2] = [2, 3];
 
 /// A short identifier: `[a-z0-9_-]{1,64}` starting with a letter or digit (recipe, node, output
 /// and field-map ids; they appear in stream ids and API paths).
