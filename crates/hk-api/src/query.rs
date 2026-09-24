@@ -1600,6 +1600,27 @@ pub fn inventory_entry_json_at(
                 "detail": r.detail,
             })
         });
+        // T-860 (ADR-0015 §5.4, MAUTO M-9): the latest `emitter_synthesis` row, summarised — the
+        // full row is `POST /api/analyze {"emitter_id"}`. `null` means **not searched**, never
+        // "searched and found nothing" (ADR-0021 §7A.4: a finished search that found nothing has
+        // a row, with its `resolution`). Withheld rows read `null` whatever storage holds, like
+        // `estimated_params` and `cluster_id`: a template id or a decode count appearing is not
+        // allowed to confirm a withheld identity indirectly (T-159/T-163).
+        let synthesis = if withheld {
+            None
+        } else {
+            repo.synthesis(e.id)?
+                .map(|row| synthesis_summary_json(&row))
+        };
+        // T-860 (ADR-0015 §5.5 trust rules): whether the identity rests only on synthesized
+        // decodes. A synthesized identity — even a real one, such as `adsb-icao` from a
+        // template-bound pipeline — is strong evidence and never an unexplained fact, so the
+        // provenance is shown beside it. `null` without an identity, and on a withheld row.
+        let identity_synthesized = if withheld {
+            None
+        } else {
+            repo.identity_synthesized(e.id)?
+        };
         // T-191: the user-adjusted band, beside (never replacing) the measured f_lo_hz/f_hi_hz.
         let user_band = repo.user_band(e.id)?.map(|b| user_band_json(&b, withheld));
         let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
@@ -1727,6 +1748,8 @@ pub fn inventory_entry_json_at(
             // for another cause — and this is where they stop reading as one silence.
             "cluster_status": cluster_status,
             "identity_scheme": scheme,
+            // T-860: the identity rests only on synthesized decodes (null without one / withheld).
+            "identity_synthesized": identity_synthesized,
             "identity_class": class,
             "withheld": withheld,
             "snr_db": measurement.map(|m| m.snr_peak_db),
@@ -1738,6 +1761,8 @@ pub fn inventory_entry_json_at(
             // T-219 (C40): why this row defers to another, when it does. Never a deletion — the
             // row, its detections, tracks and history are all kept and the claim is reversible.
             "relation": relation,
+            // T-860 (ADR-0015 §5.4): the latest analysis, summarised; null = not searched.
+            "synthesis": synthesis,
         });
         // ADR-0017 §7.1: present only when the request named a window — see the function docs for
         // why absent and `null` must stay different answers.
@@ -1749,6 +1774,34 @@ pub fn inventory_entry_json_at(
         }
         Ok(row)
     }
+}
+
+/// The inventory row's `synthesis` summary of an `emitter_synthesis` row (ADR-0015 §5.4): what
+/// was analysed, how deep it got, and — for a region-analyze job (MAUTO M-9) — the job, its
+/// profile and template, the confirm outcome, the confirm key and the decodes it stored. Every
+/// sentence is backend-rendered; the full row is served by `POST /api/analyze {"emitter_id"}`.
+fn synthesis_summary_json(row: &hk_model::repo::synthesis::EmitterSynthesis) -> Value {
+    let job = row.job.as_ref();
+    json!({
+        "t_s": ts_s(row.t),
+        "engine": row.engine,
+        "verdict": row.verdict,
+        "stage_reached": row.stage_reached,
+        "summary": row
+            .pipeline
+            .as_ref()
+            .map(|p| p.summary.as_str())
+            .or(row.resolution.as_ref().map(|r| r.summary.as_str())),
+        "resolution": row.resolution.as_ref().map(|r| r.kind),
+        "job_id": job.map(|j| j.job_id.as_str()),
+        "profile": job.map(|j| j.profile.as_str()),
+        "template": job.and_then(|j| j.template.as_ref()),
+        "analytic_holdout_bits": job.and_then(|j| j.analytic_holdout_bits),
+        "decodes_stored": job.map(|j| j.decodes_stored),
+        "confirm": job
+            .and_then(|j| j.confirm.as_ref())
+            .and_then(|c| c.get("outcome")),
+    })
 }
 
 #[cfg(test)]
@@ -1977,5 +2030,113 @@ mod tests {
         assert_eq!(none.src_t_cell_s, 60.0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-860 (ADR-0015 §5.4): an inventory row carries its latest analysis, summarised — `null`
+    /// before any (not searched), the job's confirm outcome and confirm key after one — and a
+    /// withheld row reads `null` whatever storage holds.
+    #[test]
+    fn inventory_row_summarises_the_latest_synthesis_and_withholds_it() {
+        use hk_model::repo::synthesis::{
+            EmitterSynthesis, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Stage, SynthPipeline, SynthesisJob,
+            Verdict,
+        };
+        use hk_model::{Fingerprint, IdentityAccess, LinkTarget, Sighting, TrackId};
+
+        let t = |s: i64| Timestamp::from_unix_nanos(1_800_000_000_000_000_000 + s * 1_000_000_000);
+        let mut repo = Repository::open_in_memory().unwrap();
+        let id = repo
+            .record_sighting(
+                &Sighting {
+                    source: LinkTarget::Track(TrackId::new()),
+                    seen: TimeRange::new(t(0), t(5)),
+                    count: 3,
+                    f_center_hz: 915e6,
+                    bandwidth_hz: 12e3,
+                    fingerprint: Some(Fingerprint::new(915e6, 12e3)),
+                    identity: None,
+                    context: None,
+                    classification: None,
+                    tags: Vec::new(),
+                },
+                None,
+            )
+            .unwrap()
+            .emitter_id;
+        let row = |repo: &Repository| {
+            let entry = repo
+                .emitter_with_access(id, IdentityAccess::Standard)
+                .unwrap();
+            inventory_entry_json(repo, &entry).unwrap()
+        };
+        let v = row(&repo);
+        assert_eq!(v["synthesis"], Value::Null, "not searched: {v}");
+        assert_eq!(v["identity_synthesized"], Value::Null, "no identity: {v}");
+
+        repo.insert_synthesis(&EmitterSynthesis {
+            emitter_id: id,
+            provenance: SYNTHESIZED_BY_OUTPUT_ANALYSIS.into(),
+            engine: "hk-synth@1".into(),
+            t: t(4),
+            verdict: Verdict::Solved,
+            stage_reached: Stage::S5Check,
+            pipeline: Some(SynthPipeline {
+                demod: "fsk_demod".into(),
+                decode: Some("crc".into()),
+                params: Vec::new(),
+                summary: "2-FSK at 9.6 kBd, CRC-16 framed".into(),
+            }),
+            evidence: Vec::new(),
+            trace: Vec::new(),
+            resolution: None,
+            receiver: None,
+            job: Some(SynthesisJob {
+                job_id: "a7".into(),
+                profile: "standard".into(),
+                evidence_bits: 60.0,
+                prior_bits: 1.5,
+                analytic_holdout_bits: Some(30.0),
+                template: None,
+                recipe: json!({ "schema": "hackriff.recipe" }),
+                recipe_hash: "sha256:00".into(),
+                check: None,
+                holdout: None,
+                trace_summary: None,
+                replay_key: None,
+                null_control: None,
+                sealed_resolution: None,
+                decodes_stored: 12,
+                decodes_valid: 12,
+                confirm: Some(json!({ "outcome": "confirmed" })),
+            }),
+        })
+        .unwrap();
+        let v = row(&repo);
+        let s = &v["synthesis"];
+        assert_eq!(s["verdict"], json!("solved"), "{v}");
+        assert_eq!(s["stage_reached"], json!("s5-check"), "{v}");
+        assert_eq!(
+            s["summary"],
+            json!("2-FSK at 9.6 kBd, CRC-16 framed"),
+            "{v}"
+        );
+        assert_eq!(s["resolution"], Value::Null, "{v}");
+        assert_eq!(s["job_id"], json!("a7"), "{v}");
+        assert_eq!(s["profile"], json!("standard"), "{v}");
+        assert_eq!(s["analytic_holdout_bits"], json!(30.0), "{v}");
+        assert_eq!(s["decodes_stored"], json!(12), "{v}");
+        assert_eq!(s["confirm"], json!("confirmed"), "{v}");
+        assert_eq!(s["t_s"], json!(ts_s(t(4))), "{v}");
+
+        let mut entry = repo
+            .emitter_with_access(id, IdentityAccess::Standard)
+            .unwrap();
+        entry.identity = InventoryIdentity::Withheld {
+            scheme: hk_model::IdentityScheme::Other("pocsag-capcode".into()),
+            class: None,
+        };
+        let v = inventory_entry_json(&repo, &entry).unwrap();
+        assert_eq!(v["synthesis"], Value::Null, "withheld: {v}");
+        assert_eq!(v["identity_synthesized"], Value::Null, "withheld: {v}");
     }
 }

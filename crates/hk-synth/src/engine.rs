@@ -344,7 +344,8 @@ impl SolveRule {
     pub fn met(&self, stage: Stage, h: &HoldoutEvidence) -> bool {
         stage >= Stage::S5
             && h.check_width.is_some_and(|w| w >= self.min_check_width)
-            && h.check_bits.is_some_and(|b| b >= self.hard_check_floor_bits)
+            && h.check_bits
+                .is_some_and(|b| b >= self.hard_check_floor_bits)
             && h.l_check.is_some()
             && h.analytic_bits >= self.min_analytic_holdout_bits
     }
@@ -1139,10 +1140,9 @@ impl<'a, E: Evaluator> Engine<'a, E> {
     }
 
     fn reserve(&self) -> u64 {
-        self.spec
-            .budget
-            .max_evaluations
-            .map_or(0, |m| (VALIDATION_RESERVE + self.null_reserve(m)).min(m / 4))
+        self.spec.budget.max_evaluations.map_or(0, |m| {
+            (VALIDATION_RESERVE + self.null_reserve(m)).min(m / 4)
+        })
     }
 
     /// Evaluations the null control may spend: `K` seven-stage chains, within
@@ -2568,8 +2568,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         }
         let n = &self.nodes[id as usize];
         // A trigger, not a verdict: search-window evidence that could clear the analytic floor.
-        if n.stage >= Stage::S5 && self.evidence(id) >= self.spec.solve.min_analytic_holdout_bits
-        {
+        if n.stage >= Stage::S5 && self.evidence(id) >= self.spec.solve.min_analytic_holdout_bits {
             self.validate(id);
         }
     }
@@ -3068,7 +3067,11 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         let results = self.results();
         let holdout_frames = self
             .solved
-            .filter(|_| results.first().is_some_and(|r| r.verdict == Verdict::Solved))
+            .filter(|_| {
+                results
+                    .first()
+                    .is_some_and(|r| r.verdict == Verdict::Solved)
+            })
             .and_then(|id| self.nodes[id as usize].holdout.as_ref())
             .map(|h| h.frames.clone())
             .unwrap_or_default();

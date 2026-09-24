@@ -32,7 +32,7 @@
 //! [`MAX_TRACE_NODES`] is a safety bound rather than an elision policy. A producer that can exceed
 //! it is a producer that needs ADR-0021 §2.3 implemented.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{RepoError, Repository, blob};
@@ -657,7 +657,11 @@ impl EmitterSynthesis {
             if serde_json::to_string(&j.recipe).map_or(true, |t| t.len() > MAX_RECIPE_BYTES) {
                 return bad(format!("the recipe exceeds {MAX_RECIPE_BYTES} bytes"));
             }
-            let nums = [Some(j.evidence_bits), Some(j.prior_bits), j.analytic_holdout_bits];
+            let nums = [
+                Some(j.evidence_bits),
+                Some(j.prior_bits),
+                j.analytic_holdout_bits,
+            ];
             if nums.into_iter().flatten().any(|v| !v.is_finite()) {
                 return bad("non-finite job number".into());
             }
@@ -747,8 +751,7 @@ impl Repository {
         for (flags, retune) in rows {
             let f = DetectionFlags::from_bits(u32::try_from(flags | retune).unwrap_or(0));
             t.detections += 1;
-            if f.clipped || f.spur_candidate || f.image_candidate || f.suspect_imd || f.compressed
-            {
+            if f.clipped || f.spur_candidate || f.image_candidate || f.suspect_imd || f.compressed {
                 t.suspect += 1;
             }
         }
@@ -794,6 +797,15 @@ impl Repository {
         &self,
         emitter: EmitterId,
     ) -> Result<Vec<EmitterSynthesis>, RepoError> {
+        self.synthesis_rows(emitter, SYNTHESIS_HISTORY_MAX)
+    }
+
+    /// At most `limit` analyses of `emitter`, newest first.
+    fn synthesis_rows(
+        &self,
+        emitter: EmitterId,
+        limit: usize,
+    ) -> Result<Vec<EmitterSynthesis>, RepoError> {
         self.ensure_synthesis_table()?;
         let id = self.live_emitter_id(emitter)?;
         let mut stmt = self.conn.prepare_cached(
@@ -806,9 +818,7 @@ impl Repository {
              ORDER BY t DESC, synthesis_id DESC LIMIT ?2",
         )?;
         let texts = stmt
-            .query_map(params![blob(id), SYNTHESIS_HISTORY_MAX as i64], |r| {
-                r.get::<_, String>(0)
-            })?
+            .query_map(params![blob(id), limit as i64], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         texts
             .iter()
@@ -821,7 +831,36 @@ impl Repository {
     /// `None` means **not searched** ([`Resolution::not_searched`]), never "searched and found
     /// nothing" — the caller must not collapse the two (ADR-0021 §7A.4).
     pub fn synthesis(&self, emitter: EmitterId) -> Result<Option<EmitterSynthesis>, RepoError> {
-        Ok(self.synthesis_history(emitter)?.into_iter().next())
+        // One row, not the history: `/api/inventory` reads this for every row it serves.
+        Ok(self.synthesis_rows(emitter, 1)?.into_iter().next())
+    }
+
+    /// Whether `emitter`'s decoded identity rests **only** on synthesized decodes (decoder id
+    /// `synth:…`, ADR-0015 §5.5 trust rules): `None` without an identity; `Some(true)` when at
+    /// least one synthesized decode carries it and no ordinary decoder's does. `/api/inventory`
+    /// shows it beside the identity, so a synthesized identity — even a real one such as
+    /// `adsb-icao` from a template-bound pipeline — is strong evidence, never an unexplained fact.
+    /// Metadata only: the value never leaves this call.
+    pub fn identity_synthesized(&self, emitter: EmitterId) -> Result<Option<bool>, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        let tx = self.read_tx()?;
+        let row: Option<(Option<String>, Option<String>)> = tx
+            .prepare_cached(
+                "SELECT identity_scheme, identity_value FROM emitter WHERE emitter_id = ?1",
+            )?
+            .query_row([blob(id)], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((Some(scheme), Some(value))) = row else {
+            return Ok(None);
+        };
+        let (synth, other): (i64, i64) = tx
+            .prepare_cached(
+                "SELECT coalesce(sum(decoder_id LIKE 'synth:%'), 0), \
+                        coalesce(sum(decoder_id NOT LIKE 'synth:%'), 0) \
+                 FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2",
+            )?
+            .query_row(params![scheme, value], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(Some(synth > 0 && other == 0))
     }
 }
 

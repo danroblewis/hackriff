@@ -23,13 +23,13 @@ use hk_synth::engine::{
     ProposalReply, ProposeRequest, RecipeHead, Root, SearchOutcome, SearchSpec, Suggestion,
     UnsupportedStructure, search,
 };
+use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutFrame};
 use hk_synth::search::{JobState, Profile, StopReason};
 use hk_synth::trace::{Outcome, OutcomeKind, Reason};
 use hk_synth::{
     Control, Evidence, EvidenceSet, GroupId, MetricId, PowerPolicy, ProposalOp, Skeleton, Stage,
     Verdict,
 };
-use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutFrame};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------------------------
@@ -129,8 +129,8 @@ impl Evaluator for World {
         let t = &self.truth;
         // A phase-randomised or time-reversed null keeps the PSD (S0) and destroys everything
         // after it — unless this world plants structure in the nulls too.
-        let upstream =
-            req.parent.is_none_or(|p| p.on_truth) && !(null && req.stage > Stage::S0 && !self.null_fits);
+        let upstream = req.parent.is_none_or(|p| p.on_truth)
+            && !(null && req.stage > Stage::S0 && !self.null_fits);
         let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
         let last = nodes.last().expect("every alternative here has nodes");
         let p = |name: &str| last.params.get(name).cloned().unwrap_or(Value::Null);
@@ -989,7 +989,10 @@ fn m9_an_open_search_solves_on_analytic_hold_out_bits_after_the_null_control_pas
     check_outcome(&o, &world);
     let top = &o.results[0];
     assert_eq!(top.verdict, Verdict::Solved);
-    let h = top.holdout.as_ref().expect("a solved result carries its hold-out evidence");
+    let h = top
+        .holdout
+        .as_ref()
+        .expect("a solved result carries its hold-out evidence");
     // The confirm key is the analytic part only: S4's sync excess and S5's check, each net of its
     // own stage's L — never the calibrated S0–S3 bits.
     let analytic_on_ladder: f32 = h
@@ -1009,25 +1012,42 @@ fn m9_an_open_search_solves_on_analytic_hold_out_bits_after_the_null_control_pas
     assert_eq!(h.check_width, Some(16));
     assert_eq!(h.differences, 12);
     assert!(h.check_bits.unwrap() >= 16.0);
-    let l_check = h.l_check.expect("an open search's L_check is the S5 stage's own");
+    let l_check = h
+        .l_check
+        .expect("an open search's L_check is the S5 stage's own");
     assert!(l_check > 0.0, "three polynomials were tried at S5");
     assert!((h.check_bits.unwrap() - (16.0 * 12.0 - l_check)).abs() < 1e-3);
     assert_eq!(h.check_origin, CheckOrigin::Searched);
     // ADR-0021 §8.2: K = 2 at standard, the unchanged prefix over each null, recorded.
-    let nc = h.null_control.expect("a searched check runs the null control");
+    let nc = h
+        .null_control
+        .expect("a searched check runs the null control");
     assert!(nc.ran && !nc.capped && nc.passed());
     assert_eq!(nc.k, 2);
     assert!(nc.margin_bits >= 8.0);
     assert_eq!(
         world.null_calls.load(Ordering::SeqCst),
-        2 * top.stages.iter().map(|e| e.stage).collect::<std::collections::BTreeSet<_>>().len() as u64,
+        2 * top
+            .stages
+            .iter()
+            .map(|e| e.stage)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len() as u64,
         "K nulls × the chain's stages, no more"
     );
     // The decodes the attach step stores are the solved rank-1's hold-out frames.
     assert_eq!(o.holdout_frames.len(), 12);
-    assert!(o.holdout_frames.iter().all(|f| f.check_valid && !f.corrected));
+    assert!(
+        o.holdout_frames
+            .iter()
+            .all(|f| f.check_valid && !f.corrected)
+    );
     assert!(o.null_control().is_some_and(|n| n.passed()));
-    assert_eq!(o.seal(None, None, "t"), None, "a solved search seals no negative result");
+    assert_eq!(
+        o.seal(None, None, "t"),
+        None,
+        "a solved search seals no negative result"
+    );
 }
 
 /// A search that finds its structure in the null windows too cannot tell the fit from chance:
@@ -1057,8 +1077,13 @@ fn m9_the_null_control_caps_a_fit_that_the_nulls_reproduce() {
     let nc = capped.holdout.as_ref().unwrap().null_control.unwrap();
     assert!(nc.ran && nc.capped && !nc.passed());
     assert!(nc.margin_bits < 8.0);
-    assert!(o.holdout_frames.is_empty(), "nothing solved, nothing to store");
-    let res = o.seal(None, None, "t").expect("an unsolved search seals a resolution");
+    assert!(
+        o.holdout_frames.is_empty(),
+        "nothing solved, nothing to store"
+    );
+    let res = o
+        .seal(None, None, "t")
+        .expect("an unsolved search seals a resolution");
     assert_eq!(res.kind, hk_synth::ResolutionKind::Unknown);
     assert_eq!(res.null_control, Some(nc));
     assert!(res.summary.contains("null windows"), "{}", res.summary);
@@ -1075,12 +1100,20 @@ fn m9_a_template_fixed_check_and_a_quick_job_run_no_null_control() {
         &["0x8005"],
     );
     fixed.check_origin = CheckOrigin::TemplateFixed;
-    let o = run(&spec(vec![fixed], Profile::Standard), &world, &Control::new());
+    let o = run(
+        &spec(vec![fixed], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
     check_outcome(&o, &world);
     let top = &o.results[0];
     assert_eq!(top.verdict, Verdict::Solved);
     let h = top.holdout.as_ref().unwrap();
-    assert_eq!(h.l_check, Some(0.0), "one polynomial: zero look-elsewhere at S5");
+    assert_eq!(
+        h.l_check,
+        Some(0.0),
+        "one polynomial: zero look-elsewhere at S5"
+    );
     assert_eq!(h.null_control, None);
     assert_eq!(world.null_calls.load(Ordering::SeqCst), 0);
 
@@ -1091,9 +1124,11 @@ fn m9_a_template_fixed_check_and_a_quick_job_run_no_null_control() {
         &Control::new(),
     );
     assert_eq!(world.null_calls.load(Ordering::SeqCst), 0, "quick: K = 0");
-    assert!(o.results.iter().all(|r| {
-        r.holdout.as_ref().is_none_or(|h| h.null_control.is_none())
-    }));
+    assert!(
+        o.results
+            .iter()
+            .all(|r| { r.holdout.as_ref().is_none_or(|h| h.null_control.is_none()) })
+    );
 }
 
 /// ADR-0022 §4: the three constants that replaced 64 bits / 3 frames / width 16. A check under the
@@ -1147,10 +1182,17 @@ fn m9_width_floor_hard_check_floor_and_the_laundering_rule() {
         look_elsewhere_bits: Some(20.0),
     };
     let world = World::new(FSK);
-    let o = run(&spec(vec![laundered], Profile::Standard), &world, &Control::new());
+    let o = run(
+        &spec(vec![laundered], Profile::Standard),
+        &world,
+        &Control::new(),
+    );
     let h = o.results[0].holdout.as_ref().unwrap();
     assert_eq!(h.l_check, Some(20.0));
     assert!((h.check_bits.unwrap() - (16.0 * 12.0 - 20.0)).abs() < 1e-3);
-    assert!(h.null_control.is_some(), "a discovered check counts as searched");
+    assert!(
+        h.null_control.is_some(),
+        "a discovered check counts as searched"
+    );
     assert_eq!(o.results[0].verdict, Verdict::Solved);
 }
