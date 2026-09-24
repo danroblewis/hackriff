@@ -339,6 +339,16 @@ def build(repo: str, ops: str, now: float | None = None) -> dict:
            "churn": churn(repo, sha, now), "tests": {"run": tests.get("run"), "at": tests.get("at"), "by_area": cost},
            "largest": largest, "longest_fns": longest_fns(files), "hygiene": hygiene(files, repo, sha, ops),
            "caveats": CAVEATS}
+    try:
+        from hkpy import codearch
+        out["arch"] = codearch.analyse(files, repo, sha, now)
+    except Exception as e:                      # a part that fails is named, the rest still ships
+        out["arch"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        from hkpy import codecomplex
+        out["complexity"] = codecomplex.analyse(files, repo, sha, ops, now)
+    except Exception as e:
+        out["complexity"] = {"error": f"{type(e).__name__}: {e}"}
     out["build_s"] = round(time.time() - t0, 1)
     out["trend"] = sample(ops, out, now)
     return out
@@ -363,6 +373,21 @@ def sample(ops: str, m: dict, now: float) -> list[dict]:
                "test": m["lines"]["total"].get("test", 0),
                "by_lang": {r["name"]: [r["product"], r["test"]] for r in m["lines"]["by_lang"]},
                "churn_24h": m["churn"]["totals"]["24h"]}
+        a = m.get("arch") or {}
+        if a.get("per_crate"):
+            coup = {r["name"]: r for r in a.get("coupling", [])}
+            rec["crates"] = {p["name"]: {"lines": p["product_lines"], "pub": p["pub_items"], "undoc": p["undocumented"],
+                                         "unwrap": p["idioms"].get("unwrap()/expect()", 0), "unsafe": p["idioms"].get("unsafe", 0),
+                                         "zstd": p["zstd_ratio"], "I": coup.get(p["name"], {}).get("instability"),
+                                         "D": coup.get(p["name"], {}).get("distance")} for p in a["per_crate"]}
+            rules = a.get("rules") or {}
+            cx = m.get("complexity") or {}
+            for a in cx.get("areas") or []:
+                if a["name"] in rec["crates"]:
+                    rec["crates"][a["name"]].update(cog90=a["cognitive_p90"], cogmax=a["cognitive_max"], mi=a["mi"],
+                                                    fns=a["functions"])
+            rec["rules"] = {"layer": len(rules.get("layer_violations") or []), "gpl": (rules.get("gpl") or {}).get("violations"),
+                            "ui_dsp_suspects": len(rules.get("ui_dsp_suspects") or [])}
         rows.append(rec)
         try:
             with open(path, "a", encoding="utf-8") as fh:
