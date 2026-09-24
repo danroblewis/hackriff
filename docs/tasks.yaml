@@ -25245,7 +25245,8 @@ tasks:
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
-    status: todo
+    status: in-progress
+    branch: task-t859
     priority: normal
     deps:
     - T-854
@@ -25431,7 +25432,8 @@ tasks:
   - id: T-866
     milestone: MAUTO
     title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
-    status: todo
+    status: in-progress
+    branch: task-t866
     priority: normal
     deps:
     - T-865
