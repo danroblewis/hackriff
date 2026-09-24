@@ -78,7 +78,8 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { reviewAt, setNavigation, toast } from "../state";
+import { requestGoto, reviewAt, setNavigation, toast } from "../state";
+import { mountMapControls, paneActions, type MapControlHost } from "../chrome/map-controls";
 
 const S_TO_NS = 1e9;
 /** The map strip along the bottom of the canvas, device px. */
@@ -200,6 +201,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
+  /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
+  let renderFollow: () => void = () => {};
+  let viewMoved: () => void = () => {};
+  let renderLive: () => void = () => {};
   let windows: ActiveWindow[] = [];
   let detach: (() => void) | null = null;
   /** The region stroke in progress (T-458), in surface coordinates, or `null`. Read inside the
@@ -540,8 +545,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
 
   const pressRetune = (paneId: string): void => {
-    const p = preview, o = lastPainted.get(paneId);
-    if (!p || !o) return;
+    const o = lastPainted.get(paneId);
+    if (o) pressOffer(o);
+  };
+  /** Press a painted offer: the pane row's (above) or the floating Go-to's (T-802), which shows
+   * the offer it derived after the move and passes that same object here — so both reach the one
+   * gate with the destination the user actually read, and both refuse if the view moved since. */
+  const pressOffer = (o: PaneRetuneOffer): void => {
+    const p = preview;
+    if (!p) return;
     void acceptPaneRetune(ctx, {
       offerNow,
       // T-437 §5.2: the growing edge's tiles were computed from the tuning that has just ended, so
@@ -754,7 +766,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
 
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
-      onView: () => { mirror(); },
+      onView: () => { mirror(); viewMoved(); },
       onHover: (p) => {
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
@@ -818,9 +830,44 @@ function mount(el: HTMLElement, ctx: AppContext) {
       },
     });
 
+    // ---- the floating control cluster (T-802 / MAP-02), docked over the canvas's edges ----
+    // Go-to, the layers button, zoom and the follow-live FAB. All view arithmetic on the active
+    // pane through `paneActions` (the code `ui/test/app-map-controls.test.ts` drives against a
+    // fetch spy); the only press that can reach the radio is the Go-to's retune OFFER, which goes
+    // through `pressOffer` above — the same gate as the pane row's Retune.
+    const pv = preview;
+    const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on));
+    const host: MapControlHost = {
+      ...acts,
+      goTo: (hz) => store.set(requestGoto(hz)),
+      centreHz: () => store.get().device.centerHz,
+      gotoOffer: () => {
+        const o = offerNow(pv.activePane);
+        // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
+        // reaches it and the pane row's persistent control is where a finer capture is offered.
+        if (!o || o.covered) return null;
+        return { why: offerLabel(o), enabled: offerAcceptable(o), press: () => pressOffer(o) };
+      },
+      layers: () => [
+        { id: "signals", label: "Found signals (Candidate / Confirmed boxes)",
+          on: () => signalsBtn.getAttribute("aria-pressed") === "true", toggle: () => signalsBtn.click() },
+        { id: "trace", label: "Spectrum trace",
+          on: () => traceBtn.getAttribute("aria-pressed") === "true", toggle: () => traceBtn.click() },
+      ],
+      viewChanged: () => { lastMirror = ""; mirror(); renderLive(); },
+      toast: (text) => store.set(toast(text)),
+    };
+    const controls = mountMapControls(host);
+    stage.append(controls.el);
+    renderFollow = controls.syncFollow;
+    viewMoved = controls.viewMoved;
+
     const fit = () => {
       const r = stage.getBoundingClientRect();
-      preview?.resize(r.width, r.height, window.devicePixelRatio || 1);
+      const dpr = window.devicePixelRatio || 1;
+      preview?.resize(r.width, r.height, dpr);
+      // The map strip is drawn in device px; the FAB docks above it in CSS px.
+      stage.style.setProperty("--map-strip", `${MINIMAP_PX / dpr}px`);
     };
     fit();
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
@@ -858,13 +905,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
       mirror();
       renderLive();
     });
-    const renderLive = () => {
+    renderLive = () => {
       const on = !!preview && preview.view.panes.isFollowing(preview.activePane);
       liveBtn.textContent = on ? "Live" : "Paused";
       liveBtn.classList.toggle("on", on);
       liveBtn.title = on
         ? "This viewport follows the growing edge. Pausing freezes the view only — capture, the ring and detection never stop."
         : "This viewport is frozen on a past window. Capture never stopped.";
+      renderFollow();
     };
     renderLive();
     store.select((s) => s.time.live, renderLive);
