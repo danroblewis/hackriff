@@ -25860,6 +25860,24 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+  - id: T-880
+    milestone: MCANVAS
+    title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the app-trace re-merge worker (task-deflake-app-trace-e2e-mjs, 9c6f32ec; handback ~/.hackriff-ops/work/deflake-app-trace-e2e-mjs/handback-merge-main.json). ui/e2e/app-trace.e2e.mjs's T-475 colour check (the spectrum trace at a scrubbed pane's time position must be the FFT of that pane's top cell) went red 2 of 12 clean runs, both on panes showing ~2 s of history (every pane >= 3.1 s passed): 77.2% (766/992) and 71.7% (665/928) of columns matched against the 80% bar. Offline re-analysis of both saved screenshots: canvas position correct, the 6 rows read are exactly the pane's top cell; the trace matches that cell in only 72-80% of columns but matches max(that cell, the next-older cell) in 88.6-91.8%, with misses spread across all columns (not one tile). So the drawn slice appears to be a max over TWO cells, which sliceWindow's own comment says must never happen; on longer panes cells are ~3 px so 6 rows already span two cells and the defect is masked.
+      UNCONFIRMED HYPOTHESIS: ui/src/surface/trace.ts maxHoldColumns derives the rows to read with floor/ceil on f64 epoch nanoseconds (~1.8e18 > 2^53, ~256 ns precision), so a boundary value just off a cell edge pulls in the neighbouring cell.
+      DELIVER: root-cause (it reproduces on main - the colour check is main's T-475 check), fix so the trace at a pane's time position is exactly one cell's FFT (e.g. integer/BigInt or cell-relative arithmetic, not raw epoch-ns doubles), and a ui/test unit test at a cell boundary with realistic epoch-ns values that goes red on the old code. Presentation-only arithmetic (thin client); no change to the e2e threshold or control.
+      WHAT THE USER WILL SEE ON STAGING: scrubbing a pane into the past, the spectrum trace strip above it matches the top waterfall row of that pane exactly, including on very short (~2 s) pane windows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
