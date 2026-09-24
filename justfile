@@ -173,6 +173,12 @@ hold *args:
 touchpoints *args:
     uv run --locked --project py python -m hkpy.flow --touchpoints "$@"
 
+# The pipeline manager's scope check (user, 2026-09-23): `check <branch>` says whether the merge
+# runner would hold it (no `Serves:` reason, or a file outside the pipeline paths); `release
+# <branch>` is a person's word to let a held one through; `status` reports lines landed today.
+pm-budget *args:
+    uv run --locked --project py python -m hkpy.pmbudget {{args}}
+
 # Is the merge suite within its duration budget? Exits 1 if not (T-762). Deliberately NOT part
 # of any suite: it reads this machine's recorded history, so no diff can clear it and a merge
 # must never hang on it.

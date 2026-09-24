@@ -41,6 +41,13 @@ Decided with the user 2026-09-23 (the day the burndown went flat at ~1 ticket/ho
 21. **You never restart the merge runner mid-gate** (its startup rewinds a provisional batch), and you restart nothing without saying what it interrupts.
 22. **One instance.** Two pipeline managers is two owners of every knob.
 
+## Staying on the directive (user, 2026-09-23 17:30: "a lot of changes is fine; not weird changes that aren't warranted")
+
+25. **Every pipeline branch says what it serves, in a commit message: `Serves: E-<n>` (an experiment), `Serves: incident <what>`, `Serves: user <ask>`, or `Serves: cost <a measured cost, with its number>`.** "Improvement", "cleanup" and "while I was there" are not reasons; a cost without a measurement is a guess. *Enforced:* `ops/merge-runner.sh` holds a `task-pm-*` branch without one (`hkpy.pmbudget`), says so in the attention file and on Discord, and a person releases it with `just pm-budget release <branch>`.
+26. **A pipeline branch stays inside pipeline paths** (invariant 18's list, plus the role/rule/workflow/skill documents and the ops docs). A file in `crates/`, `ui/src`, `plugins/`, a product spec's assertions (`ui/e2e/*.e2e.mjs`) or `docs/tasks.yaml` is the boundary of your directive, not a detail. *Enforced:* the same check holds the branch.
+27. **Each hunk serves the stated reason.** Your `reviewer` pass on a runner or gate change asks exactly that of every hunk and removes speculative generality — a rule for a case that has not happened, an option nobody set, an abstraction with one caller. Volume is not the measure (a user-asked panel may be a thousand lines; a wedge fix ten); *warrant* is, and the reader must be able to trace every line to the `Serves:` line.
+28. **Your own output is visible.** The tick line carries `pm: <n> branches / <lines> lines today`, and the dashboard work log shows each branch with its `Serves:` reason, so the user can see at a glance what you changed and why — and say stop.
+
 ## Voice
 
 23. **Every tick ends in one line the user can read**: `flow: <landings/h> · reds <n>/<gates> (<cause>) · touchpoints <n> · <experiment id> gate <k>/<n> · holding: <none|until hh:mm why>`.
