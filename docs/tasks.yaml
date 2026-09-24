@@ -24612,7 +24612,7 @@ tasks:
     milestone: M3
     title: C38 durable shadow sink in hk-store plus the three /api/ml routes, landed with a producer
       so the path is not vacuous
-    status: in-progress
+    status: todo
     branch: task-t844
     priority: normal
     deps:
@@ -24652,6 +24652,11 @@ tasks:
       to mislead the next reader. If the section 4.6 evidence still does not support wiring any
       producer when this is picked up, do not force it: say so and leave the ticket open rather than
       landing a vacuous half.
+    result: |
+      I kept the WIP and corrected it. What is built: the durable sink (hk_store::ml::ShadowStore, CRC-line NDJSON with one segment per capture-time hour, 256 MiB / 30 days, per-(model, consumer, family, SNR-bin) agreement aggregates kept per segment, non-shadow records refused); StoreShadowSink as the production ShadowSink; hk_pipeline::ml::MlStage (registry, one ModelHost per provider, modes persisted in <data>/ml/modes.json and restored, active only with section 4.6 evidence plus a conformant provider or an audited force); the producer at the fsk chain's single C15 call site, run after the published row is written and outside the repository lock; the three /api/ml routes (hk-api/src/ml.rs plus an hk-cli adapter), docs/api.md and an api_contract test; the hk-ml dormancy prose rewritten and no_production_caller.rs removed; m3_ml.rs now reads the run's real mode table and counts records from hk-store on disk. WIP fixes: records were keyed on the wall clock and are now keyed on the subject's capture time; served JSON obeys the API time law (t_s/t_ns, verified by the time-law sweep); the racy observe return count is fixed; dead code, clippy and fmt are fixed. The branch is NOT ready to land, and it is blocked by the ticket's own rule against a vacuous producer. hk_ml::gate::admit correctly refuses a subject whose classical family is 'unknown', and every scene I ran through the mock SDR is classified 'unknown' at the call site. That covers fsk_burst_train at 15/20/25/30 dB, 23-430 ms bursts, 2400/4800/9600 Bd, and trunk_control_channel; pocsag, lora, multipath, acars and retune produced no classification rows at all. Open-set is about 1.0 throughout, and at 20 dB the row is flagged BelowGate with spectrum_too_few_segments and low_snr at a measured 18.7 dB. So no real run ever writes a shadow record. The wiring half of the non-vacuity pair, crates/hk-pipeline/tests/ml_shadow.rs, is written and fails on its precondition assertion ('the scene must produce fsk classifications'). The sink half is proven: swapping in MemoryShadowSink turns a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage red (left 0, right 1). The routes are proven the same way: unrouting /api/ml turns the contract test red (404 vs 200). Everything else passes. Do not queue this branch until ml_shadow.rs passes.
+    depends_on: [T-852]
+    notes: |
+      2026-09-23 (coordinator): code complete on task-t844 (ad29641b: sink, producer, three /api/ml routes, tests green except ml_shadow) but NOT queued - the ticket forbids landing a producer that never fires, and through the mock SDR the classifier calls every row unknown, so the C38 gate never admits one. Now todo behind T-852; when it lands, re-run crates/hk-pipeline/tests/ml_shadow.rs unchanged and queue.
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
@@ -24876,6 +24881,38 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+  - id: T-852
+    milestone: M3
+    title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-23 by the T-844 worker (task-t844, ad29641b; handback ~/.hackriff-ops/work/T-844/handback.json),
+      through the MOCK SDR (the device interface, not direct file feeding):
+      - `fsk_burst_train` at 15/20/25/30 dB (bursts 23-430 ms, 2400/4800/9600 Bd) and `trunk_control_channel`: the
+        classical classifier (the fsk chain is its only call site) calls EVERY row `unknown`, open-set score ~1.0.
+      - At 20 dB the row is BelowGate with `spectrum_too_few_segments` although the measured SNR is 18.7 dB against a
+        gate of 0.0; at 30 dB fsk is the runner-up with open-set 0.99999.
+      - pocsag, lora, multipath, acars and retune scenes produce NO classification rows at all.
+      So through the device the M3 classifier never names a family for synthetic scenes it was built for - the device-path
+      analogue of the T-238/T-240 over-the-air gaps. It blocks T-844 (the C38 ML shadow producer is correctly refused for
+      `unknown` rows, so it never fires) and M3's own claim.
+      DELIVER: root-cause why the classification path, fed through the mock SDR, abstains/unknowns on these scenes
+      (segment count for the spectrum dimension vs burst length and FFT/segmentation settings; which dimensions abstain;
+      why pocsag/lora/... never reach a classifier call) and fix the cause - never by lowering the open-set threshold or
+      the gate to make a number pass (detection thresholds are core_interface). Blind: hidden truth only in assertions.
+      ASSERT through the mock SDR: fsk_burst_train at >=20 dB classifies as fsk in top-1 with open-set below the unknown
+      threshold on a stated majority of rows; state the per-scene numbers before/after. Then T-844's
+      crates/hk-pipeline/tests/ml_shadow.rs should pass unchanged.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-844 worker 2026-09-23 (observed through the mock SDR).
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
