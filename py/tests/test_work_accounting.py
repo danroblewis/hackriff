@@ -324,18 +324,33 @@ def test_no_branch_means_no_work_and_an_error_means_work(monkeypatch):
     assert R.has_work("T-801") is True                                  # cannot tell: never revert
 
 
-def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflicts):
+def test_only_a_branch_really_in_head_is_being_merged_and_it_waits(conflicts):
+    """The marker's branches= lists every branch the batch ATTEMPTED - a skipped (conflicted) one
+    too. Only a tip already in HEAD is being merged; that one waits (no fix run, line unseen), the
+    skipped one gets its conflict run (T-848/T-849, 19:16 on 2026-09-23)."""
+    import subprocess as sp
     tmp, launched = conflicts
-    (tmp / "bulk-in-progress").write_text("base=abc\nbranches=task-t627 task-x\n")
-    assert R.merging_branches() == {"task-t627", "task-x"}
-    claims = {"T-627": _claim("T-627", "task-t627")}
+    git = lambda *a: sp.run(["git", "-C", str(tmp), *a], check=True, capture_output=True)   # noqa: E731
+    git("init", "-q", "-b", "main")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+    git("branch", "task-t849")                                            # skipped: not merged
+    git("checkout", "-q", "-b", "task-t848")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work")
+    git("checkout", "-q", "main")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "main moved")
+    git("checkout", "-q", "task-t849")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "its work")
+    git("checkout", "-q", "main")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "batch merges t848", "task-t848")
+    (tmp / "bulk-in-progress").write_text("base=abc\nbranches=task-t848 task-t849\n")
+    assert R.merging_branches() == {"task-t848"}
+    (tmp / "merge-needs-attention.txt").write_text(
+        "09-23 19:16  task-t848  T-848  CONFLICT(skipped from bulk)\n09-23 19:16  task-t849  T-849  CONFLICT(skipped from bulk)\n")
+    claims = {"T-848": _claim("T-848", "task-t848"), "T-849": _claim("T-849", "task-t849")}
     R.handle_gate_failures(claims, dry=False)
-    assert launched == [] and claims["T-627"]["gate_fails_seen"]
-    assert not (tmp / "merge-queue.txt").exists()
+    assert "gate_fails_seen" not in claims["T-848"]                      # waits for its merge to end
+    assert [t for t, _ in launched] == ["T-849"]                          # the skipped one is resumed
 
-
-
-# --------------------------------------------------------------------- the merge runner lends its safe moment
 def test_sync_board_flag_runs_one_board_sync_and_exits(tmp_path, monkeypatch):
     (tmp_path / "claims.json").write_text('{"T-801": {"state": "no-work"}}')
     monkeypatch.setattr(R, "CLAIMS", str(tmp_path / "claims.json"))

@@ -964,15 +964,21 @@ def conflict_skip(c, branch, line, statuses):
 
 
 def merging_branches():
-    """Branches the merge runner holds right now: a batch's (bulk marker `branches=`) or the single
-    merge staged in main (MERGE_HEAD's tip). Such a branch is not in merge-queue.txt, so without
-    this the conflict rule re-queued task-t613 at 17:06 while its own gate was running."""
+    """Branches the merge runner is merging right now: a batch member whose tip is IN main's HEAD
+    (the batch commits each merge before gating), or the single merge staged in main (MERGE_HEAD's
+    tip). Such a branch is not in merge-queue.txt, so without this the conflict rule re-queued
+    task-t613 at 17:06 while its own gate was running. NOT every name in the marker's `branches=`:
+    that lists every branch the batch ATTEMPTED, including the ones it skipped for a conflict - read
+    as "being merged", T-848 and T-849 (skipped 19:16) were never given their fix run."""
     out = set()
     try:
         for ln in open(BULKMARK):
             if ln.startswith("branches="):
-                out.update(ln.split("=", 1)[1].split())
-    except OSError:
+                for b in ln.split("=", 1)[1].split():
+                    if subprocess.run(["git", "merge-base", "--is-ancestor", b, "HEAD"], cwd=REPO,
+                                      capture_output=True, timeout=30).returncode == 0:
+                        out.add(b)
+    except (OSError, subprocess.SubprocessError):
         pass
     try:
         head = open(f"{REPO}/.git/MERGE_HEAD").read().split()[0]
@@ -1052,6 +1058,8 @@ def handle_gate_failures(claims, dry):
             if not statuses:
                 continue                      # board unreadable: cannot tell a landed ticket, so wait
             why = conflict_skip(c, branch, line, statuses)
+            if why == "being merged now":
+                continue                      # decided when that merge ends: lands, or conflicts again
             if why:
                 c.setdefault("gate_fails_seen", []).append(line)
                 changed = True
