@@ -45,13 +45,16 @@ pub use hk_pipeline::class::{FM_BROADCAST_HZ, RowPlan, SPECTRUM_DATATYPE, row_pl
 /// Where `hk serve` gets samples.
 #[derive(Clone, Debug)]
 pub enum ServeSource {
-    /// A device: the live HackRF One (`hackrf` or `hackrf:<serial>`) or the mock SDR
-    /// (`mock:<file.sigmf-meta>`, `hk serve --device`), driven through the same live path.
+    /// A device: the live HackRF One (`hackrf` or `hackrf:<serial>`), an RTL-SDR
+    /// (`rtlsdr` or `rtlsdr:<serial>`, T-514) or the mock SDR (`mock:<file.sigmf-meta>`,
+    /// `hk serve --device`), all driven through the same live path.
     HackRf {
         /// Source spec.
         spec: String,
         /// Tuning and gains.
         live: LiveArgs,
+        /// Further devices (T-512), from `resolve_devices`; empty = one device.
+        extra: Vec<(String, LiveArgs)>,
     },
     /// A SigMF recording.
     Replay {
@@ -131,11 +134,12 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
     let token = token(opts.token.as_deref())?;
     opts.listen.validate()?;
     match &opts.source {
-        ServeSource::HackRf { spec, live } => {
+        ServeSource::HackRf { spec, live, extra } => {
             let lp = start_live(
                 &LiveOptions {
                     source: spec.clone(),
                     live: live.clone(),
+                    extra: extra.clone(),
                     data_dir: data_dir.clone(),
                     plan: None,
                     // `hk serve` is interactive tuning: it never drives the scheduler, so a
@@ -171,7 +175,7 @@ pub fn start(opts: &ServeOptions) -> anyhow::Result<Serving> {
                 &lp.handle,
                 token,
                 "hk serve",
-                lp.live_control.clone(),
+                hk_api::LiveControls::new(lp.live_controls.clone())?,
             )?;
             Ok(Serving {
                 server,
@@ -507,6 +511,7 @@ mod tests {
             source: ServeSource::HackRf {
                 spec: "hackrf".into(),
                 live: LiveArgs::default(),
+                extra: Vec::new(),
             },
             data_dir: Some(dir),
             bind: "127.0.0.1:0".parse().unwrap(),

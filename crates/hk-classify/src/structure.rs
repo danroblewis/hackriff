@@ -1,12 +1,23 @@
-//! T-233: the fingerprint's modulation-structure discriminator ([`hk_model::ModulationStructure`]).
+//! T-233: an emission's modulation-structure statistic, `envelope_shape` ([`ModulationStructure`]).
 //!
-//! # What this is for
+//! # Status (T-594): a measurement with no consumer
 //!
-//! Entity resolution ([`hk_model::cluster`]) decides whether two observations are one emitter. By
-//! the time it has compared centre, bandwidth, family label, symbol rate, deviation and the timing
-//! statistics, everything cheap is exhausted: two emissions that agree on all of those are one
-//! inventory row, whether or not they are one transmitter. What is left to measure is the
-//! modulation's **own structure**.
+//! T-233 built this as a discriminator for entity resolution and put it on
+//! `hk_model::Fingerprint` as split-only evidence. **T-594 removed it from the fingerprint**: no
+//! pipeline stage ever called [`modulation_structure`], so over real replays the field was on 0
+//! stored fingerprints and took part in 0 comparisons (`hk-pipeline`'s
+//! `fingerprint_field_census`). It was removed rather than wired because every producer that
+//! holds IQ also writes an exact `family`, and every family those producers write is
+//! constant-envelope (analogue FM, the FSK chain, the trunking control channel) — for which this
+//! statistic reads 1.00 by construction, so a wired comparison could only have split on what moves
+//! a constant envelope (multipath fading, noise-correction error): the look, not the emitter.
+//! `hk_model::cluster`'s module docs carry the full reasoning.
+//!
+//! The statistic itself is kept, with its derivation and its tests, because it is a correct
+//! measurement of the emission (`am` against `wfm`, `bpsk` against `qpsk`) that C15 may use; it
+//! is **not** an entity-resolution feature, and nothing in the inventory reads it. The
+//! entity-resolution merge/split rates T-233 measured with it (`structure_rates`,
+//! `structure-probe`) were removed with the comparison they measured.
 //!
 //! # The statistic, and why it separates what it separates
 //!
@@ -24,7 +35,8 @@
 //!
 //! What it does **not** separate is `2fsk` from `gfsk` or `msk`: all three are constant-envelope
 //! by construction and all three read 1.00. That is not a shortcoming of this statistic but a fact
-//! about those three — see `hk_model::cluster::Fingerprint::compare` for what follows from it.
+//! about those three — see `hk_model::cluster::Fingerprint::compare` for what followed from it
+//! (the exact family gate).
 //!
 //! # Why it measures the emission and not the observation (T-281's rule)
 //!
@@ -32,13 +44,13 @@
 //! never a count that grows with how long anyone watched. Lengthening the record estimates it
 //! **better** and moves it not at all. It is also invariant to amplitude (both moments scale
 //! together), to a residual carrier offset and to any phase rotation, since it sees only `|s|`.
-//! That is the property the fingerprint needs: the two observations it compares were watched
+//! That is the property a cross-observation comparison needs: two observations were watched
 //! differently by construction, so a statistic that moved with the watch would split or merge on
 //! the watch.
 //!
 //! The one thing that does move it is noise, and that is why the value is reported **with the
-//! sigma this module measured it to** rather than bare (`hk_model::cluster` then compares in
-//! sigmas, so no width is fitted anywhere).
+//! sigma this module measured it to** rather than bare, so a consumer can compare in sigmas and
+//! fit no width.
 //!
 //! # A second dimension, built and rejected
 //!
@@ -60,8 +72,28 @@
 //! look. It is recorded here rather than deleted because the next person to reach for an
 //! instantaneous-frequency shape statistic should know what it costs.
 
-use hk_model::ModulationStructure;
 use num_complex::Complex32;
+
+/// One emission's modulation structure: the dimensionless statistic and the uncertainty its
+/// producer measured it to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModulationStructure {
+    /// `E|s|⁴/(E|s|²)²` of the emission, noise-corrected. `1.0` = constant envelope.
+    pub envelope_shape: f64,
+    /// 1σ on [`Self::envelope_shape`]. Never zero in practice.
+    pub envelope_shape_sigma: f64,
+}
+
+impl ModulationStructure {
+    /// The value and its sigma are finite and non-negative (`μ₄ ≥ 0` for any distribution, and an
+    /// uncertainty is not negative).
+    pub fn is_valid(&self) -> bool {
+        self.envelope_shape.is_finite()
+            && self.envelope_shape >= 0.0
+            && self.envelope_shape_sigma.is_finite()
+            && self.envelope_shape_sigma >= 0.0
+    }
+}
 
 /// Fewest samples the structure will be measured over. Below this the within-record spread has
 /// too little to divide into [`SPREAD_BLOCKS`], so the module abstains rather than report a value

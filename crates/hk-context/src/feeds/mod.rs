@@ -26,7 +26,9 @@
 //! past its validity window ([`FeedState::is_stale`]). Correlation still uses stale data and marks
 //! the result provisional ([`crate::correlate`]).
 
+pub mod gnss_orbits;
 pub mod gpsjam;
+pub mod tle;
 
 use std::collections::BTreeMap;
 use std::fmt;

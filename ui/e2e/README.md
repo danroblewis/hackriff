@@ -51,6 +51,17 @@ Two of those deserve a note:
 - **The cap is read from the server** (`cost.in_flight_limit`), never restated here. The runner reads
   it *before any browser starts*, because asking for it while a browser holds four reads in flight
   gets a `503` — the harness would manufacture the condition it exists to detect.
+- **A second page belongs in its own window, or the first one stops running** (2026-09-23). A spec
+  that needs two clients *at the same time* must open the second with `browser.page(url, { newWindow:
+  true })`. A second target in the same window becomes that window's active tab, so the first page's
+  `visibilityState` flips to `hidden` and Chrome delivers it no `requestAnimationFrame` — measured
+  here at 26 frames/s before and **0 after**, with `--disable-background-timer-throttling` and
+  `--disable-renderer-backgrounding` both already set (those govern timers and process priority, not
+  rAF for a hidden page). The surface computes its tile demand in its render pass, so a same-window
+  second tab silently ends the first one's fetching: `surface-contention` was left asserting on the
+  tail of an already-draining queue and went red three times in one day's gate on a race that never
+  happened. `setInterval` readouts keep ticking while hidden, which is why the symptom reads as a
+  stale number rather than a dead page.
 
 ## What's here
 
@@ -60,7 +71,7 @@ Two of those deserve a note:
 | `png.mjs` | Minimal PNG decoder + `census()`, the colour histogram the pixel assertions use. |
 | `harness.mjs` | `Browser`/`Page`: navigation, console and exception capture, network recording with concurrency watches, gestures (drag, wheel **with real modifier bits**, click, double-click), screenshots, named waits. |
 | `backend.mjs` | Starts `hk serve` over the fixture; `assertRealCsp`; `tileCost`. |
-| `run.mjs` | One backend, shared; one node process per `*.e2e.mjs`; prints the runtime of each. Every spec runs under a per-file deadline, `HK_E2E_SPEC_TIMEOUT_MS` (default 300000 ms — well above the ~95 s the slowest file takes today): on expiry the spec is killed **whole-tree** — its node process, its Chrome, and any extra `hk serve` it started — and reported FAILED, never a pass (T-473). |
+| `run.mjs` | A bounded pool of **lanes** (`HK_E2E_CONCURRENCY`, default 3 — measured: 695.3 s sequential → 207.7 s), each with **its own `hk serve` on its own port range**; one node process per `*.e2e.mjs`, handed to whichever lane is free, longest spec first; prints the runtime of each, slowest first. A backend per lane rather than one shared one because `/api/tiles`' backpressure cap is counted per server — `surface-contention` asserts on it — so N browsers on one server would refuse each other's reads; per lane, a spec sees exactly the single-browser server it saw when this loop was sequential. `HK_E2E_CONCURRENCY=1` restores that sequential run exactly. Every spec runs under a per-file deadline, `HK_E2E_SPEC_TIMEOUT_MS` (default 600000 ms — well above the ~170 s the slowest file takes, and dearer still with three other lanes on the box): on expiry the spec is killed **whole-tree** — its node process, its Chrome, and any extra `hk serve` it started — and reported FAILED, never a pass (T-473). |
 | `surface-load.e2e.mjs` | **T-450's guard**, on `/surface.html`. |
 | `app-surface.e2e.mjs` | **T-445's guard**, on **`/` — the page the user actually opens.** The cutover put this renderer on the app's critical path and deleted the waterfall it replaces, so "the app comes up" stopped being a property of an additive preview. Different bundle (`--splitting`), different entry, different mount: passing `surface-load` says nothing about it. Also asserts the retired slots are absent, the rest of Explore is present, and that a drag moves the view while reaching no device route. Its own non-vacuity (T-466) is `t445-app-retired-slot-left-behind` in `selftest.mjs`. |
 | `surface-nav.e2e.mjs` | **T-454's guard** — the in-flight cap and the AIMD contract. Plus **T-456's**: the four navigation gestures, and the modifier the browser actually delivered. |
@@ -121,6 +132,7 @@ Measured on the dev Mac, warm (`hk` already built, `npm ci` a no-op):
 | **`npm run e2e` total** | **~60 s** |
 | `npm run e2e:selftest`, one fault (e.g. `node e2e/selftest.mjs t445`) | ~9 min (baseline once + the whole suite again for the fault, ~4.5 min each) |
 | `npm run e2e:selftest`, no filter (baseline + every fault in `FAULTS`) | scales with `FAULTS.length` — baseline once, then the whole suite per fault; run narrowed by name in practice |
+| `node e2e/selftest.mjs --expected-only <fault…>` | baseline + each fault against ONLY the specs the faults name (T-846) — an iteration aid: proves the named guard goes red, cannot prove no other guard caught it instead |
 
 Cold, `just test-ui-e2e` also pays `cargo build -p hk-cli --bin hk` and `npm ci`.
 
@@ -177,6 +189,19 @@ What is asserted now conditions the permission on the mechanism instead of count
 `selftest.mjs` carries a fault for each: `t454-ignore-the-cap` (peak 13), `t454-forget-abandoned-slots`
 (peak 5), `t454-never-back-off` (cap pinned at the ceiling, 10 refusals), and
 `t454-probe-gives-up-on-503`.
+
+**T-573's batch route made two of those faults invisible, and T-846 re-aimed them.** A
+`GET /api/tiles/batch` carries up to 64 addresses, so a client ignoring its cap read `peak 1/4` on
+the request count; the cap is per ADDRESS (the client charges a slot per address, the route takes a
+producer slot per address), so (1) is now also asserted over `addressPeak(tileAsks(…))` — measured
+3/4 on the correct client, 7/4 with the cap ignored. And the route no longer refuses on this fixture
+at all (batch workers retire on a 503 instead of recording one; T-630's share clamps the ceiling on
+every answer), so (3) judged an empty set and a client with the halving deleted stayed green. A
+second test now puts ONE per-address `503` inside a real batch answer (a `fetch` wrapper, like
+`live-edge`'s T-523 proxy) and requires the operating cap to fall across it: 4 -> 2 correct,
+3 -> 3 with `t454-never-back-off`. The `t454-ignore-the-cap` fault itself moved to where the cap is
+obeyed (`effectiveLimit` and `nextAddr`'s per-viewport share), because since T-630 the first answer
+clamped the constructor's 64 back to the route's number.
 
 ## Findings this tier produced
 

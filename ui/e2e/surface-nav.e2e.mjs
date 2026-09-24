@@ -57,7 +57,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, addressPeak, census, tileAsks, until } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -79,6 +79,27 @@ const READOUT = `[...document.querySelectorAll('.hk-surface-viewport')].map((v) 
 }))`;
 
 const STATUS = `(document.querySelector('[data-slot="status"]')?.textContent ?? '')`;
+
+/**
+ * **A status line this file cannot parse is a wording drift, never a controller state** — so it
+ * fails at once, naming the line, before anything waits on a parse.
+ *
+ * On 2026-09-23 the share clause gained its age (`share 2, stated 0.4 s ago`, a6ae3d17) while this
+ * file matched `in flight \(share (\d+)\)` with the closing paren. Every readout became null; the
+ * T-846 test spent 60 s waiting for a premise it could not parse and then reported "the operating
+ * cap never reached 2 with the page quiet (last: null)" — a claim about the controller, on a page
+ * whose status line read `0+0/2 in flight (share 2, stated 8.2 s ago) · queue 0`, which IS the
+ * premise. The merge runner took that for a product defect on main. `parse` is the caller's own
+ * reader, so this checks the exact pattern the claims below are read with.
+ */
+const assertReadable = (parse, st) => {
+  const c = parse(st);
+  assert.ok(c && Number.isFinite(c.busy) && Number.isFinite(c.queue),
+    "the page's status line does not read as `N+M/L in flight (share C` … `queue Q` … `B backpressure`: " +
+    "this file's parser and preview-main.ts's wording have drifted, so every controller readout " +
+    `would be null and every claim about the cap vacuous. The line: ${JSON.stringify(st)}`);
+  return c;
+};
 
 /** The page's own action buttons, found by the label the user reads. */
 const BUTTON = (label) =>
@@ -104,8 +125,19 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   await page.waitFor("the first tile textures to be uploaded",
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
 
+  // **The gesture point is re-derived from the canvas's box every time it is used.** The layout
+  // moves under this test: T-505 put the tier inside every viewport row's level cell, so the row
+  // wraps and un-wraps as these gestures change the level, and the canvas slides with it. A point
+  // held in page coordinates from before a gesture can land off the pane — and `input.ts`
+  // `preventDefault`s every wheel over the canvas BEFORE it decides which viewport the point is
+  // over, so a wheel that missed still arrives and still reports `defaultPrevented`. It would read
+  // as a gesture the surface refused rather than one the surface never got.
+  const midAt = async (fx = 0.5, fy = 0.35) => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * fx, y: r.y + r.h * fy, rect: r };
+  };
   const rect = await page.$rect('[data-slot="canvas"]');
-  const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
   const before = await page.eval(`JSON.stringify(${READOUT})`);
 
   // A pan, then zoom on each axis, then a pan of the whole-surface map at the bottom. Between
@@ -119,21 +151,39 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // `t454-never-back-off` fault produces 8 refusals with the cap pinned at 4, against 2 with it
   // falling to 2.)
   const caps = [];
+  /** The ceiling the client may recover to at each cap sample — its SHARE since T-630, printed
+   * beside the cap as `(share N)`. Index-aligned with `caps`; NaN where the line named none. */
+  const shares = [];
   const sampleCap = async () => {
-    const m = (await page.eval(STATUS)).match(/(\d+)\/(\d+) in flight/);
-    if (m) caps.push(Number(m[2]));
+    const st = await page.eval(STATUS);
+    const m = st.match(/(\d+)\/(\d+) in flight/);
+    if (m) { caps.push(Number(m[2])); shares.push(Number(st.match(/in flight \(share (\d+)/)?.[1] ?? NaN)); }
   };
 
   const moved = [], clamped = [], visited = [];
+  /**
+   * One gesture, read once **the surface has applied it** rather than 900 ms later.
+   *
+   * The wait used to be `frames(6)` plus two 450 ms sleeps, and the readout was read at the end of
+   * them — so whether this step saw the gesture depended on how many frames the box had got round
+   * to, which is a measurement of the machine and not of the page. Beside one bounded worker it
+   * lost: *"the drags moved nothing at all, so this proves nothing"*, green alone.
+   *
+   * `waitUntilStill` settles on the readout **not changing** across real frames, which is the right
+   * wait before both shapes of assertion here and cannot manufacture either: a gesture that does
+   * nothing settles immediately on the old value and still fails `mustMove`, and one that moves the
+   * view is still classified by what it moved to. The cap samples stay two real intervals apart,
+   * because the AIMD trace they feed is a sequence and not a snapshot.
+   */
   const step = async (what, fn, { mustMove = true } = {}) => {
     const was = await page.eval(`JSON.stringify(${READOUT})`);
     await fn();
-    await page.frames(6);
-    await new Promise((r) => setTimeout(r, 450));
+    const settled = await page.waitUntilStill(`${what} to be applied and the readout to settle`,
+      `JSON.stringify(${READOUT})`, { stable: 3, framesEach: 4, timeoutMs: 15000 });
     await sampleCap();
-    await new Promise((r) => setTimeout(r, 450));
+    await page.frames(8);
     await sampleCap();
-    const now = await page.eval(`JSON.stringify(${READOUT})`);
+    const now = settled.value;
     if (mustMove) assert.notEqual(now, was, `${what} did not move the view — the gesture missed, so it tested nothing`);
     (now === was ? clamped : moved).push(what);
     visited.push(now);
@@ -159,32 +209,58 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // requests still counted with the rest of the storm, the step still records whether it moved (it
   // is printed either way), and every claim about which axes a wheel moves is made in the T-456 and
   // T-472 tests below, each of which establishes its own premise first rather than assuming one.
-  await step("drag-pan", () => page.drag(mid, { x: mid.x - 260, y: mid.y + 120 }, 12));
+  await step("drag-pan", async () => {
+    const m = await midAt();
+    await page.drag(m, { x: m.x - 260, y: m.y + 120 }, 12);
+  });
   await step("jump to the whole surface", () => page.click(BUTTON("Whole surface")));
-  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240); },
+  await step("wheel zoom in (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), -240); },
     { mustMove: false });
-  await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, -240, { shift: true }); });
-  await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(mid, 240, { shift: true }); });
-  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(mid, 240); },
+  await step("shift+wheel zoom in (frequency)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), -240, { shift: true }); });
+  await step("shift+wheel zoom out (frequency)", async () => { for (let i = 0; i < 3; i++) await page.wheel(await midAt(), 240, { shift: true }); });
+  await step("wheel zoom out (uniform)", async () => { for (let i = 0; i < 5; i++) await page.wheel(await midAt(), 240); },
     { mustMove: false });
   // The map along the bottom is a viewport too, and it opens showing the whole surface — so
   // *dragging* it is clamped for the same reason the time wheel is. Double-clicking it is not:
   // that is the page's discrete "send the active pane there", which moves the pane across the
   // spectrum in one step and invalidates its whole working set.
-  const mapAt = (fx) => ({ x: rect.x + rect.w * fx, y: rect.y + rect.h - 18 });
-  await step("drag the whole-surface map", () => page.drag(mapAt(0.5), { x: rect.x + rect.w * 0.5 + 180, y: rect.y + rect.h - 18 }, 10),
-    { mustMove: false });
-  await step("double-click the map to send the pane there", () => page.dblclick(mapAt(0.22)));
+  const mapAt = async (fx) => {
+    const r = (await midAt()).rect;
+    return { x: r.x + r.w * fx, y: r.y + r.h - 18, rect: r };
+  };
+  await step("drag the whole-surface map", async () => {
+    const m = await mapAt(0.5);
+    await page.drag(m, { x: m.rect.x + m.rect.w * 0.5 + 180, y: m.y }, 10);
+  }, { mustMove: false });
+  await step("double-click the map to send the pane there", async () => page.dblclick(await mapAt(0.22)));
   await step("fit back to coverage", () => page.click(BUTTON("Fit to coverage")));
   t.diagnostic(`moved the view: ${moved.join(", ")}`);
   t.diagnostic(`clamped (no movement, expected on this fixture): ${clamped.join(", ") || "none"}`);
 
-  // Let anything still queued drain, so a refusal from the last gesture has every chance to arrive
-  // before the steady-state window opens.
+  // **The boundary is drawn once the gestures' own requests have been ANSWERED, not 1500 ms after
+  // the last one.** Every request still on the wire when the gestures end is one whose `503` would
+  // otherwise land inside the steady window and be counted against a window that did not cause it —
+  // and how long the route takes to answer four in-flight reads is the same twenty-fold-varying
+  // service rate this file already refuses to bet on elsewhere. The route's cap bounds how many
+  // there can be, so this is a short wait on a small, named set: requests that started before the
+  // mark and have neither a status nor an error.
   await page.frames(10);
-  await new Promise((r) => setTimeout(r, 1500));
+  const settlingFrom = Date.now();
+  const unanswered = () => page.requests.filter(
+    (r) => r.startedMs <= settlingFrom && r.status === null && r.error === null);
+  const drained = await until("the gestures' own requests to be answered before the steady window opens",
+    async () => unanswered().length === 0, { timeoutMs: 30000, everyMs: 150 })
+    .then((ms) => ({ ok: true, ms }), () => ({ ok: false, ms: Date.now() - settlingFrom }));
+  t.diagnostic(`the gestures' requests settled after ${drained.ms} ms` +
+    (drained.ok ? "" : ` — ${unanswered().length} never came back; opening the steady window anyway`));
   const navigationEnded = Date.now();
-  const navigationRefusals = page.requests.filter((r) => r.status === 503).length;
+  // **Counted per ADDRESS** (T-573): a `GET /api/tiles/batch` answers 200 and carries each
+  // address's own 503 inside, so a status-line count would see none of the refusals the client
+  // backs off from. [[tileAsks]] expands every request into the addresses it named, each with the
+  // status the route gave THAT address; everything below that reasons about refusals, re-asks or
+  // turnover is per address for the same reason.
+  await page.settleBodies();
+  const navigationRefusals = tileAsks(page.requests).filter((a) => a.status === 503).length;
 
   // ——— STEADY STATE: the page keeps rendering, nothing moves the view ———
   //
@@ -293,13 +369,14 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   const mapFollowing = await page.eval(
     `[...document.querySelectorAll('.hk-surface-viewport[data-viewport="minimap"]')]` +
     `.map((v) => v.getAttribute('data-following')).join(",")`);
-  const schemeOf = (r) => new URL(r.url).searchParams.get("scheme") ?? "view";
+  const schemeOf = (a) => a.scheme;
 
   // ——— the evidence, gathered and PRINTED before anything is asserted ———
   // A failing guard whose first assertion hides the rest of the picture is a guard people bisect by
   // hand. Everything below is reported, then judged.
-  const tileReqs = page.requests.filter((r) => r.url.includes("/api/tiles"));
-  const refused = page.requests.filter((r) => r.status === 503);
+  await page.settleBodies();
+  const tileReqs = tileAsks(page.requests);
+  const refused = tileReqs.filter((a) => a.status === 503);
   const steadyRefusals = refused.filter((r) => r.startedMs >= navigationEnded);
   const steady = tileReqs.filter((r) => r.startedMs >= navigationEnded);
   const steadyRequests = steady.length;
@@ -329,19 +406,29 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // leaked. So the set is the addresses that came back `200`.
   const askedBefore = new Set(tileReqs
     .filter((r) => r.startedMs < navigationEnded && r.status === 200)
-    .map((r) => r.url));
+    .map((a) => a.key));
   const steadyDetailReqs = steady.filter((r) => schemeOf(r) === "view");
   const steadyDetail = steadyDetailReqs.length;
-  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.url));
+  const steadyReasks = steadyDetailReqs.filter((r) => askedBefore.has(r.key));
   const steadyFirstTime = steadyDetail - steadyReasks.length;
   const status = await page.eval(STATUS);
   const backpressure = Number(status.match(/(\d+) backpressure/)?.[1] ?? -1);
   const cancelled = Number(status.match(/(\d+) cancelled/)?.[1] ?? 0);
   const canceledOnWire = page.requests.filter((r) => r.error === "canceled").length;
   const gestures = moved.length + clamped.length;
+  const addrPeak = addressPeak(tileReqs);
+  t.diagnostic(`peak ${addrPeak}/${limit} tile ADDRESSES outstanding on the wire at once (over ` +
+    `${tiles.peak} request(s) — a batch names many)`);
   t.diagnostic(`peak ${tiles.peak}/${limit} in flight · ${tileReqs.length} tile requests · ` +
     `${cancelled} cancelled (client), ${canceledOnWire} aborted on the wire`);
   t.diagnostic(`operating cap over the run: ${caps.join(" ")} (server ceiling ${limit})`);
+  t.diagnostic(`the client's share at each sample:  ${shares.join(" ")}`);
+  // A NaN share is the wording drift above, not a share: it made this trace NaN on every sample of
+  // the 2026-09-23 run while the test stayed green, so it is a failure rather than a diagnostic.
+  assert.ok(caps.length > 0 && shares.every(Number.isFinite),
+    `the status line's share did not parse at ${shares.filter((x) => !Number.isFinite(x)).length} of ` +
+    `${shares.length} cap sample(s) (last line: ${JSON.stringify(await page.eval(STATUS))}) — the parser ` +
+    "and preview-main.ts's wording have drifted");
   t.diagnostic(`503s: ${navigationRefusals} during ${gestures} viewport changes, ` +
     `${steadyRefusals.length} during ${(STEADY_STATE_MS / 1000).toFixed(0)} s of steady state ` +
     `(${steadyRequests} requests) · ${backpressure} counted by the client`);
@@ -359,7 +446,7 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
   // Tile reads the route COMPLETED for the page during the probe window, counted from CDP's own
   // network log rather than from anything the client says about itself: a `200` whose body
   // finished inside the window. This is the budget turning over, measured from outside.
-  const served = page.requests.filter((r) => r.url.includes("/api/tiles") && r.status === 200 &&
+  const served = tileReqs.filter((r) => r.status === 200 &&
     r.endedMs !== null && r.endedMs >= probeFrom && r.endedMs <= probeTo).length;
   t.diagnostic(`steady-state slot probes: ${probes.length} asked, ` +
     `${probes.filter((p) => p.status === 200).length} answered, ${probeRefusals.length} refused · ` +
@@ -384,6 +471,15 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `${tiles.peak} tile requests were in flight at once against a declared cap of ${limit} ` +
     "(and that is a lower bound — the browser's own 6-connection limit hides anything beyond it)");
   assert.ok(tiles.peak > 1, `only ${tiles.peak} tile request was ever in flight — the cap was never approached, so this proves nothing`);
+  // **…and counted per ADDRESS, because since T-573 that is what the cap is a cap on** (T-846). A
+  // `GET /api/tiles/batch` carries up to 64 addresses, the client charges one slot per address and
+  // the route takes one producer slot per address — so a client that ignored its cap altogether
+  // put every address it wanted into one or two batches, and the request count above read it as
+  // `peak 2/4`. Measured with `t454-ignore-the-cap` injected: green on the request count, red here.
+  assert.ok(addrPeak <= limit,
+    `${addrPeak} tile ADDRESSES were outstanding on the wire at once against a declared cap of ` +
+    `${limit}, over only ${tiles.peak} request(s). The route's cap is per address and so is the ` +
+    "client's budget: batching changes how many requests carry them, not how many may be asked for.");
 
   // (2) ONCE CONVERGED, NEVER REFUSED AGAIN. This is the strict half, and it is stricter than the
   // "zero refusals" it replaces is about anything that matters: it forbids the regime the user
@@ -461,13 +557,22 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
     `a steady-state slot probe did not get an HTTP answer at all (statuses: ${probes.map((p) => p.status).join(" ")}) — ` +
     "a probe that errors proves nothing either way, so the assertions above would be vacuous");
 
+  // **T-538 re-landed speculation under this bound, and did not weaken it.** The lane that replaced
+  // T-471's standing ring (`TileCache.prefetchAhead`) is driven by DISPLACEMENT between frames and
+  // asks each address at most once per session, so it cannot produce a re-ask at all and a view
+  // that is not moving has no direction to predict. It also issues only while the client holds
+  // NOTHING — which on this fixture is never, the gestures' backlog still draining right through
+  // the window — so the measured cost of it here is exactly zero: the status line's own
+  // `N guessed (M drawn)` read `0 guessed (0 drawn)` over the whole run, and the steady window's
+  // re-ask count was 0 with 4-7 first-time addresses, which is the backlog and not a decision.
+  //
   // (2c) A FROZEN VIEW THAT NOTHING TOUCHES ASKS FOR NOTHING. The premise is measured at both ends
   // of the window, not assumed: every pane is off the live edge, so nothing new can be wanted, and
   // only then is "it must ask for nothing" the right claim. What this forbids is speculation — and
   // speculation is not free: every speculative read that a later gesture aborts leaves the server
   // producing a tile nobody will read, holding the slot (2) and (2b) are about.
   if (frozen(followingBefore) && frozen(followingAfter)) {
-    assert.deepEqual(steadyReasks.map((r) => new URL(r.url).search).slice(0, 5), [],
+    assert.deepEqual(steadyReasks.map((r) => r.key).slice(0, 5), [],
       `the page RE-ASKED ${steadyReasks.length} DETAIL-tier addresses it had already been ANSWERED ` +
       "for, " +
       `during ${(STEADY_STATE_MS / 1000).toFixed(0)} s in which nothing moved the view and no pane ` +
@@ -557,6 +662,118 @@ test("panning and zooming stays inside the tile route's in-flight cap, with no r
 });
 
 // ———————————————————————————————————————————————————————————————————————————————————————————————
+// T-454's CONTROLLER, AGAINST A REFUSAL THIS TEST KNOWS HAPPENED (T-846)
+// ———————————————————————————————————————————————————————————————————————————————————————————————
+//
+// Assertion (3) above — "a refusal must halve the cap" — is conditional on the route refusing, and
+// since T-573 it does not, on this fixture: a `/api/tiles/batch` answers its members on at most the
+// asker's share of workers and retires a worker on a 503 rather than recording one, and T-630's
+// share clamps the client's ceiling on every answer. Measured over the gestures above: 0 refusals,
+// the operating cap pinned at 2 by a transient share of 2 — so `t454-never-back-off` (the halving
+// deleted) came back GREEN, because there was nothing to back off from and the cap was already
+// below the server's number for another reason.
+//
+// So the refusal is put on the wire deliberately, in exactly the batch-era shape: a 200 whose one
+// member carries its own `503` and the route's own words, which is how `hk-api` answers a batch
+// member it cannot admit. The injection sits in `fetch`, before the page's scripts, like T-523's
+// proxy in `live-edge.e2e.mjs`. It rewrites ONE member of ONE batch; everything else is the real
+// route. The claim is then the controller's own contract, read off the status line the page draws:
+// the operating cap in the first readout that counts the refusal is BELOW the one before it. A
+// client that merely counts refusals keeps its cap (measured with `t454-never-back-off`: 3 -> 3,
+// share 4); the controller halves it (measured: 4 -> 2, share 4).
+test("a per-address 503 inside a batch answer halves the operating cap: back-off is a controller, not a counter (T-454, T-846)", async (t) => {
+  const limit = Number(process.env.HK_E2E_TILE_LIMIT);
+  assert.ok(Number.isInteger(limit) && limit > 0, `the server did not declare cost.in_flight_limit (got "${process.env.HK_E2E_TILE_LIMIT}")`);
+  const inject = `(() => {
+    const real = window.fetch.bind(window);
+    window.__t846 = { arm: 0, refused: [] };
+    window.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      const r = await real(input, init);
+      if (!(window.__t846.arm > 0 && url.includes("/api/tiles/batch") && r.status === 200)) return r;
+      const body = await r.json();
+      const e = (body.tiles ?? []).find((x) => x.status === 200);
+      if (e) {
+        window.__t846.arm--;
+        window.__t846.refused.push(e.address?.spelling ?? "?");
+        e.status = 503;
+        delete e.tile;
+        e.error = "too many tile reads in flight (limit ${limit}, share ${limit}): injected by ui/e2e/surface-nav.e2e.mjs (T-846)";
+      }
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+  })();`;
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: inject });
+  await page.goto(`${ORIGIN}/surface.html#token=${TOKEN}`);
+  await page.waitForSurfaceMounted();
+  await page.waitFor("the first tile textures to be uploaded",
+    `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
+
+  /** The controller's state as the page prints it: `N+M/L in flight (share C)` and `B backpressure`. */
+  const read = (st) => {
+    const f = st.match(/(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/);
+    return f ? { inflight: Number(f[1]), cap: Number(f[3]), share: Number(f[4]),
+      busy: Number(st.match(/(\d+) backpressure/)?.[1] ?? NaN), queue: Number(st.match(/queue (\d+)/)?.[1] ?? NaN) } : null;
+  };
+  // The status line must parse BEFORE the premise is waited for: an unreadable line would time the
+  // wait out and report a controller state the page may well be in (2026-09-23, `assertReadable`).
+  assertReadable(read, await page.eval(STATUS));
+  // The premise: a cap that CAN halve. At 1 the halving is `max(1, …)` and a controller is
+  // indistinguishable from a counter, so the test waits for the cap to be at least 2 with the page
+  // quiet, rather than assuming where the opening fill left it.
+  const ready = await page.waitForValue("the operating cap to be at least 2 with nothing outstanding", STATUS,
+    (st) => { const c = read(st); return !!c && c.cap >= 2 && c.inflight === 0 && c.queue === 0; }, { timeoutMs: 60000 });
+  t.diagnostic(`before the injected refusal: ${JSON.stringify(read(ready.value))}`);
+  assert.ok(ready.ok, `the operating cap never reached 2 with the page quiet (last: ${JSON.stringify(assertReadable(read, ready.value))}), ` +
+    "so a halving could not be told from no halving and this test would assert nothing");
+
+  // Arm, then ask for tiles the page does not hold: a frequency zoom IN over the opening view, which
+  // is observed spectrum (the page opens on the coverage map's observed extent) at a finer level
+  // than anything cached — so T-580's survey cannot answer it and a batch must go out.
+  const trace = [];
+  let last = read(ready.value);
+  await page.eval("window.__t846.arm = 1");
+  const r = await page.$rect('[data-slot="canvas"]');
+  const at = { x: r.x + r.w * 0.5, y: r.y + r.h * 0.35 };
+  let hit = null;
+  for (let i = 0; i < 6 && !hit; i++) {
+    await page.wheel(at, -240, { shift: true });
+    const t0 = Date.now();
+    while (!hit && Date.now() - t0 < 8000) {
+      const c = read(await page.eval(STATUS));
+      if (c) {
+        trace.push(`${c.cap}/${c.share}·${c.busy}`);
+        if (c.busy > last.busy) hit = { before: last, after: c };
+        else last = c;
+      }
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+  const refused = await page.eval("window.__t846.refused.slice()");
+  t.diagnostic(`injected a per-address 503 for ${JSON.stringify(refused)}; cap/share·backpressure readouts: ${trace.join(" ")}`);
+  assert.ok(refused.length > 0, "no batch went out for the zoom, so no refusal was injected and this test asserts nothing");
+  assert.ok(hit, `the client never counted the injected refusal (readouts: ${trace.join(" ")})`);
+  t.diagnostic(`the readout that first counts it: ${JSON.stringify(hit.after)} (the one before: ${JSON.stringify(hit.before)})`);
+  // Strictly LOWER, and nothing more exact: the readout is a 500 ms sample, so the cap it shows as
+  // "before" may have moved by an additive step since. What no correct client can do is come out of
+  // a refusal at or above where it went in — `max(1, min(⌊cap/2⌋, ceiling))` is below any cap ≥ 2.
+  // A fall in the SHARE at the same instant would lower even a counter's cap (the insert clamp), so
+  // it is reported when it happens rather than assumed not to.
+  if (hit.after.share < hit.before.cap) {
+    t.diagnostic(`the share fell to ${hit.after.share} in the same readout, so the clamp alone could explain ` +
+      "a lower cap this run: the fault this test exists for may pass it once in such a run, a correct client never fails it");
+  }
+  assert.ok(hit.after.cap < hit.before.cap,
+    `the route refused a member of a batch and the client's operating cap went from ${hit.before.cap} to ` +
+    `${hit.after.cap} with its share at ${hit.after.share}. A 503 must HALVE it (AIMD's multiplicative ` +
+    "decrease): a client that counts the refusal and keeps its cap has not discovered anything, and it is " +
+    "refused again on its very next burst, for as long as the user keeps navigating — T-454's regime.");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the refusal was handled");
+});
+
+// ———————————————————————————————————————————————————————————————————————————————————————————————
 // T-456: GOOGLE-MAPS NAVIGATION, AND THE MODIFIER THE BROWSER ACTUALLY DELIVERED
 // ———————————————————————————————————————————————————————————————————————————————————————————————
 //
@@ -638,13 +855,17 @@ async function timeRoom() {
   return { extentS: latestS - oldestS, floorS: MIN_CELLS * cellS };
 }
 
-/** The pane row of the chrome — not the map, which is a viewport too and moves for other reasons. */
+/** The pane row of the chrome — not the map, which is a viewport too and moves for other reasons.
+ * `time` is the chrome's offset-from-the-edge LABEL, which rounds to whole seconds past 10 s and
+ * states only the top edge; `t0Ns`/`t1Ns` are the pane's time window itself, unrounded, from the
+ * row's `data-t0-ns` / `data-t1-ns`. */
 const PANE_ROW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
   if (!v) return null;
   const where = v.querySelector('.hk-surface-where')?.textContent ?? '';
   const level = v.querySelector('.hk-surface-level')?.textContent ?? '';
   const parts = where.split(' · ');
-  return { freq: parts[0] ?? '', time: parts[1] ?? '', level };
+  return { freq: parts[0] ?? '', time: parts[1] ?? '', level,
+           t0Ns: Number(v.getAttribute('data-t0-ns')), t1Ns: Number(v.getAttribute('data-t1-ns')) };
 })()`;
 
 /**
@@ -671,8 +892,25 @@ const INSTALL_PROBE = `(() => {
 const ZOOM_NOW = `JSON.stringify({ dpr: window.devicePixelRatio,
   scale: window.visualViewport ? window.visualViewport.scale : null, base: window.__zoomBase })`;
 
-test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach the page", async (t) => {
-  // ——— the premise, measured and waited for ———
+/**
+ * **The premise every gesture test in this file needs, and the one that made two of them fail
+ * ALONE.**
+ *
+ * `SurfacePreview` resolves the surface's bounds ONCE, at load, so how much room the time axis has
+ * is decided by how long the backend has been recording when the page opens — and each of these
+ * tests opens its own page. Measured 2026-09-22: run alone, this file met a ~40 s record against a
+ * 16 s zoom floor (2.5 floors); run after another spec, 120-149 s (7.5-9.3 floors). At 2.5 floors
+ * the axis is close enough to clamped in both directions that a zoom cannot be seen to move it, and
+ * T-472 and T-486 went red **alone** and green in company — the exact inverse of a load flake, and
+ * the reason the merge runner's "re-run the failing spec alone" triage manufactured a red for this
+ * file rather than clearing one.
+ *
+ * T-456 has waited for this since it was written. The wait belongs to all three, so it lives here:
+ * asked of the two routes that state the extent and the floor, bounded generously, and asserted
+ * rather than assumed — a fixture that never grows a usable axis fails as a missing premise instead
+ * of as a welded one.
+ */
+async function waitForTimeRoom(t) {
   let room = await timeRoom();
   const waitedFrom = Date.now();
   while (room.extentS < TIME_ROOM * room.floorS && Date.now() - waitedFrom < 120000) {
@@ -687,6 +925,12 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
     "zoom floor, so the time axis is clamped in both directions and a uniform zoom CANNOT be seen to " +
     "move it. This is the premise, not the claim: without it a green run would prove nothing about " +
     "the time half of the gesture.");
+  return room;
+}
+
+test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach the page", async (t) => {
+  // ——— the premise, measured and waited for ———
+  await waitForTimeRoom(t);
 
   const browser = await Browser.open();
   t.after(() => browser.close());
@@ -697,9 +941,32 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
   assert.equal(await page.eval(INSTALL_PROBE), true);
 
+  /**
+   * The gesture point, **re-derived from the canvas's box every time it is used**.
+   *
+   * A point taken once at the top of a test is in page coordinates of the layout that existed then,
+   * and this page's layout moves: T-505 put the tier inside every viewport row's level cell, so
+   * that row wraps and un-wraps as a gesture changes the level and the canvas slides with it. A
+   * wheel delivered at a stale point can land off the pane entirely — and `input.ts`
+   * `preventDefault`s every wheel over the canvas *before* it decides which viewport the point is
+   * over, so such a wheel still arrives at `window` and still reports `defaultPrevented`. The
+   * delivery checks below therefore cannot see it, and the gesture reads as one the surface refused
+   * rather than one the surface never got.
+   */
+  const midAt = async (fx = 0.5, fy = 0.35) => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * fx, y: r.y + r.h * fy };
+  };
   const rect = await page.$rect('[data-slot="canvas"]');
   const mid = { x: rect.x + rect.w / 2, y: rect.y + rect.h * 0.35 };
   const read = async () => page.eval(PANE_ROW);
+  /** Wait for the surface to APPLY whatever was just dispatched, then read the settled row. */
+  const settled = async (what) => {
+    const r = await page.waitUntilStill(what, `JSON.stringify(${PANE_ROW})`,
+      { stable: 3, framesEach: 4, timeoutMs: 15000 });
+    return JSON.parse(r.value);
+  };
   const levels = (row) => row.level.match(/level (\d+)\/(\d+)/)?.slice(1).map(Number) ?? [NaN, NaN];
 
   /**
@@ -713,9 +980,9 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
    */
   const reset = async (inSteps = 0) => {
     await page.click(BUTTON("Whole surface"));
-    await page.frames(4);
-    for (let i = 0; i < inSteps; i++) await page.wheel(mid, -240);
-    if (inSteps) await page.frames(4);
+    await settled("Whole surface to be applied");
+    for (let i = 0; i < inSteps; i++) await page.wheel(await midAt(), -240);
+    if (inSteps) await settled("the reset zoom to be applied");
     await page.eval("window.__wheels = []");
     return read();
   };
@@ -724,8 +991,10 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   const gesture = async (what, run, { inSteps = 0 } = {}) => {
     const was = await reset(inSteps);
     await run();
-    await page.frames(6);
-    const now = await read();
+    // The readout is read once the surface has applied the gesture, never after a frame count: how
+    // many frames a wheel or a drag takes to reach the view is the box's business, and reading too
+    // early reports a gesture that arrived as one that did nothing.
+    const now = await settled(`${what} to be applied and the readout to settle`);
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     t.diagnostic(`${what}: freq ${was.freq} → ${now.freq} · time ${was.time} → ${now.time} · ${now.level}`);
     t.diagnostic(`${what}: ${wheels.length} wheel event(s) reached the page` +
@@ -738,15 +1007,17 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // ——— 1. DRAG PANS BOTH AXES ———
   // Diagonal, so a handler that fed one component to both axes — or measured travel as the sum of
   // the two, which is T-407's defect — would show up as the wrong axis moving.
-  const drag = await gesture("drag (diagonal)", () =>
-    page.drag(mid, { x: mid.x - 240, y: mid.y + 140 }, 12), { inSteps: 2 });
+  const drag = await gesture("drag (diagonal)", async () => {
+    const m = await midAt();
+    await page.drag(m, { x: m.x - 240, y: m.y + 140 }, 12);
+  }, { inSteps: 2 });
   assert.ok(drag.freqMoved, "a drag must pan the FREQUENCY axis");
   assert.ok(drag.timeMoved, "a drag must pan the TIME axis: both axes, in one gesture");
   assert.deepEqual(levels(drag.now), levels(drag.was), "a pan must not change either pyramid level");
 
   // ——— 2. PLAIN WHEEL: UNIFORM ZOOM, BOTH AXES ———
   const plain = await gesture("plain wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240);
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240);
   });
   assert.equal(plain.wheels.length, 2, "the browser did not deliver the plain wheels to the page at all");
   assert.ok(plain.wheels.every((w) => !w.shift && !w.alt && !w.ctrl && !w.meta),
@@ -767,7 +1038,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
 
   // ——— 3. SHIFT + WHEEL: FREQUENCY ONLY ———
   const shift = await gesture("shift + wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { shift: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { shift: true });
   });
   assert.ok(shift.wheels.length > 0 && shift.wheels.every((w) => w.shift),
     `the browser did not deliver shiftKey on the wheel: ${JSON.stringify(shift.wheels)}`);
@@ -778,7 +1049,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // ——— 4. ALT / OPTION + WHEEL: TIME ONLY ———
   // The binding the whole ticket turns on, and the one a unit test cannot speak for.
   const alt = await gesture("alt + wheel", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { alt: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { alt: true });
   });
   assert.ok(alt.wheels.length > 0, "the browser delivered NO wheel event at all when alt was held — " +
     "alt+wheel is being consumed before the page sees it, and the time axis has no modifier");
@@ -795,7 +1066,7 @@ test("T-456: drag pans, a plain wheel zooms BOTH axes, and the modifiers reach t
   // surface. The renderer-level answer below is reported for exactly what it is worth — it says
   // nothing about the window server, which is the reason the binding is alt.
   const ctrl = await gesture("ctrl + wheel (unbound: expected to behave as a plain wheel)", async () => {
-    for (let i = 0; i < 2; i++) await page.wheel(mid, -240, { ctrl: true });
+    for (let i = 0; i < 2; i++) await page.wheel(await midAt(), -240, { ctrl: true });
   });
   const zoom = JSON.parse(await page.eval(ZOOM_NOW));
   t.diagnostic(`ctrl + wheel: devicePixelRatio ${zoom.base.dpr} → ${zoom.dpr}, ` +
@@ -926,6 +1197,10 @@ const MAX_STEPS = 60;
 const PROBE_STEPS = 4;
 
 test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt each still move one", async (t) => {
+  // **Before the browser, because the page reads the bounds once at load** — see
+  // [[waitForTimeRoom]]. Run alone, this test met a record barely wider than its own zoom floor and
+  // reported the result as a welded axis.
+  await waitForTimeRoom(t);
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -935,10 +1210,45 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     `(${STATUS}.match(/(\\d+) uploads/)?.[1] | 0) > 0`, { timeoutMs: 90000 });
   assert.equal(await page.eval(INSTALL_PROBE), true);
 
-  const rect = await page.$rect('[data-slot="canvas"]');
-  // Off-centre on both axes, so the two anchors differ and a gesture that fed one to both would show.
-  const at = { x: rect.x + rect.w * 0.42, y: rect.y + rect.h * 0.35 };
+  /**
+   * The gesture point, **re-derived from the canvas's box for every wheel**.
+   *
+   * Off-centre on both axes, so the two anchors differ and a gesture that fed one to both would
+   * show. Re-derived rather than taken once, because the layout moves while this test runs: T-505
+   * put the tier inside every viewport row's level cell, and this test drives the level from 11 to
+   * 8 and the frequency span from megahertz to megahertz, so the row wraps and un-wraps and the
+   * canvas slides with it.
+   *
+   * That matters here more than anywhere else in this file, because of what `input.ts` does in what
+   * order: it `preventDefault`s **every** wheel over the canvas before it decides which viewport
+   * the point is over, and `SurfacePreview.wheel` returns silently when the point is over no pane.
+   * So a wheel delivered at a stale point arrives at `window`, is recorded by the probe, reports
+   * `defaultPrevented: true` — and moves nothing. Every "did not move the time axis" check below
+   * would read that as the surface refusing the gesture, which is the opposite finding, and is what
+   * *"4 alt wheels outward did not move the time axis (−21 s): it is welded shut"* looked like in
+   * the gate's pooled run and never looked like alone.
+   */
+  const atNow = async () => {
+    const r = await page.$rect('[data-slot="canvas"]');
+    assert.ok(r && r.w > 100 && r.h > 100, `the canvas has no box to gesture on: ${JSON.stringify(r)}`);
+    return { x: r.x + r.w * 0.42, y: r.y + r.h * 0.35 };
+  };
   const read = async () => page.eval(PANE_ROW);
+  /**
+   * Wait for the surface to APPLY what was just dispatched, and hand back the settled row.
+   *
+   * Never a frame count: how many frames a wheel takes to reach the view is a fact about the box.
+   * Settling on "the readout stopped changing" is the right wait before both shapes of assertion in
+   * this test and can manufacture neither — a wheel the surface clamps settles at once on the old
+   * value and still fails a `notEqual`, and one that moves the view is still judged on where it
+   * landed. This preview holds a fixed edge (see the header), so a settled readout here is view
+   * state and not lag.
+   */
+  const settle = async (what) => {
+    const r = await page.waitUntilStill(what, `JSON.stringify(${PANE_ROW})`,
+      { stable: 3, framesEach: 4, timeoutMs: 15000 });
+    return JSON.parse(r.value);
+  };
   const same = (a, b) => a.freq === b.freq && a.time === b.time && a.level === b.level;
   const show = (r) => `${r.freq} · ${r.time} · ${r.level}`;
 
@@ -953,13 +1263,12 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     "that follows a live edge the offset drifts with wall-clock lag, and then neither an equal nor a " +
     "notEqual on it means anything — this preview is supposed to hold a fixed edge.");
 
-  /** One wheel, and everything the readout says. */
+  /** One wheel, and everything the readout says once the surface has applied it. */
   const wheel = async (mods = {}, deltaY = -240) => {
     const was = await read();
     await page.eval("window.__wheels = []");
-    await page.wheel(at, deltaY, mods);
-    await page.frames(4);
-    const now = await read();
+    await page.wheel(await atNow(), deltaY, mods);
+    const now = await settle("the surface to apply the wheel");
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     return { was, now, wheels, moved: !same(was, now) };
   };
@@ -968,9 +1277,8 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
   const probe = async (mods, deltaY) => {
     const was = await read();
     await page.eval("window.__wheels = []");
-    for (let i = 0; i < PROBE_STEPS; i++) await page.wheel(at, deltaY, mods);
-    await page.frames(6);
-    const now = await read();
+    for (let i = 0; i < PROBE_STEPS; i++) await page.wheel(await atNow(), deltaY, mods);
+    const now = await settle(`the surface to apply ${PROBE_STEPS} ${JSON.stringify(mods)} wheels`);
     const wheels = JSON.parse(await page.eval("JSON.stringify(window.__wheels)"));
     assert.equal(wheels.length, PROBE_STEPS,
       `the browser delivered ${wheels.length} of ${PROBE_STEPS} wheels for ${JSON.stringify(mods)} — ` +
@@ -981,8 +1289,7 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
 
   // ——— out to the whole surface, then wheel IN until the uniform gesture stops ———
   await page.click(BUTTON("Whole surface"));
-  await page.frames(4);
-  t.diagnostic(`whole surface: ${show(await read())}`);
+  t.diagnostic(`whole surface: ${show(await settle("Whole surface to be applied"))}`);
 
   let steps = 0;
   for (let i = 0; i < MAX_STEPS; i++) {
@@ -1027,6 +1334,8 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
     "the plain wheel above did not stop because TIME ran out. This run reached some other bound, and " +
     "(c) below would be measuring the wrong thing.");
   assert.equal(altIn.now.freq, held.freq, "alt + wheel moved the FREQUENCY axis: the axes are welded");
+  t.diagnostic(`alt + wheel inward at the lock: time window [${held.t0Ns}, ${held.t1Ns}] → ` +
+    `[${altIn.now.t0Ns}, ${altIn.now.t1Ns}] ns`);
 
   // ——— (c) FREQUENCY HAD ROOM: shift inward still moves it, and only it ———
   // The assertion that makes (a) mean something. Without it, "a plain wheel moved neither axis" is
@@ -1049,11 +1358,23 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
   // still INDEPENDENT: alt moves time and leaves the frequency window exactly where it was. The fix
   // that would quietly undo T-434/T-438/T-440 — keeping the pixels square by welding the two axes
   // together — cannot produce either (c) or (d).
+  //
+  // **Judged on the time WINDOW, not on the label** (the 09-22 gate red). The label is the pane's top
+  // edge as an offset from the live edge, rounded to whole seconds past 10 s — and an outward zoom
+  // anchored 35 % down a pane at the time floor moves that top by about a second, so the same real
+  // move read `−24 s → −23 s` on one run and `−21 s → −21 s` on another, depending only on where the
+  // fraction fell. What alt+wheel outward must do is WIDEN the time span; that is read from the
+  // pane's own window, exactly, and a welded axis leaves it bit-for-bit unchanged.
   const base = await read();
   const altOut = await probe({ alt: true }, 240);
-  t.diagnostic(`alt + wheel outward: time ${base.time} → ${altOut.now.time}, frequency ${altOut.now.freq}`);
-  assert.notEqual(altOut.now.time, base.time,
-    `${PROBE_STEPS} alt wheels outward did not move the time axis (${base.time}): it is welded shut`);
+  const spanS = (r) => (r.t1Ns - r.t0Ns) / 1e9;
+  assert.ok(Number.isFinite(spanS(base)) && spanS(base) > 0 && Number.isFinite(spanS(altOut.now)),
+    `the pane row does not state its time window (data-t0-ns/data-t1-ns): ${JSON.stringify(base)}`);
+  t.diagnostic(`alt + wheel outward: time span ${spanS(base).toFixed(3)} s → ${spanS(altOut.now).toFixed(3)} s ` +
+    `(x${(spanS(altOut.now) / spanS(base)).toFixed(2)}), label ${base.time} → ${altOut.now.time}, frequency ${altOut.now.freq}`);
+  assert.ok(spanS(altOut.now) > spanS(base),
+    `${PROBE_STEPS} alt wheels outward did not widen the time axis (span ${spanS(base)} s → ` +
+    `${spanS(altOut.now)} s, label ${base.time}): it is welded shut`);
   assert.equal(altOut.now.freq, base.freq,
     `alt + wheel outward moved the FREQUENCY axis (${base.freq} → ${altOut.now.freq})`);
 
@@ -1079,6 +1400,9 @@ test("T-472: at the bound a plain wheel moves NEITHER axis, while shift and alt 
 // attribute must go to `false`. A guard that could not observe the pane leaving live would pass
 // step 1 no matter what the client did.
 test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag back to the edge returns it", async (t) => {
+  // The same premise, for the same reason ([[waitForTimeRoom]]): this test zooms the time axis in
+  // and then scrubs 160 px along it, and neither is a gesture on a record with no room in it.
+  await waitForTimeRoom(t);
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page();
@@ -1121,6 +1445,60 @@ test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag 
     return now;
   };
 
+  /** The pane's own offset behind the live edge, in seconds, off the readout it already prints. */
+  const LAG_S = `(() => {
+    const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const where = v?.querySelector('.hk-surface-where')?.textContent ?? '';
+    const label = (where.split(' \u00b7 ')[1] ?? '').trim();
+    if (label === 'LIVE') return 0;
+    // Parsed the way paneSpanBoundS parses the ruler, and deliberately NOT anchored on the sign:
+    // the label's leading minus is a typographic one, and a regex that assumed which codepoint it
+    // was reported every reading as unreadable while the number was right there.
+    const mm = /([\\d.]+) m ([\\d.]+) s/.exec(label);
+    if (mm) return Number(mm[1]) * 60 + Number(mm[2]);
+    const m = /([\\d.]+) (ms|s|h)/.exec(label);
+    if (!m) return null;
+    return Number(m[1]) * { ms: 1e-3, s: 1, h: 3600 }[m[2]];
+  })()`;
+
+  /**
+   * **A drag back to the edge whose RELEASE is taken from the pane's own position, not from a step
+   * count** (the deflake, 2026-09-22).
+   *
+   * `settleTime` re-follows only when the release lands inside the snap-back zone — `snapPx` device
+   * pixels of the pane's own height, a fraction of a second of capture time at this zoom. But the
+   * two sides of that comparison come from two different clocks: the window was clamped against the
+   * edge the pane model knew on its **last rendered frame**, and the release is measured against
+   * the edge the **stream** has reached by the time the pointer lifts. The residual lag at release
+   * is therefore exactly "how long since this page last rendered" — microseconds on a quiet box,
+   * hundreds of milliseconds beside three other lanes and a bounded worker, where this failed as
+   * *"a drag released at the live edge left the pane frozen"* and passed alone every time.
+   *
+   * So the pointer is walked a frame at a time, and then nudged a pixel at a time until the pane
+   * says it has come to rest AT the edge — and released immediately after that frame, so what is
+   * released against is what was last drawn. The claim is untouched: a client that does not snap
+   * back never re-follows, whatever the lag at release was, and still fails below with it printed.
+   */
+  const dragBackToEdge = async (dy, steps, { restS = 0.05, nudges = 40 } = {}) => {
+    let y = mid.y;
+    await page.mouse("mousePressed", mid.x, y, { buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= steps; i++) {
+      y = mid.y + (dy * i) / steps;
+      await page.mouse("mouseMoved", mid.x, y, { buttons: 1 });
+      await page.frames(1);
+    }
+    let lag = await page.eval(LAG_S), used = 0;
+    for (; used < nudges && (lag === null || lag > restS); used++) {
+      y += 1;
+      await page.mouse("mouseMoved", mid.x, y, { buttons: 1 });
+      await page.frames(1);
+      lag = await page.eval(LAG_S);
+    }
+    await page.mouse("mouseReleased", mid.x, y, { buttons: 0, clickCount: 1 });
+    await page.frames(6);
+    return { lag, used, following: await follow() };
+  };
+
   // 1. THE REPORTED DEFECT. One pixel, straight up the time axis — a twitch, not a scrub.
   assert.deepEqual(await step("a 1 px time-pan", -1, 1), ["true"],
     "a 1 px time-pan dropped the pane out of live: this is the dead zone the user asked for, twice");
@@ -1131,6 +1509,12 @@ test("T-486: a 1 px time-pan keeps the pane LIVE; a real drag pauses it; a drag 
 
   // 3. AND BACK. A drag hard toward the edge clamps against it, and the release is a return to live
   //    rather than a pause a few rows short of it — with rows appending under the cursor throughout.
-  assert.deepEqual(await step("a drag back to the live edge", 420, 14), ["true"],
-    "a drag released at the live edge left the pane frozen — the second half of the report");
+  const back = await dragBackToEdge(420, 14);
+  t.diagnostic(`a drag back to the live edge (420 px, then ${back.used} one-pixel nudge(s)): the pane ` +
+    `reported itself ${back.lag === null ? "at an unreadable offset" : `${(back.lag * 1000).toFixed(0)} ms`} ` +
+    `behind the edge at the release · data-following = ${JSON.stringify(back.following)}`);
+  assert.deepEqual(back.following, ["true"],
+    "a drag released at the live edge left the pane frozen — the second half of the report " +
+    `(the pane put itself ${back.lag === null ? "?" : (back.lag * 1000).toFixed(0)} ms behind the edge ` +
+    `when the pointer lifted, after ${back.used} nudge(s))`);
 });

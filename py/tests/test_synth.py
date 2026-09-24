@@ -30,8 +30,14 @@ from hkpy.synth.__main__ import main as cli_main
 #: Small parameter sets so the suite stays fast.
 SMALL: dict[str, dict] = {
     "tone": {},
+    "nbfm_voice": {"duration_s": 0.3},
+    "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
+    "c4fm_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
+    # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
+    # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
+    "multipath_echo": {"duration_s": 0.6},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
@@ -43,12 +49,17 @@ SMALL: dict[str, dict] = {
     "trunk_control_channel": {"duration_s": 0.2},
     "trunk_tsbk_control_channel": {"duration_s": 0.2},
     "trunk_encrypted_control_channel": {"duration_s": 0.2},
+    "trunk_p25p2_control_channel": {"duration_s": 0.2},
+    "trunk_voice_frames_control_channel": {"duration_s": 0.5},
     "trunk_dmr_control_channel": {"duration_s": 0.2},
     "trunk_nxdn_control_channel": {"duration_s": 0.2},
     "lora_ism_burst": {"duration_s": 0.15, "sf": 7, "first_packet_s": 0.02,
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
     "mismatched_hypothesis": {"duration_s": 0.3},
+    "ofdm_nonstandard_cp": {"duration_s": 0.1},
+    "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
+    "qam16_unframed": {"duration_s": 0.1},
 }
 
 
@@ -360,6 +371,65 @@ def test_fsk_bursts_demodulate_to_truth_bits_with_valid_crc(tmp_path, impaired):
             assert abs(db(np.mean(np.abs(x[s : s + n]) ** 2) - noise) - t["power_dbfs"]) < 0.5
 
 
+@pytest.mark.parametrize("width", [8, 16, 24, 32])
+def test_fsk_check_width_is_parameterised_and_round_trips(tmp_path, width):
+    """T-622: docs/22 A7 needs CRC-8/16/24/32 on the generic generator; ADR-0022 SS4.3 lowered
+    the confirm-gate width floor to 8."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", check_width=width))
+    st = scenario_truth(meta)
+    bursts = truths(meta, kind="fsk-burst")
+    assert len(bursts) >= 2
+    assert st["emitter"]["crc"]["width"] == width
+    hex_width = width // 4
+    for _, t in bursts:
+        assert t["crc"]["width"] == width
+        payload = bytes.fromhex(t["frame"]["payload_hex"])
+        params = t["crc"]
+        # Independent reference: the bit-serial RevEng engine, over the params truth states.
+        crc = fsk_mod.crc_generic(payload, width, int(params["poly"], 16), int(params["init"], 16),
+                                   params["refin"], params["refout"], int(params["xorout"], 16))
+        assert f"{crc:0{hex_width}x}" == t["frame"]["crc_hex"] == params["value"][2:]
+        assert len(t["frame"]["crc_hex"]) == hex_width
+        assert t["frame"]["layout"][-1] == {"field": "check", "bits": width,
+                                            "covers": "sensor_id..flags (6 bytes)"}
+        assert params["start_bit"] == t["frame"]["preamble_bits"] + 16  # sync is always 2 bytes
+
+
+def test_fsk_off_catalogue_polynomial_is_flagged_and_not_recognised(tmp_path):
+    """T-622 / docs/22 A7: a polynomial not in the RevEng catalogue, so a structured signal
+    exists whose check cannot be looked up."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", check_width=16, check_poly_hex="0x8F45"))
+    _, t = truths(meta, kind="fsk-burst")[0]
+    assert t["crc"]["poly"] == "0x8f45"
+    assert t["crc"]["in_reveng_catalogue"] is False
+    assert t["crc"]["catalogue_name"] is None
+    assert fsk_mod.crc_catalogue_name(16, 0x8F45, 0xFFFF, False, False, 0) is None
+    # The default (no override) still lands exactly on the historical CRC-16/CCITT-FALSE, so
+    # existing fixtures and their byte-identical determinism are unaffected by this feature.
+    _, meta_default, _ = load(gen(tmp_path, "fsk_burst_train"))
+    _, td = truths(meta_default, kind="fsk-burst")[0]
+    assert td["crc"]["catalogue_name"] == "CRC-16/CCITT-FALSE" and td["crc"]["in_reveng_catalogue"]
+
+
+def test_fsk_constant_payload_beacon_repeats_the_same_frame(tmp_path):
+    """T-622 / docs/22 P7, ADR-0022 SS4.2: a beacon must NOT confirm on repeat count alone -
+    `differences` (chance-corrected) stays 1 for a beacon how ever many bursts are sent, unlike
+    `distinct_valid`, which counts every valid frame. This fixture is the case that exercises it:
+    every burst carries the identical payload and therefore the identical CRC."""
+    _, meta, _ = load(gen(tmp_path, "fsk_burst_train", constant_payload=True))
+    st = scenario_truth(meta)
+    bursts = truths(meta, kind="fsk-burst")
+    assert len(bursts) >= 3 and st["emitter"]["constant_payload"] is True
+    payloads = {t["frame"]["payload_hex"] for _, t in bursts}
+    crcs = {t["frame"]["crc_hex"] for _, t in bursts}
+    assert len(payloads) == 1 and len(crcs) == 1
+    # A non-beacon run (the default) varies payload/CRC frame to frame.
+    _, meta_varying, _ = load(gen(tmp_path, "fsk_burst_train"))
+    varying_bursts = truths(meta_varying, kind="fsk-burst")
+    assert len(varying_bursts) >= 3
+    assert len({t["frame"]["payload_hex"] for _, t in varying_bursts}) > 1
+
+
 def st_floor(meta):
     [(_, fl)] = truths(meta, role="floor")
     return fl["expected_floor_dbfs"]
@@ -463,6 +533,81 @@ def test_encrypted_trunk_scene_stages_an_encrypted_grant_and_a_late_entry_channe
     # All four granted frequencies are distinct, so no assertion can be satisfied by the wrong one.
     assert len({e["encrypted_target_hz"], e["late_entry_target_hz"],
                 t["follow_target_hz"], t["grant_target_hz"]}) == 4
+
+
+def test_p25_voice_frame_codes_have_the_properties_the_decoder_relies_on():
+    """T-849: the NID, hexbit and Reed-Solomon codes this encoder writes are the codes they claim.
+
+    Checked by property rather than by a second copy of the same arithmetic: every NID codeword is
+    a multiple of the BCH generator (and the generator divides x^63 + 1, as a cyclic code's must);
+    the Hamming code has minimum distance 3; and every RS codeword vanishes at alpha^1..alpha^(n-k).
+    """
+    from hkpy.synth import trunking as tk
+
+    g = tk.P25_NID_BCH_GENERATOR
+    assert g.bit_length() - 1 == 47
+
+    def polymod(a: int, m: int) -> int:
+        while a.bit_length() >= m.bit_length():
+            a ^= m << (a.bit_length() - m.bit_length())
+        return a
+
+    assert polymod((1 << 63) | 1, g) == 0, "a BCH(63,16) generator divides x^63 + 1"
+    for nac, duid in ((0x293, tk.P25_DUID_LDU1), (0xF7E, tk.P25_DUID_LDU2), (0, 0), (0xFFF, 0xF)):
+        nid = tk.p25_nid(nac, duid)
+        assert nid >> 48 == (nac << 4) | duid, "systematic: NAC and DUID lead"
+        assert polymod(nid >> 1, g) == 0
+        assert bin(nid).count("1") % 2 == 0, "trailing even parity"
+
+    words = [tk.hamming_10_6(d) for d in range(64)]
+    assert min(bin(a ^ b).count("1") for i, a in enumerate(words) for b in words[i + 1:]) == 3
+
+    rng = np.random.default_rng(849)
+    for k in (12, 16):
+        data = [int(v) for v in rng.integers(0, 64, k)]
+        cw = data + tk.rs64_parity(data, 24)
+        for j in range(1, 24 - k + 1):
+            acc = 0
+            for s in cw:  # Horner, first symbol = highest power
+                acc = tk._gf_mul(acc, tk._GF_EXP[j % 63]) ^ s
+            assert acc == 0, f"RS(24,{k}) codeword is not zero at alpha^{j}"
+
+    ldu = tk.p25_ldu_dibits(tk.P25_DUID_LDU1, tk.p25_lc_group_voice(1, 2), rng)
+    assert len(ldu) == tk.P25_LDU_DIBITS
+    assert list(ldu[:24]) == list(tk.sync_dibits())
+    assert all(ldu[i] == 0b10 for i in range(35, tk.P25_LDU_DIBITS, 36)), "status dibits"
+
+
+def test_voice_frames_scene_stages_a_clear_and_an_encrypted_call_the_grants_cannot_tell_apart(
+        tmp_path):
+    """T-849: two granted channels whose LDU2 ALGIDs differ while their grants say nothing."""
+    manifest = gen(tmp_path, "trunk_voice_frames_control_channel")
+    _, meta, _ = load(manifest)
+    t = scenario_truth(meta)["trunking"]["tsbk"]
+    vf = t["voice_frames"]
+    chans = {c["name"]: c for c in vf["channels"]}
+    assert set(chans) == {"clear", "encrypted"}
+    assert chans["clear"]["algid"] == 0x80 and chans["encrypted"]["algid"] != 0x80
+    for name, c in chans.items():
+        assert t["base_hz"] + t["spacing_hz"] * c["channel"] == c["target_hz"]
+        assert c["channel_16bit"] == (t["iden"] << 12) | c["channel"]
+        assert c["grant_service_options"] == 0, "the grant must state nothing about encryption"
+        assert t["counts"][f"grant-voice-frames-{name}"] >= 1
+        assert abs(c["offset_hz"]) < 0.4 * t["sample_rate_hz"], "inside the window"
+        # The first keying holds a whole LDU1 and a whole LDU2 inside the hunt's first 0.5 s.
+        duids = [u["duid"] for u in c["ldus"] if u["start_s"] + 0.18 <= 0.5]
+        assert "ldu1" in duids and "ldu2" in duids, c["ldus"]
+        assert c["keyings_s"][0][1] + 0.09 < 0.5, "its end is observable inside the window"
+    assert chans["clear"]["target_hz"] != chans["encrypted"]["target_hz"]
+    assert len({c["target_hz"] for c in chans.values()}
+               | {t["follow_target_hz"], t["grant_target_hz"]}) == 4
+
+
+def test_trunk_scenes_without_voice_frames_carry_none(tmp_path):
+    """The voice-frame branch is off by default: no earlier scene grows voice-frame truth."""
+    manifest = gen(tmp_path, "trunk_tsbk_control_channel")
+    _, meta, _ = load(manifest)
+    assert "voice_frames" not in scenario_truth(meta)["trunking"]["tsbk"]
 
 
 def test_tsbk_trunk_scene_is_unchanged_by_the_encryption_branch(tmp_path):
@@ -1421,14 +1566,25 @@ def test_retune_diversity_emitters_stay_put_and_artefacts_move_with_the_lo(tmp_p
             # Fixed LO offset: the absolute frequency changes with the centre.
             power = tone_power_dbfs(seg, fs, offset)
             assert power > floor + 6, f"artefact at offset {offset} missing at centre {centre}"
+        # T-599: an IQ image, fixed in the invariant f - 2*f_LO, so its baseband offset (and
+        # absolute frequency) changes with the centre at TWICE the LO's own step.
+        image_offset = 2.0 * centre - st["image_source_hz"] - centre
+        power = tone_power_dbfs(seg, fs, image_offset)
+        assert power > floor + 6, f"IQ image missing at centre {centre}"
 
     # The annotations say the same thing.
     for _, t in truths(meta, role="emission"):
         assert t["center_hz"] in st["emitters_hz"]
     for _, t in truths(meta, role="artefact"):
-        assert t["kind"] in ("dc-offset", "lo-spur")
-        assert t["offset_hz"] in st["lo_relative_offsets_hz"]
-        assert t["center_hz"] - t["offset_hz"] in centres
+        assert t["kind"] in ("dc-offset", "lo-spur", "iq-image")
+        if t["kind"] == "iq-image":
+            # Fixed in the invariant f - 2*f_LO, not in a fixed LO offset.
+            centre = t["center_hz"] - t["offset_hz"]
+            assert centre in centres
+            assert t["center_hz"] - 2.0 * centre == pytest.approx(-st["image_source_hz"])
+        else:
+            assert t["offset_hz"] in st["lo_relative_offsets_hz"]
+            assert t["center_hz"] - t["offset_hz"] in centres
 
 
 def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):
@@ -1436,3 +1592,49 @@ def test_retune_diversity_refuses_a_layout_whose_lines_would_merge(tmp_path):
     signal."""
     with pytest.raises(ValueError, match="minimum separation"):
         gen(tmp_path, "retune_diversity", lo_spur_offset_hz=20e3)
+
+
+# ---- c4fm_burst_train check parameterisation (T-850) -------------------------------------------
+
+
+def _crc_ok(t):
+    c = t["check"]
+    payload = bytes.fromhex(t["frame"]["payload_hex"])
+    crc = fsk_mod.crc_generic(payload, c["width"], int(c["poly"], 16), int(c["init"], 16),
+                              c["refin"], c["refout"], int(c["xorout"], 16))
+    assert f"0x{crc:0{c['width'] // 4}x}" == c["value"]
+    assert t["frame"]["body_hex"] == t["frame"]["payload_hex"] + c["value"][2:]
+
+
+@pytest.mark.parametrize("width", [8, 16, 24, 32])
+def test_c4fm_crc_width_round_trips(tmp_path, width):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_width=width))
+    bursts = truths(meta, kind="c4fm-burst")
+    assert len(bursts) >= 2
+    assert scenario_truth(meta)["emitter"]["crc"]["width"] == width
+    for _, t in bursts:
+        assert t["modulation"] == "c4fm" and t["levels"] == 4
+        _crc_ok(t)
+
+
+def test_c4fm_searched_crc_is_in_catalogue_and_random_poly_is_not(tmp_path):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", crc_source="searched", seed=3))
+    _, t = truths(meta, kind="c4fm-burst")[0]
+    assert t["check"]["in_reveng_catalogue"] and t["check"]["source"] == "searched"
+    _crc_ok(t)
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", crc_source="random", check_width=24))
+    _, t = truths(meta, kind="c4fm-burst")[0]
+    assert t["check"]["in_reveng_catalogue"] is False and t["check"]["catalogue_name"] is None
+    _crc_ok(t)
+
+
+def test_c4fm_bch_and_none_and_constant_payload(tmp_path):
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_kind="bch"))
+    for _, t in truths(meta, kind="c4fm-burst"):
+        words = [int(w, 16) for w in t["check"]["codewords_hex"]]
+        assert all(pocsag_mod.bch_encode(w >> 11) == w for w in words)
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", check_kind="nocheck"))
+    assert all(t["check"] is None for _, t in truths(meta, kind="c4fm-burst"))
+    _, meta, _ = load(gen(tmp_path, "c4fm_burst_train", constant_payload=True))
+    bursts = truths(meta, kind="c4fm-burst")
+    assert len(bursts) >= 3 and len({t["frame"]["body_hex"] for _, t in bursts}) == 1

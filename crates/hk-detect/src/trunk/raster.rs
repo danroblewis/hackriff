@@ -163,6 +163,200 @@ where
     })
 }
 
+/// The widest receiver clock error the alias search admits, ppm (T-628).
+///
+/// **A device figure, not a fitted one**: the HackRF One's crystal is specified to ±20 ppm, and
+/// this project's own unit measured −9.6 ppm (`docs/19 §7.6a`). At 851 MHz that is ±17 kHz, which
+/// does **not** pick one 12.5 kHz alias on its own — it bounds the search to three — so the bound
+/// only limits what is tried; what is *chosen* is decided by measurement ([`resolve_alias`]).
+/// A receiver with a TCXO has a tighter bound, and below ~150 MHz the bound alone settles it.
+pub const RECEIVER_CLOCK_BOUND_PPM: f64 = 20.0;
+
+/// Every absolute receiver offset a modulo-`spacing_hz` grid fit of `offset_hz` is consistent
+/// with, within `±bound_ppm` of `center_hz` — nearest zero first, ties to the negative side.
+///
+/// [`GridFit::offset_hz`] is known only modulo the spacing: +4300 Hz and −8200 Hz name the same
+/// 12.5 kHz grid. These are the candidates; empty means the fit itself sits beyond the bound,
+/// which is a receiver this search does not claim to understand.
+pub fn grid_aliases(offset_hz: f64, spacing_hz: f64, center_hz: f64, bound_ppm: f64) -> Vec<f64> {
+    let bound = bound_ppm.abs() * 1e-6 * center_hz.abs();
+    let usable =
+        offset_hz.is_finite() && spacing_hz.is_finite() && spacing_hz > 0.0 && bound.is_finite();
+    if !usable {
+        return Vec::new();
+    }
+    let lo = ((-bound - offset_hz) / spacing_hz).ceil() as i64;
+    let hi = ((bound - offset_hz) / spacing_hz).floor() as i64;
+    let mut out: Vec<f64> = (lo..=hi)
+        .map(|m| offset_hz + m as f64 * spacing_hz)
+        .collect();
+    out.sort_by(|a, b| a.abs().total_cmp(&b.abs()).then(a.total_cmp(b)));
+    out
+}
+
+/// The receiver's clock offset modulo `spacing_hz`, from a grid fit made relative to the tuned
+/// centre, given one absolute channel frequency on that grid (T-560).
+///
+/// [`GridFit::offset_hz`] is the phase of the received emissions **relative to the tuned centre**,
+/// so it holds two things at once: the receiver's clock error, and where the tuned centre itself
+/// sits against the channel grid. Tune 852.456 MHz on the 851.0125 + k·12.5 kHz raster and the
+/// centre is 6 kHz off a channel *before* any clock error — reading that fit as the clock would
+/// misstate the receiver by 6 kHz and send every grant to the channel next door. A granted
+/// frequency is an absolute transmit frequency on the real grid (announced by the system itself,
+/// not looked up), so its phase against the tuned centre is known exactly and is removed here,
+/// leaving the clock alone. A centre tuned on a channel gives back `grid_offset_hz` unchanged.
+///
+/// Result in `(-spacing/2, spacing/2]`; NaN when an input is unusable.
+pub fn clock_offset_mod_grid(
+    grid_offset_hz: f64,
+    spacing_hz: f64,
+    tune_center_hz: f64,
+    channel_hz: f64,
+) -> f64 {
+    let usable = grid_offset_hz.is_finite()
+        && spacing_hz.is_finite()
+        && spacing_hz > 0.0
+        && tune_center_hz.is_finite()
+        && channel_hz.is_finite();
+    if !usable {
+        return f64::NAN;
+    }
+    let phase = (channel_hz - tune_center_hz).rem_euclid(spacing_hz);
+    let m = (grid_offset_hz - phase).rem_euclid(spacing_hz);
+    if m > spacing_hz / 2.0 {
+        m - spacing_hz
+    } else {
+        m
+    }
+}
+
+/// What one candidate alias measured on the granted channels (T-628).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AliasScore {
+    /// The absolute receiver offset tried, Hz.
+    pub offset_hz: f64,
+    /// Granted channels measured under it.
+    pub targets: usize,
+    /// Of those, how many actually carried a transmission.
+    pub occupied: usize,
+}
+
+/// How a receiver's grid alias was settled, or why it was not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AliasResolution {
+    /// One alias, chosen by the evidence named.
+    Resolved {
+        /// The receiver's absolute offset, Hz: add it to a transmit frequency to find where the
+        /// emission lands in the received spectrum.
+        offset_hz: f64,
+        /// What chose it.
+        by: AliasEvidence,
+        /// Aliases the clock bound admitted.
+        candidates: usize,
+        /// Granted channels measured per alias (0 when the bound alone decided).
+        targets: usize,
+        /// Granted channels the winner found carrying energy.
+        occupied: usize,
+        /// The best any *other* alias managed.
+        runner_up: usize,
+    },
+    /// Tried and not settled: following would measure a guess, so it does not happen.
+    Unresolved {
+        /// Aliases the clock bound admitted.
+        candidates: usize,
+        /// Granted channels measured per alias.
+        targets: usize,
+        /// Best occupied count any alias reached.
+        best: usize,
+        /// Why nothing won.
+        why: AliasUnresolved,
+    },
+}
+
+/// What chose a resolved alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasEvidence {
+    /// The receiver's clock bound admits only one alias: nothing to measure.
+    ClockBound,
+    /// Of the admitted aliases, exactly one put energy on more granted channels than any other.
+    GrantedChannelEnergy,
+}
+
+/// Why an alias search did not settle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AliasUnresolved {
+    /// The fitted offset is already beyond the clock bound: no admissible alias at all.
+    NoAliasInBound,
+    /// No alias found energy on any granted channel.
+    NothingOccupied,
+    /// Two or more aliases found energy on equally many granted channels.
+    Tied,
+}
+
+/// Settles an alias from per-alias measurements: **the one alias whose granted channels carry the
+/// most transmissions, if it is unique.**
+///
+/// A grant is an absolute transmit frequency, so the right alias puts every granted channel on
+/// the energy the grant announced, and a wrong one puts it on the channel next door — which may be
+/// quiet or may be busy with something else. A tie is therefore reported, never broken: breaking
+/// it by the smaller offset would be assuming the receiver is nearly on frequency, which is the
+/// assumption this exists to replace, and a wrong pick measures the neighbour's traffic as the
+/// granted call. One admissible alias needs no measurement at all.
+pub fn resolve_alias(scores: &[AliasScore]) -> AliasResolution {
+    let candidates = scores.len();
+    let targets = scores.iter().map(|s| s.targets).max().unwrap_or(0);
+    match scores {
+        [] => AliasResolution::Unresolved {
+            candidates,
+            targets,
+            best: 0,
+            why: AliasUnresolved::NoAliasInBound,
+        },
+        [only] => AliasResolution::Resolved {
+            offset_hz: only.offset_hz,
+            by: AliasEvidence::ClockBound,
+            candidates,
+            targets: only.targets,
+            occupied: only.occupied,
+            runner_up: 0,
+        },
+        _ => {
+            let best = scores.iter().map(|s| s.occupied).max().unwrap_or(0);
+            let winners: Vec<&AliasScore> = scores.iter().filter(|s| s.occupied == best).collect();
+            if best == 0 {
+                return AliasResolution::Unresolved {
+                    candidates,
+                    targets,
+                    best,
+                    why: AliasUnresolved::NothingOccupied,
+                };
+            }
+            if winners.len() > 1 {
+                return AliasResolution::Unresolved {
+                    candidates,
+                    targets,
+                    best,
+                    why: AliasUnresolved::Tied,
+                };
+            }
+            let runner_up = scores
+                .iter()
+                .filter(|s| s.occupied < best)
+                .map(|s| s.occupied)
+                .max()
+                .unwrap_or(0);
+            AliasResolution::Resolved {
+                offset_hz: winners[0].offset_hz,
+                by: AliasEvidence::GrantedChannelEnergy,
+                candidates,
+                targets,
+                occupied: best,
+                runner_up,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +491,133 @@ mod tests {
         assert!(fit_grid_offset(Vec::<(f64, f64)>::new(), 0.5, 12_500.0).is_none());
         assert!(fit_grid_offset([(f64::NAN, 1.0)], 0.5, 12_500.0).is_none());
         assert!(fit_grid_offset([(0.0, f64::NAN)], 0.5, 12_500.0).is_none());
+    }
+    /// The number this exists for: at 851 MHz, the measured -8200 Hz error fits as +4300 Hz, and
+    /// a 20 ppm bound admits exactly three aliases, one of which is the truth.
+    #[test]
+    fn the_clock_bound_limits_the_aliases_to_a_handful_including_the_truth() {
+        let a = grid_aliases(4_300.0, 12_500.0, 851.0125e6, RECEIVER_CLOCK_BOUND_PPM);
+        assert_eq!(a.len(), 3, "{a:?}");
+        assert!((a[0] - 4_300.0).abs() < 1e-6, "nearest zero first: {a:?}");
+        assert!(a.iter().any(|&x| (x + 8_200.0).abs() < 1e-6), "{a:?}");
+        assert!(a.iter().any(|&x| (x - 16_800.0).abs() < 1e-6), "{a:?}");
+        // Every alias is the same grid, and every one is inside the bound.
+        for x in &a {
+            assert!(((x - 4_300.0) / 12_500.0).fract().abs() < 1e-9);
+            assert!(x.abs() <= 20e-6 * 851.0125e6);
+        }
+    }
+
+    /// At VHF the same crystal cannot reach the next alias, so the bound alone settles it.
+    #[test]
+    fn at_vhf_the_bound_alone_leaves_one_alias() {
+        let a = grid_aliases(-1_900.0, 12_500.0, 155e6, RECEIVER_CLOCK_BOUND_PPM);
+        assert_eq!(a, vec![-1_900.0]);
+        match resolve_alias(&[AliasScore {
+            offset_hz: a[0],
+            targets: 0,
+            occupied: 0,
+        }]) {
+            AliasResolution::Resolved { by, offset_hz, .. } => {
+                assert_eq!(by, AliasEvidence::ClockBound);
+                assert_eq!(offset_hz, -1_900.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// T-560: the capture docs/19 §7.6a measured was tuned to 852.456 MHz, which is itself 6 kHz
+    /// off the 851.0125 + k·12.5 kHz raster. The spectrum's grid phase then holds that 6 kHz AND
+    /// the −8200 Hz clock error; only the clock may reach the alias search, or the "resolved"
+    /// receiver is off by the tuning and every grant lands on the channel next door.
+    #[test]
+    fn an_off_raster_tuned_centre_is_removed_so_the_alias_search_sees_only_the_clock() {
+        let (spacing, tune, channel): (f64, f64, f64) = (12_500.0, 852.456e6, 852.4625e6);
+        let clock: f64 = -8_200.0;
+        // What the spectrum shows relative to the tuned centre: channel phase + clock, mod raster.
+        let seen = (channel - tune + clock).rem_euclid(spacing);
+        let seen = if seen > spacing / 2.0 {
+            seen - spacing
+        } else {
+            seen
+        };
+        let naive = grid_aliases(seen, spacing, tune, RECEIVER_CLOCK_BOUND_PPM);
+        assert!(
+            !naive.iter().any(|&x| (x - clock).abs() < 1.0),
+            "the uncorrected phase never offers the true clock: {naive:?}"
+        );
+        let clk = clock_offset_mod_grid(seen, spacing, tune, channel);
+        let aliases = grid_aliases(clk, spacing, tune, RECEIVER_CLOCK_BOUND_PPM);
+        assert!(
+            aliases.iter().any(|&x| (x - clock).abs() < 1e-6),
+            "{aliases:?}"
+        );
+        // On-channel tuning is the identity: nothing changes for a centre on the grid.
+        assert!(
+            (clock_offset_mod_grid(4_300.0, spacing, 851.0125e6, 851.5e6) - 4_300.0).abs() < 1e-6
+        );
+        assert!(clock_offset_mod_grid(f64::NAN, spacing, tune, channel).is_nan());
+        assert!(clock_offset_mod_grid(0.0, 0.0, tune, channel).is_nan());
+    }
+
+    #[test]
+    fn a_fit_beyond_the_bound_or_a_degenerate_grid_admits_no_alias() {
+        // 20 ppm of 100 kHz is 2 Hz; a 4300 Hz fit cannot be reached by any alias of it.
+        assert!(grid_aliases(4_300.0, 12_500.0, 100e3, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(grid_aliases(4_300.0, 0.0, 851e6, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(grid_aliases(f64::NAN, 12_500.0, 851e6, RECEIVER_CLOCK_BOUND_PPM).is_empty());
+        assert!(matches!(
+            resolve_alias(&[]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::NoAliasInBound,
+                ..
+            }
+        ));
+    }
+
+    fn score(offset_hz: f64, occupied: usize) -> AliasScore {
+        AliasScore {
+            offset_hz,
+            targets: 3,
+            occupied,
+        }
+    }
+
+    #[test]
+    fn the_alias_that_finds_the_granted_energy_wins_by_measurement() {
+        let r = resolve_alias(&[score(4_300.0, 0), score(-8_200.0, 3), score(16_800.0, 2)]);
+        assert_eq!(
+            r,
+            AliasResolution::Resolved {
+                offset_hz: -8_200.0,
+                by: AliasEvidence::GrantedChannelEnergy,
+                candidates: 3,
+                targets: 3,
+                occupied: 3,
+                runner_up: 2,
+            }
+        );
+    }
+
+    /// A tie is reported, not broken -- and in particular not broken toward the smaller offset,
+    /// which would be assuming the receiver is nearly on frequency.
+    #[test]
+    fn a_tie_or_silence_is_unresolved_rather_than_guessed() {
+        assert!(matches!(
+            resolve_alias(&[score(4_300.0, 2), score(-8_200.0, 2), score(16_800.0, 0)]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::Tied,
+                best: 2,
+                candidates: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
+            resolve_alias(&[score(4_300.0, 0), score(-8_200.0, 0)]),
+            AliasResolution::Unresolved {
+                why: AliasUnresolved::NothingOccupied,
+                ..
+            }
+        ));
     }
 }

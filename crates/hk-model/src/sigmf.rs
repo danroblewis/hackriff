@@ -8,6 +8,8 @@
 //!   (that segment, overriding global).
 //! - `hackriff:truth`: a free-form ground-truth object on an annotation (synthetic generator,
 //!   valid decodes, hand labels).
+//! - `hackriff:annotation`: a human-authored annotation block (T-816) — `authored: true`, author,
+//!   provenance stamp, collection; structurally distinct from `hackriff:truth`.
 //! - `hackriff:clip_count`: clipped ADC samples within a capture segment. Per segment, not in
 //!   provenance, because provenance is deduplicated by value.
 //!
@@ -31,6 +33,9 @@ pub const HACKRIFF_EXTENSION_VERSION: &str = "0.1.0";
 pub const PROVENANCE_KEY: &str = "hackriff:provenance";
 /// Key for the ground-truth object on an annotation.
 pub const TRUTH_KEY: &str = "hackriff:truth";
+/// Key for a human-authored annotation block (T-816, docs/25 §5): `authored: true`, the author,
+/// the authored-provenance stamp and the collection. Never ground truth.
+pub const AUTHORED_ANNOTATION_KEY: &str = "hackriff:annotation";
 /// Key for the clipped-sample count of a capture segment.
 pub const CLIP_COUNT_KEY: &str = "hackriff:clip_count";
 

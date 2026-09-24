@@ -141,6 +141,7 @@ fn hk_serve_answers_status_and_capture_routes_while_a_144gb_ring_allocates() {
         source: ServeSource::HackRf {
             spec: format!("mock:{}", fixture_path().display()),
             live: LiveArgs::default(),
+            extra: Vec::new(),
         },
         data_dir: Some(dir.clone()),
         // An ephemeral loopback port: never one of the fixed ports a demo or another test binds.

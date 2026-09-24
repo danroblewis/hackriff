@@ -107,7 +107,12 @@ def control_channel_dibits(rng: np.random.Generator, n_frames: int) -> tuple[np.
 #   IDEN_UP args, 64 bits: iden(4) bandwidth(9) offset-sign(1) offset-magnitude(8) spacing(10)
 #                          base(32); base in units of 5 Hz, spacing in units of 125 Hz
 #   GRP_VCH_GRANT args, 64 bits: service options(8) channel(16) group(16) source(24)
-#   A 16-bit channel number is iden(4) then channel(12); f = base + spacing x channel
+#   IDEN_UP_TDMA args, 64 bits: iden(4) channel-type(4) offset-sign(1) offset-magnitude(13)
+#                               spacing(10) base(32); same units, plus a channel type whose slot
+#                               count divides the channel number (T-272)
+#   A 16-bit channel number is iden(4) then channel(12); f = base + spacing x (channel / slots),
+#   and slot = channel % slots -- so on a two-slot TDMA plan, channels 2n and 2n+1 are ONE
+#   frequency on two slots, which is C23's TDMA slot mix-up pitfall
 #
 # STILL NOT STANDARDS-COMPLIANT, deliberately and in the same four ways T-267 recorded: no
 # rate-1/2 trellis code, no interleaving, no status symbols, and CRC-16/CCITT-FALSE where real P25
@@ -117,6 +122,11 @@ def control_channel_dibits(rng: np.random.Generator, n_frames: int) -> tuple[np.
 TSBK_OP_GRP_VCH_GRANT = 0x00
 TSBK_OP_GRP_VCH_GRANT_UPDATE = 0x02
 TSBK_OP_IDEN_UP = 0x3D
+TSBK_OP_IDEN_UP_TDMA = 0x33
+
+#: Slots per carrier for each 4-bit IDEN_UP_TDMA channel type (op25's ``slots_per_carrier``, for
+#: types 0-4; the reserved types are not generated here because the decoder refuses them).
+TDMA_SLOTS_PER_CHANNEL_TYPE = {0: 1, 1: 1, 2: 1, 3: 2, 4: 4}
 
 # --- Service options (T-270) ---------------------------------------------------------------
 #
@@ -175,6 +185,44 @@ def iden_up_args(iden: int, base_hz: float, spacing_hz: float, *, tx_offset_hz: 
     v = ((iden & 0xF) << 60) | (bw << 51) | ((1 if tx_offset_hz >= 0 else 0) << 50) \
         | (mag << 42) | (spacing << 32) | base
     return v.to_bytes(8, "big")
+
+
+def iden_up_tdma_args(iden: int, channel_type: int, base_hz: float, spacing_hz: float,
+                      *, tx_offset_steps: int = 0) -> bytes:
+    """Pack an IDEN_UP_TDMA argument field (T-272). Raises if a value does not encode exactly.
+
+    iden(4) channel-type(4) offset-sign(1) offset-magnitude(13) spacing(10) base(32) = 64 bits.
+    The transmit offset is in units of the channel spacing here, not 250 kHz.
+    """
+    base = round(base_hz / IDEN_BASE_UNIT_HZ)
+    spacing = round(spacing_hz / IDEN_SPACING_UNIT_HZ)
+    if base * IDEN_BASE_UNIT_HZ != base_hz:
+        raise ValueError(f"base {base_hz} Hz is not a whole number of {IDEN_BASE_UNIT_HZ} Hz steps")
+    if spacing * IDEN_SPACING_UNIT_HZ != spacing_hz:
+        raise ValueError(f"spacing {spacing_hz} Hz is not a whole number of "
+                         f"{IDEN_SPACING_UNIT_HZ} Hz steps")
+    if not 0 <= iden <= 0xF or not 0 <= channel_type <= 0xF:
+        raise ValueError("an IDEN_UP_TDMA field is out of range")
+    if not 0 <= spacing <= 0x3FF or not 0 <= base <= 0xFFFF_FFFF or abs(tx_offset_steps) > 0x1FFF:
+        raise ValueError("an IDEN_UP_TDMA field is out of range")
+    v = ((iden & 0xF) << 60) | ((channel_type & 0xF) << 56) \
+        | ((1 if tx_offset_steps >= 0 else 0) << 55) | ((abs(tx_offset_steps) & 0x1FFF) << 42) \
+        | (spacing << 32) | base
+    return v.to_bytes(8, "big")
+
+
+def tdma_channel_number(iden: int, channel: int, slot: int, slots: int) -> int:
+    """The 16-bit channel number naming ``channel`` on ``slot`` of a ``slots``-slot TDMA plan.
+
+    The FREQUENCY and the slot are the truth; this derives the number a grant has to carry to name
+    them, never the other way round -- so a decoder still has to divide by the slot count it read
+    off the air to get back to either.
+    """
+    if slots not in TDMA_SLOTS_PER_CHANNEL_TYPE.values():
+        raise ValueError(f"{slots} is not a slot count any channel type names")
+    if not 0 <= slot < slots:
+        raise ValueError(f"slot {slot} is out of range for {slots} slots")
+    return channel_number(iden, channel * slots + slot)
 
 
 def grant_args(channel: int, talkgroup: int, *, source: int = 0, service_options: int = 0) -> bytes:
@@ -627,3 +675,162 @@ def c4fm(dibits: np.ndarray, sample_rate: float, symbol_rate: float = C4FM_SYMBO
         freq = np.convolve(freq, h / h.sum(), mode="same")
     phase = phase0 + 2 * math.pi * np.cumsum(freq) / sample_rate
     return np.exp(1j * phase)
+
+
+# ---------------------------------------------------------------------------------------------
+# P25 Phase 1 voice frames: LDU1 link control, LDU2 encryption sync (T-849)
+# ---------------------------------------------------------------------------------------------
+#
+# Unlike the TSBK block above, this IS the P25 coding as recalled -- status symbols, the BCH NID,
+# Hamming(10,6,3) hexbits and the two GF(64) Reed-Solomon codes -- because the decoder it feeds
+# (crates/hk-detect/src/trunk/ldu.rs) reads the real layout. Recalled, NOT verified against the
+# standard or a real capture: see that module's docs for what each piece rests on. This encoder is
+# written separately from the Rust one and represents each code differently (the BCH generator as
+# the published octal literal where Rust derives it from GF(64); the Hamming parity from six
+# generator columns where Rust carries the 64-entry table; RS by an LFSR where Rust does long
+# division), so a slip in either implementation does not silently agree with itself.
+#
+#   LDU = sync 48 | NID 64 | IMBE1 | IMBE2 | LC 40 | IMBE3 | LC 40 | IMBE4 | LC 40 | IMBE5 |
+#         LC 40 | IMBE6 | LC 40 | IMBE7 | LC 40 | IMBE8 | LSD 32 | IMBE9     (1680 bits)
+#   then one status dibit after every 35 dibits, counted from the first sync dibit -> 864 dibits.
+#
+# The IMBE and LSD bits are random: nothing reads them, and real IMBE frames would add nothing a
+# decoder of LC/ES could use. No voice exists in this fixture and none can be recovered from it.
+
+#: The published BCH(63,16,23) generator, octal (bit i = coefficient of x^i).
+P25_NID_BCH_GENERATOR = 0o6331_1413_6723_5453
+#: The default network access code (the conventional factory NAC).
+P25_DEFAULT_NAC = 0x293
+P25_DUID_LDU1 = 0x5
+P25_DUID_LDU2 = 0xA
+#: Dibits in one LDU on the air, status symbols included.
+P25_LDU_DIBITS = 864
+#: Seconds one LDU occupies (1728 bits at 9600 bit/s).
+P25_LDU_S = 0.18
+#: First bit of each 40-bit LC/ES block in the de-statused frame.
+P25_LC_BLOCK_STARTS = (400, 584, 768, 952, 1136, 1320)
+#: P25 ALGIDs this scene uses.
+P25_ALGID_CLEAR = 0x80
+P25_ALGID_AES256 = 0x84
+
+#: Hamming(10,6,3) parity of each single data bit, MSB (32) first.
+_HAMMING_COLUMNS = {32: 14, 16: 13, 8: 11, 4: 7, 2: 3, 1: 12}
+
+
+def _gf64_tables() -> tuple[list[int], list[int]]:
+    exp: list[int] = []
+    log = [0] * 64
+    x = 1
+    for i in range(63):
+        exp.append(x)
+        log[x] = i
+        x <<= 1
+        if x & 0x40:
+            x ^= 0x43  # x^6 + x + 1
+    return exp, log
+
+
+_GF_EXP, _GF_LOG = _gf64_tables()
+
+
+def _gf_mul(a: int, b: int) -> int:
+    if a == 0 or b == 0:
+        return 0
+    return _GF_EXP[(_GF_LOG[a] + _GF_LOG[b]) % 63]
+
+
+def hamming_10_6(data: int) -> int:
+    """The 10-bit codeword of a hexbit: six data bits then four parity bits."""
+    parity = 0
+    for bit, col in _HAMMING_COLUMNS.items():
+        if data & bit:
+            parity ^= col
+    return ((data & 0x3F) << 4) | parity
+
+
+def rs64_parity(data: list[int], n: int) -> list[int]:
+    """The ``n - len(data)`` parity hexbits of a shortened RS code over GF(64), roots a^1..a^(n-k).
+
+    Systematic, data first on the air, via the usual LFSR: the register holds the running
+    remainder of d(x) x^(n-k) divided by g(x).
+    """
+    p = n - len(data)
+    g = [1]  # coefficient i of x^i
+    for i in range(1, p + 1):
+        root = _GF_EXP[i % 63]
+        nxt = [0] * (len(g) + 1)
+        for j, c in enumerate(g):
+            nxt[j + 1] ^= c
+            nxt[j] ^= _gf_mul(c, root)
+        g = nxt
+    reg = [0] * p  # reg[0] is the highest-order remainder coefficient
+    for d in data:
+        fb = d ^ reg[0]
+        reg = reg[1:] + [0]
+        if fb:
+            for j in range(p):
+                reg[j] ^= _gf_mul(fb, g[p - 1 - j])
+    return reg
+
+
+def p25_nid(nac: int, duid: int) -> int:
+    """The 64-bit NID: BCH(63,16) over NAC and DUID, then an even-parity bit (unverified, unread)."""
+    data = ((nac & 0xFFF) << 4) | (duid & 0xF)
+    rem = data << 47
+    for bit in range(62, 46, -1):
+        if rem >> bit & 1:
+            rem ^= P25_NID_BCH_GENERATOR << (bit - 47)
+    cw = (data << 47) | rem
+    return (cw << 1) | (bin(cw).count("1") & 1)
+
+
+def p25_lc_group_voice(talkgroup: int, source: int, service_options: int = 0) -> bytes:
+    """A group-voice-channel-user link control: LCF 0x00, MFID 0, svc, reserved, TGID, source."""
+    return (bytes([0x00, 0x00, service_options & 0xFF, 0x00])
+            + int(talkgroup).to_bytes(2, "big") + int(source).to_bytes(3, "big"))
+
+
+def p25_es(mi: bytes, algid: int, key_id: int) -> bytes:
+    """An encryption sync: 72-bit MI, ALGID, 16-bit key id."""
+    if len(mi) != 9:
+        raise ValueError("the message indicator is 72 bits")
+    return bytes(mi) + bytes([algid & 0xFF]) + int(key_id).to_bytes(2, "big")
+
+
+def _hexbits(payload: bytes) -> list[int]:
+    value = int.from_bytes(payload, "big")
+    n = len(payload) * 8 // 6
+    return [(value >> (6 * (n - 1 - i))) & 0x3F for i in range(n)]
+
+
+def p25_ldu_dibits(duid: int, payload: bytes, rng: np.random.Generator, *,
+                   nac: int = P25_DEFAULT_NAC, status: int = 0b10) -> np.ndarray:
+    """The 864 on-air dibits of one LDU1 (``payload`` = 9-octet LC) or LDU2 (12-octet ES)."""
+    if duid == P25_DUID_LDU1 and len(payload) == 9:
+        n_data = 12
+    elif duid == P25_DUID_LDU2 and len(payload) == 12:
+        n_data = 16
+    else:
+        raise ValueError("an LDU1 carries a 9-octet LC and an LDU2 a 12-octet ES")
+    hexbits = _hexbits(payload)
+    if len(hexbits) != n_data:
+        raise AssertionError("payload does not fill its hexbits")
+    hexbits = hexbits + rs64_parity(hexbits, 24)
+    bits = rng.integers(0, 2, 1680).astype(np.uint8)  # IMBE + LSD filler, overwritten below
+    bits[:48] = np.unpackbits(np.frombuffer(bytes.fromhex(P25_FRAME_SYNC_HEX), dtype=np.uint8))
+    nid = p25_nid(nac, duid)
+    bits[48:112] = [(nid >> (63 - i)) & 1 for i in range(64)]
+    for b, start in enumerate(P25_LC_BLOCK_STARTS):
+        for w in range(4):
+            cw = hamming_10_6(hexbits[b * 4 + w])
+            at = start + w * 10
+            bits[at:at + 10] = [(cw >> (9 - i)) & 1 for i in range(10)]
+    data = (bits[0::2] * 2 + bits[1::2]).astype(np.uint8)
+    out: list[int] = []
+    for d in data:
+        out.append(int(d))
+        if len(out) % 36 == 35:
+            out.append(status & 3)
+    if len(out) != P25_LDU_DIBITS:
+        raise AssertionError("an LDU is 864 dibits on the air")
+    return np.array(out, dtype=np.uint8)

@@ -30,8 +30,10 @@ Edges (docs/06 §5/§2.1): C23 depends on **C11 (channelizer) + C12 (occupancy)*
   - `IDEN_UP` maps 16-bit channel numbers to frequencies. Use grant updates for late entry.
   - No dedicated CC: Capacity Plus rest channel, NXDN Type-D, LTR subaudible.
 - **Grant following:** allocate a voice demod on the channel or TDMA slot: C4FM/CQPSK/H-DQPSK/4FSK via C20, analog FM via C19 for analog SmartNet/EDACS. End on a silence timeout (docs/03 §3.5).
+  - **A call still keyed when the dwell ends is truncated, never closed at the window edge** (T-308, docs/07 §2.29): `t_end` stays NULL and `observed_until` records where watching stopped, so the duration reads as a lower bound. A later pass continues it only across a gap ≤ the silence timeout (90 ms) — the duty cycle's gap is ~9.5 s, so ordinarily it does not, and the row stays truncated.
 - **Encryption check before the vocoder** (docs/04 §8.3):
   - P25 ALGID 0x80 = clear; 0x81 DES-OFB, 0x84 AES-256, 0xAA ADP/RC4.
+  - The ALGID and key id live in each call's LDU2 encryption sync (talkgroup/source in its LDU1 link control). `hk_detect::trunk::ldu` (T-849) reads both off a followed FDMA channel — status symbols, BCH(63,16) NID, Hamming(10,6,3) hexbits, RS(24,12)/RS(24,16) over GF(64), IMBE skipped — and the follower records them on the call's `call-start` event (`detail.voice_frames`). Recalled, not verified against a real capture. `CallHeader::fold` (T-330) folds a call's LDU2 ALGIDs into its encryption state: the header replaces an `unknown` grant and names the algorithm behind an `encrypted` one, but a clear header never walks back an encrypted grant (kept encrypted, reason `algid-contradicts-grant`). Only clear-by-own-ALGID earns a `VoicePermit`, still only via `VoicePermit::open`.
   - Grant service-options bit; DMR privacy indicators in LC/PI headers.
   - Encrypted calls are labelled and skipped. **Never** decrypt others' traffic; own system with own keys only.
 - **Simulcast:** CQPSK/LSM needs coherent QPSK with equalization (docs/04 §8.1).

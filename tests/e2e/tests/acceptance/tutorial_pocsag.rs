@@ -33,12 +33,9 @@ use hk_cli::pipeline::PipelineRecipes;
 use hk_cli::record::http;
 use hk_e2e::blind::matching;
 use hk_e2e::{SynthRequest, TruthItem};
-use hk_stream::{OpenerRegistry, Record, StreamReader};
+use hk_stream::OpenerRegistry;
 use serde_json::{Value, json};
-use std::io::Write as _;
-use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 use crate::blind::{BlindLive, BlindSource, blind_live_streams, center_tol_hz};
 use crate::common::*;
@@ -153,65 +150,6 @@ impl Served {
         drop(server);
         live.handle.stop();
         finish(live.handle);
-    }
-}
-
-struct Tail {
-    sock: TcpStream,
-    join: JoinHandle<Vec<Value>>,
-}
-
-/// Opens a stage/inspector tap and returns it reading, re-issuing a refusal.
-///
-/// **T-632.** The header used to be read on the spawned thread and any failure carried to
-/// `finish()` as a panic, so a refusal frame failed the test at a point that said nothing about
-/// what refused or when. A tap open is refused for reasons that are not this test's subject —
-/// none of these files asserts a refusal at all: the TCP server's connection cap (`503 busy`), a
-/// chain/tap budget, or a `404` in the moment before the recipe pipeline finishes registering.
-/// So the header is read HERE, and a refusal is re-issued on a fresh connection a BOUNDED NUMBER
-/// of times (attempts, never wall clock), printing each. Running out is the failure, and it names
-/// the target.
-fn tail(tcp: SocketAddr, target: &str) -> Tail {
-    for attempt in 1..=OPEN_TRIES {
-        let mut s = TcpStream::connect(tcp).unwrap();
-        s.set_read_timeout(Some(LIMIT)).unwrap();
-        let sep = if target.contains('?') { '&' } else { '?' };
-        s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
-            .unwrap();
-        let sock = s.try_clone().unwrap();
-        let mut r = StreamReader::new(s);
-        if let Err(e) = r.read_header() {
-            eprintln!(
-                "[{TAG}] tail {target} attempt {attempt}/{OPEN_TRIES}: no stream header ({e:?}), \
-                 re-requesting"
-            );
-            let _ = sock.shutdown(Shutdown::Both);
-            continue;
-        }
-        let join = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            while let Ok(Some(rec)) = r.next_record() {
-                match rec {
-                    Record::Message(m) => out.push(m.value),
-                    Record::Unknown(b) => {
-                        if let Ok(v) = serde_json::from_slice(&b) {
-                            out.push(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out
-        });
-        return Tail { sock, join };
-    }
-    panic!("[{TAG}] tail {target}: {OPEN_TRIES} opens in a row produced no stream header");
-}
-
-impl Tail {
-    fn finish(self) -> Vec<Value> {
-        let _ = self.sock.shutdown(Shutdown::Both);
-        self.join.join().expect("the tail reader thread")
     }
 }
 
@@ -491,7 +429,7 @@ fn signal_062_pocsag_recipe_multi_channel_net_decodes_blind_and_dedupes_simulcas
     found_blind_all(s.addr(), &refs);
 
     let (id, _) = start_pocsag(&s, band);
-    let pages = tail(s.tcp, &format!("inspector/{id}/pages"));
+    let pages = tail(s.tcp, &format!("inspector/{id}/pages"), TAG);
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();
     // Several loops of the (~1 s) recording: enough for the simulcast pair to collide and be
     // deduplicated more than once.

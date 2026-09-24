@@ -7,7 +7,8 @@
 //! - [`block`]: [`SampleBlock`] / [`BlockHeader`] with time, monotonic sample counter,
 //!   [`ProvenanceHandle`] and [`Discontinuity`] flags.
 //! - [`source`]: the [`Source`] stream / [`SourceControl`] split, [`SourceCapabilities`],
-//!   [`SigmfReplaySource`] and the [`HackRfSource`] stub.
+//!   [`SigmfReplaySource`], the [`HackRfSource`] and [`RtlSdrSource`] drivers (cargo features
+//!   `hackrf` / `rtlsdr`).
 //! - [`ring`]: the single-writer, multi-reader RAM ring ([`ring_buffer`]) with exact loss
 //!   accounting and streaming or in-memory pre-trigger capture.
 //! - [`rt`]: best-effort priority and memory-lock hooks for the capture/writer thread.
@@ -35,9 +36,10 @@ pub use source::{
     BasebandFilters, ControlMailbox, Coverage, DeviceInfo, GainStage, Gains, HackRfConfig,
     HackRfDeviceInfo, HackRfDriver, HackRfSource, HackRfStats, MockClock, MockEnd, MockFault,
     MockOptions, MockSdrControl, MockSdrDriver, MockSdrSource, MockStats, NamedGain, OpenRequest,
-    Pacing, PendingControl, Recording, ReplayOptions, SigmfReplaySource, Source,
-    SourceCapabilities, SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability,
-    SweepPlan, TuningStep,
+    Pacing, PendingControl, R820T_GAINS_DB, R820T_MAX_HZ, R820T_MIN_HZ, R820T_RATES_HZ,
+    R820T_TUNING_STEP_HZ, Recording, ReplayOptions, RtlSdrConfig, RtlSdrControl, RtlSdrDeviceInfo,
+    RtlSdrDriver, RtlSdrSource, RtlSdrStats, SigmfReplaySource, Source, SourceCapabilities,
+    SourceControl, SourceDriver, SourceError, SourceStats, SweepCapability, SweepPlan, TuningStep,
 };
 
 #[cfg(test)]

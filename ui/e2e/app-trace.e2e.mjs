@@ -138,9 +138,14 @@ const TAP = `(() => {
 /** What the page is saying and what the socket delivered, read in ONE evaluation so they agree. */
 const SNAPSHOT = `(() => {
   const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+  const canvas = document.querySelector('.sf-canvas');
+  const box = canvas ? canvas.getBoundingClientRect() : null;
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
     headline: row ? row.children[1].textContent : "",
+    // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
+    // the words** — see [[heldObservation]] for what a stale one costs.
+    rect: box ? { x: box.x, y: box.y, w: box.width, h: box.height } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
     counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
@@ -413,6 +418,13 @@ function topWithin(cols, centrePx, widthPx) {
  */
 const CELL_SLICE_RE = /slice [\d:]+Z \(\d[^)]*(ms|s|min) cell\) · peak/;
 /**
+ * **The page saying the rows before its instant are NOT in hand** (`afterglowAbsence`): the tiles
+ * the afterglow would be read from are pending, drawn by a coarse stand-in, refused, or answered only
+ * up to an earlier instant. A frame in that state says nothing about the afterglow either way — it
+ * is the not-loaded state, not the claim.
+ */
+const AFTERGLOW_NOT_IN_HAND_RE = /afterglow — the rows before this instant are not all in hand/;
+/**
  * **The pane drew this frame with the tiles it is addressing, and nothing standing in for them.**
  *
  * A coarse stand-in is a real measurement — the parent level's, max-held over a cell several times
@@ -432,11 +444,13 @@ const isResident = (counts) => {
   const m = COUNTS_RE.exec(counts ?? "");
   return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
 };
-const scrubbedExpr = (lagS, { resident = false } = {}) => `(() => {
+const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) => `(() => {
   const txt = document.querySelector('.sf-trace')?.textContent ?? "";
   const m = /slice (\\d\\d):(\\d\\d):(\\d\\d)Z \\(\\d[^)]*(ms|s|min) cell\\) · peak/.exec(txt);
   const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
   if (!m || !r) return false;
+  // [[AFTERGLOW_NOT_IN_HAND_RE]], in the page, for the same one-rule-two-places reason as below.
+  if (${afterglowInHand} && /afterglow — the rows before this instant are not all in hand/.test(txt)) return false;
   if (${resident}) {
     // The same condition as isResident(), in the page, so the wait establishes exactly the state
     // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
@@ -535,10 +549,31 @@ const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.t
  *    hand, so the strip was empty and the check read it as "the trace drew nothing". So the state is
  *    **re-established and then re-verified on the observed readout** rather than assumed to persist.
  *
+ *  - **THE RECTANGLE THE PIXELS ARE INDEXED BY HAS MOVED** (the deflake, 2026-09-23). Every caller
+ *    used to read the canvas's box once, at `waitForCanvas`, and index this observation's framebuffer
+ *    with it — across `scrubOntoCell`'s up-to-eight press-and-wait attempts and this function's own
+ *    six, which is tens of seconds. The chrome above the stage is not a fixed height over that: the
+ *    trace readout gains and loses clauses ("no tile in hand for this span yet (4 pending…)",
+ *    "max-hold over 18.5 s", "afterglow …"), the viewport row's level cell wraps and un-wraps (T-505),
+ *    and pressing Live swaps `LIVE` for an offset — so the canvas slides, and a stale `rect.y` reads
+ *    the page ABOVE the pane. `strip()` still finds the stroke (its 96 px window overlaps the real
+ *    strip either way) while `cellColours()`, which is `rect.y + TRACE_PX + 2`, lands off the pane
+ *    entirely and returns the backdrop `rgb(10,10,13)` for every column. That is exactly what the
+ *    gate's pooled tier reported: *"only 0.0% of trace columns are painted a colour the waterfall
+ *    paints at the same frequency … 1 run(s), widest 586 column(s) = 100.0% of the drawn span"*, with
+ *    the first misses showing cyan trace ink against eight identical `[10,10,13]` cells, and the pane
+ *    itself reporting `24 tiles · 0 coarse stand-ins · 0 pending` — a fully drawn pane, measured
+ *    somewhere else. Green alone, 6/6. So the box is read in the same evaluation as the words, is
+ *    bracketed by the screenshot exactly as they are, and comes back with the image; `obs.rect` is
+ *    what every pixel read in this file uses. `fog-of-war.e2e.mjs` carries the same note against the
+ *    same mistake, one file along.
+ *
  * Each attempt therefore resumes the stream, waits for the state, holds, and observes; an attempt
- * that fails either test is retried from the top rather than accepted. Exhausting them is a failure,
- * never a skip: it would mean the page cannot be held in the state the claims are about.
+ * that fails any of these tests is retried from the top rather than accepted. Exhausting them is a
+ * failure, never a skip: it would mean the page cannot be held in the state the claims are about.
  */
+const sameBox = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+
 async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000 }) {
   let last = null;
   for (let i = 0; i < tries; i++) {
@@ -549,19 +584,23 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
     const before = JSON.parse(await page.eval(SNAPSHOT));
     const img = await page.shot(shotPath);
     const after = JSON.parse(await page.eval(SNAPSHOT));
-    const still = before.trace === after.trace && before.headline === after.headline;
+    const still = before.trace === after.trace && before.headline === after.headline
+      && sameBox(before.rect, after.rect);
     if (still && accept(before)) {
-      return { snap: before, img, withheld: after.tap.withheld,
+      return { snap: before, img, rect: before.rect, withheld: after.tap.withheld,
         rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
     }
-    last = { still, accepted: accept(before), before: before.trace, after: after.trace, held: after.tap.held };
+    last = { still, accepted: accept(before), before: before.trace, after: after.trace,
+      held: after.tap.held, box: sameBox(before.rect, after.rect),
+      rects: `${JSON.stringify(before.rect)} -> ${JSON.stringify(after.rect)}` };
     await page.frames(2);
   }
   throw new Error(
     `the page would not hold still in the state under test across ${tries} attempts, so the readout ` +
     "and the pixels cannot be compared as one frame.\n" +
     `  waiting for: ${what}\n  held: ${last?.held}; readout unchanged across the capture: ${last?.still}; ` +
-    `state still held at the capture: ${last?.accepted}\n  before: ${last?.before}\n  after:  ${last?.after}`);
+    `canvas box unchanged across the capture: ${last?.box} (${last?.rects})\n` +
+    `  state still held at the capture: ${last?.accepted}\n  before: ${last?.before}\n  after:  ${last?.after}`);
 }
 
 test("the trace is the spectrum at the viewport's time position, and its numbers are the socket's own", async (t) => {
@@ -639,7 +678,7 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
     "the trace must say which measured range it is drawn against, and how that range was decided");
 
   // ---- (2) the render path: the pixels agree with the statement, IN THE SAME FRAME ----
-  const s = strip(obs.img, rect);
+  const s = strip(obs.img, obs.rect);
   assert.ok(s.slicePx > 20, `the slice series drew ${s.slicePx} pixels in the strip — that is not a trace`);
   // The max-hold's pixels are DIAGNOSTIC, not asserted. Whether it draws depends on a tile being
   // resident for this pane's window, which is a claim about when the pyramid materialises a node —
@@ -723,7 +762,9 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
 
-  const { rect } = await page.waitForCanvas(".sf-canvas",
+  // The canvas became a real render. Its BOX is deliberately not kept: the rectangle the pixels
+  // below are indexed by comes back with them, from `heldObservation` — see the note there.
+  await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   // A live-frame slice, so the boundary under test is the tuned band and not a tile edge.
   const obs = await heldObservation(page, path.join(ART, "app-trace-extent.png"), {
@@ -731,7 +772,7 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   });
   const img = obs.img;
   const snap = obs.snap;
-  const s = strip(img, rect);
+  const s = strip(img, obs.rect);
   const win = windowOf(snap.headline);
   const geom = snap.tap.geom;
   assert.ok(geom && geom.bandwidthHz > 0, "the tap never saw a stream header to take the band from");
@@ -803,7 +844,8 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  const { rect } = await page.waitForCanvas(".sf-canvas",
+  // As above: the box that indexes the pixels is the observation's own, not this one.
+  const opened = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
 
   // Freeze the viewport. "Pause freezes the view, not the capture", so the live row keeps arriving
@@ -818,7 +860,15 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
     timeoutMs: 20000,
   });
   t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
-  const s = strip(obs.img, rect);
+  // **How far the canvas moved while this test was getting into state.** Reported rather than
+  // asserted: the movement is legitimate (the chrome above the stage grows and shrinks with what it
+  // has to say), and the only thing that was ever wrong was measuring pixels with the box from
+  // before it. A non-zero number here is this deflake's own evidence.
+  const drift = Math.round(obs.rect.y - opened.rect.y);
+  t.diagnostic(`the canvas moved ${drift} px vertically and ${Math.round(obs.rect.h - opened.rect.h)} px ` +
+    "in height between the first real render and this observation; the pixels below are indexed by " +
+    "the box this observation itself reported");
+  const s = strip(obs.img, obs.rect);
   t.diagnostic(`readout: ${obs.snap.trace}`);
   t.diagnostic(`strip ink: ${s.slicePx} ramp px, ${s.holdPx} max-hold px, ${s.greyPx} afterglow/bloom px`);
   assert.ok(s.drawn > 20, `only ${s.drawn} of ${s.w} columns carry ramp ink — nothing to compare`);
@@ -838,8 +888,8 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
-    const ink = coreInk(obs.img, rect, x, s.cols[x]);
-    const cells = cellColours(obs.img, rect, x, halfPx, ROWS);
+    const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
+    const cells = cellColours(obs.img, obs.rect, x, halfPx, ROWS);
     const d = nearestDist(ink, cells);
     if (d <= 8) { matched++; worst = Math.max(worst, d); }
     else {
@@ -876,7 +926,7 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;
     const far = (x + Math.floor(s.w / 3)) % s.w;
-    if (nearestDist(coreInk(obs.img, rect, x, s.cols[x]), cellColours(obs.img, rect, far, halfPx, ROWS)) <= 8) shuffled++;
+    if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(obs.img, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
   t.diagnostic(`negative control: ${shuffled}/${compared} = ${(shuffledRate * 100).toFixed(1)}% match a ` +
@@ -1010,17 +1060,31 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  const { rect } = await page.waitForCanvas(".sf-canvas",
+  await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   const LAG_S = 2;
   const parked = await scrubOntoCell(page, LAG_S);
+  // **The rows before the slice must be IN HAND before the afterglow is judged** (the deflake,
+  // 2026-09-23). The afterglow is read from what RESIDENT tiles answered, so while the tiles holding
+  // the rows before the pane's instant are still pending or drawn by a coarse stand-in, an empty glow
+  // is a fact about latency, not about the rows. The gate's pooled tier caught it twice with one
+  // signature: the max-hold over the whole 45 s / 2.6 min window peaked at exactly the slice's own dB
+  // (−54.1 / −57.4, against −50.0 on every green run) — the slice's tile freshly started and the rest
+  // of the window not yet in hand at that level — and the readout said "afterglow — no earlier row in
+  // this window". That was the PRODUCT claiming a fact it could not know, and it now says "not all in
+  // hand yet" there (`afterglowAbsence`), so a frame in that state is the not-loaded state and not
+  // the claim. What varies between runs is the backend's age: alone, a fresh backend's pane spans
+  // ~18 s and its afterglow rows share the slice's tile; in the gate the lane's backend had served
+  // other files first, the pane spanned minutes, and a freeze near a tile boundary put the rows
+  // before the slice in a tile the pane did not yet hold.
   const obs = await heldObservation(page, path.join(ART, "app-trace-afterglow.png"), {
-    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge`,
-    expr: scrubbedExpr(LAG_S),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge, with the ` +
+      "rows before it in hand",
+    expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
     timeoutMs: 20000,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
   const snap = obs.snap;
   const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
   assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);
@@ -1033,7 +1097,24 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
 
   // ---- what the readout claims ----
   const glow = /afterglow (\d+) × ([\d.]+ (?:ms|s|min)) back to ([\d:]+)Z/.exec(snap.trace);
-  assert.ok(glow, `no afterglow is stated on a scrubbed viewport: ${JSON.stringify(snap.trace)}`);
+  // What the SOCKET delivered in the second before the slice's: independent of the pyramid and of
+  // the page, so a red below says which of "no rows existed" and "rows existed and the pane said
+  // there were none" it was.
+  const [hh, mm, ss] = m[1].split(":").map(Number);
+  const sliceS = hh * 3600 + mm * 60 + ss;
+  const tapS = snap.tap.recent.map((r) => {
+    const d = new Date(r.tS * 1000);
+    return d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds() + (r.tS % 1);
+  });
+  const rowsBefore = tapS.filter((at) => at >= sliceS - 1 && at < sliceS).length;
+  // The tap is a bounded ring that also restarts on a stream header, so "0 rows" is only evidence
+  // when its oldest row is older than the second in question — stated rather than assumed.
+  const socketSays = tapS.length && tapS[0] <= sliceS - 1
+    ? `the socket delivered ${rowsBefore} row(s) in the second before ${m[1]}Z`
+    : `the tap holds no rows from before ${m[1]}Z (its oldest is ${tapS.length ? (tapS[0] - sliceS).toFixed(2) : "—"} s from it), so the socket cannot say`;
+  t.diagnostic(socketSays);
+  assert.ok(glow, `no afterglow is stated on a scrubbed viewport whose earlier rows the page says it holds ` +
+    `(${snap.counts}); ${socketSays}: ${JSON.stringify(snap.trace)}`);
   t.diagnostic(`afterglow: ${glow[1]} rows of ${glow[2]}, back to ${glow[3]}Z`);
   assert.ok(Number(glow[1]) >= 1, "the readout claims no glowing rows");
   assert.equal(glow[2], m[2].replace(" cell", ""),
@@ -1050,7 +1131,7 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   // The afterglow and the bloom are the only ACHROMATIC ink in the strip (`TraceStyle.shade`), so a
   // grey pixel there is a shadow and a chromatic one is the current slice. That separation is what
   // lets this count them without a second copy of the ramp.
-  const s = strip(obs.img, rect);
+  const s = strip(obs.img, obs.rect);
   t.diagnostic(`strip: ${s.slicePx} ramp px (current slice), ${s.greyPx} achromatic px ` +
     `(afterglow + bloom), ${s.holdPx} max-hold px`);
   assert.ok(s.slicePx > 20, "the current slice is not drawn, so there is nothing for a glow to be behind");
@@ -1084,7 +1165,7 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   //
   // The separation is still measured, and reported, because a future tree where it collapses to zero
   // is worth seeing in the log even though it is not a failure.
-  const x0 = Math.round(rect.x), y0 = Math.round(rect.y);
+  const x0 = Math.round(obs.rect.x), y0 = Math.round(obs.rect.y);
   const offsets = [];
   for (let x = 0; x < s.w; x++) {
     if (s.cols[x] < 0) continue;

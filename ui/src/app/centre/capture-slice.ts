@@ -3,7 +3,7 @@
 // keys: time, captureWindow.
 import type { AppState } from "../state";
 // Pure types only (`capture-window.ts` imports nothing), so this is not a cycle.
-import type { CaptureWindow } from "./capture-window";
+import type { CaptureWindow, IqSpan } from "./capture-window";
 
 /**
  * The capture-timeline cursor: following live data, or reviewing a past instant (Unix s).
@@ -57,9 +57,16 @@ export interface CaptureState {
    * must say so rather than substitute a window of its own.
    */
   captureWindow: CaptureWindow | null;
+  /**
+   * The raw-IQ-available spans `GET /api/recordings`'s `iq_available` served (T-464): the ring
+   * **and** persisted recordings, ring first — the wider of the two questions `captureWindow`'s
+   * ring-only `buffered` can answer. `null` means *not answered yet* (server never polled, or the
+   * read failed), which is distinct from `[]` — polled, and nothing extends the horizon.
+   */
+  iqAvailability: IqSpan[] | null;
 }
 
-export const captureInitial = (): CaptureState => ({ time: { live: true }, captureWindow: null });
+export const captureInitial = (): CaptureState => ({ time: { live: true }, captureWindow: null, iqAvailability: null });
 
 /** Records the capture window `GET /api/timeline` served (T-379); `null` when it reports none. */
 export const setCaptureWindow = (w: CaptureWindow | null) => (s: AppState): Partial<AppState> => {
@@ -67,6 +74,14 @@ export const setCaptureWindow = (w: CaptureWindow | null) => (s: AppState): Part
   const same = cur === w || (!!cur && !!w && cur.t0S === w.t0S && cur.t1S === w.t1S && cur.spanS === w.spanS
     && (cur.buffered?.t0S ?? null) === (w.buffered?.t0S ?? null) && (cur.buffered?.t1S ?? null) === (w.buffered?.t1S ?? null));
   return same ? {} : { captureWindow: w };
+};
+
+/** Records the raw-IQ-available spans `GET /api/recordings`'s `iq_available` served (T-464). */
+export const setIqAvailability = (spans: IqSpan[] | null) => (s: AppState): Partial<AppState> => {
+  const cur = s.iqAvailability;
+  const same = cur === spans || (!!cur && !!spans && cur.length === spans.length
+    && cur.every((a, i) => a.t0S === spans[i].t0S && a.t1S === spans[i].t1S && a.source === spans[i].source && a.recording === spans[i].recording));
+  return same ? {} : { iqAvailability: spans };
 };
 
 export const goLive = (): Partial<AppState> => ({ time: { live: true } });

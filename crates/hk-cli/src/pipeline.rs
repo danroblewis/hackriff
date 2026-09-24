@@ -34,7 +34,7 @@ use hk_api::{
 };
 use hk_core::{
     DeviceInfo, HackRfDriver, MockClock, MockEnd, MockOptions, MockSdrDriver, NamedGain,
-    OpenRequest, Pacing, Source, SourceCapabilities, SourceControl, SourceDriver,
+    OpenRequest, Pacing, RtlSdrDriver, Source, SourceCapabilities, SourceControl, SourceDriver,
 };
 use hk_model::cluster::most_restrictive;
 use hk_model::{ContentClass, Repository, ScanPlan, Timestamp};
@@ -46,8 +46,8 @@ use hk_pipeline::{
 };
 
 use crate::control::{
-    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelineRecordings, PipelineRetuner,
-    PipelineRunControl,
+    PipelineDatasets, PipelineIqBuffer, PipelineOutputs, PipelinePlayback, PipelineRecordings,
+    PipelineRetuner, PipelineRunControl,
 };
 use crate::signal;
 
@@ -165,6 +165,8 @@ pub struct RunArgs {
     pub source: String,
     /// Tuning and gains.
     pub live: LiveArgs,
+    /// Further devices (T-512), from [`resolve_devices`]; empty = one device.
+    pub extra_devices: Vec<(String, LiveArgs)>,
     /// Stop after this long (default: until Ctrl-C).
     pub duration_s: Option<f64>,
     /// Data directory (default: a fresh temp directory).
@@ -195,6 +197,8 @@ pub struct DaemonArgs {
     pub source: String,
     /// Live tuning (initial window; the scheduler then follows the plan).
     pub live: LiveArgs,
+    /// Further devices (T-512), from [`resolve_devices`]; empty = one device.
+    pub extra_devices: Vec<(String, LiveArgs)>,
     /// Replay again at the end, continuing the stream (recordings only).
     pub loop_replay: bool,
     /// Data directory.
@@ -1064,7 +1068,11 @@ impl hk_api::attention::AttentionControl for PipelineAttention {
 /// Starts the API server over a running pipeline: streams, history/floor, status, the inventory
 /// the pipeline writes, the control API (display, recording and bookmarks, audited to
 /// `<data dir>/control-audit.jsonl`), and (live runs without the scheduler) the live control
-/// handle for device settings.
+/// handles for device settings.
+///
+/// `live_controls` is **every** front end this run holds (T-511): none for a replay or a
+/// scheduler-driven run, one for today's single-SDR run, N when N are composed. `Option<Arc<dyn
+/// LiveControl>>` converts into it, so a single-device caller writes what it always did.
 pub fn serve_api(
     bind: SocketAddr,
     ui_dist: Option<PathBuf>,
@@ -1072,8 +1080,9 @@ pub fn serve_api(
     handle: &PipelineHandle,
     token: Token,
     tag: &str,
-    live_control: Option<Arc<dyn LiveControl>>,
+    live_controls: impl Into<hk_api::LiveControls>,
 ) -> anyhow::Result<Server> {
+    let live_controls = live_controls.into();
     let counters = handle.counters();
     // The pipeline writes the inventory (TrackInventory, chain record writers, plugin Ingest)
     // into this database; the API reads it through `query_inventory` only. Bookmarks live in the
@@ -1091,13 +1100,29 @@ pub fn serve_api(
     // On-demand streams (T-043 listen, T-060 burst bits and symbols, T-165 channelised IQ), over
     // WebSocket and TCP.
     let recipes = handle.recipe_runtime();
+    // T-463: historical playback - the one playhead, reading raw IQ from the ring and the
+    // persisted recordings; its opener re-runs demod/decode, never detection.
+    let playback = Arc::new(hk_pipeline::playback::PlaybackService::new(
+        Arc::new(hk_pipeline::playback::RunIq::new(
+            handle.iq_buffer(),
+            Some((
+                handle.data_dir().join("hackriff.db"),
+                handle.data_dir().to_path_buf(),
+            )),
+        )),
+        hk_pipeline::playback::PlaybackConfig::default(),
+    ));
     let openers = hk_api::stream::OpenerRegistry::new()
         .with("listen", handle.listen_service())
         .with("bits", handle.bits_service())
         .with("symbols", handle.symbols_service())
         .with("iq", handle.iq_service()) // T-165
         .with("stage", recipes.stage_service()) // T-088
-        .with("inspector", recipes.inspector_service()); // T-088 (T-089/T-092 extend it)
+        .with("inspector", recipes.inspector_service()) // T-088 (T-089/T-092 extend it)
+        .with(
+            "playback",
+            Arc::clone(&playback) as Arc<dyn hk_api::stream::StreamOpener>,
+        ); // T-463
     let tcp = start_stream_tcp(registry, &openers, &token)?;
     let attention = attention_control(handle, &db)?; // T-119
     let alarms = alarm_control(handle, registry, &db)?; // T-122
@@ -1124,14 +1149,17 @@ pub fn serve_api(
         // is a driver over the interactive retune path, not the scheduler this run does not drive.
         // T-517: with the run's own bin width, so a coarse step widens the window only where the
         // detection/history bins stay exactly as wide.
-        scan: live_control.clone().map(|lc| {
+        // T-511: the sweep drives **one** front end — the run's default. A per-device sweep is a
+        // separate decision (`crate::scan`'s arbitration is written for one radio), and the wire
+        // says which one it commissions.
+        scan: live_controls.primary().cloned().map(|lc| {
             let fft = handle.detection_fft_len();
             Arc::new(
                 hk_api::scan::ScanRunner::new(lc)
                     .with_bin_width(Arc::new(move |fs| hk_pipeline::detection_bin_hz(fs, fft))),
             )
         }),
-        live_control,
+        live_controls,
         run_control: Some(Arc::new(PipelineRunControl(controller))),
         bookmarks: Some(db),
         audit: Some(Arc::new(audit)),
@@ -1168,8 +1196,19 @@ pub fn serve_api(
             handle.data_dir().join("hackriff.db"),
             handle.data_dir().to_path_buf(),
         ))),
+        // T-463: the one playhead of historical playback.
+        playback: Some(Arc::new(PipelinePlayback(playback))),
         // T-438: the tile route's ingest-backpressure cap, per server.
-        tiles_in_flight: Default::default(),
+        tile_admission: Default::default(),
+        // T-572: the hot-tile LRU, on for a served run. A viewport that has not moved re-reads the
+        // same SEALED tiles every poll, and a sealed tile can never change again. Live tiles at the
+        // growing edge are never cached — see `HotTileCache`.
+        tile_cache: Some(Arc::new(hk_api::tiles::HotTileCache::default())),
+        row_feeds: Default::default(),
+        // T-579: the tile route's memoised geometry, per server — the readable ceiling per
+        // lattice and the coverage raster keyed on the tune-history evidence it is drawn from.
+        ceiling_memo: Default::default(),
+        coverage_raster: Default::default(),
     };
     let mut config = ServerConfig::new(bind, token.clone());
     config.ui_dist = ui_dist;
@@ -1259,13 +1298,27 @@ pub(crate) fn config_for(
 /// `hackrf` → the first device, `hackrf:<serial>` → that one; anything else is not a HackRF
 /// source.
 pub fn hackrf_serial(spec: &str) -> Option<Option<String>> {
-    match spec {
-        "hackrf" => Some(None),
-        s => s
-            .strip_prefix("hackrf:")
-            .filter(|serial| !serial.is_empty())
-            .map(|serial| Some(serial.to_owned())),
+    device_serial("hackrf", spec)
+}
+
+/// `rtlsdr` → the first dongle, `rtlsdr:<serial>` → that one (T-514).
+///
+/// **Prefer the serial form.** A USB index changes when anything else is plugged in, so `rtlsdr`
+/// alone can open a different radio between two runs and file its measurements under the wrong
+/// provenance; `rtl_test -t` lists the serials.
+pub fn rtlsdr_serial(spec: &str) -> Option<Option<String>> {
+    device_serial("rtlsdr", spec)
+}
+
+/// `<driver>` → the first device, `<driver>:<serial>` → that one; `None` for any other spec.
+fn device_serial(driver: &str, spec: &str) -> Option<Option<String>> {
+    if spec == driver {
+        return Some(None);
     }
+    spec.strip_prefix(driver)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .filter(|serial| !serial.is_empty())
+        .map(|serial| Some(serial.to_owned()))
 }
 
 /// The content class of every window tiling `plan`'s regions at rate `fs`.
@@ -1295,7 +1348,7 @@ pub fn mock_path(spec: &str) -> Option<PathBuf> {
 
 /// `spec` names a device (the live HackRF One or the mock SDR), not a recording played back.
 pub fn is_device_spec(spec: &str) -> bool {
-    hackrf_serial(spec).is_some() || mock_path(spec).is_some()
+    hackrf_serial(spec).is_some() || rtlsdr_serial(spec).is_some() || mock_path(spec).is_some()
 }
 
 /// The mock device as the binaries run it: like the radio, in real time from the wall clock,
@@ -1344,14 +1397,22 @@ pub fn mock_fault_from_env() -> anyhow::Result<Option<hk_core::MockFault>> {
     }
 }
 
-/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One) or
-/// `mock:<file.sigmf-meta>` (the mock SDR, `None` if the recording cannot be opened; [`open_live`]
-/// reports why). SoapySDR plugs in here later behind the same `SourceDriver` contract.
+/// The driver for a live source spec: `hackrf` / `hackrf:<serial>` (HackRF One),
+/// `rtlsdr` / `rtlsdr:<serial>` (RTL-SDR, T-514) or `mock:<file.sigmf-meta>` (the mock SDR,
+/// `None` if the recording cannot be opened; [`open_live`] reports why). SoapySDR plugs in here
+/// later behind the same `SourceDriver` contract.
+///
+/// Each driver reports its own capabilities, and the open request is built from them
+/// ([`LiveArgs::named_gains`] only sets stages the device has), so `--lna` reaches the RTL-SDR's
+/// one combined gain knob and `--vga` / `--amp` are simply not offered there.
 pub fn driver_for(spec: &str) -> Option<(Box<dyn SourceDriver>, Option<String>)> {
     if let Some(path) = mock_path(spec) {
         let options = cli_mock_options_for(&path);
         let driver = MockSdrDriver::new(path, options).ok()?;
         return Some((Box::new(driver), None));
+    }
+    if let Some(serial) = rtlsdr_serial(spec) {
+        return Some((Box::new(RtlSdrDriver) as Box<dyn SourceDriver>, serial));
     }
     hackrf_serial(spec).map(|serial| (Box::new(HackRfDriver) as Box<dyn SourceDriver>, serial))
 }
@@ -1486,8 +1547,8 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
             (driver, request)
         } else {
             anyhow::bail!(
-                "unsupported live source {spec:?}: use hackrf, hackrf:<serial> or \
-             mock:<file.sigmf-meta>"
+                "unsupported live source {spec:?}: use hackrf, hackrf:<serial>, rtlsdr, \
+             rtlsdr:<serial> or mock:<file.sigmf-meta>"
             );
         };
     let caps = driver.capabilities();
@@ -1531,6 +1592,95 @@ pub fn open_live(spec: &str, live: &LiveArgs) -> anyhow::Result<LiveSource> {
     })
 }
 
+/// Resolves repeatable `--device SPEC` and `--device-set SPEC:KEY=VALUE` into one
+/// `(spec, settings)` per device (T-512). `base` is the shared `--center-hz`/`--rate`/gain
+/// defaults; a `--device-set` overrides them for **one** device. Keys: `center-hz`, `rate`, `lna`,
+/// `vga`, `amp` (`true`/`false`), `baseband-filter-hz`, `gain.STAGE` (dB). An empty, duplicated
+/// or unknown device, or an unknown key, is an error naming it, never a silent drop.
+pub fn resolve_devices(
+    specs: &[String],
+    sets: &[String],
+    base: &LiveArgs,
+) -> anyhow::Result<Vec<(String, LiveArgs)>> {
+    let mut out: Vec<(String, LiveArgs)> = Vec::new();
+    for spec in specs {
+        if spec.trim().is_empty() {
+            anyhow::bail!("--device: empty device spec");
+        }
+        if out.iter().any(|(s, _)| s == spec) {
+            anyhow::bail!("--device {spec:?} given twice: each device may be named once");
+        }
+        out.push((spec.clone(), base.clone()));
+    }
+    for set in sets {
+        let (lhs, value) = set
+            .split_once('=')
+            .with_context(|| format!("--device-set {set:?}: expected SPEC:KEY=VALUE"))?;
+        let (spec, key) = lhs
+            .rsplit_once(':')
+            .with_context(|| format!("--device-set {set:?}: expected SPEC:KEY=VALUE"))?;
+        let Some((_, live)) = out.iter_mut().find(|(s, _)| s == spec) else {
+            anyhow::bail!(
+                "--device-set {set:?}: no --device {spec:?} (devices: {})",
+                out.iter()
+                    .map(|(s, _)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        };
+        let num = |v: &str| {
+            v.trim()
+                .parse::<f64>()
+                .with_context(|| format!("--device-set {set:?}: {v:?} is not a number"))
+        };
+        match key {
+            "center-hz" => live.center_hz = num(value)?,
+            "rate" => live.sample_rate_hz = num(value)?,
+            "lna" => live.lna_db = num(value)?,
+            "vga" => live.vga_db = num(value)?,
+            "baseband-filter-hz" => live.baseband_filter_hz = Some(num(value)?),
+            "amp" => {
+                live.amp = value
+                    .trim()
+                    .parse::<bool>()
+                    .with_context(|| format!("--device-set {set:?}: amp is true or false"))?
+            }
+            k if k.starts_with("gain.") => {
+                num(value)?;
+                live.gains.push(format!("{}={}", &k[5..], value.trim()));
+            }
+            _ => anyhow::bail!(
+                "--device-set {set:?}: unknown key {key:?} (center-hz, rate, lna, vga, amp, \
+                 baseband-filter-hz, gain.STAGE)"
+            ),
+        }
+    }
+    Ok(out)
+}
+
+/// [`resolve_devices`] with the single-device default folded in (T-512): with no `--device` the
+/// run's one device is `default_spec` (`--source`, `--hackrf`), so `--device-set` addresses it too
+/// and one device behaves exactly as before. Returns the primary (the first device) and the rest.
+#[allow(clippy::type_complexity)]
+pub fn resolve_primary(
+    default_spec: String,
+    devices: &[String],
+    sets: &[String],
+    base: &LiveArgs,
+) -> anyhow::Result<(String, LiveArgs, Vec<(String, LiveArgs)>)> {
+    if devices.is_empty() && sets.is_empty() {
+        return Ok((default_spec, base.clone(), Vec::new()));
+    }
+    let specs = if devices.is_empty() {
+        vec![default_spec]
+    } else {
+        devices.to_vec()
+    };
+    let mut all = resolve_devices(&specs, sets, base)?.into_iter();
+    let (spec, live) = all.next().context("no device")?;
+    Ok((spec, live, all.collect()))
+}
+
 /// A live pipeline start request.
 #[derive(Clone, Debug)]
 pub struct LiveOptions {
@@ -1538,6 +1688,9 @@ pub struct LiveOptions {
     pub source: String,
     /// Tuning and gains.
     pub live: LiveArgs,
+    /// Further front ends (T-512): each a device spec with its own resolved settings, opened
+    /// beside the primary and composed by `Pipeline::start_multi` (T-510). Empty = one device.
+    pub extra: Vec<(String, LiveArgs)>,
     /// Data directory.
     pub data_dir: PathBuf,
     /// ScanPlan JSON.
@@ -1571,6 +1724,10 @@ pub struct LivePipeline {
     pub control: Arc<dyn SourceControl>,
     /// The API control handle (`None` when the scheduler drives the radio).
     pub live_control: Option<Arc<dyn LiveControl>>,
+    /// Every front end's control (T-512): the primary's first, then each further device's (which
+    /// refuses rate changes, as the pipeline does: its ring is built for the rate it opened at).
+    /// Empty when the scheduler drives the radio.
+    pub live_controls: Vec<Arc<dyn LiveControl>>,
     /// The run's content class.
     pub class: ContentClass,
 }
@@ -1628,12 +1785,34 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
         baseband_filter_hz: None,
     };
     let control = Arc::clone(&live.control);
-    let handle = hk_pipeline::Pipeline::start(
+    // T-512: further front ends open before anything starts, so a missing one fails the run
+    // whole rather than leaving a half-started pipeline.
+    let mut extra = Vec::new();
+    let mut extra_controls = Vec::new();
+    for (spec, args) in &opts.extra {
+        let l = open_live(spec, args).with_context(|| format!("--device {spec}"))?;
+        extra_controls.push((
+            Arc::clone(&l.control),
+            LiveTuning {
+                center_hz: l.info.center_hz,
+                sample_rate_hz: l.info.sample_rate_hz,
+                gains: l.gains.clone(),
+                bias_tee: l.bias_tee,
+                baseband_filter_hz: None,
+            },
+        ));
+        extra.push(hk_pipeline::ExtraSource {
+            source: l.source,
+            info: l.info,
+        });
+    }
+    let handle = hk_pipeline::Pipeline::start_multi(
         cfg,
         live.source,
         live.info,
         None,
         Box::new(TrackInventory::default()),
+        extra,
     )?;
     let live_control = (!opts.schedule).then(|| {
         Arc::new(
@@ -1641,10 +1820,17 @@ pub fn start_live(opts: &LiveOptions, registry: &StreamRegistry) -> anyhow::Resu
                 .with_retuner(Arc::new(PipelineRetuner(handle.controller()))),
         ) as Arc<dyn LiveControl>
     });
+    let mut live_controls: Vec<Arc<dyn LiveControl>> = live_control.iter().cloned().collect();
+    if !opts.schedule {
+        live_controls.extend(extra_controls.into_iter().map(|(c, t)| {
+            Arc::new(SourceLiveControl::new(c, t).with_fixed_rate()) as Arc<dyn LiveControl>
+        }));
+    }
     Ok(LivePipeline {
         handle,
         control,
         live_control,
+        live_controls,
         class,
     })
 }
@@ -1722,6 +1908,7 @@ pub fn run_live(args: &RunArgs) -> anyhow::Result<RunSummary> {
         &LiveOptions {
             source: args.source.clone(),
             live: args.live.clone(),
+            extra: args.extra_devices.clone(),
             data_dir: args.data_dir.clone().unwrap_or_else(temp_data_dir),
             plan: args.plan.clone(),
             survey_dwell_s: args.survey_dwell_s,
@@ -1795,6 +1982,7 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
             &LiveOptions {
                 source: args.source.clone(),
                 live: args.live.clone(),
+                extra: args.extra_devices.clone(),
                 data_dir: args.data_dir.clone(),
                 plan: args.plan.clone(),
                 survey_dwell_s: args.survey_dwell_s,
@@ -1834,10 +2022,16 @@ pub fn start_daemon(args: &DaemonArgs) -> anyhow::Result<Daemon> {
             source_control: Some(lp.control),
         });
     }
+    if let Some((spec, _)) = args.extra_devices.first() {
+        anyhow::bail!(
+            "--device {spec:?}: a sigmf: recording replays alone; further devices need the \
+             primary to be a live device"
+        );
+    }
     let Some(path) = args.source.strip_prefix("sigmf:").map(PathBuf::from) else {
         anyhow::bail!(
-            "unsupported --source {:?}: use hackrf, hackrf:<serial>, mock:<file.sigmf-meta> or \
-             sigmf:<file.sigmf-meta>",
+            "unsupported --source {:?}: use hackrf, hackrf:<serial>, rtlsdr, rtlsdr:<serial>, \
+             mock:<file.sigmf-meta> or sigmf:<file.sigmf-meta>",
             args.source
         );
     };
@@ -1932,6 +2126,40 @@ mod tests {
 
     use super::*;
 
+    /// T-512: a replay primary refuses further devices rather than dropping them.
+    #[test]
+    fn daemon_replay_refuses_extra_devices() {
+        let mut a = daemon_args("sigmf:/nope.sigmf-meta".into(), temp_data_dir(), Some("t"));
+        a.extra_devices = vec![("rtlsdr".into(), LiveArgs::default())];
+        let err = start_daemon(&a).err().expect("must refuse");
+        assert!(err.to_string().contains("replays alone"), "{err:#}");
+    }
+
+    /// T-512 (AWARE-011): per-device settings are addressable; bad devices are loud errors.
+    #[test]
+    fn device_flags_resolve_per_device_and_refuse_bad_ones() {
+        let base = LiveArgs::default();
+        let specs = ["mock:/a.sigmf-meta".to_string(), "rtlsdr".to_string()];
+        let sets = [
+            "mock:/a.sigmf-meta:center-hz=433.9e6".to_string(),
+            "rtlsdr:gain.lna=30".to_string(),
+        ];
+        let r = resolve_devices(&specs, &sets, &base).unwrap();
+        assert_eq!(r[0].1.center_hz, 433.9e6);
+        assert_eq!(r[1].1.center_hz, base.center_hz);
+        assert_eq!(r[1].1.gains, vec!["lna=30".to_string()]);
+        assert!(r[0].1.gains.is_empty());
+        let dup = resolve_devices(&[specs[1].clone(), specs[1].clone()], &[], &base);
+        assert!(dup.unwrap_err().to_string().contains("twice"));
+        let unk = resolve_devices(&specs, &["hackrf:rate=1e6".to_string()], &base);
+        assert!(unk.unwrap_err().to_string().contains("no --device"));
+        let key = resolve_devices(&specs, &["rtlsdr:nope=1".to_string()], &base);
+        assert!(key.unwrap_err().to_string().contains("unknown key"));
+        // One device with nothing else is today's behaviour exactly.
+        let (s, l, x) = resolve_primary("hackrf".into(), &[], &[], &base).unwrap();
+        assert_eq!((s.as_str(), &l, x.len()), ("hackrf", &base, 0));
+    }
+
     /// Writes `secs` of a ci8 tone (+50 kHz) in noise at 250 kS/s, 433.5 MHz (no LFS data needed).
     fn tiny_recording(dir: &Path, secs: f64) -> PathBuf {
         use hk_model::sigmf::{Capture, Datatype, SigmfMeta};
@@ -1993,6 +2221,7 @@ mod tests {
         DaemonArgs {
             source,
             live: LiveArgs::default(),
+            extra_devices: Vec::new(),
             loop_replay: false,
             data_dir,
             plan: None,
@@ -2331,6 +2560,39 @@ mod tests {
         }
     }
 
+    /// T-514: `rtlsdr` / `rtlsdr:<serial>` names the RTL-SDR driver, and the serial form is what
+    /// actually pins the radio — an index would move when anything else is plugged in.
+    #[test]
+    fn rtlsdr_specs_select_the_rtl_driver_by_serial() {
+        assert_eq!(rtlsdr_serial("rtlsdr"), Some(None));
+        assert_eq!(
+            rtlsdr_serial("rtlsdr:7673444264"),
+            Some(Some("7673444264".into()))
+        );
+        assert_eq!(rtlsdr_serial("rtlsdr:"), None);
+        assert_eq!(rtlsdr_serial("rtlsdrx"), None);
+        assert_eq!(rtlsdr_serial("hackrf"), None);
+        assert_eq!(hackrf_serial("rtlsdr"), None);
+        assert!(is_device_spec("rtlsdr") && is_device_spec("rtlsdr:7673444264"));
+        let (driver, serial) = driver_for("rtlsdr:7673444264").expect("an RTL-SDR spec");
+        assert_eq!(driver.name(), "rtlsdr");
+        assert_eq!(serial.as_deref(), Some("7673444264"));
+        // The capabilities the CLI would plan against are the RTL's, not the HackRF's.
+        let caps = driver.capabilities();
+        assert_eq!(caps.driver, "rtl-sdr");
+        assert!(!caps.supports_frequency(2.4e9) && !caps.sample_rates.supports(20e6));
+        // `--lna` reaches its one gain knob; `--vga` / `--amp` are not offered on this device.
+        let gains = LiveArgs {
+            lna_db: 28.0,
+            vga_db: 20.0,
+            amp: true,
+            ..LiveArgs::default()
+        }
+        .named_gains(&caps)
+        .expect("only the stages the device has");
+        assert_eq!(gains, vec![NamedGain::new("lna", 28.0)]);
+    }
+
     /// T-049: `mock:<file>` opens like a device, with the recording's own tuning unless given, and
     /// carries the band-derived class a live radio at that frequency would.
     #[test]
@@ -2374,6 +2636,7 @@ mod tests {
             &LiveOptions {
                 source: spec.clone(),
                 live: LiveArgs::default(),
+                extra: Vec::new(),
                 data_dir: dir.join("live"),
                 plan: None,
                 survey_dwell_s: None,

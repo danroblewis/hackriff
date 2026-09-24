@@ -2,7 +2,7 @@
 
 **Status:** PROVISIONAL (T-198, core interface, planning only; reviewed before the T-211 skeleton lands)
 **Touches:** C15 modulation classifier, C18 fingerprint signatures, C38 ml-runtime; inputs C13/C14/C16, priors C17, consumers C27 inventory, C12/C04 attention ([ADR-0012 §4](0012-attention-memory-contracts.md)), recipes ([ADR-0011 §2.4](0011-decoder-workbench-contracts.md)), decoder synthesis (MAUTO, [docs/15](../15-decoder-synthesis.md), ADR-0015 in progress under T-208); Emitter ([docs/07 §2.11](../07-data-model.md)), Annotation §2.13, Decode §2.15; [ADR-0007](0007-compute-placement.md) provider model
-**Code (today):** `hk-estimate::blind::Family {Unknown, Ook, Fsk, Bpsk, Qpsk}` with S5 floors; `hk-pipeline/src/family.rs` (label → service vocabulary, ranked explanations, `FAMILY_MAP_VERSION`); `hk-model` `emitter_classification` table + `Classification {family, confidence, open_set_score, model_version}`, `FAMILY_ORDER` (T-183), `cluster::Fingerprint` v1; `hk-pipeline/src/candidates.rs::class_entropy`. Nothing in this ADR is implemented yet; T-211 lands the skeleton.
+**Code (today):** `hk-estimate::blind::Family {Unknown, Ook, Fsk, Bpsk, Qpsk}` with S5 floors; `hk-pipeline/src/family.rs` (label → service vocabulary, ranked explanations, `FAMILY_MAP_VERSION`); `hk-model` `emitter_classification` table + `Classification {family, confidence, open_set_score, model_version}`, `FAMILY_ORDER` (T-183), `cluster::Fingerprint` v1; `hk-pipeline/src/candidates.rs::class_entropy`. Nothing in this ADR is implemented yet; T-211 lands the skeleton. ~~(As written for T-198.)~~ **Stale as written — M3 has since landed (T-211, T-199–T-205, T-212–T-215); read §9/§10's per-task cells, not this line, for what exists. The one row that did not land is the shadow store and the `/api/ml` routes, reassigned from T-203 to T-844 by the §10 amendment of 2026-09-22 (T-365).**
 
 ## Context
 
@@ -27,7 +27,7 @@ Constraints carried in:
 | Fusion | `P(c∣x,f,ℓ) ∝ p(x∣c)·P(c∣f,ℓ)` over known families only, with λ₀ ≥ 0.1 enforced. The unknown mass is set by the open-set score and is never scaled by priors. **Evidence-dominance:** when the likelihood ratio of the likelihood top-1 over the runner-up is ≥ 10, the posterior top equals the likelihood top. A prior that flips a closer call sets `prior-tiebreak`; disagreement sets `prior-mismatch`. |
 | Cascade | Feature tree (C13 shape, instantaneous statistics, cumulants, cyclic features, C16) → class-conditional densities give `p(x∣c)` and a χ² open-set score → optional verifier (ALRT/GLRT, post-sync only, can only re-rank) → optional per-family DL, within-family class only, energy-score open set → fusion → decoders arbitrate. |
 | DL enable | Per family, only when the dev-set evaluation beats classical by ≥ 5 points at every SNR bin ≥ the gate, with the 95 % CI lower bound > 0, no AUROC loss > 0.02, and no higher false-known rate. Otherwise the stage runs in shadow mode or is off. |
-| C18 | `EmissionFeatures` (per-field value ± σ, method, n) superset of `Fingerprint` v1; immutable versioned `Signature`s (SQLite, seeded from recipe `match` + CRC-confirmed emitters); `SignatureMatch` full/partial/none with ranked candidates, never an identity or status. `Fingerprint` also carries `ModulationStructure` (value ± σ) — evidence that can only split, never merge (§5.1, T-233). Its family comparison stays **exact**: §1's `family_of` relaxation is withdrawn. |
+| C18 | `EmissionFeatures` (per-field value ± σ, method, n) superset of `Fingerprint` v1; immutable versioned `Signature`s (SQLite, seeded from recipe `match` + CRC-confirmed emitters); `SignatureMatch` full/partial/none with ranked candidates, never an identity or status. `Fingerprint` carried T-233's `ModulationStructure` (value ± σ) as split-only evidence until **T-594 removed it**: it had no producer, so it was on 0 real-run fingerprints and took part in 0 comparisons (§5.1). Its family comparison stays **exact**: §1's `family_of` relaxation is withdrawn. |
 | Clustering | Online leader clustering on the **tolerance-normalised** distance shared with matching (ε = 1), min 3 members before a cluster becomes visible, nightly batch DBSCAN repair with append-only merge/split history. A cluster is a *type* above emitters (*instances*). |
 | ML runtime | `MlProvider` trait over ONNX models loaded at runtime (no rebuild). CPU reference **tract** (pure Rust); Mac acceleration **ort + CoreML EP** behind opt-in `ml-coreml`; Jetson **ort + TensorRT EP** (`ml-trt`, deferred). Candle and Burn are rejected: model code in Rust means a rebuild per model. Hand-written wgpu is rejected for v1. |
 | Evaluation | A-priori floors in this ADR. Dev and acceptance seeds are disjoint; OTA labels come only from CRC-valid decodes, split by session. Every number is reported per SNR bin × source (synthetic / OTA). T-206 is the exit gate. |
@@ -174,7 +174,7 @@ Below a gate, a family contributes no likelihood mass, so its mass moves to `unk
 - optional `pri_s` / `scan_period_s` (radar) and `cfo_offset_hz` (oscillator, AWARE-051, later);
 - `suspect_fraction`, `snr_db` distribution.
 
-`Fingerprint` v1 is a projection (`EmissionFeatures::fingerprint()`). Entity resolution is unchanged but for §5.1's `ModulationStructure`, which only ever makes it stricter.
+`Fingerprint` v1 is a projection (`EmissionFeatures::fingerprint()`). Entity resolution is unchanged (§5.1's `ModulationStructure` was added by T-233 and removed by T-594).
 
 **`Signature`** is immutable per `(signature_id, version)`, like recipes:
 - `name`, `kind` (`protocol` / `device-type` / `rfi` / `radar` / `learned`), `taxonomy`;
@@ -218,13 +218,15 @@ A match **never sets identity, known_status or lifecycle**. It adds explanation 
 
 **3. That family is exactly where no discriminator reaches.** `2fsk`, `gfsk` and `msk` are not three modulations but one modulation at three filter settings, and every one of them is **constant-envelope by construction**. Conditioned as the fingerprint conditions — matched centre, bandwidth, symbol rate and modulation index — over 99 % of genuinely distinct pairs are indistinguishable on the statistic that shipped, at every SNR from the FSK gate upwards. The best statistic T-233 tried on that pair (the instantaneous frequency's Sarle bimodality) still left 5.8 % to 33 % indistinguishable, and was rejected anyway for measuring the observation rather than the emission. Blind tests must never merge two genuinely distinct emitters, and there is no width at which this pair can be gated that honours that.
 
-**What landed instead: `ModulationStructure` on `Fingerprint`, as evidence that can only split.**
+**What landed instead: `ModulationStructure` on `Fingerprint`, as evidence that can only split — since removed (T-594, below).**
 
 - **The statistic.** `envelope_shape` = `μ₄ = E|s|⁴/(E|s|²)²` of the emission, with the additive-noise contribution removed in closed form (`μ₄ₛ = μ₄ₓ(1+1/ρ)² − 4/ρ − 2/ρ²`, from `E|x|⁴ = E|s|⁴ + 4Pσ² + 2σ⁴`). It is exactly 1 for any constant-envelope emission, and it separates an amplitude modulation from an angle one, and a binary phase alphabet from a quaternary one: a shaped BPSK's 180° transitions carry the trajectory through the origin where a QPSK's mostly do not. It is a ratio of two expectations, so it measures the emission and not the observation — the T-281 rule.
 - **Its uncertainty is measured, not assumed.** Each value carries a sigma: the noise correction's own error given an SNR known to ±3 dB, plus the statistic's spread across four blocks of the record, in quadrature. `Tolerances::structure_sigmas` is then a number of sigmas (3), not a width, so nothing is fitted to any pair. The dimension stops discriminating on its own as the SNR falls rather than needing an SNR floor bolted on.
 - **Measured** (acceptance seeds, `hk-classify`'s `structure_rates`; bandwidth-matched pairs at an identical centre, bandwidth, symbol rate and family label): `bpsk`/`qpsk` false merge **0.097 at 20 dB** and **0.027 at 25 dB** against a baseline of 1.00, false split under 0.02; at the 15 dB PSK gate the band exceeds the 0.18 separation and the dimension concludes nothing.
 - **It can only split.** It is an ordinary scored feature, so a fingerprint carrying structure is compared on strictly more evidence; a pair that matched without it can stop matching and never start. Adding it to entity resolution therefore adds **no** false-merge exposure at all, which is what made it safe to land while the relaxation is not.
 - **A second dimension was built and rejected.** `if_concentration` (`IQR/(P95−P5)` of the instantaneous frequency) separates `bpsk` from `qpsk` even at 10 dB, but its quantiles count samples, so it moves with the analysis geometry — one `bpsk` emitter read 0.014 over a 16 384-sample record and 0.078 over a 6 144-sample one, while reporting a confident sigma. That is the T-281/T-310 failure mode, and one dimension that measures the emission beats two where the second measures the look.
+
+**T-594 removed it.** Nothing in `hk-pipeline` ever called `hk_classify::modulation_structure`, so the field was absent in every real run: replaying the real FM and 433 MHz captures blind through the mock SDR stored 18 fingerprints, **0** carrying `structure`, so it took part in **0** comparisons (`hk-pipeline/tests/fingerprint_field_census.rs`). It was removed rather than wired: every producer that holds IQ also writes an exact `family`, and every family those producers write is constant-envelope (analogue FM, the FSK chain, the four-level trunking control channel), where the statistic reads 1.00 by construction. Wired, it could only have split on what moves a constant envelope — multipath fading and the noise correction's error — which measure the look, not the emitter; and the `bpsk`/`qpsk` pair it was measured on has no producer that writes fingerprints. A dead comparison kept "in case" implies a discrimination that is not happening. The statistic stays in `hk_classify::structure` as a measurement with no inventory consumer; `structure_rates` and `structure-probe`, which measured the removed comparison, went with it. Stored fingerprints carrying the key still parse. The same census found the wider state of entity resolution on those runs: only centre, bandwidth, duty cycle and burst length were ever present on both sides of a pair; `family` was on 1 of 18 fingerprints, and symbol rate, deviation, period and the hop fields on none.
 
 T-218's guard test (`t218_the_family_gate_separates_two_emissions_that_share_a_family`) is unchanged and still passes, which is the point: the discriminator did not earn the relaxation, so nothing about the gate moved.
 
@@ -258,6 +260,7 @@ pub struct Prediction {
   - Models are data: loading, swapping or rolling back needs no rebuild (ADR-0001's hard requirement). Rollback = set the mode of the previous version.
 - **Batching.** One worker thread per loaded model, never a ring/DSP thread. It flushes at batch 32, after 20 ms, or at the earliest deadline (C38 card defaults, *estimates*). The queue is bounded: when full, requests are dropped and counted, and the consumer falls back to classical (the stage is reported). Inference runs only on CFAR-surviving, classified-by-tree events. `max_in_flight` bounds GPU contention. In low-power mode, active and shadow are both off.
 - **Shadow mode.** Per `(model, consumer)`: `off` / `shadow` / `active`. Shadow runs the model and appends `{Prediction, classical decision, snr_bin, subject}` to hk-store `ml/shadow/` hourly CRC-line NDJSON (256 MiB, 30 days), with per-SNR agreement aggregates. **Shadow never writes a Classification row or changes any decision.** T-203 unit-tests this and T-206 asserts it.
+  - **Landed vs. owed (T-365, 2026-09-22).** T-203 landed the `ShadowSink` trait, the `off`/`shadow`/`active` mode machinery and `MemoryShadowSink`, which is **in-memory** and is the only implementation in the tree. The hk-store `ml/shadow/` NDJSON writer described above does not exist and is **T-844's**, with the `/api/ml` routes that read it (§9, §10 amendment). Until it does, `ModelHost::observe` has no durable consumer, which is the third of the three reasons `hk-ml`'s crate docs give for the host being deliberately unwired.
 - **Provider choice (Mac-first).**
   - **CPU reference = `tract-onnx`.** Pure Rust, loads ONNX at runtime, no native library in the default build or CI (*maintenance and op coverage unverified; checked in T-203*).
   - **Mac acceleration = `ort`** (ONNX Runtime bindings) with the CoreML execution provider, behind the opt-in feature `ml-coreml` (*unverified: CoreML EP op coverage for 1-D conv and dynamic batch; ort's build-time binary download*).
@@ -306,6 +309,28 @@ pub struct Prediction {
 | Clustering, multi-day scene with repeated unknowns | ARI ≥ 0.8; ≤ 1.5 clusters per truth type; merge rate ≤ 0.05; identical after restart |
 | ML | shadow changes no Classification row; each `active` family has enable evidence; zero ring sample drops with ML on |
 | Regression | M0/M1/M2 acceptance unchanged |
+
+**Where each row is asserted.** A gate row nothing checks is satisfied by nothing checking it —
+T-206's two vacuous dimensions, found and paid for once. The **ML row** was in that state until
+T-366: `tests/e2e/tests/acceptance/m3_*.rs` held no ML assertion at all. It is now
+`hk_ml::exit_gate` — the three clauses as a pure predicate over observables (the `(model, consumer)`
+modes in force, the `Classification` rows a run persisted, the run's lost-sample count) — asserted
+over a real run through the mock SDR by `tests/e2e/tests/acceptance/m3_ml.rs`, with the shape of the
+rule being *every ML-attributed `Classification` row must name a model that is `active` with §4.6
+enable evidence behind it*.
+
+The honest part: with the host dormant (T-363) the modes table is empty, so the row holds today
+**because nothing is on**, and that is what the gate prints (`[T-206] ML: off (clause 3 not
+exercised)`) rather than claiming ML was exercised. What makes the assertion worth having is that
+it **fails the day ML becomes active without its evidence** — and that is demonstrated, not argued:
+`m3_ml_exit_gate_catches_the_states_the_adr_row_forbids` constructs each forbidden state on the
+run's own snapshot and shows the gate reporting it, and
+`hk-ml/src/host.rs::a_forced_active_model_without_evidence_fails_the_adr_0016_s7_exit_gate` does the
+same through a live host on the one path that can reach `active` without evidence (a forced
+`set_mode`, which §4.6 audits rather than refuses). The empty-modes premise is itself guarded:
+`m3_ml_the_dormant_premise_of_this_gate_is_still_guarded` fails if `hk-ml`'s no-production-caller
+tripwire is removed, so whoever wires the host must give the gate a real mode enumeration
+(`MlGateSnapshot::from_host`) in the same change.
 
 ### 7.1 Canonical baseline, and how a brief cites it (T-415)
 
@@ -670,9 +695,9 @@ Rules the M3 side guarantees (ADR-0015 decides how the search uses them):
 | POST | `/api/signatures/import` | T-214 | rtl_433 flex specs (untrusted, validated) |
 | GET | `/api/clusters`, `/api/clusters/{id}` | T-202 | members, centroid, events, best pipeline |
 | POST | `/api/clusters/{id}/promote` | T-202 | → `Signature` |
-| GET | `/api/ml/models` | T-203 | registry, loaded, provider, mode per consumer, conformance |
-| PUT | `/api/ml/models/{id}/mode` | T-203 | `{consumer, version, mode, force?}` (audited; `active` needs evidence or `force`) |
-| GET | `/api/ml/shadow` | T-203 | per-model, per-SNR-bin agreement summary |
+| GET | `/api/ml/models` | ~~T-203~~ **T-844** | registry, loaded, provider, mode per consumer, conformance |
+| PUT | `/api/ml/models/{id}/mode` | ~~T-203~~ **T-844** | `{consumer, version, mode, force?}` (audited; `active` needs evidence or `force`) |
+| GET | `/api/ml/shadow` | ~~T-203~~ **T-844** | per-model, per-SNR-bin agreement summary |
 | POST, GET | `/api/datasets`, `/api/datasets/{id}` | T-205 | export a labelled snippet set (job), list/read manifests |
 | GET | `/api/inventory/{id}/seed` | T-215 | `SearchSeed` |
 
@@ -712,14 +737,24 @@ Rules the M3 side guarantees (ADR-0015 decides how the search uses them):
 | T-213 | `py/hkpy/synth/amc/**`, `py/tests/test_amc*.py`, `tests/e2e/tests/acceptance/common/classify.rs` |
 | T-201 | `hk-context/src/signature/{features,matcher,store}.rs`, `hk-model/src/repo/signatures.rs`, `hk-pipeline/src/signatures.rs`, `hk-api/src/signatures.rs`, `signatures/*.signature.json` |
 | T-202 | `hk-context/src/signature/cluster.rs`, `hk-model/src/repo/clusters.rs`, `hk-api/src/clusters.rs` |
-| T-203 | `hk-ml/**`, `hk-store/src/ml/**`, `hk-api/src/ml.rs`, `py/hkpy/ml/make_conformance_model.py` |
+| T-203 | `hk-ml/**`, `py/hkpy/ml/make_conformance_model.py` (**landed**) |
+| **T-844** | `hk-store/src/ml/**`, `hk-api/src/ml.rs`, the three `/api/ml` rows in `docs/api.md` (**reassigned from T-203, 2026-09-22 — T-365**; see the amendment note below) |
 | T-204 | `py/hkpy/ml/train_amc/**`, `hk-classify/src/dl.rs` |
 | T-205 | `hk-store/src/dataset/**`, `hk-api/src/datasets.rs` |
 | T-215 | `hk-pipeline/src/seed.rs`, the seed route in `hk-api/src/classify.rs` (after T-199 merges) |
 | T-206 | `tests/e2e/tests/acceptance/m3_*.rs`, `just acceptance-m3` |
 | T-207 | `ui/src/app/explore/**` classification/signature/cluster views |
 
-Shared, append-only (merge order T-199 → T-201 → T-202 → T-203 → T-205): `http.rs ROUTES`, `api_contract.rs`, `docs/api.md` subsections, `ApiState` fields, `hk-cli` construction lines. Evolution rule as in ADR-0012 §10: additive changes are allowed in the owning PR; renames and semantic changes amend this ADR.
+Shared, append-only (merge order T-199 → T-201 → T-202 → T-844 → T-205): `http.rs ROUTES`, `api_contract.rs`, `docs/api.md` subsections, `ApiState` fields, `hk-cli` construction lines. Evolution rule as in ADR-0012 §10: additive changes are allowed in the owning PR; renames and semantic changes amend this ADR.
+
+### Amendment 2026-09-22 (T-365): the shadow store and the `/api/ml` routes are T-844's, not T-203's
+
+**The defect this fixes is an attribution one.** T-203 reads `status: done` on the board while this section assigned it `hk-store/src/ml/**` and `hk-api/src/ml.rs`, and §9 assigned it `GET /api/ml/shadow`, `GET /api/ml/models` and `PUT /api/ml/models/{id}/mode`. None of that exists: there is no `crates/hk-store/src/ml/`, no `crates/hk-api/src/ml.rs`, no `/api/ml` row in `docs/api.md`, and `hk_ml::host::MemoryShadowSink` is the only `ShadowSink` in the tree. Every *other* M3 row's routes did land (`/api/taxonomy`, `/api/signatures`, `/api/clusters`, `/api/datasets` are all served), so this was the one row where an ADR assigned work to a completed ticket — and a reader could not tell whether the ticket had been closed early or the ADR had gone stale.
+
+**It is the ADR that was stale, and the board says so in T-203's own words.** T-203's acceptance is *"Mac provider plus CPU reference; conformance suite; batching defaults; inference only on CFAR-surviving detections; shadow mode records predictions without acting"*, and its `scope_audit_2026_09_15` narrowed it further to *"the model host itself: runtime load/unload, batching, model@version provenance, inference gated to CFAR-surviving detections, and the provider conformance suite"*. Neither mentions a store or a route. T-203 delivered exactly that, including the `ShadowSink` **trait** and the in-memory implementation its unit tests need. The durable sink and the operator surface were never in its definition of done; this table's `hk-store`/`hk-api` cells were a planning-time allocation that the re-scope left behind. So T-203's `done` stands and the table moves.
+
+**Why the cells were not simply implemented instead.** ADR-0016 §4.6 puts each family in `off`/`shadow`/`active` on evidence, and T-204 measured that no family earns even `shadow` on the dev evidence available (on `fsk`, AUROC 0.326 against classical's 0.824 and a false-known rate of 1.000 against 0.325). Nothing therefore *produces* a shadow record today, and `hk-ml`'s own crate docs (T-363) record the host as **dormant by design** behind three conditions: a model installed in a registry, a family clearing §4.6, and this durable sink. Building the writer and the three routes now would add a store nothing writes to and an operator surface over an empty table — the capability-with-no-caller pattern T-363 counted seven prior instances of. T-844 therefore owns the sink **together with** the condition that makes it non-vacuous, and is scoped so that its tests can only pass with a real producer behind them.
+
 
 ## Options considered
 
@@ -750,7 +785,8 @@ Shared, append-only (merge order T-199 → T-201 → T-202 → T-203 → T-205):
 | T-201 | C18 EmissionFeatures aggregation + Signature store (recipe-confirmed minting) + SignatureMatch full/partial/none + routes | T-211 | hk-context/signature, hk-model repo, hk-pipeline/signatures.rs, hk-api | Opus, medium, core_interface | M3B | revised: deps T-211 |
 | T-202 | C18 incremental clustering (online leader + nightly DBSCAN repair, merge/split history) linked to emitters; cluster routes + promote | T-201 | hk-context/signature/cluster.rs, hk-model repo, hk-api | Opus, medium | M3B | confirmed; algorithm fixed |
 | **T-214** | rtl_433 flex-spec import as untrusted signatures (validated; must match fixtures where available) | T-201 | hk-context/signature/import.rs, hk-api | Sonnet, low; priority low | M3B | **new** |
-| T-203 | C38 `hk-ml`: MlProvider (tract CPU reference, ort+CoreML opt-in after the day-1 bake-off), registry/manifest, batching, shadow mode + store, conformance suite, ml routes | T-211 | hk-ml, hk-store/ml, hk-api/ml.rs | Opus, high, core_interface | M3C | revised: provider decided, deps T-211 |
+| T-203 | C38 `hk-ml`: MlProvider (tract CPU reference, ort+CoreML opt-in after the day-1 bake-off), registry/manifest, batching, shadow mode (trait + in-memory sink), conformance suite | T-211 | hk-ml | Opus, high, core_interface | M3C | revised: provider decided, deps T-211; **store + ml routes moved to T-844 (T-365, 2026-09-22)** |
+| **T-844** | C38 durable shadow: hk-store `ml/shadow/` NDJSON `ShadowSink` + per-SNR agreement aggregates + the three `/api/ml` routes, landed *with* a producer so the path is non-vacuous | T-203, T-204 | hk-store/ml, hk-api/ml.rs | Opus, high, core_interface | M3C | **new** (T-365: reassigned from T-203) |
 | T-204 | C15 per-family DL (within-family class, energy open set), py training on the T-213 grid, shadow first, enable evidence per §4.6 | T-199, T-203, T-213 | py/hkpy/ml, hk-classify/dl.rs | Opus, high | M3C | revised: deps + scope (class only) |
 | T-205 | Labelled-capture dataset export: CRC-valid decode + user labels → `hk-mod@1` labels, SigMF snippets with provenance and session split keys, content-class gated | T-211 | hk-store/dataset, hk-api/datasets.rs | Sonnet, medium | M3L | revised: deps T-211, group renamed |
 | **T-215** | SearchSeed assembly + `GET /api/inventory/{id}/seed` for MAUTO (§8 rules) | T-199, T-201, T-202 | hk-pipeline/seed.rs, hk-api | Opus, medium, core_interface | M3M | **new** |

@@ -1,8 +1,12 @@
 # 21 — Do the ADR-0015 evidence bits survive 8-bit quantisation and gain? (T-547 measurement)
 
-**Status:** measurement, 2026-09-21. Not a decision. Written for [ADR-0022 §9](adr/0022-false-confirm-budget.md), which
-reserves the decision (an explicit amendment) for later and says in terms that its own
-soundness does not depend on this result.
+**Status:** measurement, 2026-09-21; **§10 extends it to the AM/OOK and C4FM paths at two
+supports (T-619, 2026-09-22)**. Not a decision. Written for
+[ADR-0022 §9](adr/0022-false-confirm-budget.md), which reserves the decision (an explicit
+amendment) for later and says in terms that its own soundness does not depend on this result.
+**§§1–9 are the FSK path at one support and every "every metric" in them means that path's
+metrics**; §10 is where the other blocks are, and its first finding is that the two do not
+agree.
 **Answers:** [ADR-0015 §2.2](adr/0015-decoder-synthesis-contracts.md)'s single unverified line —
 "whether these tails are stable enough across 8-bit quantisation and gain states is **unverified**".
 **Use cases:** RESEARCH-001, RESEARCH-008, SIGNAL-052.
@@ -279,6 +283,337 @@ cargo run --release -p hk-pipeline --example t547_ladder -- \
 `--no-quant` gives §4's control; `--rate`/`--cfo` give the mismatched nulls; `--gains-db 0` with
 an already-`ci8` stream converted to `cf32` gives the real-capture rows.
 
+## 10 — The AM/OOK and C4FM ladders, at two supports (T-619)
+
+§7 said there was no reason to assume δ transfers to the other blocks. **It does not.** The same
+harness, extended (`--path ook|c4fm`), measured the AM/OOK envelope ladder and the C4FM path over
+the same gain grid, the same noise null and three signal-present nulls each, at **two supports**.
+Three sentences carry the result:
+
+1. **Gain is still a no-op** — the no-ADC control reproduces the float table to ≤ 0.02 bits on
+   both new paths, as it did on the FSK path (§10.6). The conditioning key is the ADC, on all
+   three paths measured.
+2. **§3's headline is path-specific and must not be generalised.** "Clipping is refuted,
+   under-fill is the hazard" is a statement about an **angle-modulated** signal read by an
+   angle-demodulating ladder. The AM/OOK ladder measures *amplitude*, and clipping is amplitude
+   distortion: at 77 % clipped its metrics over-claim **+5.1 to +6.0 bits** on a 6-bit claim
+   (§10.3). Both ends of the ADC range are hazards there, not one.
+3. **δ grows with support.** At the larger support every path's worst δ is larger, not smaller
+   (OOK +0.46 → +1.85, C4FM +1.16 → +1.02/+1.37 depending on the metric). A calibration table
+   indexed by `n` is not bookkeeping; a table borrowed from a shorter window **under-states** the
+   discount.
+
+**Verdict:** **C4FM is CONDITIONAL** (small δ, but two of its six metrics must not ship an
+`evidence()` at all). **AM/OOK is NO-GO under [ADR-0015 §13.3](adr/0015-decoder-synthesis-contracts.md)'s
+current `nominal` bucket** and CONDITIONAL under a tighter one. §13.5's own trigger for splitting
+that bucket — "any null-side measurement beyond 28 % clipped" — is exactly what fired.
+
+### 10.1 What was measured
+
+| path | S1 | S2 | S3 | source |
+|---|---|---|---|---|
+| `ook` | `am_demod` | `clock_recovery` (nrz, Gardner) | `slicer` | the real M1 blocks, built through `Registry::build`, so their parameters pass the same schema validation a recipe's do |
+| `c4fm` | — | `hk_demod::fsk::c4fm::C4fmDemod` (one block spans S1–S3) | — | the real C23 path |
+
+Metrics, and where each comes from:
+
+| path | metric | source | ADR-0015 `MetricId` |
+|---|---|---|---|
+| ook | `env_bimodality` | harness: Sarle's coefficient of the `am_demod` envelope (the formula `hk_classify` applies to the IF) | `bimodality` — §1.1's "AM/OOK: envelope bimodality" |
+| ook | `env_depth` | `am_demod` `Status.extra["depth"]` | — |
+| ook | `gamma_max`, `mu42_a` | `hk_classify::features` (the Azzouz–Nandi envelope pair) | — |
+| ook | `eye_open`, `snr_db` | `clock_recovery` `Status.quality` / `Status.snr_db` | `eye_open`, `snr` |
+| ook | `timing_var` | rms of `clock_recovery`'s `timing_error` diagnostic port | `timing_var` |
+| ook | `evm`, `line_viol`, `bit_struct` | harness, §1's definitions, over the `slicer`'s output | `evm`, `line_violations`, `bit_structure` |
+| c4fm | `if_local_bimodality`, `if_local_modality` | `hk_classify::features` | `bimodality` |
+| c4fm | `level_margin` | `C4fmSymbols::level_margin` (mean distance to the sliced ideal level: the 4-level EVM) | `evm` |
+| c4fm | `offset_ratio` | `C4fmSymbols::residual_cfo_hz` / `outer_deviation_hz` | `offset_ratio` |
+| c4fm | `dibit_balance` | harness: Wilson–Hilferty \|z\| of the dibit histogram against uniform | `line_violations` analogue |
+| c4fm | `bit_struct` | harness: runs test over the dibits expanded MSB-first | `bit_structure` |
+
+**Corpora** (all `cf32_le` from `just synth` at 500 kHz, ADC applied by the harness, as §1):
+
+| role | ook | c4fm |
+|---|---|---|
+| Null A — noise | `noise_floor_rise`, step 0, 140 s (§1's corpus, reused) | the same |
+| Null B1 — **wrong symbol rate** | `acars_message` read at 1600 Bd, true 2400 | `trunk_control_channel` read at 3200 Bd, true 4800 |
+| Null B2 — **wrong centre** | the same, +25 kHz off | the same, +25 kHz off (an empty 12.5 kHz raster slot) |
+| Null B3 — **wrong family / wrong emitter** | the §1 2-FSK burst corpus, i.e. a constant-envelope emission read by an envelope ladder | the scene's unframed 4FSK **decoy** channel: right modulation, wrong emitter |
+| Alternative — matched | `acars_message` at 2400 Bd on its centre (AM, 70 % depth, keyed) | the C4FM control channel, 100 % duty |
+
+**Supports.** Window 16 384 and 65 536 samples, stride = window. Median realised support:
+**77 and 313 symbols** (ook, 2400 Bd), **156 and 628 dibits** (c4fm, 4800 Bd). Windows per
+condition: 4200 / 1068 on the noise null, ~3670 / ~915 on the signal nulls (the 2-FSK corpus is
+shorter: 1281 / 320). A 6-bit claim therefore puts ≈ 66 / 17 windows in the tail, so these δ
+carry roughly **±0.35 bits at the small support and ±0.7 at the large**; the 8-bit columns carry
+±0.7 and ±1.4 and are indicative only.
+
+**Direction.** Each metric's evidence tail is fixed **once per (path, metric)** from the float
+rows of Null A against the matched alternative, and then used for every null — the alternative
+defines which tail is evidence, not the null under test.
+
+### 10.2 Per-metric verdicts
+
+δ at a 6-bit claim, worst over all four nulls and over the admitted ADC states, at both supports.
+"ADR bucket" is [§13.3](adr/0015-decoder-synthesis-contracts.md)'s `nominal` (σ ≥ 0.5 LSB,
+clip ≤ 30 %); "tight" is σ ≥ 1.0 LSB, clip ≤ 10 % (§10.4). **Recall** is the share of matched
+windows that beat the Null-A 6-bit threshold — validity is worthless without it.
+
+**AM/OOK** (n = 77 / 313 symbols):
+
+| metric | δ ADR bucket | δ tight | δ@8 tight | recall | verdict |
+|---|---|---|---|---|---|
+| `env_bimodality` | +3.01 / +5.06 | +0.46 / +0.47 | +0.49 / +0.68 | 0.87 / 0.95 | **CONDITIONAL** on the tight bucket |
+| `gamma_max` | +3.12 / +4.93 | +0.13 / +0.80 | +0.74 / +0.94 | 0.95 / 1.00 | **CONDITIONAL** — the strongest AM metric |
+| `mu42_a` | +1.46 / +4.33 | +0.29 / +0.26 | +0.49 / +1.26 | 0.95 / 1.00 | **CONDITIONAL** |
+| `env_depth` | +1.10 / +3.87 | +0.38 / +1.85 | +0.48 / +3.26 | 0.19 / 0.90 | **CONDITIONAL**, useless at the short support |
+| `eye_open` | +2.97 / +2.14 | +0.14 / +0.49 | +0.32 / +0.96 | 0.41 / 0.64 | **CONDITIONAL**, and identical to `snr_db` (§10.5) |
+| `snr_db` | +2.97 / +2.14 | +0.14 / +0.49 | +0.32 / +0.96 | 0.41 / 0.64 | **not a second metric** |
+| `timing_var` | +1.35 / +3.13 | +0.26 / +0.26 | +0.96 / +1.75 | 0.58 / 0.98 | **CONDITIONAL** |
+| `evm` | +1.65 / +1.85 | +0.36 / +0.26 | +0.85 / +1.47 | 0.40 / 0.57 | **CONDITIONAL** |
+| `line_viol` | −0.01 / +0.32 | −0.01 / +0.26 | −0.00 / +1.15 | 0.29 / 0.48 | **NO-GO at 6 bits**: 23 distinct values at n = 77, table not invertible (§10.6) |
+| `bit_struct` | +2.38 / +3.86 | +0.27 / +0.68 | +0.36 / +1.61 | 0.46 / 0.75 | **CONDITIONAL** |
+
+**C4FM** (n = 156 / 628 dibits):
+
+| metric | δ ADR bucket | δ tight | δ@8 tight | recall | verdict |
+|---|---|---|---|---|---|
+| `if_local_bimodality` | +0.43 / +1.37 | +0.15 / +0.80 | +0.42 / +1.16 | 1.00 / 1.00 | **GO** at the short support, CONDITIONAL at the long |
+| `level_margin` | +0.27 / +0.40 | +0.23 / +0.40 | +0.62 / +0.75 | 0.99 / 1.00 | **GO** — the best-behaved calibrated metric measured on any path |
+| `dibit_balance` | +0.39 / +0.52 | −0.11 / +0.52 | +0.42 / +0.52 | 0.80 / 1.00 | **CONDITIONAL**: +2.38 once clipping is unconditioned, and it has atoms |
+| `if_local_modality` | +2.23 / +3.65 | +1.16 / +1.02 | +1.33 / +1.33 | 0.99 / 1.00 | **NO-GO**: a mode count over 67 distinct values cannot express 6 bits (a 6-bit ask realises 6.15, an 8-bit ask 9.71) |
+| `offset_ratio` | +0.11 / +0.52 | +0.11 / +0.52 | +0.66 / +1.40 | **0.036 / 0.080** | **NO-GO**: carries no evidence (§10.3) |
+| `bit_struct` | +0.43 / +0.75 | +0.33 / +0.75 | +0.13 / +1.62 | **0.006 / 0.009** | **NO-GO**: no separation in **either** tail |
+
+### 10.3 Two metrics that are parameters, not evidence
+
+`offset_ratio` and `bit_struct` on the C4FM path have small δ and near-zero recall: a matched
+control channel is *less* likely than noise to produce an extreme value, in the tail the medians
+point to. That is not a weak metric, it is a **mis-typed** one.
+
+- **`offset_ratio`.** Against a noise null the discriminator's mean is zero by symmetry, so
+  *noise* has the smaller residual offset and a real emission the larger. A residual carrier
+  offset is a **parameter estimate**; it becomes evidence only against a template that states
+  what the offset should be, which is `prior_bits`, not `evidence_bits`. ADR-0015 §1.1 lists
+  "offset/deviation" under S1 primary evidence; on this path that line needs splitting.
+- **The deviation estimate is the counter-example, and it is a prior.** `outer_deviation_hz`
+  reads **4157 Hz median on noise and 1634–1776 Hz on every real 4-level emission**: *zero* of
+  4200 noise windows land within ±10 % of C4FM's 1800 Hz, against 100 % of matched windows. It
+  separates "a 4-level emission is here" almost perfectly — and separates the *right* emitter
+  from the wrong one not at all (98.6 % of the wrong-rate null and 61.5 % of the decoy null also
+  land inside the same ±10 %). Exactly the plausibility check §1.3 keeps out of `evidence_bits`.
+
+### 10.4 The `nominal` bucket is not tight enough for either path
+
+Worst δ at a 6-bit claim over all nulls and metrics, by admitted bucket:
+
+| bucket | ook n = 77 | ook n = 313 | c4fm n = 156 | c4fm n = 628 |
+|---|---|---|---|---|
+| σ ≥ 0.5, no clip limit | +5.38 | +6.00 | +2.38 | +3.65 |
+| **σ ≥ 0.5, clip ≤ 30 % (ADR-0015 §13.3 `nominal`)** | **+3.12** | **+5.06** | **+2.23** | **+3.65** |
+| σ ≥ 1.0, clip ≤ 30 % | +1.11 | +4.79 | +1.16 | +1.02 |
+| **σ ≥ 1.0, clip ≤ 10 %** | **+0.46** | **+1.85** | **+1.16** | **+1.02** |
+| σ ≥ 2.0, clip ≤ 10 % | +0.36 | +1.14 | +0.33 | +0.80 |
+
+Two things move it, and they are the two ends of the ADC range:
+
+- **Clipping, on the envelope path only.** On the noise null clipping is as harmless as §3 found
+  (≤ 0.52 bits at 28 % clipped). On the *signal-present* nulls it is not: at 77 % clipped
+  `env_bimodality` over-claims **+5.12** and `gamma_max` **+5.38** at the short support, +5.77
+  and +6.00 at the long. A limiter costs an angle-modulated signal about 2 dB and destroys no
+  timing structure (§3); it costs an *amplitude*-modulated one the entire statistic. §3's
+  refutation of clipping was a true statement about the FSK path and is a false one about this
+  one. The C4FM path sides with FSK, as its physics says it should: its clipping damage is to
+  **recall** (`level_margin` 0.99 → 0.88, `dibit_balance` 0.80 → 0.56 at 82 % clipped), not to
+  validity.
+- **Under-fill, worse than on the FSK path.** At σ = 0.21 LSB the worst OOK metric over-claims
+  **+3.20 bits** at a 6-bit claim (FSK: +1.64; C4FM: +0.89 at the short support, +2.24 at the
+  long). And the σ ≥ 0.5 boundary is measured on the *stream*, not on the noise: on the
+  signal-present corpora the −11.1 dB state reads σ ≈ 0.6 LSB in total while its **noise floor is
+  still at ~0.2 LSB**, and that is precisely where the OOK nulls break (+3.01 on `env_bimodality`
+  at 0 % clipped). **The fill that matters is the noise floor's fill, not the window's.** A
+  runtime rule reading `std(re)` over a window containing a strong emission will pass a window
+  whose null behaviour is under-filled.
+
+### 10.5 Dependence groups: one exact duplicate, one near one
+
+Spearman ρ over the matched alternative at the short support (§5.1's measurement, repeated):
+
+- **`eye_open` ↔ `snr_db` on the AM/OOK path: ρ = 1.000, exactly.** `clock_recovery` computes
+  `snr_db = 10 log₁₀(q/(1−q))` from the same eye quality `q` it publishes — a deterministic
+  monotone map, so they are one number twice. T-547 found ρ = −0.989 for the FSK path's pair and
+  called summing them double-counting; here it is not an approximation. `evm` ↔ `eye_open` is
+  −0.876 and `env_depth` ↔ `mu42_a` is 0.678 in the same matrix.
+- **`level_margin` ↔ `offset_ratio` on the C4FM path: ρ = 0.842.** Both are derived from the
+  single level-centring step (`centre` and the 80th-percentile `outer`), so a noisy centre moves
+  both. Nothing else on that path exceeds 0.13.
+
+[ADR-0015 §13.1](adr/0015-decoder-synthesis-contracts.md)'s maximum-within-a-declared-group rule
+is therefore confirmed on two more paths, and the groups to declare are
+`{eye_open, snr, evm}` on the AM/OOK path and `{evm(level_margin), offset_ratio}` on the C4FM
+path. §13.1's rule survives; only its table changes, which is what §13.5 predicted.
+
+### 10.6 Expressibility, and what it costs at each support
+
+§5.2 found `eye_open`'s table non-invertible at 4 and 6 bits on the FSK path. The generalisation
+is that **every statistic on a discrete support has atoms**, and its expressible levels are a
+function of `n`:
+
+| metric | distinct values (of 4200 / 1068 null windows) | realised for a 4 / 6 / 8-bit ask |
+|---|---|---|
+| `line_viol` (ook) | 23 at n = 77, 40 at n = 313 | 4.10 / **6.54** / 9.45 (short); 4.25 / **6.48** / 8.06 (long) |
+| `if_local_modality` (c4fm) | 67 at n = 156, 168 at n = 628 | 4.36 / **6.15** / **9.71** (short) |
+| `dibit_balance` (c4fm) | 243 / 548 | 4.00 / **6.54** / 8.04 (short) |
+| `bit_struct` (c4fm) | 838 / 904 | 4.00 / **6.25** / 8.13 (short) |
+| everything else | ≥ 3832 of 4200 | 4.00 / 5.99 / 8.04 |
+
+Two differences from §5.2 worth keeping. First, **these atoms under-claim**, not over-claim: a
+6-bit ask lands at 6.5 realised, which is conservative — unlike `eye_open`'s 2.41, which was a
+3.6-bit lie. The refusal ADR-0015 §13.2 requires is still the right behaviour (a block must not
+silently deliver 6.54 when asked for 6.00), but it is not a validity hole on these paths.
+Second, the distinct-value count **roughly doubles with the support**, so `admissible_bits` is
+per-`n` and a table cannot be shared across supports even where δ says it could.
+
+### 10.7 The control: gain is still exactly a no-op
+
+The §4 control, repeated on both new paths — 4200 noise windows, 51 dB of gain applied, the ADC
+skipped, 6-bit claim:
+
+```
+ook    float  -11.1   -5.1    0.9    6.9   13.0   19.0   25.0   31.1   34.6   37.1   40.0
+env_bimodality  5.99 ...  5.99 on every column
+gamma_max       5.99   5.99   5.99   5.99   5.99   5.99   5.97   5.97   5.99   5.97   5.99
+line_viol       6.54 ...  6.54 on every column (its atom, §10.6)
+
+c4fm
+if_local_bimod  5.99   6.01   6.01   6.01   6.01   5.99   6.01   5.99   6.01   6.01   6.01
+level_margin    5.99 ...  5.99 on every column
+if_local_modal  6.15   6.13   6.13   6.13   6.15   6.13   6.13   6.15   6.11   6.15   6.13
+```
+
+Three paths, 33 gain columns, zero movement beyond ±0.02 bits (the ±0.02 wobble is windows
+crossing a threshold under `f32` rounding). §4's conclusion holds for every block measured so
+far: **ADR-0015's "across gain states" names the wrong variable**, and naming ADC fill instead
+was right — it is only the *boundaries* of the fill buckets that this note changes.
+
+### 10.8 What this still cannot tell you
+
+- **PSK EVM remains unmeasured**, because there is still no Costas block (ADR-0015 §1.1's
+  catalogue gap). Nothing here transfers to it either: the two paths measured differ from each
+  other more than either differs from the FSK path.
+- **The AM alternative is an AM-MSK aviation waveform, not a hard-keyed OOK sensor.** Its envelope
+  keys on and off between messages but carries a constant-envelope subcarrier while on, so the
+  *recall* column for the AM/OOK path is pessimistic for a true OOK burst and the δ column —
+  a null-side quantity — is unaffected. A hard-keyed 902–928 MHz OOK corpus would sharpen §10.2's
+  recall, not its verdicts.
+- **No real captures.** §6's unattributed real-world spread was measured only on the FSK path;
+  nothing says it is the same ~2 bits here, and the AM/OOK path has the stronger reason to differ
+  (a city's IMD environment is an *amplitude* phenomenon).
+- **The 8-bit columns rest on ≈ 16 windows at the short support and ≈ 4 at the long.** They are
+  indicative. §2's "do not admit a calibrated claim above 6 bits" is, if anything, better
+  supported here than there.
+
+### 10.9 Reproducing it
+
+Harness: the same `crates/hk-pipeline/examples/t547_ladder.rs`, with `--path ook|c4fm`
+(`--path fsk` is T-547's, unchanged but for one added `"path"` key per output line). Analysis: single-use scripts named in the commit
+message. Nothing under `fixtures/` was written.
+
+```sh
+just synth trunk_control_channel --seed 619 --out $D/trunk --datatype cf32_le \
+  --param sample_rate=500e3 --param duration_s=120
+just synth acars_message --seed 619 --out $D/acars --datatype cf32_le \
+  --param sample_rate=500e3 --param n_bursts=350 --param period_s=0.345 --param prekey_s=0.05
+
+cargo run --release -p hk-pipeline --example t547_ladder -- \
+  --iq $D/trunk/trunk_control_channel.sigmf-data --path c4fm \
+  --rate 4800 --dev 1800 --cfo 37500 --win 16384 --stride 16384 --windows 4200 --label alt
+cargo run --release -p hk-pipeline --example t547_ladder -- \
+  --iq $D/acars/acars_message.sigmf-data --path ook \
+  --rate 2400 --cfo 50000 --ch-bw 12000 --win 65536 --stride 65536 --windows 4200 --label alt
+```
+
+The nulls are the same commands with `--rate`/`--cfo` moved, `--iq` pointed at the noise corpus,
+or `--no-quant` for §10.7. The whole sweep — 22 runs, 3 corpora, ~2.5 M window-evaluations — took
+about 40 minutes on 8 threads.
+
+### 10.10 What ADR-0022 and ADR-0015 should do with this
+
+Nothing changes without an explicit amendment (§8.1's rule, unchanged). When one is written:
+
+1. **The `nominal` fill bucket must split, and §13.5 said so in advance.** Its stated trigger —
+   "any null-side measurement beyond 28 % clipped" — fired: at 77 % clipped the AM/OOK nulls
+   over-claim 5–6 bits. The measured bucket that holds every path to ≤ 1.2 bits at a 6-bit claim
+   is **σ ≥ 1.0 LSB and clip ≤ 10 %**; at σ ≥ 2.0 and clip ≤ 10 % it is ≤ 1.14. Whether to split
+   by path or to tighten globally is the decision, and the cheap answer is to tighten globally:
+   it costs recall only where the receiver is already misconfigured.
+2. **Fill must be measured on the noise floor, not on the window** (§10.4). The §13.3 runtime
+   rule (`σ_LSB < 0.5` over the evaluation window) passes windows whose *null* behaviour is
+   under-filled whenever a strong emission is present — which is exactly when a ladder runs.
+3. **Two C4FM metrics must not ship an `evidence()`:** `offset_ratio` (a parameter, not evidence)
+   and `bit_struct` (no separation in either tail). `if_local_modality` must not claim 6 bits.
+   On the AM/OOK path, `eye_open` and `snr` are one number and must be one dependence group.
+4. **Tables are per support, and the discount grows with `n`.** Nothing measured here lets a
+   table be shared across supports, in either direction.
+
+## 11 — The CSS (LoRa) ladder (T-851)
+
+T-619 measured AM/OOK and C4FM only, leaving docs/22 P9 (CSS) report-only with no owner. This closes
+the measurement. **Scope caveat first:** `css_demod` is a catalogue descriptor with no
+implementation, so the ladder here is the block's own first stage in numpy — dechirp, FFT, fold to
+the chirp bandwidth — not a shipped block, and the evidence metrics are the two that stage yields.
+Harness: `py/scripts_t851_css_ladder.py` (single-use; nothing under `fixtures/` written).
+
+**Setup.** SF9, BW 125 kHz, fs 500 kHz (2048 samples/symbol), window = 8 and 32 symbols (the 8-symbol
+preamble is the natural support). Same 11-state ADC gain grid and the same δ definition as §1
+(per-null table on its own float IQ; δ = claim − realised). Nulls: **A** noise (2000 / 600 windows),
+**B1** wrong SF (a true SF7 chirp read at the SF9 hypothesis), **B2** wrong bandwidth (250 kHz chirp read as 125 kHz),
+**B3** wrong family (2-FSK). Alternative: matched SF9 at 6 dB per-sample SNR, symbol-aligned.
+Metrics: `peak_ratio` (mean over symbols of max/mean of the folded dechirped spectrum) and
+`bin_run` (symbols sharing the modal peak bin — the preamble-repeat count). Bucket is applied to each
+stream's own σ (noise floor) and clip fraction, as §10.4 requires.
+
+Worst δ over nulls and admitted ADC states, at a 6-bit claim (8-bit in brackets), n = 8 / 32 symbols:
+
+| bucket | `peak_ratio` | `bin_run` |
+|---|---|---|
+| no restriction | +6.00 / +6.00 (+8.0) | +1.89 / +1.77 |
+| ADR-0015 §13.3 `nominal` (σ ≥ 0.5, clip ≤ 30 %) | **+1.94 / +3.53** (+3.36 / +5.09) | +0.49 / +0.36 (+1.03 / +2.36) |
+| tight (σ ≥ 1.0, clip ≤ 10 %) | **+0.73 / +1.77** (+1.36 / +3.36) | +0.20 / +0.36 (+0.03 / +1.77) |
+| σ ≥ 2.0, clip ≤ 10 % | +0.36 / +1.09 (+0.62 / +2.36) | +0.20 / +0.36 |
+
+(An earlier revision of this section built the wrong-SF null as a matched SF9 chirp read at SF9 and
+so over-stated `peak_ratio`'s δ; the table above is the corrected run.)
+
+Findings:
+
+1. **`peak_ratio` is NO-GO under `nominal`** (up to +3.5 bits at a 6-bit claim) **and its δ grows
+   with support** even under the tight bucket (+0.73 → +1.77, 8 → 32 symbols; +3.36 at 8 bits, 32
+   symbols). +6.00 in the unrestricted row is saturation: every null window beats the float
+   threshold. The mechanism is an under-filled stream (σ ≈ 0.1 LSB) that makes the folded spectrum
+   spiky for *every* input, plus clipping of strong tonal nulls; both ends of the ADC range are
+   hazards, as for OOK (§10.4), not only under-fill as for FSK/C4FM. Under the tight bucket at
+   n = 8 it is CONDITIONAL, like the other paths.
+2. **`bin_run` has small δ but cannot carry a calibrated claim.** It is a count over 8 (or 32)
+   symbols: **2 distinct values on the noise null at n = 8, 3 at n = 32** — §10.6's atom problem in
+   its extreme form. It expresses ≈ 1–2 bits; a 6-bit ask is refused (§13.2), not answered. Its
+   right home is an *analytic* bound (a run of k of n symbols on one of 2^SF bins has an exact
+   binomial null), which is `L_check`-style analytic evidence, not a table.
+3. Recall on the aligned matched alternative is 1.00 in every bucket at this SNR — **not
+   informative**: a real ISM burst has unknown symbol alignment, CFO/SFO and lower SNR, none of
+   which were exercised. Real LoRa captures were not used.
+4. Gain is a no-op as on every other path (§4/§10.7 hold structurally: gain only matters through
+   the ADC); not re-run as a separate control.
+
+**Verdict.** CSS: **`peak_ratio` NO-GO** under §13.3's `nominal` bucket, CONDITIONAL-and-support-
+sensitive under the tight bucket (a table per `n`, δ +0.73 → +1.77 bits at 6); **`bin_run` GO only as an
+analytic bit, NO-GO as a calibrated one.** The §10.10 recommendation (tighten the fill bucket
+globally, measure fill on the noise floor) is confirmed on a fourth path. **P9 stays report-only**:
+the measurement supports no calibrated bar, and its only sound evidence (`bin_run` as an analytic
+bound) requires a `css_demod` implementation that does not yet exist. Numbers above are the
+reason, not an omission. Sample noise: ±0.7 bits at 6 bits on the nulls at n = 32 (≈ 9 tail windows
+of 600); 8-bit columns are indicative only.
+
 ## Follow-ups filed
 
 T-616 (`snr`/`evm` are one statistic — ADR-0015 §1.3 must not sum correlated metric bits),
@@ -297,4 +632,7 @@ budgeted 4 096 windows per cell. That amendment deliberately leaves
 the maximum rule to it, and §2.1 of that ADR had already excluded every calibrated metric from a
 confirm, so §5.1's finding costs search recall and display honesty, not validity.
 **T-660** carries the Rust conformance test and the generator, which need `hk-synth` to exist.
-T-619 remains open.
+**T-619 is answered by §10 above** (2026-09-22): δ does not transfer, the AM/OOK ladder is NO-GO
+under §13.3's current fill bucket and CONDITIONAL under a tighter one, C4FM is CONDITIONAL with
+two of its six metrics ruled out of `evidence()` entirely, and the bucket-splitting trigger
+ADR-0015 §13.5 wrote down has fired. PSK EVM stays unmeasured until a Costas block exists.

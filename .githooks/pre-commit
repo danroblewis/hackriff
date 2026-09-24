@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Validate docs/tasks.yaml BEFORE any commit that touches it (T-764).
+#
+# The gate only runs on merges. The board is committed directly several times an hour — "Board:
+# flip nine tickets", "File T-700" — and none of those commits runs a gate, which is exactly how a
+# board that no YAML loader would accept reached `main` on 2026-09-22 and blanked the dashboard.
+# This hook is the check at the writing end. It covers both writers: a person's direct board
+# commit, and `ops/merge-runner.sh` committing a staged merge (MERGE_HEAD present).
+#
+# IT FAILS CLOSED. Missing uv, missing checker, unreadable index, a checker that runs but does not
+# SAY it validated the board — all refuse the commit. That last one matters: a validator silently
+# replaced by something that exits 0 is the failure mode this ticket exists to close, so success
+# must be asserted by the token the checker prints, never by its exit status alone.
+set -uo pipefail
+
+BOARD=docs/tasks.yaml
+staged=$(git diff --cached --name-only --diff-filter=ACMRD 2>/dev/null)
+merging=$(git rev-parse --verify --quiet MERGE_HEAD 2>/dev/null || true)
+
+# Untouched board and no merge in flight: nothing to say. (A worker committing Rust in a worktree
+# pays nothing, and — more to the point — is never refused for an environment it does not need.)
+if ! printf '%s\n' "$staged" | grep -qx "$BOARD" && [ -z "$merging" ]; then
+  exit 0
+fi
+# A merge that does not carry the board at all is likewise none of our business.
+if [ -n "$merging" ] && ! git ls-files --error-unmatch "$BOARD" >/dev/null 2>&1; then
+  exit 0
+fi
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  echo "board-check: REFUSING — cannot locate the repository root." >&2; exit 1; }
+
+# The INDEX content is what the commit will record; the working tree may differ.
+blob=$(git show ":$BOARD" 2>/dev/null) || {
+  echo "board-check: REFUSING — $BOARD is staged but its index content cannot be read" >&2
+  echo "  (a deletion, or an unresolved conflict). Resolve it; do not commit blind." >&2
+  exit 1; }
+
+# Overridable for tests and for an environment with a different runner — but see above: the
+# override cannot become a bypass, because the token below must still appear.
+CMD=${HK_BOARDCHECK:-"uv run --locked --project $top/py python -m hkpy.boardcheck"}
+out=$(printf '%s\n' "$blob" | $CMD - 2>&1)
+rc=$?
+if [ $rc -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^board-ok:'; then
+  echo "board-check: REFUSING this commit — $BOARD did not validate (rc=$rc)." >&2
+  printf '%s\n' "$out" | sed 's/^/  /' >&2
+  echo "  Fix the board and commit again. A malformed board breaks every tool that loads it," >&2
+  echo "  and it breaks them silently: the dashboard renders empty rather than complaining." >&2
+  exit 1
+fi
+exit 0

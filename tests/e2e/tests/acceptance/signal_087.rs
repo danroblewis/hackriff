@@ -34,13 +34,15 @@ const T545: &str = "T-545/SIGNAL-087";
 /// "the control channel is at 851.0500 MHz". It never narrows the search inside the band, never
 /// pre-populates the inventory and never commands a tune.
 ///
-/// **But it is band-gated rather than measurement-driven, and that is a real limit**: the same
-/// chain would not fire on a VHF (150–174 MHz), UHF (450–470 MHz) or 700 MHz trunked system, so
-/// `SIGNAL-085`'s actual claim — find a 100 %-duty narrowband four-level emission *anywhere* —
-/// is not what runs today. T-546 should make the occupancy trigger fire from the measured
-/// structure (continuous + on a narrowband raster + four-level) with the band as a *prior on the
-/// ranking* rather than a gate on the search. That is recorded here rather than asserted, because
-/// it is a separate capability from the five this ticket scopes.
+/// **T-545 found it band-gated rather than measurement-driven; T-615 measured which it is.** The
+/// hunt itself reads no band — raster origin, occupancy floor and sync + CRC are all measured from
+/// the window — so the band decides only whether a pass is *spent*: a dwell budget, recorded on
+/// `Trigger::Occupancy`. T-615 added the VHF high band the registry had been missing and asserts
+/// in `signal_085.rs` that the control channel is found at 155 MHz with the built-in registry and
+/// at 300 MHz once a plan widens the budget to the whole device, while the built-in hunt spends
+/// no pass at 300 MHz. Making the four-level structure itself the *trigger* (rather than the
+/// thing each pass measures) would still let the budget shrink further; that is a cost question,
+/// not a blindness one.
 pub const NO_LOOKUP: &str = "band gate, not a frequency lookup; see the doc comment";
 
 /// The a-priori tolerances. **Set from the standards figures in `docs/19 §2.1` and from the
@@ -95,6 +97,8 @@ pub struct Run {
     pub rows: Vec<serde_json::Value>,
     /// The fixture, truth included — **only this test process may read it**.
     pub fx: Fixture,
+    /// The id the device reported, which C05 calibration state is keyed by (T-560).
+    pub device_id: String,
 }
 
 impl Run {
@@ -167,6 +171,7 @@ fn blind_run(tag: &'static str, seed: u64, clock_error: bool) -> Option<Run> {
         ..BlindSource::default()
     };
     let cfg = blind_config(&fx.meta_path, tag, source, serde_json::json!({}));
+    let device_id = cfg.cfg.device_id.clone();
     let dir = cfg.dir;
     let handle = start(cfg.cfg, cfg.replay);
     let counters = handle.counters();
@@ -178,6 +183,7 @@ fn blind_run(tag: &'static str, seed: u64, clock_error: bool) -> Option<Run> {
         summary,
         rows,
         fx,
+        device_id,
     })
 }
 
@@ -186,6 +192,15 @@ static RUN: OnceLock<Option<Arc<Run>>> = OnceLock::new();
 /// The shared clean-clock run; `None` skips (no `uv`).
 fn run() -> Option<Arc<Run>> {
     RUN.get_or_init(|| blind_run("s087", 545, false).map(Arc::new))
+        .clone()
+}
+
+static CLK_RUN: OnceLock<Option<Arc<Run>>> = OnceLock::new();
+
+/// The same scene shifted by the measured receiver clock error; `None` skips (no `uv`).
+fn clk_run() -> Option<Arc<Run>> {
+    CLK_RUN
+        .get_or_init(|| blind_run("s087clk", 545, true).map(Arc::new))
         .clone()
 }
 
@@ -887,9 +902,7 @@ fn top_services(rows: &[&serde_json::Value]) -> Vec<(f64, Vec<String>)> {
 /// every emission in the capture.
 #[test]
 fn f_the_receiver_clock_error_is_measured_not_assumed_zero() {
-    let Some(run) = blind_run("s087clk", 545, true) else {
-        return;
-    };
+    let Some(run) = clk_run() else { return };
     report(&run);
 
     let truth = run.cc_truth();
@@ -950,6 +963,208 @@ fn f_the_receiver_clock_error_is_measured_not_assumed_zero() {
             .filter_map(|s| s.cc_freq_hz)
             .map(|f| f / 1e6)
             .collect::<Vec<_>>(),
+    );
+}
+
+/// The calls a run FOLLOWED onto granted channels inside the window, counted per granted
+/// frequency (Hz, rounded). `outside-window` rows are excluded: those are refusals, not follows.
+fn followed_calls(run: &Run) -> std::collections::BTreeMap<i64, usize> {
+    let repo = repo(&run.dir.0);
+    let mut out = std::collections::BTreeMap::new();
+    for sys in repo.trunk_systems().unwrap() {
+        for call in repo.calls_for_system(sys.id, 100_000).unwrap() {
+            if call.reasons.iter().any(|r| r == "grant-outside-window") {
+                continue;
+            }
+            if let Some(f) = call.f_hz {
+                *out.entry(f.round() as i64).or_insert(0) += 1;
+            }
+        }
+    }
+    out
+}
+
+/// **T-628: a grant is followed even when the receiver is off-grid.**
+///
+/// The grid fit behind [`f_the_receiver_clock_error_is_measured_not_assumed_zero`] is known only
+/// **modulo the raster**: +4300 Hz and -8200 Hz name the same 12.5 kHz grid. That re-origins the
+/// grid for candidacy, but a grant names an ABSOLUTE frequency, and down-converting it at the
+/// wrong alias measures the channel next door. T-546 therefore skipped following whenever the
+/// receiver was measurably off-grid -- which, on every real 800 MHz capture this HackRF makes, is
+/// always.
+///
+/// What a passing run proves: the alias is **resolved by measurement** -- the crystal's ppm bound
+/// limits it to a handful, and the one whose granted channels actually carry energy wins -- so
+/// over the same scene shifted by the measured -8200 Hz, **every granted voice channel inside
+/// the window is followed and yields exactly as many calls as the unshifted run**. Counts, not
+/// wall-clock. The resolved offset is recorded as receiver provenance with the evidence that chose
+/// it.
+#[test]
+fn g_a_grant_is_followed_off_grid_once_the_receiver_alias_is_resolved() {
+    let Some(clean) = run() else { return };
+    let Some(shifted) = clk_run() else { return };
+    report(&shifted);
+
+    let want = followed_calls(&clean);
+    let got = followed_calls(&shifted);
+    let c = |r: &Run, p: &str| r.summary.counter(p);
+    eprintln!(
+        "[{T545}] (G) followed calls per granted Hz: clean {want:?}, shifted {got:?}; follows \
+         clean {} shifted {}; alias resolved {} unresolved {}",
+        c(&clean, "/chains/cc_follows"),
+        c(&shifted, "/chains/cc_follows"),
+        c(&shifted, "/chains/cc_alias_resolved"),
+        c(&shifted, "/chains/cc_alias_unresolved"),
+    );
+    // The control: with a perfect clock the scene's granted channels are followed at all. If
+    // this fails, the comparison below means nothing.
+    assert!(
+        !want.is_empty() && want.values().all(|&n| n > 0),
+        "[{T545}] (G) CONTROL: the unshifted run followed no granted channel ({want:?})",
+    );
+    assert_eq!(
+        got,
+        want,
+        "[{T545}] (G) WITH A {:.0} Hz RECEIVER CLOCK ERROR THE GRANTS ARE NOT FOLLOWED THE SAME. \
+         Calls per granted frequency: clean {want:?}, shifted {got:?}. The grid offset is only \
+         known modulo the {:.0} Hz raster; a grant is an absolute frequency, so following it \
+         needs the alias resolved -- bounded by the crystal's ppm and chosen by which alias \
+         measures energy on the granted channels -- not skipped, and not guessed.",
+        apriori::CLOCK_ERROR_HZ,
+        apriori::RASTER_HZ,
+    );
+    assert_eq!(
+        c(&shifted, "/chains/cc_follows"),
+        c(&clean, "/chains/cc_follows"),
+        "[{T545}] (G) channelizer allocations differ between the clean and shifted runs",
+    );
+
+    // The resolution is receiver PROVENANCE, with its evidence, on the analysis of the emitter
+    // the decode confirmed -- and it names the -8200 Hz alias, not the +4300 Hz one.
+    let repo = repo(&shifted.dir.0);
+    let cc_hz = repo
+        .trunk_systems()
+        .unwrap()
+        .iter()
+        .find_map(|s| s.cc_freq_hz)
+        .expect("the shifted run confirms its control channel (test F)");
+    let server = serve_api_with_control(&shifted.dir.0);
+    let receivers: Vec<serde_json::Value> = shifted
+        .rows_near(cc_hz)
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .filter_map(|id| {
+            let (status, body) = api_post(
+                server.local_addr(),
+                "/api/analyze",
+                &serde_json::json!({ "emitter_id": id }).to_string(),
+            );
+            (status == 200)
+                .then(|| serde_json::from_slice::<serde_json::Value>(&body).ok())
+                .flatten()
+                .map(|v| v["receiver"].clone())
+                .filter(|r| !r.is_null())
+        })
+        .collect();
+    eprintln!("[{T545}] (G) receiver provenance: {receivers:?}");
+    let alias = receivers
+        .iter()
+        .map(|r| &r["alias"])
+        .find(|a| a["state"] == "resolved")
+        .unwrap_or_else(|| {
+            panic!(
+                "[{T545}] (G) no analysis near {:.4} MHz records a RESOLVED receiver alias: \
+                 {receivers:?}",
+                cc_hz / 1e6
+            )
+        });
+    let offset = alias["offset_hz"].as_f64().unwrap_or(f64::NAN);
+    assert!(
+        (offset - apriori::CLOCK_ERROR_HZ).abs() <= hk_detect::trunk::RASTER_TOLERANCE_HZ,
+        "[{T545}] (G) the resolved absolute offset {offset:.0} Hz is not the imposed \
+         {:.0} Hz: {alias}",
+        apriori::CLOCK_ERROR_HZ,
+    );
+    assert!(
+        alias["candidates"].as_u64().unwrap_or(0) > 1,
+        "[{T545}] (G) at 851 MHz a 20 ppm bound admits more than one 12.5 kHz alias, so the \
+         evidence must show several were TRIED: {alias}",
+    );
+}
+
+/// **The receiver's clock is recorded as C05 calibration state, blind, once (T-560).**
+///
+/// (F) and (G) prove the hunt copes with the −9.6 ppm HackRF: the raster is fitted rather than
+/// assumed, and the alias is settled by measurement. What they leave per-pass is the *estimate*:
+/// `docs/19 §7.6a`'s correction is a property of the receiver, so it belongs in the device's
+/// calibration state with its provenance — method, device, time, and the version it replaces —
+/// where every later query reads it instead of re-deriving it, and where a band-plan comparison
+/// can remove it before calling anything off-raster.
+///
+/// Blind: nothing here tells the system the error. The run is the (F) scene shifted by the
+/// measured constant; the ppm must come back out of the IQ alone. Sign: emissions landing 9.6 ppm
+/// LOW is an oscillator 9.6 ppm FAST, which is what `CalibrationState::ppm` (positive = fast)
+/// records. And the clean run must be *measured* on frequency, not merely left unrecorded.
+#[test]
+fn h_the_measured_receiver_clock_is_recorded_once_as_calibration_state() {
+    let Some(shifted) = clk_run() else { return };
+    let Some(clean) = run() else { return };
+    let latest = |r: &Run| {
+        repo(&r.dir.0)
+            .latest_calibration_state_for_device(
+                &r.device_id,
+                &hk_model::CalibrationMethod::LmrRaster,
+            )
+            .unwrap()
+    };
+    let tune_hz = 0.5 * (shifted.cc_truth().f_lo_hz + shifted.cc_truth().f_hi_hz);
+    // The raster tolerance, in ppm at this centre: the precision a raster assignment needs.
+    let tol_ppm = 1e6 * hk_detect::trunk::RASTER_TOLERANCE_HZ / tune_hz;
+
+    let cal = latest(&shifted).unwrap_or_else(|| {
+        panic!(
+            "[{T545}] (H) THE RECEIVER CLOCK WAS NOT RECORDED. A {:.0} Hz ({:.1} ppm) error was \
+             imposed and (G) resolves it per pass, but device {:?} has no lmr-raster \
+             CalibrationState: every query would have to re-derive it from raw IQ, and nothing \
+             outside the trunk hunt can remove it before a raster comparison.",
+            apriori::CLOCK_ERROR_HZ,
+            apriori::CLOCK_ERROR_PPM,
+            shifted.device_id,
+        )
+    });
+    eprintln!("[{T545}] (H) recorded receiver calibration: {cal:?}");
+    let want_ppm = -1e6 * apriori::CLOCK_ERROR_HZ / tune_hz;
+    assert!(
+        (cal.ppm - want_ppm).abs() <= tol_ppm,
+        "[{T545}] (H) recorded {:+.2} ppm, but emissions landing {:.0} Hz low is an oscillator \
+         {want_ppm:+.2} ppm fast (tolerance {tol_ppm:.2} ppm): {cal:?}",
+        cal.ppm,
+        -apriori::CLOCK_ERROR_HZ,
+    );
+    assert_eq!(cal.device_id, shifted.device_id);
+    // Recorded once, not per pass: walk the version chain back to its root.
+    let db = repo(&shifted.dir.0);
+    let mut versions = 1;
+    let mut at = cal.supersedes;
+    while let Some(id) = at {
+        versions += 1;
+        at = db.calibration_state(id).unwrap().supersedes;
+    }
+    let passes = shifted.summary.counter("/chains/cc_alias_resolved");
+    assert!(
+        versions <= 2 && passes >= 1,
+        "[{T545}] (H) {versions} calibration versions over {passes} resolved passes: the \
+         estimate is re-recorded per pass instead of once",
+    );
+
+    // The control: a perfect clock is measured as one, within the same tolerance.
+    let clean_cal = latest(&clean).unwrap_or_else(|| {
+        panic!("[{T545}] (H) CONTROL: the unshifted run recorded no receiver calibration")
+    });
+    assert!(
+        clean_cal.ppm.abs() <= tol_ppm,
+        "[{T545}] (H) CONTROL: an exact clock recorded as {:+.2} ppm",
+        clean_cal.ppm
     );
 }
 

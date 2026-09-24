@@ -103,6 +103,9 @@ export async function startBackend({
   // build, to prove this suite can still tell the difference.
   uiDist = process.env.HK_E2E_UI_DIST ?? path.join(UI_DIR, "dist"),
   token = "hke2e0123456789abcdef",
+  // T-845, additive: further `hk serve` flags, e.g. `["--iq-retention", "20s"]` for a ring that
+  // wraps within seconds rather than after the default two minutes.
+  args = [],
 } = {}) {
   if (FORBIDDEN.has(port)) {
     throw new Error(`port ${port} is reserved (the user's live-HackRF demo and its stream port); pick another`);
@@ -131,6 +134,7 @@ export async function startBackend({
     "--bind", `127.0.0.1:${port}`,
     "--data-dir", dataDir,
     "--ui-dist", uiDist,
+    ...args,
   ], {
     cwd: REPO,
     // HK_STREAM_TCP is pinned away from the default as well: `hk serve` also runs a TCP stream

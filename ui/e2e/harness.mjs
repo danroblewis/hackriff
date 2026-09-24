@@ -41,9 +41,15 @@ export function modifierBits({ alt = false, ctrl = false, meta = false, shift = 
  * returns `{ ok: false, reason }` and lets `surface-load.e2e.mjs` say what is wrong, in its own
  * words, with the CSP violation and the exception attached.
  */
-export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000 } = {}) {
+export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000, onSpawn } = {}) {
   const t0 = Date.now();
-  const browser = await Browser.open();
+  // T-740: this Chrome is a DIRECT child of the caller (run.mjs), not of any spec — so it is
+  // invisible to `killSpecTree`'s spec-tree walk and to the per-spec timeout. `onSpawn`, if given,
+  // reaches all the way down to `cdp.mjs`'s `spawn()` call and fires the instant the pid exists —
+  // before Chrome forks any of its own helper processes — so a caller that tracks its own children
+  // (for a sweep on SIGINT/SIGTERM/next-run-start) can track this one from the start, rather than
+  // trusting the `finally` below, which a `process.exit()` mid-await never reaches.
+  const browser = await Browser.open({ onSpawn });
   try {
     const page = await browser.page();
     for (;;) {
@@ -69,6 +75,138 @@ export async function waitForSurfaceHistory(origin, token, { timeoutMs = 60000 }
   } finally { browser.close(); }
 }
 
+/**
+ * **Poll a node-side predicate until it holds, and say what was waited for when it does not.**
+ *
+ * The counterpart to [[Page.waitFor]] for facts that live in THIS process rather than in the page —
+ * a request having come back on `page.requests`, a server route having answered. It exists so that
+ * "wait until the thing happened" never has to be spelled as "wait a while and hope": a readiness
+ * wait that reads the wall clock decides, on how busy the box is, whether a test measures the
+ * product or measures the scheduler.
+ *
+ * `timeoutMs` is a FAILURE BOUND, never the wait itself: on expiry it throws naming `what`, which is
+ * the sentence whoever reads the red line needs.
+ */
+export async function until(what, ok, { timeoutMs = 30000, everyMs = 200 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    if (await ok()) return Date.now() - t0;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}`);
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
+
+/**
+ * **Wait for a page-derived report to reach `done`, and keep waiting while the page is still
+ * WORKING towards it.**
+ *
+ * The mechanism behind every "wait for the pane to become resident" in this tier, shared because
+ * the *bound* is the thing that was wrong in all of them and the *predicate* is the thing that must
+ * stay each file's own.
+ *
+ * What was wrong: a fixed deadline (25 s, 40 s) is a bet on the tile route's service rate, and this
+ * repo has measured that rate moving more than twenty-fold between a quiet box and a full suite —
+ * 167 ms a tile with one other spec running, 3612 ms a tile in the whole suite. The same pane, the
+ * same product and the same claim then pass or fail on how many other lanes are up, which is the
+ * one thing the test is not about.
+ *
+ * What replaces it is not a longer deadline. It is the difference between a pane that is FILLING
+ * and a pane that is STUCK, which the page states plainly: its report changes, or its requests are
+ * on the wire. While either is true the page is working and the wait continues; when BOTH have been
+ * quiet for `stallMs` the page has finished doing whatever it is going to do, and the caller's
+ * assertion judges that. So the defect these waits exist to catch — a place a refusal made terminal,
+ * which is a *steady* `0 tiles · N coarse stand-ins · 0 pending` with nothing on the wire — is
+ * reported FASTER than the old deadline reported it, not slower.
+ *
+ * `timeoutMs` remains, as the failure bound of last resort for a page that churns forever.
+ */
+export async function waitWhileWorking(page, read, done, {
+  everyMs = 400, stallMs = 12000, timeoutMs = 180000, busy = (u) => u.includes("/api/tiles"),
+} = {}) {
+  const t0 = Date.now();
+  const wire = () => page.requests.filter((r) => busy(r.url))
+    .reduce((n, r) => n + 1 + (r.endedMs !== null ? 1 : 0), 0);
+  let value = await read(), lastSeen = JSON.stringify(value), lastWire = wire(), movedAt = Date.now();
+  for (;;) {
+    if (done(value)) return { ok: true, value, ms: Date.now() - t0, stalledMs: 0 };
+    const elapsed = Date.now() - t0;
+    if (elapsed > timeoutMs) return { ok: false, value, ms: elapsed, stalledMs: Date.now() - movedAt };
+    if (Date.now() - movedAt > stallMs) return { ok: false, value, ms: elapsed, stalledMs: Date.now() - movedAt };
+    await new Promise((r) => setTimeout(r, everyMs));
+    value = await read();
+    const seen = JSON.stringify(value), w = wire();
+    if (seen !== lastSeen || w !== lastWire) movedAt = Date.now();
+    lastSeen = seen; lastWire = w;
+  }
+}
+
+/**
+ * Every tile ADDRESS a list of requests asked for, one record per address (T-573).
+ *
+ * A single `GET /api/tiles` names one address in its query and answers it with its own status. A
+ * `GET /api/tiles/batch` names many in `addresses=<level_f>.<level_t>.<f_index>.<t_index>,…` and
+ * answers each with its own status inside a 200 (read by [[Page]] off the body); an address it
+ * listed in `remaining` was not answered at all (`status: null`, like a request still in flight).
+ * A batch whose request itself failed passes that status to every address it carried. The events
+ * route is not a tile read and is excluded.
+ */
+export function tileAsks(requests) {
+  const out = [];
+  for (const r of requests) {
+    if (!r.url.includes("/api/tiles") || r.url.includes("/api/tiles/events")) continue;
+    const u = new URL(r.url), q = u.searchParams;
+    const common = { url: r.url, startedMs: r.startedMs, respondedMs: r.respondedMs ?? null,
+      endedMs: r.endedMs, error: r.error,
+      scheme: q.get("scheme") ?? "view", device: q.get("device") ?? "any",
+      cells: q.has("cells") ? Number(q.get("cells")) : 256 };
+    if (u.pathname.endsWith("/api/tiles/batch")) {
+      const byAddr = new Map((r.entries ?? []).map((e) => [e.spelling, e.status]));
+      for (const sp of (q.get("addresses") ?? "").split(",").filter(Boolean)) {
+        const [levelF, levelT, fIndex, tIndex] = sp.split(".").map(Number);
+        const status = r.status !== 200 ? r.status : (byAddr.get(sp) ?? null);
+        out.push({ ...common, batch: true, spelling: sp, levelF, levelT, fIndex, tIndex, status,
+          key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
+      }
+    } else {
+      const n = (k) => (q.has(k) ? Number(q.get(k)) : NaN);
+      const [levelF, levelT, fIndex, tIndex] = ["level_f", "level_t", "f_index", "t_index"].map(n);
+      const sp = `${levelF}.${levelT}.${fIndex}.${tIndex}`;
+      out.push({ ...common, batch: false, spelling: sp, levelF, levelT, fIndex, tIndex, status: r.status,
+        key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
+    }
+  }
+  return out;
+}
+
+/**
+ * The most tile ADDRESSES this page ever had outstanding on the wire at once (T-846).
+ *
+ * [[Page.watchConcurrency]] counts REQUESTS, and since T-573 a request is a batch of up to 64
+ * addresses: a client that ignored the route's in-flight cap entirely put all of them in ONE batch
+ * and read `peak 1/4`. The cap the client obeys is per address (`TileCache` charges one slot per
+ * address, and the route takes one producer slot per address), so this is the like-for-like count.
+ *
+ * Each address is outstanding from its request's start until the route ANSWERED it — the response
+ * line, not the end of the body, for the reason `#release` gives — or until the request failed or
+ * was cancelled. A batch's addresses are all outstanding until the batch answers, which is exactly
+ * what the route was asked for and what the client's own budget charged. Like the request count, it
+ * is a LOWER bound on what the client had queued behind the browser's connection limit.
+ */
+export function addressPeak(asks) {
+  const ev = [];
+  for (const a of asks) {
+    const end = a.respondedMs ?? a.endedMs ?? Number.POSITIVE_INFINITY;
+    ev.push([a.startedMs, 1], [end, -1]);
+  }
+  // Ends before starts at the same millisecond: a slot released and re-taken in one tick is not two.
+  ev.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  let live = 0, peak = 0;
+  for (const [, d] of ev) { live += d; peak = Math.max(peak, live); }
+  return peak;
+}
+
 export class Browser {
   static async open(opts = {}) {
     const b = await launch(opts);
@@ -82,10 +220,24 @@ export class Browser {
 
 /** One page target, with its console, its exceptions and its network recorded from before load. */
 export class Page {
-  static async open(conn, url, { width = 1440, height = 900, initScript = null } = {}) {
-    // No width/height here: `Target.createTarget` only accepts them for a new *window*, and the
-    // viewport is set by `Emulation.setDeviceMetricsOverride` below anyway.
-    const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
+  static async open(conn, url, { width = 1440, height = 900, initScript = null, newWindow = false } = {}) {
+    // **`newWindow` is not cosmetic: it decides whether the page ALREADY OPEN keeps rendering**
+    // (2026-09-23). A second target in the SAME window becomes the window's active tab, so the
+    // first one's `document.visibilityState` flips to `hidden` and Chrome stops delivering it
+    // `requestAnimationFrame` — measured here at 26 frames/s before and **0 frames/s after**, with
+    // `--disable-background-timer-throttling` and `--disable-renderer-backgrounding` both already
+    // set (they govern timers and process priority, not rAF for a hidden page). The surface's tile
+    // demand is computed in its render pass (`preview.ts` `start()` → `frame()`), so a spec that
+    // opens a second tab has silently stopped the first one's fetching — which is exactly the
+    // situation `surface-contention.e2e.mjs` exists to create. In its own window both pages stay
+    // `visible` and both keep rendering (measured 26 and 68 frames/s side by side).
+    //
+    // Default off, so every existing single-page spec opens exactly the target it always did.
+    //
+    // width/height are only accepted by `Target.createTarget` for a new *window*; the page's own
+    // viewport comes from `Emulation.setDeviceMetricsOverride` below either way.
+    const { targetId } = await conn.send("Target.createTarget",
+      newWindow ? { url: "about:blank", newWindow: true, width, height } : { url: "about:blank" });
     const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
     const p = new Page(conn, sessionId);
     conn.on("Runtime.consoleAPICalled", (m, sid) => {
@@ -145,14 +297,14 @@ export class Page {
   constructor(conn, sessionId) {
     this.conn = conn; this.sessionId = sessionId;
     this.console = []; this.exceptions = [];
-    /** Every request this page made, in order: `{url, status, error, startedMs, endedMs}`. */
+    /** Every request this page made, in order: `{url, status, error, startedMs, respondedMs, endedMs}`. */
     this.requests = [];
     /** Live and peak concurrency, per url predicate name — see `watchConcurrency`. */
     this.watches = [];
   }
 
   #sent(m) {
-    const rec = { id: m.requestId, url: m.request.url, method: m.request.method, status: null, error: null, startedMs: Date.now(), endedMs: null, counted: true };
+    const rec = { id: m.requestId, url: m.request.url, method: m.request.method, status: null, error: null, startedMs: Date.now(), respondedMs: null, endedMs: null, counted: true };
     this.requests.push(rec);
     this.#open.set(m.requestId, rec);
     for (const w of this.watches) if (w.match(rec.url)) { w.live++; w.peak = Math.max(w.peak, w.live); }
@@ -176,6 +328,12 @@ export class Page {
     const r = this.#open.get(m.requestId);
     if (!r) return;
     r.status = m.response.status;
+    // **When the SERVER let go of its slot** (T-630), which is not when the body finished
+    // streaming. A concurrency measured to `endedMs` would count a request the route has already
+    // answered as still holding a slot, and so would report a client that obeys its share as one
+    // that does not — the same like-for-like rule `#release` is written for, recorded rather than
+    // only acted on so a test can reconstruct the peak per status.
+    r.respondedMs = Date.now();
     this.#release(r);
   }
   #done(id, error) {
@@ -184,7 +342,27 @@ export class Page {
     this.#open.delete(id);
     r.error = error; r.endedMs = Date.now();
     this.#release(r);
+    // **A batch's per-address answers live in its BODY** (T-573). `GET /api/tiles/batch` answers
+    // 200 for the request and carries each address's own status — a 503, a 400 — inside it, so
+    // the status line alone would read every refusal as an answer. Read off CDP after the body
+    // landed and reduced to what a test asserts on: which address, and what the route said.
+    if (!error && r.status === 200 && r.url.includes("/api/tiles/batch")) {
+      const got = this.conn.send("Network.getResponseBody", { requestId: id }, this.sessionId)
+        .then(({ body, base64Encoded }) => {
+          const text = base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body;
+          const j = JSON.parse(text);
+          r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null }));
+          r.remaining = j.remaining ?? [];
+        })
+        .catch((e) => { r.bodyError = String(e?.message ?? e); });
+      this.#bodies.add(got);
+      void got.finally(() => this.#bodies.delete(got));
+    }
   }
+
+  #bodies = new Set();
+  /** Wait until every batch body already requested from CDP has been read into its record. */
+  async settleBodies() { await Promise.all([...this.#bodies]); }
 
   /**
    * Start counting how many requests matching `match` are in flight at once, and keep the peak.
@@ -248,6 +426,61 @@ export class Page {
           `  exceptions: ${JSON.stringify(this.exceptions.slice(0, 3))}`);
       }
       await new Promise((r) => setTimeout(r, everyMs));
+    }
+  }
+
+  /**
+   * **Poll an in-page expression for a VALUE until `ok(value)` holds, and report rather than throw.**
+   *
+   * Three properties [[waitFor]] cannot give a test that has to assert on numbers:
+   *
+   *  - **One evaluation per sample.** Reading a rectangle in one `eval` and the drawing buffer that
+   *    is supposed to match it in another is a race against the page's own layout — the chrome's
+   *    height changes when a level label wraps, the canvas moves with it, and the two halves of the
+   *    comparison then come from two different layouts. Whatever must be compared is read together.
+   *  - **It reports the last sample instead of throwing.** The caller keeps its own assertion, with
+   *    its own message and its own number, so a genuine defect still fails as itself rather than as
+   *    "the harness timed out".
+   *  - **`timeoutMs` is a failure bound, not the wait.** A green run returns the moment the page
+   *    agrees with itself; a red one says what it was waiting for and what it last saw.
+   */
+  async waitForValue(what, expression, ok, { timeoutMs = 30000, everyMs = 150 } = {}) {
+    const t0 = Date.now();
+    let value = null, polls = 0;
+    for (;;) {
+      value = await this.eval(expression);
+      polls++;
+      if (ok(value)) return { value, ok: true, what, ms: Date.now() - t0, polls };
+      if (Date.now() - t0 > timeoutMs) return { value, ok: false, what, ms: Date.now() - t0, polls };
+      await new Promise((r) => setTimeout(r, everyMs));
+    }
+  }
+
+  /**
+   * **Wait until an in-page value STOPS changing, across real frames.**
+   *
+   * The readiness a gesture needs. A wheel or a drag is applied by the render loop, not by the
+   * dispatch, and how many frames that takes is a function of how busy the box is — so "dispatch,
+   * sleep 450 ms, read the readout" asks the machine's load whether the gesture happened. This asks
+   * the page: sample the readout across frames until `stable` consecutive samples agree, and hand
+   * back the settled value.
+   *
+   * It settles on **no change**, never on a particular value, so it is equally the right wait before
+   * an assertion that the view moved and before one that it did not — neither can be made true by
+   * waiting, and both stop being decided by when the sample was taken. Reports rather than throws,
+   * for [[waitForValue]]'s reason.
+   */
+  async waitUntilStill(what, expression, { stable = 3, framesEach = 2, timeoutMs = 15000 } = {}) {
+    const t0 = Date.now();
+    let last = await this.eval(expression), same = 1, samples = 1;
+    for (;;) {
+      await this.frames(framesEach);
+      const now = await this.eval(expression);
+      samples++;
+      same = JSON.stringify(now) === JSON.stringify(last) ? same + 1 : 1;
+      last = now;
+      if (same >= stable) return { value: last, still: true, what, ms: Date.now() - t0, samples };
+      if (Date.now() - t0 > timeoutMs) return { value: last, still: false, what, ms: Date.now() - t0, samples };
     }
   }
 

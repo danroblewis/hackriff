@@ -60,11 +60,153 @@ _EVENTS = (
 )
 
 
+#: `gate: just test took 1221s (exit 0)` — one line per suite, printed by `py/hkpy/gate.py`
+#: right beside the `gatelog.append()` that records the same fact structurally.
+#:
+#: T-763 PARSES THIS RATHER THAN TRUSTING `gate-timings.jsonl` ALONE, because the structured
+#: log turned out to hold almost none of the runs that matter. On 2026-09-22 it carried 33
+#: runs, of which 31 were `py`-class records written by `py/tests/test_gate.py` itself (root
+#: = a pytest tmpdir) and exactly TWO were real `full` gates — against 48 full gates visible
+#: in `merge-runner.log` over the same window. The printed line is the one that survived, it
+#: is retroactive back to before the instrumentation existed, and it is per suite, which is
+#: the resolution "which half of the gate got slower" actually needs.
+_SUITE = re.compile(r"^gate: (just [\w-]+) took (\d+)s \(exit (-?\d+)\)")
+
+#: A run boundary: the merge runner announces every gate it starts, branch or bulk.
+_GATE_BEGIN = re.compile(r"^(?:GATE \S+ \(just gate-merge|BULK gate \()")
+
+
 @dataclass
 class Event:
     when: datetime
     kind: str
     branch: str | None
+
+
+@dataclass
+class SuiteRun:
+    """One gate run as its own printed suite lines describe it."""
+
+    when: datetime
+    suites: list[tuple[str, int, int]] = field(default_factory=list)
+
+    @property
+    def seconds(self) -> int:
+        return sum(sec for _, sec, _ in self.suites)
+
+    @property
+    def passed(self) -> bool:
+        """Every suite it launched exited 0.
+
+        The gate aborts on the first failure, so "all zero" is also "it ran the whole set
+        for its class". A failed run is therefore SHORTER than the suite costs, which is
+        why it must never be averaged in with the passing ones.
+        """
+        return bool(self.suites) and all(rc == 0 for _, _, rc in self.suites)
+
+    def cost(self, cmd: str) -> int | None:
+        for name, sec, _ in self.suites:
+            if name == cmd:
+                return sec
+        return None
+
+
+def parse_suite_runs(text: str, year: int) -> list[SuiteRun]:
+    """Per-suite durations for every gate in `merge-runner.log`, oldest first.
+
+    Boundaries come from the runner's own `GATE …`/`BULK gate …` announcements rather than
+    from guessing which suite runs first, so a class whose first suite is `lint-py` groups
+    the same way as one that starts with `lint`. Lines before the first announcement are
+    dropped: a log opened mid-run would otherwise contribute a run missing its own head.
+    """
+    out: list[SuiteRun] = []
+    cur: SuiteRun | None = None
+    seen: set[tuple[datetime, str, int, int]] = set()
+    when: datetime | None = None
+    prev: datetime | None = None
+    cur_year = year
+    for raw in text.splitlines():
+        line = raw.strip()
+        stamped = _LINE.match(line)
+        if stamped:
+            mon, day, hh, mm, ss, rest = stamped.groups()
+            try:
+                when = datetime(cur_year, int(mon), int(day), int(hh), int(mm), int(ss))
+            except ValueError:
+                continue
+            # Same December -> January roll-back as parse_runner_log; the log has no year.
+            if prev is not None and when < prev - timedelta(days=200):
+                cur_year += 1
+                when = when.replace(year=cur_year)
+            prev = when
+            if _GATE_BEGIN.match(rest):
+                cur = SuiteRun(when=when)
+                out.append(cur)
+            continue
+        hit = _SUITE.match(line)
+        if not hit or cur is None or when is None:
+            continue
+        cmd, sec, rc = hit.group(1), int(hit.group(2)), int(hit.group(3))
+        # The runner's log() both tees and inherits a redirect, so every line lands twice.
+        key = (when, cmd, sec, rc)
+        if key in seen:
+            continue
+        seen.add(key)
+        cur.suites.append((cmd, sec, rc))
+    return [run for run in out if run.suites]
+
+
+def suite_stats(runs: list[SuiteRun], min_runs: int = 4) -> list[str]:
+    """Per-suite p50, and earlier-half vs recent-half — "which suite moved", as a table.
+
+    Two filters, and both of them are the point:
+
+    * only COMPLETE PASSING runs. A run that aborted on a failing suite never reached the
+      ones after it, so including it would report the later suites as having got cheaper
+      every time an earlier one broke.
+    * grouped BY CLASS, where a run's class is the set of suites it launched. Mixing them is
+      how `CLAUDE.md` came to record a 21.4 min "gate median" that a 17-second `py` gate and
+      a 40-minute `full` one both contributed to (T-763). Classes are reported separately
+      and never pooled.
+    """
+    good = [r for r in runs if r.passed]
+    groups: dict[tuple[str, ...], list[SuiteRun]] = {}
+    for run in good:
+        groups.setdefault(tuple(name for name, _, _ in run.suites), []).append(run)
+    if not groups:
+        return ["  no complete passing runs recorded yet."]
+    out: list[str] = []
+    for names, members in sorted(
+        groups.items(), key=lambda kv: -statistics.median([r.seconds for r in kv[1]])
+    ):
+        label = " + ".join(name.split(None, 1)[-1] for name in names)
+        out.append("")
+        out.append(f"  CLASS [{label}] — {len(members)} complete passing run(s)")
+        if len(members) < min_runs:
+            out.append("    too few to compare halves.")
+            continue
+        half = len(members) // 2
+        early, recent = members[:half], members[half:]
+        out.append(
+            f"    {members[0].when:%m-%d %H:%M} -> {members[-1].when:%m-%d %H:%M}"
+        )
+
+        def row(name: str, pick) -> str:
+            allv = [float(v) for v in map(pick, members) if v is not None]
+            ev = [float(v) for v in map(pick, early) if v is not None]
+            rv = [float(v) for v in map(pick, recent) if v is not None]
+            moved = (
+                f"   earlier {_fmt(statistics.median(ev))}"
+                f" -> recent {_fmt(statistics.median(rv))}"
+                if ev and rv
+                else ""
+            )
+            return f"    {name:18s} median {_fmt(statistics.median(allv))}{moved}"
+
+        out.append(row("TOTAL", lambda r: float(r.seconds)))
+        for name in names:
+            out.append(row(name, lambda r, n=name: r.cost(n)))
+    return out
 
 
 def parse_runner_log(text: str, year: int) -> list[Event]:
@@ -329,6 +471,14 @@ def report(root: str, limit: int = 20) -> list[str]:
         return out
 
     year = datetime.fromtimestamp(os.path.getmtime(runner_log)).year
+
+    # T-763: which SUITE moved. This is the question `just cycle-time` could not answer
+    # before — `gate-timings.jsonl` had two real `full` runs in it — and it is the question
+    # a duration regression is actually about.
+    out.append("")
+    out.append("GATE SUITES (per-suite durations printed into merge-runner.log)")
+    out.extend(suite_stats(parse_suite_runs(text, year)))
+
     events = parse_runner_log(text, year)
     lives = lives_from_events(events)
     merged = [life for life in lives.values() if life.merged]
@@ -413,6 +563,29 @@ def report(root: str, limit: int = 20) -> list[str]:
 #: box runs up to four agents plus an `hk serve` by policy, and a single contended run is not
 #: evidence of anything (a `cargo build -p hk-plugins --bins` documented at 0.05 s was
 #: measured at 500 s under load 211). A median that moves is.
+#:
+#: T-763, 2026-09-22 — DELIBERATELY NOT RAISED, and why. The board said the gate had gone
+#: from 21.4 min to ~34 in two days, "roughly 60 % slower". Measured against the per-suite
+#: history (48 full gates in `merge-runner.log`, 24 of them complete and passing):
+#:
+#:   * The 21.4 min baseline in `CLAUDE.md` is NOT the same measurement as the 34.0 the
+#:     guard reported. 21.4 came from this file's BRANCH table — gate start -> MERGED, so
+#:     only gates that passed, ACROSS ALL CLASSES, and on 2026-09-20 that window was mostly
+#:     cheap classes (a `py` gate of 17 s sits in the same median as a 40 min `full` one).
+#:     34.0 came from `gate-timings.jsonl`, `full` class only, failed and bulk runs included.
+#:     The step between them is largely an artefact of comparing two different quantities.
+#:   * The REAL drift, like for like over the 24 complete passing full gates: median total
+#:     30.0 min over the earlier half -> 34.7 min over the recent half, +16 %.
+#:   * It is one located step, not a diffuse cost of a growing suite. The workspace nextest
+#:     wall went 462 s -> 756 s at the 2026-09-21 04:55 gate while the test count moved
+#:     2395 -> 2403 (+0.3 %), and in that same run four `hk-classify` binaries
+#:     (`accuracy_sweep`, `below_gate_absorption`, `open_set_stats`, `verifier_gain`) went
+#:     from never-slow to SLOW past 60-180 s and stayed there, with
+#:     `hk-estimate::receiver_lines` going from >60 s to >240 s alongside them.
+#:
+#: So 35 min stays. The extra ~5 min is attributable to about 300 s in five named test
+#: binaries, which makes it a defect to shrink, not a new honest price for the loop. Raising
+#: the budget to fit it would be exactly the move the ticket forbade.
 BUDGET_S: dict[str, float] = {
     "full": 35 * 60,
     "ui": 8 * 60,
@@ -430,15 +603,25 @@ MIN_SAMPLES = 5
 def rolling_medians(
     runs_: list[dict], window: int = ROLLING_WINDOW
 ) -> dict[str, tuple[float, int]]:
-    """Per class: (median of the last `window` FINISHED runs, how many there were).
+    """Per class: (median of the last `window` FINISHED, PASSING runs, how many there were).
 
     Unfinished runs are excluded — a killed gate has no duration — but they are counted and
     reported elsewhere, never silently treated as fast.
+
+    FAILED runs are excluded too (T-763). The gate aborts on the first suite that fails, so
+    a failed run measures a PREFIX of the suite, not the suite: of the 48 full gates recorded
+    by 2026-09-22, exactly half never reached `test-ui-e2e` at all. Averaging those in makes
+    the budget read the failure rate as speed, and moves the number every time an unrelated
+    test breaks — the opposite of what a duration budget is for.
     """
     per: dict[str, list[float]] = {}
     for run in runs_:
         if not run.get("finished"):
             continue
+        if run.get("result") not in (None, "pass"):
+            continue
+        if str(run.get("phase") or "").startswith("resume"):
+            continue          # the suffix after an accepted flake: not a whole gate
         secs = run.get("seconds")
         klass = run.get("class")
         if isinstance(secs, (int, float)) and isinstance(klass, str):
@@ -536,6 +719,13 @@ def main(argv: list[str] | None = None) -> int:
         help="p50/p90 per class and per phase only — what `just gate-stats` prints",
     )
     parser.add_argument(
+        "--suites",
+        action="store_true",
+        help=(
+            "per-suite durations only, from merge-runner.log — which half of the gate moved"
+        ),
+    )
+    parser.add_argument(
         "--check-budget",
         action="store_true",
         help=(
@@ -561,6 +751,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.stats:
         for line in stats(gatelog.runs(gatelog.read())):
+            print(line)
+        return 0
+    if args.suites:
+        runner_log = os.path.join(gatelog.ops_dir(), "merge-runner.log")
+        try:
+            with open(runner_log, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as exc:
+            print(f"cycle-time: cannot read {runner_log}: {exc}", file=sys.stderr)
+            return 1
+        year = datetime.fromtimestamp(os.path.getmtime(runner_log)).year
+        print("GATE SUITES (per-suite durations printed into merge-runner.log)")
+        for line in suite_stats(parse_suite_runs(text, year)):
             print(line)
         return 0
     root = args.root

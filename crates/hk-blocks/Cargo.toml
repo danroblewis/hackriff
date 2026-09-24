@@ -12,6 +12,8 @@ publish.workspace = true
 hk-demod.workspace = true
 hk-dsp.workspace = true
 hk-estimate.workspace = true
+# T-609: psk_demod adapts liquid-dsp's symtrack (ADR-0011 §9.4).
+hk-liquid-sys.workspace = true
 hk-model.workspace = true
 hk-recipe.workspace = true
 hk-stream.workspace = true
