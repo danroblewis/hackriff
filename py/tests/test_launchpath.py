@@ -60,5 +60,8 @@ def test_every_ops_daemon_runs_the_guard_before_it_does_anything():
 def test_the_dashboards_child_builds_load_the_repos_monitor_not_the_running_file():
     text = (OPS / "monitor.py").read_text()
     assert 'os.path.join(OPSDIR, "monitor.py")' not in text
-    assert 'os.path.join(REPO, "ops", "monitor.py")' in text
+    # the child loads CODE_ROOT's monitor.py: REPO for the real instance, the preview's own copy only
+    # under MONITOR_PREVIEW=1 (ops/preview-dashboard.sh) - never a worktree's
+    assert 'os.path.join(CODE_ROOT, "ops", "monitor.py")' in text
+    assert 'CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO' in text
     assert 'os.path.join(REPO, "ops", "alert.py")' in (OPS / "work-runner.py").read_text()

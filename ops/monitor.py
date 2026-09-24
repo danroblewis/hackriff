@@ -8,6 +8,12 @@ SCRATCH = os.environ.get("HACKRIFF_OPS", os.path.expanduser("~/.hackriff-ops"))
 os.makedirs(SCRATCH, exist_ok=True)
 PROJ = "/Users/daniellewis/.claude/projects/-Users-daniellewis-hackriff"
 OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same dir) resolves
+# A PREVIEW (ops/preview-dashboard.sh, user 2026-09-24: "he does not want to wait behind a merge batch
+# to SEE a dashboard change") runs a branch's ops/ + py/ copied out of git into a scratch directory,
+# on :8902 beside the real :8901. Its child builds must run that copy's code, not main's; everywhere
+# else (the real instance) they run REPO's, never a path derived from a worktree.
+PREVIEW = os.environ.get("MONITOR_PREVIEW") == "1"
+CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -1871,7 +1877,7 @@ def gather():
 
 def _flow_modules():
     import sys as _sys
-    py_dir = os.path.join(REPO, "py")
+    py_dir = os.path.join(CODE_ROOT, "py")
     if py_dir not in _sys.path:
         _sys.path.insert(0, py_dir)
     from hkpy import flow as flow_mod, experiment as exp_mod
@@ -1997,7 +2003,7 @@ def flow_panel_cached(ops, max_age=30.0):
         # built in a child process (_child_json): the log parse's heap goes when the child exits
         data = _child_json(f"""
 import importlib.util, json
-spec = importlib.util.spec_from_file_location("mon", {os.path.join(REPO, "ops", "monitor.py")!r})
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(CODE_ROOT, "ops", "monitor.py")!r})
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.build_flow_panel({ops!r})))
 """)
@@ -2956,7 +2962,8 @@ def _child_json(code, timeout=90):
     is a threaded server, and a forked child can deadlock on a lock another thread held."""
     import sys as _sys
     out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
-                         env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "py"), HACKRIFF_OPS=SCRATCH))
+                         env=dict(os.environ, PYTHONPATH=os.path.join(CODE_ROOT, "py"), HACKRIFF_OPS=SCRATCH,
+                                  **({"HK_METRICS_NO_SAMPLE": "1"} if PREVIEW else {})))
     if out.returncode != 0:
         raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
     return json.loads(out.stdout)
@@ -2982,7 +2989,7 @@ print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}
 
 
 _METRICS = {"sha": None, "v": None, "err": None}
-METRICS_CACHE = os.path.join(SCRATCH, "metrics-cache.json")
+METRICS_CACHE = os.path.join(CODE_ROOT if PREVIEW else SCRATCH, "metrics-cache.json")
 
 
 def _committed_sha():
