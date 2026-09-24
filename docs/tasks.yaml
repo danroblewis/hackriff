@@ -23617,7 +23617,7 @@ tasks:
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
-    status: in-progress
+    status: done
     branch: task-t803
     priority: high
     parallel_group: MAP-CHROME
@@ -23650,6 +23650,7 @@ tasks:
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): panels open as bottom sheets you can drag between peek, half and full height, and the canvas stays usable behind them (non-modal). Say in your handback exactly what to open on staging to see it.
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
+    commit: 42c26a91
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
