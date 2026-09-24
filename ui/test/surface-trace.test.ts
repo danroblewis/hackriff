@@ -396,6 +396,39 @@ test("a slice at an instant nothing covers is entirely absent, not a flat line a
   assert.equal(peakOf(cols, box), null, "and there is no peak to state — the readout says so instead");
 });
 
+test("T-880: at realistic EPOCH-ns times the slice is exactly ONE cell, never a max over two", () => {
+  // The lattice the route states for a 10 ms finest cell, recovered the way `latticeFrom` does
+  // (`cell_s * 1e9`), 256 cells a tile. Times are today's epoch in ns (~1.76e18 — past 2^53, so a
+  // double holds them to 256 ns). The ground truth is computed in BigInt: cell k of the level holds
+  // the value v(k), and neighbouring cells always differ, so a slice that reached into a
+  // neighbouring row (the T-880 defect: floor/ceil on raw epoch-ns doubles) shows the louder one.
+  const cellNsBig = 10_000_000n, cells = 256;
+  const lat: Lattice = { scheme: "view", cells, f0Hz: 600_000, t0Ns: (Number(cellNsBig) / 1e9) * 1e9, levelsF: 8, levelsT: 8 };
+  const nf = 4;
+  const v = (k: bigint) => -100 + Number(k % 7n) * 10;
+  const tiles = {
+    peek(a: TileAddr) {
+      const vals: number[] = [];
+      for (let r = 0; r < cells; r++) {
+        const k = BigInt(a.tIndex) * BigInt(cells) + BigInt(r);
+        for (let j = 0; j < nf; j++) vals.push(v(k));
+      }
+      return { addr: a, key: keyOf(a), data: tileOf(a, nf, cells, vals) } as never;
+    },
+  };
+  const fw = lat.f0Hz * cells;
+  let wrong = 0;
+  const firstK = 175_880_000_000n; // 2025-09 in 10 ms cells
+  for (let i = 0n; i < 600n; i++) {
+    const k = firstK + i * 37n + (i % 5n === 0n ? 255n - (firstK % 256n) : 0n); // incl. tile-edge cells
+    const tAt = Number(k * cellNsBig + cellNsBig / 2n);        // mid-cell: unambiguous
+    const box = { f0Hz: 0, f1Hz: fw, t0Ns: tAt - 2 * S, t1Ns: tAt };
+    const cols = sliceColumns(lat, tiles, box, 0, 0, "any", nf, tAt);
+    if (!cols.every((c) => c === v(k))) wrong++;
+  }
+  assert.equal(wrong, 0, `${wrong}/600 slices were not exactly their own cell's row`);
+});
+
 // ---------------------------------------------------------------------------
 // T-475 persistenceSlices: the afterglow is a function of the PANE'S WINDOW
 // ---------------------------------------------------------------------------
