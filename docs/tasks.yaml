@@ -25381,6 +25381,8 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
 
       Review fix (attempt 1): the review failed the branch for changing ACCEPTED ADR-0015 §2.3 without the user. Changed: bandwidth axis restored (it is the S0 channel filter's width behind a flat channeliser), schema v3 no longer refuses bandwidth_hz, and the ADR block is reworded as a PROPOSED AMENDMENT PENDING THE USER (S0 not counted in quality or the lock; bandwidth read as the S0 filter width; measured S1-S3 saturation). The coordinator should raise the amendment with the user. No gate failure: this was a review finding. Tests: hk-recipe + hk-synth 142/142, precheck clean.
+
+      Review fix 2: the review failed the branch because the code still left S0 out of quality and refused S0-only prefixes while ADR-0015 called that amendment pending. Now the code implements §2.3 exactly as accepted (S0 counted; any prefix accepted). The S0 exception exists only as ADR text marked 'not accepted, not implemented', for the user to decide. Tests: hk-synth 93/93; hk-recipe 49 of its 50 pass in the combined run. The 50th, field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant, failed at load average ~40 and passes alone in 0.9 s: a pre-existing wall-clock-bound test outside this diff, for the deflaker.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 03:29).
