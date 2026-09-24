@@ -1404,8 +1404,11 @@ def candidates(tasks, claims):
 
 
 def dispatch_cap():
-    if not GATE_ALONE and gate_running():
-        return min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
+    # The gate keeps its GATE_RESERVE cores while it runs - and while branches are queued, when the
+    # next gate is seconds away: an isolation's single gates leave 3-8 s gaps with no marker, and
+    # each gap filled the box to CAP (2026-09-24 14:30: 7 workers beside a gate, load 58 vs plan 32).
+    if not GATE_ALONE and (gate_running() or branches_waiting()):
+        return min(CAP, RESERVE_CAP)
     return CAP
 
 
