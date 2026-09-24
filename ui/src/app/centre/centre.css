@@ -123,3 +123,44 @@
 .sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
 /* Time: just right of the tick, vertically centred on it. */
 .sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }
+
+/* T-809 (MAP-09): pins — band 1, DOM, placed every render frame by `surface/pins.ts`. The container
+   AND each pin are `pointer-events: none`: the pointer reaches a pin through the canvas's own handler
+   and the pin quadtree, so a drag or wheel over a pin still pans and zooms. Each pin is a focusable
+   <button> with a 24 px hit area and an ≥ 11 px glyph whose SHAPE carries the kind (docs/24 §14.2):
+   Confirmed filled square, Candidate open diamond, unexplained open circle with `?`, my marker a
+   filled pennant. Selected adds a ring and hover/focus a scale — never hue alone. */
+.sf-pins { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+.sf-pin {
+  position: absolute; left: 0; top: 0; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
+  border: 0; background: none; pointer-events: none; display: grid; place-items: center;
+  color: var(--teal); font: 600 9px/1 var(--mono);
+}
+.sf-pin::before { content: ""; display: block; box-sizing: border-box; transition: scale .12s; }
+.sf-pin.confirmed { color: var(--teal); }
+.sf-pin.confirmed::before { width: 11px; height: 11px; background: currentColor; outline: 1px solid rgba(0, 0, 0, .7); }
+.sf-pin.candidate { color: var(--lav); }
+.sf-pin.candidate::before { width: 10px; height: 10px; rotate: 45deg; border: 2px solid currentColor; background: rgba(13, 19, 23, .7); }
+.sf-pin.unknown { color: var(--amber); }
+.sf-pin.unknown::before { width: 12px; height: 12px; border-radius: 50%; border: 2px solid currentColor; background: rgba(13, 19, 23, .7); }
+.sf-pin.unknown::after { content: "?"; position: absolute; }
+.sf-pin.curated { color: var(--cream); }
+.sf-pin.curated::before {
+  width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent;
+  border-bottom: 12px solid currentColor; filter: drop-shadow(0 0 1px rgba(0, 0, 0, .9));
+}
+.sf-pin.hovered::before, .sf-pin:focus-visible::before { scale: 1.3; }
+.sf-pin:focus-visible { outline: 2px dashed var(--fg, #d5dee2); outline-offset: -2px; border-radius: 4px; }
+.sf-pin.selected { border-radius: 50%; box-shadow: inset 0 0 0 2px var(--amber), 0 0 6px var(--amber); }
+.sf-pins-over {
+  position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 10px;
+  background: rgba(13, 19, 23, .8); color: var(--lav); font: 10.5px var(--mono);
+}
+/* The MapTip: a lightweight readout beside the hovered/focused pin. Reads loaded state only. */
+.sf-maptip {
+  position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; white-space: pre-line;
+  max-width: 280px; padding: 6px 9px; border-radius: 6px; background: rgba(19, 27, 32, .94);
+  border: 1px solid rgba(255, 255, 255, .12); color: #d5dee2; font: 11px/1.45 var(--mono);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+}
+.sf-maptip::first-line { font-weight: 600; color: #fff; }

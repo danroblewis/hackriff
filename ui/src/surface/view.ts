@@ -116,6 +116,13 @@ export interface SurfaceViewOptions {
   hud?: HTMLElement | null;
   /** The chrome's fade, `0..1`, asked every frame; the ticks' ink is multiplied by it. Default 1. */
   hudAlpha?: (() => number) | null;
+  /**
+   * **Band-1 DOM marks** (T-809, `./pins.ts`): called once per frame, after the overlays and the
+   * HUD, with the SAME pane views the data pass was handed — so a DOM mark is placed by the very
+   * box and rect the tiles were, on the same frame (the one-shared-time-axis rule), never on a
+   * poll. `canvasHpx`/`dpr` convert the GL-convention rects to CSS px, as the HUD labels do.
+   */
+  dom?: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 }
 
 /** One pane's trace strip this frame: where it is, and the window it is a trace across. */
@@ -173,6 +180,7 @@ export class SurfaceView {
   hudAxes: boolean;
   private readonly hud: HudAxes | null;
   private readonly hudAlpha: (() => number) | null;
+  private readonly dom: ((panes: readonly PaneView[], edgeNs: number, canvasHpx: number, dpr: number) => void) | null;
 
   constructor(opts: SurfaceViewOptions) {
     this.marks = opts.marks ?? null;
@@ -181,6 +189,7 @@ export class SurfaceView {
     this.hudAxes = opts.hudAxes ?? !!opts.hud;
     this.hud = opts.hud ? new HudAxes(opts.hud) : null;
     this.hudAlpha = opts.hudAlpha ?? null;
+    this.dom = opts.dom ?? null;
     this.canvas = opts.canvas;
     this.surface = new Surface(opts.canvas, opts.lattices ?? opts.lattice, opts.cache, opts.surface ?? {});
     this.overlay = new OverlayPass(this.surface.gl);
@@ -325,6 +334,12 @@ export class SurfaceView {
         labels.push(...hudLabels(r, hPx, dpr));
       }
       this.hud?.update(labels);
+    }
+
+    // 5. band-1 DOM marks (T-809's pins): the same pane views, this frame.
+    if (this.dom) {
+      const cssW = this.canvas.clientWidth;
+      this.dom(paneViews, edgeNs, hPx, cssW > 0 ? w / cssW : 1);
     }
 
     return {

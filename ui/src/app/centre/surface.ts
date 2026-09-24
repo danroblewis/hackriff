@@ -48,6 +48,7 @@ import {
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
+import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import {
@@ -159,7 +160,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every render frame by `SurfaceView` from the same ruler its ticks were stroked from. Never read
   // by the pointer: a label must not steal a pan from the surface underneath it.
   const hudEl = h("div", { class: "sf-hud", "aria-hidden": "true" });
-  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, captureEl);
+  // T-809 (MAP-09): the pins — band 1, DOM so each is keyboard-focusable with an accessible name,
+  // laid out every render frame by the `dom` hook below from the same pane views the tiles were
+  // drawn with. `pointer-events: none` throughout: the POINTER reaches a pin through the canvas's
+  // own handler and `PinLayer.pick` (the quadtree), so a drag or wheel that starts on a pin still
+  // pans and zooms — one gesture everywhere (docs/23 §3). The MapTip is placed in the same pass.
+  const pinsEl = h("div", { class: "sf-pins", role: "group", "aria-label": "Signal markers: Tab to a marker for its summary, Enter to select it, arrow keys for its neighbours" });
+  const tipEl = h("div", { class: "sf-maptip", role: "tooltip", id: "sf-maptip", hidden: true });
+  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, tipEl, captureEl);
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -399,7 +407,55 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
-  const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
+  const drawnLayers = new Set<LayerId>([...Object.keys(overlayFns) as LayerId[], "pins"]);
+
+  // ---- the pins (T-809 / MAP-09, docs/24 §14) ----
+  // Hover and keyboard focus are pointer/focus state, kept here like `pending` rather than in the
+  // store; selection IS the store's one `focus`, so the canvas, the sheet and the lists agree.
+  let hoveredPin: PlacedPin | null = null;
+  let focusedPin: PlacedPin | null = null;
+  const selectPin = (p: PlacedPin) => {
+    // A detection marker selects its row: `focusSignal` is what raises the detail sheet (T-804).
+    // A curated marker has no focus target until MAP-21's panel; selecting one does nothing rather
+    // than mis-focusing a row.
+    if (p.pin.source === "detection") store.set(focusSignal(p.pin.id));
+  };
+  const pinLayer = new PinLayer(pinsEl, {
+    onFocus: (p) => { focusedPin = p; },
+    onSelect: selectPin,
+  });
+  /** The MapTip for whichever pin is focused (keyboard) or else hovered (pointer), re-placed on the
+   * pin's position THIS frame so it moves with the pin. It reads loaded state only. */
+  const placeTip = () => {
+    const want = focusedPin ?? hoveredPin;
+    const now = want ? pinLayer.pins.find((q) => q.paneId === want.paneId && q.pin.id === want.pin.id) ?? null : null;
+    if (!now) {
+      if (!tipEl.hidden) tipEl.hidden = true;
+      return;
+    }
+    const text = pinTipLines(now.pin).join("\n");
+    if (tipEl.textContent !== text) tipEl.textContent = text;
+    if (tipEl.hidden) tipEl.hidden = false;
+    tipEl.dataset.pin = now.pin.id;
+    // Beside the pin, flipped to its left where it would run off the canvas's right edge.
+    const w = tipEl.offsetWidth;
+    const x = now.x + 14 + w > canvas.clientWidth ? now.x - 14 - w : now.x + 14;
+    tipEl.style.transform = `translate(${x.toFixed(1)}px, ${(now.y + 10).toFixed(1)}px)`;
+  };
+  const pinsFrame = (panes: readonly PaneView[], edge: number, hPx: number, dpr: number) => {
+    const s = store.get();
+    const all = detectionPins(Object.values(s.inventory.rows));
+    const layouts = panes
+      .filter((v) => isLayerVisible(layersFor(v.id), "pins"))
+      .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
+    pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
+    placeTip();
+  };
+  /** CSS px from the canvas's top-left — the coordinate the pins are laid out in. */
+  const cssPoint = (e: MouseEvent) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
   //
@@ -848,6 +904,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
+        dom: pinsFrame,
       });
     } catch (e) {
       say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);
@@ -870,7 +927,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
-      onHover: (p) => {
+      onHover: (p, e) => {
+        // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
+        hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
+        canvas.style.cursor = hoveredPin ? "pointer" : "";
         if (!p) { hoverEl.textContent = ""; return; }
         const hit = hitAt(p.x, p.y);
         const markLabel = hit?.mark
@@ -880,7 +940,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
           : null;
         hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
       },
-      onClick: (p) => {
+      onClick: (p, e) => {
+        const c = cssPoint(e);
+        const pin = pinLayer.pick(c.x, c.y);
+        if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
         if (!hit?.mark) return;
         if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
@@ -958,7 +1021,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         return {
           pane: ids.length > 1 ? `pane ${n} of ${ids.length}` : "this pane",
           bases: BASE_STYLES.map((b) => ({ id: b.id, label: b.label, hint: b.hint, on: reg.base === b.id })),
-          overlays: paintOrder(reg).filter((l) => l.plane === "overlay" && drawnLayers.has(l.id)).map((l) => {
+          // T-809: the `dom`-plane pins are an overlay-content toggle too (docs/24 §4's second axis).
+          overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             return { id: l.id, label: d.label, hint: d.hint, on: l.visible };
           }),
