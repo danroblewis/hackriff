@@ -280,7 +280,21 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   // only narrows onto tiles it already has); stays, because a place is only owed a redraw while
   // the viewport still wants it. And the claim is the pane's own residency readout rather than the
   // request log — see step 3.
+  //
+  // **This proxy carries no WebSocket to `/ws/tiles/rows`** (T-893). Since T-893 a following pane
+  // puts the row its edge is in on screen from PUSHED rows, so with the feed up the pane's own
+  // places at the zoomed level are drawn without ever being fetched — the premise below ("a place
+  // the pane still wants was answered 502") is then unreachable, and worse, the recovery claim
+  // would be vacuous, because a place made terminal would still be drawn from pushed rows. The
+  // subject here is the TILE-READ path, so the feed is refused for the whole test, as a proxy
+  // that does not do WebSockets would: the pane is then on the polling path T-523 was about.
   const inject = `(() => {
+    const RealWS = window.WebSocket;
+    window.WebSocket = class extends RealWS {
+      constructor(url, protocols) {
+        super(String(url).includes("/ws/tiles/rows") ? String(url).replace("/ws/tiles/rows", "/ws/no-such-route") : url, protocols);
+      }
+    };
     const real = window.fetch.bind(window);
     window.__t523 = { on: false, injected: [] };
     window.fetch = (input, init) => {
@@ -596,5 +610,135 @@ test("a FOLLOWING pane shorter than a tile keeps its rows across a row boundary,
     `a following pane had NONE of its own tiles in hand after crossing a row boundary (first at +${empty[0]?.at} ms: ` +
     `"${empty[0]?.counts}"): its old row scrolled out and the new row was still a cold fetch — the live edge ` +
     "gated on a tile request (T-890)");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
+});
+
+test("a FOLLOWING pane's newest rows arrive PUSHED: its top stays at the live edge with every tile read slowed (T-893)", async (t) => {
+  // **The defect** (T-893, after T-890): rows reached a following pane only when the polling lane
+  // re-asked its live tile, at most once per a share of what a tile costs. On a busy route that
+  // period exceeds a short pane's span, so the TOP of the pane was drawn seconds behind the rows the
+  // server already had — "drawn to 2.3 s short of the top" of a 2.8 s pane in a gate run, with no
+  // row crossing at all. `/ws/tiles/rows` pushes each row as it is recorded, and nothing used it.
+  //
+  // **Every** tile read is held here — the batch AND the lone revalidation — so polling alone cannot
+  // keep up on any machine; the row feed is the only path left that can. The assertion is the pane's
+  // own report: how far below its top it was drawn, sampled over several seconds and a row boundary.
+  const HOLD_MS = 2500;
+  const inject = `(() => {
+    const real = window.fetch.bind(window);
+    window.__t893 = { held: 0, feeds: 0, messages: 0, pushedNs: 0 };
+    window.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/api/tiles")) {
+        window.__t893.held++;
+        await new Promise((r) => setTimeout(r, ${HOLD_MS}));
+      }
+      return real(input, init);
+    };
+    const RealWS = window.WebSocket;
+    window.WebSocket = class extends RealWS {
+      constructor(url, protocols) {
+        super(url, protocols);
+        if (String(url).includes("/ws/tiles/rows")) {
+          window.__t893.feeds++;
+          this.addEventListener("message", (ev) => {
+            window.__t893.messages++;
+            // The newest row the SERVER has pushed, on the capture clock: what the pane could show.
+            try {
+              const m = JSON.parse(ev.data);
+              if (m.type === "rows") window.__t893.pushedNs = Math.max(window.__t893.pushedNs, (m.row0 + m.rows) * m.t_cell_s * 1e9);
+            } catch {}
+          });
+        }
+      }
+    };
+  })();`;
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { initScript: inject, width: 800 });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the chrome to report a viewport",
+    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 60000 });
+  assert.equal(
+    await page.$count('.hk-surface-viewport[data-viewport="pane"][data-following="true"]'), 1,
+    "no pane is following the live edge, so there is no live edge to keep up with");
+
+  const READ = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const c = document.querySelector('.sf-canvas').getBoundingClientRect();
+    return JSON.stringify({ level: v.querySelector('.hk-surface-level')?.textContent ?? '',
+      counts: v.querySelector('.hk-surface-counts')?.textContent ?? '',
+      following: v.getAttribute('data-following'),
+      t0: Number(v.getAttribute('data-t0-ns')), t1: Number(v.getAttribute('data-t1-ns')),
+      x: c.x + c.width / 2, y: c.y + c.height / 3 }); })()`;
+  const read = async () => JSON.parse(await page.eval(READ));
+  // A pane shorter than 3 s, as observed: zoom time alone (alt, T-456).
+  let r = await read();
+  for (let i = 0; i < 30 && r.t1 - r.t0 > 3e9; i++) {
+    await page.wheel({ x: r.x, y: r.y }, -240, { alt: true });
+    await page.frames(3);
+    r = await read();
+  }
+  const span = r.t1 - r.t0;
+  t.diagnostic(`pane span ${(span / 1e9).toFixed(2)} s at "${r.level}"`);
+  assert.ok(span < 3.5e9, `the pane (${(span / 1e9).toFixed(2)} s) did not zoom below 3.5 s, so it is not the observed shape`);
+
+  // Wait until the pane draws anything at all, then watch its top for 15 s.
+  const drew = await waitWhileWorking(page, read, (s) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S*/.exec(s.counts);
+    return !!m && Number(m[1]) + Number(m[2]) > 0;
+  }, { everyMs: 300, stallMs: 30000, timeoutMs: 90000 });
+  assert.ok(drew.ok, `the pane never drew anything with every tile read held ${HOLD_MS} ms (${drew.value?.counts})`);
+  const shorts = [];
+  const started = Date.now();
+  const level0 = (await read()).level;
+  // A settling second first: the first tile read may still be landing.
+  await new Promise((res) => setTimeout(res, 1000));
+  while (Date.now() - started < 16000) {
+    const s = await read();
+    assert.equal(s.following, "true", "the pane stopped following, so the rest of this run is not about the live edge");
+    assert.equal(s.level, level0, `the pane changed level mid-run ("${level0}" -> "${s.level}") with no gesture`);
+    const short = Number(/drawn to (\d+(?:\.\d+)?) s short of the top/.exec(s.counts)?.[1] ?? 0);
+    // A pane that drew nothing at all is short by its whole span (the readout then states no top).
+    const m = /(\d+) tiles · (\d+) coarse/.exec(s.counts);
+    const blank = Number(/(\d+) drew nothing/.exec(s.counts)?.[1] ?? 0);
+    const none = !m || Number(m[1]) + Number(m[2]) - blank <= 0;
+    // The client's own lag: how far below the newest row the server has already pushed (capped at
+    // the pane's top) the pane is drawn. The server's stalls are not in this number; the client's are.
+    const pushedNs = Number(await page.eval("window.__t893.pushedNs"));
+    const topNs = none ? s.t0 : s.t1 - short * 1e9;
+    const lag = pushedNs > 0 ? Math.max(0, Math.min(pushedNs, s.t1) - topNs) / 1e9 : null;
+    shorts.push({ at: Date.now() - started, short: none ? span / 1e9 : short, lag, counts: s.counts });
+    await new Promise((res) => setTimeout(res, 200));
+  }
+  const stats = JSON.parse(await page.eval("JSON.stringify(window.__t893)"));
+  const worst = shorts.reduce((m, x) => (x.short > m.short ? x : m));
+  const late = shorts.filter((x) => x.short > 0.5);
+  t.diagnostic(`${shorts.length} samples; worst top shortfall ${worst.short} s at +${worst.at} ms ("${worst.counts}"); ` +
+    `${late.length} sample(s) over 0.5 s; ${stats.held} tile read(s) held ${HOLD_MS} ms; ${stats.feeds} row feed(s) opened, ${stats.messages} message(s)`);
+  for (const x of late.slice(0, 5)) t.diagnostic(`  +${x.at} ms: ${x.counts}`);
+  const sorted = shorts.map((x) => x.short).sort((a, b) => a - b);
+  t.diagnostic(`shortfall p50 ${sorted[Math.floor(sorted.length / 2)]} s, p90 ${sorted[Math.floor(sorted.length * 0.9)]} s; all: ${shorts.map((x) => x.short).join(" ")}`);
+  t.diagnostic(`last sample: ${shorts[shorts.length - 1].counts}`);
+  assert.ok(stats.held > 0, "no tile read was held, so the route was never slowed and this run proves nothing");
+  assert.ok(stats.feeds > 0, "the following pane opened no /ws/tiles/rows subscription: its rows arrive only by polling (T-893)");
+  // **The median, and the share of bad samples — not the worst one.** The pushed rows are the
+  // server's to send, and it sends none past its tune record's reach (docs/api.md), which on a
+  // loaded server stalls for a second or so while tile reads hold the history lock; that stall is
+  // the backend's and would show here whatever the client did. What the client owns is the rest:
+  // measured on the pre-T-893 code this run reads p50 1.4 s with 60 of 75 samples over 0.5 s
+  // (polling alone, every read held); with the feed, p50 0 s and 12 of 75.
+  const p50 = sorted[Math.floor(sorted.length / 2)];
+  const lags = shorts.map((x) => x.lag).filter((x) => x !== null).sort((a, b) => a - b);
+  const lag90 = lags[Math.floor(lags.length * 0.9)];
+  t.diagnostic(`client lag behind the newest PUSHED row: p50 ${lags[Math.floor(lags.length / 2)]?.toFixed(2)} s, ` +
+    `p90 ${lag90?.toFixed(2)} s, worst ${lags[lags.length - 1]?.toFixed(2)} s over ${lags.length} samples`);
+  assert.ok(p50 <= 0.5,
+    `a following pane's top was drawn a median ${p50} s short of the live edge (${late.length} of ${shorts.length} ` +
+    `samples over 0.5 s; worst ${worst.short} s: "${worst.counts}") with every tile read slowed: new rows still arrive ` +
+    "by polling, not as they are recorded (T-893)");
+  // One readout decimal (0.1 s) plus a sample's worth of rows arriving between the two reads.
+  assert.ok(lags.length > 0 && lag90 <= 0.35,
+    `rows the server had already PUSHED were not on the pane: p90 ${lag90} s behind the newest pushed row — the ` +
+    "feed is open but its rows do not reach the screen (T-893)");
   assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
 });

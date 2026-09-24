@@ -191,6 +191,26 @@ export class RowAccumulator {
     this.gaps.set(k, merged);
   }
 
+  /**
+   * Forget the pushed rows of `col` in tiles before `tIndex` (T-893). A live feed walks forward for
+   * as long as a pane follows, so an accumulator that never forgot would grow with the session; a
+   * tile the edge has left is sealed and `GET /api/tiles` is the authority for it from then on.
+   */
+  prune(col: ColumnAddr, tIndex: number): void {
+    const ck = columnKey(col);
+    for (const [k, t] of this.tiles) {
+      if (t.addr.tIndex < tIndex && columnKey(t.addr) === ck) this.tiles.delete(k);
+    }
+    const g = this.gaps.get(ck);
+    if (g) {
+      const keep = g.filter((r) => r[1] > tIndex * col.cells);
+      if (keep.length) this.gaps.set(ck, keep); else this.gaps.delete(ck);
+    }
+  }
+
+  /** Drop one tile's pushed rows (a retune's [[TileCache.invalidate]]). */
+  drop(addr: TileAddr): void { this.tiles.delete(keyOf(addr)); }
+
   /** Files a block; returns the tile addresses whose pushed rows it changed (none for a gap). */
   apply(col: ColumnAddr, m: RowBlock | GapBlock): TileAddr[] {
     if (m.kind === "unobserved") {
@@ -289,4 +309,128 @@ export class PaneFeeds {
   feed(pane: string): RowFeed | undefined { return this.feeds.get(pane)?.feed; }
   /** This pane's own edge, ns, or `null` when it has none yet. */
   edgeNs(pane: string): number | null { return this.feeds.get(pane)?.feed.edgeNs ?? null; }
+}
+
+/** One column a following pane wants rows pushed for, and the row to start from if it is opened. */
+export interface WantedColumn {
+  readonly col: ColumnAddr;
+  readonly fromRow: number;
+}
+
+/**
+ * Row subscriptions opened at once by one client (T-893). The route admits
+ * [`MAX_ROW_FEEDS`](../../../crates/hk-api/src/rows.rs) = 16 per SERVER, shared by every tab; a
+ * full-width pane is six columns, so twelve serves two such panes and leaves room for another client.
+ * Past it the columns in excess are simply not subscribed and keep the polling lane (T-460), which
+ * is what every column had before.
+ */
+export const MAX_CLIENT_ROW_FEEDS = 12;
+/** How long a column the route refused, or whose socket dropped, waits before it is asked again. */
+export const ROW_FEED_RETRY_MS = 5000;
+
+/**
+ * **Rows pushed to the columns a FOLLOWING pane draws** (T-893) — the wiring T-468 left undone.
+ *
+ * The polling lane (`TileCache.refreshEdge`) re-asks a live tile at most once per a share of what
+ * it costs, so on a busy route the top of a short following pane was drawn seconds behind the rows
+ * that existed. Here each wanted column holds one open-ended subscription (`t_to` absent) that
+ * starts at a row the caller names, and every block it pushes goes straight to `sink`, which files
+ * it under the tile address the cache already uses. The subscription is still an ADDRESS RANGE
+ * ([[rowFeedPath]] refuses anything else); "following" is only that the caller keeps it open.
+ *
+ * Keyed by COLUMN, not by pane: two panes over one column share one socket, and a column no
+ * following pane wants any more is closed on the next [[want]]. A frozen pane never appears in a
+ * `want` list — the caller builds it from following viewports only — so pausing closes its feeds,
+ * and nothing here can reach a device route: it only ever reads `/ws/tiles/rows`.
+ */
+export class LiveRowFeeds {
+  private feeds = new Map<string, { feed: RowFeed; conn: { close(): void }; col: ColumnAddr }>();
+  /** Columns whose last subscription was refused or cut, and when they may be asked again. */
+  private retryAt = new Map<string, number>();
+  /** Every path this client has opened, in order — what ui/test asserts the request against. */
+  readonly requests: string[] = [];
+
+  constructor(
+    private readonly open: RowOpener,
+    private readonly sink: (col: ColumnAddr, block: RowBlock | GapBlock) => void,
+    private readonly opts: { max?: number; retryMs?: number; now?: () => number } = {},
+  ) {}
+
+  get size(): number { return this.feeds.size; }
+  /** The columns with an open subscription, by column key. */
+  columns(): string[] { return [...this.feeds.keys()]; }
+
+  /**
+   * Make the open subscriptions exactly `wanted` (first come first served up to the cap): close
+   * the rest, open the missing ones. An already-open column is left alone — its own edge carries on.
+   */
+  want(wanted: readonly WantedColumn[]): void {
+    const now = (this.opts.now ?? Date.now)();
+    const max = this.opts.max ?? MAX_CLIENT_ROW_FEEDS;
+    const keep = new Map<string, WantedColumn>();
+    for (const w of wanted) {
+      const k = columnKey(w.col);
+      if (!keep.has(k) && keep.size < max) keep.set(k, w);
+    }
+    for (const [k, f] of this.feeds) {
+      if (!keep.has(k)) { f.conn.close(); this.feeds.delete(k); }
+    }
+    for (const [k, w] of keep) {
+      if (this.feeds.has(k)) continue;
+      if ((this.retryAt.get(k) ?? 0) > now) continue;
+      this.subscribe(k, w);
+    }
+  }
+
+  private subscribe(k: string, w: WantedColumn): void {
+    const path = rowFeedPath(w.col, { fromRow: w.fromRow, toRow: null });
+    this.requests.push(path);
+    const feed = new RowFeed(w.col, { fromRow: w.fromRow, toRow: null });
+    const entry = { feed, col: w.col, conn: { close: () => {} } };
+    const cut = () => {
+      if (this.feeds.get(k) !== entry) return;
+      entry.conn.close();
+      this.feeds.delete(k);
+      this.retryAt.set(k, (this.opts.now ?? Date.now)() + (this.opts.retryMs ?? ROW_FEED_RETRY_MS));
+    };
+    this.feeds.set(k, entry);
+    entry.conn = this.open(path, (text) => {
+      if (this.feeds.get(k) !== entry) return;
+      let block: RowBlock | GapBlock | null;
+      try {
+        const m = parseRowMessage(w.col, text);
+        block = feed.take(m);
+        // A refusal (the route's cap, above all) ends this column's feed; polling carries it.
+        if (m.kind === "refused") { cut(); return; }
+      } catch {
+        // A protocol error is never patched over: drop the feed and start again later from
+        // wherever the caller then says the rows in hand stop.
+        cut();
+        return;
+      }
+      if (block) this.sink(w.col, block);
+    }, cut);
+  }
+
+  /** Close every subscription. */
+  close(): void {
+    for (const f of this.feeds.values()) f.conn.close();
+    this.feeds.clear();
+  }
+}
+
+/**
+ * The browser transport for [[LiveRowFeeds]]: one WebSocket per subscription, the token as a query
+ * parameter like every `/ws/` route.
+ */
+export function wsRowOpener(token: string, loc: { protocol: string; host: string } = location): RowOpener {
+  return (path, onText, onClose) => {
+    const proto = loc.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${loc.host}${path}&token=${encodeURIComponent(token)}`);
+    let closedByUs = false;
+    ws.onmessage = (ev) => { if (typeof ev.data === "string") onText(ev.data); };
+    ws.onclose = () => { if (!closedByUs) onClose(); };
+    ws.onerror = () => { /* onclose follows */ };
+    return { close: () => { closedByUs = true; ws.close(); } };
+  };
 }
