@@ -1190,11 +1190,8 @@ fn run(inner: &Arc<Inner>, n: u64, plan: Option<Plan>) {
         .map(|c| c.chunk.piece.provenance.tune.sample_rate_hz);
     // ADR-0015 §5.5 condition 4: any piece recorded under an overloaded front end. No pieces is
     // "not known", which the confirm gate refuses.
-    let overload = (!acq.chunks.is_empty()).then(|| {
-        acq.chunks
-            .iter()
-            .any(|c| c.chunk.piece.provenance.overload)
-    });
+    let overload = (!acq.chunks.is_empty())
+        .then(|| acq.chunks.iter().any(|c| c.chunk.piece.provenance.overload));
     let job_window = |acq: &Acquisition, clip: Option<RecordingId>| {
         let w = acq.window();
         JobWindow {
@@ -1495,7 +1492,8 @@ fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
                     if let Some(e) = a.emitter {
                         s.emitter_id = Some(e.to_string());
                     }
-                    s.decodes = Some(json!({ "stored": a.decodes_stored, "valid": a.decodes_valid }));
+                    s.decodes =
+                        Some(json!({ "stored": a.decodes_stored, "valid": a.decodes_valid }));
                     s.confirm = serde_json::to_value(&a.confirm).ok();
                 }
                 None => {

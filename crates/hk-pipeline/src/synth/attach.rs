@@ -116,9 +116,7 @@ pub fn emitter_in_window(
     let mut rows: Vec<_> = repo
         .emitters_in_region(&Region::new(band, window))?
         .into_iter()
-        .filter(|e| {
-            (e.f_center_hz - center).abs() <= 0.5 * width && e.bandwidth_hz <= 2.0 * width
-        })
+        .filter(|e| (e.f_center_hz - center).abs() <= 0.5 * width && e.bandwidth_hz <= 2.0 * width)
         .collect();
     rows.sort_by(|a, b| {
         (a.f_center_hz - center)
@@ -392,7 +390,7 @@ pub fn attach(
         profile: input.profile,
         result: r,
         pipeline: pipeline_name(r),
-        suspect_fraction: trust.suspect_fraction(),
+        suspect_fraction: (trust.detections > 0).then(|| trust.suspect_fraction()),
         overload: input.overload,
     });
     let mut confirm = match &decision {
@@ -467,14 +465,17 @@ pub fn attach(
         resolution: if r.verdict == Verdict::Solved {
             None
         } else {
-            Some(input.resolution.map(row_resolution).unwrap_or_else(|| {
-                RowResolution {
-                    kind: RowKind::Unknown,
-                    deepest_verdict: Some(row_verdict(r.verdict)),
-                    reason: None,
-                    summary: "Searched and not identified.".into(),
-                }
-            }))
+            Some(
+                input
+                    .resolution
+                    .map(row_resolution)
+                    .unwrap_or_else(|| RowResolution {
+                        kind: RowKind::Unknown,
+                        deepest_verdict: Some(row_verdict(r.verdict)),
+                        reason: None,
+                        summary: "Searched and not identified.".into(),
+                    }),
+            )
         },
         receiver: None,
         job: Some(SynthesisJob {
@@ -515,4 +516,244 @@ pub fn attach(
         synthesis_written: written,
         confirm,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    //! `ConfirmPolicy.synthesized` clause by clause (ADR-0022 §4, §6). Each refusal names the
+    //! clause that refused, so a reader can tell which number was close.
+    use hk_synth::result::{CheckOrigin, CheckSummary, HoldoutEvidence};
+    use hk_synth::trace::NullControl;
+
+    use super::*;
+
+    fn recipe() -> hk_recipe::Recipe {
+        serde_json::from_str(include_str!("../../../../recipes/adsb.recipe.json")).unwrap()
+    }
+
+    /// A searched CRC-16 solved on hold-out: 3 differences, `L_check` 21 (ADR-0022 §4.2's row),
+    /// 48 − 21 = 27 check bits, 30 analytic bits, the null control passed with 11.4 bits.
+    fn solved() -> PipelineResult {
+        PipelineResult {
+            rank: 1,
+            verdict: Verdict::Solved,
+            summary: "s".into(),
+            recipe: recipe(),
+            template: None,
+            stage_reached: Stage::S5,
+            stages: Vec::new(),
+            evidence_bits: 40.0,
+            prior_bits: 0.0,
+            analytic_holdout_bits: Some(30.0),
+            check: Some(CheckSummary {
+                kind: "crc".into(),
+                model: "CRC-16".into(),
+                width: 16,
+                pass_rate: 1.0,
+                distinct_valid: 3,
+                corrected_excluded: 0,
+                tested: 3,
+                holdout: true,
+            }),
+            frames_preview: Vec::new(),
+            characterisation: None,
+            holdout: Some(HoldoutEvidence {
+                evidence_bits: 40.0,
+                analytic_bits: 30.0,
+                check_bits: Some(27.0),
+                l_check: Some(21.0),
+                check_width: Some(16),
+                differences: 3,
+                check_origin: CheckOrigin::Searched,
+                stages: Vec::new(),
+                null_control: Some(NullControl {
+                    k: 2,
+                    ran: true,
+                    best_null_bits: 28.6,
+                    margin_bits: 11.4,
+                    capped: false,
+                }),
+            }),
+        }
+    }
+
+    fn decide(
+        r: &PipelineResult,
+        profile: Profile,
+        suspect: Option<f64>,
+        overload: Option<bool>,
+    ) -> Result<String, String> {
+        SynthesizedConfirm::default().decide(&SynthesizedEvidence {
+            profile,
+            result: r,
+            pipeline: "generic-fsk-framed".into(),
+            suspect_fraction: suspect,
+            overload,
+        })
+    }
+
+    fn ok(r: &PipelineResult) -> Result<String, String> {
+        decide(r, Profile::Standard, Some(0.0), Some(false))
+    }
+
+    fn with(f: impl FnOnce(&mut HoldoutEvidence)) -> PipelineResult {
+        let mut r = solved();
+        f(r.holdout.as_mut().unwrap());
+        r
+    }
+
+    /// ADR-0022 §4.2's worked table: the frame count is a formula, not a constant.
+    #[test]
+    fn min_differences_is_adr_0022_s4_2s_table() {
+        let p = SynthesizedConfirm::default();
+        for (width, l_check, want) in [
+            (24, 0.0, 1), // CRC-24 template-fixed: one squitter
+            (16, 0.0, 2),
+            (8, 0.0, 3),
+            (16, 21.0, 3),
+            (8, 13.0, 5),
+            (32, 37.0, 2),
+        ] {
+            assert_eq!(
+                p.min_differences(width, l_check),
+                want,
+                "width {width}, L {l_check}"
+            );
+        }
+        assert_eq!(p.min_differences(0, 0.0), u64::MAX);
+    }
+
+    #[test]
+    fn a_searched_check_passing_every_clause_confirms_with_the_arithmetic_in_the_reason() {
+        let reason = ok(&solved()).unwrap();
+        assert_eq!(
+            reason,
+            "decoded by synthesized pipeline `generic-fsk-framed`: CRC-16 (searched), 3 differing \
+             frame(s) valid on hold-out without correction, 48.0 − 21.0 = 27.0 check bits, 30.0 \
+             analytic bits against a 24-bit threshold; null control passed with a 11.4-bit margin"
+        );
+    }
+
+    #[test]
+    fn a_partial_verdict_and_quick_never_confirm() {
+        let mut r = solved();
+        r.verdict = Verdict::Checked;
+        assert!(ok(&r).unwrap_err().contains("not solved"));
+        let e = decide(&solved(), Profile::Quick, Some(0.0), Some(false)).unwrap_err();
+        assert!(e.contains("`quick` never confirms"), "{e}");
+    }
+
+    #[test]
+    fn width_floor_hard_check_floor_and_analytic_threshold_each_refuse() {
+        let e = ok(&with(|h| h.check_width = Some(7))).unwrap_err();
+        assert!(e.contains("under the 8-bit floor"), "{e}");
+        let e = ok(&with(|h| h.check_width = None)).unwrap_err();
+        assert!(e.contains("always carries a check"), "{e}");
+        // 24 analytic bits of sync excess and a thin check: not a decode.
+        let e = ok(&with(|h| h.check_bits = Some(15.9))).unwrap_err();
+        assert!(e.contains("16-bit hard check floor"), "{e}");
+        let e = ok(&with(|h| h.check_bits = None)).unwrap_err();
+        assert!(e.contains("hard check floor"), "{e}");
+        let e = ok(&with(|h| h.analytic_bits = 23.9)).unwrap_err();
+        assert!(e.contains("against a 24-bit threshold"), "{e}");
+        let e = ok(&with(|h| h.analytic_bits = f32::NAN)).unwrap_err();
+        assert!(e.contains("analytic"), "{e}");
+    }
+
+    /// ADR-0022 §5.1: an unknown inherited charge is not a zero one.
+    #[test]
+    fn a_discovered_template_without_its_charge_never_confirms() {
+        let e = ok(&with(|h| {
+            h.check_origin = CheckOrigin::Discovered {
+                look_elsewhere_bits: None,
+            };
+            h.l_check = None;
+        }))
+        .unwrap_err();
+        assert!(e.contains("not recorded"), "{e}");
+    }
+
+    /// ADR-0022 §5.3 / ADR-0021 §8.2: a searched check needs the null control to have run and
+    /// passed; a template-fixed one does not run it.
+    #[test]
+    fn the_null_control_gates_a_searched_check_only() {
+        let e = ok(&with(|h| h.null_control = None)).unwrap_err();
+        assert!(e.contains("needs the null control"), "{e}");
+        let e = ok(&with(|h| {
+            h.null_control = Some(NullControl {
+                k: 2,
+                ran: false,
+                best_null_bits: 0.0,
+                margin_bits: 0.0,
+                capped: false,
+            })
+        }))
+        .unwrap_err();
+        assert!(e.contains("could not run"), "{e}");
+        let e = ok(&with(|h| {
+            h.null_control = Some(NullControl {
+                k: 2,
+                ran: true,
+                best_null_bits: 35.0,
+                margin_bits: 5.0,
+                capped: true,
+            })
+        }))
+        .unwrap_err();
+        assert!(e.contains("capped"), "{e}");
+        // A discovered template counts as searched.
+        let e = ok(&with(|h| {
+            h.check_origin = CheckOrigin::Discovered {
+                look_elsewhere_bits: Some(4.0),
+            };
+            h.null_control = None;
+        }))
+        .unwrap_err();
+        assert!(e.contains("needs the null control"), "{e}");
+        // Template-fixed: no control, and it confirms.
+        let reason = ok(&with(|h| {
+            h.check_origin = CheckOrigin::TemplateFixed;
+            h.null_control = None;
+        }))
+        .unwrap();
+        assert!(reason.contains("(template-fixed)"), "{reason}");
+        assert!(!reason.contains("null control"), "{reason}");
+    }
+
+    /// ADR-0015 §5.5 condition 4, failing closed on what was not measured.
+    #[test]
+    fn front_end_trust_refuses_suspect_overloaded_or_unmeasured_windows() {
+        let r = solved();
+        let e = decide(&r, Profile::Standard, Some(0.51), Some(false)).unwrap_err();
+        assert!(
+            e.contains("51 % of the window's detections are suspect"),
+            "{e}"
+        );
+        assert!(decide(&r, Profile::Standard, Some(0.5), Some(false)).is_ok());
+        let e = decide(&r, Profile::Standard, None, Some(false)).unwrap_err();
+        assert!(e.contains("no detection of this emitter"), "{e}");
+        let e = decide(&r, Profile::Standard, Some(0.0), Some(true)).unwrap_err();
+        assert!(e.contains("overloaded"), "{e}");
+        let e = decide(&r, Profile::Standard, Some(0.0), None).unwrap_err();
+        assert!(e.contains("unknown"), "{e}");
+    }
+
+    #[test]
+    fn a_disabled_rule_confirms_nothing() {
+        let p = SynthesizedConfirm {
+            enabled: false,
+            ..SynthesizedConfirm::default()
+        };
+        let r = solved();
+        let e = p
+            .decide(&SynthesizedEvidence {
+                profile: Profile::Deep,
+                result: &r,
+                pipeline: "p".into(),
+                suspect_fraction: Some(0.0),
+                overload: Some(false),
+            })
+            .unwrap_err();
+        assert!(e.contains("disabled"), "{e}");
+    }
 }

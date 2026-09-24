@@ -332,7 +332,8 @@ pub struct ConfirmPolicy {
 /// 5. a **searched** check (open search, or a template discovered by an earlier search): ADR-0021
 ///    §8.2's null control ran and did not cap;
 /// 6. front-end trust: at most `max_suspect_detection_fraction` suspect detections and no overload
-///    in the analysed window.
+///    in the analysed window. **No detection in the window refuses** — zero suspect detections out
+///    of zero is not a measurement — and so does an unknown overload state.
 ///
 /// Not here: ADR-0022 §8's rolling decision-rate counter against `assumed_decisions_per_week`
 /// (T-575). The field is carried so the configuration states the denominator the thresholds
@@ -384,8 +385,11 @@ pub struct SynthesizedEvidence<'a> {
     pub result: &'a hk_synth::PipelineResult,
     /// The pipeline's name for the reason text (`generic-fsk-framed`, a template id).
     pub pipeline: String,
-    /// Share of the emitter's detections in the window that were suspect.
-    pub suspect_fraction: f64,
+    /// Share of the emitter's detections in the window that were suspect; `None` when no
+    /// detection of the emitter overlaps the window, which refuses: with nothing measured, the
+    /// front end's trust is unknown, not clean (a CRC-valid image of a real signal is exactly the
+    /// ghost this clause exists for, and only a detection's flags can say so).
+    pub suspect_fraction: Option<f64>,
     /// Whether any acquired IQ was recorded under an overloaded front end. `None` (not known)
     /// refuses.
     pub overload: Option<bool>,
@@ -491,7 +495,10 @@ impl SynthesizedConfirm {
         let searched = h.check_origin.searched();
         let null_text = match h.null_control {
             Some(nc) if nc.passed() => {
-                format!("; null control passed with a {:.1}-bit margin", nc.margin_bits)
+                format!(
+                    "; null control passed with a {:.1}-bit margin",
+                    nc.margin_bits
+                )
             }
             Some(nc) if searched && self.require_null_control_when_searched => {
                 return Err(if nc.ran {
@@ -508,7 +515,13 @@ impl SynthesizedConfirm {
             }
             _ => String::new(),
         };
-        let fraction = ev.suspect_fraction;
+        let Some(fraction) = ev.suspect_fraction else {
+            return Err(
+                "no detection of this emitter overlaps the analysed window, so the front end's \
+                 trust over it is unknown"
+                    .into(),
+            );
+        };
         if fraction.is_nan() || fraction > self.max_suspect_detection_fraction {
             return Err(format!(
                 "{:.0} % of the window's detections are suspect (limit {:.0} %)",
@@ -526,7 +539,11 @@ impl SynthesizedConfirm {
             .check
             .as_ref()
             .map_or_else(|| format!("{width}-bit check"), |c| c.model.clone());
-        let origin = if searched { "searched" } else { "template-fixed" };
+        let origin = if searched {
+            "searched"
+        } else {
+            "template-fixed"
+        };
         Ok(format!(
             "decoded by synthesized pipeline `{}`: {check} ({origin}), {} differing frame(s) valid \
              on hold-out without correction, {:.1} − {l_check:.1} = {check_bits:.1} check bits, \

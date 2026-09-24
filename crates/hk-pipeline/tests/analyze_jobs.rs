@@ -887,8 +887,8 @@ mod m9 {
     use super::*;
     use hk_model::repo::synthesis::Verdict as RowVerdict;
     use hk_model::{
-        CrcStatus, DecodeProvenance, Fingerprint, LifecycleAuthor, LifecycleState,
-        LinkTarget, Repository, Sighting, Track, TrackId, TrackState,
+        CrcStatus, DecodeProvenance, Fingerprint, LifecycleAuthor, LifecycleState, LinkTarget,
+        Repository, Sighting, Track, TrackId, TrackState,
     };
     use hk_pipeline::inventory::{CONFIRM_SYNTH_RULE, SynthesizedConfirm};
     use hk_pipeline::synth::jobs::{Attacher, RepoAttacher};
@@ -906,27 +906,100 @@ mod m9 {
         p
     }
 
-    /// A candidate emitter on the analysed channel, seen across the analysed window — found by
-    /// blind detection upstream, never looked up by the test's truth.
-    fn seed_emitter(db: &std::path::Path) -> EmitterId {
+    /// A candidate emitter on the analysed channel, seen across the analysed window with
+    /// `detections` detections linked through its track, `suspect` of them flagged spur
+    /// candidates — found by blind detection upstream, never looked up by the test's truth. The
+    /// detections are what ADR-0015 §5.5's front-end trust clause reads.
+    fn seed_emitter_with(db: &std::path::Path, detections: usize, suspect: usize) -> EmitterId {
+        use hk_model::{
+            Detection, DetectionFlags, DetectionId, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy,
+            Schedule, Survey, SurveyId, SurveyState,
+        };
         let mut repo = Repository::open(db).unwrap();
+        let seen = TimeRange::new(
+            Timestamp::from_unix_nanos(T0_NS + 4 * S),
+            Timestamp::from_unix_nanos(T0_NS + 7 * S),
+        );
+        let plan = ScanPlan {
+            id: ScanPlanId::new(),
+            version: 1,
+            name: "ism".into(),
+            created_at: seen.start,
+            regions: vec![PlanRegion {
+                freq: FreqRange::new(902e6, 928e6),
+                priority: 1.0,
+                revisit_ns: None,
+            }],
+            policy: ScanPolicy::SweepThenDwell,
+            gain_table: vec![],
+            schedule: Schedule::Cron {
+                expr: "* * * * *".into(),
+            },
+            extra: Value::Null,
+        };
+        repo.insert_scan_plan(&plan).unwrap();
+        let survey = Survey {
+            id: SurveyId::new(),
+            plan_id: plan.id,
+            plan_version: plan.version,
+            device_id: "mock:test".into(),
+            state: SurveyState::Open,
+            t_start: seen.start,
+            t_end: None,
+            summary: None,
+        };
+        repo.insert_survey(&survey).unwrap();
+        let prov = repo.intern_provenance(&provenance()).unwrap();
         let track = Track {
             id: TrackId::new(),
             state: TrackState::Closed,
             split_from: None,
-            time: TimeRange::new(
-                Timestamp::from_unix_nanos(T0_NS + 4 * S),
-                Timestamp::from_unix_nanos(T0_NS + 7 * S),
-            ),
+            time: seen,
             f_center_hz: CENTER_HZ,
             bandwidth_hz: 12e3,
-            detection_count: 20,
+            detection_count: detections as u64,
             timing: Default::default(),
-            updated_at: Timestamp::from_unix_nanos(T0_NS + 7 * S),
+            updated_at: seen.end,
         };
+        let dets: Vec<Detection> = (0..detections)
+            .map(|i| {
+                let t = T0_NS + 4 * S + i as i64 * (3 * S / detections.max(1) as i64);
+                let mut flags = DetectionFlags::default();
+                flags.spur_candidate = i < suspect;
+                Detection {
+                    id: DetectionId::new(),
+                    survey_id: survey.id,
+                    time: TimeRange::new(
+                        Timestamp::from_unix_nanos(t),
+                        Timestamp::from_unix_nanos(t + S / 10),
+                    ),
+                    f_center_hz: CENTER_HZ,
+                    obw_hz: 12e3,
+                    xdb_bandwidth_hz: None,
+                    xdb_level_db: None,
+                    snr_peak_db: 20.0,
+                    snr_mean_db: 17.0,
+                    peak_level_dbfs: -30.0,
+                    peak_level_dbm: None,
+                    sk: None,
+                    clip_count: 0,
+                    detector_version: "test@1".into(),
+                    provenance_ref: prov,
+                    flags,
+                }
+            })
+            .collect();
+        repo.insert_detections(&dets).unwrap();
         repo.upsert_track(&track).unwrap();
+        let ids: Vec<_> = dets.iter().map(|d| d.id).collect();
+        repo.link_detections_to_track(track.id, &ids, seen.end)
+            .unwrap();
         let s = Sighting::track(&track, Fingerprint::new(CENTER_HZ, 12e3));
         repo.record_sighting(&s, None).unwrap().emitter_id
+    }
+
+    fn seed_emitter(db: &std::path::Path) -> EmitterId {
+        seed_emitter_with(db, 20, 0)
     }
 
     fn attaching(ring: &Arc<Ring>, db: &std::path::Path) -> AnalyzeJobs {
@@ -934,7 +1007,9 @@ mod m9 {
             Arc::new(Env::new(Arc::clone(ring))),
             Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
             PowerPolicy::Mains,
-            Some(Arc::new(RepoAttacher::new(db, SynthesizedConfirm::default())) as Arc<dyn Attacher>),
+            Some(
+                Arc::new(RepoAttacher::new(db, SynthesizedConfirm::default())) as Arc<dyn Attacher>,
+            ),
         )
     }
 
@@ -959,11 +1034,17 @@ mod m9 {
         // The job says where its results went and what they did.
         assert_eq!(done.emitter_id, Some(emitter.to_string()));
         assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
-        let confirm = done.confirm.clone().expect("a finished job states its confirm outcome");
+        let confirm = done
+            .confirm
+            .clone()
+            .expect("a finished job states its confirm outcome");
         assert_eq!(confirm["rule"], json!(CONFIRM_SYNTH_RULE));
         assert_eq!(confirm["outcome"], json!("confirmed"), "{confirm}");
         let reason = confirm["reason"].as_str().unwrap();
-        assert!(reason.starts_with("decoded by synthesized pipeline"), "{reason}");
+        assert!(
+            reason.starts_with("decoded by synthesized pipeline"),
+            "{reason}"
+        );
         assert!(reason.contains("12 differing frame(s)"), "{reason}");
         assert!(reason.contains("against a 24-bit threshold"), "{reason}");
         assert!(reason.contains("null control passed"), "{reason}");
@@ -974,7 +1055,11 @@ mod m9 {
             repo.emitter_lifecycle_state(emitter).unwrap(),
             LifecycleState::Confirmed
         );
-        let last = repo.emitter_lifecycle_history(emitter).unwrap().pop().unwrap();
+        let last = repo
+            .emitter_lifecycle_history(emitter)
+            .unwrap()
+            .pop()
+            .unwrap();
         assert_eq!(last.author, LifecycleAuthor::Auto);
         assert_eq!(last.actor, CONFIRM_SYNTH_RULE);
         assert_eq!(last.reason, reason);
@@ -982,7 +1067,10 @@ mod m9 {
         // The append-only row: the job, the recipe inline with its hash, the hold-out evidence,
         // the trace summary and replay key, the null control; the emitter's measured values
         // untouched.
-        let row = repo.synthesis(emitter).unwrap().expect("attach appends a row");
+        let row = repo
+            .synthesis(emitter)
+            .unwrap()
+            .expect("attach appends a row");
         assert_eq!(row.verdict, RowVerdict::Solved);
         assert!(row.resolution.is_none());
         let job = row.job.as_ref().expect("a job row");
@@ -992,12 +1080,19 @@ mod m9 {
         assert_eq!(job.recipe["nodes"].as_array().map(Vec::len).is_some(), true);
         assert!(job.analytic_holdout_bits.unwrap() >= 24.0);
         assert!(job.trace_summary.is_some());
-        assert!(job.replay_key.as_ref().unwrap()["window"].get("clip_id").is_some());
+        assert!(
+            job.replay_key.as_ref().unwrap()["window"]
+                .get("clip_id")
+                .is_some()
+        );
         assert_eq!(job.null_control.as_ref().unwrap()["capped"], json!(false));
         assert_eq!((job.decodes_stored, job.decodes_valid), (12, 12));
         assert_eq!(job.confirm.as_ref().unwrap()["outcome"], json!("confirmed"));
         let e = repo.emitter(emitter).unwrap();
-        assert_eq!(e.f_center_hz, CENTER_HZ, "measured values are never overwritten");
+        assert_eq!(
+            e.f_center_hz, CENTER_HZ,
+            "measured values are never overwritten"
+        );
 
         // Each stored decode is linked, CRC-valid, and carries the arithmetic the gate read.
         let decodes: Vec<_> = repo
@@ -1012,7 +1107,10 @@ mod m9 {
         assert_eq!(decodes.len(), 12);
         for d in &decodes {
             assert_eq!(d.decoder_id, "synth:open");
-            assert!(d.decoder_version.starts_with(&format!("{}+sha256:", hk_synth::ENGINE)));
+            assert!(
+                d.decoder_version
+                    .starts_with(&format!("{}+sha256:", hk_synth::ENGINE))
+            );
             assert_eq!(d.crc_status, CrcStatus::Valid);
             let id = d.identity.as_ref().expect("the structural identity");
             assert_eq!(id.scheme.as_string(), "other:hk-framing");
@@ -1050,11 +1148,19 @@ mod m9 {
         let emitter = seed_emitter(&db);
         let ring = ring10();
         let jobs = attaching(&ring, &db);
-        jobs.start(band_request(one_second(), Profile::Quick)).unwrap();
+        jobs.start(band_request(one_second(), Profile::Quick))
+            .unwrap();
         let done = wait_terminal(&jobs, "a1");
         assert_eq!(done.state, JobState::Done, "{:?}", done.error);
         let confirm = done.confirm.clone().unwrap();
-        assert_ne!(confirm["outcome"], json!("confirmed"), "{confirm}");
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("`quick` never confirms"),
+            "{confirm}"
+        );
         let repo = Repository::open(&db).unwrap();
         assert_eq!(
             repo.emitter_lifecycle_state(emitter).unwrap(),
@@ -1078,7 +1184,11 @@ mod m9 {
             .unwrap();
         let done = wait_terminal(&jobs, "a2");
         assert_eq!(done.state, JobState::Done, "{:?}", done.error);
-        assert_ne!(done.emitter_id, Some(emitter.to_string()), "never attach to a deleted row");
+        assert_ne!(
+            done.emitter_id,
+            Some(emitter.to_string()),
+            "never attach to a deleted row"
+        );
         let repo = Repository::open(&db).unwrap();
         assert_eq!(
             repo.emitter_lifecycle_state(emitter).unwrap(),
@@ -1107,9 +1217,63 @@ mod m9 {
             .parse()
             .unwrap();
         let repo = Repository::open(&db).unwrap();
-        let row = repo.synthesis(id).unwrap().expect("attached to the new candidate");
+        let row = repo
+            .synthesis(id)
+            .unwrap()
+            .expect("attached to the new candidate");
         assert_eq!(row.job.as_ref().unwrap().job_id, "a1");
         assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        // The new candidate has no detection in the window, so the front end's trust over it is
+        // unknown: it stays a candidate (ADR-0015 §5.5 condition 4 fails closed).
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no detection of this emitter"),
+            "{confirm}"
+        );
+        assert_eq!(
+            repo.emitter_lifecycle_state(id).unwrap(),
+            LifecycleState::Candidate
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A window whose detections are mostly suspect (spur candidates) never confirms, however
+    /// clean the decode: the front end manufactures real-looking ghosts, and a CRC-valid image of
+    /// a real signal is one (ADR-0015 §5.5 condition 4). The row and decodes are still kept.
+    #[test]
+    fn a_mostly_suspect_window_attaches_but_never_confirms() {
+        let dir = tempdir("t860-suspect");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter_with(&db, 10, 6);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_eq!(done.emitter_id, Some(emitter.to_string()));
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                // Only the window's detections count: of the ten (one every 0.3 s from 4 s),
+                // those at 5.2, 5.5 and 5.8 s overlap [5 s, 6 s), and the first two are suspect.
+                .contains("67 % of the window's detections are suspect"),
+            "{confirm}"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate
+        );
+        let row = repo.synthesis(emitter).unwrap().expect("attached anyway");
+        assert_eq!(row.job.as_ref().unwrap().decodes_stored, 12);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
