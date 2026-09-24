@@ -807,7 +807,7 @@ On-device fine-tuning (docs/11 M3 row) moves to T-216. M3 closes on off-device t
 
 1. **Exit floors.** Are the §7 floors (top-1 ≥ 0.90 above gate + 5 dB, wrong-label ≤ 2 %, unknown recall ≥ 0.80) the right bar? Real OOK/PSK truth is still missing (S5 §6). Would you capture an owned 433 MHz remote and an AIS or NOAA pass so the OTA rows aren't FSK/analog only?
 2. **ML dependency.** Is tract (pure Rust) in the default build acceptable? And ort only if the Mac bake-off shows ≥ 2×?
-3. **User authority.** Should a user reclassification (rank 0) outrank a CRC-valid decode (rank 1), or should a decode win and flag the contradiction?
+3. **User authority.** Should a user reclassification (rank 0) outrank a CRC-valid decode (rank 1), or should a decode win and flag the contradiction? — **Answered 2026-09-23 (user, docs/20 U3 = A):** the user wins (rank 0); the contradicting decode is recorded and shown beside the label. Recorded in ADR-0015 §5.5.
 4. **Cluster novelty.** Should a newly `active` cluster (a never-seen *type*) feed ADR-0012 novelty as its own component? That would amend ADR-0012 §4.4.
 5. **Signature sharing.** Are signatures exportable (without instance data) for a later friend-user exchange, or local only for now?
 

@@ -5571,3 +5571,40 @@ retries existed for exactly two timing tests; the other five known-timing tests 
 **Measure it:** the dashboard gets gate pass rate per day beside the burndown. The target is a batch
 pass rate above 80 % by 09-24; below that, the next lever is running the gate's `nextest` at fewer
 threads under load, then the deflake work itself.
+
+### B0.693 — ADR-0015 ACCEPTED: the user answers docs/20's five, and says yes to stereo (2026-09-23)
+
+**Decided by the user (relayed by the supervisor), on [docs/20](20-mauto-decision-brief.md)'s table:**
+**U1 = B** (one frame auto-confirms only on a template-fixed check ≥ 24 bits; budget ≤ 1 wrong
+Confirmed emitter per unattended week — already ADR-0022's inequality), **U2 = B** (auto-queue
+unexplained candidates at `quick` only, on mains, one job at a time; `deep` user-triggered, refused on
+battery), **U3 = A** (the user's label wins at rank 0; a contradicting CRC-valid decode is recorded
+and shown beside it — also closes ADR-0016 Q3), **U4 = A** (fund `psk_demod`, M-14 **required**;
+SSB/CW stay on the legacy Listen chain permanently), and **U5 = yes — against the brief's "no"**: the
+user wants stereo audio, as part of decoding the signal. Then: accept ADR-0015 accordingly, and let
+the MAUTO M-1/M-3 chain proceed.
+
+**What changed.** [ADR-0015](adr/0015-decoder-synthesis-contracts.md) → **ACCEPTED (2026-09-23, user
+decisions U1–U5)**. T-848's eight engineering corrections (§16.2: D1, C2–C8) are folded into the
+sections they amend — the evidence vocabulary in `hk_model::synth` (§9), likelihood-only deferral
+(§4.2), the memoised-node exception (ADR-0021 §2.2), `output_policy` as the recipe's typed map
+(§4.1), the PSK gap closed (§1.1, §10), CandidatePipeline's docs/07 number (§11.7), S6 without a
+floor and floors never lowered (§1.3). U1–U5 are written into §§3.3, 4.2, 5.5, 6, 8, 12.5, 12.10,
+12.12, and a new **§12.13** puts stereo in scope as two placeholder tasks: LP-9 `stereo_decode`
+(pilot PLL, L−R, honest mono fallback) and LP-10 the `channels` wire change with every audio client
+in the same change and mono byte-identical. ADR-0011 §8.4's "stereo is out" and ADR-0016 Q3 carry
+pointers. The ADR-0016 dependency on M-1 is waived by the acceptance (hk-synth reads only the landed
+`SearchSeed`).
+
+**M-14 vs T-609.** T-609 delivered M-14's block (and more: eight constellations, not a BPSK Costas;
+T-610/T-611 complete CCSDS). What M-14 still owes before PSK reaches bits *in a search* is recorded
+in ADR-0015 §10's M-14 row: `psk_demod`'s `evidence()` metric and calibration table (M-2's scope must
+include it), a PSK S1 alternative in the open skeletons/seeding (none in §4.1's list), and a
+burst/preamble acquisition mode (T-609 needs 512–1024 symbols).
+
+**Still open — the user did not decide these (ADR-0015 §16.8):** (1) T-660: S3 reaches 4.5 bits, not
+`floor_j = 6`, under §13.1's max rule — restate the floor beside that measurement, never return to the
+sum; (2) T-552 / docs/27 (in flight): proposal-operator calls at 0.3–2.4 s dominate, so §3.3's
+3 / 20 / 120 s wall budgets should become op-count budgets with wall time as a backstop — M-3 should
+not freeze `SynthBudget`'s public shape first; (3) T-619's fill-bucket amendment, which must land (or
+M-2 must pass `TIGHT_NOMINAL_BOUNDS`) before the first calibration table is generated.

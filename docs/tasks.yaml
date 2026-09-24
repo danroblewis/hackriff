@@ -24899,6 +24899,8 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
+
+      ADR-0015 ACCEPTED 2026-09-23 on the user's docs/20 answers: U1 B, U2 B, U3 A, U4 A with M-14 required, U5 YES - stereo audio in scope against the recommendation, ADR-0015 §12.13 LP-9/LP-10. §16.2's 8 corrections folded into the ADR text; ADR-0016 dependency waived. Still OPEN per ADR-0015 §16.8: T-660 S3 floor 4.5 bits vs floor_j=6 under the max rule; T-552 op-count budgets, docs/27; T-619 fill-bucket amendment before M-2's first calibration table. M-14 residue beyond T-609 - psk_demod evidence and calibration, PSK S1 skeleton and seeding, burst acquisition - recorded in ADR-0015 §10. Branch task-adr15-accept, commit 671e0380.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-23 18:03).
