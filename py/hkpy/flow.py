@@ -440,6 +440,9 @@ def summary(ops: str, now: datetime | None = None) -> dict:
         "queue_depth": len(queue), "workers_running": running, "worker_cap": cap,
         "flake_accepts_24h": len(fa := flake_accepts(ops, now - timedelta(hours=24), now)),
         "flake_saved_min_24h": round(sum(float(o.get("saved_s") or 0) for o in fa) / 60),
+        # The one-solo-pass rule's own saving: the second isolated run it skipped (~ the first one's time).
+        "flake_solo_24h": sum(1 for o in fa if o.get("passes_alone") == 1),
+        "flake_solo_saved_min_24h": round(sum(float(o.get("solo_saved_s") or 0) for o in fa if o.get("passes_alone") == 1) / 60),
     }
 
 
@@ -487,7 +490,9 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
             f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
             f"{exp} · holding: {_holding(ops, now)}"
             + (f" · {s['open_graph']['short']}" if (s.get("open_graph") or {}).get("short") else "")
-            + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min)"
+            + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min"
+               + (f"; {s['flake_solo_24h']} after one solo pass, {s['flake_solo_saved_min_24h']} min of it" if s.get("flake_solo_24h") else "")
+               + ")"
                if s.get("flake_accepts_24h") else ""))
 
 

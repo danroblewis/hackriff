@@ -231,3 +231,69 @@ def test_a_branch_main_is_red_on_waits_until_main_moves(tmp_path):
     assert "GATED=[task-t802]" in out and queued == [] and not still          # main moved: it gates again
     out, queued, still = _park(tmp_path, "task-t802 aaa tipOLD\n", "aaa", "task-t802")
     assert "GATED=[task-t802]" in out and queued == []                         # its own tip moved: a fix, it gates
+
+
+def _solo_run(tmp_path, solo_answer, knob="1", alone_rcs=(0, 0), code_changed=False):
+    """A browser red in test-ui-e2e, re-run alone by the real _flake_retry/flake_accept/solo_ok."""
+    log = tmp_path / "merge-runner.log"
+    log.write_text("[09-24 14:30:00] BULK gate (just gate --base abc ...)\n"
+                   "gate: just test-ui took 8s (exit 0)\n"
+                   "e2e: 15/16 files passed in 258.5 s (backend 2.5 s); failed: app-trace.e2e.mjs\n"
+                   "gate: just test-ui-e2e took 259s (exit 1)\n")
+    (tmp_path / "ui").mkdir(exist_ok=True)
+    calls = tmp_path / "calls"
+    rcs = " ".join(str(r) for r in alone_rcs)
+    script = f"""
+set -u
+LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}; FLAKE_SOLO_ONE={knob}; BULKMARK={tmp_path}/no-bulk
+git(){{ echo "git $*" >> {calls}; return {1 if code_changed else 0}; }}      # `git diff --quiet` of the acceptance code
+log(){{ echo "[09-24 14:40:00] $*" >> $LOG; echo "LOG $*"; }}
+alert(){{ :; }}
+RCS=({rcs}); N=0
+npm(){{ echo "npm $*" >> {calls}; local r=${{RCS[$N]:-0}}; N=$((N+1)); return $r; }}
+uv(){{ echo "uv $*" >> {calls}; echo "{solo_answer}"; case "{solo_answer}" in solo-ok*) return 0;; *) return 1;; esac; }}
+limited(){{ echo "limited $*" >> {calls}; return 0; }}
+{_function("solo_ok")}
+{_function("_flake_retry")}
+{_function("flake_accept")}
+_flake_retry abc 1 "T-1" "just gate --base abc"
+echo "RC $?"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    ran = calls.read_text().splitlines() if calls.exists() else []
+    recs = [json.loads(ln) for ln in (tmp_path / "flaky.jsonl").read_text().splitlines()] if (tmp_path / "flaky.jsonl").exists() else []
+    return out.stdout, ran, recs
+
+
+def test_a_ledger_known_flaker_is_accepted_after_one_solo_pass(tmp_path):
+    """User decision 2026-09-24 14:20 (knob FLAKE_SOLO_ONE)."""
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11")
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"]          # ONE solo run
+    assert "accepted after one solo pass (ledger: 11 alone-passes)" in out and "PASS alone once" in out
+    assert ran[-1] == "limited just gate --base abc --resume-after test-ui-e2e" and "RC 0" in out
+    assert recs[-1]["passes_alone"] == 1 and recs[-1]["accepted"] is True
+
+
+def test_a_first_time_flaker_or_the_knob_off_keeps_the_twice_rule(tmp_path):
+    for answer, knob in (("solo-no 1", "1"), ("solo-ok 11", "0")):
+        d = tmp_path / f"{answer[:7]}{knob}"
+        d.mkdir()
+        out, ran, recs = _solo_run(d, answer, knob=knob)
+        assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
+        assert "PASS alone twice" in out and recs[-1]["passes_alone"] == 2
+        assert knob == "1" or not any(c.startswith("uv") for c in ran)                    # off: the ledger is not even asked
+
+
+def test_a_fail_alone_is_a_real_red_whatever_the_ledger_says(tmp_path):
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11", alone_rcs=(1,))
+    assert "FAILS alone -> a real defect" in out and "RC 1" in out and recs == []
+    assert not any(c.startswith("uv") for c in ran)                                          # asked only after a pass
+
+
+def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path):
+    """Review 2026-09-24: a batch editing hkpy/flakes.py or the runner would decide its own flake accept."""
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11", code_changed=True)
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
+    assert any("diff --quiet HEAD -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh" in c for c in ran)
+    assert not any(c.startswith("uv") for c in ran) and recs[-1]["passes_alone"] == 2

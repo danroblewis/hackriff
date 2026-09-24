@@ -382,3 +382,54 @@ def test_failed_alone_is_charged_only_to_the_specs_the_isolated_run_named():
     # no summary line (a Rust test set): every test in the set, as before
     led = flakes.build(flakes.parse_runner_log(log(*FAIL_EPISODE), YEAR))
     assert led["the_view_lattices_floor"].failed_alone == 1
+
+
+def test_the_one_solo_pass_rule_reads_the_windowed_ledger():
+    """User decision 2026-09-24 14:20: a test the ledger already shows passing alone (>= 2 in 7 d,
+    never failing alone) is accepted after ONE solo pass; anything else keeps the twice rule."""
+    now = time.time()
+    day = 86400
+    inc = flakes.Incident
+    P, F = flakes.PASSED_ALONE, flakes.FAILED_ALONE
+    incs = [inc(ts=now - 1 * day, tests=("app-trace.e2e.mjs",), outcome=P),
+            inc(ts=now - 2 * day, tests=("app-trace.e2e.mjs",), outcome=P),
+            inc(ts=now - 1 * day, tests=("fog-of-war.e2e.mjs",), outcome=P),
+            inc(ts=now - 2 * day, tests=("fog-of-war.e2e.mjs",), outcome=P),
+            inc(ts=now - 3 * day, tests=("fog-of-war.e2e.mjs",), outcome=F),
+            inc(ts=now - 1 * day, tests=("once.e2e.mjs",), outcome=P),
+            inc(ts=now - 9 * day, tests=("old.e2e.mjs",), outcome=P),
+            inc(ts=now - 8 * day, tests=("old.e2e.mjs",), outcome=P),
+            # 2026-09-24 11:19-11:30: passed alone before, then FAILED alone, pinned on the branch.
+            inc(ts=now - 1 * day, tests=("canvas.e2e.mjs",), outcome=P),
+            inc(ts=now - 2 * day, tests=("canvas.e2e.mjs",), outcome=P),
+            inc(ts=now - 3 * day, tests=("canvas.e2e.mjs",), outcome=F, branch_defect=True),
+            # a multi-spec red whose isolated run named ANOTHER spec as the failure
+            inc(ts=now - 1 * day, tests=("a.e2e.mjs",), outcome=P),
+            inc(ts=now - 2 * day, tests=("a.e2e.mjs",), outcome=P),
+            inc(ts=now - 3 * day, tests=("a.e2e.mjs", "b.e2e.mjs"), outcome=F, failed_alone_tests=("b.e2e.mjs",))]
+    since = now - 7 * day
+    ok = lambda *t: flakes.solo_decision(incs, list(t), since)  # noqa: E731
+    assert ok("app-trace.e2e.mjs") == (True, 2)
+    assert ok("fog-of-war.e2e.mjs")[0] is False              # failed alone in the window
+    assert ok("canvas.e2e.mjs")[0] is False                  # ... even when that fail was pinned on a branch
+    assert ok("once.e2e.mjs")[0] is False                    # a first-time flaker: twice rule
+    assert ok("old.e2e.mjs")[0] is False                     # its passes are outside the window
+    assert ok("a.e2e.mjs") == (True, 2)                      # the isolated run named b, not a
+    assert ok("app-trace.e2e.mjs", "once.e2e.mjs")[0] is False   # every test must qualify
+    assert ok("never-seen.e2e.mjs")[0] is False and ok()[0] is False
+    assert flakes.solo_decision(incs, ["fog-of-war.e2e.mjs"], now - 2.5 * day) == (True, 2)   # window start moves
+
+
+def test_solo_query_counts_only_what_the_log_covers(tmp_path):
+    """Fail-alones live only in the runner log, read from its last 40 MB: passes older than the log's
+    first line must not count, and an unreadable log is no."""
+    now = time.time()
+    assert flakes.solo_query(str(tmp_path), ["x.e2e.mjs"], now=now) == (False, 0)
+    from datetime import datetime as _dt
+    stamp = lambda t: _dt.fromtimestamp(t).strftime("%m-%d %H:%M:%S")  # noqa: E731
+    iso = lambda t: _dt.fromtimestamp(t).strftime("%Y-%m-%dT%H:%M:%S")  # noqa: E731
+    (tmp_path / "merge-runner.log").write_text(f"[{stamp(now - 3600)}] merge-runner up\n")
+    (tmp_path / "flaky.jsonl").write_text(
+        "".join(f'{{"ts":"{iso(now - d * 86400)}","tests":"x.e2e.mjs","passes_alone":2,"accepted":true}}\n'
+                for d in (2, 3, 4)))
+    assert flakes.solo_query(str(tmp_path), ["x.e2e.mjs"], now=now)[0] is False   # all three predate the log
