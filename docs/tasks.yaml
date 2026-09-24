@@ -25147,7 +25147,7 @@ tasks:
   - id: T-856
     milestone: MAUTO
     title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25180,6 +25180,7 @@ tasks:
       Commits: c0dcec02
       Observed, not chased: Skeleton psk_demod node lacks required symbol_rate_bd param; candidates (M-3) must supply it | Built-in standard refs (ITU-R M.584-2, ARINC 618, ICAO Annex 10, IEC 62106) are unverified transcriptions from recipes
       Resources: 49 CPU-s, peak 0.6 GB
+    commit: 37486d14
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
