@@ -25383,7 +25383,7 @@ tasks:
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-854
@@ -25417,6 +25417,7 @@ tasks:
       Observed, not chased: hk-api tests/ondemand.rs:365 silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails even when run alone on this box at load avg 16.8-18.2: 'assert!(records > 20)' got '11 records'. It asserts wall-clock throughput from a Ticking opener that sleeps 20 ms per record over 1.5 s, so it is a latency/throughput bound (docs/10 §3.6 timing tier) rather than a defect in this diff. This diff touches that path only with a '/ws/analyze/' prefix check placed before '/ws/open/'. Needs a deflaker: move it to the timing tier or make it count-based. | crates/hk-pipeline/src/region.rs:6 module doc still says 'POST /api/analyze still answers 501'; stale after this ticket (doc comment only). | tests/e2e/tests/acceptance/t255_lora_chirp.rs:35/577 text still says POST /api/analyze answers 501; that is a message string, not an assertion. | ADR-0015 §5.1 has POST {emitter_id} start a job. This keeps a bare {emitter_id} (no job field) as T-546's synchronous 200 read, because signal_087 and acceptance_mauto assert on it, and starts a job only when a job field is present. ADR-0015 §5.1 may want a note recording this. | TCP stream form is 'open/analyze?id=<id>' (the existing on-demand TCP syntax), not ADR-0015 §5.1's 'analyze/<id>'; /ws/analyze/{id} is served as the ADR names it. | Burst-set acquisition from inventory detections (ADR-0015 §6 burst path) is not wired into jobs: every job uses the continuous two-part window. M-6's BurstSet::collect is ready for it once a detection query feeds sightings. | frames_preview content gating in the job snapshot has no dedicated test: the engine never fills frames_preview today, so no test can reach it through the real seam.
       Use cases: RESEARCH-002
       Resources: 252 CPU-s, peak 4.1 GB
+    commit: d62a10d0
   - id: T-860
     milestone: MAUTO
     title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
