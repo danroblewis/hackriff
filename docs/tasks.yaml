@@ -23818,7 +23818,8 @@ tasks:
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
-    status: todo
+    status: in-progress
+    branch: task-t808
     priority: high
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -24056,7 +24057,7 @@ tasks:
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
-    status: todo
+    status: in-progress
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24095,6 +24096,7 @@ tasks:
       Observed, not chased: Go restores time extent and centre frequency only; restoring span needs a nav slice extension
       Use cases: AWARE-042
       Resources: 56 CPU-s, peak 0.9 GB
+    branch: task-t815
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
