@@ -18196,6 +18196,34 @@ tasks:
       The point is that the profile names reach the API in the engine set's M-8; this ticket
       wants the numbers behind them to exist first.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      {
+        "ticket": "T-552",
+        "outcome": "done",
+        "summary": "Measured what one candidate evaluation costs on the real M1 blocks (S0-S6) plus the hk_estimate::assist proposal operators, on a Mac release build, load average ~10-11 (28-core M3 Ultra, quiet box, no gate/merge running). Finding: S0 channelisation (dominated by lowpass) costs ~80% of a from-scratch S0-S6 evaluation (~85ms of ~105-120ms per 3s window of 240kHz IQ), so ADR-0015's prefix memoisation pays off as designed and stage depth is cheap once the head is cached (S1 ~5ms, S2-S6 each <1ms once cached). But assist.sync/assist.codes/assist.fields calls cost 0.3-2.4s each (2-4 orders of magnitude above a full DSP pass), and THOSE are what a profile's wall-clock budget actually rations, not DSP re-evaluation. At that cost, quick's 3s buys only ~4-9 assist calls at the crate's default op-budget (~1-3 at its 'max' tier) -- too few to safely cover 'templates and the top-2 open skeletons' (Profile::Quick's doc comment) if either open skeleton needs a full sync+codes+fields sequence (a 3-call minimum). This directly contradicts treating ADR-0015 section 3.3's 3s/20s/120s wall-clock numbers as ready to freeze into the /api/analyze profile contract as specified. Recommendation: budget the proposal-operator calls by evaluation/op count (hk_estimate::assist::Budget{max_ops} already exists and is near machine-independent per the measured ns/op figures) rather than wall time, keep wall_s only as a human-meaningful backstop ceiling, and re-examine quick's 3s allowance specifically before it ships. Wrote crates/hk-blocks/src/blocks/fec/tests.rs (S5 bench), framing/tests.rs (S4 bench), parse/fields.rs (S6 bench) -- all re-verified running locally, numbers reproduce closely to what docs/27 reports (e.g. S5 crc 5.015e6 frames/s vs doc's 5.0e6). Reused pre-existing hk-blocks::blocks::iq::throughput_bench (S0-S3) and hk-estimate::assist::assist_bench_work_cap_timing (proposal operators) benches rather than duplicating them. Did NOT touch hk-synth's Profile::budget() (crates/hk-synth/src/search.rs) -- left it exactly as landed by T-848/T-660, with its comment already citing T-552 as the number's owner; the ADR-0015 acceptance step should apply the recommendation. Resolved a docs/README.md merge conflict against main (T-800/MMAP rows 23-26 landed since the WIP was parked) by keeping both sets of rows in table order. Merged main into task-t552 (worktree was recreated fresh; branch had been checked out clean before, no prior worktree existed).",
+        "commits": ["1bd61338131920b892a015dd597837ad34f2a5af"],
+        "files": [
+          "docs/27-synth-stage-cost-measurement.md",
+          "docs/README.md",
+          "crates/hk-blocks/src/blocks/fec/tests.rs",
+          "crates/hk-blocks/src/blocks/framing/tests.rs",
+          "crates/hk-blocks/src/blocks/parse/fields.rs"
+        ],
+        "tests": [
+          {"cmd": "just test-crate hk-blocks", "exit": 0, "summary": "150 passed, 4 skipped, 13.0s"},
+          {"cmd": "cargo test --release -p hk-blocks --lib fec::tests::s5_check_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; crc24 5.015e6 frames/s / 199.4 ns, bch(31,21) 1.142e7 frames/s / 87.5 ns -- matches docs/27 table within noise"},
+          {"cmd": "cargo test --release -p hk-blocks --lib framing::tests::s4_sync_search_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; rds sync 6.58e7 bits/s, pocsag sync 8.49e8 bits/s -- matches docs/27"},
+          {"cmd": "cargo test --release -p hk-blocks --lib blocks::parse::fields::tests::s6_fields_throughput_bench -- --ignored --nocapture", "exit": 0, "summary": "1 passed; 1.939e6 frames/s / 515.6 ns/frame -- matches docs/27"}
+        ],
+        "precheck": {"exit": 0, "summary": "just precheck hk-blocks: fmt clean, clippy clean"},
+        "use_cases": ["RESEARCH-001", "SIGNAL-052"],
+        "load_at_measurement": "load average(1m) ~10.4-11.5 on a 28-core M3 Ultra (just builders confirmed 'safe to launch another builder', no gate/merge in progress, ~.hackriff-ops/bulk-in-progress absent, .git/MERGE_HEAD absent); all reported numbers are single-run release-build wall-clock/op-count figures, not statistically replicated -- consistent with docs/27's own stated confidence caveats (section 7)",
+        "budget_recommendation_vs_adr0015_3.3": "Contradicts the assumption that 3.3's wall_s numbers (quick 3s/standard 20s/deep 120s) are close to right as a rationing unit: they were sized apparently assuming DSP re-evaluation dominates cost, but DSP re-evaluation is cheap (memoisation works) while assist.sync/codes/fields proposal calls are the real cost driver at 0.3-2.4s each. Recommend switching the primary budget unit for the search to an evaluation/proposal-call count (near machine-independent per this measurement's stable ns/op figures) with wall_s retained only as a backstop ceiling for the power-policy/503-busy story, and specifically re-examining whether quick's 3s figure can complete even one open-skeleton sync+codes+fields sequence with margin. This change belongs to the ADR-0015 acceptance step, not this ticket -- Profile::budget() in crates/hk-synth/src/search.rs was left untouched.",
+        "observed_but_not_chased": [
+          "T-453's ring-safety question (does a synth chain at lower OS priority disturb the capture ring) cannot be measured until hk-synth's actual chain/engine exists -- explicitly out of scope per the ticket text and flagged in docs/27 section 5 as MAUTO M-3/M-13's job, not filed as a new ticket since the ADR's own task graph already owns it.",
+          "Jetson figures are out of scope per the ticket (MAUTO M-13); every number here is this Mac workstation's optimistic floor, stated as such in docs/27 section 0."
+        ]
+      }
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'

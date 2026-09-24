@@ -510,3 +510,31 @@ fn interleavers_permute_and_invert() {
         );
     }
 }
+
+/// T-552 (ADR-0015 §3.3 measurement): S4 `sync_search` release timing over a long noise bit
+/// stream (the worst case: it never locks, so every window is scored).
+/// `cargo test --release -p hk-blocks --lib framing::tests::s4_sync_search_throughput_bench -- --ignored --nocapture`
+#[test]
+#[ignore = "timing bench, release builds"]
+fn s4_sync_search_throughput_bench() {
+    use std::time::Instant;
+
+    let n_bits = 4_000_000;
+    let stream = noise(n_bits, 7);
+    let cases: Vec<(&str, Value)> = vec![
+        ("rds sync (26-bit offset words)", recipe_node("rds", "sync")),
+        ("pocsag sync (32-bit)", recipe_node("pocsag", "sync")),
+    ];
+    eprintln!("{:<32} {:>14} {:>12}", "case", "bits/s", "s per Mbit");
+    for (label, params) in cases {
+        let mut s = build("sync_search", params, PortType::Bits);
+        let t0 = Instant::now();
+        run_bits(s.as_mut(), &stream, 16_384, false);
+        let secs = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "{label:<32} {:>14.3e} {:>12.4}",
+            stream.len() as f64 / secs,
+            secs * 1e6 / stream.len() as f64
+        );
+    }
+}
