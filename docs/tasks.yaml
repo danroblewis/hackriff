@@ -25495,6 +25495,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      Review: Analyze section only mounted on emitter focus; now mounts on selection focus and whenever a job is watched.
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 04:13).
       Added an Analyze section to the Explore output panel (ui/src/app/explore/analyze-panel.ts): shows the watched AnalyzeJob's state/deepest stage, budget use (proposal calls first, wall time as backstop), stop/dismiss, ranked results (max 10) with backend summary/verdict, per-result evidence ladder (rungs and relative bars from stages[].bits), 'Start as pipeline' (POST /api/pipelines {recipe, target}) and 'Save template' (POST /api/analyze/{id}/results/{rank}/template, ADR-0015 4.3). New analyze slice holds the watched job id; the context-menu Analyze action now returns the started job id and sets it. Thin client: no signal logic, all values are the server's. Note: the save-template route is M-10's and is not in docs/api.md yet; the UI reports 404/405 as 'not available on this server yet'. No crates touched, so precheck is n/a.
