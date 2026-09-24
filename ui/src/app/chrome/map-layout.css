@@ -10,14 +10,11 @@
 /* T-801 round 3: `--panel-w`/`--panel-gap` are the one definition of the floating side/focus
    columns' footprint, shared with the `.sf-bar` inset below so the two can never drift apart. */
 #view-explore { --panel-w: 300px; --panel-gap: 8px; }
-#view-explore > .side, #view-explore > .focus { position: absolute; z-index: 4; top: 64px; bottom: 74px; width: min(var(--panel-w), calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
+#view-explore > .side { position: absolute; z-index: 4; top: 64px; bottom: 74px; width: min(var(--panel-w), calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
 #view-explore > .side { left: 8px; }
-#view-explore > .focus { right: 8px; }
-/* Nothing focused renders only the placeholder sentence (`explore/index.ts`'s `render()`, which
-   sets this class in that one case and clears it whenever there is a real focus or an explanatory
-   "not here" state) — collapse the panel then rather than covering the canvas's right edge with an
-   empty box. `:empty` never fired here: the slot is always filled with *something*. */
-#view-explore > .focus.is-empty { display: none; }
+/* T-803: the focus panel is no longer a right-hand column — it is the body of the bottom sheet
+   (`chrome/sheet.css`), which is collapsed to its title strip rather than hidden when nothing is
+   focused, so the old `.focus.is-empty { display: none }` column rule is gone with the column. */
 /* T-801 round 2 cleared the panels vertically (`top: 64px`, above) so they no longer sit under the
    top `.bar`, but round 3's review caught what that left: the surface's OWN toolbar (`.sf-bar`,
    T-528's wrapping button row, mounted inside `.centre`) still spans the full-bleed canvas's whole
@@ -36,15 +33,15 @@
    submits through the same `requestGoto`; the bar's copy stays for Decode/History, where it
    switches to Explore first. One Go-to on screen, not two. */
 .app:has(#view-explore:not([hidden])) > .bar #goto-form { display: none; }
-#view-explore > .centre .sf-bar { padding-left: calc(var(--panel-w) + var(--panel-gap) * 2); padding-right: calc(var(--panel-w) + var(--panel-gap) * 2); box-sizing: border-box; }
+/* T-803: only the left column remains (the right-hand focus column became the bottom sheet, which
+   sits at the bottom and whose `full` state stops below this toolbar), so only the left inset stays. */
+#view-explore > .centre .sf-bar { padding-left: calc(var(--panel-w) + var(--panel-gap) * 2); padding-right: 12px; box-sizing: border-box; }
 @media (max-width: 900px) {
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }
   .app:has(#view-explore:not([hidden])) > .bar { flex-wrap: wrap; max-height: 40dvh; overflow: auto; }
   #view-explore > .centre { grid-template-rows: minmax(0, 1fr); padding-top: 96px; }
-  #view-explore > .side, #view-explore > .focus { top: auto; max-height: 28dvh; overflow: auto; width: calc(100vw - 16px); left: 8px; right: 8px; }
-  #view-explore > .side { bottom: calc(70px + 28dvh + 8px); }
-  #view-explore > .focus { bottom: 70px; }
+  #view-explore > .side { top: auto; max-height: 28dvh; overflow: auto; width: calc(100vw - 16px); left: 8px; right: 8px; bottom: calc(70px + 56px + 8px); }
   .app:has(#view-explore:not([hidden])) > .dock { flex-wrap: nowrap; }
   /* Below the breakpoint the panels drop to the bottom of the screen (above) and no longer share a
      row with the surface's toolbar, so the desktop inset is not needed — and at phone widths it
