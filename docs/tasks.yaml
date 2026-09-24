@@ -23491,7 +23491,7 @@ tasks:
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-800]
     use_cases: []
@@ -23515,13 +23515,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801]
     use_cases: []
@@ -23545,13 +23547,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801]
     use_cases: []
@@ -23575,13 +23579,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-803]
     use_cases: [AWARE-053]
@@ -23605,13 +23611,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801, T-459]
     use_cases: [AWARE-042]
@@ -23634,6 +23642,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -23671,7 +23681,7 @@ tasks:
     status: todo
     priority: normal
     parallel_group: MAP-LAYERS
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-806]
     use_cases: [AWARE-042]
@@ -23694,6 +23704,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
@@ -24248,7 +24260,7 @@ tasks:
     status: todo
     priority: normal
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-805, T-814, T-821]
     use_cases: []
@@ -24271,13 +24283,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
     status: todo
     priority: normal
     parallel_group: MAP-TEST
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-809, T-810, T-812, T-820, T-821, T-822]
     use_cases: []
@@ -24300,6 +24314,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
