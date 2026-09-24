@@ -2111,13 +2111,14 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
   </div>
   <div class=col>
     <div class="card" id=mergecard><h2>Merge queue <em id=mqn></em></h2><div class=bd id=mergeq></div></div>
+    <div class="card" id=levcard style="flex:0 0 auto"><h2>Leverage <em><a class=maplink href="/worklog#leverage">all ↗</a></em></h2><div class=bd id=lev style="font-size:12px"></div></div>
     <div class="card" id=queuecard style="flex:0 0 auto;max-height:44%"><h2>Up next <em id=qn></em></h2><div class=bd id=queue></div></div>
     <div class="card fill"><h2>Work trees <em id=wtn></em></h2><div class=bd id=wts></div></div>
   </div>
@@ -2291,6 +2292,19 @@ async function tick(){
  }catch(e){ $('#err').textContent='fetch error: '+e; $('#st').textContent='retrying'; }
 }
 tick(); setInterval(tick,5000);
+// Leverage beside the merge queue (user, 2026-09-24: "put the Leverage top-5 and the ETA line on the
+// MAIN page beside the queue, since that is where he looks") - the full panel is /worklog#leverage.
+async function levTick(){ try{
+  const [b,e]=await Promise.all([fetch('/taskorder.json',{cache:'no-store'}).then(r=>r.json()),
+                                 fetch('/eta.json',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}))]);
+  const el=$('#lev'); if(!el) return;
+  if(b.error){ el.innerHTML='<div style="color:var(--dim)">'+esc(String(b.error))+'</div>'; return; }
+  const rows=(b.rows||[]).filter(r=>r.unblocks>0).slice(0,5);
+  el.innerHTML=(e.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px">${esc(e.line)}</div>`:'')+
+    rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline"><span style="font:12px var(--mono);color:var(--amber);min-width:2.2em;text-align:right" title="open tickets transitively behind it">${esc(String(r.unblocks))}</span><span class=tlink data-tid="${esc(r.id)}" style="font:12px var(--mono)">${esc(r.id)}</span><span style="color:var(--dim);font:11px var(--mono)">${esc(Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', '))}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.title)}</span></div>`).join('')+
+    `<div style="color:var(--dim);font:11px var(--mono);margin-top:3px">${esc(String(b.open))} open · frontier ${esc(String((b.frontier||[]).length))} ready now${(b.self_deps||[]).length?' · <span style="color:var(--coral)">self-dependency '+esc(b.self_deps.join(' '))+'</span>':''}</div>`;
+}catch(x){} }
+levTick(); setInterval(levTick,60000);
 const coreEl=$('#cores'); let cells=[];
 function coreColor(v){ return v>=85?'#E47B68':v>=55?'#F0A542':v>=20?'#52C2AE':'#2E4A5B'; }
 function buildCores(n){ coreEl.innerHTML=''; cells=[]; for(let i=0;i<n;i++){ const c=document.createElement('div'); c.className='core'; const f=document.createElement('i'); c.appendChild(f); c.title='core '+i; coreEl.appendChild(c); cells.push(f);} }
@@ -2949,6 +2963,22 @@ def _child_json(code, timeout=90):
 
 
 _TASKORDER = {"t": 0.0, "v": None}
+_ETA = {"t": 0.0, "v": None}
+
+
+def eta_cached(max_age=60.0):
+    """The digest's ETA line (hkpy.flow.eta_line: queue clears / top Leverage ticket lands), for the
+    main page's Leverage card - built in a child (_child_json), cached 60 s."""
+    if _ETA["v"] is not None and time.time() - _ETA["t"] < max_age:
+        return _ETA["v"]
+    v = _child_json(f"""
+import json
+from datetime import datetime
+from hkpy import flow
+print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}}))
+""")
+    _ETA.update(t=time.time(), v=v)
+    return v
 
 
 def taskorder_cached(max_age=60.0):
@@ -2974,6 +3004,13 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
         # when they land, over main's committed board - the panel on /worklog beside the role logs.
+        if self.path.startswith("/eta.json"):
+            try:
+                body = json.dumps(eta_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/taskorder.json"):
             try:
                 body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
