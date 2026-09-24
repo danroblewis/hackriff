@@ -336,3 +336,32 @@ def test_the_deflake_counter_follows_the_window_down():
     flakes.deflake_due({"t": e})
     e.recent_passed = 3                                           # three NEW flakes
     assert flakes.deflake_due({"t": e}) == [e]
+
+
+
+def test_a_branch_breaking_a_spec_is_not_the_spec_being_flaky():
+    """2026-09-23 23:01: T-801 broke three specs (failed alone on its merge) -> three FLAKY alarms."""
+    single = log(
+        "[09-23 22:57:49] TRIAGE: browser specs red: fog-of-war.e2e.mjs app-trace.e2e.mjs - re-running them alone",
+        "[09-23 23:01:05] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 23:01:07] GATE FAILED task-t801 (attempt 1/2, tip 7a5d243f) -> abort + flag for AI",
+    )
+    bulk = log(
+        "[09-23 18:27:40] TRIAGE: browser specs red: fog-of-war.e2e.mjs - re-running them alone",
+        "[09-23 18:28:18] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 18:28:19] TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: fog-of-war.e2e.mjs",
+        "[09-23 18:30:00] TRIAGE: main is green on them -> the batch introduced it; isolating",
+    )
+    main_red = log(
+        "[09-23 13:40:00] TRIAGE: browser specs red: surface-nav.e2e.mjs - re-running them alone",
+        "[09-23 13:41:00] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-23 13:41:01] TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: surface-nav.e2e.mjs",
+        "[09-23 13:47:00] TRIAGE: MAIN IS RED on browser spec(s): surface-nav.e2e.mjs -> batch re-queued in order",
+    )
+    incs = flakes.parse_runner_log(single + bulk + main_red, YEAR)
+    assert [(i.tests, i.branch_defect) for i in incs] == [
+        (("fog-of-war.e2e.mjs", "app-trace.e2e.mjs"), True), (("fog-of-war.e2e.mjs",), True),
+        (("surface-nav.e2e.mjs",), False)]
+    ledger = flakes.build(incs, now=NOW + 86400)
+    assert ledger["fog-of-war.e2e.mjs"].recent_red == 0 and ledger["fog-of-war.e2e.mjs"].branch_defects == 2
+    assert ledger["surface-nav.e2e.mjs"].recent_red == 1                 # main red on it: counts
