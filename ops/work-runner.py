@@ -176,6 +176,9 @@ def attention(ticket, branch, kind, detail=""):
         if subprocess.run(["tmux", "has-session", "-t", "dev"], capture_output=True).returncode == 0:
             subprocess.run(["tmux", "send-keys", "-t", "dev", "-l", f"WORK-RUNNER: {ticket} {kind} - {detail[:160]} See {NEEDS}."], capture_output=True)
             subprocess.run(["tmux", "send-keys", "-t", "dev", "Enter"], capture_output=True)
+        else:   # incident 2026-09-24 04:07: the pane was gone 5.5 h and this returned quietly
+            subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"), "--no-receiver", "dev",
+                            f"WORK-RUNNER: {ticket} {kind} - {detail[:160]}"], capture_output=True, timeout=30)
     except Exception:
         pass
 
