@@ -166,7 +166,7 @@ def attention(ticket, branch, kind, detail=""):
              "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
     if level:
         try:
-            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
+            subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"),
                             level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
                            capture_output=True, timeout=30)
         except Exception:
@@ -1850,6 +1850,8 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     for p in (NEEDS, DONE):
         open(p, "a").close()
+    import launchpath
+    launchpath.check(__file__, log)
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
     # What this process is actually running with - `just knobs show` reads it back as "effective".
