@@ -7,6 +7,7 @@ caveat of its method from the JSON (`caveats`), so the page never states more th
 
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>Code metrics</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <style>
 :root{--bg:#0D1317;--panel:#131B20;--line:#243039;--txt:#D5DEE2;--mut:#8595A0;--dim:#5A6973;--teal:#52C2AE;--amber:#F0A542;--lav:#A395E0;--coral:#E47B68;--mono:"SFMono-Regular",Menlo,monospace}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:13px/1.5 -apple-system,system-ui,sans-serif}
@@ -31,6 +32,9 @@ td.n,th.n{text-align:right;font-family:var(--mono)}td.p{font-family:var(--mono);
 .add{color:var(--teal)}.del{color:var(--coral)}.warn{color:var(--coral)}.ok{color:var(--teal)}
 .tabs>span{border:1px solid var(--line);border-radius:10px;padding:0 8px;margin-right:4px;cursor:pointer;color:var(--mut);font-size:11.5px}.tabs>span.on{border-color:var(--amber);color:var(--txt);box-shadow:inset 0 -2px 0 var(--amber)}
 svg text{fill:var(--mut);font:10.5px var(--mono)}
+.mm{overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px}.mm svg text{fill:inherit;font:inherit}
+.zero{color:var(--teal)}.nz{color:var(--coral)}.spark{vertical-align:middle}
+.sel span{border:1px solid var(--line);border-radius:10px;padding:0 7px;margin:0 3px 3px 0;cursor:pointer;color:var(--mut);font-size:11px;display:inline-block}.sel span.on{border-color:var(--amber);color:var(--txt)}
 </style></head><body>
 <div class=top><span class=nm>hack<b>riff</b> · code metrics</span><a href="/">← dashboard</a><a href="/flow">flow</a><a href="/worklog">work log</a><span class=sub id=sub>loading…</span></div>
 <div class=wrap><div class=grid id=g></div></div>
@@ -74,9 +78,42 @@ function render(){
     card('Lines per language',lines,C.lines)+card('Lines per crate / area',areas,'')+
     card('Churn',churn,C.churn)+card('Tests and their cost, per crate',tests,C.tests)+
     card('20 largest files',largest,'')+card('Longest Rust functions (proxy)',fns,C.outliers)+
-    card('Hygiene',hyg,C.hygiene)+card('Trends',trend(d.trend),C.trends);
+    card('Hygiene',hyg,C.hygiene)+card('Trends',trend(d.trend),C.trends)+arch(d);
+  const mm=document.getElementById('mm');
+  if(mm&&window.mermaid){ try{ mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'strict'}); mermaid.run({nodes:[mm]}); }catch(e){ mm.textContent='mermaid: '+e; } }
 }
-document.addEventListener('click',e=>{const s=e.target.closest('.tabs>span[data-w]'); if(s&&D){win=s.dataset.w; render();}});
+let spk='lines';
+const SPK={lines:'product lines',unwrap:'unwrap/expect',pub:'pub items',undoc:'undocumented pub',unsafe:'unsafe',zstd:'zstd ratio',I:'instability',D:'distance'};
+function spark(vals){ const v=vals.filter(x=>x!=null); if(v.length<2) return '<span style="color:var(--dim)">'+(v.length?'1 day':'—')+'</span>';
+  const mn=Math.min(...v), mx=Math.max(...v), W=90,H=18; const pts=vals.map((x,i)=>x==null?null:[i*(W/(vals.length-1)), H-2-((x-mn)/((mx-mn)||1))*(H-4)]).filter(Boolean);
+  return `<svg class=spark width=${W} height=${H}><polyline fill=none stroke="#52C2AE" stroke-width=1.5 points="${pts.map(p=>p.join(',')).join(' ')}"/></svg>`; }
+function arch(d){
+  const A=d.arch||{}; if(A.error) return card('Architecture',`<div class=nz>${esc(A.error)}</div>`,'',true);
+  const C=A.caveats||{}, R=A.rules||{}, g=R.gpl||{};
+  const z=(n,label)=>`<span class="${n?'nz':'zero'}">${n==null?'?':n}</span> <i>${label}</i>`;
+  const rules=`<div class=big>${z((R.layer_violations||[]).length,'layer violations')} · ${z(g.violations,'GPL outside the plugin boundary')} · <span class="${(R.ui_dsp_suspects||[]).length?'warn':'zero'}">${(R.ui_dsp_suspects||[]).length}</span> <i>DSP-in-UI suspects</i></div>`+
+    ((R.layer_violations||[]).length?'<h2 style="margin-top:8px">layer violations (normal deps)</h2>'+R.layer_violations.map(v=>`<div class="p nz">${esc(v)}</div>`).join(''):'')+
+    ((R.layer_violations_dev||[]).length?'<h2 style="margin-top:8px">upward dev-dependencies (test code only)</h2>'+R.layer_violations_dev.map(v=>`<div class=p>${esc(v)}</div>`).join(''):'')+
+    ((g.copyleft_with_alternative||[]).length?`<div class=cav>copyleft with a permissive alternative (not a violation): ${esc(g.copyleft_with_alternative.join(', '))}</div>`:'')+
+    '<h2 style="margin-top:8px">DSP-in-UI suspects (keyword proxy - read each)</h2>'+table([['where',r=>esc(r.at.replace(/^ui\/src\//,'')),'p'],['word',r=>esc(r.word)],['line',r=>esc(r.line),'p']],R.ui_dsp_suspects||[]);
+  const coup=table([['crate',r=>esc(r.name)+(r.layer==null?' <i style="color:var(--dim)">unranked</i>':'')],['Ca',r=>r.ca,'n'],['Ce',r=>r.ce,'n'],['I',r=>r.instability,'n'],['A',r=>r.abstractness,'n'],['D',r=>`<b>${r.distance}</b>`,'n']],A.coupling||[]);
+  const IDK=['dyn Trait','generic fns/impls','Arc<Mutex|RwLock>','static/OnceCell/lazy','mpsc','fn build(','unsafe','unwrap()/expect()'];
+  const idioms=table([['crate',r=>esc(r.name)],...IDK.map(k=>[esc(k),r=>r.idioms[k]||0,'n'])],A.per_crate||[]);
+  const api=table([['crate',r=>esc(r.name)],['pub items',r=>r.pub_items,'n'],['undocumented',r=>r.undocumented?`<span class=warn>${r.undocumented}</span>`:0,'n'],['API churn 7d',r=>`<span class=add>+${(r.api_churn_7d||{}).added||0}</span> <span class=del>-${(r.api_churn_7d||{}).removed||0}</span>`,'n'],['zstd ratio',r=>r.zstd_ratio,'n']],A.per_crate||[]);
+  const comp='<h2>most repetitive files (lowest ratio)</h2>'+table([['file',r=>esc(r.path),'p'],['lines',r=>r.lines,'n'],['ratio',r=>r.ratio,'n']],A.most_repetitive||[])+
+    '<h2 style="margin-top:8px">least compressible</h2>'+table([['file',r=>esc(r.path),'p'],['lines',r=>r.lines,'n'],['ratio',r=>r.ratio,'n']],A.least_compressible||[]);
+  const days=(d.trend||[]).filter(r=>r.crates), names=(A.per_crate||[]).map(r=>r.name);
+  const sparks=`<div class=sel>${Object.entries(SPK).map(([k,v])=>`<span data-spk=${k} class="${k===spk?'on':''}">${esc(v)}</span>`).join('')}</div>`+
+    table([['crate',r=>esc(r)],['per day ('+days.length+' samples)',r=>spark(days.map(x=>(x.crates[r]||{})[spk]))],['now',r=>{const v=days.length?(days.at(-1).crates[r]||{})[spk]:null;return v==null?'—':v;},'n']],names);
+  return card('Architecture rules (must read 0)',rules,C.rules,true)+
+    card('Crate dependency graph',`<div class=mm><pre class=mermaid id=mm>${esc(A.mermaid||'')}</pre></div>`,C.graph,true)+
+    card('Coupling per crate',coup,C.coupling)+card('Idioms per crate (product code)',idioms,C.idioms)+
+    card('Public API, docs and compression',api,C.api+' '+C.compression)+card('Compression outliers',comp,C.compression+' Codec this build: '+(A.codec||'?')+'.')+
+    card('Per-crate trends',sparks,'One point per daily sample (metrics.jsonl); the numbers, no composite score.',true)+
+    card('Not yet measured','<div class=p>Complexity (rust-code-analysis: cyclomatic, cognitive, Halstead, MI) and hotspots (churn x complexity) - part B. Duplication (jscpd), ui/src import cycles (madge) and the ui/src and py/hkpy directory graphs - part C.</div>','',true);
+}
+document.addEventListener('click',e=>{const s=e.target.closest('.tabs>span[data-w]'); if(s&&D){win=s.dataset.w; render();}
+  const k=e.target.closest('.sel span[data-spk]'); if(k&&D){spk=k.dataset.spk; render();}});
 async function load(){ try{ const r=await (await fetch('/metrics.json',{cache:'no-store'})).json();
   if(r.error){ document.getElementById('sub').textContent='error: '+r.error; if(!D) document.getElementById('g').innerHTML=card('Metrics',`<div class=warn>${esc(r.error)}</div>`,''); return; }
   D=r; render(); }catch(e){ document.getElementById('sub').textContent='error: '+e; } }
