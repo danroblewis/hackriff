@@ -26236,7 +26236,8 @@ tasks:
   - id: T-894
     milestone: M2-hardening
     title: fog-of-war.e2e.mjs waitForResident still gives up on a 10 s wall-clock stall (T-889 residue)
-    status: todo
+    status: in-progress
+    branch: task-t894
     priority: normal
     deps: []
     parallel_group: UI-E2E
@@ -26425,7 +26426,8 @@ tasks:
   - id: T-904
     milestone: M2-hardening
     title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
-    status: todo
+    status: in-progress
+    branch: task-t904
     priority: high
     deps: []
     parallel_group: STORE
