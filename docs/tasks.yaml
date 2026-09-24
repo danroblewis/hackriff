@@ -26046,6 +26046,22 @@ tasks:
       FOUND BY T-890 worker 2026-09-24.
     effort_reason: "real-time display path: wiring a live row stream into tile residency without regressing T-890's look-ahead or the thin-client rule"
     branch: task-t893
+  - id: T-894
+    milestone: M2-hardening
+    title: fog-of-war.e2e.mjs waitForResident still gives up on a 10 s wall-clock stall (T-889 residue)
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-889 deflaker (task-t889 136d84df): after T-889 made fog-of-war's band-A draw() waits event-counted, `waitForResident` in ui/e2e/fog-of-war.e2e.mjs (~lines 248-254) still has a WALL-CLOCK stall - stallMs = 10000 via waitWhileWorking, giving up only when the wire and the pane's report are both quiet for 10 s. Less load-exposed than the draw() wait, but in T-889's red run (band-A tiles refused) retries kept the wire busy and it sat at its full 120 s timeout, most of that run's 206 s.
+      DELIVER: bound waitForResident by events (tile answers for the pane's own addresses, as T-889's paneAnswers does), never a clock; no assertion or threshold change; prove red (refused tiles -> fails fast with counts) and green alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-889 deflaker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
