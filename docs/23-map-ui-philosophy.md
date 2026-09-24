@@ -419,7 +419,8 @@ backend already serves.
 *This section is the contract MAP-01…MAP-05, MAP-13 and MAP-24 build to. The mockup
 [`ui/mockups/map-ui-v1.html`](../ui/mockups/map-ui-v1.html) is the visual reference; where the two
 disagree, this section wins and the mockup is a bug report. Rationale is
-[ADR-0023](adr/0023-map-ui-and-research-state.md) §1 and §7.*
+[ADR-0023](adr/0023-map-ui-and-research-state.md) §1 and §7. The user's five principles in §10.6
+override the rest of this section where they conflict.*
 
 ### 10.1 Four z-bands, and the band decides the coordinate system
 
@@ -508,6 +509,43 @@ to un-tuned *frequency* **offers** a retune, and an explicit press commits one t
   panel is reachable by tab order, and focus is visible (`:focus-visible`).
 - **State is never encoded in hue alone** (§7; docs/24 §8): candidate/confirmed/unknown and
   observed/unobserved/unknown/excluded each carry a shape or pattern; red-green pairings are avoided.
+
+### 10.6 The user's five map-UI principles (normative, 2026-09-24)
+
+*Stated by the user on 2026-09-24 after reviewing T-801/T-802/T-803 on staging. Where anything else in
+this document, ADR-0023 or the mockup disagrees, these win. An audit on the same day found each only
+partly planned; the tickets that close the gaps are named per principle.*
+
+1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
+   **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
+   **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
+   closing**. A panel's default state is its smallest: the left inventory column collapses to a chip or
+   a peek strip no taller than 56 px on every width, and expanded it is an overlay with a dismiss —
+   a column that keeps the height it had before the redesign is not minimal. (Left column: the
+   collapse ticket; closeability across the sheet, the Research slide-in and the left column: the
+   closeable-overlays ticket, amending T-824.)
+2. **Anything with coordinates is drawn on the map.** A thing with a (time x frequency) place is
+   rendered on the surface — as a point or pin (docs/24), a box, or a **traced path** (an ordered
+   (t, f) polyline, like a directions line) — laid out through the pane's capture-time mapping in the
+   same pass as the tiles (the shared-time-axis invariant, §10.1). Listing it only in a panel is not
+   enough. First path producers: chirps, frequency-hop sequences, sweep paths, and the device's retune
+   history (the path-layer and retune-history tickets).
+3. **We decide the overlay arrangement.** No overlay is draggable or repositionable: each has one
+   position this section assigns (§10.1-§10.3), and the user chooses only **whether** it is shown. No
+   chrome dock position is read from or written to local or user state. (The sheet's vertical
+   peek/half/full snap, T-803, is a size state of a fixed-position panel and does not conflict.) This is
+   a deliberate Google-Maps-style choice to try, guarded by T-825.
+4. **Size is inversely proportional to influence.** The bigger a panel, the less it may change the
+   map. Big panels (the bottom sheet, the Explore drawer, the Research slide-in, the left column) only
+   add or remove marks, or shift coordinates slightly. Anything that changes the map in a **major**
+   way — retune, zoom, jump the view, switch base style or layers, follow live — is a **small button
+   or a small cluster**. So a bare click on a row in a big panel never jumps the map and never offers a
+   retune: that action lives on a small, explicit per-row button. §11 rule 1 (device routes only from
+   Go-to and Selected actions) still holds, and T-825 guards that no device route or view-jump handler
+   is bound to a panel body element.
+5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
+   reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
+   rule 4, and are not to be replaced or enlarged.
 
 ---
 
