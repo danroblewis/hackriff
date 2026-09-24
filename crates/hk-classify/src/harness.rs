@@ -1623,12 +1623,17 @@ mod tests {
             // redrew which waveform each acceptance seed produces, so the one snippet the stage
             // runs on here is a different 2-FSK emission, and the verifier re-ranks its class
             // instead of agreeing.
+            // T-888 re-pinned `reranked=1` → `confirmed=1`, run count again unchanged (1 of 8).
+            // `blind_qpsk`/`blind_bpsk` are now absent where C14 cannot look past a lower-order
+            // line, so the refitted fsk densities no longer carry the veto-floor spike those rows
+            // read (0.200 / 0.300 exactly); the tree's own top class for that snippet is now the
+            // one the verifier agrees with, rather than one it had to re-rank.
             (
                 "fsk",
                 5,
                 8,
                 1,
-                "abstained_upstream=1 reranked=1 single_candidate=6",
+                "abstained_upstream=1 confirmed=1 single_candidate=6",
             ),
         ];
         let mut got: Vec<String> = Vec::new();
