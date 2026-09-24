@@ -25760,7 +25760,8 @@ tasks:
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
-    status: todo
+    status: in-progress
+    branch: task-t873
     priority: normal
     deps:
     - T-866
