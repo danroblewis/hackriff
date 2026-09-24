@@ -140,6 +140,33 @@ test("a per-address refusal fails only its own address", async () => {
   assert.equal(h.urls.length, 1);
 });
 
+test("T-630: a per-address refusal carries the SHARE it names, as a single-tile refusal does", async () => {
+  // Since T-573 nearly every tile read is a batch, so a batch member's `503` is the main way a tab
+  // learns another client arrived. Dropping its `share` here (only `limit` was parsed) left a tab
+  // told "share 2" still claiming 4 on its status line — `ui/e2e/surface-contention.e2e.mjs`'s red
+  // under load, whenever that tab's reads after the newcomer registered were all refused.
+  const message = "too many tile reads in flight (limit 4, share 2) — 2 client(s) are reading tiles, " +
+    "so your share is 2 of them: tile production takes the history lock";
+  const h = spy((s) => ({
+    tiles: [{ address: { spelling: s[0] }, status: 503, error: message }],
+    truncated: false, remaining: [],
+  }));
+  const source = batchedTileSource("tok", h.fetchFn);
+  await assert.rejects(() => source(addr(0)), (e: unknown) => {
+    assert.ok(e instanceof TileBusyError);
+    assert.equal(e.limit, 4);
+    assert.equal(e.share, 2, "the batch path must hand the cache the share the route stated");
+    return true;
+  });
+  // And a pre-T-630 route that names no share says nothing, exactly as on the single-tile path.
+  const old = spy((s) => ({
+    tiles: [{ address: { spelling: s[0] }, status: 503, error: "too many tile reads in flight (limit 4)" }],
+    truncated: false, remaining: [],
+  }));
+  await assert.rejects(() => batchedTileSource("tok", old.fetchFn)(addr(0)),
+    (e: unknown) => e instanceof TileBusyError && e.share === null && e.limit === 4);
+});
+
 test("a truncated batch re-asks for exactly what `remaining` named", async () => {
   let call = 0;
   const h = spy((s) => {
