@@ -25103,7 +25103,8 @@ tasks:
   - id: T-855
     milestone: MAUTO
     title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
-    status: todo
+    status: in-progress
+    branch: task-t855
     priority: normal
     deps:
     - T-848
