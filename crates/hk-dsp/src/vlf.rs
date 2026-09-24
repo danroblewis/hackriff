@@ -112,7 +112,7 @@ const C_M_S: f64 = 299_792_458.0;
 
 /// PROP-019: change in D-region reflection height (km) implied by a phase change `dphi_rad`
 /// of a `carrier_hz` transmitter over a ground path of `path_km`, single-hop flat-earth model
-/// (sky path = 2·sqrt((d/2)² + h²)). Advancing phase = longer path = higher reflection.
+/// (sky path = 2·sqrt((d/2)² + h²)). With track_carrier's e^{-jωt} convention a delay τ gives φ = −ωτ, so a phase ADVANCE (Δφ>0) = shorter path = LOWER reflection (the flare signature).
 /// Requires a GPS-disciplined receiver for the phase to be meaningful.
 pub fn reflection_height_change_km(
     dphi_rad: f64,
@@ -121,7 +121,7 @@ pub fn reflection_height_change_km(
     base_height_km: f64,
 ) -> f64 {
     let lambda_km = C_M_S / carrier_hz / 1000.0;
-    let dpath = dphi_rad / (2.0 * PI) * lambda_km;
+    let dpath = -dphi_rad / (2.0 * PI) * lambda_km;
     let half = path_km / 2.0;
     let p0 = 2.0 * (half * half + base_height_km * base_height_km).sqrt();
     let h1 = (((p0 + dpath) / 2.0).powi(2) - half * half).max(0.0).sqrt();
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn prop_019_phase_advance_means_higher_reflection() {
+    fn prop_019_phase_advance_means_lower_reflection() {
         let fs = 48_000.0;
         let x = tone(
             fs,
@@ -207,8 +207,8 @@ mod tests {
             pts.iter().map(|p| p.phase_rad).collect::<Vec<_>>()
         );
         let dh = reflection_height_change_km(d, 20_000.0, 2000.0, 70.0);
-        assert!((dh - 15.4).abs() < 0.5, "{dh}");
-        assert!(reflection_height_change_km(-d, 20_000.0, 2000.0, 70.0) < 0.0);
+        assert!((dh + 19.9).abs() < 0.5, "{dh}");
+        assert!(reflection_height_change_km(-d, 20_000.0, 2000.0, 70.0) > 0.0);
     }
 
     #[test]
