@@ -514,6 +514,9 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   # and re-running only the first would accept the second (review, 2026-09-23).
   tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?(FAIL|SIG[A-Z]+|TIMEOUT|ABORT|LEAK-FAIL) \[' | awk '{print $NF}' | sort -u)
   TRIAGE_KIND="test"
+  # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
+  # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -593,8 +596,15 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
   log "TRIAGE: they PASS alone twice -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
   printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "$kind" "$failed" "$saved" >> "$FLAKY"
   alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone twice; the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
+  local resumed; resumed=$(( $(wc -l < "$LOG") + 1 ))
   limited $retry --resume-after "$failed" ${steps:+--resume-steps $steps}; rc=$?
   [ "$rc" -eq 0 ] && log "TRIAGE: resumed gate PASSED" || log "TRIAGE: resumed gate FAILED -> a red in a suite that had not run yet"
+  # That red gets the same triage, once (2026-09-24 10:47: a test-ui-e2e red on fog-of-war.e2e.mjs,
+  # which passes alone 4 times in 7 days, went straight to isolating 11 branches with no re-run).
+  if [ "$rc" -ne 0 ] && [ "${FLAKE_DEPTH:-0}" -lt 1 ]; then
+    local FLAKE_DEPTH=1
+    _flake_retry "" "$resumed" "$tickets" "$retry"; rc=$?
+  fi
   return $rc
 }
 

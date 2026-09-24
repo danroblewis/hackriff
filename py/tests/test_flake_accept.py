@@ -99,3 +99,43 @@ def test_the_record_carries_the_reds_own_time(tmp_path):
     _, recs = run(tmp_path, "     Summary [1.0s] 9 tests run: 8 passed, 1 failed\ngate: just test took 900s (exit 100)\n",
                   t0="2026-09-23T17:00:05")
     assert recs[-1]["ts"] == "2026-09-23T17:00:05"
+
+
+def test_a_red_in_the_resumed_gate_is_triaged_too_and_main_red_uses_its_own_reds(tmp_path):
+    """2026-09-24 10:36-10:47: a Rust red passed alone twice and was accepted; the resumed gate then
+    went red on fog-of-war.e2e.mjs, which got no re-run - straight to isolating 11 branches - and the
+    MAIN-IS-RED check re-ran the accepted Rust test's filter instead of the spec."""
+    log = tmp_path / "merge-runner.log"
+    log.write_text("[09-24 10:15:34] BULK gate (just gate --base abc ...)\n"
+                   "gate: just lint took 40s (exit 0)\n"
+                   "        FAIL [   4.159s] (2681/3003) hk-cli::api_contract t_band\n"
+                   "gate: just test took 1231s (exit 100)\n")
+    (tmp_path / "ui").mkdir()
+    calls = tmp_path / "calls"
+    script = f"""
+set -u
+LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}
+log(){{ echo "[09-24 10:40:00] $*" >> $LOG; echo "LOG $*"; }}
+alert(){{ :; }}
+cargo(){{ echo "cargo $*" >> {calls}; return 0; }}          # the Rust flake passes alone
+npm(){{ echo "npm $*" >> {calls}; return 0; }}              # ... and so does the browser spec
+N=0
+limited(){{
+  N=$((N+1)); echo "limited $*" >> {calls}
+  if [ $N -eq 1 ]; then                                     # the resumed gate: red in the browser tier
+    printf 'gate: just acceptance-ci took 213s (exit 0)\\ne2e: 14/15 files passed in 237.3 s (backend 4.2 s); failed: fog-of-war.e2e.mjs\\ngate: just test-ui-e2e took 300s (exit 1)\\n' >> $LOG
+    return 1
+  fi
+  return 0
+}}
+{_function("_flake_retry")}
+{_function("flake_accept")}
+_flake_retry abc 1 "T-1 T-2" "just gate --base abc"
+echo "RC $? FILTER=[$TRIAGE_FILTER] SPECS=[$TRIAGE_SPECS]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    ran = calls.read_text().splitlines()
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- fog-of-war.e2e.mjs"] * 2   # re-run alone, twice
+    assert ran[-1] == "limited just gate --base abc --resume-after test-ui-e2e"
+    assert "RC 0 FILTER=[] SPECS=[fog-of-war.e2e.mjs]" in out.stdout
