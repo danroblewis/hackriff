@@ -29,7 +29,7 @@ While the warning is showing: **do not delete a branch, do not flip a ticket to 
 
 ## Then act
 - **MERGED** → mark the ticket `done` with its commit — *unless a bulk is staged*, in which case wait.
-- **AHEAD n** (finished) → queue it: append the branch to `ops/merge-queue.txt` (gate + merge).
+- **AHEAD n** (finished) → queue it: append the branch to `$HACKRIFF_OPS/merge-queue.txt` (gate + merge).
 - **NO BRANCH / NO WORK** (lost agent) → relaunch the worker, or re-status the ticket honestly (`todo` if nothing was done).
 - Anything ambiguous → re-status it honestly, don't leave it claiming in-progress.
 

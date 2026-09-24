@@ -40,7 +40,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser } from "./harness.mjs";
+import { Browser, tileAsks, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR } from "./backend.mjs";
 
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
@@ -467,6 +467,54 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
 })()`;
 
 /**
+ * **Wait for a scrubbed pane's state for as long as the page is WORKING towards it — not for a
+ * number of seconds** (the deflake, 2026-09-24).
+ *
+ * Both states the scrubbed checks need — "a cell slice with a peak", and "every tile the pane
+ * addresses resident" — are reached by the tile route answering, and nothing else. Their waits
+ * were wall-clock deadlines (12 s a park attempt, 20 s for residency): a bet on that route's
+ * service rate, which this repo measured moving more than twenty-fold with load (harness.mjs,
+ * [[waitWhileWorking]]). The gate's signature, three times in two days: `timed out after 20000 ms
+ * waiting for the trace to be drawn from a pyramid cell … (no coarse stand-ins, nothing pending)`,
+ * green alone in ~31 s each time. Measured on this file at load 17–20: one tile request on the
+ * wire at a time, ~4 s each, and a frozen pane reaching `8 tiles · 0 coarse stand-ins · 0 pending`
+ * 8 s after the park; a little more contention and both scrubbed checks went red on runs ALONE —
+ * the colour check still filling at 20 s, and the afterglow check's eight park attempts each
+ * timing out at 12 s on a readout that still said `no tile in hand for this span yet (24 pending)`.
+ * Holding every tile response 13 s (CDP `Fetch`, so the request stays open exactly as a slow
+ * route's does) reproduces the park failure deterministically on the old waits.
+ *
+ * So the wait runs while the pane's report (its tile counts and the trace's own words) changes or
+ * a tile request is on the wire — including one the route is still answering — and gives up when
+ * both have been still for [[waitWhileWorking]]'s `stallMs`. The state asserted is unchanged; a pane
+ * that stops working without reaching it (a hole in the history, a refusal made terminal, T-523's
+ * wedge) is reported as before, with the last report and what the wire did.
+ */
+const PANE_REPORT = (expr) => `JSON.stringify({
+  ok: ${expr},
+  counts: document.querySelector('.hk-surface-viewport[data-viewport="pane"]')
+    ?.querySelector('.hk-surface-counts')?.textContent ?? "",
+  trace: document.querySelector('.sf-trace')?.textContent ?? "",
+})`;
+async function whileTilesArrive(page, what, expr) {
+  const n0 = page.requests.length;
+  const r = await waitWhileWorking(page, async () => JSON.parse(await page.eval(PANE_REPORT(expr))),
+    (v) => v.ok === true, { openIsWork: true });
+  const tiles = page.requests.slice(n0).filter((q) => q.url.includes("/api/tiles"));
+  await page.settleBodies();
+  const answers = {};
+  for (const a of tileAsks(tiles)) answers[a.status ?? "unanswered"] = (answers[a.status ?? "unanswered"] ?? 0) + 1;
+  const wire = `${tiles.length} tile request(s), ${tiles.filter((q) => q.endedMs !== null).length} ended; ` +
+    `addresses by answer ${JSON.stringify(answers)}`;
+  if (!r.ok) {
+    throw new Error(`the page stopped working without reaching ${what}: after ${r.ms} ms, nothing ` +
+      `changed for ${r.stalledMs} ms (${wire})\n  pane: ${JSON.stringify(r.value.counts)}\n` +
+      `  trace: ${JSON.stringify(r.value.trace)}\n  exceptions: ${JSON.stringify(page.exceptions.slice(0, 3))}`);
+  }
+  return { ms: r.ms, wire };
+}
+
+/**
  * **Park a viewport on an observed pyramid cell behind the live edge** — by RE-ESTABLISHING the
  * state, never by waiting for it.
  *
@@ -480,8 +528,10 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
  * about which second each one happened to freeze on.
  *
  * So each attempt returns to the growing edge, waits for a live frame that HAS a peak (data is
- * arriving), freezes there, and gives the pyramid a bounded moment to answer for that cell. A failed
- * attempt freezes somewhere else rather than waiting longer in the same hole.
+ * arriving), freezes there, and waits while the pyramid is answering for that cell
+ * ([[whileTilesArrive]] — as long as tiles are arriving, never a fixed number of seconds). A failed
+ * attempt — the pane went still without a cell — freezes somewhere else rather than waiting longer
+ * in the same hole.
  */
 async function scrubOntoCell(page, lagS, tries = 8) {
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
@@ -512,9 +562,9 @@ async function scrubOntoCell(page, lagS, tries = 8) {
       { timeoutMs: 30000 });
     await page.click(`document.querySelector('.sf-live')`);
     try {
-      await page.waitFor(`a pyramid-cell slice at least ${lagS} s behind the live edge`,
-        scrubbedExpr(lagS), { timeoutMs: 12000 });
-      return i + 1;
+      const w = await whileTilesArrive(page, `a pyramid-cell slice at least ${lagS} s behind the live edge`,
+        scrubbedExpr(lagS));
+      return `attempt ${i + 1} (the cell arrived ${w.ms} ms after the freeze; ${w.wire})`;
     } catch (e) {
       last = String((e && e.message) || e);
       await page.frames(4);
@@ -612,11 +662,14 @@ const isLiveFrame = (snap) => /slice [\d:]+Z \(live frame\) · peak/.test(snap.t
  */
 const sameBox = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
-async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000 }) {
+async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, timeoutMs = 60000, scrubbed = false }) {
   let last = null;
   for (let i = 0; i < tries; i++) {
     await page.eval("window.__hkTap.resume()");
-    await page.waitFor(what, expr, { timeoutMs });
+    // A scrubbed pane's state is reached by tiles arriving, so it is waited for while they arrive
+    // ([[whileTilesArrive]]); a live frame needs no tile and keeps its plain bound.
+    const waited = scrubbed ? await whileTilesArrive(page, what, expr)
+      : { ms: await page.waitFor(what, expr, { timeoutMs }), wire: "" };
     await page.eval("window.__hkTap.hold()");
     await page.frames(4);
     const before = JSON.parse(await page.eval(SNAPSHOT));
@@ -630,7 +683,7 @@ async function heldObservation(page, shotPath, { expr, accept, what, tries = 6, 
       // canvas by design, and their pixels are not the trace's.
       const unocc = await page.unoccludedColumns(".sf-canvas",
         { y0: before.rect.y, y1: before.rect.y + TRACE_PX });
-      return { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld,
+      return { snap: before, img, rect: before.rect, unocc, withheld: after.tap.withheld, waited,
         rowsDuring: after.tap.rows - before.tap.rows, tries: i + 1 };
     }
     last = { still, accepted: accept(before), before: before.trace, after: after.trace,
@@ -932,9 +985,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
       "in a pane holding every tile it is addressing (no coarse stand-ins, nothing pending)",
     expr: scrubbedExpr(2, { resident: true }),
     accept: (snap) => CELL_SLICE_RE.test(snap.trace) && isResident(snap.counts),
-    timeoutMs: 20000,
+    scrubbed: true,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
+  t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
+    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
   // **How far the canvas moved while this test was getting into state.** Reported rather than
   // asserted: the movement is legitimate (the chrome above the stage grows and shrinks with what it
   // has to say), and the only thing that was ever wrong was measuring pixels with the box from
@@ -960,7 +1014,20 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // BLOCK about as wide as whatever drew it. The one recorded failure was 147 of 586 columns —
   // a quarter of a band this pane cuts into four tiles — and there was no record of which.
   const missAt = [];
-  for (let x = 0; x < s.w; x++) {
+  // **Only where the SURFACE is on top** (T-801's rule, carried to this check). The inventory panel
+  // floats over the full-bleed canvas's left side, and its own text and background were being read
+  // as "trace ink" over "cells": every run's first misses were column 51, ink [212,221,225] over
+  // eight identical [20,28,33] — the panel's lettering on the panel. Those are not the trace's
+  // pixels or the waterfall's, so they are neither compared nor counted, exactly as the extent
+  // check does with the same `obs.unocc`.
+  const vis = obs.unocc && obs.unocc.w > 0
+    ? { lo: Math.max(0, Math.round(obs.unocc.x - obs.rect.x)),
+        hi: Math.min(s.w - 1, Math.round(obs.unocc.x - obs.rect.x) + obs.unocc.w - 1) }
+    : { lo: 0, hi: s.w - 1 };
+  const visW = vis.hi - vis.lo + 1;
+  t.diagnostic(`comparing uncovered columns ${vis.lo}..${vis.hi} of ${s.w} ` +
+    `(${obs.unocc?.occluded ?? 0} under floating chrome)`);
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
     compared++;
     const ink = coreInk(obs.img, obs.rect, x, s.cols[x]);
@@ -998,9 +1065,10 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   // strip is one colour, or the waterfall is — this would score as well as the real comparison, and
   // the test would be measuring the ramp's coarseness rather than the trace's colour.
   let shuffled = 0;
-  for (let x = 0; x < s.w; x++) {
+  for (let x = vis.lo; x <= vis.hi; x++) {
     if (s.cols[x] < 0) continue;
-    const far = (x + Math.floor(s.w / 3)) % s.w;
+    // A third of the UNCOVERED span away, wrapping inside it, so the control never reads the panel.
+    const far = vis.lo + ((x - vis.lo + Math.floor(visW / 3)) % visW);
     if (nearestDist(coreInk(obs.img, obs.rect, x, s.cols[x]), cellColours(obs.img, obs.rect, far, halfPx, ROWS)) <= 8) shuffled++;
   }
   const shuffledRate = shuffled / Math.max(1, compared);
@@ -1157,9 +1225,10 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
       "rows before it in hand",
     expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
     accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
-    timeoutMs: 20000,
+    scrubbed: true,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
+  t.diagnostic(`parked on an observed cell on ${parked}; the state under test was reached ` +
+    `${obs.waited.ms} ms into the observation (${obs.waited.wire}); the pane drew it with ${obs.snap.counts}`);
   const snap = obs.snap;
   const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
   assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);

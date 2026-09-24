@@ -860,6 +860,14 @@ fn decide(
         None => None,
     };
     if let Some(claim) = &s.identity {
+        // T-879: a structural identity (the blind framer's signature) names a device *type*, not
+        // a unit, so it is never a resolution key — another unit of the type holding it is not
+        // this emitter. It shares a channel, so (as for any such scheme) neither the context nor
+        // a fingerprint folds it into an entry either: the sighting starts its own, and the
+        // pipeline's same-emission link joins it to the track it was demodulated from.
+        if claim.identity.scheme.is_structural() {
+            return Ok((None, Assignment::Created));
+        }
         let holder = match emitter_id_by_identity(conn, &claim.identity)? {
             Some(h) => active_id(conn, h)?,
             None => None,
@@ -929,7 +937,15 @@ fn decide(
 fn create(conn: &Connection, s: &Sighting, why: &str) -> Result<EmitterId, RepoError> {
     let id = EmitterId::new();
     let freq = FreqRange::centered(s.f_center_hz, s.bandwidth_hz);
-    let (scheme, value, class) = match &s.identity {
+    // T-879: a structural identity another live emitter already holds stays with it (the
+    // identity index is unique); this unit of the same type is created without it.
+    let held_elsewhere = match &s.identity {
+        Some(c) if c.identity.scheme.is_structural() => {
+            emitter_id_by_identity(conn, &c.identity)?.is_some()
+        }
+        _ => false,
+    };
+    let (scheme, value, class) = match s.identity.as_ref().filter(|_| !held_elsewhere) {
         Some(c) => (
             Some(c.identity.scheme.as_string()),
             Some(c.identity.value.clone()),
@@ -1045,6 +1061,10 @@ fn apply_identity(
                 .execute(params![enum_text(&class)?, blob(target)])?;
             Ok(None)
         }
+        // T-879: a structural claim is never a conflict. It describes the device type, so another
+        // unit of that type already holding it (or this emitter holding a different one) says
+        // nothing about who this is; the emitter keeps what it has.
+        Some(_) if claim.identity.scheme.is_structural() => Ok(None),
         Some(_) => Ok(conflict(
             vec![target],
             ConflictReason::ContextHoldsOtherIdentity,
@@ -1053,6 +1073,9 @@ fn apply_identity(
             if let Some(h) = emitter_id_by_identity(conn, &claim.identity)?
                 && h != target
             {
+                if claim.identity.scheme.is_structural() {
+                    return Ok(None);
+                }
                 return Ok(conflict(
                     vec![h, target],
                     ConflictReason::ContextHoldsOtherIdentity,

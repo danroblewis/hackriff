@@ -100,6 +100,7 @@ fn observations(repo: &Repository, dets: &[Detection]) -> Vec<RetuneObservation>
                 lo_hz: p.tune.center_hz,
                 f_center_hz: d.f_center_hz,
                 bandwidth_hz: d.obw_hz,
+                span_hz: Some(p.tune.sample_rate_hz),
             }
         })
         .collect()

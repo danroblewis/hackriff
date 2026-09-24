@@ -106,6 +106,7 @@ QUEUE_PAUSE = int(os.environ.get("WORK_QUEUE_PAUSE", "6"))
 GROUP_CAP = int(os.environ.get("WORK_GROUP_CAP", "2"))
 DISK_MIN_GB = int(os.environ.get("WORK_DISK_MIN_GB", "20"))
 REAP_AFTER_MIN = int(os.environ.get("WORK_REAP_AFTER_MIN", "30"))   # a worktree younger than this is never reaped
+IDLE_TARGET_H = float(os.environ.get("WORK_IDLE_TARGET_H", "2"))     # a kept worktree's target/ untouched this long is reclaimed
 MAX_MINUTES = int(os.environ.get("WORK_MAX_MINUTES", "180"))
 REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # A branch that fails its merge gate goes back to the SAME worker: `claude -p --resume <session>`
@@ -1490,6 +1491,50 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+def _target_written(t):
+    """Newest write under target/. ctime too: `cp -c -R -p` (the worktree clone recipe) keeps main's old
+    mtimes, so a target cloned a minute ago would read as idle; the clone cannot keep the old ctime."""
+    return max(max(st.st_mtime, st.st_ctime) for st in
+               (os.stat(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p)))
+
+
+def reclaim_idle_targets(claims, dry):
+    """reap_worktrees keeps a worktree with unmerged commits or edits, and enqueue() frees a target only
+    when its branch is queued - so a timed-out, blocked, conflicted or uncommitted worker keeps 4-8 GB
+    of build output forever. 2026-09-24 09:47: 22 GB free (floor 20), 55 GB of it in twelve such idle
+    targets, reclaimed by hand; on 2026-09-22 the floor held dispatch for 209 ticks. Remove target/ only
+    (the source stays, a resume rebuilds through sccache) when no running claim owns the worktree, no
+    process names it or sits in it, and nothing under target/ has been written for IDLE_TARGET_H."""
+    root = os.path.join(REPO, ".claude", "worktrees")
+    live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    idle = []
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        wt, t = os.path.join(root, name), os.path.join(root, name, "target")
+        if wt in live or os.path.islink(wt) or os.path.islink(t) or not os.path.isdir(t):
+            continue
+        written = _target_written(t)
+        if time.time() - written >= IDLE_TARGET_H * 3600:
+            idle.append((wt, time.time() - written))
+    if not idle:
+        return
+    # Coordinator-run work has no claim (09-24: t802/t803 e2e specs, t858); a process is the only sign.
+    cwds = sh(["lsof", "-d", "cwd", "-Fn"], timeout=60)
+    if not re.search(r"^p\d+", cwds, re.M):
+        return   # lsof said nothing: no evidence the worktrees are unused, so no delete
+    seen = sh(["ps", "-axo", "command"]) + "\n" + cwds
+    for wt, age in idle:
+        if re.search(re.escape(wt) + r"(/|\s|$)", seen, re.M):
+            continue
+        if dry:
+            log(f"DRY-RUN would reclaim {wt}/target (idle {age / 3600:.1f} h)")
+            continue
+        # Renamed first: a build that starts during a long delete finds no target, never half of one.
+        gone = os.path.join(wt, f"target.reclaim-{int(time.time())}")
+        os.rename(os.path.join(wt, "target"), gone)
+        shutil.rmtree(gone, ignore_errors=True)
+        log(f"RECLAIM {wt}/target (idle {age / 3600:.1f} h, no running claim or process; source kept)")
+
+
 # ---------- deflake dispatch (user, 2026-09-23) ----------
 # "A red test that passes alone twice is accepted as a load flake and the batch lands; the 3rd flake
 # of the same test within 7 days auto-spawns a deflaker, so flakes get fixed, not tolerated."
@@ -1541,9 +1586,12 @@ _DEFER_SAID = set()
 def deflake_deferred(slug, req, claims):
     """Why this deflake request must wait, or "". (a) its own last run left a branch with unmerged
     commits (held, blocked, review-failed): a second run would start over beside it; (b) an in-flight
-    ticket branch edits the same spec file."""
+    ticket branch edits the same spec file. Both are asked of merge_target(), not main: while a batch
+    gates, main holds it provisionally and every branch in it reads as merged (09-24 09:39:52: a second
+    app-trace deflaker went out 28 s after the batch carrying the first one's fix was committed)."""
+    target = merge_target()
     c = claims.get(DEFLAKE_PREFIX + slug)
-    if c and c.get("branch") and commits_ahead(c["branch"], "main") > 0:
+    if c and c.get("branch") and commits_ahead(c["branch"], target) > 0:
         return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
     test = str(req.get("test", ""))
     if not test.endswith(".e2e.mjs"):
@@ -1557,7 +1605,7 @@ def deflake_deferred(slug, req, claims):
             continue
         if t["state"] == "queued" and t["branch"] not in waiting:
             continue
-        if sh(["git", "diff", "--name-only", f"main...{t['branch']}", "--", path]).strip():
+        if sh(["git", "diff", "--name-only", f"{target}...{t['branch']}", "--", path]).strip():
             return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
     return ""
 
@@ -1815,6 +1863,10 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
+    try:
+        reclaim_idle_targets(claims, dry)
+    except Exception as e:
+        log(f"reclaim_idle_targets error: {e}")
     try:
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:
