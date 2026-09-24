@@ -24949,7 +24949,7 @@ tasks:
   - id: T-851
     milestone: MAUTO
     title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
-    status: todo
+    status: done
     priority: low
     deps: []
     parallel_group: MAUTOD
@@ -24976,6 +24976,7 @@ tasks:
       precheck exit 0
       Commits: 8391b63d
       Resources: 116 CPU-s, peak 6.5 GB
+    commit: 1408923f
   - id: T-852
     milestone: M3
     title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
