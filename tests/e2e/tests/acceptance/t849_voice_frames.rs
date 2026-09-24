@@ -23,9 +23,8 @@
 //!
 //! # What this test does NOT assert
 //!
-//! It does not assert what the call's `encryption` column says. Whether an LDU2's ALGID overrides
-//! what the grant announced — and so whether the clear-by-ALGID call may ever earn a `VoicePermit` —
-//! is T-330's decision, and asserting either answer here would decide it by test. This proves the
+//! It does not assert what the call's `encryption` column says: that the ALGID decides it, and
+//! what that means for a `VoicePermit`, is T-330's and asserted in `t330_algid`. This proves the
 //! statement is read, recorded on the call's own `call-start` event in capture time, and correct.
 //!
 //! Metadata only: the IMBE codewords are skipped, `recordings == 0`, and nothing is decrypted.

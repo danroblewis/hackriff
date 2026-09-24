@@ -83,3 +83,6 @@ mod t345_nxdn;
 
 #[path = "acceptance/t849_voice_frames.rs"]
 mod t849_voice_frames;
+
+#[path = "acceptance/t330_algid.rs"]
+mod t330_algid;
