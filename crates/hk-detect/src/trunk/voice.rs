@@ -21,9 +21,11 @@
 //! # What earns a permit
 //!
 //! **Only clear-by-ALGID.** A grant's service-options bit can say `Encrypted` but is never allowed
-//! to say `Clear` (see `super::tsbk`), so in practice today *nothing* earns a permit, and that is
-//! the correct state for a milestone with no voice-frame decode: the authoritative statement lives
-//! in the call's own header, which nothing reads yet.
+//! to say `Clear` (see `super::tsbk`), so in practice today *nothing* earns a permit. The
+//! authoritative statement lives in the call's own voice frames: since T-849 [`super::ldu`] reads
+//! an LDU2's ALGID off the granted channel and the follower records it on the call's `call-start`
+//! event, but nothing yet folds it into the call's encryption state — that, and so the first
+//! permit, is T-330's, and it must come through [`VoicePermit::open`] like everything else.
 //!
 //! Both refusals are distinguished, because they are different facts about the world — one is
 //! "this is protected", the other "nobody told us" — and a person reading a call list deserves to
