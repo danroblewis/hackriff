@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, clipToUnoccluded, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, tileAsks, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -956,6 +956,62 @@ const LIVE_MIN_MEASURED = 0.25;
 const PROGRESS_EPS = 0.01;
 
 /**
+ * How many of the pane's OWN tile answers may land without the frame getting any closer before a
+ * [[draw]] wait gives up (T-889). See [[paneAnswers]] for what is counted and why it is the unit.
+ *
+ * Measured alone, 2026-09-24 (load ~14): a healthy band-A wait that took 18 s to converge got
+ * closer every 0-9 answers (median 3), and a settled following pane lands ~3-10 of them a second
+ * on a quiet box. 30 is over three times the worst healthy gap; on a quiet box it is ~3-10 s,
+ * about the old clock, and on a busy one it stretches with the route's service time (the cache
+ * paces its revalidation at a multiple of it) instead of running out underneath the fill.
+ */
+const STALL_ANSWERS = 30;
+
+/**
+ * A counter of **tile answers for the pane's own addresses** over `[centerHz ± spanHz/2]`, landed
+ * since this was made — the event a band-A [[draw]] wait is bounded by (T-889).
+ *
+ * The wait it replaces gave up after a WALL-CLOCK 10 s without the frame getting closer, and a
+ * following pane's frame gets closer as its tile answers land (the app surface has no row feed —
+ * every row it draws came in a tile): its fill, and after that its live-edge revalidation, which
+ * the cache paces at a multiple of the route's own MEASURED service time
+ * (`TileCache.refreshCostOf`). So 10 s was a bet on the service rate, and the gate lost it —
+ * 2026-09-24 10:15, load 20.7, a tile answer took 5062 ms and band A's baseline was shot as "0
+ * distinct colours"; alone on the same branch the same wait already needed 7847 of its 10 000 ms.
+ * Counted in answers, a busy route slows the wait down with it instead of running it out.
+ *
+ * "The pane's own" = the `view` lattice's addresses whose tile intersects the pane's band and is
+ * no wider than a pane's (the minimap asks far wider — the same 80 MHz cut [[findPaneTileFor]]
+ * uses). An address is placed in Hz from the lattice's level-0 cell, read off any answer this page
+ * has had (`fCellHz / 2^level_f`, origin 0 Hz — `lattice.ts`'s `extentOf`). Every ANSWERED address
+ * counts, refusals included: a 503 is the route answering that address, and a pane that is refused
+ * N times without drawing closer is exactly the stuck pane the wait exists to report.
+ */
+function paneAnswers(page, centerHz, spanHz, { maxSpanHz = 80e6 } = {}) {
+  const sinceIdx = page.requests.length;
+  const lo = centerHz - spanHz / 2, hi = centerHz + spanHz / 2;
+  let f0Hz = null;
+  const count = () => {
+    if (f0Hz === null) {
+      const known = tileAsks(page.requests).find((a) => a.scheme === "view" && a.fCellHz > 0);
+      if (!known) return { answered: 0, ok: 0, refused: 0 };
+      f0Hz = known.fCellHz / 2 ** known.levelF;
+    }
+    let ok = 0, refused = 0;
+    for (const a of tileAsks(page.requests.slice(sinceIdx))) {
+      if (a.scheme !== "view" || a.status === null || a.endedMs === null) continue;
+      const fw = f0Hz * 2 ** a.levelF * a.cells;
+      if (!(fw > 0) || fw > maxSpanHz) continue;
+      const f0 = a.fIndex * fw;
+      if (f0 >= hi || f0 + fw <= lo) continue;
+      if (a.status === 200) ok++; else refused++;
+    }
+    return { answered: ok + refused, ok, refused };
+  };
+  return { count: () => count().answered, detail: count, what: "pane tile answers" };
+}
+
+/**
  * Split a pane's ROI into **the part the surface says it drew** and the strip above it.
  *
  * T-580's fourth rule: a skipped tile is drawn grey only as far forward as the survey's own
@@ -1061,7 +1117,8 @@ function splitAtDrawnTop(img, rect, notGround = null, tol = 2) {
  */
 async function draw(page, {
   settleMs = 600, timeoutMs = 25000, needsRender = false, notGround = null,
-  accept = null, progress = null, giveUp = null, stallMs = 10000, acceptTimeoutMs = 180000,
+  accept = null, progress = null, giveUp = null, stallOn = null, stallAnswers = STALL_ANSWERS,
+  acceptTimeoutMs = 180000,
 } = {}) {
   await page.frames(4);
   const counts = `(document.querySelector('${PANE_ROW} .hk-surface-counts')?.textContent ?? '')`;
@@ -1094,28 +1151,43 @@ async function draw(page, {
   // backstop and then to the spec's own 600 s kill, reading as a timeout rather than as the claim
   // that failed. So a caller states `progress(snap)`, a number that rises as the frame approaches
   // what it accepts (the measured share, minus the shadow ink left), and the wait gives up once it
-  // has not beaten its best by `PROGRESS_EPS` for `stallMs`. A defect that stops the frame from
-  // ever getting there stops the number, and the named assertion fires ten seconds later. `giveUp`
-  // is the other bound — an EVENT count the caller names, e.g. survey answers landed — and
-  // `acceptTimeoutMs` only the backstop for a pane that keeps improving without arriving.
+  // has not beaten its best by `PROGRESS_EPS` over `stallAnswers` EVENTS of `stallOn` — a counter
+  // the caller names, in practice [[paneAnswers]]: the pane's own tile answers, which are what moves
+  // its frame. **Never over a stretch of wall-clock** (T-889): that was a bet on the tile route's
+  // service rate, and under gate load the route lost it while the pane was still filling. A defect
+  // that stops the frame from ever getting there stops the number while the answers keep landing,
+  // and the named assertion fires after `stallAnswers` of them. `giveUp` is the other bound — an
+  // event count the caller names from the start of the wait, e.g. survey answers landed — and
+  // `acceptTimeoutMs` only the backstop for a pane that keeps improving without arriving (or whose
+  // wire went silent, which no following pane's does). A wait with neither is refused, so no call
+  // site can fall back to a clock.
   const want = accept ?? (needsRender ? (s) => splitAtDrawnTop(s.img, s.roi, notGround).drawn.h > 0 : null);
   if (want) {
+    if (!giveUp && !stallOn) {
+      throw new Error("draw(): a wait needs an event bound — `stallOn` (e.g. paneAnswers) or `giveUp` — never a wall-clock stall (T-889)");
+    }
     const t0 = Date.now();
     const score = progress ?? ((s) => splitAtDrawnTop(s.img, s.roi, notGround).drawn.h);
-    let best = score(snap), movedAt = Date.now(), why = "accepted";
+    const events0 = stallOn ? stallOn.count() : 0;
+    let best = score(snap), bestAt = events0, why = "accepted";
     while (!want(snap)) {
       if (giveUp) { if (await giveUp()) { why = "gave up (caller's event count)"; break; } }
-      else if (Date.now() - movedAt > stallMs) {
-        why = `stopped getting closer for ${stallMs} ms (best ${best.toFixed(3)})`; break;
+      else if (stallOn.count() - bestAt >= stallAnswers) {
+        why = `stopped getting closer over ${stallOn.count() - bestAt} ${stallOn.what} (best ${best.toFixed(3)})`; break;
       }
       if (Date.now() - t0 > acceptTimeoutMs) { why = `backstop ${acceptTimeoutMs} ms`; break; }
       await page.frames(6);
       snap = await snapPane(page);
       const v = score(snap);
-      if (v > best + PROGRESS_EPS) { best = v; movedAt = Date.now(); }
+      if (v > best + PROGRESS_EPS) { best = v; bestAt = stallOn ? stallOn.count() : 0; }
     }
     snap.renderWaitMs = Date.now() - t0;
     snap.acceptedWhy = why;
+    if (stallOn) {
+      const d = stallOn.detail?.() ?? { answered: stallOn.count() - events0 };
+      snap.acceptedWhy += ` · ${d.answered} ${stallOn.what} in the wait` +
+        (d.ok !== undefined ? ` (${d.ok} tile(s), ${d.refused} refused)` : "");
+    }
   }
   const img = snap.img;
   img.drew = drew;
@@ -1231,7 +1303,10 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   const liveEnough = (s) => splitAtDrawnTop(s.img, s.roi, marks.greyRgb).drawn.h > 0
     && measuredPart(s.img, s.roi, marks.notLevel).share >= LIVE_MIN_MEASURED;
   const liveShare = (s) => measuredPart(s.img, s.roi, marks.notLevel).share;
-  const imgA0 = await draw(page, { notGround: marks.greyRgb, accept: liveEnough, progress: liveShare });
+  const imgA0 = await draw(page, {
+    notGround: marks.greyRgb, accept: liveEnough, progress: liveShare,
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
+  });
   const roiA = imgA0.roi;
   t.diagnostic(`band A's first frame landed in the pane's own rectangle after ${imgA0.renderWaitMs} ms (${imgA0.acceptedWhy})` +
     (imgA0.movedWhileShooting ? " — the canvas was still moving when it was shot" : ""));
@@ -1243,7 +1318,8 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
   t.diagnostic(`LIVE A baseline: meanLuma ${liveA.census.meanLuma.toFixed(1)}, grey ${(liveA.greyShare * 100).toFixed(1)}%, ` +
     `ink ${(liveA.inkShare * 100).toFixed(1)}%, distinct ${liveA.census.distinct} · drawn with "${imgA0.counts}"` +
     (imgA0.drew ? "" : " — THE PANE NEVER REPORTED ITSELF DRAWN"));
-  assert.ok(liveA.census.distinct >= 4, `band A at boot is not a real render (only ${liveA.census.distinct} distinct colours) — this run proves nothing`);
+  assert.ok(liveA.census.distinct >= 4, `band A at boot is not a real render (only ${liveA.census.distinct} distinct colours; ` +
+    `"${imgA0.counts}", ${imgA0.acceptedWhy}) — this run proves nothing`);
   assert.ok(liveA.greyShare < 0.5, `band A at boot already reads mostly grey (${(liveA.greyShare * 100).toFixed(1)}%) — this run has no live baseline to lose`);
   // The live baseline the shadow is compared against: the band's own measured cells.
   const liveLumaA = measuredPart(imgA0, roiA, marks.notLevel);
@@ -1306,6 +1382,7 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     notGround: marks.greyRgb,
     accept: (s) => splitAtDrawnTop(s.img, s.roi, marks.greyRgb).drawn.h > 0 && shadowShare(s) >= LIVE_MIN_MEASURED,
     progress: shadowShare,
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
   });
   // The grey and ink shares are still read over the part the pane SAYS it drew (`splitAtDrawnTop`).
   const cutA1 = splitAtDrawnTop(imgA1, imgA1.roi, marks.greyRgb);
@@ -1510,6 +1587,7 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     notGround: marks.greyRgb,
     accept: (s) => liveEnough(s) && inkOf(s) < 0.02,
     progress: (s) => Math.min(liveShare(s), LIVE_MIN_MEASURED) - inkOf(s),
+    stallOn: paneAnswers(page, A_HZ, A_VIEW_SPAN_HZ),
   });
   // Measured over the part the pane SAYS it drew, never across its ground: the strip a
   // following pane leaves at its top varies with load, and a mean brightness taken across it

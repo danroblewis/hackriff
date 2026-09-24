@@ -187,18 +187,19 @@ export function tileAsks(requests) {
       scheme: q.get("scheme") ?? "view", device: q.get("device") ?? "any",
       cells: q.has("cells") ? Number(q.get("cells")) : 256 };
     if (u.pathname.endsWith("/api/tiles/batch")) {
-      const byAddr = new Map((r.entries ?? []).map((e) => [e.spelling, e.status]));
+      const byAddr = new Map((r.entries ?? []).map((e) => [e.spelling, e]));
       for (const sp of (q.get("addresses") ?? "").split(",").filter(Boolean)) {
         const [levelF, levelT, fIndex, tIndex] = sp.split(".").map(Number);
-        const status = r.status !== 200 ? r.status : (byAddr.get(sp) ?? null);
+        const status = r.status !== 200 ? r.status : (byAddr.get(sp)?.status ?? null);
         out.push({ ...common, batch: true, spelling: sp, levelF, levelT, fIndex, tIndex, status,
+          fCellHz: byAddr.get(sp)?.fCellHz ?? null,
           key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
       }
     } else {
       const n = (k) => (q.has(k) ? Number(q.get(k)) : NaN);
       const [levelF, levelT, fIndex, tIndex] = ["level_f", "level_t", "f_index", "t_index"].map(n);
       const sp = `${levelF}.${levelT}.${fIndex}.${tIndex}`;
-      out.push({ ...common, batch: false, spelling: sp, levelF, levelT, fIndex, tIndex, status: r.status,
+      out.push({ ...common, batch: false, spelling: sp, levelF, levelT, fIndex, tIndex, status: r.status, fCellHz: null,
         key: `${common.device}|${common.scheme}|${common.cells}|${sp}` });
     }
   }
@@ -376,7 +377,10 @@ export class Page {
         .then(({ body, base64Encoded }) => {
           const text = base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body;
           const j = JSON.parse(text);
-          r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null }));
+          // `fCellHz` is the answered tile's own frequency cell, which is how a caller places an
+          // ADDRESS in Hz (T-889): the lattice's level-0 cell is `fCellHz / 2^level_f`, origin 0 Hz.
+          r.entries = (j.tiles ?? []).map((e) => ({ spelling: e.address?.spelling ?? null, status: e.status ?? null,
+            fCellHz: e.tile?.grid?.f_cell_hz ?? null }));
           r.remaining = j.remaining ?? [];
         })
         .catch((e) => { r.bodyError = String(e?.message ?? e); });
