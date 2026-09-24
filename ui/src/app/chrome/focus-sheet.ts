@@ -14,10 +14,12 @@ export const FOCUS_SHEET_KEY = "hk-mui-sheet-selected";
  * agree with `map-layout.css`'s `--sheet-bottom` and the `.bar` / `.sf-bar` it keeps clear of. */
 export const FOCUS_SHEET_RESERVED_PX = 170;
 
-/** The peek strip's heading for a focus state — the one line visible while collapsed. */
-export function focusSheetTitle(f: Focus): string {
+/** The peek strip's heading for a focus state — the one line visible while collapsed. T-804: a
+ * focused signal whose row is loaded names its served centre, so the collapsed sheet still says
+ * *which* signal is selected (the detail sheet's big frequency, in one line). */
+export function focusSheetTitle(f: Focus, centerHz?: number | null): string {
   switch (f.kind) {
-    case "signal": return "Selected signal";
+    case "signal": return centerHz != null && Number.isFinite(centerHz) ? `Selected signal · ${(centerHz / 1e6).toFixed(4)} MHz` : "Selected signal";
     case "selection": return "Selected region";
     default: return "Selected — nothing yet: click a signal or drag a region";
   }
@@ -48,8 +50,15 @@ export const mountFocusSheet: MountFn = (el, ctx) => {
     clearOf: () => document.querySelector(".sf-bar")?.getBoundingClientRect().bottom ?? null,
   });
   watchToolbar(() => sheet.relayout());
+  // The heading follows the focused row's served centre (refined when the server has refined it),
+  // which can arrive after the focus does; only a change of focus ever raises the sheet.
+  ctx.store.select((s) => {
+    const r = s.focus.kind === "signal" ? s.inventory.rows[s.focus.id] : undefined;
+    return (r ? r.refined?.center_hz ?? r.f_center_hz : null) as number | null;
+  }, (hz) => { sheet.title.textContent = focusSheetTitle(ctx.store.get().focus, hz); });
   ctx.store.select((s) => s.focus, (f, prev) => {
-    sheet.title.textContent = focusSheetTitle(f);
+    const r = f.kind === "signal" ? ctx.store.get().inventory.rows[f.id] : undefined;
+    sheet.title.textContent = focusSheetTitle(f, r ? r.refined?.center_hz ?? r.f_center_hz : null);
     const changed = prev !== undefined && (f.kind !== prev.kind || (f.kind !== "none" && prev.kind !== "none" && f.id !== prev.id));
     if (changed && f.kind !== "none") sheet.reveal("half");
   }, { immediate: true });

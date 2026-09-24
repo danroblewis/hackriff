@@ -211,3 +211,15 @@ def test_a_conflict_the_work_runner_took_is_not_a_touchpoint_but_its_escalations
     assert "T-875" not in text and "T-7 " not in text and "NO_WORK" not in text and "DEFLAKE_REQUESTED" not in text
     assert "T-9  CONFLICT" in text and "GATE_FAIL_ESCALATE" in text and "coordinator  NOTE" in text and "a person must" in text
     assert len(tp) == 4
+
+
+def test_the_tick_line_shows_what_the_one_solo_pass_rule_saved(tmp_path):
+    """User decision 2026-09-24 14:20: the one-solo-pass saving must be visible in `just flow`."""
+    from datetime import datetime as _dt
+    t = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+    (tmp_path / "flaky.jsonl").write_text(
+        f'{{"ts":"{t}","tests":"a","passes_alone":1,"accepted":true,"saved_s":300,"solo_saved_s":200}}\n'
+        f'{{"ts":"{t}","tests":"b","passes_alone":2,"accepted":true,"saved_s":600}}\n')
+    (tmp_path / "merge-runner.log").write_text("")
+    line = flow.tick_line(str(tmp_path), flow.summary(str(tmp_path)))
+    assert "flake-accepts 2 (saved 15 min; 1 after one solo pass, 3 min of it)" in line

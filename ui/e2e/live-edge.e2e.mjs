@@ -309,12 +309,43 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: inject });
-  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the app's surface to draw",
-    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
-    { timeoutMs: 60000 });
-  await page.waitFor("the chrome to report a viewport",
-    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
+  const open = async () => {
+    // A cross-document navigation, so the page really loads again: the same URL differing only in
+    // its fragment would be a same-document navigation, and no load event.
+    if (await page.eval("location.protocol !== 'about:'")) assert.equal(await page.goto("about:blank"), "load");
+    assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+    await page.waitFor("the app's surface to draw",
+      `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
+      { timeoutMs: 60000 });
+    await page.waitFor("the chrome to report a viewport",
+      `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+    return page.eval(PANE_WINDOW);
+  };
+  // 0. **A pane long enough that a refused place is still WANTED when the gate reopens** — the
+  //    premise step 3 states ("the newest stays on screen for a whole pane-span, far longer than the
+  //    gate's 30 s ceiling"), which this test used to INHERIT from running third in its file. A
+  //    following pane opens on the observed extent (`surface/bootstrap.ts`), so its span is the
+  //    server's age at page load: measured 44-46 s in file order, 2.1-2.9 s with this test run alone
+  //    — and a 2.5 s pane carries every refused place out of view long before T-499's gate reopens,
+  //    so "never asked for again" is then the client correctly no longer wanting it (red 6 of 6
+  //    alone, with or without the fix under test). So wait on the CAPTURE clock — the pane's own
+  //    edge, not a sleep — until the recording is long enough, and open the page again on it.
+  const MIN_SPAN_NS = 45e9; // OFFLINE_MAX_BACKOFF_MS (30 s) + the wedge's own 4 s stall + margin
+  let win = await open();
+  if (win && win[1] - win[0] < MIN_SPAN_NS) {
+    const t0 = win[0];
+    const grown = await page.waitForValue(`the recording to reach ${MIN_SPAN_NS / 1e9} s`, PANE_WINDOW,
+      (w) => !!w && w[1] - t0 >= MIN_SPAN_NS, { timeoutMs: 120000 });
+    assert.ok(grown.ok, `the live edge did not advance ${MIN_SPAN_NS / 1e9} s past the pane's opening bottom ` +
+      `in ${grown.ms} ms (${JSON.stringify(grown.value)}), so no pane long enough for this claim can be opened`);
+    win = await open();
+  }
+  t.diagnostic(`the pane opened spanning ${win ? ((win[1] - win[0]) / 1e9).toFixed(1) : "?"} s`);
+  assert.ok(win && win[1] - win[0] >= MIN_SPAN_NS * 0.9,
+    `the pane opened spanning only ${win ? ((win[1] - win[0]) / 1e9).toFixed(1) : "?"} s: a refused place ` +
+    "may scroll out before the silence gate reopens, so nothing below would be a claim about 502s");
   const { rect } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const pane = paneRectOf(rect, dpr);
@@ -412,8 +443,6 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   t.diagnostic(`the wedged proxy was first asked after ${asked.ms} ms and stopped being asked at ` +
     `${wedge.value} refusal(s), ${wedge.ms} ms into the outage`);
   await page.eval("window.__t523.on = false");
-  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
-    return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
   const winAtLift = await page.eval(PANE_WINDOW);
   const liftedAt = Date.now();
   const injected = [...new Set(await page.eval("window.__t523.injected.slice()"))];

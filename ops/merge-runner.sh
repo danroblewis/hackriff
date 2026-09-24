@@ -319,6 +319,21 @@ process(){
       echo "$branch $(git -C "$REPO" rev-parse HEAD) $tip" >> "$S/main-red-parked"
       return 1
     fi
+    # Main passed it alone just now, but the same spec failed alone on ANOTHER branch within a day:
+    # an intermittent defect on main, not this branch's (canvas-journey, 2026-09-24). Held like a main
+    # red - no attempt, parked until main or the branch moves - and a deflaker/ticket requested once.
+    # Once per branch tip: a second main-side verdict on the same tip is charged like any red (its
+    # worker gets the fix run) - two different real defects in one spec must not park a branch for a day.
+    local side=""; grep -qx "$branch $tip" "$S/main-side-seen" 2>/dev/null || side=$(main_side_of "$branch" | sed 's/^main-side //')
+    if [ -n "$side" ]; then
+      echo "$branch $tip" >> "$S/main-side-seen"
+      local what; what=$(tail -n +"$gate_line" "$LOG" | grep -m1 -E 'AssertionError|panicked at' | sed 's/^ *//' | cut -c1-240)
+      log "TRIAGE: MAIN-SIDE $(echo $side) -> $branch held, no attempt charged: the spec fails alone on 2+ branches in 24 h"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  BLOCKED_ON_SPEC - $(echo $side) - fails alone on 2+ different branches in 24 h: a MAIN-side defect, not this branch's. Assertion: ${what:-see merge-runner.log}. Request: a deflaker or a ticket for main (evidence: just flakes; the branches above). $branch is held and re-queued automatically when main moves." >> "$NEEDS"
+      notify_coordinator "main-side $(echo $side | cut -c1-120) - $ticket ($branch) held, not blamed; assertion: ${what:-see log}. Needs a deflaker or a ticket for main." "main-side defect - deflaker/ticket needed"
+      echo "$branch $(git -C "$REPO" rev-parse HEAD) $tip" >> "$S/main-red-parked"
+      return 1
+    fi
     record_attempt "$branch" "$tip"
     log "GATE FAILED $branch (attempt $((tries+1))/$MAX_ATTEMPTS, tip $tip) -> abort + flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate: $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} ${TRIAGE_WHAT:-} | cut -c1-300)" "gate failed - fix run"
@@ -539,6 +554,29 @@ limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
 # Best effort, always: it runs AFTER the triage decision has already been made and returned, it
 # cannot change that decision, and `|| true` plus a total `try/except` inside mean a broken
 # ledger can never fail a merge. A measurement must not be able to break what it measures.
+# The one-solo-pass rule (user decision 2026-09-24 14:20, knob FLAKE_SOLO_ONE, an experiment whose
+# rollback is FLAKE_SOLO_ONE=0 = the twice rule): after the FIRST isolated pass, a red whose flake
+# ledger already shows every test passing alone >= 2 times and never failing alone in 7 d is accepted
+# without the second run. Prints `solo-ok N`; exit 1 (twice rule) when off, unknown, or not qualified.
+# A merge that changes the code judging its own red (the ledger, the runner) must not be excused by it
+# (review, 2026-09-24). Compared against the last gated commit - a bulk's base=, else HEAD for a staged merge.
+judge_changed(){
+  local ref=HEAD; [ -f "$BULKMARK" ] && ref=$(sed -n 's/^base=//p' "$BULKMARK" | head -1)
+  ! git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh 2>/dev/null
+}
+solo_ok(){
+  [ "${FLAKE_SOLO_ONE:-0}" = 1 ] || return 1
+  judge_changed && return 1
+  ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --solo-ok "$@" ) 2>/dev/null
+}
+# Supervisor for the user, 2026-09-24 14:55: a spec that fails alone on >= 2 DIFFERENT branches in 24 h
+# is main's defect (canvas-journey was pinned on three merges; each fail-alone counted as a branch
+# defect, so the deflake path never fired). Prints the ledger's `main-side TEST: other branches` lines.
+main_side_of(){ # branch  (runs after the merge is aborted: main's own ledger code decides)
+  local names="${TRIAGE_SPECS:-${TRIAGE_TESTS:-}}"
+  [ -n "$names" ] || return 0
+  ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --main-side $names --branch "$1" ) 2>/dev/null
+}
 flake_ledger(){
   ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --update ) >>"$LOG" 2>&1 || true
 }
@@ -570,7 +608,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; FLAKE_PASSES=2; FLAKE_SOLO_S=0
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -578,7 +616,13 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   if [ -z "$tests" ] && [ -n "$specs" ]; then
     TRIAGE_SPECS="$specs"   # try_bulk re-runs these on main alone if this batch is red
     log "TRIAGE: browser specs red: $specs - re-running them alone"
+    t0=$SECONDS
     if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
+      local solo; if solo=$(solo_ok $specs); then
+        FLAKE_PASSES=1; FLAKE_SECOND_S=0; FLAKE_SOLO_S=$((SECONDS - t0))
+        log "TRIAGE: accepted after one solo pass (ledger: ${solo#solo-ok } alone-passes)"
+        flake_accept spec "$specs" "$from" "$tickets" "$retry"; return $?
+      fi
       log "TRIAGE: first isolated run passed - running them alone once more (the rule is twice)"
       t0=$SECONDS
       if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
@@ -598,8 +642,15 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (${TRIAGE_WHAT:-lint/build/ui-unit failure}) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
+  TRIAGE_TESTS="$(echo $tests)"   # the full nextest names - the flake ledger's keys (main_side_of)
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
+  t0=$SECONDS
   if ( cd "$REPO" && HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+    local solo; if solo=$(solo_ok $tests); then
+      FLAKE_PASSES=1; FLAKE_SECOND_S=0; FLAKE_SOLO_S=$((SECONDS - t0))
+      log "TRIAGE: accepted after one solo pass (ledger: ${solo#solo-ok } alone-passes)"
+      flake_accept rust "$(echo $tests | tr '\n' ' ')" "$from" "$tickets" "$retry"; return $?
+    fi
     log "TRIAGE: first isolated run passed - running them alone once more (the rule is twice)"
     t0=$SECONDS
     # The gate's strict env (test-rust / acceptance / e2e-harness export it): alone, a missing
@@ -626,15 +677,15 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
     counted=$(printf '%s\n' "$att" | grep -E '^ *Summary \[' | grep -oE '[0-9]+ (failed|timed out)' | awk '{s+=$1} END{print s+0}')
     rerun=$(printf '%s\n' $names | grep -c .)
     if [ "${counted:-0}" -gt "${rerun:-0}" ]; then
-      log "TRIAGE: they PASS alone twice, but the stopped run counted $counted failure(s) and only $rerun were re-run alone -> not accepted; a real red until every failure is accounted for"
+      log "TRIAGE: they PASS alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo once || echo twice), but the stopped run counted $counted failure(s) and only $rerun were re-run alone -> not accepted; a real red until every failure is accounted for"
       return 1
     fi
   fi
   failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just ([a-z0-9-]+) took [0-9]+s \(exit [1-9][0-9]*\)$/\1/p' | tail -1)
   if [ -z "$failed" ]; then
     # Cannot tell which suite stopped the gate: do the old, safe thing (a full retry).
-    log "TRIAGE: they PASS alone twice, but the stopped suite is not in the log -> full retry (the old path)"
-    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":false}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    log "TRIAGE: they PASS alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo once || echo twice), but the stopped suite is not in the log -> full retry (the old path)"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":%s,"accepted":false}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "${FLAKE_PASSES:-2}" >> "$FLAKY"
     limited $retry; return $?
   fi
   # acceptance-ci runs two nextest steps (acceptance, then e2e-harness); a red in the first
@@ -652,9 +703,9 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
     old=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just [a-z0-9-]+ took ([0-9]+)s.*/\1/p' | awk '{s+=$1} END{print s+0}')
   fi
   saved=$(( old - ${FLAKE_SECOND_S:-0} )); [ "$saved" -lt 0 ] && saved=0
-  log "TRIAGE: they PASS alone twice -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
-  printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "$kind" "$failed" "$saved" >> "$FLAKY"
-  alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone twice; the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
+  log "TRIAGE: they PASS alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo once || echo twice) -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
+  printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":%s,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s,"solo_saved_s":%s}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "${FLAKE_PASSES:-2}" "$kind" "$failed" "$saved" "${FLAKE_SOLO_S:-0}" >> "$FLAKY"
+  alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo "once (one-solo-pass rule)" || echo twice); the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
   local resumed; resumed=$(( $(wc -l < "$LOG") + 1 ))
   limited $retry --resume-after "$failed" ${steps:+--resume-steps $steps}; rc=$?
   [ "$rc" -eq 0 ] && log "TRIAGE: resumed gate PASSED" || log "TRIAGE: resumed gate FAILED -> a red in a suite that had not run yet"
@@ -824,7 +875,7 @@ self_version(){
 
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
-log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS"
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0}"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a

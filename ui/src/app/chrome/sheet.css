@@ -15,6 +15,9 @@
 .sheet .sheet-grab:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
 .sheet .sheet-head { flex: none; height: 34px; display: flex; align-items: center; padding: 0 16px 4px;
   border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+.sheet .sheet-close { margin-left: auto; flex: none; min-width: 28px; min-height: 28px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.sheet .sheet-close:hover, .sheet .sheet-close:focus-visible { border-color: var(--line); color: inherit; }
+.sheet .sheet-close[hidden] { display: none; }
 .sheet .sheet-title { font-size: 12px; letter-spacing: .04em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Content reflows per state: the body takes whatever height the snap leaves and scrolls inside it. */
 .sheet .sheet-body { flex: 1; min-height: 0; overflow: auto; }
@@ -34,3 +37,19 @@
   .sheet { left: 8px; width: auto; }
 }
 @media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+
+/* T-814 (MAP-14): the Explore drawer inside the sheet body (mockup `.poi`). */
+.explore-drawer { padding: 12px 16px 8px; }
+.explore-drawer .drawer-peek { margin: 0 0 8px; color: var(--muted); font-size: 11.5px; }
+.explore-drawer h4 { margin: 12px 0 6px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.explore-drawer ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; }
+.explore-drawer li { display: flex; gap: 4px; align-items: stretch; }
+.explore-drawer li button.row { flex: 1; min-width: 0; text-align: left; border: 1px solid var(--line); background: var(--panel-2, none); color: inherit; border-radius: 8px; padding: 8px 10px; display: grid; gap: 2px; cursor: pointer; }
+.explore-drawer li button.row:hover { border-color: var(--muted); }
+.explore-drawer li.selected button.row { border-color: var(--amber); }
+/* docs/23 §10.6 P4: the one control that moves the map is small and explicit (>= 24 px target). */
+.explore-drawer li button.go { flex: none; align-self: center; min-width: 28px; min-height: 28px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: none; color: inherit; font-size: 11px; cursor: pointer; }
+.explore-drawer li button.go:hover, .explore-drawer li button.go:focus-visible { border-color: var(--amber); }
+.explore-drawer .f { font-family: var(--mono, monospace); }
+.explore-drawer .why { color: var(--muted); font-size: 11.5px; }
+.explore-drawer .tag { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--amber); }

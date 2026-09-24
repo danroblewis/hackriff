@@ -79,8 +79,13 @@ import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { requestGoto, reviewAt, setNavigation, toast } from "../state";
-import { mountMapControls, paneActions, type MapControlHost } from "../chrome/map-controls";
+import { requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import {
+  BASE_STYLES, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
+  type LayerId, type OverlayLayerFn, type PaneLayers,
+} from "../../surface/layers";
+import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 
 const S_TO_NS = 1e9;
 /** The map strip along the bottom of the canvas, device px. */
@@ -138,6 +143,11 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
+ * describes before the surface has booted. Used for nothing once `preview.activePane` exists. */
+const FIRST_PANE = "pane1";
+/** The phosphor base style's one ink (T-806): a P31-style green, off the amplitude ramp. */
+const PHOSPHOR_INK: readonly [number, number, number] = [0.35, 1, 0.45];
 
 function mount(el: HTMLElement, ctx: AppContext) {
   const { store, client } = ctx;
@@ -177,9 +187,31 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
-  let showSignals = readShowSignals();
+  // T-806 (MAP-06): per-pane layer registries (docs/24 §13). A pane with no entry in
+  // `state.layers` yet starts from its SEED: what this viewer stored for that pane id, else the
+  // defaults — with T-522's older found-signal preference applied, so a viewer who hid the boxes
+  // does not get them back by an upgrade. A seed is computed once per pane id and never follows
+  // another pane's edits (a split inherits explicitly, by value, below).
+  const seeds = new Map<string, PaneLayers>();
+  const seedFor = (paneId: string): PaneLayers => {
+    let s = seeds.get(paneId);
+    if (!s) {
+      const d = defaultPaneLayers(paneId);
+      s = loadPaneLayers(paneId) ?? (readShowSignals() ? d : withLayer(d, "detections", false));
+      seeds.set(paneId, s);
+    }
+    return s;
+  };
+  const layersFor = (paneId: string): PaneLayers => paneLayersOf(store.get(), paneId, seedFor(paneId));
+  /** Every registry write goes through here: the pane's entry in the store, and in this viewer's
+   * storage under that pane's id. Presentation state only — no route, no poll. */
+  const editLayers = (patch: (s: AppState) => Partial<AppState>, paneId: string) => {
+    store.set(patch);
+    savePaneLayers(layersFor(paneId));
+    syncLayerControls();
+  };
   const signalsBtn = h("button", {
-    class: "mini sf-signalsbtn", type: "button", "aria-pressed": String(showSignals),
+    class: "mini sf-signalsbtn", type: "button", "aria-pressed": String(isLayerVisible(seedFor(FIRST_PANE), "detections")),
     title: "Show or hide the found-signal boxes (Candidate/Confirmed detections) on the canvas. Display only — changes nothing about what is detected.",
   }, "Signals");
   const rangeEl = h("span", { class: "sf-range", role: "status" });
@@ -196,8 +228,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
   }, "Measure");
   const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn, measureBtn,
     recordIqButton(ctx),
-    h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved.", onclick: () => preview?.split("columns") }, "Split ⇔"),
-    h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => preview?.closeActive() }, "Close"),
+    h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", onclick: () => splitActive() }, "Split ⇔"),
+    h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => closeActive() }, "Close"),
     h("button", { class: "mini", type: "button", title: "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", onclick: () => preview?.fitToSurface() }, "Whole surface"));
   el.replaceChildren(h("div", { class: "sf-bar" }, actions, rangeEl, hoverEl), stage, traceEl, ringEl, chrome, note);
 
@@ -206,6 +238,38 @@ function mount(el: HTMLElement, ctx: AppContext) {
   let renderFollow: () => void = () => {};
   let viewMoved: () => void = () => {};
   let renderLive: () => void = () => {};
+  let renderLayers: () => void = () => {};
+  /** Split: the new pane inherits the creating pane's registry by value (docs/24 §13.5). */
+  const splitActive = () => {
+    const p = preview;
+    if (!p) return;
+    const from = p.activePane;
+    p.split("columns");
+    if (p.activePane !== from) {
+      store.set(inheritPane(from, p.activePane, seedFor(from)));
+      savePaneLayers(layersFor(p.activePane));
+    }
+    syncLayerControls();
+  };
+  const closeActive = () => {
+    const p = preview;
+    if (!p) return;
+    const gone = p.activePane;
+    p.closeActive();
+    if (p.activePane !== gone) store.set(dropPaneLayers(gone));
+    syncLayerControls();
+  };
+  /** The toolbar's `Signals` button and an open layers menu both describe the ACTIVE pane's
+   * registry, so a pane switch or a toggle from either place re-states both. Set-if-changed. */
+  let syncedFor = "";
+  function syncLayerControls(): void {
+    const p = preview;
+    const reg = layersFor(p ? p.activePane : FIRST_PANE);
+    const on = String(isLayerVisible(reg, "detections"));
+    if (signalsBtn.getAttribute("aria-pressed") !== on) signalsBtn.setAttribute("aria-pressed", on);
+    const key = `${reg.paneId}|${reg.base}|${reg.layers.map((l) => +l.visible).join("")}`;
+    if (key !== syncedFor) { syncedFor = key; renderLayers(); }
+  }
   let windows: ActiveWindow[] = [];
   let detach: (() => void) | null = null;
   /** The region stroke in progress (T-458), in surface coordinates, or `null`. Read inside the
@@ -316,8 +380,26 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // drawn over, and only on the pane it is being stroked on (T-458).
     const pendingRegion = pending && pending.pane === pane.id ? pending.region : null;
     const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region : null;
-    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, showSignals, measurements, null, pendingMeasureRegion);
+    // The found-signal boxes are the `detections` LAYER now (T-806, below), so this composition —
+    // selections, measurements and the in-progress gesture, which are the user's own interaction
+    // and are always drawn — passes `false` for them.
+    return paneMarkBoxes(Object.values(s.inventory.rows), focusId, s.selections.list, selId, pane.box, pendingRegion, false, measurements, null, pendingMeasureRegion);
   };
+
+  // ---- the overlay layers (T-806 / MAP-06, docs/24 §13.2) ----
+  // Each is a pure `(pane, edge) => OverlayQuad[]` over store state, placed through the pane's own
+  // box and rect. `composeOverlays` concatenates the pane's VISIBLE ones in ascending z into the one
+  // `marks` hook — still one place overlay geometry is produced and one pass (`overlay.ts`: no
+  // sampler, no ramp) that draws it. MAP-07…MAP-13 each add one entry here.
+  const detectionQuads: OverlayLayerFn = (pane, edge) => {
+    const s = store.get();
+    const focusId = s.focus.kind === "signal" ? s.focus.id : null;
+    return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
+  };
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads };
+  /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
+   * `base` is the base-style axis, not a toggle. */
+  const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
 
   // ---- the spectrum trace (T-457, docs/16 §8.5b finding 1) ----
   //
@@ -396,9 +478,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // scrubbed into last hour glows with last hour, which is the whole point of deriving them from
     // the window instead of from a buffer of whatever the page received.
     const shadows = persistenceSlices(lat, s.cache, pane.box, report.levelF, report.levelT, dev, n, tAtNs);
+    // T-806: the pane's BASE STYLE (docs/24 §4). `ramp` is T-475's look, unchanged: the slice's core
+    // on the waterfall's ramp. `phosphor` draws the slice and its afterglow in one flat green ink,
+    // off the ramp — so it is a look, not a second measurement colour, and the readout says which.
+    const phosphor = layersFor(pane.id).base === "phosphor";
     for (const sh of [...shadows].reverse()) {
       out.push(...tracePaths(sh.cols, pane.box, strip, s.lo, s.hi, "trace-glow", pane.id,
-        { alpha: sh.alpha, widthPx: SHADOW_PX, shade: "mono" }));
+        phosphor ? { alpha: sh.alpha, widthPx: SHADOW_PX, ink: PHOSPHOR_INK } : { alpha: sh.alpha, widthPx: SHADOW_PX, shade: "mono" }));
     }
 
     // The current slice, twice: a wide neutral bloom under a full-opacity ramp-coloured core. The
@@ -410,7 +496,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-bloom", pane.id,
       { alpha: 0.18, widthPx: GLOW_PX, shade: "mono" }));
     out.push(...tracePaths(slice, pane.box, strip, s.lo, s.hi, "trace-slice", pane.id,
-      { alpha: 1, widthPx: SLICE_PX }));
+      phosphor ? { alpha: 1, widthPx: SLICE_PX, ink: PHOSPHOR_INK } : { alpha: 1, widthPx: SLICE_PX }));
 
     // The readout, for the pane gestures apply to. Written here rather than on the poll for the same
     // reason the quads are: it describes the frame that was just drawn. It names the SOURCE, because
@@ -433,6 +519,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         slicePk
           ? `slice ${at(live && fr ? fr.tNs : tAtNs)} (${src}) · peak ${fmtDb(slicePk.db)} at ${fmtHz(slicePk.hz)}`
           : `slice ${at(tAtNs)} (${src}) — ${empty}`,
+        ...(phosphor ? ["phosphor style: trace in one green ink, not on the ramp"] : []),
         holdPk
           ? `max-hold over ${fmtDur(spanS)} · peak ${fmtDb(holdPk.db)} at ${fmtHz(holdPk.hz)}`
           : `max-hold over ${fmtDur(spanS)} — ${empty}`,
@@ -477,13 +564,15 @@ function mount(el: HTMLElement, ctx: AppContext) {
     traceEl.hidden = !traceOn;
     if (!traceOn) traceEl.textContent = "";
   });
-  // T-522: presentation only — no store write, no route, no poll. `boxesFor` reads `showSignals`
+  // T-522: presentation only — no route, no poll. The frame reads the pane's registry
   // fresh every frame (the same discipline as `traceOn` above), so the next frame just draws fewer
   // boxes; there is no cache or subscription to invalidate.
+  // T-806: it is the ACTIVE pane's `detections` layer now — the same switch the layers menu shows.
   signalsBtn.addEventListener("click", () => {
-    showSignals = !showSignals;
-    signalsBtn.setAttribute("aria-pressed", String(showSignals));
-    writeShowSignals(showSignals);
+    const id = preview?.activePane ?? FIRST_PANE;
+    const on = !isLayerVisible(layersFor(id), "detections");
+    editLayers(setPaneLayer(id, "detections", on, seedFor(id)), id);
+    writeShowSignals(on);
   });
 
   // ---- mirror the active viewport into the app's one window (CLAUDE.md's whole-UI window rule) ----
@@ -742,8 +831,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,
-        // The ring rules first, so a signal box or selection that crosses one is drawn over it.
-        marks: (pane, edge) => [...ringQuads(pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)],
+        // T-806: the pane's visible overlay layers in z order (the ring rules first, so a signal box
+        // or selection that crosses one is drawn over it), then the user's own interaction marks.
+        marks: (pane, edge) => {
+          if (pane.id === preview?.activePane) {
+            syncLayerControls();
+            // The readout beside the rules names two lines; when they are not drawn it says so
+            // instead of describing strokes that are not on the screen.
+            if (!isLayerVisible(layersFor(pane.id), "rules")) {
+              setText(ringEl, "Capture rules (retention bound, oldest IQ) are hidden on this pane — Layers menu to show them");
+            }
+          }
+          return [...composeOverlays(layersFor(pane.id), overlayFns, pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)];
+        },
         trace: traceFor, tracePx: TRACE_PX,
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
@@ -851,18 +951,39 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!o || o.covered) return null;
         return { why: offerLabel(o), enabled: offerAcceptable(o), press: () => pressOffer(o) };
       },
-      layers: () => [
-        { id: "signals", label: "Found signals (Candidate / Confirmed boxes)",
-          on: () => signalsBtn.getAttribute("aria-pressed") === "true", toggle: () => signalsBtn.click() },
-        { id: "trace", label: "Spectrum trace",
-          on: () => traceBtn.getAttribute("aria-pressed") === "true", toggle: () => traceBtn.click() },
-      ],
+      layerMenu: (): LayerMenu => {
+        const reg = layersFor(pv.activePane);
+        const ids = pv.view.panes.list().map((x) => x.id);
+        const n = ids.indexOf(pv.activePane) + 1;
+        return {
+          pane: ids.length > 1 ? `pane ${n} of ${ids.length}` : "this pane",
+          bases: BASE_STYLES.map((b) => ({ id: b.id, label: b.label, hint: b.hint, on: reg.base === b.id })),
+          overlays: paintOrder(reg).filter((l) => l.plane === "overlay" && drawnLayers.has(l.id)).map((l) => {
+            const d = layerDef(l.id)!;
+            return { id: l.id, label: d.label, hint: d.hint, on: l.visible };
+          }),
+          viewWide: [{ id: "trace", label: "Spectrum trace strip", hint: "above every pane", on: traceBtn.getAttribute("aria-pressed") === "true" }],
+        };
+      },
+      setBase: (id) => {
+        const b = BASE_STYLES.find((x) => x.id === id);
+        if (b) editLayers(setPaneBase(pv.activePane, b.id, seedFor(pv.activePane)), pv.activePane);
+      },
+      toggleOverlay: (id) => {
+        const lid = id as LayerId;
+        if (!drawnLayers.has(lid)) return;
+        const on = !isLayerVisible(layersFor(pv.activePane), lid);
+        editLayers(setPaneLayer(pv.activePane, lid, on, seedFor(pv.activePane)), pv.activePane);
+        if (lid === "detections") writeShowSignals(on);
+      },
+      toggleViewWide: (id) => { if (id === "trace") traceBtn.click(); },
       viewChanged: () => { lastMirror = ""; mirror(); renderLive(); },
       toast: (text) => store.set(toast(text)),
     };
     const controls = mountMapControls(host);
     stage.append(controls.el);
     renderFollow = controls.syncFollow;
+    renderLayers = controls.syncLayers;
     viewMoved = controls.viewMoved;
 
     const fit = () => {

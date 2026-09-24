@@ -1120,6 +1120,21 @@ def latest_junit():
                       "total_s": round(sum(c["s"] for c in cases))})
     return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
 
+def blamed_alone(n=6):
+    """Tests whose fail-alone reds the runner pinned on a merge (`branch_defects` in flakes.json),
+    most first. Several on one test is the shape of a MAIN-side defect blamed on unrelated branches
+    (canvas-journey, 2026-09-24: three) - shown on /flow so it is seen, not rediscovered."""
+    try:
+        with open(os.path.join(SCRATCH, "flakes.json"), encoding="utf-8") as fh:
+            tests = json.load(fh).get("tests") or {}
+    except Exception:
+        return []
+    rows = [{"test": str(k), "blamed": int(v.get("branch_defects") or 0), "failed_alone": int(v.get("failed_alone") or 0),
+             "passed_alone": int(v.get("passed_alone") or 0)}
+            for k, v in tests.items() if isinstance(v, dict) and int(v.get("branch_defects") or 0) > 0]
+    return sorted(rows, key=lambda r: (-r["blamed"], r["test"]))[:n]
+
+
 def flake_top(n=5):
     """The flake ledger's worst offenders — `$HACKRIFF_OPS/flakes.json` (py/hkpy/flakes.py).
 
@@ -1987,6 +2002,7 @@ def build_flow_panel(ops, now=None):
             "gates_48h": gates48,
             "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
             "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
+            "blamed_alone": blamed_alone(),
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
             "experiment": experiment,
         }
@@ -2914,6 +2930,13 @@ function drawCauses(el, d){
     h+=`<tr><td style="color:${C.txt}">${k}</td><td class=num><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><span style="width:${w.toFixed(0)}%;max-width:80px;height:8px;background:${k==='real'?C.coral:k==='other'?C.mut:C.amber};border-radius:4px;display:inline-block"></span>${v}</div></td></tr>`;
   });
   h+='</tbody></table>';
+  // fail-alone reds pinned on a merge, per test: several on one test = a main-side defect blamed on branches
+  const B=d.blamed_alone||[];
+  if(B.length){
+    h+='<div class=kv style="margin-top:8px"><span>blamed on a branch (fails alone, per test)</span></div><table><tbody>';
+    B.forEach(r=>{ h+=`<tr><td style="color:${r.blamed>=2?C.coral:C.txt}">${esc(r.test)}</td><td class=num>${r.blamed}× blamed · alone ${r.passed_alone} pass / ${r.failed_alone} fail</td></tr>`; });
+    h+='</tbody></table>';
+  }
   el.innerHTML=h;
 }
 
