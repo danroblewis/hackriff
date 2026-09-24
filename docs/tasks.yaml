@@ -25063,7 +25063,7 @@ tasks:
   - id: T-853
     milestone: MAUTO
     title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
-    status: in-progress
+    status: done
     branch: task-t853
     priority: normal
     deps:
@@ -25099,6 +25099,7 @@ tasks:
       Commits: d737891f
       Observed, not chased: ADR tension, needs a Fable/user call: ADR-0015 §2.2 says sync_excess = Chernoff tail MINUS the pattern width, and hk_model::synth::null::sync_excess_bits implements that literally. For a searched sync word this double-charges the engine's L_j, and for a template-fixed preamble it removes the bits that ADR-0022 §4.2's single-burst narrative relies on ('a matched 8-pulse preamble carries its own sync_excess bits'). Fails closed, but S4 floors (10 bits) will be hard to clear for 16-bit words. | M-3 constraint: S1 tables are drawn through a 4x-oversampled S0 channel (nullchain.rs). They are conservative for S1 inputs oversampled up to 4x and generous beyond that, so M-3's skeletons must keep S1 input at <= 4x or regenerate. Windows must also be sized to land on a calibrated support ([n, n + n/50 + 16]); any other n scores NoTable (0 bits) by design. | Not generated: the mismatched-parameter nulls (§13.3 mismatch:symbol_rate/centre) need per-block signal corpora. Only the noise null ships, and the §13.1 correlation matrices are measured on that noise null, not on a matched corpus. | subcarrier pilot_lock has no table (needs an FM-composite null corpus), so it scores NoTable (0 bits). fields field_fit is published at 0 bits because a field map states no chance-fit rate. identity_recurrence, plausibility and sync_regularity are not emitted (template/engine side, M-5/M-3). ppm_demod, deframe, assemble, interleave, viterbi and reed_solomon emit no evidence. | §2.1 live mirror (<node>.ev_bits / ev_quality in hk-pipeline status ticks) is not wired. It is a runtime/stream addition and was left for whichever ticket first serves it. | Pre-existing, unrelated: nextest flagged hk-model relate::tests::an_image_is_predicted_from_the_tuning_centre_and_a_real_neighbour_is_not as LEAK (it passed; the leak is in that test's own handles).
       Resources: 133 CPU-s, peak 1.7 GB
+    commit: "81143197"
   - id: T-854
     milestone: MAUTO
     title: "MAUTO M-3: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle"
