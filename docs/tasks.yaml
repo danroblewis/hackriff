@@ -23575,7 +23575,8 @@ tasks:
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
-    status: todo
+    status: in-progress
+    branch: task-t802
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -25310,7 +25311,8 @@ tasks:
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
-    status: todo
+    status: in-progress
+    branch: task-t858
     priority: normal
     deps:
     - T-853
