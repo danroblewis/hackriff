@@ -1100,6 +1100,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-synth"
+version = "0.1.0"
+dependencies = [
+ "hk-blocks",
+ "hk-demod",
+ "hk-estimate",
+ "hk-model",
+ "hk-recipe",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

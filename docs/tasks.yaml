@@ -24671,6 +24671,16 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 18:03).
+      New crate hk-synth (ADR-0015 §9 deps pre-added): types, modules and stubs, no engine. It covers stage/evidence (S0-S6 ladder, default caps and floors, a NodeScore whose rank key cannot see the prior, prior_bits clipping, the look-elsewhere charge), calibration (the §13.2 Score/Threshold/Unexpressible answer types, with the loader left to T-660, and §13.3's fail-closed fill bucket), candidate/skeleton/template/proposal (§1.2 candidate = recipe prefix + free params, checked against the real hk-blocks catalogue; hackriff.template/1 with §15 fact provenance), and search/result/trace/seed/objective (profiles, budgets, stop reasons, job states, the NodeHeuristic slot, the Verdict ladder, PipelineResult, ADR-0021's TraceNode/Outcome/Resolution/Reason, and the one adapter over ADR-0016's SearchSeed). Each module names the M-n ticket that fills it.
+      The evidence vocabulary (Stage, MetricId, GroupId, Evidence, EvidenceSet) lives in hk_model::synth and hk-synth re-exports it. hk-blocks needs these types for Block::evidence (M-2), and hk-synth depends on hk-blocks, so ADR-0015 §9 as written was a dependency cycle.
+      The ADR-0015 -> ACCEPTED review is prepared as ADR-0015 §16 and is NOT accepted; the status stays PROVISIONAL. It lists 8 engineering corrections found while implementing, and three open items: docs/20 U2, U3 and U5 are still unanswered (U1 is answered via ADR-0022; U4's PSK half is moot because T-609 landed psk_demod), T-619's fill-bucket amendment is pending for T-660, and it proposes to waive the ADR-0016 dependency (hk-synth only consumes ADR-0016 §8's SearchSeed, which is landed code). USER DECISION NEEDED: §16.7 'the ask'. M-2..M-7 can start now.
+      Tests: cargo build -p hk-synth -> exit 0 (builds); cargo nextest run -p hk-synth -> exit 0 (27 passed (24 unit + 3 candidate_is_a_recipe)); cargo nextest run -p hk-model -E 'kind(lib) and test(/^synth::/)' -> exit 0 (4 passed); RUSTDOCFLAGS='-D warnings' cargo doc -p hk-synth --no-deps -> exit 0 (clean)
+      precheck exit 0
+      Commits: a3ece799
+      Observed, not chased: ADR-0015 §4.2 says a family with posterior < 0.02 is deferred; ADR-0016 §8/T-215 says only the likelihood prunes. hk-synth follows ADR-0016 (correction C2 in §16.2); the ADR-0015 text needs the fold-in on acceptance. | ADR-0015 §11.7 proposes a 'new docs/07 §2.28 CandidatePipeline', but docs/07 §2.28 is TrunkSystem (T-266). CP-1 should take §2.33. | T-206 records M3 NOT closing (unknown recall 0.778 vs 0.80; no end-to-end classification row) while its status is done. Relevant to the ADR-0016-accepted dependency; §16.5 proposes waiving it for ADR-0015. | T-552 (the quick/standard/deep budget measurement) is still todo; hk-synth carries §3.3's unverified numbers in Profile::budget().
+      Resources: 101 CPU-s, peak 1.0 GB
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
