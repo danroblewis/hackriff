@@ -155,23 +155,56 @@ fn declarations() -> Vec<Unreachable> {
                  done ticket, so this gap has no owner",
         ticket: Ticket::Unfiled,
     });
-    for fam in ["ofdm", "dsss", "16qam"] {
+    // --- Negative families whose generator now exists (T-623 N3, T-624 N2): the gap is no
+    // longer the scene but the suite that runs it through an engine and asserts the verdict.
+    for (fam, reason) in [
+        (
+            "ofdm",
+            "N3 generator exists (hkpy.synth ofdm_nonstandard_cp, T-623) but no row runs it: its \
+             `unsupported-structure` + missing_block assertion needs an engine that writes a \
+             Resolution, run by the negative-control suite",
+        ),
+        (
+            "dsss",
+            "N3 generator exists (hkpy.synth dsss_m_sequence, T-623) but no row runs it: its \
+             `unsupported-structure` + missing_block assertion needs an engine that writes a \
+             Resolution, run by the negative-control suite",
+        ),
+        (
+            "16qam",
+            "N3 generator exists (hkpy.synth qam16_unframed, T-623) but no row runs it: its \
+             `unsupported-structure` + missing_block assertion needs an engine that writes a \
+             Resolution, run by the negative-control suite",
+        ),
+    ] {
         d.push(Unreachable {
             family: fam,
             planes: &[],
             when: &[],
-            reason: "out-of-catalogue structure generator not built (N3)",
-            ticket: Ticket::Filed("T-623"),
+            reason,
+            ticket: Ticket::Filed("T-568"),
         });
     }
-    for fam in ["fm-voice", "am-voice"] {
+    for (fam, reason) in [
+        (
+            "fm-voice",
+            "N2 generator exists (hkpy.synth nbfm_voice, T-624) but no row runs it: its \
+             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
+             writes a Resolution, run by the negative-control suite",
+        ),
+        (
+            "am-voice",
+            "N2 generator exists (hkpy.synth am_voice, T-624) but no row runs it: its \
+             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
+             writes a Resolution, run by the negative-control suite",
+        ),
+    ] {
         d.push(Unreachable {
             family: fam,
             planes: &[],
             when: &[],
-            reason: "standalone analog-voice negative scene not built (N2); exists only as \
-                     decoys inside the trunking scenes",
-            ticket: Ticket::Filed("T-624"),
+            reason,
+            ticket: Ticket::Filed("T-568"),
         });
     }
     d.push(Unreachable {
@@ -186,9 +219,11 @@ fn declarations() -> Vec<Unreachable> {
         family: "css-lora",
         planes: &[],
         when: &[],
-        reason: "LoRa generator exists but P9 is report-only until the calibrated-bit discount is \
-                 measured outside FSK (docs/22 §7.2); no row wired",
-        ticket: Ticket::Filed("T-619"),
+        reason: "LoRa generator exists (lora_ism_burst) but no MAUTO block dechirps or scores CSS \
+                 and there is no generic synthesis engine, so no row is wired; P9 would also stay \
+                 report-only, because T-619 measured the calibrated-bit discount on AM/OOK and \
+                 C4FM only, not CSS (docs/22 §7.2, docs/21 §10)",
+        ticket: Ticket::Filed("T-565"),
     });
     d.push(Unreachable {
         family: "cw",
@@ -198,23 +233,48 @@ fn declarations() -> Vec<Unreachable> {
                  wired",
         ticket: Ticket::Filed("T-565"),
     });
-    // --- Families with blocks: the check axis is a generator gap before it is an engine gap.
+    // --- Families with blocks. The check axis: T-622 put CRC width / off-catalogue polynomial /
+    // constant payload on the 2-level FSK generator (`fsk_burst_train`, which also yields MSK at
+    // deviation = rate / 4), so for 2-FSK the gap is now the confirm-gate rows that consume it
+    // (ADR-0022 §10.1 A3 (b)/(c), T-576's recall control). The C4FM generators (the trunk
+    // scenes) still carry only the fixed P25 framing: that is a generator gap nobody owns.
+    d.push(Unreachable {
+        family: "2fsk",
+        planes: &["A1xA7"],
+        when: &[],
+        reason: "check parameterisation exists on fsk_burst_train (T-622) but no row runs it: the \
+                 CRC-8 / off-catalogue-poly / constant-payload rows are the confirm-gate recall \
+                 control of the false-confirm suite, which needs the derived ConfirmPolicy",
+        ticket: Ticket::Filed("T-576"),
+    });
+    d.push(Unreachable {
+        family: "msk",
+        planes: &["A1xA7"],
+        when: &[],
+        reason: "check parameterisation exists on fsk_burst_train at h = 0.5 (T-622) but no row \
+                 runs it: no generic synthesis engine binds or refuses a check on an MSK emitter",
+        ticket: Ticket::Filed("T-565"),
+    });
+    d.push(Unreachable {
+        family: "4fsk-c4fm",
+        planes: &["A1xA7"],
+        when: &[],
+        reason: "check/payload parameterisation (CRC width, off-catalogue polynomial, constant \
+                 payload) is on the 2-level FSK generator only (T-622); the C4FM trunk scenes \
+                 carry the fixed P25 framing and nothing else",
+        ticket: Ticket::Unfiled,
+    });
     for fam in ["2fsk", "4fsk-c4fm", "msk"] {
-        d.push(Unreachable {
-            family: fam,
-            planes: &["A1xA7"],
-            when: &[],
-            reason: "check/payload parameterisation (CRC width, off-catalogue polynomial, \
-                     constant payload) not on the generator",
-            ticket: Ticket::Filed("T-622"),
-        });
+        // The F ladder: the generator is built (hkpy.synth.fill, T-625) and T-619 measured the
+        // C4FM discount, but F's report (C-R pass rate, resolution.reason per fill level) and its
+        // bar (the under-filled cell flagged) are read off a synthesis result.
         d.push(Unreachable {
             family: fam,
             planes: &["A1xA3"],
             when: &[],
-            reason: "F ladder not wired into acceptance_mauto, and the calibrated-bit path is \
-                     unmeasured outside the T-547 FSK corner",
-            ticket: Ticket::Filed("T-619"),
+            reason: "F ladder generator exists (hkpy.synth.fill, T-625) but no row runs it: its \
+                     per-fill C-R pass rate and resolution.reason need a generic synthesis engine",
+            ticket: Ticket::Filed("T-565"),
         });
         d.push(Unreachable {
             family: fam,
