@@ -23532,6 +23532,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator: after staging review the user stated principle P1 (docs/23 §10.6): the left column kept its pre-redesign height, which is not minimal. The collapse-to-chip + dismiss is T-895 (high).
     result: |
       Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
       siblings of `.centre` which is z-index:auto) painted above `.centre`
@@ -23695,6 +23697,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): clicking a pin or box slides up a detail sheet for that signal (its centre, bandwidth, time extent and explanations) without leaving the canvas. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Selected tab holds the most device actions in the largest surface - invert that: device actions (Listen, Record clip, Stream out, Analyze, Promote/Delete, any retune) are a COMPACT action cluster of small buttons, not a large surface, and no device route is bound to the sheet body. P1: the sheet has a visible dismiss (T-900).
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
@@ -24028,6 +24032,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
@@ -24059,6 +24065,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a browse list of past surveys; choosing one jumps the canvas to that saved coverage window. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): 'jump the pane' to a saved coverage window is a MAJOR map change: it is a small explicit per-row button, never a bare row click in the survey list.
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
@@ -24302,6 +24310,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a Collections panel with a table view; selecting a row highlights its mark on the canvas and vice versa. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Research slide-in (460 px, full height) is a big panel: a row click selects/highlights the mark; any view jump or the gated retune offer is a small explicit per-row button only. P1: visible dismiss (T-900). P3: fixed position.
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
@@ -24383,7 +24393,7 @@ tasks:
     parallel_group: MAP-CHROME
     model: opus
     effort: medium
-    depends_on: [T-805, T-814, T-821]
+    depends_on: [T-805, T-814, T-821, T-900]
     use_cases: []
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
     acceptance: |
@@ -24408,6 +24418,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): at phone width the floating chrome rearranges to fit, and in immersive mode the controls fade away until you touch or move the pointer. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLE P1 (docs/23 §10.6 rule 1): overlays are meant to be CLOSED, not faded - fade-to-35 % is an idle courtesy only, never a substitute for a dismiss. The dismiss itself is T-900 (now a dependency); this pass keeps it working at phone width.
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-825
     milestone: MMAP
@@ -24442,6 +24454,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): nothing new to look at: this adds the UI tests and honesty guards; SEE = the staging build still shows every MMAP feature above working. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator, USER PRINCIPLES (docs/23 §10.6): fold in the guards filed today - T-896 (P3: no chrome dock POSITION read from/written to local or user state; no drag-to-move handler on band-2/3 chrome) and T-899 (P4: no device route or view-jump handler bound to a big-panel body element: sheet, Explore drawer, Research slide-in, left column). Each guard goes red on an injected violation.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
@@ -25951,6 +25965,9 @@ tasks:
       FOUND BY T-802 worker 2026-09-24 (user DoD: the old toolbar row is gone).
 
       2026-09-24 T-803 worker: at 1000/920 px the toolbar overflows (Split, Close, Whole surface off-screen) and at 420 px Live/Trace/Auto-contrast sit under the top bar with the rest off-screen - the row runs off-screen rather than wrapping, and T-528's hit test runs only at 1440 px. Removing the row fixes this; ALSO extend the rehomed controls' hit test to 1000/920/420 px so an unreachable control goes red. Evidence: diagnostic lines in ui/e2e/app-sheet.e2e.mjs (task-t803).
+
+      2026-09-24 coordinator: now depends on T-895 (left column collapses to a chip) - same chrome files, and the user sees that first. P3/P5: the rehomed controls take fixed positions (not draggable); the existing zoom/FAB/layers/Go-to controls are kept as they are.
+    depends_on: [T-802, T-806, T-895]
   - id: T-883
     milestone: M2-hardening
     title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
@@ -26062,6 +26079,120 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-889 deflaker 2026-09-24.
+  - id: T-895
+    milestone: MMAP
+    title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
+    status: todo
+    priority: high
+    deps:
+    - T-801
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P1 (docs/23 §10.6 rule 1): minimize overlay; expose as much map as possible; overlays exist to be CLOSED. After reviewing T-801 on staging the user noted the left bar is still the same height as before the redesign - not minimal.
+      AUDIT EVIDENCE: ui/src/app/chrome/map-layout.css - `#view-explore > .side { position:absolute; top:64px; bottom:74px; width:min(var(--panel-w),...) }`, --panel-w 300px, 92 % opaque, no collapsed state. The left column has NO row in docs/23 §11 ("a panel not in this table has no home"). T-803 retired the RIGHT focus column into the sheet; nothing did the same for the left. Only fade-to-35 % exists, no dismiss.
+      DELIVER: `.side` (the left inventory column: Candidate/Confirmed lists) has a COLLAPSED DEFAULT on every width - an icon/chip or a peek strip no taller than 56 px - that shows the lists' counts; expanding it opens an overlay with a visible DISMISS that returns every pixel to the map (not a fade). It never covers the Go-to box, the zoom cluster or the FAB (T-802), or the sheet's handle (T-803). Fixed position, not draggable (P3). Add the left column's row to docs/23 §11 (panel -> client slice -> reads/writes; it reads the inventory routes it reads today, writes nothing new). Presentation only (thin client). Keep T-528's hit test passing and extend it to 1440/1000/920/420 px.
+      WHAT THE USER WILL SEE ON STAGING: open Explore - the map fills the window; the Candidate/Confirmed lists are a small chip with counts at the left edge; click it to open the lists over the map, click the close (x) to put the map back.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+  - id: T-896
+    milestone: MMAP
+    title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MAP-TEST
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P3 (docs/23 §10.6 rule 3): WE decide the overlay arrangement; overlays are not draggable and cannot be repositioned; the user only chooses whether each is shown (a deliberate Google-Maps-style choice to try).
+      AUDIT EVIDENCE: ADR-0023 §1 "four fixed bands" and docs/23 §10.2's edge docks imply it and §10.3 stores only visibility/snap state, but until §10.6 no normative sentence forbade repositioning, and T-825 has no guard. T-803's peek/half/full is a vertical snap of a fixed-position sheet - no conflict.
+      DELIVER: (a) docs/23 §10.2 gains the line "no overlay is draggable or repositionable; users choose visibility only" pointing at §10.6 rule 3, and ADR-0023 §1 gets the same one-line amendment (ADR-0023 is PROVISIONAL; if it is ACCEPTED by then, route the amendment to Fable + the user per CLAUDE.md). (b) A guard test in ui/test (and folded into T-825's suite) asserting that no chrome dock POSITION is read from or written to localStorage/sessionStorage/user state - only visibility and the sheet's snap state may be - and that no band-2/3 chrome element has a drag handler that moves it. Red on a deliberately injected position write.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+
+      WHAT THE USER WILL SEE ON STAGING: every floating control and panel sits in the one place the design gives it; nothing can be dragged somewhere else, and a reload never restores a moved panel - only which panels are shown.
+  - id: T-897
+    milestone: MMAP
+    title: "Path layer: (t, f) polylines on the surface in the tile pass - chirp, hop sequence, sweep path as first producers (user P2)"
+    status: todo
+    priority: normal
+    deps:
+    - T-806
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER PRINCIPLE P2 (docs/23 §10.6 rule 2): anything with (time x frequency) coordinates is rendered ON the map - as a point/pin, or as a TRACED PATH like Google Maps' blue directions line.
+      AUDIT EVIDENCE: pins, boxes, artefact lines, fog, priors, measurements, annotations and rules are all planned, but there is NO path/polyline primitive in the ADR-0023 §2 `LayerId` union and no producer for a chirp, a hop sequence or a sweep path; presence is only an interval box (ADR-0019).
+      DELIVER: a `paths` overlay LayerId in the per-pane layer registry (T-806) rendering an ordered (t, f) vertex list in CONTENT space through the pane's own capture-time mapping, in the SAME render pass as the tiles (docs/23 §10.1: band 0, re-laid-out every frame - never on the data-poll cadence, the T-388 defect), toggleable per pane from the layers menu, stroke-only (a layer can never tint a measurement - keep the byte-identical-with-overlays-on/off guard). Backend: a path record carrying absolute capture time per vertex, with provenance, served by a viewport route (docs/api.md + api_contract.rs together, T-079). First producers, from blind measurement only: a chirp's swept frequency over its time extent, a frequency-hop sequence, and a sweep path. Tests: a path's vertices stay on the same (t, f) as the tile rows under scroll/zoom (drift = invariant violation), through the mock SDR with a synthetic chirp and hop sequence and hidden truth.
+      WHAT THE USER WILL SEE ON STAGING: a chirp or a hopping emitter on the canvas has a thin line traced along the path it took through time and frequency, which can be turned off in the layers menu.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+    effort_reason: a new content-space render primitive on the shared-time-axis render pass plus a backend path record and route - the per-frame invariant makes it real-time display work
+  - id: T-898
+    milestone: MMAP
+    title: Retune history drawn as a traced directions-style path per device, from the recorded tune intervals (user P2)
+    status: todo
+    priority: normal
+    deps:
+    - T-897
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P2 (docs/23 §10.6 rule 2): the device's own movement through frequency is a thing with (t, f) coordinates and belongs ON the map as a traced path, like Google Maps' directions line.
+      DELIVER: the device's centre-frequency timeline - from the coverage map / tune history the backend already records per interval (centre, span, rate, device_id; CLAUDE.md "coverage map derived from the SDR configuration/tune history") - drawn through the paths layer as a directions-style line, one per device (the several-SDRs rule: each device's path, labelled by device_id), toggleable per pane. Each retune is a vertex at its capture time; a dwell is a vertical run. No new client-side derivation of tune history: read it from the backend (a route over the recorded tune intervals; docs/api.md + api_contract.rs together, T-079). Test through the mock SDR with scripted retunes: the drawn vertices land on the recorded retune instants and centres, and move with the tile rows under scroll/zoom.
+      WHAT THE USER WILL SEE ON STAGING: after tuning around, a line on the canvas traces where the radio has been tuned over time, like a route on a map.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+  - id: T-899
+    milestone: MMAP
+    title: "Size inversely proportional to influence: big panels never jump the map or offer a retune on a bare row click - re-spec T-814/T-815/T-821/T-804 + T-825 guard (user P4)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MAP-DESIGN
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P4 (docs/23 §10.6 rule 4): size is inversely proportional to influence. Big panels only add/remove things or shift coordinates slightly; anything that changes the map in a MAJOR way (retune, zoom, jump, base/layer switch, follow-live) is a small button or small cluster.
+      AUDIT EVIDENCE: docs/23 §11 rule 1 keeps device routes to Go-to + Selected actions and small controls are 36-48 px, but: T-814's Explore drawer (to ~90 vh) says "selecting an item pans/zooms (or offers a retune)"; T-815 says "jump the pane"; T-821/T-819's Research slide-in (460 px, full height) inherits the gated retune offer; T-804's Selected tab holds the most device actions in the largest surface.
+      DELIVER: (a) DOC (sonnet-level work, done here): docs/23 §10.6 rule 4 is in place; re-spec T-814/T-815/T-821/T-804's acceptance so a bare click on a row in a big panel never jumps the map or offers a retune - that lives on a small, explicit per-row button (and T-804's device actions become a compact action cluster, not a large surface); the coordinator has added notes to those tickets pointing here - reconcile their acceptance text with them. (b) GUARD (opus): a ui/test guard, folded into T-825, that no device route (the gated DeviceAction path) and no view-jump handler is bound to a big-panel BODY element (sheet, Explore drawer, Research slide-in, left column) - only to small explicit controls; red on an injected row-click jump.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+
+      WHAT THE USER WILL SEE ON STAGING: clicking a row in a big panel (sheet, Explore drawer, Research) highlights its mark but never moves or retunes the map; moving the map from a row is a small explicit button on that row.
+  - id: T-900
+    milestone: MMAP
+    title: "Overlays are closeable, not just fadeable: a visible dismiss (and Esc) on the sheet, Research slide-in and left column (user P1)"
+    status: todo
+    priority: high
+    deps:
+    - T-895
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER PRINCIPLE P1 (docs/23 §10.6 rule 1): overlays are temporary and meant to be CLOSED so the user resumes the map - not time-based fading.
+      AUDIT EVIDENCE: only fade-to-35 % after ~6 s idle (docs/23 §10.2) exists; there is no dismiss on the bottom sheet (T-803), the Research slide-in, or the left column.
+      DELIVER: every band-2/3 overlay - the bottom sheet, the Research slide-in, the left column (the collapse ticket), any open menu - has a visible, keyboard-reachable DISMISS that returns its pixels to the map, and Esc closes the topmost. Fade-to-35 % stays only as an idle courtesy on band-2 chrome and is never a substitute. A closed overlay reopens from its small control. Test at 1440/1000/420 px that each overlay closes and the map area it covered is uncovered afterwards (the unoccludedColumns harness helper). Presentation only.
+      WHAT THE USER WILL SEE ON STAGING: every panel over the map has an x; closing it gives the map back, and Esc closes the top one.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
