@@ -71,6 +71,14 @@ RED_THRESHOLD = 2
 NOTIFY_STEP = 2
 WINDOW_DAYS = 7
 
+#: The user's rule (2026-09-23): a red test that passes alone twice is accepted and the batch lands
+#: - so a flake is no longer paid for in gates, and must be FIXED instead of tolerated. The 3rd
+#: passed-alone incident of one test inside `WINDOW_DAYS` files a deflake request, which
+#: ops/work-runner.py dispatches as a `deflaker`; another every `DEFLAKE_STEP` after that.
+DEFLAKE_THRESHOLD = 3
+DEFLAKE_STEP = 2
+DEFLAKE_REQUESTS = "deflake-requests.jsonl"
+
 #: `[09-22 15:35:26] TRIAGE: ...`
 _LINE = re.compile(r"^\[(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\] (.*)$")
 
@@ -277,6 +285,12 @@ class Entry:
     notified_at: int = 0
     #: Reds inside the window, recomputed on every update — what the rule actually reads.
     recent_red: int = 0
+    #: Passed-alone incidents inside the window - what the deflake rule reads.
+    recent_passed: int = 0
+    #: `recent_passed` when a deflake request was last filed (persisted like `notified_at`).
+    deflaked_at: int = 0
+    #: This test's incidents, oldest first, for the deflaker's brief.
+    incidents: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -289,6 +303,8 @@ class Entry:
             "loads": self.loads,
             "notified_at": self.notified_at,
             "recent_red": self.recent_red,
+            "recent_passed": self.recent_passed,
+            "deflaked_at": self.deflaked_at,
         }
 
     def verdict(self) -> str:
@@ -335,6 +351,9 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
                 e.loads.append(inc.load)
             if inc.ts >= cut:
                 e.recent_red += 1
+                if inc.outcome == PASSED_ALONE:
+                    e.recent_passed += 1
+            e.incidents.append(inc)
     return ledger
 
 
@@ -356,6 +375,42 @@ def load_state(path: str) -> dict[str, int]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def load_deflaked(path: str) -> dict[str, int]:
+    """`{test: deflaked_at}` from `flakes.json`; empty when missing or corrupt."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            tests = json.load(fh).get("tests") or {}
+        return {str(k): int(v.get("deflaked_at") or 0) for k, v in tests.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+def deflake_due(ledger: dict[str, Entry]) -> list[Entry]:
+    """Tests whose passed-alone count in the window reached DEFLAKE_THRESHOLD, then each +DEFLAKE_STEP."""
+    for e in ledger.values():
+        if e.recent_passed < e.deflaked_at:      # the filed incidents aged out of the window
+            e.deflaked_at = 0
+    out = [e for e in ledger.values()
+           if e.recent_passed >= DEFLAKE_THRESHOLD and e.recent_passed >= e.deflaked_at + DEFLAKE_STEP
+           and (e.deflaked_at == 0 or e.recent_passed > e.deflaked_at)]
+    return sorted(out, key=lambda e: (-e.recent_passed, e.test))
+
+
+def deflake_request(e: Entry, now: float, days: int = WINDOW_DAYS) -> dict:
+    """The record ops/work-runner.py turns into a deflaker dispatch (its brief carries `evidence`)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", e.test.lower()).strip("-")[:60]
+    kind = "spec" if e.test.endswith(".e2e.mjs") else "rust"
+    incs = [{"ts": datetime.fromtimestamp(i.ts).strftime("%Y-%m-%d %H:%M:%S"), "outcome": i.outcome,
+             "load_before": i.load, "batch": i.batch} for i in e.incidents[-12:]]
+    lines = [f"{e.test}: passed alone {e.recent_passed}x in {days} days ({e.red_in_gate} reds recorded, "
+             f"failed alone {e.failed_alone}); verdict so far: {e.verdict()}.",
+             "Each red below is a `TRIAGE:` line in $HACKRIFF_OPS/merge-runner.log at that time "
+             "(grep -n 'TRIAGE' ... | grep '<HH:MM:SS>'), with the gate output just above it; loads are 1-min averages."]
+    lines += [f"  {i['ts']}  {i['outcome']}  load {i['load_before']}" for i in incs]
+    return {"ts": now, "id": f"deflake-{slug}", "test": e.test, "kind": kind, "count_7d": e.recent_passed,
+            "incidents": incs, "evidence": "\n".join(lines)}
 
 
 def save(path: str, ledger: dict[str, Entry]) -> bool:
@@ -462,8 +517,10 @@ def ledger(ops: str | None = None, *, now: float | None = None, days: int = WIND
     ops = ops or gatelog.ops_dir()
     entries = build(read_sources(ops), now=now, days=days)
     state = load_state(os.path.join(ops, LEDGER_JSON))
+    deflaked = load_deflaked(os.path.join(ops, LEDGER_JSON))
     for name, e in entries.items():
         e.notified_at = state.get(name, 0)
+        e.deflaked_at = deflaked.get(name, 0)
     return entries
 
 
@@ -491,6 +548,20 @@ def update(ops: str | None = None, *, root: str | None = None, now: float | None
             f"flake:{e.test}",
         )
         e.notified_at = e.recent_red
+    for e in deflake_due(entries):
+        req = deflake_request(e, time.time() if now is None else now, days)
+        try:
+            with open(os.path.join(ops, DEFLAKE_REQUESTS), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(req) + "\n")
+        except Exception:
+            continue
+        append_attention(os.path.join(ops, NEEDS_FILE),
+                         f"DEFLAKE_REQUESTED {e.test} passed alone {e.recent_passed}x in {days}d - "
+                         f"the work runner dispatches a deflaker ({req['id']})")
+        alert(root, "amber", f"deflaker requested: {e.test}",
+              f"Passed alone {e.recent_passed}x in {days} days - accepted each time under the user's rule; "
+              f"now it gets fixed. Dispatch id {req['id']}.", f"deflake:{e.test}")
+        e.deflaked_at = e.recent_passed
     save(os.path.join(ops, LEDGER_JSON), entries)
     return filed
 

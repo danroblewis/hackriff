@@ -338,6 +338,22 @@ def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
     return out
 
 
+def flake_accepts(ops: str, since: datetime, until: datetime) -> list[dict]:
+    """flaky.jsonl records the merge runner wrote when a red test passed alone twice and the gate went
+    on without a re-run (the user's rule, 2026-09-23): {ts, tests, batch, suite, kind, saved_s}."""
+    out = []
+    for o in _jsonl(os.path.join(ops, "flaky.jsonl")):
+        if not o.get("accepted"):
+            continue
+        try:
+            t = datetime.fromisoformat(str(o.get("ts")))
+        except ValueError:
+            continue
+        if since <= t <= until:
+            out.append(dict(o, _t=t))
+    return out
+
+
 def summary(ops: str, now: datetime | None = None) -> dict:
     now = now or datetime.now()
     h6 = hourly(ops, now - timedelta(hours=6), now)
@@ -375,6 +391,8 @@ def summary(ops: str, now: datetime | None = None) -> dict:
         "conflicts_24h": sum(g["conflicts"] for g in g24),
         "touchpoints_24h": len(touchpoints(ops, now - timedelta(hours=24), now)),
         "queue_depth": len(queue), "workers_running": running, "worker_cap": cap,
+        "flake_accepts_24h": len(fa := flake_accepts(ops, now - timedelta(hours=24), now)),
+        "flake_saved_min_24h": round(sum(float(o.get("saved_s") or 0) for o in fa) / 60),
     }
 
 
@@ -420,7 +438,9 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
         exp = f"experiment ? ({type(e).__name__})"
     return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
             f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
-            f"{exp} · holding: {_holding(ops, now)}")
+            f"{exp} · holding: {_holding(ops, now)}"
+            + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min)"
+               if s.get("flake_accepts_24h") else ""))
 
 
 def _holding(ops: str, now: datetime) -> str:
@@ -481,8 +501,15 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
     for kind, why in trend_breaks(s, _jsonl(os.path.join(ops, "flow.jsonl")), holding):
         send("amber", f"pipeline trend break: {kind}", f"{why}\n{line}", f"flow:break:{kind}")
         posted.append(f"flow:break:{kind}")
-    if now.timestamp() - _last_sent(ops, "flow:digest") >= DIGEST_EVERY_S:
-        send("green", "pipeline digest", line, "flow:digest")
+    last = _last_sent(ops, "flow:digest")
+    if now.timestamp() - last >= DIGEST_EVERY_S:
+        # Every flake the gate accepted since the last digest, by name - never a silent pass.
+        events = flake_accepts(ops, datetime.fromtimestamp(last) if last else now - timedelta(hours=24), now)
+        body = line + "".join(
+            f"\nflake accepted {o['_t'].strftime('%H:%M')}: {o.get('tests')} in `just {o.get('suite')}` "
+            f"({o.get('batch')}) - passed alone twice, ~{round(float(o.get('saved_s') or 0) / 60)} min saved"
+            for o in events)
+        send("green", "pipeline digest", body, "flow:digest")
         posted.append("flow:digest")
     return posted
 

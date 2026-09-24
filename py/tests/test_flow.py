@@ -168,3 +168,20 @@ def test_digest_posts_every_two_hours_and_each_break_at_once(tmp_path):
     (tmp_path / "flow.jsonl").write_text(json.dumps(_s(now.timestamp() - 1800, touchpoints_24h=1)) + "\n")
     assert flow.digest(ops, _s(now.timestamp()), now, send) == ["flow:break:touchpoint"]
     assert sent == [("amber", "flow:break:touchpoint")]
+
+
+
+def test_accepted_flakes_reach_the_tick_line_and_the_digest(tmp_path):
+    ops = str(tmp_path)
+    now = datetime(2026, 9, 23, 18)
+    (tmp_path / "flaky.jsonl").write_text(
+        json.dumps({"ts": "2026-09-23T17:10:00", "tests": "fog-of-war.e2e.mjs", "batch": "T-1 T-2", "accepted": True,
+                    "suite": "test-ui-e2e", "kind": "spec", "saved_s": 780}) + "\n"
+        + json.dumps({"ts": "2026-09-23T17:20:00", "tests": "x", "batch": "T-3"}) + "\n")   # old-style, not accepted
+    s = dict(_s(now.timestamp()), flake_accepts_24h=1, flake_saved_min_24h=13)
+    assert flow.tick_line(ops, s, now).endswith(" · flake-accepts 1 (saved 13 min)")
+    assert [o["tests"] for o in flow.flake_accepts(ops, datetime(2026, 9, 23), now)] == ["fog-of-war.e2e.mjs"]
+    bodies = []
+    flow.digest(ops, s, now, lambda level, title, body, key: bodies.append((key, body)))
+    digest = dict(bodies)["flow:digest"]
+    assert "flake accepted 17:10: fog-of-war.e2e.mjs in `just test-ui-e2e` (T-1 T-2) - passed alone twice, ~13 min saved" in digest
