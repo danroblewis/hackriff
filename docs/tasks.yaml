@@ -20987,6 +20987,17 @@ tasks:
       catalogue row.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (`just test-crate hk-blocks`), then HAND
       BACK. Never `just gate`.
+
+      2026-09-23 (coordinator): rebuilt on main after a conflict in hk-blocks symbol/mod.rs registration (kept main's descramble + mlevel_slicer, added bitstuff through the shared mauto::planned()); result re-applied. Old tip old/task-t613.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 15:14).
+      Added hk-blocks `bitstuff` (symbol group, bits|frames -> same): HDLC zero destuff/stuff with stuff_after=5, abort_ones=7, direction, flag documented (framing stays sync_search's). State is only the run-of-ones counter, so chunk-boundary stuffed zeros are handled identically. Bits mode passes flags/abort runs through and counts aborts; frames mode restarts per frame and truncates at an abort run. Descriptor pinned (params_pinned true) and registered; the T-606 catalogue row is now built by bitstuff::descriptor. Unit tests: known AIS-style frame, stuff/destuff round trip, chunking invariance 1..N incl. boundary zero, frames mode + abort. They fail without the block (it is not registered, so mk() panics).
+      Tests: cargo nextest run -p hk-blocks --no-fail-fast -> exit 0 (126 passed)
+      precheck exit 0
+      Commits: f2fb44c4
+      Observed, not chased: ADR-0011 section 1.5/9 table row for bitstuff not updated to say params pinned
+      Use cases: SIGNAL-015, SIGNAL-036, SIGNAL-004, AWARE-007, AWARE-012, PROP-024, PROP-025
+      Resources: 58 CPU-s, peak 0.5 GB
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
