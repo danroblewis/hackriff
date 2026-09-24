@@ -839,3 +839,16 @@ def test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed(tmp_path, mon
     assert R.release_stale_claims(claims, board)
     assert {t: c["state"] for t, c in claims.items()} == {"T-1": "merged", "T-2": "queued", "T-3": "queued", "T-5": "queued"}
     assert "CLAIM T-1: the board says done and task-t1 is in no queue" in (tmp_path / "work-runner.log").read_text()
+
+
+def test_no_rebuilt_branch_close_while_a_single_merge_is_staged(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "MERGE_HEAD").write_text("abc\n")      # the runner is merging task-t1 alone
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "queued", "started": 0}}
+    R.release_stale_claims(claims, {"T-1": {"status": "done"}})
+    assert claims["T-1"]["state"] == "queued"

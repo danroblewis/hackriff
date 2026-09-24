@@ -915,6 +915,17 @@ def _run_fix(c, n, prompt):
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 
+def branches_waiting():
+    """Branches in merge-queue.txt or in the running batch (the bulk marker's branches=)."""
+    waiting = set()
+    for f in (MERGE_QUEUE, BULKMARK):
+        try:
+            waiting |= set(open(f).read().replace("branches=", " ").split())
+        except OSError:
+            pass
+    return waiting
+
+
 def release_stale_claims(claims, tasks_by_id):
     changed = False
     # A `queued` claim whose branch is already on main is finished: the merge runner landed it
@@ -934,14 +945,10 @@ def release_stale_claims(claims, tasks_by_id):
     # rebuilt copy (task-t538 as task-t538-rl), so its own branch is never on main. 12 of 13 `queued`
     # claims were such on 2026-09-24 02:50, 26-42 h after landing - each one a deflake wait on a spec
     # its branch touched (deflake_deferred) and a phantom in every "in queue" count.
-    waiting = set()
-    for f in (MERGE_QUEUE, BULKMARK):
-        try:
-            waiting |= set(open(f).read().replace("branches=", " ").split())
-        except OSError:
-            pass
+    # A staged single-branch merge is in neither list: wait for it to end (the next tick decides).
+    waiting = None if os.path.exists(f"{REPO}/.git/MERGE_HEAD") else branches_waiting()
     for tid, c in list(claims.items()):
-        if (c.get("state") == "queued" and c.get("branch") and c["branch"] not in waiting
+        if (waiting is not None and c.get("state") == "queued" and c.get("branch") and c["branch"] not in waiting
                 and tasks_by_id.get(tid, {}).get("status") in ("done", "cancelled")):
             log(f"CLAIM {tid}: the board says {tasks_by_id[tid]['status']} and {c['branch']} is in no queue "
                 f"(landed as a rebuilt branch) - claim closed")
@@ -1539,12 +1546,7 @@ def deflake_deferred(slug, req, claims):
     path = f"ui/e2e/{test}"
     # A `queued` claim counts only while its branch really is queued or gating: 15 claims were
     # `queued` 25-40 h after landing under another name (T-538 as task-t538-rl) - a forever wait.
-    waiting = set()
-    for f in (MERGE_QUEUE, BULKMARK):
-        try:
-            waiting |= set(open(f).read().replace("branches=", " ").split())
-        except OSError:
-            pass
+    waiting = branches_waiting()
     for tid, t in claims.items():
         if tid.startswith(DEFLAKE_PREFIX) or t.get("state") not in _INFLIGHT or not t.get("branch"):
             continue
