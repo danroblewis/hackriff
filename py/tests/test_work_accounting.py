@@ -283,3 +283,24 @@ def test_dispatch_counts_fix_runs_against_the_cap():
     claims = {"A": {"state": "running", "kind": "work"}, "B": {"state": "running", "kind": "fix"},
               "C": {"state": "running", "kind": "review"}, "D": {"state": "queued", "kind": "work"}}
     assert R.busy_workers(claims) == 2
+
+
+# --------------------------------------------------------------------- dead dispatches (2026-09-23)
+def test_a_dispatch_that_ended_with_nothing_goes_back_to_todo_after_the_release_window():
+    now, old = 1_000_000.0, 1_000_000.0 - (R.RELEASE_AFTER_H + 1) * 3600
+    tasks = {t: {"id": t, "status": s} for t, s in
+             [("T-801", "in-progress"), ("T-512", "in-progress"), ("T-9", "in-progress"), ("T-10", "in-progress"),
+              ("T-11", "in-progress"), ("T-12", "todo"), ("T-13", "in-progress")]}
+    claims = {"T-801": {"state": "no-work", "started": old},          # killed 2 min in: revert
+              "T-512": {"state": "timeout", "started": old},          # revert
+              "T-9": {"state": "no-work", "started": now - 600},      # inside the window: wait
+              "T-10": {"state": "no-work", "started": old},           # has commits: someone's work
+              "T-11": {"state": "blocked", "started": old},           # a person's call, never automatic
+              "T-12": {"state": "no-work", "started": old},           # already todo: release handles it
+              "T-13": {"state": "error", "started": old}}             # an agent took it up since
+    got = R.dead_dispatches(claims, tasks, now, has_work=lambda t: t == "T-10", busy={"T-13"})
+    assert sorted(got) == ["T-512", "T-801"]
+
+
+def test_has_work_fails_safe():
+    assert R.has_work("T-does-not-exist-anywhere") is False

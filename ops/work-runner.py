@@ -1026,6 +1026,34 @@ def handle_gate_failures(claims, dry):
 
 
 # ---------- board sync ----------
+def has_work(tid):
+    """A branch with commits ahead of main, or a dirty worktree: someone's work (same test as candidates)."""
+    try:
+        if sh(["git", "rev-parse", "--verify", "-q", branch_of(tid)]).strip() and \
+           int(sh(["git", "rev-list", "--count", f"main..{branch_of(tid)}"]).strip() or 0) > 0:
+            return True
+        wt = worktree_of(tid)
+        return os.path.isdir(wt) and any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+    except Exception:
+        return True                       # cannot tell: treat as work, never revert
+
+
+def dead_dispatches(claims, tasks, now, has_work=has_work, busy=frozenset()):
+    """Tickets THIS runner flipped to in-progress whose run ended with nothing to show - no-work,
+    error or timeout, RELEASE_AFTER_H ago, no commits, no edits - and that no agent took up since.
+    They go back to todo; release_stale_claims then frees the claim and dispatch sees them again.
+    Before this rule the flip was one-way: release_stale_claims only frees a claim whose ticket is
+    `todo`, so a dispatch killed two minutes in (T-801, 2026-09-22 14:38, the stop-kill pattern)
+    held its ticket in-progress for 26 h and with it the 19 MMAP tickets that depend on it."""
+    out = []
+    for tid, c in claims.items():
+        t = tasks.get(tid)
+        if (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout")
+                and now - c.get("started", 0) > RELEASE_AFTER_H * 3600 and tid not in busy and not has_work(tid)):
+            out.append(tid)
+    return out
+
+
 def sync_board(claims, dry):
     """Flip statuses on main in ONE small commit, only when main is safe. Never edits anything else."""
     if not main_safe_to_commit():
@@ -1042,16 +1070,20 @@ def sync_board(claims, dry):
     # Agents the coordinator or supervisor spawned with the Agent tool are not claims, but the
     # PreToolUse(Agent) hook registered them (agent-registry.jsonl, user 2026-09-23): a ticket
     # with a registered agent spawned in the last 30 min and still `todo` is in progress too.
+    recent_agents = set()
     try:
         cut = time.time() - 1800
         with open(f"{S}/agent-registry.jsonl") as f:
             for line in f.readlines()[-200:]:
                 o = json.loads(line)
                 t = tasks.get(o.get("ticket") or "")
+                if t and o.get("ts", 0) > cut:
+                    recent_agents.add(o["ticket"])
                 if t and o.get("ts", 0) > cut and t.get("status") == "todo" and (o["ticket"], "in-progress", None) not in flips:
                     flips.append((o["ticket"], "in-progress", None))
     except Exception:
         pass
+    flips += [(tid, "todo", None) for tid in dead_dispatches(claims, tasks, time.time(), has_work, recent_agents)]
     for tid, sha in landed.items():
         t = tasks.get(tid)
         if t and t.get("status") in ("todo", "in-progress"):
