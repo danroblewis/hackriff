@@ -45,7 +45,9 @@
 use std::sync::{MutexGuard, PoisonError};
 
 use hk_model::repo::synthesis::Resolution;
-use hk_model::{EmitterId, IdentityAccess, RepoError, Repository, SelectionId, Timestamp};
+use hk_model::{
+    EmitterId, IdentityAccess, LifecycleState, RepoError, Repository, SelectionId, Timestamp,
+};
 use serde_json::{Map, Value, json};
 
 use crate::control::{
@@ -398,6 +400,12 @@ fn resolve_target(state: &ApiState, target: &Target) -> Result<Resolved, Fail> {
             let repo = inventory_store(state)?;
             let fail = repo_fail("inventory store", "no such inventory entry");
             let live = repo.live_emitter_id(id).map_err(&fail)?;
+            // T-860: a user-deleted entry is out of the inventory, and a user delete wins — a job
+            // may not analyse it, attach to it or confirm it. `404`, as every mutating inventory
+            // route answers for a deleted entry.
+            if repo.emitter_lifecycle_state(live).map_err(&fail)? == LifecycleState::Deleted {
+                return Err(Fail::new(404, "not_found", "no such inventory entry"));
+            }
             let e = repo
                 .emitter_with_access(live, IdentityAccess::Standard)
                 .map_err(&fail)?

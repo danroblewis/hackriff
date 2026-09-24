@@ -1436,6 +1436,18 @@ fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
     let mut attach_warning = None;
     let attached = match (&inner.attacher, &request) {
         (Some(a), Some(req)) if req.attach && !cancelled && o.state == JobState::Done => {
+            // Re-read under the lock at the end of the attach transaction: a cancel that lands
+            // while attaching rolls the attach back. (Today the engine's last progress report
+            // already marks the job `done`, so a `DELETE` in this window *forgets* the finished
+            // job rather than cancelling it — and forgetting a job does not undo its analysis, so
+            // a vanished job is not a cancelled one.)
+            let is_cancelled = || {
+                inner
+                    .lock()
+                    .jobs
+                    .get(&n)
+                    .is_some_and(|j| j.snap.state == JobState::Cancelled)
+            };
             let input = AttachInput {
                 job_id: &format!("a{n}"),
                 profile: req.profile,
@@ -1448,6 +1460,7 @@ fn finish_search(inner: &Inner, n: u64, mut o: SearchOutcome, f: Finished) {
                 resolution: resolution.as_ref(),
                 content_class: class.unwrap_or(ContentClass::FAIL_CLOSED),
                 overload: f.overload,
+                cancelled: Some(&is_cancelled),
             };
             match a.attach(&input) {
                 Ok(x) => x,

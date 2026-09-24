@@ -79,6 +79,11 @@ pub struct AttachInput<'a> {
     pub content_class: ContentClass,
     /// Whether any acquired piece was recorded under an overloaded front end.
     pub overload: Option<bool>,
+    /// Whether the job has been cancelled since it finished searching, read under the job
+    /// manager's lock. Checked last, inside the attach transaction: a cancelled job never attaches
+    /// (docs/api.md), so a cancel that lands mid-attach rolls every write back — decodes, row and
+    /// confirmation alike. `None`: nothing can cancel.
+    pub cancelled: Option<&'a (dyn Fn() -> bool + Sync)>,
 }
 
 /// What attaching did (served on the job: `emitter_id`, `decodes`, `confirm`).
@@ -300,26 +305,83 @@ fn decode_row(
 }
 
 /// Attaches a finished job's results (module docs). `Ok(None)` when there is nothing to attach:
-/// the job did not finish `done`, or it has no results.
+/// the job did not finish `done`, it has no results, or it was cancelled before the attach
+/// committed.
+///
+/// **One transaction.** Every write — the stored decodes, the new candidate they may create, the
+/// `emitter_synthesis` row and the confirmation — lands together or not at all, so a failed write
+/// can never leave a Confirmed emitter behind a job that says `not-attached`, and a cancel that
+/// lands mid-attach undoes the lot.
 pub fn attach(
     ingest: &mut Ingest,
     policy: &SynthesizedConfirm,
     input: &AttachInput<'_>,
 ) -> Result<Option<Attached>, RepoError> {
     let o = input.outcome;
-    if o.state != hk_synth::JobState::Done {
+    if o.state != hk_synth::JobState::Done || o.results.is_empty() {
         return Ok(None);
     }
+    ingest.repo_mut().begin_write_batch()?;
+    let out = attach_in(ingest, policy, input);
+    let cancelled = input.cancelled.is_some_and(|c| c());
+    match out {
+        Ok(a) if !cancelled => {
+            ingest.repo_mut().commit_write_batch()?;
+            Ok(a)
+        }
+        Ok(_) => {
+            ingest.repo_mut().rollback_write_batch()?;
+            Ok(None)
+        }
+        Err(e) => {
+            let _ = ingest.repo_mut().rollback_write_batch();
+            Err(e)
+        }
+    }
+}
+
+/// [`attach`]'s writes, inside its transaction.
+fn attach_in(
+    ingest: &mut Ingest,
+    policy: &SynthesizedConfirm,
+    input: &AttachInput<'_>,
+) -> Result<Option<Attached>, RepoError> {
+    let o = input.outcome;
     let Some(r) = o.results.first() else {
         return Ok(None);
     };
     let hash = recipe_hash(&r.recipe);
     let center = (input.band.lo_hz + input.band.hi_hz) / 2.0;
     let width = input.band.hi_hz - input.band.lo_hz;
+    let evidence_bits = r.analytic_holdout_bits.map(f64::from);
+    let not_attached = |stored, valid, reason: &str| Attached {
+        emitter: None,
+        decodes_stored: stored,
+        decodes_valid: valid,
+        synthesis_written: false,
+        confirm: SynthConfirmDecision {
+            rule: CONFIRM_SYNTH_RULE,
+            outcome: SynthConfirmOutcome::NotAttached,
+            evidence_bits,
+            reason: reason.to_owned(),
+        },
+    };
 
-    // 1. The emitter: the target, else the nearest in the window.
+    // 1. The emitter: the target, else the nearest in the window. A user-deleted target is out of
+    //    the inventory and a user delete wins: nothing is stored, linked or appended for it (the
+    //    route refuses such a target at admission; this is the delete-during-search race).
     let mut emitter = match input.target {
-        Some(e) => Some(e),
+        Some(e) => {
+            let e = ingest.repo().live_emitter_id(e)?;
+            if ingest.repo().emitter_lifecycle_state(e)? == LifecycleState::Deleted {
+                return Ok(Some(not_attached(
+                    0,
+                    0,
+                    "the target was deleted by the user; a user delete wins",
+                )));
+            }
+            Some(e)
+        }
         None => emitter_in_window(ingest.repo(), input.band, input.window)?,
     };
 
@@ -354,37 +416,31 @@ pub fn attach(
                         linked_at: t,
                     })?;
                 }
-                // No emitter: ordinary ingestion, whose identity sighting creates the candidate.
+                // No emitter yet: ordinary ingestion, whose identity sighting creates the
+                // candidate — for this frame only. Every later frame is stored and linked to the
+                // emitter it created (the arm above): entity resolution mints a new entry per
+                // sighting of a structural identity, so ingesting every frame would stack one
+                // ghost candidate per frame on one emission.
                 None => {
                     ingest.store_decode(d, None, None, Some(center), Some(width))?;
+                    emitter = ingest.take_new_emitters().into_iter().next();
                 }
             }
             stored += 1;
             valid += u64::from(is_valid);
         }
-        if emitter.is_none() {
-            emitter = ingest.take_new_emitters().into_iter().next();
-        }
     }
 
-    let evidence_bits = r.analytic_holdout_bits.map(f64::from);
     let Some(emitter) = emitter else {
-        return Ok(Some(Attached {
-            emitter: None,
-            decodes_stored: stored,
-            decodes_valid: valid,
-            synthesis_written: false,
-            confirm: SynthConfirmDecision {
-                rule: CONFIRM_SYNTH_RULE,
-                outcome: SynthConfirmOutcome::NotAttached,
-                evidence_bits,
-                reason: "no inventory emitter in the analysed window, and no decode created one"
-                    .into(),
-            },
-        }));
+        return Ok(Some(not_attached(
+            stored,
+            valid,
+            "no inventory emitter in the analysed window, and no decode created one",
+        )));
     };
 
-    // 3. The decision, then the row, then the lifecycle.
+    // 3. The decision, then the row, then the lifecycle — all in this transaction, and the state
+    //    read here is the state the confirmation changes (the batch holds the write lock).
     let trust = ingest.repo().window_trust(emitter, input.window)?;
     let decision = policy.decide(&SynthesizedEvidence {
         profile: input.profile,
@@ -393,12 +449,27 @@ pub fn attach(
         suspect_fraction: (trust.detections > 0).then(|| trust.suspect_fraction()),
         overload: input.overload,
     });
-    let mut confirm = match &decision {
-        Ok(reason) => SynthConfirmDecision {
+    let state = ingest.repo().emitter_lifecycle_state(emitter)?;
+    if state == LifecycleState::Deleted {
+        // Deleted since it was chosen: a user delete wins, and the rule never resurrects.
+        return Ok(Some(not_attached(
+            stored,
+            valid,
+            "the emitter was deleted by the user; a user delete wins",
+        )));
+    }
+    let confirm = match &decision {
+        Ok(reason) if state == LifecycleState::Candidate => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
             outcome: SynthConfirmOutcome::Confirmed,
             evidence_bits,
             reason: reason.clone(),
+        },
+        Ok(reason) => SynthConfirmDecision {
+            rule: CONFIRM_SYNTH_RULE,
+            outcome: SynthConfirmOutcome::Already,
+            evidence_bits,
+            reason: format!("already confirmed; this analysis would have: {reason}"),
         },
         Err(why) => SynthConfirmDecision {
             rule: CONFIRM_SYNTH_RULE,
@@ -407,28 +478,6 @@ pub fn attach(
             reason: why.clone(),
         },
     };
-    if let Ok(reason) = &decision {
-        match ingest.repo_mut().change_emitter_lifecycle(
-            emitter,
-            LifecycleState::Confirmed,
-            LifecycleAuthor::Auto,
-            CONFIRM_SYNTH_RULE,
-            reason,
-            input.window.end,
-        ) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                confirm.outcome = SynthConfirmOutcome::Already;
-                confirm.reason = format!("already confirmed; this analysis would have: {reason}");
-            }
-            // Deleted by the user: a user delete wins, and the rule never resurrects.
-            Err(RepoError::NotFound { .. }) => {
-                confirm.outcome = SynthConfirmOutcome::Already;
-                confirm.reason = "deleted by the user; a user delete wins".into();
-            }
-            Err(e) => return Err(e),
-        }
-    }
 
     let holdout = r.holdout.as_ref();
     let row = EmitterSynthesis {
@@ -503,17 +552,23 @@ pub fn attach(
             confirm: serde_json::to_value(&confirm).ok(),
         }),
     };
-    let written = match ingest.repo_mut().insert_synthesis(&row) {
-        Ok(_) => true,
-        // The emitter vanished (a user delete between search and attach): nothing to append to.
-        Err(RepoError::NotFound { .. }) => false,
-        Err(e) => return Err(e),
-    };
+    // The row first, then the irreversible transition; the transaction makes them one.
+    ingest.repo_mut().insert_synthesis(&row)?;
+    if confirm.outcome == SynthConfirmOutcome::Confirmed {
+        ingest.repo_mut().change_emitter_lifecycle(
+            emitter,
+            LifecycleState::Confirmed,
+            LifecycleAuthor::Auto,
+            CONFIRM_SYNTH_RULE,
+            &confirm.reason,
+            input.window.end,
+        )?;
+    }
     Ok(Some(Attached {
         emitter: Some(emitter),
         decodes_stored: stored,
         decodes_valid: valid,
-        synthesis_written: written,
+        synthesis_written: true,
         confirm,
     }))
 }
@@ -718,6 +773,27 @@ mod tests {
         .unwrap();
         assert!(reason.contains("(template-fixed)"), "{reason}");
         assert!(!reason.contains("null control"), "{reason}");
+    }
+
+    /// ADR-0022 §4.2 (review M1): the check is worth at most `width × differences − L_check`,
+    /// whatever the evaluator reports. A searched CRC-8 on a beacon repeating one payload five
+    /// times has one difference: 8 − 13 = −5 bits, so it refuses even when told 40.
+    #[test]
+    fn check_bits_are_clamped_to_width_times_differences_less_l_check() {
+        let e = ok(&with(|h| {
+            h.check_width = Some(8);
+            h.differences = 1;
+            h.l_check = Some(13.0);
+            h.check_bits = Some(40.0);
+            h.analytic_bits = 45.0;
+        }))
+        .unwrap_err();
+        assert!(e.contains("hard check floor"), "{e}");
+        assert!(e.contains("-5.0 bits"), "{e}");
+        // Clamped check bits come off the analytic total too: 3 differences of CRC-16, reported
+        // 40 check bits but worth 27, with 30 analytic → 17 after the 13-bit excess is removed.
+        let e = ok(&with(|h| h.check_bits = Some(40.0))).unwrap_err();
+        assert!(e.contains("17.0 analytic hold-out bits"), "{e}");
     }
 
     /// ADR-0015 §5.5 condition 4, failing closed on what was not measured.

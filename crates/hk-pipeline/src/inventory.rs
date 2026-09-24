@@ -475,7 +475,23 @@ impl SynthesizedConfirm {
                     .into(),
             );
         };
-        let check_bits = h.check_bits.map(f64::from).unwrap_or(f64::NAN);
+        // ADR-0022 §4.2: a check can be worth no more than `width × differences − L_check`,
+        // whatever the evaluator reports — `differences` counts a repeated payload once, so a
+        // beacon repeating one frame earns one frame's bits. The excess is taken off the analytic
+        // total too, since the S5 bits are part of it.
+        let reported = h.check_bits.map(f64::from).unwrap_or(f64::NAN);
+        let bound = f64::from(width) * f64::from(h.differences) - l_check;
+        // `f64::min` drops a NaN: a missing report must stay missing, and refuse below.
+        let check_bits = if reported.is_nan() {
+            f64::NAN
+        } else {
+            reported.min(bound)
+        };
+        let excess = if reported.is_nan() {
+            0.0
+        } else {
+            (reported - check_bits).max(0.0)
+        };
         if check_bits.is_nan() || check_bits < self.hard_check_floor_bits {
             return Err(format!(
                 "the check carries {check_bits:.1} bits after L_check {l_check:.1}, under the \
@@ -485,7 +501,7 @@ impl SynthesizedConfirm {
                 self.min_differences(width, l_check),
             ));
         }
-        let analytic = f64::from(h.analytic_bits);
+        let analytic = f64::from(h.analytic_bits) - excess;
         if analytic.is_nan() || analytic < self.min_analytic_holdout_bits {
             return Err(format!(
                 "{analytic:.1} analytic hold-out bits against a {:.0}-bit threshold",

@@ -1231,6 +1231,33 @@ mod m9 {
             .expect("attached to the new candidate");
         assert_eq!(row.job.as_ref().unwrap().job_id, "a1");
         assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        // Exactly ONE candidate for one emission (review B1): the first frame's sighting creates
+        // it and every later frame is linked to it, rather than each structural-identity sighting
+        // minting a ghost of its own.
+        let all = repo
+            .emitters_in_region(&hk_model::Region::new(
+                FreqRange::new(1e6, 6e9),
+                TimeRange::new(
+                    Timestamp::from_unix_nanos(0),
+                    Timestamp::from_unix_nanos(T0_NS + 3600 * S),
+                ),
+            ))
+            .unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![id],
+            "one emission, one inventory entry"
+        );
+        let linked = repo
+            .emitter_links(id)
+            .unwrap()
+            .into_iter()
+            .filter(|l| matches!(l.target, LinkTarget::Decode(_)))
+            .count();
+        assert_eq!(
+            linked, 12,
+            "every stored decode belongs to the one candidate"
+        );
         // The new candidate has no detection in the window, so the front end's trust over it is
         // unknown: it stays a candidate (ADR-0015 §5.5 condition 4 fails closed).
         let confirm = done.confirm.clone().unwrap();
@@ -1245,6 +1272,133 @@ mod m9 {
         assert_eq!(
             repo.emitter_lifecycle_state(id).unwrap(),
             LifecycleState::Candidate
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review B2: a job whose emitter target the user deleted while it searched attaches nothing
+    /// to it — no decodes stored or linked, no `emitter_synthesis` row — and says why. A user
+    /// delete wins.
+    #[test]
+    fn a_target_deleted_during_the_search_is_never_attached_to() {
+        let dir = tempdir("t860-deleted-target");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let mut repo = Repository::open(&db).unwrap();
+        repo.change_emitter_lifecycle(
+            emitter,
+            LifecycleState::Deleted,
+            LifecycleAuthor::User,
+            "test-user",
+            "not interesting",
+            Timestamp::from_unix_nanos(T0_NS + 8 * S),
+        )
+        .unwrap();
+        drop(repo);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        let mut req = band_request(one_second(), Profile::Standard);
+        req.emitter_id = Some(emitter);
+        jobs.start(req).unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("not-attached"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("deleted by the user"),
+            "{confirm}"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert!(
+            repo.synthesis(emitter).unwrap().is_none(),
+            "no row under a deleted entry"
+        );
+        assert!(
+            !repo
+                .emitter_links(emitter)
+                .unwrap()
+                .iter()
+                .any(|l| matches!(l.target, LinkTarget::Decode(_))),
+            "no decode linked to a deleted entry"
+        );
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Deleted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review L2: a cancel observed at the end of the attach transaction rolls the whole attach
+    /// back — no decodes, no row, no confirmation — because a cancelled job never attaches
+    /// (docs/api.md). The attacher here runs the real attach over the real job's input with the
+    /// cancel check answering "cancelled", the latest a cancel can be seen.
+    #[test]
+    fn a_cancel_seen_at_the_end_of_attach_rolls_everything_back() {
+        use hk_pipeline::synth::attach::{AttachInput, Attached, attach};
+        struct CancelledAtCommit {
+            db: std::path::PathBuf,
+        }
+        impl Attacher for CancelledAtCommit {
+            fn attach(&self, input: &AttachInput<'_>) -> Result<Option<Attached>, String> {
+                let always = || true;
+                let cancelled = AttachInput {
+                    job_id: input.job_id,
+                    profile: input.profile,
+                    target: input.target,
+                    band: input.band,
+                    window: input.window,
+                    outcome: input.outcome,
+                    trace_summary: input.trace_summary.clone(),
+                    replay_key: input.replay_key.clone(),
+                    resolution: input.resolution,
+                    content_class: input.content_class,
+                    overload: input.overload,
+                    cancelled: Some(&always),
+                };
+                let repo = Repository::open(&self.db).map_err(|e| e.to_string())?;
+                let mut ingest = hk_plugins::Ingest::new(repo);
+                let out = attach(&mut ingest, &SynthesizedConfirm::default(), &cancelled)
+                    .map_err(|e| e.to_string())?;
+                assert!(out.is_none(), "a cancelled attach reports nothing attached");
+                Ok(out)
+            }
+        }
+        let dir = tempdir("t860-cancel");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = AnalyzeJobs::with_attacher(
+            Arc::new(Env::new(Arc::clone(&ring))),
+            Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
+            PowerPolicy::Mains,
+            Some(Arc::new(CancelledAtCommit { db: db.clone() }) as Arc<dyn Attacher>),
+        );
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_eq!(
+            done.results[0].verdict,
+            Verdict::Solved,
+            "it would have confirmed"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate,
+            "no confirmation"
+        );
+        assert!(repo.synthesis(emitter).unwrap().is_none(), "no row");
+        assert!(
+            !repo
+                .emitter_links(emitter)
+                .unwrap()
+                .iter()
+                .any(|l| matches!(l.target, LinkTarget::Decode(_))),
+            "no decodes"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
