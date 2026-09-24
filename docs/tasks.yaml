@@ -24021,6 +24021,15 @@ tasks:
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
     branch: task-t814
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:12).
+      Added the Explore drawer (ui/src/app/chrome/explore-drawer.ts) as a data-slot=drawer inside the T-803 bottom sheet, above the focus panel; collapsed by default (peek), expands to half/full. Groups: unknown & unexplained (/api/events), strongest (/api/analysis/strongest), quiet-but-active (/api/scheduler POI), past surveys (observed runs from /api/coverage). Clicking an item writes requestGoto (and reviewAt for a survey window) to the store: view arithmetic only, GETs only, no device route. Pure model + thin-client source guard tested. To see it on staging: open the app in Explore mode, click the bottom sheet's peek strip/grab handle to expand it, and click any entry to pan the canvas there.
+      Tests: node ui/test/run.mjs app-explore-drawer app-sheet app-shell -> exit 0 (3+11+11 passed)
+      precheck exit 0
+      Commits: d4f5ebfa
+      Observed, not chased: No e2e/spy-client DOM test of clicking a drawer item; covered by source guard only. Drawer polls every 30 s and only once live.edgeTS/view exist.
+      Use cases: AWARE-042
+      Resources: 49 CPU-s, peak 0.6 GB — LEAKED 5 processes (killed at reap)
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'

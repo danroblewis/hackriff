@@ -24,7 +24,7 @@ const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n
 // T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
 // next to and the Centre readout they change.
 // T-803's "sheet": the bottom sheet that wraps the focus slot (index.html nests "focus" inside it).
-const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
+const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "drawer", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
