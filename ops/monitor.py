@@ -3166,7 +3166,36 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
+#: The dashboard re-executes itself in place above this RSS (MB): the watchdog's ceiling is 1536,
+#: and on 2026-09-23/24 it crossed it twice in one evening (1746 MB after 6.5 h, then 1818 MB 50
+#: min after a restart) and was restarted by hand both times - its rebuilds allocate big transient
+#: structures and CPython does not hand the freed heap back. Twice by hand -> a rule.
+RSS_MAX_MB = int(os.environ.get("MONITOR_RSS_MAX") or 1200)
+
+
+def _rss_mb():
+    try:
+        return int(subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True,
+                                  text=True, timeout=10).stdout.strip() or 0) / 1024
+    except Exception:
+        return 0.0
+
+
+def _rss_guard(limit_mb=None, every_s=60, rss=_rss_mb, execv=os.execv, sleep=time.sleep):
+    """Checks own RSS every `every_s`; above the limit, logs and re-executes this script in place
+    (same pid and port, ~2 s without a dashboard). Returns only in tests (execv stubbed)."""
+    limit_mb = limit_mb or RSS_MAX_MB
+    while True:
+        sleep(every_s)
+        mb = rss()
+        if mb > limit_mb:
+            import sys as _sys
+            print(f"monitor: RSS {mb:.0f} MB > {limit_mb} MB - re-executing in place", file=_sys.stderr, flush=True)
+            return execv(_sys.executable, [_sys.executable] + _sys.argv)
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
     threading.Thread(target=_usage_poller, daemon=True).start()
