@@ -18,6 +18,7 @@ Two properties matter more than the individual patterns:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 import shutil
@@ -229,3 +230,63 @@ def test_settings_bounds_every_session_build(tmp_path):
     assert env["CARGO_BUILD_JOBS"] == "3"
     assert env["NEXTEST_TEST_THREADS"] == "2"
     assert env["CARGO_INCREMENTAL"] == "0"
+
+
+
+# ------------------------------------------------------------------ commands, not text (2026-09-23)
+_spec = importlib.util.spec_from_file_location("cmd_code", HOOKS / "cmd_code.py")
+CC = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(CC)
+
+
+@pytest.mark.parametrize("cmd", [
+    "tmux send-keys -t super -l 'relay: they ran hk serve --bind 127.0.0.1:8899 then npm run e2e'",
+    "python3 - <<'EOF'\nnote = 'hk serve and npm run e2e and just test appear in this file'\nEOF\necho done",
+    "git commit -q -m 'hk serve: fix the npm run e2e wait'",
+    "echo \"just gate is what the runner runs\"",
+    "cat > /tmp/x <<EOF\nwhile :; do :; done\nEOF",
+])
+def test_quoted_text_and_heredoc_bodies_are_not_commands(cmd, tmp_path):
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert bash(cmd, ops=tmp_path) is None, CC.code(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash -c 'npm run e2e'",
+    "cd ui && npm run e2e -- fog-of-war.e2e.mjs",
+    "zsh -c \"just gate --base abc\"",
+    "bash <<'EOF'\nnpm run e2e\nEOF",
+])
+def test_shell_payloads_are_still_commands(cmd, tmp_path):
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert decision(bash(cmd, ops=tmp_path)) == "deny", CC.code(cmd)
+
+
+def test_a_spec_run_on_its_own_ports_may_go_beside_a_gate(tmp_path):
+    """The 2026-09-22 reds were port sharing; ports are per-run now. Every port named must be >= 9216
+    (the gate's lanes + sweeps end below it), and canvas-journey's own port counts too."""
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    own = {"HK_E2E_PORT": "9472", "HK_E2E_JOURNEY_PORT": "9696"}
+    assert bash("cd ui && HK_E2E_PORT=9472 HK_E2E_JOURNEY_PORT=9696 npm run e2e -- a.e2e.mjs", ops=tmp_path) is None
+    assert bash("cd ui && npm run e2e -- a.e2e.mjs", ops=tmp_path, env=own) is None
+    assert bash("./target/debug/hk serve --bind 127.0.0.1:9400 --data /tmp/d", ops=tmp_path) is None
+    for cmd, env in (("HK_E2E_PORT=8791 npm run e2e", own),
+                     ("npm run e2e", {"HK_E2E_PORT": "9472"}),                        # journey defaults to 8801
+                     ("HK_E2E_PORT=8791 npm run e2e; HK_E2E_PORT=9400 npm run e2e", own),   # every value, not the last
+                     ("HK_E2E_PORT=9400 npm run e2e; ./target/debug/hk serve --bind 127.0.0.1:8795", own),
+                     ("env -u HK_E2E_PORT npm run e2e", own),
+                     ("HK_E2E_PORT= npm run e2e", own),
+                     ("./target/debug/hk serve --data /tmp/d", own)):                  # default ports, not ours
+        out = bash(cmd, ops=tmp_path, env=env)
+        assert decision(out) == "deny" and "HK_E2E_PORT=<9216 or above>" in reason(out), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    'echo "$(just gate --base x)"',
+    "printf 'just gate --base x' | bash",
+    "cat <<'EOF' | bash\njust gate\nEOF",
+    "grep '<<EOF' x.sh\njust gate",
+])
+def test_what_really_runs_is_never_stripped(cmd):
+    assert "just gate" in CC.code(cmd)
+    assert decision(bash(cmd)) == "deny", CC.code(cmd)
