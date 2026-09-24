@@ -9,8 +9,10 @@ use num_complex::Complex32;
 use super::common::*;
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::buffer::PortSlice;
+use crate::evidence::calibrated;
 use crate::registry::BuildCtx;
 use crate::status::Status;
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
 
@@ -124,6 +126,11 @@ pub(crate) fn build_lowpass(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         params: p.clone(),
         fir: None,
         delay: 0.0,
+        noise_gain: 0.0,
+        ev_in: 0.0,
+        ev_out: 0.0,
+        ev_n_in: 0,
+        ev_n_out: 0,
         status: Status::default(),
     }))
 }
@@ -141,7 +148,25 @@ struct Lowpass {
     stopband_db: f64,
     fir: Option<Fir>,
     delay: f64,
+    /// Σh²: the filter's white-noise power gain.
+    noise_gain: f64,
+    /// Evidence (T-853): Σ input and output power, and the counts, since `reset()`.
+    ev_in: f64,
+    ev_out: f64,
+    ev_n_in: u64,
+    ev_n_out: u64,
     status: Status,
+}
+
+impl Lowpass {
+    /// Drops the filter history (a `DISCONTINUITY`); the window's evidence is kept.
+    fn restart(&mut self) {
+        match &mut self.fir {
+            Some(Fir::Iq(f)) => f.clear(),
+            Some(Fir::Real(f)) => f.clear(),
+            None => {}
+        }
+    }
 }
 
 impl Block for Lowpass {
@@ -170,6 +195,7 @@ impl Block for Lowpass {
             )));
         }
         self.delay = (hold as f64 - 1.0) / 2.0;
+        self.noise_gain = taps.iter().map(|h| f64::from(*h) * f64::from(*h)).sum();
         self.fir = Some(match input.ty {
             PortType::Iq => Fir::Iq(FirDecimator::new(taps, 1)),
             _ => Fir::Real(FirDecimator::new(taps, 1)),
@@ -184,7 +210,7 @@ impl Block for Lowpass {
     fn process(&mut self, io: &mut Io<'_>) -> Result<(), BlockError> {
         let input = io.input(0)?;
         if restarts(input.meta.flags) {
-            self.reset();
+            self.restart();
         }
         let Some(fir) = &mut self.fir else {
             return Err(BlockError::Ports("lowpass not initialised".into()));
@@ -200,11 +226,24 @@ impl Block for Lowpass {
         match (input.data, fir) {
             (PortSlice::Iq(x), Fir::Iq(f)) => {
                 let y = iq_out(out)?;
+                let before = y.len();
                 y.extend(x.iter().filter_map(|&s| f.push(s)));
+                self.ev_in += x.iter().map(|s| f64::from(s.norm_sqr())).sum::<f64>();
+                self.ev_out += y[before..]
+                    .iter()
+                    .map(|s| f64::from(s.norm_sqr()))
+                    .sum::<f64>();
+                self.ev_n_in += x.len() as u64;
+                self.ev_n_out += (y.len() - before) as u64;
             }
             (PortSlice::Real(x), Fir::Real(f)) => {
                 let y = real_out(out)?;
+                let before = y.len();
                 y.extend(x.iter().filter_map(|&s| f.push(s)));
+                self.ev_in += x.iter().map(|s| f64::from(s * s)).sum::<f64>();
+                self.ev_out += y[before..].iter().map(|s| f64::from(s * s)).sum::<f64>();
+                self.ev_n_in += x.len() as u64;
+                self.ev_n_out += (y.len() - before) as u64;
             }
             (d, _) => return Err(mismatch(0, PortType::Iq, d.port_type())),
         }
@@ -215,10 +254,32 @@ impl Block for Lowpass {
     }
 
     fn reset(&mut self) {
-        match &mut self.fir {
-            Some(Fir::Iq(f)) => f.clear(),
-            Some(Fir::Real(f)) => f.clear(),
-            None => {}
+        self.restart();
+        self.ev_in = 0.0;
+        self.ev_out = 0.0;
+        self.ev_n_in = 0;
+        self.ev_n_out = 0;
+    }
+
+    /// S0 `snr` (ADR-0015 §1.1, "in-band SNR vs … guard bands"): the in-band power excess over
+    /// flat noise, `10·log₁₀(P_out / (P_in · Σh²))` dB — 0 dB for white noise (the filter passes
+    /// exactly its noise gain), positive when the passband holds more than its share.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_n_in == 0 || self.ev_n_out == 0 || self.noise_gain <= 0.0 {
+            return;
+        }
+        let p_in = self.ev_in / self.ev_n_in as f64;
+        let p_out = self.ev_out / self.ev_n_out as f64;
+        if p_in > 0.0 && p_out > 0.0 {
+            let raw = 10.0 * (p_out / (p_in * self.noise_gain)).log10();
+            calibrated(
+                out,
+                Stage::S0,
+                MetricId::Snr,
+                GroupId::Undeclared,
+                raw,
+                self.ev_n_out,
+            );
         }
     }
 

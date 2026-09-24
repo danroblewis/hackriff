@@ -12,8 +12,10 @@ use serde_json::Value;
 use super::common::*;
 use super::filter::Rate;
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
+use crate::evidence::calibrated;
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 /// Residual-phase averaging time constant, s.
 const PHASE_TAU_S: f64 = 0.25;
@@ -81,6 +83,9 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         psi: 0.0,
         n_z: 0,
         alpha: 1.0,
+        ev_m: Complex64::new(0.0, 0.0),
+        ev_power: 0.0,
+        ev_n: 0,
         non_finite: 0,
         status: Status::default(),
     }))
@@ -99,6 +104,10 @@ struct Subcarrier {
     psi: f64,
     n_z: u64,
     alpha: f64,
+    /// Evidence (T-853): Σ z^m, Σ |z|^m and the samples since `reset()` (phase tracking only).
+    ev_m: Complex64,
+    ev_power: f64,
+    ev_n: u64,
     non_finite: u64,
     status: Status,
 }
@@ -146,6 +155,9 @@ impl Subcarrier {
         let m = if order == 2 { zz } else { zz * zz };
         let norm = b.norm_sqr();
         self.z2 += (m - self.z2) * a;
+        self.ev_m += m;
+        self.ev_power += if order == 2 { norm } else { norm * norm };
+        self.ev_n += 1;
         self.power += (if order == 2 { norm } else { norm * norm } - self.power) * a;
         let step = 2.0 * PI / f64::from(order);
         let est = self.z2.im.atan2(self.z2.re) / f64::from(order);
@@ -250,6 +262,26 @@ impl Block for Subcarrier {
 
     fn reset(&mut self) {
         self.restart(0);
+        self.ev_m = Complex64::new(0.0, 0.0);
+        self.ev_power = 0.0;
+        self.ev_n = 0;
+    }
+
+    /// S1 `pilot_lock` (group `pilot`): the window's phase coherence `|Σ z^m| / Σ |z|^m` of the
+    /// sub-carrier at the tracked order (BPSK m = 2, QPSK m = 4) — about `1/√n` for noise, 1 for
+    /// a clean phase-modulated sub-carrier. Only with phase tracking on.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_n > 0 && self.ev_power > 0.0 {
+            let raw = self.ev_m.norm() / self.ev_power;
+            calibrated(
+                out,
+                Stage::S1,
+                MetricId::PilotLock,
+                GroupId::Pilot,
+                raw,
+                self.ev_n,
+            );
+        }
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
