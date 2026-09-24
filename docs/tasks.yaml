@@ -23683,7 +23683,8 @@ tasks:
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
-    status: todo
+    status: in-progress
+    branch: task-t805
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -25473,7 +25474,8 @@ tasks:
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
-    status: todo
+    status: in-progress
+    branch: task-t862
     priority: normal
     deps:
     - T-859
@@ -25844,7 +25846,8 @@ tasks:
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
-    status: todo
+    status: in-progress
+    branch: task-t878
     priority: high
     deps: []
     parallel_group: M3A
@@ -25860,7 +25863,8 @@ tasks:
   - id: T-879
     milestone: M3
     title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
-    status: todo
+    status: in-progress
+    branch: task-t879
     priority: high
     deps: []
     parallel_group: M3A
