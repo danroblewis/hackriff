@@ -6,13 +6,13 @@ never lose them again (they used to live in a `/tmp` scratchpad that a reboot wi
 
 Runtime state (logs, tokens, the demo build, the merge queue) lives in **`$HACKRIFF_OPS`**,
 default **`~/.hackriff-ops`** — deliberately outside `/tmp` so it survives a reboot. Override
-with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The four scripts share that one dir.
+with `HACKRIFF_OPS=/some/dir` if you want it elsewhere. The five scripts share that one dir.
 
 Environment-specific constants at the top of each file (edit for a different machine/checkout):
 `REPO` (the repo path, `/Users/daniellewis/hackriff`); in `monitor.py` also `PROJ` (the Claude
 projects dir), `COORD` (the coordinator's conversation id), and `SUPER`.
 
-## The four scripts
+## The five scripts
 
 ### `stage.sh` — staging demo watcher (port 8899)
 Rebuilds the `hk` binary and restarts the "bears" demo on every **code** commit to `main`
@@ -34,8 +34,71 @@ the merge queue + derived "up next" order, system load, a Claude token-budget ti
 MONITOR_PORT=8901 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &
 # open http://127.0.0.1:8901  (or tunnel it with cloudflared)
 ```
+**Role work log — `/worklog`** (`ops/worklog.py`, linked "work log ↗" in the top bar): for each
+role session (pipeline manager, coordinator, supervisor) the final assistant message of every
+turn, newest first, as markdown, collapsed to its first line (click to expand), with a `flow:`
+filter that lists just the pipeline manager's tick lines. It is how the user reads what the roles
+did without running a command. Sessions are found from `~/.claude/sessions/<pid>.json` (role from
+the process's `roles/<role>.md` argument or its tmux session `flow`/`dev`/`super`) and remembered
+in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — the supervisor in
+the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
+"source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
+
+**Preview a dashboard branch — `bash ops/preview-dashboard.sh <branch> [PATH ...]`** (user,
+2026-09-24: he does not wait behind a merge batch to see a dashboard change). Copies the branch's
+committed `ops/` + `py/` out of git into `$HACKRIFF_OPS/preview` (`PREVIEW_DIR`) and runs that copy
+on **:8902** (`PREVIEW_PORT`; :8901 is refused) with `MONITOR_PREVIEW=1`, which makes its child
+builds run the copy's code, keeps its metrics cache in the preview directory and writes no daily
+`metrics.jsonl` sample. It replaces whichever dashboard holds the port (one preview at a time; a
+tunnel pointed at :8902 shows the newest), refuses a port held by anything else, verifies that ITS
+pid is the listener, and prints `OK`/`FAIL` with the size for each PATH (a JSON route's own
+`"error"` is a FAIL). The real :8901 restarts from main when the branch lands.
+
+**`/metrics` — code metrics** (`ops/metricspage.py` + `py/hkpy/codemetrics.py`, linked "metrics ↗"
+in the top bar): lines per language / crate / area (product vs test), churn per area over 24h/7d/30d
+and the hottest files, tests and test-seconds per crate from the gate's kept JUnit (seconds per 1k
+lines), the largest files and longest Rust functions (a brace-depth proxy), hygiene (unsafe,
+TODO/FIXME/XXX, the last lint's clippy warnings, `#[ignore]` by reason, quarantine) and daily
+trends. All of it at committed main (the bulk base while a batch gates), rebuilt in a child
+process only when that sha moves, cached in `$HACKRIFF_OPS/metrics-cache.json`; the first build
+each day appends a sample to `$HACKRIFF_OPS/metrics.jsonl`. Each section prints its method's caveat.
+`python -m hkpy.codemetrics` prints the same summary. Data: `/metrics.json`.
+
+**`/flow` — the Flow panel** (linked from the top bar) gives the pipeline manager throughput
+visibility without waiting on `flow.jsonl` to accumulate: landings/h as a rolling 6h/24h line
+chart backfilled hourly from `hkpy.flow.hourly()` (with any real `flow.jsonl` ticks overlaid as
+dots, and the open experiment's opening time + baseline landings/h marked), per-hour dispatch
+and gate occupancy for the last 24h, per-gate durations by class over 48h (red gates marked,
+against the open experiment's — or the window's — full-gate p50), red rate by cause, the last
+24h of touchpoints, and the open experiment's guards and rollback. `/flow.json`
+(`build_flow_panel` in `monitor.py`) reads only through `hkpy.flow`/`hkpy.experiment` — it never
+re-parses the ops logs itself — and is cached ~30 s (`flow_panel_cached`) because
+`hourly()`/`gate_rows()`/`touchpoints()` each re-read `merge-runner.log` in full (~500k lines);
+an uncached build took ~1.2 s in testing, a cached one ~13 ms. Tests: `py/tests/test_monitor_flow.py`.
 
 ### `merge-runner.sh` — automated, no-AI merge runner
+**Restart between gates on request:** `echo "<why>" > $HACKRIFF_OPS/merge-runner-restart` - the runner
+re-executes the repo's copy of itself at the top of its loop, the only point with no gate running and
+no merge staged, and logs `RESTART: requested (<why>)`. Use it after a runner change lands; never
+kill the runner mid-gate for that.
+
+**CHEAP FIRST (user, 2026-09-24):** when the queue holds both kinds, the branches whose diff
+classifies as anything but `full` (`hkpy.gatepri`, the gate's own `classify`) — a dashboard or
+pipeline branch is `py+ops`, a UI one `ui` — are the next attempt, by themselves, and the rest go
+back in queue order: a two-minute py+ops gate no longer waits for, or rides, a 30-minute full batch.
+It narrows no gate (the attempt is `just gate`, classified as always); it logs `CHEAP FIRST: …` with
+each branch's class, and forms the batch as before whenever classification fails.
+
+**Red triage (the user's rule, 2026-09-23):** on a red, the failing tests or browser specs are re-run
+ALONE. Pass alone **twice** → a load flake: that suite passes on the evidence, and the gate resumes
+after the suite that stopped it (`just gate … --resume-after <suite>`, a strict suffix of the
+classified suites — nothing that ran is re-run, nothing that did not is skipped; nextest runs with
+`fail-fast = false` so a red suite's other tests all ran, and the workspace-test recipe runs
+`test-rust` last). Fail alone on either run → unchanged: a real red (isolate, MAIN-IS-RED check). Every
+acceptance is a `flaky.jsonl` record (`accepted`, `suite`, `saved_s` against the old retry), an amber
+alert, a line in the 2-hourly digest; the 3rd in 7 days for one test writes
+`deflake-requests.jsonl`, which the work runner dispatches as a `deflaker`.
+
 Owns all merges to `main` deterministically. The coordinator appends a **code-complete** branch
 name (one per line, dependency order) to `$HACKRIFF_OPS/merge-queue.txt`; the runner then does
 `git merge --no-ff --no-commit <branch>` → `just gate-merge` → on green, commit + remove the
@@ -85,7 +148,114 @@ merge queue; no commits, error, timeout or an uncommitted tree → `work-needs-a
 time, user-requested first, then priority, then number — into a fresh worktree + branch
 (`task-t<nnn>`, target seeded by APFS clone) running `claude -p --agent worker` with the ticket's
 `model`/`effort`, the brief on stdin, JSON result to `$HACKRIFF_OPS/work/<ticket>/out.json`.
-Builder cap is CLAUDE.md's 4 *including* a running gate (`WORK_CAP`), disk floor 20 GB.
+**Every run is accounted for (2026-09-23):** each tick samples the claim's whole process
+TREE - not `ps -g <pgid>`, which on this box contains only the `cpulimit` wrapper - and keeps the
+peak, so `work-claims.json`, `work-done.jsonl` and the ticket's `result:` all carry `cpu_s` and
+`peak_rss_mb` ("Resources: 412 CPU-s, peak 1.9 GB"). CPU time cannot be read at reap (the kernel
+discards it when the root exits), so these are a floor, not an exact total. At reap, anything of
+the run still alive is a LEAK - it cannot be found by ancestry, because being reparented to
+launchd *is* the leak, so it is matched by a pid+group the run was seen holding or by its
+worktree path - and is killed (SIGTERM, 10 s, SIGKILL), noted in `work-needs-attention.txt` and
+in the result.
+**The worker's output contract is a file:** its last step writes `work/<ticket>/handback.json`
+(`outcome: done|blocked|cancel`, `summary`, `commits`, `files`, `tests[{cmd,exit,summary}]`,
+`precheck`, `blocked.needs`, `cancel.evidence`, `observed_but_not_chased`, `use_cases`). The runner
+validates it, refuses `done` over a failing test, writes the ticket's `result:` (and a cancel's
+status) on the worker's branch through `just task`, routes on `outcome` (cancel → an Opus review
+confirms the evidence), and only then queues the branch. Workers never edit `docs/tasks.yaml`.
+**Deflakers are dispatched from the flake ledger (user, 2026-09-23: the 3rd flake of a test in 7 days
+auto-spawns a deflaker).** `py/hkpy/flakes.py` appends one JSON line per due test to
+`$HACKRIFF_OPS/deflake-requests.jsonl` (`ts`, `id`, `test`, `kind` rust|spec, `count_7d`, `incidents`,
+`evidence`); each tick the runner reads it (garbage lines skipped), and for a request newer than the
+one its claim last consumed it launches `claude -p --agent deflaker` (opus/high, the same `bounded()`
+cpulimit + QoS wrapper, `CARGO_ENV` and budget as a worker) in `.claude/worktrees/<slug>` on
+`task-<slug>` (`-r<n>` for a later run), cut from `merge_target()` — `main`, or the bulk marker's
+`base=` while a batch gates. The brief carries the test, the incidents and evidence verbatim, and the
+triage rules: alone first; fails alone → hand back BLOCKED; passes alone → a deterministic fix (never a
+retry, skip, quarantine, timeout change or deleted assertion) proven red with the defect back. The claim
+is keyed **`DEFLAKE:<slug>`**, never a T-id, and carries `deflake: <slug>`, so board sync, candidates
+and stale-claim release (all looked up by board id) never see it and it never gets a `result:` block or a
+fix resume. It is a worker: `busy_workers()` counts kind `deflake` against the same `dispatch_cap()`, at
+most one deflake dispatch per tick (before ordinary dispatch), never while `dispatch-paused` exists or
+`gate_holds_dispatch()`, never under the disk floor. One open deflaker per id: a new request waits
+while the previous run is running or its branch is queued and unmerged (`DEFLAKE WAIT`, logged once);
+after that, a request whose `ts` is at or before the claim's `ended` (the run's end, or when its branch
+landed) is dropped as evidence from before the fix (`DEFLAKE DROP`, logged once). Reap:
+commits ahead and a clean tree → an Opus review (told to FAIL any masking) → the merge queue;
+otherwise one line in `work-needs-attention.txt` — `DEFLAKE_NO_WORK`, `DEFLAKE_BLOCKED` (with the
+hand-back summary), `DEFLAKE_ERROR`, `DEFLAKE_UNCOMMITTED`, `DEFLAKE_REVIEW_FAIL`, or `DEFLAKE_GATE_FAIL`
+for a queued deflake branch that goes red (escalated to a person, not resumed). A CONFLICT line takes
+the ticket path's `conflict_skip` (a branch that merges cleanly now is re-queued); only where a ticket
+would get a fix run is it escalated, as `DEFLAKE_CONFLICT`.
+**The resource model is a fixed budget (user, 2026-09-22).** 28 cores: the merge gate is reserved
+14 (`WORK_GATE_RESERVE`), each worker is bounded to ~3 (`WORK_WORKER_CORES`) by limits its whole
+process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a
+permanent `taskpolicy -c background` QoS clamp (efficiency cores only on Apple Silicon) — so the count
+is `WORK_CAP` = (28 − 14) / 3 = 4 and the gate always has its reserve. No load heuristics, no gate-time
+throttling, no suspending workers. The hard ceiling is **`cpulimit -l 300 -i` from the HiGarfield fork**
+(`$HACKRIFF_OPS/bin/cpulimit`; source kept at `$HACKRIFF_OPS/src/cpulimit`; rebuild with
+`cd $HACKRIFF_OPS/src/cpulimit && make install DESTDIR=$HOME/.local/bin && cp src/cpulimit $HACKRIFF_OPS/bin/` —
+no sudo needed; do NOT `brew install cpulimit`, that is the inert opsengine build) — Homebrew's `opsengine` build is inert on Apple Silicon (measured 0 %),
+the fork measured 164 % aggregate over four busy loops under `-l 200 -i`. The same bound wraps the
+reviewer and fix/resume runs, and `ops/launch.sh` bounds each role session itself at
+`ROLE_CPU_PCT` (default 800) so its subagents' builds and `hk serve` runs are bounded too. It
+**attaches** the limiter (`cpulimit -i -p <pane pid>`, detached, named `limiter` by the watchdog) to a session
+`exec`ed into the pane, and never wraps it: a wrapped child runs in its own process group, not the
+pane's foreground one, and stops on SIGTTIN at its first terminal read (2026-09-23: state T, no prompt). It bounds
+the session's descendants (subagent shells and their builds); claude's own node process is resumed by
+tmux whenever the limiter stops it, so its CPU counts against the ceiling without being throttled. Budget of
+28 cores: gate 14 + workers 4×3 + role session 8 = 34 at peak, which the QoS tiers arbitrate; a
+sustained load above ~28 means a bound is not holding. Disk floor 20 GB.
+
+**Discord alerts (user, 2026-09-23).** `ops/alert.py <red|amber|green|info> "<title>" "<body>" [--key K]`
+posts to the `#hackriff` channel and mentions the user; both runners call it — amber for every
+exception handed to a person (gate red, conflict, gave-up, MAIN_RED, suite-broken, stale merge,
+BLOCKED/ERROR/REVIEW_FAIL), red for a `GATE_TIMEOUT` kill, green for each landing. Config is
+`$HACKRIFF_OPS/discord.json` (mode 600, never in the repo): `{"token", "channel_id", "guild_id",
+"mention_user_id"}`. Same `--key` within 30 min is deduped; every attempt is recorded in
+`$HACKRIFF_OPS/alerts.jsonl`; a failed post never fails the caller. `HK_ALERT_OFF=1` silences it.
+**Pipeline alarms also wake the pipeline manager:** a key starting `watchdog:`, `mr:`, `hold:`,
+`timeout:`, `contended-gate` or `flake:` is typed into its tmux session `flow` (`HK_PM_SESSION`)
+as a message, once per key per 30 min (its own dedupe, recorded as `woke` in `alerts.jsonl`, so a
+failing Discord cannot turn a looping condition into a message every tick); no session, no wake.
+**The flow digest:** `just flow --record --digest` (the pipeline manager's tick) posts the tick line
+green under key `flow:digest` when 2 h have passed since the last one, and at once, amber, on a
+trend break against the record ~2 h earlier — landings/h (6 h) halved from ≥ 0.5, real reds (24 h)
+doubled by ≥ 2, a new touchpoint, or a hold in force — each under `flow:break:<kind>`.
+
+**The gate shares the box (default since 2026-09-23 13:30; user).** Workers keep dispatching while a
+gate runs, capped at the gate's reserve (`(WORK_CORES − WORK_GATE_RESERVE) / WORK_WORKER_CORES` = 4)
+instead of `WORK_CAP`; the merge runner gates whatever is queued the moment the previous gate ends
+(`WORKER_DRAIN_MAX=0`) and never waits for a claimed worker — only for a foreign spec run / `hk serve`
+(they share its lane ports) or watchdog contention, at most `FOREIGN_DRAIN_MAX`. `WORK_QUEUE_PAUSE`
+is inert in this mode. Why: the alone-mode cycle below alternated 45-min gates with 45-min drains;
+on 2026-09-23 dispatch was zero in 10 of 13 hours and landings fell to ~1/hour once the crisis backlog
+drained, while the three flake causes the rule was bought for had been fixed at the root (a hidden
+tab's stopped rAF in `surface-contention`, a spec port shared by `fog-of-war`/`scan-everything`, a
+self-matching `pgrep` wait loop). Every gate in this mode is honestly marked contended in its timing
+record. `WORK_GATE_ALONE=1` on the work runner plus `WORKER_DRAIN_MAX=2700` on the merge runner
+restore the cycle wholesale.
+
+**The gate runs alone (user, 2026-09-22; now opt-in, above).** The bounded budget was not enough: the SDET review
+measured untouched crates of small unit tests running 18–79× dearer during shared gates. So the two
+runners cycled: the work runner **stops dispatching** once `WORK_QUEUE_PAUSE` (6) branches wait
+in `merge-queue.txt`, and while a gate runs; running workers finish and join the queue (nothing is
+suspended); the merge runner **starts a gate only when the claims file shows no running worker**
+(`workers_drained`, capped at `WORKER_DRAIN_MAX` = 45 min so a stuck worker cannot hold every merge);
+when the batch lands the queue drops below the threshold and dispatch resumes. `just gate` therefore
+measures the code, not the neighbours. While the merge runner waits for that drain it holds
+`$HACKRIFF_OPS/gate-wanted`, which the work runner reads as a running gate. **A full stop is a
+file:** `touch $HACKRIFF_OPS/dispatch-paused` stops every dispatch until the file is removed
+(reaping, results and queueing continue) — the conditional holds each have a window, this has none.
+A batch that goes red **without a test FAIL** (lint, a build error, the UI unit step) is re-queued
+in order and held until the queue changes, never isolated: main+batch is broken as a whole and every
+isolated gate would reproduce it. Before isolating a red batch the runner re-runs the failing tests
+(or browser specs) on the rewound `main`; if `main` itself is red it holds the batch (`MAIN_RED`)
+instead of re-proving the defect once per branch. **Every gate has a hard time limit** —
+`GATE_TIMEOUT` (default 3600 s): past it the gate's whole process group is killed, the batch is
+re-queued once and flagged `GATE_TIMEOUT`. **The runner repairs its own leftovers at startup**: a
+staged merge or a provisional bulk that a killed gate left on `main` is aborted / rewound and
+re-queued automatically — nobody types `git merge --abort` any more.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown
 # dry run:   python3 ops/work-runner.py --once --dry-run      (prints what it would dispatch)
@@ -99,6 +269,97 @@ it handles the two attention files, reviews, triage and ordering, and hand-launc
 runner will not touch (`needs: user|hardware`, `dispatch: manual`). **Append to the merge queue,
 never rewrite it** — a rewrite on 2026-09-22 dropped a queued branch.
 
+### `watchdog.py` — resource-contention watchdog (the fifth script, 2026-09-23)
+The budget above is only a budget if something checks it, and nothing did. On **2026-09-22** a
+deflaker agent exited and left **sixteen** `/bin/zsh -c source …/shell-snapshots/snapshot-zsh-….sh`
+busy loops reparented to launchd, each at 100 % CPU, from 14:29 to 16:47 — through every merge
+gate in those two and a quarter hours. In the same window a killed merge runner left an orphan
+`just gate` running beside its replacement's, and `ops/monitor.py` sat at 440 % CPU. None of it
+appeared in a log, on the dashboard or in an alert: it was found because a person ran `ps`. Each
+runner knows only its own children, so **no runner can see this**; the watchdog is the one process
+whose subject is the whole box.
+
+Every 20 s it builds a process table (`ps -axo pid,ppid,pgid,pcpu,rss,etime,command`) and
+attributes every process to an **owner** — a worker (its claim's pid is its process group, or an
+ancestor of it), the merge runner, the **gate** (its own owner even under the runner, because the
+14-core reserve is the gate's), a role session (named from `HACKRIFF_ROLE`, else its
+`--append-system-prompt-file` role file), the demo, the dashboard, the runners, the fuzz rig, plus
+`sccache` / `system` / `apps` / `tunnel` / `claude-other` as **fallbacks applied only after
+ancestry fails**. Anything left is **UNOWNED**. Ancestry always answers before a command-line
+guess, so a worker's `rustc`, `git` and `/bin/zsh` stay the worker's, and only a process whose
+ancestors are all gone can be unowned. Five rules:
+
+| | condition | action |
+|---|---|---|
+| a | an UNOWNED process >90 % CPU for >120 s | amber, keyed per pid |
+| b | an UNOWNED `shell-snapshots/snapshot-zsh` shell >50 % for >600 s | **SIGKILL** + red |
+| c | more than one merge gate running | red |
+| d | `ops/monitor.py` >200 % CPU or >1.5 GB for >120 s | amber |
+| e | load1 over the plan (owners' budgets, capped at the core count, +4) for >5 min | amber + top 5 |
+
+**Rule (b) is the only thing it kills**, and only on that signature, only when unowned, only
+sustained: a live agent's shell has a live parent, so it is *owned* and can never match. Every
+kill is logged to `watchdog.log` with its full command line. Everything else is an alert through
+`ops/alert.py` (deduped 30 min per key). The last tick is `$HACKRIFF_OPS/watchdog.json`, which
+`ops/monitor.py` renders as the **Box** line in the System card — owners with CPU, unowned in red,
+and "no watchdog running" when the file is missing or stale.
+```bash
+HACKRIFF_OPS=~/.hackriff-ops nohup python3 ops/watchdog.py >/dev/null 2>&1 & disown
+python3 ops/watchdog.py --once --print --dry-run   # one tick to stdout; never kills, never alerts
+cat $HACKRIFF_OPS/watchdog.json   ·   cat $HACKRIFF_OPS/watchdog.log
+```
+Rules and attribution are pure functions over a list of rows, tested against a synthetic process
+table in `py/tests/test_watchdog.py` — including the sixteen-loop incident, which cannot be
+reproduced on demand.
+
+**Two cheaper guards sit in front of it**, so most of this never has to be caught after the fact:
+
+* **`.claude/hooks/reap-agent-processes.sh`**, wired to `Stop` and `SubagentStop`. The moment an
+  agent finishes, it kills any `shell-snapshots/snapshot-zsh` shell that is **orphaned** (ppid 1,
+  or a parent that is gone) **and** above 50 % CPU, and records the reap in the agent's transcript
+  as a `systemMessage`. A live agent's shell has a live parent and is never touched. Fail-open on
+  every error path.
+* **`.claude/hooks/block-full-gate.sh`** now also refuses, in *every* session, to run a busy loop
+  (`while :; do :; done` — polling with a `sleep` in the body is fine), `yes`, `stress`/`stress-ng`,
+  more than two backgrounded loops in one command, and `npm run e2e` / `node e2e/run.mjs` /
+  `hk serve` while a gate is running or `bulk-in-progress` exists. `HK_ALLOW_LOAD=1` overrides,
+  for a genuine contention repro. `py/tests/test_hooks.py` runs the scripts as the harness does.
+
+**`.claude/settings.json` sets `CARGO_BUILD_JOBS=3`, `NEXTEST_TEST_THREADS=2` and
+`CARGO_INCREMENTAL=0` for every Claude Code session and subagent on this box.** That is where the
+bound actually binds: `cpulimit` wraps a worker's *tree*, but an agent typing `cargo build -j 28`
+inside that tree still oversubscribes the scheduler. It overrides the work runner's `CARGO_ENV`
+(`CARGO_BUILD_JOBS=2`) inside a worker session — both are at or below the 3-core `cpulimit` bound,
+so the effective ceiling is unchanged. The **merge runner is not a Claude session** and keeps its
+own `CARGO_BUILD_JOBS=6`, which `py/hkpy/gate.py` sets explicitly for the suites it launches.
+
+## The pipeline manager, the knob store and the bounded hold (2026-09-23)
+
+A fourth role, **the pipeline manager** (`ops/launch.sh pipeline-manager`, tmux `flow`; role
+`.claude/roles/pipeline-manager.md`, invariants `.claude/rules/pipeline-invariants.md`, workflows
+`.claude/pipeline/workflows/`), owns *throughput*: landings per hour at constant gate honesty. It
+ticks every 30 minutes, measures with `just flow`, runs one experiment at a time through `just
+experiment` (ledger: `docs/ops-experiments.md`), and changes the pipeline through branches like
+everyone else. The coordinator owns the backlog; the supervisor owns the user's intent; this role
+owns the rate. Why: on 2026-09-23 the burndown went flat at ~1 ticket/hour with the box idle half
+of every hour, and nobody's job was to see that in numbers.
+
+- **`just flow [--hourly|--gates|--tickets|--touchpoints] [--since 24h] [--record]`** — where the
+  hours went, from `merge-runner.log`, `work-runner.log`, `landed.jsonl`, `handbacks.jsonl`;
+  `--record` appends to `$HACKRIFF_OPS/flow.jsonl`. Read-only.
+- **`just knobs show|set K=V|unset K|reset`** — the persistent knob store `$HACKRIFF_OPS/env`
+  (`KEY=VALUE`), which **both runners, `ops/launch.sh` and `/dev-env restart` read on start**
+  (process environment wins). `show` reports the *effective* value from each runner's own `KNOBS:`
+  start line. Refuses `WORK_CAP=0`. Every change is a line in `env.jsonl`, tagged with the open
+  experiment or as an incident change.
+- **`just hold --minutes N --why "…"` / `--release` / `--status`** — a merge-queue hold that is a
+  marker with an expiry (`$HACKRIFF_OPS/hold`): at most 30 minutes, no second within 2 hours,
+  refused while a branch is queued or a gate runs; the merge runner ignores it once expired and
+  **ends it at the first queued branch**, alerting. Every hold is charged to the open experiment
+  as blocked minutes. Dispatch is never held for measurement (the floor is `WORK_CAP=1`).
+- **`just experiment new|status|close|list`** — one open at a time; `new` needs a rollback line
+  and snapshots the baseline; `close` refuses `keep` when a guard is broken.
+
 ## Starting the orchestration environment (cold start, reboot, or "stop everything and restart")
 
 Order matters: **runners before the coordinator**, and the coordinator **last**, because it reads
@@ -110,8 +371,8 @@ OPS=$(cat ~/.hackriff-ops/active-ops-dir)                 # where the running sy
 tmux kill-session -t dev                                  # the coordinator + every subagent it spawned
 pkill -f 'ops/merge-runner.sh'; pkill -f 'just gate'; pkill -f 'cargo-nextest nextest run'
 pkill -f 'stage.sh'; pkill -f 'hk serve --bind 127.0.0.1:8899'
-pkill -f 'monitor.py'; pkill -f 'work-runner.py'
-ps -axo pid,command | grep -E 'Role: Coo|merge-runner|just gate|stage.sh|monitor.py|work-runner|hk serve' | grep -v grep   # must print nothing
+pkill -f 'monitor.py'; pkill -f 'work-runner.py'; pkill -f 'ops/watchdog.py'
+ps -axo pid,command | grep -E 'Role: Coo|merge-runner|just gate|stage.sh|monitor.py|work-runner|watchdog.py|hk serve' | grep -v grep   # must print nothing
 ```
 **If a gate was killed mid-run, `main` is provisional.** A bulk batch commits each merge before
 gating (`$OPS/bulk-in-progress` names the pre-batch `base=` sha and the branches); a killed gate
@@ -134,7 +395,7 @@ export HACKRIFF_OPS=~/.hackriff-ops
 ```
 Every script below rewrites `~/.hackriff-ops/active-ops-dir` to point at itself on start.
 
-### 2. Start the four scripts, always from the repo (never a copy)
+### 2. Start the five scripts, always from the repo (never a copy)
 ```bash
 cd /Users/daniellewis/hackriff && export HACKRIFF_OPS=~/.hackriff-ops
 nohup bash ops/stage.sh          >/dev/null 2>&1 & disown        # demo :8899, live HackRF or replay
@@ -142,6 +403,7 @@ nohup bash ops/merge-runner.sh   >/dev/null 2>&1 & disown        # the sole merg
 python3 ops/work-runner.py --once --dry-run                       # READ what it would dispatch first
 nohup python3 ops/work-runner.py >/dev/null 2>&1 & disown        # dispatch
 MONITOR_PORT=8901 nohup python3 ops/monitor.py >$HACKRIFF_OPS/monitor.log 2>&1 &   # dashboard :8901
+nohup python3 ops/watchdog.py    >/dev/null 2>&1 & disown        # contention watchdog
 ```
 Verify, a minute later:
 ```bash
@@ -149,9 +411,16 @@ grep VERSION $HACKRIFF_OPS/merge-runner.log | tail -1   # "matches HEAD:ops/merg
 tail -3 $HACKRIFF_OPS/work-runner.log                    # "VERSION: matches" then "DISPATCH T-…"
 tail -2 $HACKRIFF_OPS/stage.log                          # "started (live)" — or "(replay …)" if the HackRF is busy
 curl -s http://127.0.0.1:8901/burndown.json | head -c 80 # dashboard answers
+python3 -c 'import json;d=json.load(open("'"$HACKRIFF_OPS"'/watchdog.json"));print(d["load"],d["budget"],list(d["owners"])[:5])'
 ```
-If a script's newest version is only on an unmerged branch, start it from that branch's worktree
-(`.claude/worktrees/<name>/ops/<script>`) and restart it from `main` once the branch lands.
+**Never start an ops script from a worktree** - not even to try a change that has not landed.
+The runner removes a worktree when its branch lands, and a script running from one loses its own
+files: on 2026-09-24 the dashboard, started from `pm-dashmem`, answered /flow with
+`FileNotFoundError: .../worktrees/pm-dashmem/ops/monitor.py`. Restart with `/dev-env restart
+<script>`, which runs `REPO/ops/<script>`; a change reaches the running script by landing first.
+Each script logs `PATH: <where it runs from>` at start, and refuses (exit 2, `REFUSED:`) under
+`.claude/worktrees/` (`ops/launchpath.py`, `ops/launch-guard.sh`). That includes the one-shot diagnostics (`watchdog.py --once --print`,
+`work-runner.py --once --dry-run`): run them from the repo too.
 
 ### 3. The coordinator, last
 ```bash

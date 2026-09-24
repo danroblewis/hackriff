@@ -5,8 +5,10 @@ use hk_recipe::{Params, PortType};
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::blocks::iq::common::*;
 use crate::buffer::PortSlice;
+use crate::evidence::{BitStructure, calibrated};
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 // ------------------------------------------------------------------------------------- slicer
 
@@ -15,6 +17,7 @@ pub(crate) fn build_slicer(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block
         threshold: 0.0,
         invert: 0,
         ones: 0,
+        ev: BitStructure::default(),
         status: Status::default(),
     };
     b.apply(p);
@@ -25,6 +28,8 @@ struct Slicer {
     threshold: f32,
     invert: u8,
     ones: u64,
+    /// Evidence (T-853): the output bits' structure since `reset()`.
+    ev: BitStructure,
     status: Status,
 }
 
@@ -55,6 +60,7 @@ impl Block for Slicer {
         for &v in x {
             let b = u8::from(v > self.threshold) ^ self.invert;
             self.ones += u64::from(b);
+            self.ev.push(b);
             y.push(b);
         }
         let n = x.len() as u64;
@@ -69,7 +75,9 @@ impl Block for Slicer {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev.clear();
+    }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
         self.apply(p);
@@ -78,6 +86,11 @@ impl Block for Slicer {
 
     fn status(&self) -> Status {
         self.status
+    }
+
+    /// S3 `bit_structure` (group `bit_shape`) of the sliced bits.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
     }
 }
 
@@ -107,6 +120,8 @@ struct Differential {
     encode: bool,
     complement: u8,
     prev: Option<u8>,
+    /// Evidence (T-853): the output bits' structure since `reset()`.
+    ev: BitStructure,
     status: Status,
 }
 
@@ -117,6 +132,7 @@ impl Differential {
             encode: false,
             complement: 0,
             prev: None,
+            ev: BitStructure::default(),
             status: Status::default(),
         }
     }
@@ -174,6 +190,9 @@ impl Block for Differential {
                 self.prev = Some(b);
             }
         }
+        for &b in &y[before..] {
+            self.ev.push(b);
+        }
         self.status.items_in += x.len() as u64;
         self.status.items_out += (y.len() - before) as u64;
         Ok(())
@@ -181,6 +200,12 @@ impl Block for Differential {
 
     fn reset(&mut self) {
         self.prev = None;
+        self.ev.clear();
+    }
+
+    /// S3 `bit_structure` (group `bit_shape`) of the decoded bits.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
@@ -222,6 +247,9 @@ pub(crate) fn build_manchester(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn B
         n_segments: 0,
         open: false,
         dropped: 0,
+        ev_viol: 0.0,
+        ev_pairs: 0,
+        ev_bits: BitStructure::default(),
         status: Status::default(),
     };
     b.apply(p);
@@ -264,6 +292,11 @@ struct Manchester {
     /// Bits dropped: held at a restart, or beyond `cap`/`MAX_SEGMENTS` (realigning on nearly
     /// every chunk).
     dropped: u64,
+    /// Evidence (T-853): Σ violation over aligned pairs, the pairs, and the decoded bits'
+    /// structure, since `reset()`.
+    ev_viol: f64,
+    ev_pairs: u64,
+    ev_bits: BitStructure,
     status: Status,
 }
 
@@ -396,7 +429,11 @@ impl Block for Manchester {
                 if aligned {
                     // The pair's first chip is input item index + i − 1.
                     let source = source_at(&m, (m.index + i as u64) as f64 - 1.0);
-                    self.hold(u8::from(p > c) ^ self.ieee, source, per_item);
+                    let bit = u8::from(p > c) ^ self.ieee;
+                    self.ev_viol += v;
+                    self.ev_pairs += 1;
+                    self.ev_bits.push(bit);
+                    self.hold(bit, source, per_item);
                 }
                 if self.auto
                     && self.pairs[0] >= ALIGN_MIN_PAIRS
@@ -440,6 +477,26 @@ impl Block for Manchester {
 
     fn reset(&mut self) {
         self.clear();
+        self.ev_viol = 0.0;
+        self.ev_pairs = 0;
+        self.ev_bits.clear();
+    }
+
+    /// S3, both in group `bit_shape` (ρ 0.706, ADR-0015 §13.1): `line_violations` = the mean
+    /// violation over the pairs decoded at the chosen alignment (0 for clean Manchester, 0.5 for
+    /// random chips; **smaller is evidence**), and `bit_structure` of the decoded bits.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_pairs > 0 {
+            calibrated(
+                out,
+                Stage::S3,
+                MetricId::LineViolations,
+                GroupId::BitShape,
+                self.ev_viol / self.ev_pairs as f64,
+                self.ev_pairs,
+            );
+        }
+        self.ev_bits.evidence(out);
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {

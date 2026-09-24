@@ -1,0 +1,925 @@
+//! The M-3 search engine (ADR-0015 §3, ADR-0021 §1–§3, T-854), driven through its only seam, the
+//! `Evaluator`, over a synthetic world whose **truth the engine never sees**: the evaluator scores
+//! each prefix against a hidden FSK signal (symbol rate, line code, sync word, CRC polynomial) the
+//! way M-2's blocks will — bits of significance per stage — and the tests assert on what the
+//! engine reports: `PipelineResult`s (ADR-0015 §3.4), the `TraceNode`s (ADR-0021 §2), the
+//! `Coverage` and the `reason` (ADR-0021 §7A).
+//!
+//! Every candidate the engine builds is checked against the real `hk_blocks::Registry::builtin()`
+//! catalogue, so "a candidate is a recipe" (§1.2) holds for every result here.
+//!
+//! Use case: RESEARCH-002 (a never-seen FSK/OOK sensor decoded blind) at engine level — the IQ
+//! path arrives with M-2/M-6 and the full blind suite is M-12's.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use hk_blocks::Registry;
+use hk_model::ContentClass;
+use hk_recipe::{InputSpec, OutputPolicy, PortType};
+use hk_synth::engine::{
+    EvalError, EvalRequest, EvalWindow, Evaluated, Evaluator, NodeEvidence, Progress,
+    ProposalReply, ProposeRequest, RecipeHead, Root, SearchOutcome, SearchSpec, Suggestion,
+    UnsupportedStructure, search,
+};
+use hk_synth::search::{JobState, Profile, StopReason};
+use hk_synth::trace::{Outcome, OutcomeKind, Reason};
+use hk_synth::{
+    Control, Evidence, EvidenceSet, GroupId, MetricId, PowerPolicy, ProposalOp, Skeleton, Stage,
+    Verdict,
+};
+use serde_json::{Value, json};
+
+// ---------------------------------------------------------------------------------------------
+// The hidden world
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct Truth {
+    /// S0 in-band SNR significance, bits.
+    s0_bits: f32,
+    /// `None`: no modulation at all (a bare carrier or noise).
+    family: Option<&'static str>,
+    rate_bd: f64,
+    line: &'static str,
+    sync: &'static str,
+    poly: &'static str,
+}
+
+const FSK: Truth = Truth {
+    s0_bits: 10.0,
+    family: Some("fsk"),
+    rate_bd: 4812.0,
+    line: "nrzi",
+    sync: "0x2DD4",
+    poly: "0x8005",
+};
+
+/// What a stage hands its children: whether the prefix so far is still on the truth.
+#[derive(Clone, Copy, Debug)]
+struct Sig {
+    on_truth: bool,
+}
+
+type Hook = Box<dyn Fn(u64) + Send + Sync>;
+
+struct World {
+    truth: Truth,
+    calls: AtomicU64,
+    holdout_calls: AtomicU64,
+    proposals: AtomicU64,
+    grants: Mutex<Vec<u64>>,
+    hook: Option<Hook>,
+}
+
+impl World {
+    fn new(truth: Truth) -> Self {
+        Self {
+            truth,
+            calls: AtomicU64::new(0),
+            holdout_calls: AtomicU64::new(0),
+            proposals: AtomicU64::new(0),
+            grants: Mutex::new(Vec::new()),
+            hook: None,
+        }
+    }
+
+    fn with_hook(mut self, hook: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        self.hook = Some(Box::new(hook));
+        self
+    }
+}
+
+fn ev(stage: Stage, metric: MetricId, group: GroupId, raw: f32, n: u32, bits: f32) -> EvidenceSet {
+    let mut s = EvidenceSet::new();
+    s.push(Evidence::new(stage, metric, group, raw, n, bits))
+        .unwrap();
+    s
+}
+
+impl Evaluator for World {
+    type Output = Sig;
+
+    fn evaluate(&self, req: &EvalRequest<'_, Sig>) -> Result<Evaluated<Sig>, EvalError> {
+        let k = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if req.window == EvalWindow::Holdout {
+            self.holdout_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(h) = &self.hook {
+            h(k);
+        }
+        let t = &self.truth;
+        let upstream = req.parent.is_none_or(|p| p.on_truth);
+        let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
+        let last = nodes.last().expect("every alternative here has nodes");
+        let p = |name: &str| last.params.get(name).cloned().unwrap_or(Value::Null);
+        let holdout = req.window == EvalWindow::Holdout;
+        let (set, on_truth) = match req.stage {
+            Stage::S0 => (
+                ev(
+                    Stage::S0,
+                    MetricId::Snr,
+                    GroupId::Undeclared,
+                    t.s0_bits,
+                    4096,
+                    t.s0_bits,
+                ),
+                t.s0_bits >= 6.0,
+            ),
+            Stage::S1 => {
+                let family = match last.block.as_str() {
+                    "fsk_demod" => "fsk",
+                    "am_demod" => "ook",
+                    _ => "?",
+                };
+                let hit = upstream && t.family == Some(family);
+                let bits = if hit { 9.0 } else { 1.5 };
+                (
+                    ev(
+                        Stage::S1,
+                        MetricId::Bimodality,
+                        GroupId::DemodShape,
+                        0.7,
+                        4096,
+                        bits,
+                    ),
+                    hit,
+                )
+            }
+            Stage::S2 => {
+                let rate = p("symbol_rate_bd").as_f64().unwrap_or(0.0);
+                let err = (rate / t.rate_bd).ln().abs();
+                let bits = if upstream {
+                    (11.0 * (-(err / 0.01).powi(2)).exp()) as f32
+                } else {
+                    0.5
+                };
+                let mut s = ev(Stage::S2, MetricId::EyeOpen, GroupId::Eye, 0.5, 512, bits);
+                s.push(Evidence::new(
+                    Stage::S2,
+                    MetricId::TimingVar,
+                    GroupId::SoftQuality,
+                    0.1,
+                    512,
+                    bits * 0.5,
+                ))
+                .unwrap();
+                (s, upstream && err < 0.015)
+            }
+            Stage::S3 => {
+                let line = match last.block.as_str() {
+                    "nrzi" => "nrzi",
+                    "manchester" => "manchester",
+                    _ => "none",
+                };
+                let hit = upstream && line == t.line;
+                let bits = if hit { 8.0 } else { 2.0 };
+                (
+                    ev(
+                        Stage::S3,
+                        MetricId::BitStructure,
+                        GroupId::BitShape,
+                        0.5,
+                        512,
+                        bits,
+                    ),
+                    hit,
+                )
+            }
+            Stage::S4 => {
+                let hit = upstream && p("sync_word").as_str() == Some(t.sync);
+                let bits = if hit { 24.0 } else { 1.0 };
+                (
+                    ev(
+                        Stage::S4,
+                        MetricId::SyncExcess,
+                        GroupId::Undeclared,
+                        30.0,
+                        30,
+                        bits,
+                    ),
+                    hit,
+                )
+            }
+            Stage::S5 => {
+                let hit = upstream && p("poly").as_str() == Some(t.poly);
+                let frames = match (hit, holdout) {
+                    (true, false) => 20,
+                    (true, true) => 12,
+                    _ => 0,
+                };
+                (
+                    ev(
+                        Stage::S5,
+                        MetricId::CheckDistinctValid,
+                        GroupId::Undeclared,
+                        frames as f32,
+                        frames,
+                        16.0 * frames as f32,
+                    ),
+                    hit,
+                )
+            }
+            Stage::S6 => (EvidenceSet::new(), upstream),
+        };
+        Ok(Evaluated {
+            evidence: vec![NodeEvidence {
+                node: last.id.clone(),
+                evidence: set,
+            }],
+            output: Sig { on_truth },
+            output_bytes: 1024,
+            check: None,
+        })
+    }
+
+    fn propose(&self, req: &ProposeRequest<'_, Sig>) -> Result<ProposalReply, EvalError> {
+        self.proposals.fetch_add(1, Ordering::SeqCst);
+        self.grants.lock().unwrap().push(req.budget.max_ops);
+        assert_eq!(req.op, ProposalOp::Sync);
+        // The operator finds the true word in the node's bits — and a decoy it happens to like
+        // better. The decoy's better prior must not win: only measured evidence ranks (§3.2).
+        let mut suggestions = vec![Suggestion {
+            bind: BTreeMap::from([(req.path.to_owned(), json!("0x1234"))]),
+            prior_bits: 0.0,
+        }];
+        if req.parent.is_some_and(|p| p.on_truth) {
+            suggestions.push(Suggestion {
+                bind: BTreeMap::from([(req.path.to_owned(), json!(self.truth.sync))]),
+                prior_bits: -1.0,
+            });
+        }
+        Ok(ProposalReply {
+            suggestions,
+            ops: 1_000,
+            hypotheses: 1 << 16,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Skeletons, all in real ADR-0011 blocks
+// ---------------------------------------------------------------------------------------------
+
+fn skeleton(id: &str, s1: Value, with_s0: bool, s5_polys: &[&str]) -> Skeleton {
+    let mut slots = json!({
+        "S1": [ s1 ],
+        "S2": [ { "id": "clock", "nodes": [ { "id": "clock", "block": "clock_recovery",
+                   "params": { "pulse": "nrz", "algorithm": "gardner" } } ] } ],
+        "S3": [ { "id": "none", "nodes": [ { "id": "slice", "block": "slicer" } ] },
+                { "id": "nrzi", "nodes": [ { "id": "slice", "block": "slicer" },
+                                            { "id": "line", "block": "nrzi" } ] },
+                { "id": "manchester", "nodes": [ { "id": "slice", "block": "slicer" },
+                                                  { "id": "line", "block": "manchester" } ] } ],
+        "S4": [ { "id": "sync", "nodes": [ { "id": "sync", "block": "sync_search",
+                   "params": { "mode": "sync-word", "sync_bits": 16, "frame_bits": 64 } } ] } ],
+    });
+    if !s5_polys.is_empty() {
+        slots["S5"] = json!([ { "id": "crc16", "nodes": [ { "id": "crc", "block": "crc",
+                                "params": { "width": 16 } } ] } ]);
+    }
+    if with_s0 {
+        slots["S0"] =
+            json!([ { "id": "chan", "nodes": [ { "id": "chan", "block": "identity" } ] } ]);
+    }
+    serde_json::from_value(json!({ "id": id, "version": 1, "slots": slots })).unwrap()
+}
+
+fn fsk_s1() -> Value {
+    json!({ "id": "fsk", "family": "fsk", "nodes": [ { "id": "demod", "block": "fsk_demod" } ] })
+}
+
+fn ook_s1() -> Value {
+    json!({ "id": "ook", "family": "ook", "nodes": [ { "id": "demod", "block": "am_demod" } ] })
+}
+
+fn free(polys: &[&str]) -> Vec<hk_synth::candidate::FreeParam> {
+    let mut v: Vec<hk_synth::candidate::FreeParam> = vec![
+        serde_json::from_value(json!({
+            "path": "nodes[clock].params.symbol_rate_bd",
+            "domain": { "float": { "lo": 300, "hi": 50000, "scale": "log" } },
+            "seed": 4700, "source": "estimate" }))
+        .unwrap(),
+        serde_json::from_value(json!({
+            "path": "nodes[sync].params.sync_word", "domain": { "proposal": "assist.sync" } }))
+        .unwrap(),
+    ];
+    if !polys.is_empty() {
+        v.push(
+            serde_json::from_value(json!({
+                "path": "nodes[crc].params.poly", "domain": { "hex": { "candidates": polys } } }))
+            .unwrap(),
+        );
+    }
+    v
+}
+
+const POLYS: [&str; 3] = ["0x1021", "0x8005", "0x3D65"];
+
+fn root(sk: Skeleton, prior_bits: f32, polys: &[&str]) -> Root {
+    Root {
+        skeleton: sk,
+        template: None,
+        free: free(polys),
+        prior_bits,
+        seed_source: hk_synth::candidate::SeedSource::Open,
+        family: None,
+        deferred: None,
+    }
+}
+
+fn head() -> RecipeHead {
+    RecipeHead {
+        input: InputSpec {
+            port: PortType::Iq,
+            sample_rate_hz: Some(48_000.0),
+            bandwidth_hz: Some(20_000.0),
+            channels: Default::default(),
+            liveness: None,
+        },
+        output_policy: OutputPolicy {
+            content_class: ContentClass::Unrestricted,
+            metadata_keys: None,
+            frame_models: Vec::new(),
+            identity: None,
+        },
+        field_maps: BTreeMap::new(),
+    }
+}
+
+fn spec(roots: Vec<Root>, profile: Profile) -> SearchSpec {
+    let mut s = SearchSpec::new(head(), roots, profile);
+    // Count-bounded and wall-free, so every run here is exactly reproducible (ADR-0021 §5).
+    s.budget.wall_s = 600.0;
+    s.budget.cpu_s = 600.0;
+    s.budget.max_evaluations = Some(4_000);
+    s
+}
+
+fn standard_roots() -> Vec<Root> {
+    vec![
+        root(
+            skeleton("generic-fsk-framed", fsk_s1(), false, &POLYS),
+            -0.5,
+            &POLYS,
+        ),
+        root(
+            skeleton("generic-ook-framed", ook_s1(), false, &POLYS),
+            -1.0,
+            &POLYS,
+        ),
+    ]
+}
+
+fn run(spec: &SearchSpec, world: &World, control: &Control) -> SearchOutcome {
+    search(spec, &Registry::builtin(), world, control, &mut ())
+}
+
+/// Invariants every outcome must satisfy, whatever it found.
+fn check_outcome(o: &SearchOutcome, world: &World) {
+    // ADR-0021 §1: the trace names a subset of the decisions and accounts for all of the work.
+    assert_eq!(
+        o.trace.evaluations(),
+        o.used.evaluations,
+        "accounting identity"
+    );
+    // …and the engine counted every call it made: no uncharged work.
+    assert_eq!(world.calls.load(Ordering::SeqCst), o.used.evaluations);
+    assert_eq!(
+        world.proposals.load(Ordering::SeqCst),
+        o.used.proposal_calls
+    );
+    let ids: std::collections::BTreeSet<&str> =
+        o.trace.nodes.iter().map(|n| n.id.as_str()).collect();
+    for n in &o.trace.nodes {
+        n.check().unwrap_or_else(|e| panic!("{}: {e:?}", n.id));
+        // Lineage is never dropped: a retained node's parent is retained.
+        if let Some(p) = &n.parent {
+            assert!(
+                ids.contains(p.as_str()),
+                "{} names dropped parent {p}",
+                n.id
+            );
+        }
+    }
+    let reg = Registry::builtin();
+    for r in &o.results {
+        // A result is an ordinary, runnable recipe (§1.2).
+        let c = hk_synth::Candidate {
+            skeleton: String::new(),
+            choices: BTreeMap::new(),
+            recipe: r.recipe.clone(),
+            free: Vec::new(),
+        };
+        c.check_prefix(&reg)
+            .unwrap_or_else(|e| panic!("result {} is not a recipe: {e}", r.rank));
+    }
+    assert!(o.trace_cost.fraction >= 0.0 && o.trace_cost.fraction <= 1.0);
+    assert!(o.trace_cost.bytes > 0 || o.trace.nodes.is_empty());
+}
+
+fn param<'a>(r: &'a hk_synth::PipelineResult, node: &str, name: &str) -> &'a Value {
+    &r.recipe
+        .nodes
+        .iter()
+        .find(|n| n.id == node)
+        .unwrap_or_else(|| panic!("no node {node}"))
+        .params[name]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn blind_search_solves_the_hidden_fsk_signal() {
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.unsupported.push(UnsupportedStructure {
+        structure: "css".into(),
+        missing_block: "css_demod".into(),
+        reference: "ADR-0011 §1.5".into(),
+        family: Some("css".into()),
+        slot: Stage::S1,
+        posterior: Some(0.05),
+    });
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+
+    assert_eq!(o.state, JobState::Done);
+    assert_eq!(o.stop, Some(StopReason::Solved));
+    assert_eq!(o.reason, None, "a solved search has no negative reason");
+    assert!(!o.nondeterministic);
+    let top = &o.results[0];
+    assert_eq!(top.verdict, Verdict::Solved);
+    assert_eq!(top.stage_reached, Stage::S5);
+    // The measured structure, not the seed's and not the operator's favourite.
+    let rate = param(top, "clock", "symbol_rate_bd").as_f64().unwrap();
+    assert!(
+        (rate / FSK.rate_bd - 1.0).abs() < 0.01,
+        "symbol rate within 1 %: {rate}"
+    );
+    assert_eq!(
+        top.recipe
+            .nodes
+            .iter()
+            .find(|n| n.id == "line")
+            .unwrap()
+            .block,
+        "nrzi"
+    );
+    assert_eq!(
+        param(top, "sync", "sync_word"),
+        &json!(FSK.sync),
+        "evidence beat the decoy's prior"
+    );
+    assert_eq!(param(top, "crc", "poly"), &json!(FSK.poly));
+    // Only hold-out evidence solves: the winner was re-run on the hold-out window.
+    assert!(world.holdout_calls.load(Ordering::SeqCst) >= 5);
+    // The evidence ladder covers every stage of the chain.
+    let stages: Vec<Stage> = top.stages.iter().map(|e| e.stage).collect();
+    for st in [Stage::S1, Stage::S2, Stage::S3, Stage::S4, Stage::S5] {
+        assert!(stages.contains(&st), "{st:?} missing from the ladder");
+    }
+
+    // The trace says why the alternatives lost, and keeps tried apart from not-tried.
+    let nodes = &o.trace.nodes;
+    let ook = nodes
+        .iter()
+        .find(|n| n.hypothesis.family.as_deref() == Some("ook") && n.stage == Stage::S1)
+        .expect("the OOK hypothesis is in the trace");
+    assert!(
+        matches!(ook.outcome, Outcome::PrunedFloor { .. }),
+        "{:?}",
+        ook.outcome
+    );
+    assert!(ook.tried && ook.measured.is_some());
+    let css = nodes
+        .iter()
+        .find(|n| matches!(n.outcome, Outcome::Unsupported { .. }))
+        .expect("the unsupported suspicion is recorded");
+    assert!(!css.tried && css.measured.is_none());
+    // The decoy sync word was tried and measured, then lost on evidence.
+    let decoy = nodes
+        .iter()
+        .find(|n| n.hypothesis.params.get("nodes[sync].params.sync_word") == Some(&json!("0x1234")))
+        .expect("the decoy was evaluated");
+    assert!(decoy.tried);
+    assert!(matches!(decoy.outcome, Outcome::PrunedFloor { .. }));
+    // Continuous sweeps collapse onto their node (ADR-0021 §1 rule 2).
+    let clock = nodes
+        .iter()
+        .find(|n| n.stage == Stage::S2 && n.tried && !n.hypothesis.swept.is_empty())
+        .unwrap();
+    assert!(clock.evaluations > 1 && clock.hypothesis.swept[0].points > 1);
+    // Coverage: two skeletons offered and tried, one unsupported; the FSK family reached S5.
+    assert_eq!(o.coverage.skeletons.offered, 2);
+    assert_eq!(o.coverage.skeletons.tried, 2);
+    assert_eq!(o.coverage.skeletons.unsupported, 1);
+    let fsk = o
+        .coverage
+        .families
+        .iter()
+        .find(|f| f.family == "fsk")
+        .unwrap();
+    assert_eq!(fsk.deepest_stage, Some(Stage::S5));
+    assert!(o.used.proposal_calls >= 1);
+    assert!(
+        o.used.hypotheses >= 1 << 16,
+        "the operator's hypotheses pay look-elsewhere"
+    );
+}
+
+#[test]
+fn the_same_spec_gives_the_same_trace_at_any_thread_count() {
+    let outcome = |threads: u32| {
+        let world = World::new(FSK);
+        let mut s = spec(standard_roots(), Profile::Standard);
+        s.budget.threads = threads;
+        let o = run(&s, &world, &Control::new());
+        check_outcome(&o, &world);
+        o
+    };
+    let (a, b) = (outcome(1), outcome(4));
+    assert!(!a.nondeterministic && !b.nondeterministic);
+    let strip = |o: &SearchOutcome| {
+        o.trace
+            .nodes
+            .iter()
+            .map(|n| {
+                let mut n = n.clone();
+                n.cpu_ms = 0;
+                serde_json::to_value(&n).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(&a), strip(&b));
+    assert_eq!(a.results, b.results);
+    assert_eq!(a.used.evaluations, b.used.evaluations);
+}
+
+#[test]
+fn shared_prefixes_are_memoised_not_paid_twice() {
+    // Two skeletons identical through S4, differing only at S5's candidates.
+    let world = World::new(FSK);
+    let roots = vec![
+        root(skeleton("fsk-a", fsk_s1(), false, &POLYS), -0.5, &POLYS),
+        root(
+            skeleton("fsk-b", fsk_s1(), false, &["0x8005"]),
+            -0.5,
+            &["0x8005"],
+        ),
+    ];
+    let mut s = spec(roots, Profile::Deep);
+    s.solve.min_holdout_bits = 1e9; // never solves: both searches run to the end
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    let memo: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.outcome.kind() == OutcomeKind::Memoised)
+        .collect();
+    assert!(
+        !memo.is_empty(),
+        "the second skeleton's shared prefix is a memoised hit"
+    );
+    for m in memo {
+        assert_eq!(m.evaluations, 0, "a memoised hit does no new work");
+        assert!(m.measured.is_none());
+    }
+    assert_eq!(o.stop, Some(StopReason::Exhausted));
+}
+
+#[test]
+fn a_tight_evaluation_budget_stops_and_says_what_it_did_not_try() {
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Quick);
+    s.budget.max_evaluations = Some(20);
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    assert!(o.coverage.budget.exhausted);
+    assert!(
+        o.used.evaluations <= 20,
+        "the cap holds: {}",
+        o.used.evaluations
+    );
+    let not_tried: Vec<_> = o.trace.nodes.iter().filter(|n| !n.tried).collect();
+    assert!(!not_tried.is_empty());
+    for n in &not_tried {
+        assert!(matches!(
+            n.outcome,
+            Outcome::DeferredBudget {
+                stop: StopReason::Budget,
+                ..
+            }
+        ));
+        assert!(n.measured.is_none() && n.evidence_bits.is_none());
+    }
+    assert_eq!(o.reason, Some(Reason::BudgetExhausted));
+    assert!(
+        !o.results.is_empty(),
+        "there are always ranked partial results"
+    );
+    assert_ne!(o.results[0].verdict, Verdict::Solved);
+}
+
+#[test]
+fn proposal_calls_are_budgeted_by_count_and_share_the_op_pool() {
+    // One call allowed: it is granted its share of the op pool, and it is enough.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.budget.max_proposal_calls = Some(1);
+    s.budget.max_assist_ops = Some(10_000);
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.used.proposal_calls, 1);
+    assert!(o.used.assist_ops <= 10_000);
+    assert_eq!(*world.grants.lock().unwrap(), [10_000]);
+    assert_eq!(o.stop, Some(StopReason::Solved));
+
+    // None allowed: the S4 alternative that needs the operator is not tried, and the search
+    // stops on budget — however much evaluation budget is left.
+    let world = World::new(FSK);
+    s.budget.max_proposal_calls = Some(0);
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.used.proposal_calls, 0);
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    let s4 = o
+        .trace
+        .nodes
+        .iter()
+        .find(|n| n.stage == Stage::S4)
+        .expect("the S4 hypothesis is recorded");
+    assert!(!s4.tried, "not tried is not ruled out");
+    assert!(o.used.evaluations < 100);
+    assert_eq!(o.results[0].verdict, Verdict::Clocked);
+}
+
+#[test]
+fn noise_is_no_signal_and_a_bare_carrier_is_nothing_scored() {
+    let roots = || {
+        vec![
+            root(skeleton("fsk-s0", fsk_s1(), true, &POLYS), -0.5, &POLYS),
+            root(skeleton("ook-s0", ook_s1(), true, &POLYS), -1.0, &POLYS),
+        ]
+    };
+    let noise = World::new(Truth {
+        s0_bits: 1.0,
+        family: None,
+        ..FSK
+    });
+    let o = run(&spec(roots(), Profile::Standard), &noise, &Control::new());
+    check_outcome(&o, &noise);
+    assert_eq!(o.stop, Some(StopReason::Exhausted));
+    assert_eq!(o.reason, Some(Reason::NoSignal));
+    assert!(o.results.iter().all(|r| r.verdict != Verdict::Solved));
+    assert_eq!(o.results[0].verdict, Verdict::Energy);
+
+    let carrier = World::new(Truth {
+        s0_bits: 11.0,
+        family: None,
+        ..FSK
+    });
+    let o = run(&spec(roots(), Profile::Standard), &carrier, &Control::new());
+    check_outcome(&o, &carrier);
+    assert_eq!(o.stop, Some(StopReason::Exhausted));
+    assert_eq!(
+        o.reason,
+        Some(Reason::NothingScored),
+        "not merged with no-signal"
+    );
+}
+
+#[test]
+fn cancel_keeps_partial_results_and_rules_nothing_out() {
+    let control = Arc::new(Control::new());
+    let c2 = Arc::clone(&control);
+    let world = World::new(FSK).with_hook(move |k| {
+        if k == 20 {
+            c2.cancel();
+        }
+    });
+    let o = run(&spec(standard_roots(), Profile::Standard), &world, &control);
+    check_outcome(&o, &world);
+    assert_eq!(o.state, JobState::Cancelled);
+    assert_eq!(o.stop, Some(StopReason::Cancelled));
+    assert_eq!(
+        o.reason, None,
+        "an aborted look writes not-searched, never unknown"
+    );
+    assert!(!o.results.is_empty());
+    assert!(o.trace.nodes.iter().any(|n| matches!(
+        n.outcome,
+        Outcome::DeferredBudget {
+            stop: StopReason::Cancelled,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn capture_loss_throttles_the_job_before_capture_is_hurt() {
+    let control = Arc::new(Control::new());
+    let c2 = Arc::clone(&control);
+    let world = World::new(FSK).with_hook(move |k| {
+        if k == 5 {
+            c2.set_lost_samples(128);
+        }
+    });
+    let mut s = spec(standard_roots(), Profile::Deep);
+    s.budget.threads = 4;
+    let states = Mutex::new(Vec::new());
+    let mut obs = |p: &Progress| states.lock().unwrap().push(p.state);
+    let o = search(&s, &Registry::builtin(), &world, &control, &mut obs);
+    check_outcome(&o, &world);
+    assert_eq!(o.throttle_events, 1);
+    assert!(o.nondeterministic);
+    assert!(states.lock().unwrap().contains(&Some(JobState::Throttled)));
+    // Throttling slows the search; it does not change what is found.
+    assert_eq!(o.stop, Some(StopReason::Solved));
+}
+
+#[test]
+fn switching_to_battery_refuses_the_rest_of_a_deep_job() {
+    let control = Arc::new(Control::new());
+    let c2 = Arc::clone(&control);
+    let world = World::new(FSK).with_hook(move |k| {
+        if k == 20 {
+            c2.set_power(PowerPolicy::Battery);
+        }
+    });
+    let o = run(&spec(standard_roots(), Profile::Deep), &world, &control);
+    check_outcome(&o, &world);
+    assert_eq!(o.refused_power, Some(PowerPolicy::Battery));
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    let refused: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| matches!(&n.outcome, Outcome::RefusedPower { policy } if policy == "battery"))
+        .collect();
+    assert!(!refused.is_empty());
+    assert!(refused.iter().all(|n| !n.tried));
+}
+
+#[test]
+fn a_thermal_flag_pauses_expansion_until_it_clears() {
+    let control = Arc::new(Control::new());
+    let c2 = Arc::clone(&control);
+    let world = World::new(FSK).with_hook(move |k| {
+        if k == 10 {
+            c2.set_thermal(true);
+            let c3 = Arc::clone(&c2);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                c3.set_thermal(false);
+            });
+        }
+    });
+    let states = Mutex::new(Vec::new());
+    let mut obs = |p: &Progress| states.lock().unwrap().push(p.state);
+    let s = spec(standard_roots(), Profile::Standard);
+    let o = search(&s, &Registry::builtin(), &world, &control, &mut obs);
+    check_outcome(&o, &world);
+    assert!(states.lock().unwrap().contains(&Some(JobState::Throttled)));
+    assert_eq!(
+        o.stop,
+        Some(StopReason::Solved),
+        "the pause delays, it does not stop"
+    );
+}
+
+#[test]
+fn a_deferred_family_waits_in_the_side_queue() {
+    let mut deferred = root(
+        skeleton("generic-ook-framed", ook_s1(), false, &POLYS),
+        -6.0,
+        &POLYS,
+    );
+    deferred.deferred = Some(0.01);
+    deferred.family = Some("ook".into());
+    // Main pass solves → the side queue is never reached: deferred_prior, not tried.
+    let world = World::new(FSK);
+    let roots = vec![
+        root(
+            skeleton("generic-fsk-framed", fsk_s1(), false, &POLYS),
+            -0.5,
+            &POLYS,
+        ),
+        deferred.clone(),
+    ];
+    let o = run(
+        &spec(roots.clone(), Profile::Standard),
+        &world,
+        &Control::new(),
+    );
+    check_outcome(&o, &world);
+    let d = o
+        .trace
+        .nodes
+        .iter()
+        .find(|n| matches!(n.outcome, Outcome::DeferredPrior { .. }))
+        .expect("the deferred family is recorded, not deleted");
+    assert!(!d.tried);
+    assert_eq!(d.hypothesis.family.as_deref(), Some("ook"));
+    let ook = o
+        .coverage
+        .families
+        .iter()
+        .find(|f| f.family == "ook")
+        .unwrap();
+    assert_eq!(ook.deferred_as, Some(OutcomeKind::DeferredPrior));
+
+    // Nothing solves → the main pass exhausts and the side queue runs after it.
+    let world = World::new(Truth {
+        s0_bits: 11.0,
+        family: None,
+        ..FSK
+    });
+    let o = run(&spec(roots, Profile::Standard), &world, &Control::new());
+    check_outcome(&o, &world);
+    let first_ook = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.hypothesis.family.as_deref() == Some("ook") && n.tried)
+        .map(|n| n.id[1..].parse::<u32>().unwrap())
+        .min()
+        .expect("the side queue ran");
+    let last_fsk = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.hypothesis.skeleton == "generic-fsk-framed@1" && n.tried)
+        .map(|n| n.id[1..].parse::<u32>().unwrap())
+        .max()
+        .unwrap();
+    assert!(
+        first_ook > last_fsk,
+        "deferred runs only after the main pass"
+    );
+}
+
+#[test]
+fn the_trace_stays_within_its_bound_and_is_complete_in_counts() {
+    // Many hypotheses: 16 hex polynomials × every surviving S4 node, at quick's 128-node bound.
+    let polys: Vec<String> = (0..120).map(|i| format!("0x{:04X}", 0x1000 + i)).collect();
+    let mut polys: Vec<&str> = polys.iter().map(String::as_str).collect();
+    polys.push(FSK.poly);
+    let roots = vec![
+        root(skeleton("fsk-a", fsk_s1(), false, &polys), -0.5, &polys),
+        root(skeleton("fsk-b", fsk_s1(), false, &polys), -0.6, &polys),
+        root(skeleton("ook-a", ook_s1(), false, &polys), -1.0, &polys),
+    ];
+    let world = World::new(FSK);
+    let mut s = spec(roots, Profile::Quick);
+    s.budget.max_proposal_calls = Some(100);
+    s.solve.min_holdout_bits = 1e9;
+    let bound = Profile::Quick.trace_bounds().max_trace_nodes as usize;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    if !o.trace.over_bound {
+        assert!(
+            o.trace.nodes.len() <= bound,
+            "{} > {bound}",
+            o.trace.nodes.len()
+        );
+    }
+    assert!(o.trace.truncated && o.trace.nodes_elided > 0);
+    // Every not-tried node survives the bound.
+    let evaluated: u64 = o.trace.nodes.iter().map(|n| n.evaluations).sum();
+    assert!(
+        evaluated < o.used.evaluations,
+        "some work is only in elided counts"
+    );
+    assert!(o.trace.elided.iter().all(|e| e.outcome.tried()));
+}
+
+#[test]
+fn memoised_prefixes_survive_cache_eviction_by_recomputing() {
+    // A 1-byte cache holds nothing: every parent output is recomputed, and paid for.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.budget.max_cache_bytes = 1;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Solved));
+    assert_eq!(o.used.cache_bytes, 0);
+    let cached = {
+        let w = World::new(FSK);
+        let o = run(
+            &spec(standard_roots(), Profile::Standard),
+            &w,
+            &Control::new(),
+        );
+        o.used.evaluations
+    };
+    assert!(
+        o.used.evaluations > cached,
+        "recomputation is charged, not free"
+    );
+}

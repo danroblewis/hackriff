@@ -1,6 +1,7 @@
-//! Blocks A (T-086 iq and symbol groups) allocate nothing in `process` over steady-state
-//! chunks, including chunks flagged `DISCONTINUITY`/`RESET` (ADR-0011 §1.4 rule 1), and a
-//! restart leaves each block exactly as a freshly built one (T-104).
+//! Blocks A (T-086 iq and symbol groups; T-610 adds the streaming `viterbi`, T-612
+//! `mlevel_slicer`) allocate nothing in `process` over steady-state chunks, including chunks
+//! flagged `DISCONTINUITY`/`RESET` (ADR-0011 §1.4 rule 1), and a restart leaves each block
+//! exactly as a freshly built one (T-104).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -119,6 +120,31 @@ fn fsk_iq(fs: f64, rate: f64, dev: f64) -> Signal {
                 Complex32::new(
                     ph.cos() as f32 + 0.01 * (rng.next() as f32 - 0.5),
                     ph.sin() as f32 + 0.01 * (rng.next() as f32 - 0.5),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// T-875: BPSK bursts (80 symbols at 4 800 Bd, 300 Hz off) every 3 000 samples at 48 kS/s over
+/// a quiet floor, so `psk_demod`'s burst mode finds, acquires, tracks, closes and sometimes
+/// defers a burst inside the measured chunks.
+fn bpsk_bursts() -> Signal {
+    let mut rng = Rng(9);
+    let mut sym = 1.0f32;
+    Signal::Iq(
+        (0..items())
+            .map(|i| {
+                let t = i % 3_000;
+                let on = (500..1_300).contains(&t);
+                if t % 10 == 0 {
+                    sym = rng.sym();
+                }
+                let ph = std::f64::consts::TAU * 300.0 * i as f64 / 48_000.0;
+                let a = if on { sym } else { 0.0 };
+                Complex32::new(
+                    a * ph.cos() as f32 + 0.01 * (rng.next() as f32 - 0.5),
+                    a * ph.sin() as f32 + 0.01 * (rng.next() as f32 - 0.5),
                 )
             })
             .collect(),
@@ -260,6 +286,7 @@ fn flags_of(k: usize) -> ChunkFlags {
 fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
     let iq_fs = 240_000.0;
     let fsk = fsk_iq(48_000.0, 1_200.0, 2_400.0);
+    let bursts = bpsk_bursts();
     let fm = fsk_iq(iq_fs, 1_187.5, 50_000.0);
     let ppm = ppm_iq();
     let mpx = mpx(iq_fs);
@@ -344,11 +371,82 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
             &fsk,
             48_000.0,
         ),
+        // T-609: the liquid path through the resampler (d8psk at 4 samples/symbol → 5), at an
+        // exact integer rate (8psk: no resampler), and the native OQPSK path. The measured
+        // chunks include the acquisition FFT (it lands inside the warm-up for these rates).
+        (
+            "psk_demod",
+            json!({"modulation": "qpsk", "symbol_rate_bd": 4800}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "d8psk", "symbol_rate_bd": 12000}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "8psk", "symbol_rate_bd": 9600, "max_offset_hz": 0}),
+            &fsk,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "oqpsk", "symbol_rate_bd": 4800, "pulse": "half-sine"}),
+            &fsk,
+            48_000.0,
+        ),
+        // T-875: burst mode — detector, per-burst estimators (two FFTs), fractional-delay feed,
+        // flush and the one-burst-per-chunk deferral — on bursts, and on the native path.
+        (
+            "psk_demod",
+            json!({"modulation": "bpsk", "symbol_rate_bd": 4800, "burst": true}),
+            &bursts,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "oqpsk", "symbol_rate_bd": 4800, "burst": true}),
+            &bursts,
+            48_000.0,
+        ),
         ("slicer", json!({}), &soft, 2_400.0),
+        // T-612: the M-ary decision, auto (the windowed level fit) and fixed.
+        ("mlevel_slicer", json!({"levels": 4}), &soft, 2_400.0),
+        (
+            "mlevel_slicer",
+            json!({"levels": 8, "window": 1000, "mapping": "natural", "bit_order": "lsb"}),
+            &soft,
+            2_400.0,
+        ),
+        (
+            "mlevel_slicer",
+            json!({"levels": 4, "thresholds": "fixed", "fixed_levels": [-0.5, 0.0, 0.5],
+                   "mapping": "table", "table": [3, 2, 0, 1]}),
+            &soft,
+            2_400.0,
+        ),
         ("diff_decode", json!({}), &bits, 2_400.0),
         ("nrzi", json!({}), &bits, 2_400.0),
         ("manchester", json!({}), &soft, 2_400.0),
         ("manchester", json!({"convention": "ieee"}), &bits, 2_400.0),
+        // T-610: the streaming Viterbi decoder at symbol rate, soft with the auto phase search
+        // (two lanes), and hard on a punctured code (four lanes).
+        (
+            "viterbi",
+            json!({"constraint_length": 7, "polys": ["0x4F", "0x6D"], "invert": [false, true]}),
+            &soft,
+            2_400.0,
+        ),
+        (
+            "viterbi",
+            json!({"constraint_length": 7, "polys": ["0x4F", "0x6D"], "puncture": ["101", "110"],
+                   "traceback_bits": 128}),
+            &bits,
+            2_400.0,
+        ),
     ];
 
     let mut failures = Vec::new();

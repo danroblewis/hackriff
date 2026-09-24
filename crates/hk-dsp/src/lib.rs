@@ -52,6 +52,7 @@ pub mod synth;
 pub mod vlf;
 pub mod welch;
 pub mod window;
+pub mod xcorr;
 
 pub use channelizer::{
     ChannelHeader, ChannelSamples, ChannelTime, ChannelizerError, DEFAULT_CHANNEL_RESET_ON, Pfb,
@@ -73,6 +74,7 @@ pub use stft::{
 };
 pub use welch::{Accumulators, ConfigError, SegmentEngine, WelchConfig, welch};
 pub use window::{Window, WindowKind, WindowMetrics};
+pub use xcorr::{Xcorr, XcorrPeak, normalized_xcorr};
 
 #[cfg(test)]
 mod tests {

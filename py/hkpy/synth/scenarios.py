@@ -115,8 +115,18 @@ FSK_DEFAULTS: dict[str, Any] = {
     "sensor_id": 0x5A3C,
     "calibration_k_db": -70.0,
     "start_utc": DEFAULT_START_UTC,
+    # T-622: check and payload parameterisation (docs/22 P6/P7, ADR-0022 SS4.2/4.3).
+    "check_width": 16,       # 8 / 16 / 24 / 32 - the confirm-gate width floor is 8 (ADR-0022 SS4.3)
+    "check_poly_hex": None,  # None -> the canonical template-fixed default for check_width;
+                             # an explicit hex string (e.g. "0x8f45") lands off the RevEng
+                             # catalogue on purpose (docs/22 A7's "random polynomial" row)
+    "constant_payload": False,  # True -> every burst repeats the same payload bytes (a beacon):
+                                 # `differences` stays 1 however many bursts are sent, so it must
+                                 # NOT confirm on repeat count alone (ADR-0022 SS4.2, docs/22 P7)
 }
 
+#: bits=16 base layout, kept for readers that expect the historical shape; `fsk_layout()` below
+#: is what `fsk_burst_train` actually annotates, with the real check width.
 FSK_LAYOUT = [
     {"field": "preamble", "bits": "preamble_bits", "value": "1010..."},
     {"field": "sync", "bits": "16 (sync_hex)"},
@@ -125,15 +135,23 @@ FSK_LAYOUT = [
     {"field": "temperature_dC", "bits": 12, "signed": True},
     {"field": "humidity_pct", "bits": 8},
     {"field": "flags", "bits": 4},
-    {"field": "crc16", "bits": 16, "covers": "sensor_id..flags (6 bytes)"},
+    {"field": "check", "bits": 16, "covers": "sensor_id..flags (6 bytes)"},
 ]
+
+
+def fsk_layout(check_width: int) -> list[dict[str, Any]]:
+    """`FSK_LAYOUT` with the check field's actual width (T-622: arbitrary check width)."""
+    return [
+        {**field, "bits": check_width} if field["field"] == "check" else dict(field)
+        for field in FSK_LAYOUT
+    ]
 
 
 def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     p = ctx.params
     fs = float(p["sample_rate"])
     scene = ctx.scene("fsk_burst_train", fs, _n(p),
-                      "hkpy.synth fsk_burst_train: periodic 2-FSK sensor bursts with CRC-16")
+                      "hkpy.synth fsk_burst_train: periodic 2-FSK sensor bursts with a check")
     _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
     cap = scene.captures[0]
     rate, dev, bt = float(p["symbol_rate_bd"]), float(p["deviation_hz"]), float(p["bt"])
@@ -150,30 +168,64 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
     payload_rng = scene.rng("payload")
     temp_dc = int(payload_rng.integers(100, 250))
     humidity = int(payload_rng.integers(30, 70))
+
+    # T-622: check and payload parameterisation (docs/22 P6/P7, ADR-0022 SS4.2/4.3).
+    check_width = int(p["check_width"])
+    check_bytes = check_width // 8
+    crc_params = fsk.crc_params_for(check_width, p.get("check_poly_hex"))
+    catalogue_name = fsk.crc_catalogue_name(**crc_params)
+    constant_payload = bool(p["constant_payload"])
+    check_start_bit = int(len(preamble)) + len(sync) * 8
+    payload_bits = 48
+    crc_hex_width = check_bytes * 2
+
     k = 0
     while True:
         jitter = float(p["jitter_s"])
         t = float(p["first_burst_s"]) + k * float(p["period_s"])
         t += float(sched.uniform(-jitter, jitter)) if jitter > 0 else 0.0
-        temp_dc += int(payload_rng.integers(-3, 4))
+        if constant_payload:
+            seq = 0
+        else:
+            temp_dc += int(payload_rng.integers(-3, 4))
+            seq = k & 0xFF
         flags = 0b0001
-        payload_int = (sensor_id << 32) | ((k & 0xFF) << 24) | ((temp_dc & 0xFFF) << 12) \
+        payload_int = (sensor_id << 32) | (seq << 24) | ((temp_dc & 0xFFF) << 12) \
             | ((humidity & 0xFF) << 4) | flags
         payload = payload_int.to_bytes(6, "big")
-        crc = fsk.crc16_ccitt_false(payload)
+        crc = fsk.crc_generic(payload, **crc_params)
         bits = np.concatenate([preamble, fsk.bytes_to_bits(sync), fsk.bytes_to_bits(payload),
-                               fsk.bytes_to_bits(crc.to_bytes(2, "big"))])
+                               fsk.bytes_to_bits(crc.to_bytes(check_bytes, "big"))])
         iq = fsk.cpfsk(bits, fs, rate, dev, bt=bt, phase0=float(sched.uniform(0, 2 * math.pi)))
         start = max(0, int(round(t * fs)))
         if start + len(iq) > scene.n_samples:
             break
         tt = scene.time(start, len(iq))
         scene.add_samples(start, amp * iq * np.exp(2j * math.pi * off * tt))
+        crc_spec = {
+            "algorithm": catalogue_name or f"CRC-{check_width}/CUSTOM",
+            "poly": f"0x{crc_params['poly']:0{crc_hex_width}x}",
+            "width": check_width,
+            "init": f"0x{crc_params['init']:0{crc_hex_width}x}",
+            "refin": crc_params["refin"],
+            "refout": crc_params["refout"],
+            "xorout": f"0x{crc_params['xorout']:0{crc_hex_width}x}",
+            "covers": "payload bytes (sensor_id..flags)",
+            "start_bit": check_start_bit,
+            "covered_bits": payload_bits,
+            "tail_bits": 0,
+            "bit_order": "msb-first",
+            "in_reveng_catalogue": catalogue_name is not None,
+            "catalogue_name": catalogue_name,
+            "value": f"0x{crc:0{crc_hex_width}x}",
+            "valid": True,
+        }
         truth = scene.emission_truth(
             cap, off, bw, power, kind="fsk-burst", modulation="2fsk", levels=2,
             symbol_rate_bd=rate, deviation_hz=dev, mod_index=2 * dev / rate, bt=bt,
             nominal_center_hz=cap.center_hz + float(p["channel_offset_hz"]), cfo_hz=float(p["cfo_hz"]),
             burst_index=k, bit_order="msb-first", mapping="bit 1 = +deviation_hz",
+            constant_payload=constant_payload,
             frame={
                 "n_bits": int(len(bits)),
                 "bits_hex": fsk.bits_to_hex(bits),
@@ -181,12 +233,12 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
                 "preamble_hex": fsk.bits_to_hex(preamble),
                 "sync_hex": sync.hex(),
                 "payload_hex": payload.hex(),
-                "crc_hex": f"{crc:04x}",
-                "layout": FSK_LAYOUT,
+                "crc_hex": f"{crc:0{crc_hex_width}x}",
+                "layout": fsk_layout(check_width),
             },
-            payload_fields={"sensor_id": sensor_id, "seq": k & 0xFF, "temperature_dC": temp_dc,
+            payload_fields={"sensor_id": sensor_id, "seq": seq, "temperature_dC": temp_dc,
                             "humidity_pct": humidity, "flags": flags},
-            crc={**fsk.CRC16_SPEC, "value": f"0x{crc:04X}", "valid": True},
+            crc=crc_spec,
             identity={"type": "sensor_id", "value": f"{sensor_id:04x}"},
         )
         f = cap.center_hz + off
@@ -205,7 +257,13 @@ def fsk_burst_train(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         "n_bursts": k,
         "preamble_bits": int(len(preamble)),
         "sync_hex": sync.hex(),
-        "crc": fsk.CRC16_SPEC,
+        "constant_payload": constant_payload,
+        "crc": {"algorithm": catalogue_name or f"CRC-{check_width}/CUSTOM",
+                "poly": f"0x{crc_params['poly']:0{crc_hex_width}x}", "width": check_width,
+                "init": f"0x{crc_params['init']:0{crc_hex_width}x}", "refin": crc_params["refin"],
+                "refout": crc_params["refout"],
+                "xorout": f"0x{crc_params['xorout']:0{crc_hex_width}x}",
+                "in_reveng_catalogue": catalogue_name is not None},
     }
     return [scene], {}
 
@@ -754,3 +812,81 @@ def adsb_squitter(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
         ac.pop("carrier_phase")
     scene.scenario_truth["aircraft"] = aircraft
     return [scene], {}
+
+
+# ---------------------------------------------------------------------------------------------
+# analog voice negatives (N2 population, ADR-0021 s8.4 / docs/22 s4.3): energy without symbols
+# ---------------------------------------------------------------------------------------------
+
+VOICE_DEFAULTS: dict[str, Any] = {
+    "sample_rate": 250e3,
+    "center_hz": 462.5625e6,
+    "offset_hz": 25e3,
+    "snr_db": 20.0,  # in-channel SNR over the noise in the voice bandwidth
+    "noise_dbfs": -40.0,  # sets ADC fill
+    "deviation_hz": 2500.0,  # NBFM peak deviation
+    "am_depth": 0.8,
+    "duration_s": 0.6,
+    "burst_on_s": 0.15,  # push-to-talk structure: on/off cycle
+    "burst_off_s": 0.05,
+    "calibration_k_db": -70.0,
+    "start_utc": DEFAULT_START_UTC,
+}
+
+
+def _voice_audio(scene: Scene, n: int, fs: float) -> np.ndarray:
+    """Speech-like audio in [-1, 1]: band-limited noise (300-3000 Hz) with a syllabic envelope."""
+    rng = scene.rng("voice")
+    sos = signal.butter(4, [300.0, 3000.0], btype="band", fs=fs, output="sos")
+    a = signal.sosfilt(sos, rng.standard_normal(n))
+    env = signal.sosfilt(signal.butter(2, 6.0, fs=fs, output="sos"), np.abs(rng.standard_normal(n)))
+    a = a * (0.3 + env / max(float(np.max(np.abs(env))), 1e-12))
+    return a / max(float(np.max(np.abs(a))), 1e-12)
+
+
+def _voice_scene(ctx: Ctx, name: str, modulation: str) -> tuple[list[Scene], dict[str, Any]]:
+    p = ctx.params
+    fs = float(p["sample_rate"])
+    scene = ctx.scene(name, fs, _n(p), f"hkpy.synth {name}: analog {modulation} voice, no symbols")
+    _noise_capture(scene, p, p["center_hz"], p["calibration_k_db"])
+    cap = scene.captures[0]
+    off = float(p["offset_hz"])
+    n = scene.n_samples
+    audio = _voice_audio(scene, n, fs)
+    if modulation == "nbfm":
+        bw = 2 * (float(p["deviation_hz"]) + 3000.0)
+        ph = 2 * math.pi * float(p["deviation_hz"]) * np.cumsum(audio) / fs
+        base = np.exp(1j * ph)
+        p_lin = 1.0
+    else:
+        bw = 6000.0
+        depth = float(p["am_depth"])
+        base = 1.0 + depth * audio
+        p_lin = 1.0 + depth * depth * float(np.mean(audio ** 2))
+    noise_in_bw = float(p["noise_dbfs"]) - db(fs) + db(bw)
+    power = noise_in_bw + float(p["snr_db"])
+    amp = math.sqrt(undb(power) / p_lin)
+    t = scene.time(0, n)
+    keyed = np.zeros(n)
+    on, off_s = int(float(p["burst_on_s"]) * fs), int(float(p["burst_off_s"]) * fs)
+    i = 0
+    bursts = []
+    while i < n and on > 0:
+        keyed[i:i + on] = 1.0
+        bursts.append([i, min(i + on, n)])
+        i += on + off_s
+    scene.add_samples(0, amp * base * keyed * np.exp(2j * math.pi * off * t))
+    f = cap.center_hz + off
+    scene.annotate(0, n, f - bw / 2, f + bw / 2, name,
+                   scene.emission_truth(cap, off, bw, power, kind="none", modulation=modulation,
+                                        symbol_alphabet=None, framed=False, burst_samples=bursts,
+                                        snr_db_per_hz=power - cap.floor_dbfs_per_hz))
+    return [scene], {}
+
+
+def nbfm_voice(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    return _voice_scene(ctx, "nbfm_voice", "nbfm")
+
+
+def am_voice(ctx: Ctx) -> tuple[list[Scene], dict[str, Any]]:
+    return _voice_scene(ctx, "am_voice", "am")

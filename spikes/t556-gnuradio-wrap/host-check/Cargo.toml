@@ -1,0 +1,15 @@
+# T-556 spike: drive the wrapped gr-lora_sdr through the REAL plugin host (hk_plugins::PluginInstance),
+# not an emulation of it. Outside the workspace (spikes/ is excluded); path deps only.
+[package]
+name = "t556-host-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hk-plugins = { path = "../../../crates/hk-plugins" }
+hk-stream = { path = "../../../crates/hk-stream" }
+hk-model = { path = "../../../crates/hk-model" }
+serde_json = "1"

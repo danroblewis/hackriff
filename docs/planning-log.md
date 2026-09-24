@@ -5515,3 +5515,96 @@ shadow; never swept = grey; re-swept = bright). T-519 (2A) adds the missing carr
 query-time fold (no per-row capture cost) and a shadow plane on the tile route, plus a short ADR note;
 T-520 (2B) the client tier; T-521 (2C) the standing e2e guard. Sequence 2A → 2B → 2C, 2A+2B landing
 together so the effect is visible.
+
+**The board is now validated where it is WRITTEN, not only where it is gated (T-764, 2026-09-22).**
+T-640's unquoted `sources[iq-ring].available: true` in a title made `yaml.safe_load` reject the whole
+board and blanked the dashboard, past every textual guard in the tree. T-762 closed the gate half —
+but the break arrived through a **direct board commit**, and those run no gate at all, several times
+an hour. So `hkpy.boardcheck` is one stdlib-plus-strict-parse validator, called from
+`.githooks/pre-commit` (installed by `just setup-git`, which `ops/merge-runner.sh` runs at startup)
+before **any** commit that touches `docs/tasks.yaml` — a coordinator's board flip and the runner's
+merge commit alike — and from `hkpy.boardmerge._validate`, so the driver vouches for the same
+property when it resolves a merge with nobody watching. It **fails closed**: unreadable board,
+missing `pyyaml`, missing checker, or a checker that runs without printing its `board-ok:` token all
+REFUSE the commit (an override that exits 0 and validates nothing is the failure mode, not a
+convenience). `py/tests/test_boardcheck.py` asserts the **refusal** of that exact 2026-09-22 payload
+down each path — direct commit, driver-resolved merge, merge commit, gated merge — never merely that
+a good board passes. Unchanged and still the supervisor's: `ops/monitor.py` should say "the board did
+not parse, here is why" rather than render an empty graph.
+### B0.692 — The merge gate was the bottleneck all along: 50 % red for three days, then 11 of 16 (2026-09-22)
+
+**Measured, from `merge-runner.log`:** gate verdicts 09-20 32 pass / 40 fail, 09-21 42 / 34, 09-22 5 / 11
+(by 11:15). Today's reds fell on *different* tests each time — `listen::signal_062`, `api_contract
+tile_shadow…`, `api_contract tile_route…`, `recovery_spectrum_handshake a_run_that_really_ended…`,
+`coverage_answers…` — on branches that could not have touched them (`t800` docs+ui, `t763` ops/py,
+`t299` docs), with 6–8 workers building beside the gate at load ~17. Each red batch then ran the
+"rewind and isolate every branch" fallback at ~50 min per branch: 22 branches = 14 h for one flake.
+Half a day, one landing. The user's verdict: unacceptable, and right.
+
+**Why it was structural, not bad luck.** (1) A fail-closed classifier sends every `ops/`, `.claude/`,
+`docs/` branch through the 30–50 min full workspace run — more rolls of a 50 % die for changes that
+cannot fail it. (2) The batch fallback treats one red test as evidence against every branch. (3) Per-test
+retries existed for exactly two timing tests; the other five known-timing tests had none. (4) Dispatch
+(new today) put 8 builds beside the gate with nothing yielding.
+
+**Decided and built (task-gatefix, task-workrunner):**
+1. **`ops` gate class** — `ops/`, `.claude/`, `prompts/` → `just ops-check` (bash -n / py_compile) +
+   `lint-py` + `test-py`. Minutes, and it cannot lose to a Rust timing test. `justfile`/`.github`/the
+   classifier stay full (the gate never certifies its own weakening).
+2. **Triage before isolating** (`flake_retry` in `ops/merge-runner.sh`): on a red batch, re-run the
+   failing tests *alone* first. Pass alone → load flake, appended to `$HACKRIFF_OPS/flaky.jsonl`, and
+   the full gate retried **once** with the machine to itself. Fail alone → a real defect → isolate.
+3. **A fixed resource budget, not heuristics** (user's call, replacing an earlier suspend/resume
+   mechanism that terminated and resumed workers — dumb, and only needed because nothing bounded
+   them). 28 cores: the gate reserved 14; each worker bounded to ~3 by limits its whole process tree
+   inherits — `CARGO_BUILD_JOBS=2`, `NEXTEST_TEST_THREADS=2`, and a permanent `background` QoS clamp
+   (E-cores only) — so the worker count is a known 4 and the gate never competes. The hard ceiling is
+   the HiGarfield fork of `cpulimit` (`-l 300 -i`, built from source into `$HACKRIFF_OPS/bin`):
+   Homebrew's `opsengine` build is inert on Apple Silicon (0 % effect in three tests, open issue #121),
+   the fork measured 164 % aggregate over four busy loops under `-l 200 -i`, descendants included.
+   macOS has no CPU affinity API; QoS→cluster (background = E-cores) is the only core-set control.
+4. *(folded into 3)*
+5. **One retry** for the five named load-sensitive tests in `.config/nextest.toml`, each with its
+   ticket (T-603, T-509, T-430/436/621; two newly observed today need tickets). This is a bridge:
+   `flaky.jsonl` is the coordinator's burn-down list, and a retry that keeps firing is a defect.
+
+**Measure it:** the dashboard gets gate pass rate per day beside the burndown. The target is a batch
+pass rate above 80 % by 09-24; below that, the next lever is running the gate's `nextest` at fewer
+threads under load, then the deflake work itself.
+
+### B0.693 — ADR-0015 ACCEPTED: the user answers docs/20's five, and says yes to stereo (2026-09-23)
+
+**Decided by the user (relayed by the supervisor), on [docs/20](20-mauto-decision-brief.md)'s table:**
+**U1 = B** (one frame auto-confirms only on a template-fixed check ≥ 24 bits; budget ≤ 1 wrong
+Confirmed emitter per unattended week — already ADR-0022's inequality), **U2 = B** (auto-queue
+unexplained candidates at `quick` only, on mains, one job at a time; `deep` user-triggered, refused on
+battery), **U3 = A** (the user's label wins at rank 0; a contradicting CRC-valid decode is recorded
+and shown beside it — also closes ADR-0016 Q3), **U4 = A** (fund `psk_demod`, M-14 **required**;
+SSB/CW stay on the legacy Listen chain permanently), and **U5 = yes — against the brief's "no"**: the
+user wants stereo audio, as part of decoding the signal. Then: accept ADR-0015 accordingly, and let
+the MAUTO M-1/M-3 chain proceed.
+
+**What changed.** [ADR-0015](adr/0015-decoder-synthesis-contracts.md) → **ACCEPTED (2026-09-23, user
+decisions U1–U5)**. T-848's eight engineering corrections (§16.2: D1, C2–C8) are folded into the
+sections they amend — the evidence vocabulary in `hk_model::synth` (§9), likelihood-only deferral
+(§4.2), the memoised-node exception (ADR-0021 §2.2), `output_policy` as the recipe's typed map
+(§4.1), the PSK gap closed (§1.1, §10), CandidatePipeline's docs/07 number (§11.7), S6 without a
+floor and floors never lowered (§1.3). U1–U5 are written into §§3.3, 4.2, 5.5, 6, 8, 12.5, 12.10,
+12.12, and a new **§12.13** puts stereo in scope as two placeholder tasks: LP-9 `stereo_decode`
+(pilot PLL, L−R, honest mono fallback) and LP-10 the `channels` wire change with every audio client
+in the same change and mono byte-identical. ADR-0011 §8.4's "stereo is out" and ADR-0016 Q3 carry
+pointers. The ADR-0016 dependency on M-1 is waived by the acceptance (hk-synth reads only the landed
+`SearchSeed`).
+
+**M-14 vs T-609.** T-609 delivered M-14's block (and more: eight constellations, not a BPSK Costas;
+T-610/T-611 complete CCSDS). What M-14 still owes before PSK reaches bits *in a search* is recorded
+in ADR-0015 §10's M-14 row: `psk_demod`'s `evidence()` metric and calibration table (M-2's scope must
+include it), a PSK S1 alternative in the open skeletons/seeding (none in §4.1's list), and a
+burst/preamble acquisition mode (T-609 needs 512–1024 symbols).
+
+**Still open — the user did not decide these (ADR-0015 §16.8):** (1) T-660: S3 reaches 4.5 bits, not
+`floor_j = 6`, under §13.1's max rule — restate the floor beside that measurement, never return to the
+sum; (2) T-552 / docs/27 (in flight): proposal-operator calls at 0.3–2.4 s dominate, so §3.3's
+3 / 20 / 120 s wall budgets should become op-count budgets with wall time as a backstop — M-3 should
+not freeze `SynthBudget`'s public shape first; (3) T-619's fill-bucket amendment, which must land (or
+M-2 must pass `TIGHT_NOMINAL_BOUNDS`) before the first calibration table is generated.

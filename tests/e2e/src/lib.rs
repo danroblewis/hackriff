@@ -23,11 +23,15 @@
 //!   source when T-003 merges.
 //! - [`pipeline`]: the [`Stage`] trait and provisional output records (to be replaced by the
 //!   T-002 data-model objects).
+//! - [`corpus`]: the MAUTO corpus's coverage manifest (every declared cell populated, declared
+//!   unreachable with a ticket, or unmarked) and the sealed hold-out rule (T-627; docs/22 §6.4).
 //! - [`assertions`]: truth-box matching with time/frequency tolerance, false-alarm counting and
 //!   parameter tolerances, with use-case IDs in every failure message.
 
 pub mod assertions;
 pub mod blind;
+pub mod checks;
+pub mod corpus;
 pub mod fixture;
 pub mod paths;
 pub mod pipeline;
@@ -38,6 +42,7 @@ pub mod synth;
 pub use assertions::{
     BoxTolerance, MatchReport, Tolerance, assert_param, check_param, match_detections,
 };
+pub use checks::Checks;
 pub use fixture::{Fixture, FixtureError, Role, TruthItem};
 pub use pipeline::{
     DecodedMessage, DetectionBox, FloorEstimate, ParameterEstimate, Pipeline, PipelineError,

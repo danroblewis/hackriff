@@ -1,0 +1,128 @@
+{
+  "schema": "hackriff.calibration/1",
+  "block": "diff_decode@1",
+  "generated_utc": "2026-09-24T07:01:35Z",
+  "generator": "py/hkpy/calibrate.py@e1efe1cb7ad8",
+  "conditioning": {
+    "key": "adc_fill_sigma_lsb",
+    "bucket": "nominal",
+    "sigma_lsb_range": [
+      1.0,
+      77.0
+    ],
+    "clip_fraction_max": 0.1
+  },
+  "tables": [
+    {
+      "metric": "bit_structure",
+      "null": "noise",
+      "n": 256,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 3882,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": 0.0957992896437645,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": 0.10263336449861526,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": 0.10804915428161621,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": 0.11251352727413177,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": 0.12024590373039246,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    },
+    {
+      "metric": "bit_structure",
+      "null": "noise",
+      "n": 1024,
+      "windows": 4096,
+      "sample_ceiling_bits": 12.0,
+      "distinct_values": 4096,
+      "levels": [
+        {
+          "bits": 1.0,
+          "threshold": 0.022402077913284302,
+          "realised_bits": 1.0
+        },
+        {
+          "bits": 2.0,
+          "threshold": 0.024658717215061188,
+          "realised_bits": 2.0
+        },
+        {
+          "bits": 3.0,
+          "threshold": 0.026589971035718918,
+          "realised_bits": 3.0
+        },
+        {
+          "bits": 4.0,
+          "threshold": 0.02797093614935875,
+          "realised_bits": 4.0
+        },
+        {
+          "bits": 6.0,
+          "threshold": 0.030509155243635178,
+          "realised_bits": 6.0
+        }
+      ],
+      "unexpressible": [
+        {
+          "bits": 8.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 10.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        },
+        {
+          "bits": 12.0,
+          "realised_bits": 6.0,
+          "reason": "above_calibrated_claim_cap"
+        }
+      ],
+      "admissible_bits": 6.0
+    }
+  ],
+  "null_corpus": "noise sigma=8LSB 8-bit @48000Hz via lowpass>fsk_demod>clock_recovery>slicer>diff_decode",
+  "null_fill": {
+    "clip_fraction": 0.0,
+    "sigma_lsb": 8.0
+  }
+}

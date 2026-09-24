@@ -11,6 +11,12 @@
 //! bug in the caller** — it is the note going stale, and the fix is to remove the note (and this
 //! test) in the same change that adds the wiring.
 //!
+//! **It is also the premise of a gate row.** `tests/e2e/tests/acceptance/m3_ml.rs` asserts
+//! ADR-0016 §7's ML row over a real run, and reports an empty `(model, consumer)` mode table on the
+//! strength of this test standing. Removing this file therefore fails that gate too, which is the
+//! point: the wiring change has to give the gate a real enumeration
+//! ([`hk_ml::exit_gate::MlGateSnapshot::from_host`]) in the same breath as it deletes the note.
+//!
 //! It scans sources rather than manifests because `hk-classify` already *depends* on `hk-ml`
 //! legitimately: T-204's DL stage is written against `LoadedModel` and `Calibrator` and never
 //! touches the host. A manifest-edge test in T-274's style would therefore already be red for the

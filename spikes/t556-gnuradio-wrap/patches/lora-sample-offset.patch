@@ -1,0 +1,48 @@
+diff --git a/lib/frame_sync_impl.cc b/lib/frame_sync_impl.cc
+index 7b3f306..cc4d1f8 100644
+--- a/lib/frame_sync_impl.cc
++++ b/lib/frame_sync_impl.cc
+@@ -803,6 +803,9 @@ namespace gr
+                         frame_info = pmt::dict_add(frame_info, pmt::intern("cfo_int"), pmt::mp((long)m_cfo_int));
+                         frame_info = pmt::dict_add(frame_info, pmt::intern("cfo_frac"), pmt::mp((float)m_cfo_frac));
+                         frame_info = pmt::dict_add(frame_info, pmt::intern("sf"), pmt::mp((long)m_sf));
++                        // hackriff T-556: input-domain sample offset of the header start, so a
++                        // wrapper can re-stamp decodes from host sample indices (C22 pitfall).
++                        frame_info = pmt::dict_add(frame_info, pmt::intern("sample_offset"), pmt::from_uint64(nitems_read(0) + items_to_consume + m_samples_per_symbol / 4 + m_os_factor * m_cfo_int));
+ 
+                         add_item_tag(0, nitems_written(0), pmt::string_to_symbol("frame_info"), frame_info);
+ 
+diff --git a/lib/header_decoder_impl.cc b/lib/header_decoder_impl.cc
+index a1cb4d7..1e97fa9 100644
+--- a/lib/header_decoder_impl.cc
++++ b/lib/header_decoder_impl.cc
+@@ -63,6 +63,9 @@ namespace gr
+             header_content = pmt::dict_add(header_content, pmt::intern("crc"), pmt::from_long(crc));
+             header_content = pmt::dict_add(header_content, pmt::intern("ldro_mode"), pmt::from_long(ldro_mode));
+             header_content = pmt::dict_add(header_content, pmt::intern("err"), pmt::from_long(err));
++            // hackriff T-556: carry frame_sync's input sample offset through to the payload tags.
++            if (!pmt::is_null(m_sample_offset))
++                header_content = pmt::dict_add(header_content, pmt::intern("sample_offset"), m_sample_offset);
+             message_port_pub(pmt::intern("frame_info"), header_content);
+             if(!err) //don't propagate downstream that a frame was detected
+                 add_item_tag(0, nitems_written(0), pmt::string_to_symbol("frame_info"), header_content);
+@@ -101,6 +104,7 @@ namespace gr
+                     // print("ac ishead: "<<is_header);
+                     if (is_header)
+                     {
++                        m_sample_offset = pmt::dict_ref(tags[0].value, pmt::intern("sample_offset"), pmt::PMT_NIL);
+                         pay_cnt = 0;
+                     }
+                 }
+diff --git a/lib/header_decoder_impl.h b/lib/header_decoder_impl.h
+index 47be455..b57afd5 100644
+--- a/lib/header_decoder_impl.h
++++ b/lib/header_decoder_impl.h
+@@ -34,6 +34,7 @@ namespace gr {
+          *  \brief publish decoding information contained in the header or provided to the block   
+          */
+         void publish_frame_info(int cr, int pay_len, int crc, uint8_t ldro, int err);
++        pmt::pmt_t m_sample_offset = pmt::PMT_NIL; ///< hackriff T-556
+ 
+      public:
+       header_decoder_impl(bool impl_head, uint8_t cr, uint32_t pay_len, bool has_crc, uint8_t ldro_mode, bool print_header);

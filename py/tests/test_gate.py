@@ -101,7 +101,6 @@ def test_python_only_runs_the_python_suites():
         "CLAUDE.md",
         ".gitattributes",
         "spikes/s9-whatever/main.rs",
-        "prompts/model-selection.md",
         "tools/sweep_plot.py",
     ],
 )
@@ -388,6 +387,28 @@ def test_suite_env_overrides_a_conflicting_value_from_the_caller():
     assert suite_env({"CARGO_INCREMENTAL": "1"})["CARGO_INCREMENTAL"] == "0"
 
 
+def test_an_inherited_test_thread_count_never_reaches_the_gate():
+    """2026-09-23: a Claude session's NEXTEST_TEST_THREADS=2 (.claude/settings.json) reached the gate
+    through a runner restarted from a session, and every full gate ran its tests two at a time."""
+    from hkpy.gate import suite_env
+
+    base = {"PATH": "/usr/bin", "NEXTEST_TEST_THREADS": "2"}
+    assert "NEXTEST_TEST_THREADS" not in suite_env(base)                       # the profile governs
+    assert suite_env(base, {"NEXTEST_TEST_THREADS": "6"})["NEXTEST_TEST_THREADS"] == "6"   # the knob does
+    assert "NEXTEST_TEST_THREADS" not in suite_env(base, {"WORK_CAP": "6"})
+    assert base["NEXTEST_TEST_THREADS"] == "2"                                 # still pure
+
+
+def test_knob_store_reads_key_value_lines(monkeypatch, tmp_path):
+    from hkpy.gate import knob_store
+
+    (tmp_path / "env").write_text("# comment\nWORK_CAP=6\n NEXTEST_TEST_THREADS = 6 \nbad line\n")
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path))
+    assert knob_store() == {"WORK_CAP": "6", "NEXTEST_TEST_THREADS": "6"}
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "nowhere"))
+    assert knob_store() == {}
+
+
 def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tmp_path):
     # Full round-trip through `main()`, but with subprocess.run faked out so this stays a
     # targeted, in-process test rather than an actual build. Asserts two independent things
@@ -408,6 +429,13 @@ def test_main_runs_the_same_suites_with_the_build_env_layered_on(monkeypatch, tm
     monkeypatch.setattr(gate_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(gate_mod.shutil, "which", lambda name: "/usr/bin/just")
     monkeypatch.setenv("SOME_UNRELATED_VAR", "kept")
+    # T-763: main() records the run through gatelog, which writes to $HACKRIFF_OPS. Without
+    # this the SUITE'S OWN fake gates land in the production history that `just cycle-time`
+    # and the budget guard read: on 2026-09-22, 31 of the 33 runs in the real
+    # `gate-timings.jsonl` were records written from here (their `root` is a pytest tmpdir),
+    # a 0.0-second `py` run each time. A measurement tool whose own tests pollute the
+    # measurement is worse than one nobody runs.
+    monkeypatch.setenv("HACKRIFF_OPS", str(tmp_path / "ops"))
 
     rc = gate_mod.main(["--files", "py/hkpy/synth.py", "--root", str(tmp_path)])
 
@@ -1006,3 +1034,87 @@ def test_t562_the_coordinator_only_guard_is_wired_to_the_expensive_recipes():
     assert "just test-crate <crate>" in text
     assert "cargo nextest run -p <crate> -E 'binary(<name>)'" in text
     assert "NOT 'just test-one'" in text
+
+
+def test_ops_paths_run_the_ops_suites_not_the_full_gate():
+    """ops/, .claude/ and prompts/ are orchestration: no crate links them, no suite reads them. Four
+    docs/ops-only branches lost 50-minute full gates to load-sensitive Rust tests on 2026-09-22."""
+    from hkpy.gate import classify, OPS
+    d = classify(["ops/work-runner.py", ".claude/roles/coordinator.md", "prompts/model-selection.md"])
+    assert d.classes == (OPS,)
+    cmds = d.commands()
+    assert ["just", "ops-check"] in cmds and ["just", "test-py"] in cmds and ["just", "lint-py"] in cmds
+    assert ["just", "test"] not in cmds and ["just", "acceptance-ci"] not in cmds
+
+
+def test_ops_plus_crates_is_still_full():
+    from hkpy.gate import classify
+    assert classify(["ops/stage.sh", "crates/hk-core/src/lib.rs"]).is_full
+
+
+def test_the_justfile_stays_full_even_though_it_lives_beside_ops():
+    from hkpy.gate import classify
+    assert classify(["justfile", "ops/stage.sh"]).is_full
+
+
+def test_a_contended_gate_records_what_it_was_gating_beside():
+    """`ops/merge-runner.sh` waits for the box to clear, but the wait is capped at 45 min so a
+    stuck worker or a leaked process cannot hold every merge. Past the cap it gates anyway and
+    exports `HK_GATE_CONTENDED`.
+
+    That run is still a real gate — the code is still tested — but it is NOT a measurement of
+    the code's cost, and the timing log is the only place that can still say so afterwards. On
+    2026-09-22 sixteen unowned busy loops ran through every gate for 2 h 18 m, and the gates
+    they slowed were read as a regression in the suites.
+    """
+    from hkpy import gatelog
+
+    r = gatelog.start_record("abc", klass="full", phase="all", source="s", n_files=1,
+                             contended="load 44.0 over budget 32.0")
+    assert r["contended"] == "load 44.0 over budget 32.0"
+    assert gatelog.start_record("abc", klass="full", phase="all", source="s", n_files=1)["contended"] is None
+
+
+def test_the_contended_env_name_is_the_one_the_merge_runner_exports():
+    """The two halves live in different languages and different files; nothing but this pins
+    them together."""
+    import pathlib
+
+    from hkpy.gate import CONTENDED_ENV
+
+    runner = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    assert CONTENDED_ENV == "HK_GATE_CONTENDED"
+    assert f"export {CONTENDED_ENV}" in runner or f"{CONTENDED_ENV}=" in runner
+
+
+
+def test_resume_runs_only_the_suffix_after_the_stopped_suite():
+    """The merge runner's flake acceptance: never re-run what ran, never skip what did not."""
+    from hkpy.gate import resume
+
+    full = [["just", "lint"], ["just", "test"], ["just", "acceptance-ci"], ["just", "test-ui-e2e"]]
+    assert resume(full, "test") == [["just", "acceptance-ci"], ["just", "test-ui-e2e"]]
+    assert resume(full, "test-ui-e2e") == []
+    assert resume(full, "acceptance-ci", ["e2e-harness"]) == [["just", "e2e-harness"], ["just", "test-ui-e2e"]]
+    for bad_after, bad_steps in (("acceptance", []), ("test", ["e2e-harness"]), ("acceptance-ci", ["test-rust"])):
+        try:
+            resume(full, bad_after, bad_steps)
+        except ValueError:
+            continue
+        raise AssertionError(f"resume({bad_after!r}, {bad_steps}) should be refused")
+
+
+def test_resume_after_is_refused_for_a_suite_this_gate_does_not_run(monkeypatch, capsys):
+    from hkpy import gate
+
+    rc = gate.main(["--files", "py/hkpy/flow.py", "--resume-after", "test", "--dry-run"])
+    assert rc == 2 and "refusing --resume-after 'test'" in capsys.readouterr().err
+
+
+
+def test_a_resumed_gate_is_never_a_whole_gate_duration():
+    from hkpy import cycletime
+
+    runs_ = [{"finished": True, "result": "pass", "seconds": 2400.0, "class": "full", "phase": "all"},
+             {"finished": True, "result": "pass", "seconds": 300.0, "class": "full", "phase": "resume:test"}]
+    assert cycletime.rolling_medians(runs_)["full"] == (2400.0, 1)

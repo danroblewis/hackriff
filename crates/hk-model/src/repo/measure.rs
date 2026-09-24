@@ -288,6 +288,34 @@ impl Repository {
         )
     }
 
+    /// The most recently measured [`CalibrationState`] for `device_id`, or `None` when the device
+    /// has never been calibrated (T-560).
+    ///
+    /// A caller with a `device_id` (e.g. a raster fit or an API route) reads this instead of
+    /// re-fitting from raw IQ: the estimate is recorded once, under C05, with its own provenance
+    /// (`method`, `measured_at`), and every later query reads the stored row rather than paying
+    /// for the fit again. `method` narrows to one measurement technique, so a raster-derived ppm
+    /// and an FM-pilot-derived one never shadow each other.
+    pub fn latest_calibration_state_for_device(
+        &self,
+        device_id: &str,
+        method: &crate::calibration::CalibrationMethod,
+    ) -> Result<Option<CalibrationState>, RepoError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT body FROM calibration_state WHERE device_id = ?1 \
+             ORDER BY measured_at DESC, rowid DESC",
+        )?;
+        let mut rows = stmt.query(params![device_id])?;
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(0)?;
+            let cal: CalibrationState = serde_json::from_str(&body)?;
+            if &cal.method == method {
+                return Ok(Some(cal));
+            }
+        }
+        Ok(None)
+    }
+
     /// Inserts a SpurMask version.
     pub fn insert_spur_mask(&mut self, mask: &SpurMask) -> Result<(), RepoError> {
         self.conn.execute(
@@ -466,6 +494,7 @@ impl Repository {
             RecordingTrigger::Demodulation(m) => ("demodulation", None, Some(blob(m))),
             RecordingTrigger::Scheduler => ("scheduler", None, None),
             RecordingTrigger::Manual => ("manual", None, None),
+            RecordingTrigger::Analyze => ("analyze", None, None),
         };
         self.conn.execute(
             "INSERT INTO recording (recording_id, kind, t_start, t_end, f_center, trigger_kind, \

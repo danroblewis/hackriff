@@ -1,0 +1,27 @@
+[package]
+name = "hk-synth"
+description = "hackriff decoder synthesis (ADR-0015, MAUTO): the stage ladder, evidence scoring, candidate pipelines, skeletons, templates, the search trace and the negative result"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# T-848 (MAUTO M-1) is the scaffold: types, modules and stubs, no engine. The dependency set is
+# ADR-0015 §9's, pre-added so M-2..M-7 (evidence, search, proposals, templates, objective) each
+# start without touching this manifest. hk-synth has no HTTP and no ring: those are
+# hk-pipeline::synth and hk-api's (§9).
+[dependencies]
+# Candidates ARE recipes (§1.2): every beam node is a valid `hk_recipe::Recipe` prefix.
+hk-recipe.workspace = true
+# The batch `run_window` driver and `Block::evidence` (M-2); the catalogue candidates validate
+# against.
+hk-blocks.workspace = true
+# Proposal operators wrap `hk_estimate::assist` (M-4, §3.2).
+hk-estimate.workspace = true
+# `EvidenceObjective` implements `hk_demod::refine::Objective` (M-7, §2.3).
+hk-demod.workspace = true
+# The shared evidence vocabulary (`hk_model::synth`) and the M3 seed (`hk_model::classify`).
+hk-model.workspace = true
+num-complex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

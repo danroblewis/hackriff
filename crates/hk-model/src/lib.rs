@@ -57,6 +57,7 @@ pub mod harmonic; // T-374 (C40): harmonics of a fundamental nobody can see
 mod harmonic_tests;
 pub mod hash;
 pub mod ids;
+pub mod multipath; // T-222 (C40): content-correlated multipath
 pub mod plan;
 pub mod presence; // T-262 (ADR-0017 TM-5): presence intervals, close and revive
 pub mod provenance;
@@ -67,6 +68,7 @@ pub mod repo;
 pub mod retune; // T-586 (AWARE-011): retune diversity, absolute vs LO-relative
 pub mod sigmf;
 pub mod signature; // T-218 (ADR-0016 §5)
+pub mod synth; // T-848 (ADR-0015 §2.1, MAUTO M-1): the evidence vocabulary hk-blocks and hk-synth share
 pub mod time;
 pub mod trunking; // T-266 (C23 trunking metadata; metadata only, no call audio)
 
@@ -77,8 +79,8 @@ pub use cluster::{
     Assignment, ConflictReason, EmitterMerge, FEATURE_SET_VERSION, FeatureMatch, Fingerprint,
     IdentityAccess, IdentityClaim, IdentityConflictReport, IdentityReclassification,
     InventoryEntry, InventoryIdentity, InventoryPage, InventoryQuery, KnownStatusPrior, LinkRecord,
-    MeasurementKey, ModulationStructure, PriorVerdict, RecordedClassification, Resolution,
-    Sighting, TAG_VOCABULARY, Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
+    MeasurementKey, PriorVerdict, RecordedClassification, Resolution, Sighting, TAG_VOCABULARY,
+    Tolerances, never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
 pub use content::{ContentClass, content_gating_enabled, set_content_gating};
 pub use context::{
@@ -95,8 +97,8 @@ pub use detection::{
 };
 pub use emitter::{
     Appearance, Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation,
-    Identity, IdentityScheme, KnownStatus, KnownStatusChange, LifecycleAuthor, LifecycleChange,
-    LifecycleState, LinkTarget, Recurrence, StatusAuthor,
+    FRAMING_IDENTITY_SCHEME, Identity, IdentityScheme, KnownStatus, KnownStatusChange,
+    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, Recurrence, StatusAuthor,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,
@@ -108,9 +110,14 @@ pub use harmonic::{
 };
 pub use hash::{ContentHash, canonical_json};
 pub use ids::{
-    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId, DecodeId,
-    DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId, ProvenanceId,
-    RecordingId, ScanPlanId, SelectionId, SpurMaskId, SurveyId, TrackId, TrunkSystemId,
+    AnnotationId, AnomalyId, BitstreamId, BookmarkId, CalibrationStateId, CallRecordId,
+    CollectionId, DecodeId, DemodulationId, DetectionId, EmitterId, ExplanationId, ExternalEventId,
+    MarkerId, MeasurementId, ProvenanceId, RecordingId, SavedViewId, ScanPlanId, SelectionId,
+    SpurMaskId, SurveyId, TrackId, TrunkSystemId,
+};
+pub use multipath::{
+    ContentCorrelation, ContentKind, IdentityAgreement, MultipathFinding, MultipathRow,
+    MultipathVerdict, content_multipath,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
@@ -136,15 +143,30 @@ pub use relate::{
     present_only_with, rank_score,
 };
 pub use repo::{
-    BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX, BOOKMARKS_MAX, Bookmark, BookmarkKind, EmitterSynthesis,
-    EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX, LatestMeasurement, MAX_FAMILY_CANDIDATES,
-    MAX_LO_SPAN_HZ, MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, ProvenanceChain,
-    REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning, RepoBatch,
-    RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict, SELECTION_LINK_REF_MAX,
-    SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX, SELECTION_TAG_MAX,
-    SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS, Selection, SelectionLink,
-    SelectionLinkKind, SelectionWatch, TrustTest, TrustVerdict, USER_BAND_MAX_GAP_HZ,
-    USER_BAND_MAX_WIDTH_HZ, UserBand,
+    AUTHORED_BODY_MAX, AUTHORED_LABEL_MAX, AUTHORED_PAGE_MAX, AUTHORED_REF_MAX, AuthoredAnnotation,
+    AuthoredKind, AuthoredPage, AuthoredProvenance, BOOKMARK_NAME_MAX, BOOKMARK_NOTE_MAX,
+    BOOKMARKS_COLLECTION, BOOKMARKS_COLLECTION_COLOR, BOOKMARKS_COLLECTION_NAME, BOOKMARKS_MAX,
+    Bookmark, BookmarkKind, COLLECTION_NAME_MAX, COLLECTION_NOTE_MAX, COLLECTIONS_MAX, Collection,
+    CollectionSummary, EmitterSynthesis, EmitterUpsert, HarmonicFamilyRow, LIFECYCLE_TEXT_MAX,
+    LatestMeasurement, MARKERS_PER_COLLECTION_MAX, MAX_FAMILY_CANDIDATES, MAX_LO_SPAN_HZ,
+    MAX_RETUNE_DETECTIONS, MAX_RETUNE_ROWS, Marker, MarkerWindow, PROVENANCE_TEXT_MAX,
+    ProvenanceChain, REFINED_BY_OUTPUT_ANALYSIS, REFINED_HISTORY_MAX, RETUNE_RULE, RefinedTuning,
+    RepoBatch, RepoError, Repository, RetuneFamily, RetuneOutcome, RetuneVerdict,
+    SELECTION_LINK_REF_MAX, SELECTION_LINKS_MAX, SELECTION_NAME_MAX, SELECTION_NOTES_MAX,
+    SELECTION_TAG_MAX, SELECTION_TAGS_MAX, SELECTIONS_MAX, SYNTHESIZED_BY_OUTPUT_ANALYSIS,
+    Selection, SelectionLink, SelectionLinkKind, SelectionWatch, StorePage, TrustTest,
+    TrustVerdict, USER_BAND_MAX_GAP_HZ, USER_BAND_MAX_WIDTH_HZ, UserBand, ViewTier, authored_block,
+};
+// T-818 MAP-18 saved measurements (docs/25 §4).
+pub use repo::{
+    MEASUREMENT_N_MAX, MEASUREMENT_NOTE_MAX, MEASUREMENT_PAGE_MAX, MEASUREMENT_REF_MAX,
+    Measurement, MeasurementBasis, MeasurementComputed, MeasurementCursor, MeasurementFilter,
+    MeasurementKind, MeasurementPage, MeasurementProvenance, MeasurementTier, compute_measurement,
+};
+// T-819 MAP-19 saved views (docs/25 §6).
+pub use repo::{
+    SAVED_VIEW_LAYOUT_MAX, SAVED_VIEW_NAME_MAX, SAVED_VIEW_NOTE_MAX, SAVED_VIEW_PAGE_MAX,
+    SavedView, SavedViewFilter, SavedViewPage,
 };
 pub use retune::{
     RETUNE_MIN_CENTRES, RETUNE_MIN_TOLERANCE_HZ, RETUNE_TOLERANCE_BW_FRACTION, RetuneGroup,
@@ -162,7 +184,7 @@ pub use signature::{
 };
 pub use time::{SampleTime, Timestamp, TimestampMethod};
 pub use trunking::{
-    CALL_REASONS_MAX, CallRecord, ChannelPlanEntry, Encryption, EncryptionEvidence, GrantEvent,
-    GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, NeighbourSite, P25_ALGID_CLEAR,
-    TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
+    CALL_REASONS_MAX, CallEnding, CallRecord, ChannelPlanEntry, Encryption, EncryptionEvidence,
+    GrantEvent, GrantKind, InvalidTrunking, LabelSource, MAX_SLOT, MAX_TDMA_SLOTS, NeighbourSite,
+    P25_ALGID_CLEAR, TRUNK_LABEL_MAX, TRUNK_TEXT_MAX, Talkgroup, TrunkProtocol, TrunkSystem,
 };

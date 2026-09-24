@@ -34,8 +34,21 @@
 //!    so a grant resolves to nothing until somebody supplies one, and nothing here supplies a
 //!    default.
 
+//! 7. **P25 Phase 2** ([`tsbk`], T-272). A Phase 2 system's control channel is a Phase 1 channel
+//!    this module already decodes; what makes it Phase 2 is the band plan it announces. An
+//!    `IDEN_UP_TDMA` entry names how many slots share a carrier, so `f = base + spacing ×
+//!    (channel / slots)` and `slot = channel % slots` — consecutive channel numbers are ONE
+//!    frequency and two talkgroups, which is C23's TDMA slot mix-up pitfall read the right way
+//!    round.
+
+//! 8. **P25 Phase 1 voice frames** ([`ldu`], T-849). The granted channel's LDU1 link control and
+//!    LDU2 encryption sync — the talkgroup and source the call itself states, and the **ALGID**
+//!    that T-270's permit needs before it may ever say *clear*. The IMBE voice codewords are
+//!    skipped, never decoded: no vocoder, no audio, nothing decrypted.
+
 pub mod confirm;
 pub mod dmr;
+pub mod ldu;
 pub mod nxdn;
 pub mod raster;
 pub mod support;
@@ -55,6 +68,10 @@ pub use dmr::{
     MAX_CSBK_PER_WINDOW, MIN_DMR_CSBKS, csbk_crc, csbk_crc_ok, csbko_name, dmr_pi_encryption,
     dmr_protocol_of, is_voice_grant, scan_csbks,
 };
+pub use ldu::{
+    DUID_LDU1, DUID_LDU2, EncryptionSync, GroupVoiceLc, LDU_DIBITS, LduFrame, LduPayload, LduScan,
+    LinkControl, MAX_LDU_PER_WINDOW, Nid, scan_ldus,
+};
 pub use nxdn::{
     Cac, CacScan, MAX_CAC_PER_WINDOW, MIN_NXDN_CACS, MSG_DCALL_ASSGN, MSG_DCALL_ASSGN_DUP,
     MSG_VCALL_ASSGN, MSG_VCALL_ASSGN_DUP, NXDN_ASSIGNMENTS, NXDN_CAC_BITS, NXDN_CHANNEL_MAX,
@@ -64,8 +81,10 @@ pub use nxdn::{
 };
 pub use raster::GridFit;
 pub use raster::{
-    LMR_RASTERS_HZ, MIN_GRID_CONCENTRATION, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster,
-    fit_grid_offset, fit_raster,
+    AliasEvidence, AliasResolution, AliasScore, AliasUnresolved, LMR_RASTERS_HZ,
+    MIN_GRID_CONCENTRATION, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM, RasterFit,
+    best_lmr_raster, clock_offset_mod_grid, fit_grid_offset, fit_raster, grid_aliases,
+    resolve_alias,
 };
 pub use support::{
     SupportLevel, TRUNK_SUPPORT, TrunkSupport, support_for, support_json, unsupported,
@@ -73,8 +92,9 @@ pub use support::{
 };
 pub use tsbk::{
     ChannelMap, Grant, IDEN_MAX_AGE_S, IdenUp, MAX_TSBK_PER_WINDOW, MIN_IDEN_AGREEMENTS,
-    OP_GRP_VCH_GRANT, OP_GRP_VCH_GRANT_UPDATE, OP_IDEN_UP, P25_ALGIDS, Resolved, SVC_ENCRYPTED,
-    ServiceOptions, TSBK_BYTES, Tsbk, TsbkScan, Unmapped, algid_encryption, algid_name,
-    is_algid_evidence, protocol_of, scan_blocks,
+    OP_GRP_VCH_GRANT, OP_GRP_VCH_GRANT_UPDATE, OP_IDEN_UP, OP_IDEN_UP_TDMA, P25_ALGIDS, Resolved,
+    SVC_ENCRYPTED, ServiceOptions, TDMA_SLOTS_PER_CHANNEL_TYPE, TSBK_BYTES, Tsbk, TsbkScan,
+    Unmapped, algid_encryption, algid_name, channel_type_slots, is_algid_evidence, protocol_of,
+    scan_blocks,
 };
-pub use voice::{VoicePermit, VoiceRefused};
+pub use voice::{CallHeader, VoicePermit, VoiceRefused};

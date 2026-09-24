@@ -196,7 +196,7 @@ test("T-476: the control has a row on EVERY pane and none on the map, and the ch
     id, rect: null, following: true, device: "any", levelF: 0, levelT: 0, cellHz: 6250, cellS: 1,
     levelLabel: "6.25 kHz × 1.0 s cells (detail tier, level 0/0)", tier: "detail",
     tierLabel: "detail tier: the live chain's own lattice, at the resolution the front end measured.",
-    timeLabel: "LIVE", freqLabel: "100.800 MHz ± 500 kHz",
+    timeLabel: "LIVE", t0Ns: 0, t1Ns: 1e9, freqLabel: "100.800 MHz ± 500 kHz",
     tiles: 1, fallbacks: 0, pending: 0, differsFrom: [],
   });
   const asked: string[] = [];
@@ -208,6 +208,9 @@ test("T-476: the control has a row on EVERY pane and none on the map, and the ch
   assert.deepEqual(r.rows.map((x) => x.action?.why ?? null), ["why pane1", "why pane2", null]);
   assert.deepEqual(r.rows.map((x) => x.action?.enabled ?? null), [true, false, null],
     "a disabled control is still ON the row: a missing control teaches the user nothing");
+  // The row carries the pane's time window unrounded, for `data-t0-ns`/`data-t1-ns` (the 09-22
+  // surface-nav deflake: a test reads the axis, not the `−23 s` label that rounds it).
+  assert.deepEqual(r.rows.map((x) => [x.t0Ns, x.t1Ns]), [["0", "1000000000"], ["0", "1000000000"], ["0", "1000000000"]]);
   // And with no host supplying one, the readout is exactly what it was before T-476.
   assert.deepEqual(readoutOf([st("pane1")], null).rows.map((x) => x.action), [null]);
   // The slot is strings and a bit. `chrome.ts` may not know what a retune is, or `retune.ts` — and
@@ -535,7 +538,7 @@ function tileData(a: TileAddr): TileData {
     addr: a, key: keyOf(a), nf: 1, nt: 1, value: new Float32Array([-90]),
     state: new Uint8Array([CELL.OBSERVED]), tier: "live-iq", answeredLevel: a.levelF,
     fold: { frequency: "exact", time: "exact" }, rangeDb: { lo: -100, hi: -60 },
-    bytes: 1024, serverInFlightLimit: null,
+    bytes: 1024, serverInFlightLimit: null, serverInFlightShare: null,
   };
 }
 

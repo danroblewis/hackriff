@@ -64,7 +64,7 @@ pub const DEFAULT_ROWS: usize = 1;
 pub const MAX_ROWS: usize = 512;
 
 /// The capture window the timeline spans, read from the IQ ring's own status.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CaptureWindow {
     /// Whether a ring is running.
     pub enabled: bool,
@@ -75,6 +75,9 @@ pub struct CaptureWindow {
     pub t1_s: Option<f64>,
     /// What the ring currently holds, Unix s; `None` when it holds nothing.
     pub buffered: Option<(f64, f64)>,
+    /// The ring's next whole-slot evictions (T-845), `(at, t0)` Unix s: when the write head
+    /// reaches `at` the ring's oldest sample jumps to `t0` (`hk_store::iqbuffer::DropStatus`).
+    pub drops: Vec<(f64, f64)>,
 }
 
 impl CaptureWindow {
@@ -109,6 +112,7 @@ pub(crate) fn capture_window(state: &ApiState) -> (CaptureWindow, Value) {
                 retention_s: None,
                 t1_s: None,
                 buffered: None,
+                drops: Vec::new(),
             },
             // No ring at all on this server: the reason there is no capture window.
             json!("no IQ capture buffer on this server"),
@@ -134,6 +138,15 @@ pub(crate) fn capture_window(state: &ApiState) -> (CaptureWindow, Value) {
             retention_s: f64_of(&s, "retention_s"),
             t1_s,
             buffered,
+            drops: s
+                .get("drops")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| Some((f64_of(d, "at")?, f64_of(d, "t0")?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
         s.get("reason").cloned().unwrap_or(Value::Null),
     )
@@ -152,7 +165,13 @@ fn window_json(w: &CaptureWindow, reason: &Value) -> Value {
         "t1_s": band.map(|(_, b)| b),
         // Equal to `retention_s` by construction, and served so a client never computes it.
         "span_s": band.map(|(a, b)| b - a),
-        "buffered": w.buffered.map(|(a, b)| json!({"t0_s": a, "t1_s": b, "span_s": b - a})),
+        // `drops` (T-845): the ring's next whole-slot evictions, so a client polling this every few
+        // seconds can move the IQ horizon past a drop it has not re-polled yet, instead of drawing
+        // IQ the ring has already overwritten.
+        "buffered": w.buffered.map(|(a, b)| json!({
+            "t0_s": a, "t1_s": b, "span_s": b - a,
+            "drops": w.drops.iter().map(|&(at, t0)| json!({"at_s": at, "t0_s": t0})).collect::<Vec<_>>(),
+        })),
     })
 }
 
@@ -324,7 +343,22 @@ mod tests {
             retention_s,
             t1_s,
             buffered: None,
+            drops: Vec::new(),
         }
+    }
+
+    #[test]
+    fn t845_the_window_serves_the_rings_scheduled_drops() {
+        let mut c = w(Some(120.0), Some(1_000.0));
+        c.buffered = Some((880.0, 1_000.0));
+        c.drops = vec![(1_002.5, 887.5), (1_010.0, 895.0)];
+        let v = window_json(&c, &Value::Null);
+        assert_eq!(
+            v["buffered"]["drops"],
+            json!([{"at_s": 1_002.5, "t0_s": 887.5}, {"at_s": 1_010.0, "t0_s": 895.0}])
+        );
+        c.buffered = None;
+        assert_eq!(window_json(&c, &Value::Null)["buffered"], Value::Null);
     }
 
     #[test]

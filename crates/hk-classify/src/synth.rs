@@ -659,8 +659,37 @@ fn waveform(
         // sensor bursts in `fixtures/hackrf/2026-09-13` run h ≈ 0.53–0.55, which the grid did not
         // contain at all. The range below is the deployed range, a-priori; it is not centred on
         // any fixture.
+        //
+        // **The range reaches wide-deviation FSK (T-852).** It stopped at h = 1.6 until T-852, and
+        // the deployed range does not: POCSAG keys ±4.5 kHz at 2400/1200/512 Bd (h = 3.75, 7.5,
+        // 17.6), FLEX ±4.8 kHz at 1600 Bd (h = 6), and the ISM sensor scene the pipeline's own
+        // acceptance replays through the mock SDR (`fsk_burst_train`: ±9.6 kHz at 4800 Bd) is
+        // h = 4. Every one of those sat outside the fitted `2fsk` envelope on exactly the
+        // dimensions that scale with the deviation-to-rate ratio — measured on the h = 4 scene:
+        // `obw_over_rs` 6.66 against a fitted 1.86 ± 0.63 (z = 7.7), `sigma_af` z = 3.3,
+        // `cyclic_db` z = −3.2 — so C15 called it `unknown` at open-set 1.000 at 30 dB while the
+        // features themselves (`blind_fsk` 1.0, bimodal IF, C14's h = 3.99) said FSK plainly.
+        // Log-uniform, because the index is a ratio and no decade of it is privileged.
+        //
+        // **Up to 5, and not further, because that is as far as the features are characterised.**
+        // At the classifier's 2 samples per OBW99 a symbol is about `2·(1 + h)` samples, so the
+        // 512-sample window `if_local_modality` counts modes over holds ~43 symbols at h = 5 and
+        // ~28 at h = 8 — and at h = 7.9 one window in seven read **4** modes where the rest read 2
+        // (the least-squares detrend is pulled by the level pattern of so few, long symbols).
+        // `feature_length_invariance` rightly refuses that: a single-window prefix of the record
+        // then reads 4.0 against the whole record's 2.29. Fitting there would have put a spurious
+        // mode count into the `2fsk` density. So h = 5 covers the mock-SDR sensor scene at 4800
+        // and 9600 Bd (h = 4, 2) and POCSAG at 2400 Bd (3.75); the scene at 2400 Bd (h = 8),
+        // POCSAG at 1200/512 Bd and FLEX stay outside until that estimator is made to hold there,
+        // and are called `unknown` rather than fitted on a feature that does not.
+        //
+        // The symbol rate is capped so the emission, `(1 + h)·Rs` wide, stays at the ~100 kHz the
+        // narrow draws already occupy rather than filling the band: at 200 kHz a wide draw left
+        // neither the classifier's nor C14's view room to decimate, which is not the geometry
+        // either is handed in production.
         Class::Fsk2 => {
-            let h = 0.4 + 1.2 * rng.unit();
+            let h = 0.4 * 12.5f64.powf(rng.unit());
+            let rate = rate.min(100e3 / (1.0 + h));
             let pre = (0.1 + 0.25 * rng.unit()) * f64::from(u8::from(preamble));
             (
                 cpfsk(rng, n, fs, rate, 2, rate * h / 2.0, 0.0, pre),

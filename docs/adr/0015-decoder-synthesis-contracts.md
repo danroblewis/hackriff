@@ -1,7 +1,7 @@
 # ADR-0015 — Decoder synthesis contracts: candidate pipelines, stage evidence, search, templates, region analyze
 
-**Status:** PROVISIONAL (T-208, core interface, planning only). MAUTO is unscheduled until after M3. No code comes from this ADR until then.
-**Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning).
+**Status:** ACCEPTED (2026-09-23, user decisions U1–U5). Written PROVISIONAL (T-208, core interface); accepted on the §16 review (T-848) with the user's answers to [docs/20](../20-mauto-decision-brief.md)'s U1–U5 — U1 B, U2 B, U3 A, U4 A, and **U5 yes (stereo audio in scope, overriding the brief's recommendation)**. §16.2's eight engineering corrections are folded into the sections they amend; §16.8 lists what the acceptance did **not** decide and still stands open. The M-1 scaffold (`crates/hk-synth`, `hk_model::synth`: types and stubs, no engine) exists; the engine lands in M-2…M-12. Changing this ADR now goes to Fable plus the user.
+**Amended by:** [ADR-0022](0022-false-confirm-budget.md) (§5.5, §11.5, §1.3 — the confirm gate) and **§13 below** (T-616/T-617/T-618, 2026-09-21 — evidence-bit dependence, calibration reach, ADC-fill conditioning); **§14 below** (T-557, 2026-09-22 — template fact provenance, the fact/implementation line, bulk import).
 **Touches:** C13/C14 estimation, C15 classifier, C18 signatures, C20 digital demod, C21 bit framing, C22 decoders, C27 inventory; Emitter, Decode ([docs/07 §2.11, §2.15](../07-data-model.md)).
 **Builds on:** [docs/15](../15-decoder-synthesis.md) (the design brief), [ADR-0011](0011-decoder-workbench-contracts.md) (blocks, recipes, stream), [ADR-0012](0012-attention-memory-contracts.md) (chain tiers), ADR-0014 (IQ capture ring; T-178, `docs/adr/0014-iq-capture-ring.md` lands with it), ADR-0016 (M3 classification; T-198, written in parallel).
 **Planned code:** new crate `hk-synth` (search, evidence scoring, templates; no HTTP), `hk-pipeline::synth` (jobs, acquisition, attach), `crates/hk-api/src/analyze.rs` (replaces the T-190 stub), `templates/*.template.json`.
@@ -30,7 +30,7 @@ Constraints carried in: **blind-first** (templates and priors only order the sea
 | M3 interface | Reads the `Classification` family distribution (including `unknown`) and `SignatureMatch`. Writes a decode label and a signature proposal back. Open search keeps a budget floor. |
 | Analyze API | `POST /api/analyze` → `202` job. Get, list and cancel. `hackriff.analyze/1` messages stream. Results attach to the emitter. Save as template. |
 | Confirm-by-decode | New `ConfirmPolicy.synthesized` rule: hold-out validation, evidence ≥ 64 bits, check width ≥ 16. Decodes are provenance-marked `synthesized`. |
-| Bursts | Burst sets from the ring (ADR-0014), joined with `DISCONTINUITY`. Pin-on-analyze clip. No single-frame auto-confirm by default. |
+| Bursts | Burst sets from the ring (ADR-0014), joined with `DISCONTINUITY`. Pin-on-analyze clip. A single frame confirms only through ADR-0022's one inequality — in practice a template-fixed check of ≥ 24 bits (U1 = B, user 2026-09-23); searched checks never on one frame. |
 | Evaluation | Blind through the mock SDR, with hidden truth. Templates-on and templates-off runs. A-priori solve and over-claim floors. |
 
 ## 1. Candidate pipelines and the staged objective
@@ -49,7 +49,7 @@ Constraints carried in: **blind-first** (templates and priors only order the sea
 | S5 check | `crc`, `bch`, `parity`, `checksum` | RevEng model, BCH (n, k, poly), span | distinct valid frames × check width (assist `evidence_bits`) | check blocks |
 | S6 fields | `fields`, `text` | field map | fit ok/partial share, identity recurrence across frames, template plausibility ranges | `fields` |
 
-**Catalogue gap:** there is no `psk_demod`/Costas block, so generic PSK stops at S1 until one is added. That addition is an additive ADR-0011 §1.5 change (MAUTO task M-14, optional).
+**Catalogue gap — closed (C5, U4).** Generic PSK is funded: M-14 is **required** (U4 = A, user 2026-09-23), and its block landed as **T-609** — `psk_demod` in `hk-blocks` (BPSK/DBPSK, QPSK/DQPSK, π/4-DQPSK, OQPSK, 8PSK/D8PSK; carrier recovery, matched filter, soft per-bit output; additive to ADR-0011 §1.5), with T-610 `viterbi` and T-611 `reed_solomon` as the rest of the same investment. What M-14 still owes beyond T-609 is listed in §10's M-14 row. **SSB and CW get no blocks**: they stay on the legacy Listen chain permanently (§12.5), as a decision, not a gap.
 
 ### 1.2 Candidate representation
 
@@ -80,6 +80,8 @@ For a prefix reaching stage k:
 - The **search order** key is `evidence_bits + prior_bits + optimistic_remaining`.
 - The **result rank** key is `(stage_reached, evidence_bits)`. Prior bits are reported but never rank a result and never confirm one.
 - **Floors** prune: a node whose stage-j `b_j` < `floor_j` (default 6 bits S0–S3, 10 bits S4–S5) is pruned. Pruning is never total: the best pruned node is kept as a partial result.
+  - **S6 has no floor** (C7): `default_floor_bits(S6) = None`; S6 evidence only ranks (§4.1, "plausibility … ranking evidence only").
+  - **A floor is never lowered to fit a table** (C8): `Threshold` snaps **up** to an expressible level; a floor above a table's `admissible_bits` is `floor_unreachable` and is reported, not relaxed. (Whether 6 bits at S3 is reachable at all under §13.1's maximum rule is open — §16.8 item 1.)
 - **Why bits.** An SNR in dB, an eye opening and a CRC pass rate aren't comparable. Their tail probabilities under a null are. Caps stop a very strong carrier (S0) from outranking a weaker signal that actually frames. The look-elsewhere term keeps a search that tried 10⁴ CRC hypotheses from "finding" one by chance, the failure the assist docs describe for three Mode-S frames.
 
 ## 2. Evidence-metric API
@@ -168,11 +170,12 @@ Each suggestion's `fragment` becomes a child node's parameters. Suggestion `scor
 | `standard` | 20 s | 40 s | 2 | "Analyze" default |
 | `deep` | 120 s | 400 s | 4 | opt-in; open search |
 
-The numbers are **unverified guesses**, measured in M-3 on the Mac and later on the Jetson.
+The numbers are **unverified guesses**, measured in M-3 on the Mac and later on the Jetson. **Open (§16.8 item 2):** T-552's measurement (docs/27, in flight) finds proposal-operator calls (0.3–2.4 s each) dominate wall time, and recommends budgeting search by operation/evaluation count with wall time kept only as a backstop; the profile *shape* is therefore not settled by this acceptance.
 - **Chain kind `synth`** in the per-run chain budget (ADR-0011 §1.4 rule 5). Search threads run at lower OS priority than ring readers.
   - If the run's `lost_samples` rises while a job runs, the job throttles (`state: throttled`, threads halved) before capture is hurt.
 - **One running job** by default and a queue of ≤ 4. Beyond that: `503 busy`.
-- **Power.** The job reads the run's power policy (ADR-0007/0009): `battery` refuses `deep` (`422 power`) and halves threads, `low` allows only `quick`, and a thermal-throttle flag pauses expansion. (No such policy input exists in code yet; M-3 adds a minimal one.)
+- **Power.** The job reads the run's power policy (ADR-0007/0009): `battery` refuses `deep` (`422 power`) and halves threads, `low` allows only `quick`, and a thermal-throttle flag pauses expansion. (No such policy input exists in code yet; M-3 adds a minimal one, and U2 makes it a real input — below.)
+- **Auto-analyze (U2 = B, user 2026-09-23).** The device **may start analyze jobs itself**: the ADR-0012 attention scheduler auto-queues unexplained (unknown) candidates at **`quick` only**, **on mains only**, **one auto job at a time**, sharing the one-running-job / queue-of-4 admission above (an auto job never displaces a user job). `standard` and `deep` stay **user-triggered**; `deep` stays refused on battery. The policy is a config field `auto_profile: quick | none`, product default `quick`; M-3 may ship it `none` until the attention→queue wiring and the power-policy object exist, and flipping it is configuration, not code. M-11 gets the queue view and a stop control.
 - **Stopping** (first to hit): `solved` (§5.5); `plateau` (no best-score gain > 1 bit over 25 % of the budget); `budget`; `exhausted` (beam and deferred queue empty); `cancelled`; `source_ended` or `evicted`.
 - **ML slot.** `trait NodeHeuristic { fn prior_bits(&self, node: &NodeView) -> f32 }`. The classical default is used, and an ML value function (via the ADR-0016 ml-runtime) may replace it later. It only reorders; it never scores evidence.
 
@@ -205,6 +208,7 @@ The numbers are **unverified guesses**, measured in M-3 on the Mac and later on 
 - **Built-ins:** one per shipped recipe (`rds`, `pocsag`, `acars`, `adsb`) plus generic skeletons: `generic-fsk-framed`, `generic-ook-pwm`, `generic-ook-manchester`, `generic-msk`, `generic-ppm`.
 - `priors` is a superset of recipe `match` (ADR-0011 §2.2), read the same way: against **measured** parameters. `bands_hz` only raises rank for an emitter already detected there. Nothing tunes to it.
 - `plausibility` and `evidence_targets` contribute S6 ranking evidence only when met by measured frames. A template can never confirm a signal on its own.
+- **`output_policy` is the recipe's typed map** (C4): `Template.output_policy` is `hk_recipe::OutputPolicy`, the same object §4.3 clamps (see `recipes/pocsag.recipe.json`). The `metadata_keys` list in the example above is shorthand for that map, not a second schema.
 
 ### 4.2 Seeding and pruning from M3 (MAUTO side of ADR-0016)
 
@@ -218,12 +222,12 @@ The prior for hypothesis h is:
 
 **Rules:**
 - **Open-search floor.** Open skeletons always get ≥ max(P(unknown), 0.2) of the evaluation budget. Priors never starve unknowns.
-- **Defer, don't delete.** A family with posterior < 0.02 is deferred: it runs after higher-ranked hypotheses, if budget remains. Evidence found under a deferred family ranks exactly like any other.
+- **Defer, don't delete — and only the likelihood defers** (C2, per ADR-0016 §8 / T-215). A family is deferred exactly when ADR-0016's `Hypothesis::prune` says so, which reads the **likelihood**, never the prior: a posterior below 0.02 reorders a family (it runs later) but never defers it on its own. Deferred families run after higher-ranked hypotheses, if budget remains, and evidence found under one ranks exactly like any other. (ADR-0021's `deferred_prior` detail still reports the posterior.)
 - **Signature fast path:**
   - a `full` match with a pipeline binding is tried first, at the signature's parameter values;
   - a `partial` match narrows its template's free ranges to the signature tolerances;
   - a known `cluster_id` warm-starts the beam from that cluster's last attached result (§5.5).
-- **Feedback (writes, through M3 APIs only).** A solved result emits a decode label `{source: decode, family, template, job_id}` to C15 (a CRC-valid decode overrides classification, C15 card), proposes a C18 `Signature` from the solved parameters (provenance `decoder-confirmed`, T-201 route), and feeds its hold-out snippets to T-205's labelled-capture path.
+- **Feedback (writes, through M3 APIs only).** A solved result emits a decode label `{source: decode, family, template, job_id}` to C15 (a CRC-valid decode overrides *automatic* classification, C15 card — but **never a user label**: U3 = A, §5.5), proposes a C18 `Signature` from the solved parameters (provenance `decoder-confirmed`, T-201 route), and feeds its hold-out snippets to T-205's labelled-capture path.
 
 ### 4.3 Save as template
 
@@ -295,7 +299,8 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
 
   The lifecycle reason is backend-rendered, e.g. "decoded by synthesized pipeline `generic-fsk-framed`: 5 distinct CRC-16 frames valid on hold-out, 88 bits".
 - **Trust rules.** Partial verdicts never change lifecycle state. The rule never demotes, and a user delete wins. A template-bound decode that yields a real identity (e.g. `adsb-icao`) is still marked `synthesized`, and `/api/inventory` shows that provenance next to the identity: a successful decode is strong evidence, never an unexplained fact.
-- **Single frames** (§6) don't auto-confirm by default: the emitter stays a candidate with `verdict: solved` and the user can promote. (Open question 1.)
+- **User authority (U3 = A, user 2026-09-23; also closes ADR-0016 open question 3).** A user label or user-promoted pipeline is rank 0 and **wins** over a CRC-valid decode that disagrees. The contradicting decode is **recorded** (its Decode rows and pipeline stay) and **shown beside the label** in the inventory and output panel; it is outranked, never applied, never discarded. This is `effective_rank_sql!` as it already stands.
+- **Single frames** (§6) — U1 = B (user 2026-09-23): one frame auto-confirms **only when its check was template-fixed and ≥ 24 bits**; searched checks keep the multi-frame requirement. ADR-0022 realises this as one inequality, not a predicate (ADR-0022 §4.2): a template-fixed CRC-24 squitter satisfies it, a searched check on one frame cannot. The false-confirm budget is **≤ 1 wrong Confirmed emitter per week unattended** (ADR-0022 §1.1).
 - **Superseded by [ADR-0022](0022-false-confirm-budget.md) (T-548).** The 64 bits / 3 frames / width 16 above are guesses on a one-way door; ADR-0022 derives the gate from the user's budget of one wrong Confirmed emitter per unattended week — **24 analytic hold-out bits**, payable only in analytic-null bits each net of *its own stage's* look-elsewhere, a frame count that is a formula rather than a constant, a width floor of 8 with a 16-bit hard check floor, and the searched-generator discount that [ADR-0021](0021-search-trace-and-negative-result.md) §7A.5 deferred here. T-575 applies it to this section and to §11.5.
 
 ## 6. Burst and one-off path
@@ -307,7 +312,7 @@ It appends an **`emitter_synthesis`** row (hk-model, append-only like `emitter_r
   - Evidence `n` accumulates across bursts, and hold-out is the odd bursts.
 - **Pin on analyze.** At job start the acquired ranges are exported as a pinned clip (`Recording` kind `iq-snippet`, trigger `analyze`) before the search, so ring eviction can't race the job. The clip id is in `window`, and a re-run can target it.
 - **Search changes.** The S0 seed is the burst's short-FFT centre (±1.2 kHz, T-075); there is no tracking refinement across time; S2 seeds come from the preamble (assist `periods`); `ppm_demod` skeletons are tried first for ms-scale bursts at ≥ 1 Msps.
-- **One burst.** It can reach `solved` (e.g. one ADS-B frame passing CRC-24 under the `adsb` template). It attaches but does not auto-confirm (§5.5).
+- **One burst.** It can reach `solved` (e.g. one ADS-B frame passing CRC-24 under the `adsb` template). It attaches, and confirms on its own only through §5.5's single-frame rule (U1 = B, via ADR-0022's inequality): template-fixed and ≥ 24 bits.
 
 ## 7. Evaluation (blind; a priori)
 
@@ -333,7 +338,7 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 - **Channel hopping and trunking.** Synthesis works on one channel; `follow_hops` recipes stay hand-started. That is M4.
 - **Encrypted or proprietary payloads.** No key search or cryptanalysis. A high-entropy payload behind a valid frame is characterised ("framed, CRC-16 valid, payload entropy 7.9 bits/byte: probably encrypted or compressed") and left there.
 - **OFDM, DSSS, CSS and QAM structures** (no blocks). The classification's `unsupported-structure` is reported as the verdict reason.
-- **Automatic analysis of every detection.** v1 is user- or API-triggered. Queueing jobs from the ADR-0012 attention scheduler is a later policy (open question 3).
+- **Automatic analysis of every detection.** Not every detection, and not at every profile: per U2 (§3.3) the attention scheduler auto-queues unexplained candidates at `quick` only, on mains, one at a time; `standard`/`deep` stay user- or API-triggered.
 - **ML on the critical path** (§3.3 slot only).
 - **Transmit or active probing.**
 
@@ -341,12 +346,14 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 
 | Crate | Holds | Depends on |
 |---|---|---|
-| `hk-synth` (new) | `Stage`, `Evidence` scoring and nulls, candidate and skeleton types, search engine, proposal adapters, `EvidenceObjective`, template schema, loader and seeding | hk-recipe, hk-blocks, hk-estimate, hk-demod, hk-model |
-| `hk-blocks` | `Block::evidence`, `EvidenceSet`, per-block evidence, the batch `run_window` driver | (existing) |
+| `hk-synth` (new) | re-exports the evidence vocabulary from `hk_model::synth` (so `hk_synth::Stage` still resolves); `Evidence` scoring and nulls, candidate and skeleton types, search engine, proposal adapters, `EvidenceObjective`, template schema, loader and seeding | hk-recipe, hk-blocks, hk-estimate, hk-demod, hk-model |
+| `hk-blocks` | `Block::evidence` (returning `hk_model::synth::EvidenceSet`), per-block evidence, the batch `run_window` driver | (existing) |
 | `hk-pipeline::synth` | job manager, acquisition (ring/live/burst set, pin clip), `synth` chain kind, attach, the `ConfirmPolicy.synthesized` rule | + hk-synth |
 | `hk-store` | `IqBufferService::read` backing (ADR-0014 format, read-only) | (existing) |
-| `hk-model` | `emitter_synthesis` table, Decode provenance, template store paths | (existing) |
+| `hk-model` | **the evidence vocabulary `hk_model::synth`** (`Stage`, `MetricId`, `GroupId`, `Evidence`, `EvidenceSet`), `emitter_synthesis` table, Decode provenance, template store paths | (existing) |
 | `hk-api` (`analyze.rs`) | the routes in §5 | (existing) |
+
+**Why the vocabulary is in `hk-model`** (D1, found by T-848): `hk-blocks` must name `Evidence`/`EvidenceSet`/`Stage` for `Block::evidence`, and `hk-synth` depends on `hk-blocks`, so placing them in `hk-synth` as first written was a dependency cycle. Same pattern as ADR-0016's types in `hk_model::classify`.
 
 **Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`).
 
@@ -356,7 +363,7 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 
 | Id | Task | Deps | Model | Group |
 |---|---|---|---|---|
-| M-1 | `hk-synth` scaffold: Stage/Evidence/candidate/skeleton/template types, pre-added modules and stubs, ADR-0015 → ACCEPTED review | T-206, ADR-0016 accepted | Opus (core) | SYN-0 |
+| M-1 | `hk-synth` scaffold: Stage/Evidence/candidate/skeleton/template types, pre-added modules and stubs, ADR-0015 → ACCEPTED review | T-206, ADR-0016 accepted — **waived at acceptance** (§16.5): hk-synth consumes only ADR-0016 §8's landed `SearchSeed` | Opus (core) | SYN-0 — **done: T-848; accepted 2026-09-23** |
 | M-2 | `Block::evidence` + evidence for S0–S6 blocks, analytic nulls, calibration tables + py generator, `run_window` | M-1 | Opus (core) | SYN-B |
 | M-3 | Search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle | M-1 | Opus | SYN-E |
 | M-4 | Proposal operators over assist (sync/codes/fields) with budget charging | M-1 | Sonnet (reviewed) | SYN-P |
@@ -369,7 +376,7 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 | M-11 | MUI: Analyze progress, ranked results, evidence ladder, "start as pipeline" and "save template" in the output panel | M-8, T-192, T-195 | Sonnet | MUI-X1 |
 | M-12 | `acceptance_mauto` blind suite (§7), generic-FSK synthetic generator in `py/` | M-4, M-5, M-7, M-9 | Opus | M-E |
 | M-13 | Jetson budget/power measurement and profile re-baseline (interactive, needs the Jetson) | M-12 | Opus | JETSON |
-| M-14 | Optional `psk_demod`/Costas block (ADR-0011 catalogue addition) | M-2 | Opus | SYN-B |
+| M-14 | **Required** (U4 = A, user 2026-09-23) `psk_demod` block (ADR-0011 catalogue addition). **The block is delivered by T-609** (superseding this row's narrower "optional Costas" scope; T-610 `viterbi` + T-611 `reed_solomon` complete the CCSDS path). **Not covered by T-609, and owed before PSK reaches bits in a search:** `psk_demod`'s `Block::evidence()` S1 metric (EVM/lock) and its calibration table — M-2's contract, which must include `psk_demod`; a linear-modulation (PSK) S1 alternative in the open skeletons and seeding (M-3/M-5; §4.1's built-in skeleton list has none); and a burst/preamble-driven acquisition mode (T-609 needs a 512–1024-symbol window, so short PSK bursts lose their start) — **delivered by T-875** (`burst: true`, feed-forward acquisition over each burst's own samples; ADR-0011 §9 notes). | M-2 | Opus | SYN-B |
 
 **Waves** (≤ 4 Rust builders at once): (1) M-1; (2) M-2, M-3, M-4, M-6, with M-5 once T-199/T-201 are done; (3) M-7, M-8, M-5; (4) M-9, M-10, M-11; (5) M-12, then M-13.
 
@@ -394,6 +401,8 @@ Scheduled only after the M3 exit (T-206). There are no Fable tasks; core-interfa
 ## Open questions (for the user)
 
 **All fifteen of the questions below — these five, §11.10's five and §12.12's five — are consolidated, costed and given a recommendation in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553). Five survive as questions for the user; the rest are decided or sent to measurement there. Answer them from that table, not from these lists.**
+
+**Answered 2026-09-23 (user, from docs/20's table):** Q1 → U1 = B; Q2 → budgets sent to measurement (T-552), battery half → U2 = B; Q3 → U2 = B; Q4 → docs/20 D1 (local JSON); Q5 → U4 = A. Kept below as the record of what was asked.
 
 1. **Single-burst confirmation.** Should one frame passing a template-fixed ≥ 24-bit check (e.g. an ADS-B squitter) auto-confirm, or only attach, leaving promotion to you (proposed)?
 2. **Budget defaults and battery.** Are `quick` 3 s / `standard` 20 s / `deep` 120 s right for a handheld? Should `deep` be refused on battery?
@@ -501,8 +510,8 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 
 ### 11.7 docs/07 delta (sketch, applied by the implementing task)
 
-- **§2.11 Emitter:** an Emitter owns 0..N **candidate decode pipelines** (§2.28), ranked by evidence; its measured `f`/`BW` are never overwritten by a pipeline's channel; confirm-by-decode promotes a pipeline and confirms the emitter. Add the `duplicate_of` / `artifact_of` / `suppressed_by` links from §11.4.
-- **New §2.28 CandidatePipeline:** the §11.1 object — identity, append-only event lifecycle, ranking and supersession, relation to Recipe/Classification/Decode, retention (kept with the emitter; superseded rows summarised, never deleted), and tests.
+- **§2.11 Emitter:** an Emitter owns 0..N **candidate decode pipelines** (the new CandidatePipeline section below), ranked by evidence; its measured `f`/`BW` are never overwritten by a pipeline's channel; confirm-by-decode promotes a pipeline and confirms the emitter. Add the `duplicate_of` / `artifact_of` / `suppressed_by` links from §11.4.
+- **New CandidatePipeline section — the next free docs/07 number (§2.33 today; §2.28 is `TrunkSystem`, T-266 — C6):** the §11.1 object — identity, append-only event lifecycle, ranking and supersession, relation to Recipe/Classification/Decode, retention (kept with the emitter; superseded rows summarised, never deleted), and tests.
 - **§2.15 Decode:** `candidate_pipeline_id`, and the T-210 rule that corrected frames are not CRC-valid evidence.
 - **§2.21 Classification:** one clarifying sentence — pipelines carry evidence, Classification carries family; a promoted pipeline writes a rank-1 `decoder` row and wins the family through the existing ladder, not around it.
 
@@ -539,6 +548,8 @@ Three problems, one mechanism — **competition between hypotheses over a band**
 ### 11.10 Open questions (for the user)
 
 *Consolidated with §10's and §12.12's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q2/Q3 and Q4 are decided there as engineering defaults or measurements; only Q5 (merged with ADR-0016 open question 3) goes to the user.*
+
+**Answered 2026-09-23:** Q1 → docs/20 D2 (lazy); Q2 → D3 (a set of output kinds); Q3 → D4 (hidden by default); Q4 → measurement (T-547, still a first guess); **Q5 → U3 = A, user: the user wins (rank 0), the decode is recorded and shown beside the label** (§5.5).
 
 1. **Lazy or eager rows.** Materialise a bare `energy` pipeline only on demand (proposed), or give every emitter one from creation so the inventory is uniform, at the cost of a row per box?
 2. **Two promoted pipelines.** Is "one promoted decode plus one promoted audio pipeline per emitter" right, or should exactly one pipeline ever be promoted?
@@ -603,7 +614,7 @@ A Listen chain is owned by its consumer; a recipe pipeline is a named object wit
 
 ### 12.5 Per-mode cutover (why nothing has to break)
 
-Blocks exist, or are specified by ADR-0011 §8.4, for **WFM / NBFM / AM**. **None exist for USB / LSB / CW**, which Listen serves today. So the chooser returns either a recipe **or** `legacy`, and `legacy` runs today's chain unchanged. The migration flips modes one at a time as each recipe proves parity, and SSB/CW may legitimately stay `legacy` **forever** — that is an acceptable end state, not a failure.
+Blocks exist, or are specified by ADR-0011 §8.4, for **WFM / NBFM / AM**. **None exist for USB / LSB / CW**, which Listen serves today. So the chooser returns either a recipe **or** `legacy`, and `legacy` runs today's chain unchanged. The migration flips modes one at a time as each recipe proves parity, and SSB/CW may legitimately stay `legacy` **forever** — that is an acceptable end state, not a failure. **Decided (U4 = A, user 2026-09-23):** SSB and CW stay `legacy` permanently; no `ssb_demod`/`cw_demod` is funded, and `chains/listen.rs` stays in the build for those two modes (LP-8 retires the chain for cut-over modes only; docs/20 D6).
 
 ### 12.6 Retune and refinement
 
@@ -640,7 +651,7 @@ Ordered, each stage independently revertible, with the user live-testing between
 | **4. Opener switch, flag-gated (default off)** | `HK_LISTEN_PIPELINE=1` makes `/ws/open/listen` run chooser → ephemeral pipeline. Stage 0's conformance test runs in **both** modes. | Identical audio and UI with the flag on; instant revert by unsetting it. **This is the stage the user live-tests.** |
 | **5. Default flip, WFM/NBFM/AM only** | The flag defaults on; SSB/CW keep `legacy` (§12.5); the legacy chain stays in the build. | Dock entries carry `pipeline_id`; audio pipelines appear in `GET /api/pipelines`; a `listen`-origin row exists once §11's table has landed. Reverting is one environment variable. |
 | **6. One output model in the UI** | Dock entries become `{pipeline_id, output_id, kind}`; the FM panel reads RDS from the sibling `messages` output. | Several outputs per signal stack in one dock; RDS text comes from the pipeline that produces the audio. |
-| **7. Retire the chain (never the opener)** | Delete `ChainKind::Listen`'s producer for the cut-over modes; map listener-budget accounting onto audio pipelines. **Only after stage 5 has been live-tested**, and only for those modes. | `/api/status` `listen.budget` still reports; `/ws/open/listen` unchanged. `chains/listen.rs` survives for SSB/CW unless those blocks land. |
+| **7. Retire the chain (never the opener)** | Delete `ChainKind::Listen`'s producer for the cut-over modes; map listener-budget accounting onto audio pipelines. **Only after stage 5 has been live-tested**, and only for those modes. | `/api/status` `listen.budget` still reports; `/ws/open/listen` unchanged. `chains/listen.rs` survives for SSB/CW permanently (U4 = A). |
 
 ### 12.10 Where the framing breaks down (honest objections)
 
@@ -648,8 +659,8 @@ Ordered, each stage independently revertible, with the user live-testing between
 2. **Latency is a contract for audio and a statistic for decoding** (ADR-0011 §8.5). Without `live-edge`, moving Listen onto the recipe runtime degrades live listening in a way no existing test would catch: everything still decodes, it just lags. **Highest-risk item in this plan.**
 3. **The refinement objective is not a node metric** (ADR-0011 §8.7). Two objective forms is a wart; the alternative is a worse objective.
 4. **Per-consumer versus named object** (§12.3). Two ownership modes are irreducible, and the attach-don't-duplicate rule is load-bearing rather than an optimisation.
-5. **SSB/CW have no blocks** (§12.5) and writing them well is real DSP work this amendment does not fund. A permanent legacy path for them is an acceptable outcome.
-6. **Stereo is a wire change**, not a block (ADR-0011 §8.4): `ri16_le` mono is baked into every client. Out of scope.
+5. **SSB/CW have no blocks** (§12.5) and writing them well is real DSP work this amendment does not fund. A permanent legacy path for them is the decided outcome (U4 = A).
+6. **Stereo is a wire change *and* a block** (ADR-0011 §8.4): `ri16_le` mono is baked into every client. **In scope (U5 = yes, user 2026-09-23, overriding docs/20's "no"):** the user treats stereo as part of decoding the signal — the 19 kHz pilot and the 38 kHz L−R subcarrier are signal content the device should recover, not a listening nicety. See §12.13.
 7. **What should *not* be done: retiring the opener.** `/ws/open/listen` should never be deprecated. The task title says "retire the special-cased Listen path", and the *chain* is worth retiring — the *verb* is not. Keeping a target-shaped one-shot entry point is what makes the product feel like a radio rather than a build system.
 8. **And not yet: none of stages 2+ should start before M1's blocks and runtime are real.** `hk-blocks` and `hk-pipeline::recipes` are contracts with unmerged tasks; adding a second consumer of an unbuilt runtime is speculative. This is a contract now; code when the workbench runs.
 
@@ -674,13 +685,28 @@ This section therefore uses placeholder ids **LP-1…LP-8**, mapping onto §12.9
 
 *Consolidated with §10's and §11.10's lists in [docs/20, the MAUTO decision brief](../20-mauto-decision-brief.md) (T-553): Q1, Q3 and Q5 are decided there (Q5 duplicates §11.10 Q2 and is already answered by §12.8); Q2 is merged with §10 Q5 and Q4 stands, both for the user.*
 
+**Answered 2026-09-23:** Q1 → docs/20 D5 (retune still ends the stream); Q2/Q3 → U4 = A + D6 (SSB/CW legacy permanently, chain kept for them); **Q4 → U5 = yes, stereo in scope (§12.13)**; Q5 → D3.
+
 1. **Retune behaviour.** Keep "a class-changing retune ends the audio stream and the client reconnects" (proposed — it is today's tested behaviour), or make audio pipelines survive a retune (nicer, but a live-visible change with no coverage)?
 2. **SSB/CW.** Fund `ssb_demod`/`cw_demod` blocks so every mode is a recipe, or accept a permanent legacy path for them (proposed)?
 3. **Keep the legacy chain indefinitely** as a simple, dependency-free live-audio fallback for when a recipe misbehaves, or delete it once WFM/NBFM/AM are cut over (stage 7)?
-4. **Stereo audio.** Wanted at all? It is a wire change (`channels`, interleaved `ri16_le`) plus a `stereo_decode` block, and nothing asks for it today.
+4. **Stereo audio.** Wanted at all? It is a wire change (`channels`, interleaved `ri16_le`) plus a `stereo_decode` block, and nothing asks for it today. — **Answered: yes** (U5, user 2026-09-23; §12.13).
 5. **Promotion.** Confirm §12.8's reading: a pipeline claims a *set* of output kinds and promotion conflicts per kind (this supersedes §11.10 open question 2's phrasing).
 
 *Unverified in this amendment: that a recipe chain reaches the current Listen path's audio quality and CPU cost (stage 3 measures it); the 0.6 s `max_backlog_s`; that `squelch`-as-a-block's zero-item chunks are indistinguishable at the UI from today's `sample_index` gaps; and whether the wrapped chooser's mode decisions match today's exactly (stage 0's test pins the behaviour it must reproduce).*
+
+### 12.13 Stereo audio is in scope (U5, user 2026-09-23)
+
+The user's answer to §12.12 Q4 is **yes**, contrary to docs/20's recommendation. Stereo is part of decoding a broadcast-FM signal, so it belongs to the pipeline, not to a later nicety. What that commits, stated so the implementing tickets can be sized (placeholder ids; the coordinator allocates real ones):
+
+| Id | Task | Deps | Model |
+|---|---|---|---|
+| LP-9 | `stereo_decode` block: 19 kHz pilot PLL, 38 kHz L−R demodulation, matrix to L/R, a pilot-lock `Status` (and S1 `evidence()` via the pilot lock the refinement loop already reads); mono fallback when the pilot is absent or unlocked, never a silent mono labelled stereo | LP-2 | Opus, core_interface |
+| LP-10 | Wire change: `audio` stream header gains `channels` (1 or 2) with interleaved `ri16_le` frames, a stream-contract version bump, and every client updated in the same change (UI dock/`AudioSession`, `py/examples/hk_audio_wav.py`, the documented TCP one-liners) plus `docs/api.md` and `api_contract` tests. A mono stream stays byte-identical to today's. | LP-9, LP-1 (the conformance freeze must pin mono first) | Opus, core_interface |
+
+- **The mono contract does not break silently.** A client that ignores `channels` must still get mono unless it asks for stereo (opt-in on the opener or the output), so LP-1's frozen behaviour holds.
+- **Honesty.** A stream is labelled stereo only while the pilot is locked; losing lock mid-stream is reported (a status change), not hidden. This is the same rule as never implying resolution the front end did not deliver.
+- ADR-0011 §8.4's "Stereo is also out" is superseded by this section.
 
 ---
 
@@ -1077,8 +1103,14 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
    splits the bucket. The budget above then multiplies by the number of buckets, which is why it
    is stated per cell.
 5. **All of it, on blocks that were never measured.** Everything above rests on the FSK path at
-   n = 112 plus one classifier feature. **T-619** extends the measurement to AM/OOK and C4FM; a
-   different dependence structure there changes §13.1's table, not its rule.
+   n = 112 plus one classifier feature. **T-619** extended the measurement to AM/OOK and C4FM
+   (docs/21 §10, 2026-09-22): §13.1's rule survives and its table gains two groups
+   (`{eye_open, snr, evm}` on AM/OOK, `{evm, offset_ratio}` on C4FM, the first at ρ = 1.000
+   exactly), and **item 4's trigger fired** — the null side was measured to 77 % clipped and the
+   AM/OOK metrics over-claim 5–6 bits there, so the `nominal` bucket must split or tighten
+   (measured: σ ≥ 1.0 LSB and clip ≤ 10 % holds every path to ≤ 1.2 bits at a 6-bit claim). That
+   amendment is not taken here. docs/21 §10.4 also shows the runtime rule must measure the
+   **noise floor's** fill, not the window's.
 
 ### 13.6 Deltas to §§1–12
 
@@ -1104,3 +1136,495 @@ the rest. **Under-sampling is visible in the answers, not only in the generator'
 measures the 0.3–0.9 band); that 0.25 bits is the right expressibility tolerance; that
 `floor_j = 6` remains achievable at S2/S3 under the maximum rule on a real corpus (T-660); and
 every number inherited from docs/21, which measured one block family at one support.*
+
+---
+
+## 14. Amendment — the incremental region-decode contract (T-265 = [ADR-0017](0017-time-extent-signal-model.md) TM-10, 2026-09-22)
+
+**CONTRACT ONLY.** `POST /api/analyze` still answers `501` for a selection or band target and MAUTO is unscheduled, so nothing here runs a decoder, reads the ring or spawns a thread. ADR-0017 §9 blocked TM-10 on exactly that — *"attempting this earlier means building an incremental scheduler for a pipeline that does not exist"* — while leaving §6 as "a contract now; code when MAUTO is scheduled". This section is that contract written down where the analyze engine will read it, plus the types that make its four failure modes unrepresentable: `hk_pipeline::region` (T-265).
+
+### 14.1 What it is a contract for
+
+CLAUDE.md invariant 5: *"decode operates on a captured region and extends with it; live decoding **extends the region's time extent** and decodes only the newly-arrived part (incremental), never re-decoding what is already done."*
+
+ADR-0017 §6.2 turned that into two rules, and the load-bearing clause is that **the policy belongs to the reader, not to the pipeline, the recipe or the signal**:
+
+> **Rule L** — a reader attached at the live edge obeys ADR-0011 §8.5 unchanged: never a backlog, skip forward when behind, count and flag every skip.
+>
+> **Rule I** — a reader that is a bounded region of the ring processes `[t_start, t_end]` exactly once; extending the region enqueues only `[old_end, new_end]`.
+>
+> **A pipeline has exactly one input reader, so it is exactly one of the two.**
+
+§5's `AnalyzeJob` is a Rule I pipeline. §12's Listen is a Rule L pipeline. §6's burst path is Rule I with a discontinuous acquisition. Nothing in this ADR was ever both, and this section is what stops the first implementation making one.
+
+### 14.2 The objects
+
+| Object | What it is | Rule it carries |
+|---|---|---|
+| `ReaderPolicy` | `live-edge {max_backlog_ns}` \| `bounded-region` | one field, so a pipeline cannot declare both |
+| `PipelinePlan` | one reader policy + the outputs hanging off it | §6.2's "exactly one of the two", structurally |
+| `ReadLedger` | the spans a reader **actually read**, its skips, and the evidence credited from them | §6.3's coverage honesty and §6.4's evidence rule |
+| `RegionJob` | a Rule I job: extent, work queue, ledger, phase | §6.2 Rule I |
+| `RegionPhase` / `Handover` | `Region` → `HandedOver {at, live_from}`, and the record of what fell between | §6.3's "explicit, named state … never an implicit merge" |
+
+**Extent is not coverage.** A `RegionJob`'s *extent* is what the user asked for and it only ever grows; its *coverage* is what the reader got, and it is less whenever the ring had evicted part of the window, a segment boundary fell inside it (§5.3), or a handover abandoned enqueued work. The difference is recorded as skipped time and flagged, never rounded up — *"a coverage bar that silently has holes in it is worse than no coverage bar"*. The acceptance sentence is therefore **"a region job's coverage is exactly the samples it read"**, and it is a test, not a prose claim.
+
+**Closed intervals.** Spans are docs/07 §4 `TimeRange`s, closed `[start, end]`. Two are *contiguous* when the later starts exactly at the earlier's `end` — they meet at one instant of zero duration, so summed durations still equal the union's — *overlap* only when it starts strictly before (the re-read, refused), and leave a *gap* when it starts strictly after. Extending by `[old_end, new_end]` is the ADR-0017 §6.2 formula verbatim, and it is exactly-once under this reading.
+
+### 14.3 The four failure modes, and where each is refused
+
+ADR-0017 §6.3 names two ways to fuse the readers and says of both that *"one of the two contracts breaks silently — always the worst kind"*. Each now has a named error rather than a paragraph:
+
+| § | The mistake | Refused by |
+|---|---|---|
+| §6.2 | re-decoding what is done | `RegionJob::extend_to` answers `None` for an end already handed out; `ReadLedger::read` ⇒ `AlreadyRead` for a span overlapping one already read |
+| §6.3 | fuse onto the **region** reader — audio acquires the batch job's backlog (§12.10's "highest-risk item") | `PipelinePlan::validate` ⇒ `AudioOnBoundedRegion` |
+| §6.3 | fuse onto the **live-edge** reader — the skip discards the samples the job promised to process exactly once, and the job reports complete coverage over a region with holes | `ReadLedger::skip_to` ⇒ `SkipForbidden` under `bounded-region` |
+| §6.4 | a sibling decode output's evidence `n` inflated by time the audio reader skipped | `PipelinePlan::policy_for_output` has no per-output override; `ReadLedger::credit` ⇒ `NotRead` for a span that was not read |
+
+The last one is the one an implementer is most likely to get wrong while believing they are being generous. ADR-0011 §8.9's FM recipe has an `audio` output *and* an RDS `messages` output off the same `fm` node: **one reader, two outputs**, so RDS inherits the audio reader's live-edge policy and its text has a gap whenever the audio skips. That gap is correct and deliberate — the alternative buffers for RDS's benefit and makes the audio late — and it is recorded as a `DISCONTINUITY`. What must not happen is the §2.2 bits ladder counting the skipped seconds as evidence, which is why evidence is credited **against a span in the ledger** rather than against wall time. A user who wants gapless RDS runs a region job over the ring: Rule I, a second pipeline, and exactly the §6.3 shape.
+
+### 14.4 Handover
+
+A region job whose coverage catches the live edge **may** hand over to the live pipeline. That is one transition, out of one state, and it produces a record:
+
+`Handover {at, live_from, gap: Option<TimeRange>, abandoned_ns, flags}` — `gap` is `Some` when the live reader starts after the job's coverage ended; `abandoned_ns` is work that was enqueued and never read; either puts `DISCONTINUITY::GAP` on the record, and only a handover that loses neither is `is_seamless()`. After it the job owns no samples: `extend_to`, `complete` and a second `hand_over` all answer `HandedOver`. Continuing to decode means opening a new job, which is a new reader — never the old one re-pointed at the live edge.
+
+### 14.5 What this does **not** decide
+
+- **No engine.** No scheduler, no thread, no ring read, no `/api/analyze` behaviour change, no route and no schema. `AnalyzeJob.window` (§5.2) already carries `segments`/`samples`/`gaps`; when the engine lands it fills them **from the ledger** rather than from the requested window, and that is the only §5 delta this foresees.
+- **No persistence.** Nothing here is stored. A job's coverage lives as long as the job; `emitter_synthesis` (§5.4) keeps the verdict, not the coverage bar.
+- **Scrub-back audio is still unruled.** ADR-0017 §6.5 flagged it and this does not settle it: `AudioOnBoundedRegion` refuses audio on a *bounded-region* reader, which is the fusion, and says nothing about a future playback reader with its own policy. If one is added it is a **third** `ReaderPolicy`, declared as such, not a bounded region with the audio rule quietly relaxed.
+- **No number is introduced.** `max_backlog_ns` is carried, not defaulted: the runtime's value is `ListenConfig::max_backlog_s` (or a recipe's `input.liveness.max_backlog_s`), and a second spelling of it would be a new drift surface.
+
+*Unverified in this amendment: that the work-queue shape survives contact with the beam search's re-entrancy (§3.1 may want to re-run a stage over a span already read, which is a **re-analysis** of read samples rather than a re-read and is legal under Rule I, but nothing measures it); and whether the UI wants a handover offered automatically when coverage reaches the live edge, or only on request — §6.3 says "may hand over" and this contract does not choose.*
+
+---
+
+## 15. Amendment — protocol facts cross as template data: fact provenance, the fact/implementation line, bulk import (T-557, 2026-09-22)
+
+**Status:** PROVISIONAL, design only, no code and no template files. Use cases: **SIGNAL-049**
+(ERT meters), **SIGNAL-053** (LoRa), **RESEARCH-002** (flex decoder for a never-seen sensor).
+Source: [docs/18 §0, §3 Tier 1, §6](../18-decoder-coverage.md), which rank the short-range ISM long
+tail as the highest-return coverage and call it "templates, not code". §§1–14 stand, except for the
+deltas in §15.8.
+
+**What binds, and what doesn't.** The only licence rule is the existing one in
+[ADR-0010](0010-language-and-licence-ledger.md) and [ADR-0003](0003-process-plugin-model.md): GPLv3
+decoder *code* stays behind the process boundary and nothing is derived from it in-core. The user
+said on 2026-09-20 (T-555) that there is **no separate licence rule**. docs/18 §4's three-tier
+proposal was cancelled, and this section neither cites nor revives it. What follows is a data
+schema and a bookkeeping discipline. It adds no new gate.
+
+### 15.1 Why templates are the bridge
+
+A **template is data about a protocol** and a **block is code**. The licence question is only ever
+about code. A template holds the same things every GNU Radio or rtl_433 decoder holds, and every
+specification those decoders were written from: modulation family, symbol rate, sync word, check
+polynomial, field layout and expected band. These are **protocol facts**. The schema has no place
+for the rest of a decoder, which is its loops, taps, thresholds and state machines (§15.3).
+
+The costs differ by orders of magnitude. A template takes hours. A block takes days. A wrapped
+plugin is a dependency forever. For every protocol whose structure the ADR-0011 catalogue can
+already express (docs/18 §3 Tier 1: OOK/ASK/FSK with PWM, PPM or Manchester coding and a CRC),
+coverage therefore becomes data entry. And every template is also a MAUTO search seed (§4.2).
+
+### 15.2 The fact-source field
+
+§4.1's `provenance.kind` (`builtin | user | discovered`) says **who authored the template**. It
+does not change, and ADR-0022 §5.1's template-fixed rule still reads it. This amendment adds a
+second, independent record: **where each fact came from**.
+
+```jsonc
+"provenance": {
+  "kind": "builtin",
+  "facts": [
+    { "fields": ["priors.families", "priors.symbol_rate_bd", "evidence_targets.S4"],
+      "basis": "spec",                       // spec | tolerance | measured   (§15.3)
+      "source": { "kind": "standard",       // see the table below
+                  "ref": "ITU-R M.584-2", "locator": "Annex 1 §4", "accessed": "2026-09-22" } },
+    { "fields": ["free[clock].domain"],
+      "basis": "tolerance",
+      "source": { "kind": "decoder-source", "project": "rtl_433", "artefact": "code",
+                  "path": "src/devices/<file>.c", "commit": "<sha>",
+                  "licence": "GPL-2.0-or-later", "licence_read_from": "COPYING" } } ] }
+```
+
+| `source.kind` | Meaning | Required keys |
+|---|---|---|
+| `standard` | A standards body's document (ITU, ETSI, IEEE, CCSDS, EN, ANSI, …) | `ref`, `locator` |
+| `specification` | A published vendor or alliance spec, application note or datasheet (LoRa Alliance, Semtech, TI, …) | `ref`, `locator` |
+| `paper` | A peer-reviewed or preprint paper | `ref` (DOI or arXiv id) |
+| `reverse-engineering` | A published write-up of a protocol someone decoded (blog, talk, notes) | `ref` (URL) |
+| `wiki` | A community wiki entry (sigidwiki, …) | `ref` (URL), `licence` |
+| `decoder-source` | **Read from a decoder's own repository**: its code, tests, docs or config | `project`, `artefact` (`code \| tests \| docs \| conf`), `path`, `commit`, `licence`, `licence_read_from` |
+| `measured` | Derived by this system from a capture: a discovered template, or a fixture fit | `job_id` or `fixture` (path + content hash) |
+| `user` | The user stated it, with no further source | — |
+
+Rules:
+- **Granularity is the field path, not the template.** One template routinely mixes sources: a sync
+  word from a standard, a rate tolerance from a decoder. Every fact-bearing field of a **builtin**
+  template has to be covered by some `facts` entry. The loader refuses an uncovered field
+  (`fact_unsourced`) the same way `Recipe::validate` refuses a dangling port.
+- **Defaults fill themselves in, so the rule costs the user nothing.** A user-authored template's
+  uncovered fields default to `{kind: user}`. A discovered template (§4.3) is stamped
+  `{kind: measured, job_id}` on every field it fixed or narrowed.
+- **`decoder-source` is recorded, not refused.** A template whose parameters came from reading a
+  decoder's source must say so. That is the whole obligation. `licence` is read from the file
+  itself, never from a forge API, because docs/18 §1.5 found GitHub's licence field wrong for
+  several GNU Radio modules. A repository with no licence file records `licence: "none-stated"`.
+  This is bookkeeping in ADR-0010's ledger sense, not a gate (CLAUDE.md).
+- **Prefer the upstream description when one exists.** When a fact is available from both a
+  `standard`/`specification`/`paper` and a `decoder-source`, the template cites the former. A
+  template library lint lists fields sourced *only* from `decoder-source` (`resource_wanted`) so a
+  later pass can re-source them. That list is information, not a failure.
+- **No prose crosses.** `name` and `description` are written fresh. A wiki's or decoder's text is
+  never pasted in, because text is expression even when the numbers beside it are facts.
+
+### 15.3 The line: fact versus implementation, per §4.1 field
+
+A **fact** is a statement about the air interface or the message format that two independent,
+interoperable implementations must agree on. If a transmitter could change it and still be heard by
+every existing receiver, it is not a fact about the protocol. **Implementation** is everything a
+receiver's author chose in order to receive well.
+
+| §4.1 field | Fact side | Implementation side | The awkward middle and its rule |
+|---|---|---|---|
+| `recipe` / `skeleton` | The protocol's **layering**: line code (NRZ, NRZI, Manchester, PWM, PPM), whether whitening is applied, where the check sits | Any other decoder's flowgraph or file decomposition. A skeleton is **always** expressed in ADR-0011's own blocks, never transcribed from someone's graph | A layer the catalogue lacks (`css_demod` for LoRa, docs/18 §7 rank 9) makes the template **inert** (§15.6), not a reason to copy a block |
+| Node params the template fixes | Protocol parameters: `sync_word`, CRC RevEng model (`width, poly, init, refin, refout, xorout`), BCH code, whitening polynomial and seed, deviation, bit order, frame length | Loop bandwidths, filter taps and lengths, AGC constants, slicer thresholds and hysteresis, lock/unlock run lengths, timeouts, retry logic, any decoder state machine | **The schema enforces this line.** ADR-0011's `ParamSchema` gains `class: protocol \| tuning` (§15.8). A template may fix, range or seed only `protocol` params. `tuning` params keep the block's own defaults and are refined from the processed output (§2.3, T-070). No field exists to carry them, so a template *cannot* import them |
+| `free[].domain` | An `enum` of values the spec lists (POCSAG 512/1200/2400) | — | **Ranges are the middle.** See the tolerance rule below |
+| `priors.families`, `bursty` | Modulation family and duty cycle as the protocol defines them | — | — |
+| `priors.symbol_rate_bd` | The nominal rate | — | The width of the range is a tolerance: tolerance rule |
+| `priors.bandwidth_hz` | An emission mask or channel spacing the spec states | A decoder's channel-filter width | With no mask in the spec, the range is `basis: measured` from a fixture, or derived from the rate and family by `hk-synth` |
+| `priors.bands_hz` | Allocations and spec channel plans | — | Rank only, for an emitter already detected there (§4.1). A wrong band costs nothing but order |
+| `evidence_targets` | Sync length in bits; check kind and width | A decoder's "accept after N matches" | — |
+| `plausibility` | Field widths and enumerations from the message format (a 21-bit RIC ranges over 0…2²¹−1) | A decoder's sanity filters ("drop temperatures above 70 °C") | A tighter "values actually seen" range counts as `basis: measured` and needs a fixture or job reference. A decoder's filter never passes as a spec fact |
+| `output_policy` | — | — | Project policy, never sourced externally, so it carries no `facts` entry |
+
+**The tolerance rule (the awkward middle).** Someone chose a symbol-rate window of ±3 %. That
+number is not a spec constant, but it is not an implementation secret either, because it encodes
+what that author saw real devices do. The rule treats it as **`basis: tolerance`**, which may come
+from any recorded source, with three properties that make its origin low-stakes:
+1. **A range only changes search order and budget, never a claim.** A range that is too wide costs
+   evaluations. A range that is too narrow costs a miss, and then the open-search floor (§4.2, ≥ 20 %
+   of budget) still runs. Continuous-parameter ranges do not enter the confirm gate at all: ADR-0022
+   §2.1 pays only analytic check bits, net of `L_check`.
+2. **The engine never narrows below measurement.** The effective domain is
+   `range ∪ (estimate ± k·σ_estimate)`, so a blind estimate outside a template's tolerance is still
+   searched. The template ranks it lower (a prior), and nothing vetoes it (ADR-0016's rule).
+3. **With a spec tolerance, use it. With none, derive the tolerance, don't copy it.** Prefer the
+   spec's own figure (`basis: spec`). Otherwise use `hk-synth`'s default widening by timing class,
+   `timing: crystal | rc | unknown`, which the template declares as a fact about the transmitter
+   (for example ±2 % / ±25 % / ±50 % — **initial guesses, unverified**). A copied decoder window is
+   permitted, recorded as `basis: tolerance, source: decoder-source`, and listed by the
+   `resource_wanted` lint.
+
+### 15.4 What a template can and cannot do, and the one exposure bulk import creates
+
+These safeguards make it safe to import a template from a reference decoder, which would not be
+true of importing the decoder itself. Each restates an existing rule:
+- **Priors order the search. They NEVER rank a result and NEVER confirm one** (§1.3, §4.1).
+  `prior_bits` is kept separate from `evidence_bits` and is reported but never used as a key.
+- **A template can never confirm a signal on its own** (§4.1). Confirmation needs measured hold-out
+  frames that pass a check, under ADR-0022's inequality.
+- **`bands_hz` only raises rank for an emitter already detected there** (§4.1). A template never
+  tunes, never creates a candidate and never pre-populates the inventory (CLAUDE.md, workflow #4).
+- **A template cannot starve unknowns**: open-search floor and defer-don't-delete (§4.2).
+- **A validated template earns nothing extra** (§15.6). Validation is quality control on the
+  library. It is never a bit source.
+
+A template imported from a reference decoder therefore cannot make the system claim something it
+did not measure. The worst case for a wrong template is wasted budget, or a decode label that has
+to pass a real check on real frames.
+
+**The exposure, stated rather than hidden.** ADR-0022 §5.1 sets `L_check = 0` for a template-fixed
+check "because zero hypotheses were tried". That holds when **one** template is tried against a
+window. It stops holding when a library of hundreds is tried. If a job tries *N* template-fixed
+checks against the same window, that is *N* chances for noise to pass one of them, and ADR-0022
+§2.3's own attribution test ("the trials that could have produced *this* fit") counts every one of
+them. ADR-0022 §4.2 already applies this to one template tried at several framings. The same logic
+applies across templates:
+
+> **`L_check` for a template-fixed check is `log2(number of distinct template-fixed check
+> hypotheses evaluated against that window's frames at the check stage in this job)`.** It is zero
+> only when a single template's check was tried.
+
+Worked case: 380 ISM templates, each with a CRC-8, all tried on one burst, give
+`L_check = log2 380 ≈ 8.6 bits`, which is more than the check's own 8. ADR-0022's
+`min_differences = ceil((24 + 8.6) / 8) = 5` differing frames are then needed instead of 3. With a
+confident classification, priors put a handful of templates first, the job stops early, and the
+charge is small. The charge counts **what was tried, not the library's size**. So a large library
+costs confirmations only when the search actually had to spread across it, which is correct.
+Without this rule, bulk import would be the one way a template *could* help cause a false confirm.
+This delta belongs to ADR-0022 and is handed to **T-575**, which applies that ADR (§15.8).
+
+### 15.5 The bulk path: hand-authored, spec-first, one skeleton at a time
+
+There are three candidate paths. The position is: **(a) and (c) yes; (b) no mechanical generator
+from any decoder corpus; one narrow format importer.**
+
+**(a) Hand-authored, batched by skeleton.** One skeleton (`generic-ook-pwm`,
+`generic-ook-manchester`, `generic-fsk-framed`) carries many parameter sets. Authoring a template is
+then filling in about a dozen facts with sources, in the order docs/18 §3 ranks use cases. This is
+the primary path. rtl_433's device list is used as an **index** of which protocols exist, in which
+bands and under which modulation class, so authoring can be prioritised. The list itself is not
+copied into the repo as a table.
+
+**(b) Generated from a structured corpus: no.** The reason is not that templates are a licence
+problem, because they are data. The reasons are these:
+- **rtl_433's facts live in code, not data.** Its ~380 decoders are C (`src/devices/*.c`). The
+  `r_device` initialisers hold pulse timings, but the sync match, CRC call and field extraction are
+  inside decode functions. A generator would be a C parser for arbitrary decode functions: brittle,
+  and most of its output would fall on the implementation side of §15.3 (`gap_limit`,
+  `reset_limit`, and the decoder's own acceptance logic).
+- **A generator ships hundreds of unvalidated claims in one commit.** Each one costs budget and
+  §15.4 multiplicity. The library's value grows with *validated* templates, not with its size
+  (§15.6).
+
+**The one structured translator worth building is for RESEARCH-002.** It is an importer for the
+**rtl_433 flex (`-X`) spec language**, a small declarative format (`modulation`, `short`, `long`,
+`gap`, `reset`, `preamble`/`match`, `bits`, `repeats`). It maps directly onto the generic OOK
+skeletons and applies §15.3 as it translates:
+- `modulation` becomes the skeleton;
+- `short` and `long` become `priors` with `basis: measured` (someone measured those pulses) and a
+  derived tolerance;
+- `preamble`/`match` becomes `evidence_targets.S4`;
+- `gap` and `reset` are **dropped**, because they are receiver limits and the burst detector
+  (T-075) derives them.
+
+A spec string the user wrote is `kind: user`. That is RESEARCH-002 as the product sees it: describe
+a never-seen sensor's timing and get a searchable template, not a hard-wired decoder. One of
+rtl_433's shipped `conf/*.conf` files can go through the same importer **one file at a time, on
+request**, and is stamped `decoder-source` (artefact `conf`, commit, `GPL-2.0-or-later`)
+automatically.
+
+**(c) Grown by the user through save-as-template (§4.3).** This path is already safe:
+`kind: discovered` inherits the discovering search's look-elsewhere (ADR-0022 §5.1), and every field
+it fixes is stamped `measured`.
+
+**Corpus licences (ADR-0010's ledger rule).** A ledger row is added by the ticket that first *uses*
+a corpus as a fact source, like the gpsjam data-source row. None is adopted by this amendment.
+
+| Corpus | Licence | Status | Proposed use |
+|---|---|---|---|
+| rtl_433 (code, `conf/`, docs) | GPL-2.0-or-later | In the ADR-0010 ledger (subprocess plugin row) | Index for prioritising; per-field `decoder-source`; per-file flex import. **No bulk generator.** The plugin stays the long-tail escape |
+| rtl_433_tests (sample `.cu8` captures) | **Unverified**: read the repo's licence file before use | Not adopted | Candidate **validation fixtures** (§15.6). Nothing enters `fixtures/` until the licence is read from the file |
+| sigidwiki.com | **Unverified**: read the site's content licence and terms before use | Not adopted | Facts only (frequency, mode, bandwidth, baud), at S0–S2 depth. Better suited to the explanation/recommendation database than to decode templates, because it rarely carries field maps or checks. No scraping; no prose |
+| CRC RevEng catalogue | Parameter facts; already used (T-013 ledger row: "parameters only, no code copied") | Precedent | The `crc` model and its `check` value (§15.6) |
+| rtlamr (SIGNAL-049) | AGPL-3.0 (**verify** from the file) | Not adopted | `decoder-source` (artefact `docs`) for the SCM/IDM formats, pending a better public description |
+| gr-lora_sdr (SIGNAL-053) | GPL-3.0 | Not used | Not needed: the LoRa PHY is described in a paper and vendor application notes (§15.7) |
+| Standards bodies (ITU-R, ETSI, CCSDS; IEEE where accessible) | Each document's own terms; facts only | — | The preferred `standard` source |
+
+### 15.6 The test: templates are claims about the world and can be wrong
+
+The design already refuses to trust a template: nothing a template says ranks or confirms anything
+(§15.4). Validation is therefore **quality control on the library, never trust**. A template's
+parameters are a claim, and there are four levels of checking them, which report honestly what
+each one proves:
+
+```jsonc
+"validation": [
+  { "level": "consistency" },                                              // loader, always
+  { "level": "synthetic", "generator": "hkpy.synth:<name>", "commit": "…" },
+  { "level": "fixture", "fixture": "fixtures/…sigmf-meta", "sha256": "…", "use_case": "SIGNAL-049",
+    "result": { "rank": 1, "stage": "S5", "differences": 7 } },
+  { "level": "field", "job_id": "…", "emitter_id": "…" } ]
+```
+
+1. **`consistency`: every load, free.** The template has to be internally coherent. The CRC model
+   includes the RevEng `check` value (the CRC of `"123456789"`), and the loader verifies that
+   `hk_estimate::framing::crc` reproduces it, which catches a mistyped polynomial, init or reflect
+   flag at load. Sync length matches `evidence_targets.S4.sync_bits`. Field-map widths sum to the
+   frame length. Every `free` path names a `protocol`-class param (§15.3). Every fact field is
+   sourced (§15.2). Failure is a load error for builtins and a validation error for user templates.
+2. **`synthetic`: proves expressibility, not truth.** A synthetic generator built from the template's
+   own facts shows that ADR-0011's blocks can express and decode the signal. **It is circular about
+   the facts**, because a wrong sync word produces a synthetic with the same wrong sync word, so it
+   never counts as evidence that the facts are true.
+3. **`fixture`: the real test.** A real capture (own SigMF, or a licence-checked external one) is
+   run **blind through the mock SDR** as a §7 evaluation, with templates on and templates off
+   against a hidden truth list. It asserts the template's hypothesis is the rank-1 solved result and
+   the decode passes its check. Only this level, or `field`, validates facts. Builtins with a
+   fixture run in the T3 tier. Use-case IDs key the fixtures, per CLAUDE.md.
+4. **`field`: accrued, never asserted.** A confirmed emitter whose winning pipeline came from this
+   template is recorded by `job_id`/`emitter_id`.
+
+Beyond the four levels:
+- **Unvalidated templates may ship, and are listed as such.** A `consistency`-only builtin is legal.
+  It costs budget and §15.4 multiplicity, which is the real price of an untested claim. A builtin
+  whose skeleton names a block the catalogue lacks is **`inert`**: it loads, validates and is
+  listed, but is never seeded. The analyze trace reports it as ADR-0021's
+  `missing_block` with `suspected_by: template`.
+- **A wrong template surfaces from its record.** ADR-0021's `ruled_out` trace already records
+  "template X tried, deepest stage S2". A lint reports templates that were tried on k or more
+  emitters inside their own priors and never reached S5, as a prompt for review. It never
+  auto-deletes, never demotes, and never changes a prior. Removing or fixing a template is a human
+  act and a new version (§4.1 immutability).
+
+### 15.7 Worked sketches (illustrative; every number below is unverified)
+
+- **RESEARCH-002, a never-seen 433 MHz sensor.** The user pastes
+  `-X "n=probe,m=OOK_PWM,s=500,l=1000,r=4000,bits>=36"`. The importer yields `generic-ook-pwm` with
+  pulse-width priors {500, 1000} µs (`basis: measured`, source `user`), `bits ≥ 36` as a
+  plausibility on frame length, and `r` dropped. There is no check, so the template can order the
+  search but can never contribute analytic check bits. Confirmation, if it ever comes, needs a check
+  the search *finds*, charged by ADR-0022 §5.1. That is the honest outcome for a sensor nobody has
+  specified.
+- **SIGNAL-049, ERT SCM.** Manchester OOK, a fixed preamble and a 16-bit BCH-style check. The best
+  available public description is rtlamr's own protocol notes, so the facts are
+  `decoder-source {project: rtlamr, artefact: docs, licence: AGPL-3.0 (verify)}`, and the
+  `resource_wanted` lint lists them. The template is fully expressible in today's catalogue
+  (Manchester, `sync_search`, `crc`) and needs a `fixture` validation from the user's own meter
+  capture before anyone relies on it.
+- **SIGNAL-053, LoRa.** SF 7–12, BW 125/250/500 kHz, sync word and CRC-16 are facts sourced from
+  `paper` (Tapparel et al., the open LoRa PHY paper) and `specification` (Semtech application notes,
+  the LoRa Alliance LoRaWAN spec for the MAC headers SIGNAL-053 reads: DevAddr, FCnt). The GPLv3
+  `gr-lora_sdr` is not needed as a source. The skeleton needs `css_demod` and `descramble`
+  (docs/18 §7 ranks 9 and 2), so the template ships `inert` until those blocks land. Once they do,
+  it becomes live with no template change.
+
+### 15.8 Deltas
+
+- **§4.1 schema:** `provenance.facts[]` (§15.2), `validation[]` (§15.6), and a `timing` class for
+  the tolerance rule (§15.3). The `inert` state is derived from the catalogue, not stored.
+  `hackriff.template` stays `schema_version: 1` because nothing has been implemented yet. If
+  implementation lands first, these fields are `2`.
+- **§4.3 save-as-template:** stamps `facts: [{fields: <all fixed/narrowed>, basis: measured,
+  source: {kind: measured, job_id}}]`. The ADR-0022 §5.1 inherited-L field is unchanged.
+- **ADR-0011 `ParamSchema`:** gains `class: protocol | tuning`. `tuning` params are neither
+  template-fixable nor template-seedable. This is a descriptor contract change, listed here for
+  whichever ticket next amends ADR-0011 (docs/18 §8's T-606 carries catalogue deltas already), and
+  **not applied by this amendment**.
+- **ADR-0022 §5.1:** `L_check` for template-fixed checks counts the template-fixed check hypotheses
+  tried against the window (§15.4). **For T-575**, which applies ADR-0022. It is not applied here.
+- **ADR-0010 ledger:** a corpus row when a corpus is first used as a fact source (§15.5).
+- **Unchanged:** §§1–3, §§5–14, and ADR-0022's confirm inequality apart from the `L_check`
+  counting above.
+
+*Unverified in this amendment: the tolerance-class widenings (±2/25/50 %); the licences of
+rtl_433_tests, sigidwiki and rtlamr (to be read from their files); the §15.7 protocol constants;
+the rtl_433 decoder and flex-conf counts; and whether a handful of templates really suffices on a
+well-classified burst for §15.4's charge to stay small. That last point is measured by the templates-on
+runs in §7.*
+
+---
+
+## 16. Acceptance review (T-848 = MAUTO M-1, 2026-09-23) — **ACCEPTED 2026-09-23 (user decisions U1–U5)**
+
+**Status of this section:** the review T-848 prepared, and the record of its acceptance. The user
+answered docs/20's five questions on 2026-09-23 (relayed by the supervisor) and said "accept
+ADR-0015 accordingly, and let the MAUTO M-1/M-3 chain proceed". §16.2's corrections are now folded
+into the sections they amend; §16.3 records the decisions; **§16.8 lists what the acceptance did
+not decide — those stay open and are not resolved by it.** The M-1 scaffold the review was checked
+against is the `hk-synth` crate plus `hk_model::synth`.
+
+### 16.1 What was checked, and against what
+
+Every contract type ADR-0015 and its amendments name was written down as Rust and tested for
+shape: `Stage`, `MetricId`, `GroupId`, `Evidence`, `EvidenceSet` (§1.1, §2.1, §13.1);
+`NodeScore`, `prior_bits`, the look-elsewhere charge, default caps and floors (§1.3, §13.2);
+`Score` / `Threshold` / `Unexpressible` and the fill buckets (§13.2–§13.3); `Candidate`,
+`FreeParam`, `Domain`, `SeedSource` (§1.2); `Skeleton` (§1.2); `Template` with §15's fact
+provenance and validation (§4.1, §15); `ProposalOp` (§3.2); `Profile`, `SynthBudget`,
+`StopReason`, `JobState`, `NodeHeuristic` (§3.3, §5.2); `Verdict`, `PipelineResult` (§3.4, with
+ADR-0022's `analytic_holdout_bits` and ADR-0021's `characterisation`); and ADR-0021's
+`TraceNode`, `Outcome`, `Resolution`, `Reason` (ADR-0021 §12's M-1 amendment). A candidate prefix
+validates against the real `hk_blocks::Registry::builtin()` catalogue
+(`crates/hk-synth/tests/candidate_is_a_recipe.rs`), so "a candidate is a recipe" is checked, not
+asserted. **No engine behaviour exists**: M-2…M-12 fill the modules, each named in
+`crates/hk-synth/src/lib.rs`.
+
+### 16.2 Engineering corrections — folded into the normative text at acceptance
+
+| # | Finding | Now stated in |
+|---|---|---|
+| **D1** | `Evidence`/`EvidenceSet`/`Stage` must be nameable by `hk-blocks` (`Block::evidence`, M-2), but §9 had `hk-synth` depend on `hk-blocks` — a dependency cycle. The vocabulary lives in **`hk_model::synth`**; `hk-synth` re-exports it. | §9 (crate table + the paragraph under it) |
+| **C2** | §4.2's "posterior < 0.02 is deferred" contradicted ADR-0016 §8 / T-215: only the **likelihood** defers; a prior reorders. `hk_synth::seed` defers exactly when `Hypothesis::prune` says so (test: posterior 0.01, likelihood 0.3 stays active). | §4.2 "Defer, don't delete" |
+| **C3** | ADR-0021 §1 rule 3 (a memoised hit carries no measurement) vs §2.2 (every tried node's `measured` is non-null). `TraceNode::check` requires a measurement on every tried node **except** `memoised`. | ADR-0021 §2.2 (note added) |
+| **C4** | §4.1's `output_policy.metadata_keys` list vs the recipe's typed **map**. `Template.output_policy` is `hk_recipe::OutputPolicy`; the list is shorthand. | §4.1 |
+| **C5** | "There is no `psk_demod`" was stale: T-609 landed it. | §1.1 catalogue gap; §10 M-14 row |
+| **C6** | §11.7's "new §2.28 CandidatePipeline": docs/07 §2.28 is `TrunkSystem` (T-266). CP-1 takes the next free number (§2.33 today). | §11.7 |
+| **C7** | S6 had no stated floor. `default_floor_bits(S6) = None`: S6 ranks only. | §1.3 Floors |
+| **C8** | `Threshold` snaps **up** and refuses; a floor above `admissible_bits` is `floor_unreachable`, never lowered. | §1.3 Floors |
+
+### 16.3 The user's decisions on docs/20 (2026-09-23)
+
+| # | Question | Decision (user 2026-09-23) | Applied in |
+|---|---|---|---|
+| **U1** | Does one clean burst confirm a signal? | **B** (the recommendation): auto-confirm on one frame only when the check was **template-fixed and ≥ 24 bits**; searched checks never. False-confirm budget **≤ 1 wrong Confirmed emitter per unattended week**. ADR-0022 already realises this as one inequality (ADR-0022 §4.2), so no extra predicate is added. | Decision summary "Bursts"; §5.5; §6 |
+| **U2** | May the device analyze on its own; may `deep` run on battery? | **B** (the recommendation): auto-queue unknown candidates at **`quick` only, mains only, one job at a time**; `standard`/`deep` user-triggered; `deep` refused on battery. `auto_profile: quick \| none`, product default `quick`. | §3.3 "Auto-analyze"; §8 |
+| **U3** | User label vs a CRC-valid decode that disagrees | **A** (the recommendation): **the user wins (rank 0)**; the decode is recorded and shown beside the label. Closes ADR-0016 open question 3. | §4.2 feedback; §5.5; §11.10 Q5; ADR-0016 Q3 |
+| **U4** | Fund PSK / SSB / CW blocks? | **A** (the recommendation): **fund `psk_demod`; M-14 is required** — its block is delivered by T-609 (residue in §10's M-14 row). **SSB/CW stay on the legacy Listen chain permanently.** | §1.1; §10 M-14; §12.5; §12.10 item 5; §12.12 |
+| **U5** | Stereo audio? | **Yes — overriding the brief's recommendation ("no").** Stereo is part of decoding the signal and stays in the ADR. | §12.10 item 6; §12.12 Q4; **§12.13** (LP-9, LP-10) |
+
+The two numbers docs/20 sent to measurement stay provisional **by design**: the 4-bit supersession
+margin / 0.6 overlap (T-547 — still first guesses for §11.3) and the `quick`/`standard`/`deep`
+budgets (T-552 — §16.8 item 2). §7's thresholds are "fixed before implementation" and may only
+tighten.
+
+### 16.4 The fill-bucket amendment T-619 triggered — **still pending** (not decided at acceptance)
+
+**§13.3's single `nominal` bucket is falsified on paper.** §13.5 item 4 named its own trigger, and
+**T-619 fired it** (docs/21 §10): the AM/OOK metrics over-claim 5–6 bits at high clip, the measured
+safe region is σ ≥ 1.0 LSB **and** clip ≤ 10 %, and the runtime rule must read the **noise
+floor's** fill, not the window's. The acceptance did not take this amendment. **T-660** (done)
+deliberately did not either: `hk_synth::calibration::FillBucket` and `hk_model::provenance::FillBucket`
+both keep §13.3's as-written bounds (0.5 / 0.30) so the two crates stay in step, and the py
+generator takes the bounds as a parameter (`ADR_NOMINAL_BOUNDS` default, `TIGHT_NOMINAL_BOUNDS`
+available). **Standing constraint:** the amendment must be written, or M-2's first real calibration
+generation must pass `TIGHT_NOMINAL_BOUNDS` explicitly, **before any calibration table is generated**
+— no table exists yet, so nothing is invalidated by the deferral. §16.8 item 3.
+
+### 16.5 The ADR-0016 dependency — waived by the acceptance
+
+§10 made M-1 depend on "ADR-0016 accepted". ADR-0016 is **PROVISIONAL** with open questions 1
+(M3 exit floors / OTA captures), 2 (tract in the default build), 3 (= U3, now answered), 4 (cluster
+novelty → ADR-0012) and 5 (answered by docs/20 D1: local only). T-206's gate result also records M3
+**not closing** on two blockers (unknown recall 0.778 vs 0.80; no end-to-end classification row).
+
+What `hk-synth` consumes from ADR-0016 is **§8's `SearchSeed` only**, which is landed code (T-215,
+`hk_model::classify::seed`) read by one adapter (`hk_synth::seed`). Priors only order the search, so
+M3's accuracy floors cannot change any hk-synth contract — a weaker classifier costs search budget,
+not correctness. The ask (§16.7) bundled this waiver with acceptance and ADR-0016 was not accepted,
+so **accepting ADR-0015 waives the dependency**; ADR-0016's own review (Q1, Q2, Q4) stays separate.
+
+### 16.6 Not blocking, listed for completeness
+
+- ADR-0021's five open questions (false-label budget, null-control cost, 8-bit null margin, trace
+  retention, auto-retry) and ADR-0022's Q1 are parameters of M-3/M-9/M-12, not of the contracts
+  M-1 fixes. They stay with those ADRs.
+- The §9 deltas (docs/07 §2.11 `synthesis`, §2.15 Decode `provenance`, a Template object; docs/api
+  "Analyze"; stream `hackriff.analyze/1`; recipe `schema_version` 3) are still unwritten; each lands
+  with the ticket that first serves or stores it (M-8, M-9, M-7, CP-1), per the T-079 rule. U5 adds
+  one: the `audio` stream's `channels` field and version bump (LP-10).
+
+### 16.7 The ask (as put to the user; answered 2026-09-23)
+
+> **"Accept ADR-0015"** — with U2, U3 and U5 answered (or "take the recommendations"), SSB/CW as
+> proposed, §16.4's amendment deferred to T-660, and the ADR-0016 dependency **waived** (or ADR-0016
+> accepted). On that word the status line changes to ACCEPTED and §16.2's corrections are folded
+> into the sections they amend. Until then M-2…M-7 can start against the scaffold: none of them
+> needs an answer above except M-3's `auto_profile` default, which starts off.
+
+**Answer (user, 2026-09-23):** U1 B, U2 B, U3 A, U4 A (M-14 required), U5 **yes** (against the
+recommendation); accept ADR-0015 accordingly; the MAUTO M-1/M-3 chain proceeds.
+
+### 16.8 Still open after acceptance (the user did not decide these; the acceptance does not resolve them)
+
+1. **S3 cannot reach `floor_j = 6` under the maximum rule (T-660).** Combining docs/21 §2's published
+   per-metric realised bits through §13.1's rule with the M1 FSK ladder's declared groups: S2 goes
+   17.1 → 8.2 bits and still clears 6; **S3 goes 8.8 → 4.5 bits and does not** — S3 has one declared
+   group (`bit_shape{line_violations, bit_structure}`), so `b_3` is its best single metric, and
+   neither clears 6 alone. §13.1 predicted this in words. The rule stands: **restate S3's floor
+   (T-660 suggests roughly 4–5 bits) beside that measurement, never return to the sum.** Until an
+   amendment does, `hk_synth::stage::default_floor_bits` keeps 6 (documented there), and §1.3's
+   "pruning is never total" means the cost is search recall, not silent loss. Needs a floor
+   amendment; not decided here.
+2. **The budget unit (T-552, docs/27 — in flight, not yet on `main`).** Per-stage DSP is cheap and
+   dominated by S0 channelisation (memoisation amortises it), but **proposal-operator calls cost
+   0.3–2.4 s each** and dominate wall time, so a `wall_s` budget buys wildly different amounts of
+   search. docs/27 §6 recommends §3.3's 3 / 20 / 120 s wall budgets become **operation/evaluation-count
+   budgets** (e.g. `max_proposal_calls` or a shared `assist::Budget{max_ops}`), with **wall time kept
+   only as a backstop** for the API and power story, and `quick`'s 3 s re-examined before it ships in
+   the public API. Not decided here; M-3 should not freeze `SynthBudget`'s public shape before it is.
+3. **The fill-bucket amendment (T-619 → §16.4).** Pending; binds M-2's first calibration generation.

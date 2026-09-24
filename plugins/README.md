@@ -59,3 +59,10 @@ So:
 - Some residual channels remain open to a plugin that modulates them deliberately: timing and ordering of lines, `t` within the input range, and values within their allowlisted types. They are noted in [docs/stream-contract.md §11](../docs/stream-contract.md), not fixed.
 
 - `dummy/`: the test plugin for the host (`hk-dummy-plugin`, a bin target of `crates/hk-plugins`).
+- `gnss-sdr/`: GPS L1 full receiver (T-323). GNSS-SDR (GPL-3.0-or-later) exec'd per recorded dwell behind `hk-plugin-gnss-sdr` (a bin target of `crates/hk-gnss`); emits `hackriff.gnss/1` evidence decodes only — no identity, no annotation. See the C36 card.
+- `satdump-137/` and `satdump-lband/` (T-275): SatDump (GPLv3), wrapped once by `hk-plugin-satdump`
+  and tiered by `docs/use-cases.yaml`'s `hardware_fit` across two manifests — `satdump-137`
+  (SIGNAL-027 Meteor-M LRPT, SIGNAL-029 NOAA POES APT, native: QFH/V-dipole) and `satdump-lband`
+  (SIGNAL-025 GOES HRIT, SIGNAL-028 Metop/FengYun AHRPT, needs-accessory: dish + LNA). One reused
+  decoder, not four reimplementations; the `pipeline` param picks SatDump's own pipeline id per
+  manifest. Tests use `hk-fake-satdump`, the same stand-in pattern as `hk-fake-readsb`.

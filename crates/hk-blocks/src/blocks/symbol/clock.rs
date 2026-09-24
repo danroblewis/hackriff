@@ -33,8 +33,10 @@ use hk_recipe::{Params, PortType};
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::blocks::iq::common::*;
 use crate::buffer::PortSlice;
+use crate::evidence::calibrated;
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 const HOT: &[&str] = &["loop_bandwidth"];
 const CANDIDATES: usize = 16;
@@ -106,6 +108,10 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         contrast: 0.0,
         eye_abs: 0.0,
         eye_sq: 0.0,
+        ev_abs: 0.0,
+        ev_sq: 0.0,
+        ev_e2: 0.0,
+        ev_n: 0,
         first: None,
         diag: Vec::new(),
         non_finite: 0,
@@ -162,6 +168,11 @@ struct Clock {
     // Readout.
     eye_abs: f64,
     eye_sq: f64,
+    /// Evidence (T-853): Σ|y|, Σy², Σe² and the symbols since `reset()`.
+    ev_abs: f64,
+    ev_sq: f64,
+    ev_e2: f64,
+    ev_n: u64,
     /// Position of the first symbol emitted in the current chunk.
     first: Option<f64>,
     diag: Vec<f32>,
@@ -319,6 +330,12 @@ impl Clock {
         self.eye_abs += a * (y.abs() - self.eye_abs);
         self.eye_sq += a * (y * y - self.eye_sq);
         self.symbols += 1;
+        if y.is_finite() && e.is_finite() {
+            self.ev_abs += y.abs();
+            self.ev_sq += y * y;
+            self.ev_e2 += e * e;
+            self.ev_n += 1;
+        }
     }
 
     /// Gardner / Mueller–Müller / early–late loop: every symbol whose data has arrived.
@@ -604,6 +621,38 @@ impl Block for Clock {
 
     fn reset(&mut self) {
         self.restart(0);
+        self.ev_abs = 0.0;
+        self.ev_sq = 0.0;
+        self.ev_e2 = 0.0;
+        self.ev_n = 0;
+    }
+
+    /// S2 (ADR-0015 §1.1, §13.1's groups): `eye_open` = `(E|y|)² / E y²` over the window's
+    /// strobes — 1 for two clean levels, 2/π for Gaussian noise — in group `eye`; and
+    /// `timing_var` = `E e²` of the (normalised, clamped) timing error, **smaller is evidence**,
+    /// in group `soft_quality` (ρ 0.52 with `snr`, so not independent of it).
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_n == 0 || self.ev_sq <= 0.0 {
+            return;
+        }
+        let n = self.ev_n as f64;
+        let eye = (self.ev_abs / n).powi(2) / (self.ev_sq / n);
+        calibrated(
+            out,
+            Stage::S2,
+            MetricId::EyeOpen,
+            GroupId::Eye,
+            eye,
+            self.ev_n,
+        );
+        calibrated(
+            out,
+            Stage::S2,
+            MetricId::TimingVar,
+            GroupId::SoftQuality,
+            self.ev_e2 / n,
+            self.ev_n,
+        );
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {

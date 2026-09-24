@@ -76,7 +76,25 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 
 **How the exception is confined:** `hk-detect` (and `hk-core`/`hk-dsp`/`hk-estimate`) depend on neither `hk-gnss` nor `hk-context`, so a `PrnCodebook` is un-nameable inside the detector; `tests/blind_path_boundary.rs` fails if that edge is ever added. The jamming half stays blind — `assess_jamming` takes receiver observables as an `Option` and still flags jamming with `None`.
 
-**Not built:** tracking loops (DLL/PLL), nav-message decode, ephemeris, PVT, SBAS/WAAS, OSNMA, the GNSS-SDR plugin wrapper. Acquisition without tracking cannot produce a fix, and none is claimed.
+**Not built by T-274:** tracking loops, nav decode, ephemeris, PVT. Acquisition without tracking cannot produce a fix, and none is claimed from it.
+
+**Ephemeris forensics (T-324, SIGNAL-032):** `hk_context::ephemeris` parses GPS LNAV ephemerides from RINEX 2/3 nav (the receiver's own log, e.g. GNSS-SDR's, and the IGS BRDC reference share one parser), evaluates them with IS-GPS-200 Table 20-IV, and compares them against cached IGS SP3 precise orbits, falling back to reference broadcast ephemerides (`feeds::gnss_orbits`, C29). A wrong orbit (spoofing, bad upload) and a clock step are flagged separately; an absent reference reads as not-yet-fetched, never as agreement. It compares navigation *data*, so it cannot seed a detector (ADR-0018 unaffected). Tested on a synthetic constellation only; not yet wired to C30 or to the GNSS-SDR plugin's nav output.
+
+## GNSS-SDR plugin (T-323)
+
+The track-and-fix half comes from **GNSS-SDR wrapped as a C22 plugin**, as Methods recommends, not from reimplemented loops.
+- **Pieces:** `plugins/gnss-sdr/manifest.json` → `hk-plugin-gnss-sdr` (bin of `hk-gnss`) → `gnss-sdr --config_file=…`.
+  - The wrapper spools each contiguous `ci8` L1 dwell to a scratch file: `--dwell-s`, default 60 s. A gap or drop marker closes the dwell early, and one shorter than `--min-dwell-s` (default 36 s) is discarded.
+  - It then runs GNSS-SDR over that file: File_Signal_Source `ibyte`, GPS L1 C/A PCPS acquisition, DLL/PLL tracking, telemetry decode, RTKLIB single-point PVT.
+  - It reads back the RINEX 3 observations and NMEA that GNSS-SDR writes (`hk_gnss::receiver`).
+- **Output, schema `hackriff.gnss/1`:** one `gnss-sdr-epoch` decode per observation epoch, carrying a `GnssObservableEpoch` with C/N0, Doppler, pseudorange, carrier phase, elevation and the fix. It also emits one `gnss-sdr-dwell` summary per dwell, always, so "ran and saw nothing" is distinct from "never ran".
+  - `lock_evidence` gives AWARE-002 **real per-SV C/N0** loss, which corroborates the blind floor rise; `assess_jamming` keeps working with `None`.
+  - `s4_by_prn` gives PROP-033 S4 from tracked C/N0. **This is an approximation:** it uses 10 Hz C/N0 rather than detrended 50 Hz correlator intensity.
+- **Licence boundary (ADR-0010):** GPL-3.0-or-later, exec'd only. `tests/gnss_sdr_boundary.rs` fails on a build script, `links`, FFI, a `-sys`/gnss-sdr dependency, a missing ledger row, or a wrapper that emits `identity`/`annotation`.
+- **Evidence, never detection:** the wrapper emits no identity, so the ingest upserts no Emitter per PRN, and no annotation, so nothing targets a detection. `tests/gnss_sdr_plugin.rs` asserts `emitters_upserted == 0` through the real plugin host.
+- **Time:** GPS time is converted to UTC with the RINEX `LEAP SECONDS` (default 18 s). A decode's `sample_index` is the **dwell start**, because RINEX has no input sample counter; the exact receiver time is `epoch.t`.
+- **Unverified:** no GNSS-SDR install exists on the dev Mac (there is no Homebrew formula). The config keys follow GNSS-SDR's documentation and are unconfirmed. Tests drive a spec-shaped stand-in (`hk-fake-gnss-sdr`), and `real_gnss_sdr_accepts_the_generated_config` runs only when `gnss-sdr` is on `PATH`. Tracking accuracy, TTFF and C/N0 against a reference need a real L1 capture from an active antenna.
+- **Not yet:** routing the plugin into `hk-pipeline`'s scheduled L1 dwell (T-322 runs acquisition only), SBAS/WAAS, OSNMA, and per-epoch sample alignment (it needs GNSS-SDR's monitor stream).
 
 **Unverified:** every sensitivity and C/N0 claim rests on synthetic IQ. Settling it needs an active GNSS antenna on the bias-tee and a real L1 capture (user-triggered).
 

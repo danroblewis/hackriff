@@ -36,13 +36,15 @@ import {
   coverageUrl, observedExtent, openingWindow, orientationNote, shadeRange, surfaceBounds,
   type CoverageCensus, type CoverageSlice, type NavigationSlice, type OpeningWindow, type SurfaceOrigin,
 } from "./bootstrap";
+import { batchedTileSource } from "./tilebatch";
 import { oneTier, tileUrl, type Box, type Lattice, type LatticeSet, type TileAddr } from "./lattice";
 import type { RowActionFor, WidthActionsFor } from "./chrome";
 import type { OverlayQuad } from "./minimap";
 import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
-import { TileCache, type Viewport } from "./tilecache";
+import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
   type DisplayRange, type PaneRect, type PaneReport, type PaneView, type RangeMode, type TilePlanes,
@@ -554,6 +556,19 @@ export interface PreviewOptions {
   trace?: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of that strip, device px. 0 draws no trace and gives the space back to the pane. */
   tracePx?: number;
+  /** HUD axes (T-805, `./hud.ts`): the label layer, and the chrome's fade asked every frame. */
+  hud?: HTMLElement | null;
+  hudAlpha?: (() => number) | null;
+  /**
+   * **Ask the coverage map before asking for tiles** (T-580, `./survey.ts`): how this host reads
+   * `GET /api/coverage` for the survey. Supplied, no tile is requested until the first survey lands,
+   * and a tile over spectrum it settles as never sampled is not requested at all; a following
+   * surface re-asks every [[SURVEY_EVERY_MS]]. Omitted, every tile is fetched (the pre-T-580
+   * behaviour), which is also what a failed survey falls back to.
+   */
+  survey?: ((path: string) => Promise<unknown>) | null;
+  /** The clock the survey cadence is measured on, ms. Injected by tests; never a capture time. */
+  now?: () => number;
 }
 
 /**
@@ -577,6 +592,15 @@ export class SurfacePreview {
   private edgeSeen: number;
   /** The anchored range this host returns to, validated once. See [[anchorOf]]. */
   private readonly anchor: { lo: number; hi: number; source: string };
+  private readonly surveyFn: ((path: string) => Promise<unknown>) | null;
+  private readonly nowMs: () => number;
+  private surveyInFlight = false;
+  /** When the next survey may be asked, ms; 0 = at the first frame. */
+  private surveyNextAt = 0;
+  /** How far back the survey must reach: the surface's floor, widened to `recording_began_s`. */
+  private surveyFloorNs = Number.POSITIVE_INFINITY;
+  /** The survey requests this host has built, in order — the T-367 guard reads them. */
+  readonly surveyRequests: string[] = [];
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -585,13 +609,18 @@ export class SurfacePreview {
     this.edgeFn = opts.edge ?? null;
     this.windowsFn = opts.windows ?? null;
     this.edgeSeen = probe.origin.edgeNs;
+    this.surveyFn = opts.survey ?? null;
+    this.nowMs = opts.now ?? (() => Date.now());
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
       lattices: probe.lattices,
       bounds: probe.origin.bounds,
-      cache: (tex) => new TileCache<TilePlanes>(tex, (a: TileAddr, signal?: AbortSignal) =>
-        fetchTile(a, opts.token, opts.fetchFn, signal)),
+      // T-573: the cache still asks for one address at a time — its slots, aborts and refresh
+      // lane are per-tile facts — and `batchedTileSource` coalesces the calls one pump makes into
+      // ONE `GET /api/tiles/batch`. A viewport render costs a small constant of requests instead
+      // of one per tile, and nothing about how a tile is scheduled, aborted or decoded changes.
+      cache: (tex) => new TileCache<TilePlanes>(tex, batchedTileSource(opts.token, opts.fetchFn)),
       minimapPx: opts.minimapPx ?? 120,
       chrome: opts.chrome ?? null,
       chromeAction: opts.chromeAction ?? null,
@@ -603,6 +632,8 @@ export class SurfacePreview {
       marks: opts.marks ?? null,
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
+      hud: opts.hud ?? null,
+      hudAlpha: opts.hudAlpha ?? null,
     });
     // **Anchor the colour scale before the first frame** (T-470). `Surface` opens anchored to its
     // own stated fallback, so this is the one place a *measured* scale replaces it — once, from the
@@ -620,6 +651,8 @@ export class SurfacePreview {
       this.view.panes.goTo(this.activePane, probe.opening.centerNs);
     }
     this.view.minimap.setFollowing(!!this.edgeFn);
+    // Coverage FIRST (T-580): with a survey source, nothing is requested until it has answered.
+    if (this.surveyFn) this.view.surface.setSurvey("awaiting");
     // The map opens on the whole surface — it is the thing that says where the opened pane sits in
     // a mostly-grey world, which is half the answer to the empty-screen problem.
     this.view.minimap.setFreq(
@@ -669,6 +702,8 @@ export class SurfacePreview {
     if (!Number.isFinite(t0Ns) || !(t0Ns < b.t0Ns)) return false;
     this.boundsNow = { ...b, t0Ns };
     this.view.setBounds(this.boundsNow);
+    // A survey that does not reach the new floor is stale about the part it cannot see.
+    this.surveyNextAt = 0;
     return true;
   }
 
@@ -676,8 +711,14 @@ export class SurfacePreview {
    * and a lit segment placed from a fixed historical instant would be a live claim with no live
    * evidence. */
   frame(): SurfaceFrame {
+    this.maybeSurvey();
     this.lastFrame = this.view.frame(this.edgeNs, this.windowsFn?.() ?? []);
     if (this.edgeFn) this.refreshLiveEdge(this.lastFrame);
+    // **After the refresh, never before** (T-538): both end up spending the same four slots, and the
+    // live edge must have had its chance at one before a guess is allowed to take it. In practice
+    // [[TileCache.prefetchAhead]] cannot take it anyway — it asks only while the cache holds nothing
+    // at all — but the ordering is the statement of priority and does not depend on that.
+    this.prefetchFrozenPanes(this.lastFrame);
     return this.lastFrame;
   }
 
@@ -709,6 +750,88 @@ export class SurfacePreview {
       if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
     if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+  }
+
+  /**
+   * **Re-ask the coverage survey when it is due** (T-580). Once at open; again every
+   * [[SURVEY_EVERY_MS]] while anything follows the live edge (the edge is where "never sampled"
+   * stops being true, the moment the radio tunes there); again when the surface's floor moves. A
+   * historical surface's edge never advances, so its first survey stays true and it asks once.
+   *
+   * A failed or unreadable survey drops back to fetching every tile — the saving is lost, never an
+   * answer — and is retried on the same cadence.
+   */
+  private maybeSurvey(): void {
+    const get = this.surveyFn;
+    if (!get || this.surveyInFlight) return;
+    const t = this.nowMs();
+    if (t < this.surveyNextAt) return;
+    const b = this.bounds;
+    const t0 = Math.min(b.t0Ns, this.surveyFloorNs);
+    const t1 = Math.max(b.t1Ns, this.edgeNs);
+    if (!(t1 > t0) || !(b.f1Hz > b.f0Hz)) return;
+    const path = surveyUrl(b.f0Hz, b.f1Hz, t0, t1);
+    this.surveyRequests.push(path);
+    this.surveyInFlight = true;
+    const following = !!this.edgeFn;
+    // Historical: one survey is the whole answer, unless it failed or could not see far enough back.
+    this.surveyNextAt = following ? t + SURVEY_EVERY_MS : Number.POSITIVE_INFINITY;
+    get(path).then(
+      (body) => {
+        const s = decodeSurvey(body as SurveyResponse);
+        if (this.disposed) return;
+        if (s && !s.complete) {
+          // The survey says recording began before the window it was asked over, so rows a shadow
+          // could come from were outside it: ask again over the whole past, and keep whatever the
+          // surface had (still "awaiting" at open) rather than skip nothing in the meantime.
+          // Only ever further back, so a server that keeps answering short cannot make this re-ask
+          // on every frame: then it waits out the ordinary cadence like a failure.
+          if (s.floorNs < this.surveyFloorNs) { this.surveyFloorNs = s.floorNs; this.surveyNextAt = 0; }
+          else this.surveyNextAt = t + SURVEY_EVERY_MS;
+          return;
+        }
+        if (!s) this.surveyNextAt = t + SURVEY_EVERY_MS;
+        this.view.surface.setSurvey(s);
+      },
+      () => {
+        if (this.disposed) return;
+        this.surveyNextAt = t + SURVEY_EVERY_MS;
+        this.view.surface.setSurvey(null);
+      },
+    ).finally(() => { this.surveyInFlight = false; });
+  }
+
+  /**
+   * **The other half of [[refreshLiveEdge]]'s split** (T-538): the viewports that are **not**
+   * following get the look-ahead lane, the ones that are get the refresh lane, and nothing is in
+   * both.
+   *
+   * That split is the point, not bookkeeping. A following pane's box advances with the record on
+   * every frame — it is moving without anyone moving it — so feeding it to a lane whose whole input
+   * is *displacement* would turn "the user is panning" into "time is passing", which is a poll. The
+   * minimap follows whatever the panes do and is excluded for exactly the same reason. What is left
+   * is a frozen pane over recorded data, which moves only when a gesture moves it: a still one is
+   * going nowhere and `prefetchAhead` issues nothing for it, by having no direction rather than by
+   * being silenced.
+   *
+   * Unguarded by `edgeFn`, unlike [[refreshLiveEdge]]: T-450's historical preview freezes every
+   * viewport at open, and a frozen pane is exactly what this lane is for. It still asks for nothing
+   * until one of them is dragged.
+   *
+   * The levels come off the `PaneReport`s the renderer just drew with, for the T-397 reason
+   * [[refreshLiveEdge]] gives: a second derivation of a number this frame already computed.
+   */
+  private prefetchFrozenPanes(f: SurfaceFrame): void {
+    const frozen: MovingViewport[] = [];
+    for (const r of f.reports) {
+      const v = f.views.find((x) => x.id === r.id);
+      if (!v) continue;
+      const live = r.id === this.view.minimap.id
+        ? this.view.minimap.following
+        : this.view.panes.isFollowing(r.id);
+      if (!live) frozen.push({ id: r.id, box: v.box, levelF: r.levelF, levelT: r.levelT });
+    }
+    if (frozen.length) this.view.surface.cache.prefetchAhead(this.view.surface.lat, frozen);
   }
 
   /** Match the drawing buffer to the element's CSS box at the device's pixel ratio. */

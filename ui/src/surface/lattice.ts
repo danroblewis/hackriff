@@ -12,6 +12,8 @@
 // constant, no level policy, no fold: those are the route's (docs/api.md, "the budget is a fold
 // target, never a level selector").
 
+import { tileClientId } from "./clientid";
+
 /** How a tile's grid is addressed. Every part of it is in the key the route is keyed by. */
 export interface TileAddr {
   /** Whose coverage decides this tile's grey (`any` = the union). Part of the key: coverage is device-local. */
@@ -283,7 +285,61 @@ export function ancestorsOf(lat: Lattice, a: TileAddr, maxSteps = 4): TileAddr[]
 export const keyOf = (a: TileAddr): string =>
   `${a.device}|${a.scheme}|${a.levelF}|${a.levelT}|${a.fIndex}|${a.tIndex}|${a.cells}`;
 
-/** The request this client builds for `a` (ui/test asserts the request, not only the response). */
+/**
+ * The plane encoding this client asks for, on every tile request (T-533).
+ *
+ * `max_db` is 64 % of a live tile's body as JSON decimal text, and its destination is an R16F
+ * texture — seventeen digits sent for eleven bits kept. `f16` is the same values as base64
+ * binary16, which is what [[decodeTile]] knows how to read; asking for a spelling this client
+ * cannot decode would be worse than not asking at all, so **the name here and the decoder are one
+ * change**. A server that answers in another spelling is refused rather than mis-read.
+ */
+export const TILE_PLANES = "f16";
+
+/**
+ * The most addresses this client puts in one batch request (T-573).
+ *
+ * The route's own cap, mirrored here so the client splits rather than being refused: a refusal
+ * costs a round trip and teaches the client nothing it could not have known.
+ */
+export const TILES_BATCH_MAX_ADDRESSES = 64;
+
+/** One address in the batch route's `addresses` spelling: `level_f.level_t.f_index.t_index`. */
+export const addrSpelling = (a: TileAddr): string =>
+  `${a.levelF}.${a.levelT}.${a.fIndex}.${a.tIndex}`;
+
+/**
+ * The batch request this client builds for `addrs` (T-573; ui/test asserts the REQUEST).
+ *
+ * `device`, `scheme`, `cells`, `planes` and `client` are shared by the batch because they are properties of
+ * the viewport; only the address varies within it. A caller with a mixed set groups by
+ * [[batchGroupKey]] first — one request per group is still a small constant per render.
+ */
+export function tilesBatchUrl(addrs: readonly TileAddr[], path = "/api/tiles/batch"): string {
+  if (addrs.length === 0) throw new Error("tilesBatchUrl: no addresses");
+  const a = addrs[0];
+  const q = new URLSearchParams({ addresses: addrs.map(addrSpelling).join(",") });
+  if (a.scheme !== "view") q.set("scheme", a.scheme);
+  if (a.device !== "any") q.set("device", a.device);
+  if (a.cells !== 256) q.set("cells", String(a.cells));
+  // T-630: one batch is one asker, so it carries the same `client` a single-tile request would.
+  const client = tileClientId();
+  if (client) q.set("client", client);
+  q.set("planes", TILE_PLANES);
+  return `${path}?${q.toString()}`;
+}
+
+/** What may share one batch: everything the route takes once, per request. */
+export const batchGroupKey = (a: TileAddr): string => `${a.device}|${a.scheme}|${a.cells}`;
+
+/**
+ * The request this client builds for `a` (ui/test asserts the request, not only the response).
+ *
+ * T-630: it also carries **who is asking** (`client`), when a host has named this page
+ * ([[setTileClientId]]). That is what lets the route give each client a share of its four in-flight
+ * slots instead of serving whoever asks first — see `ui/src/surface/clientid.ts`. Unnamed adds no
+ * `client` parameter at all.
+ */
 export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   const q = new URLSearchParams({
     level_f: String(a.levelF),
@@ -294,6 +350,10 @@ export function tileUrl(a: TileAddr, path = "/api/tiles"): string {
   if (a.scheme !== "view") q.set("scheme", a.scheme);
   if (a.device !== "any") q.set("device", a.device);
   if (a.cells !== 256) q.set("cells", String(a.cells));
+  const client = tileClientId();
+  if (client) q.set("client", client);
+  // `/api/tiles/events` answers counts, not planes, and takes no `planes` parameter.
+  if (path === "/api/tiles") q.set("planes", TILE_PLANES);
   return `${path}?${q.toString()}`;
 }
 

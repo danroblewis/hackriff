@@ -1,0 +1,19 @@
+[package]
+name = "hk-liquid-sys"
+description = "Raw FFI over vendored liquid-dsp 1.8.2 (MIT): the ADR-0010 DSP-kernel library, built by cc — no cmake, no system library, no FFTW, no libfec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+# One copy of liquid's C symbols per link (the `links` rule).
+links = "liquid"
+build = "build.rs"
+
+[dependencies]
+# `liquid_float_complex` is C99 `float complex`; num-complex's `Complex32` is `#[repr(C)]`
+# `{ f32, f32 }`, which has the same layout and the same by-value calling convention on both
+# targets (an HFA of two floats on AAPCS64; one packed SSE eightbyte on SysV x86-64).
+num-complex.workspace = true
+
+[build-dependencies]
+cc.workspace = true

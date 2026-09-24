@@ -26,13 +26,15 @@
 //! thread's writer with no second queue and no runtime; consumer counts are single digits on a
 //! handheld; idle connections cost no CPU.
 
-pub mod analyze; // T-190
+pub mod analyze; // T-190, T-859
+pub mod annotations; // T-816 MAP-16
 pub mod assist;
 pub mod auth;
 pub mod bridge;
 pub mod captures;
 pub mod classification; // T-247
 pub mod clusters; // T-202
+pub mod collections; // T-817 (MAP-17): time-frequency marker collections
 pub mod control;
 pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
@@ -43,13 +45,16 @@ pub mod inspector;
 pub mod inventory;
 pub mod iqbuffer; // T-157
 pub mod live_control;
+pub mod measurements; // T-818 MAP-18
 pub mod navigation; // T-341: the achievable (centre, span) grid and the live-vs-overview claim
 pub mod ondemand;
 pub mod outputs;
+pub mod playback; // T-463: the one playhead of historical playback
 pub mod presence; // T-264 (ADR-0017 TM-8): one emitter's presence track
 pub mod query;
 pub mod recipes;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod rows; // T-468: rows pushed to a subscription over an ADDRESS RANGE of the tile lattice
 pub mod scan; // T-452: the in-app survey sweep, stepping the interactive front end
 pub mod selections;
 pub mod signatures; // T-201
@@ -57,6 +62,7 @@ pub mod taxonomy; // T-218
 pub mod tcp;
 pub mod tiles; // T-438: one tile of the unified surface, addressed by independent (level_f, level_t)
 pub mod timeline; // T-338: the capture window, and the compressed overview drawn on it
+pub mod views; // T-819 MAP-19
 
 // ADR-0012 §8/§11 attention + memory routes (pre-added by T-113; the owners fill them in).
 pub mod anomalies; // T-122
@@ -70,6 +76,9 @@ pub mod trunking; // T-273
 pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
+pub use analyze::{
+    AnalyzeControl, AnalyzeFailure, AnalyzeStart, AnalyzeTemplates, AnalyzeTraceQuery,
+};
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{
@@ -81,9 +90,11 @@ pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
     DEVICE_GATE_WAIT, DeviceAction, DeviceGate, DeviceGuard, LiveControl, LiveControlError,
-    LiveTuning, SourceLiveControl, WindowPolicy, WindowRetuner, validate_gains,
+    LiveControls, LiveControlsError, LiveTuning, SelectError, SourceLiveControl, WindowPolicy,
+    WindowRetuner, validate_gains,
 };
 pub use outputs::{OutputControl, OutputFailure, OutputStart, OutputTarget};
+pub use playback::{PlaybackChange, PlaybackControl, PlaybackFailure};
 pub use recordings::{RecordingCatalog, RecordingsFailure};
 pub use scan::{Phase as ScanPhase, Prepared as ScanPlan, ScanError, ScanRequest, ScanRunner};
 

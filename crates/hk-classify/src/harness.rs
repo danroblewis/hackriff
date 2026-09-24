@@ -437,6 +437,195 @@ struct OodTally {
     generators: BTreeSet<&'static str>,
 }
 
+// ---------------------------------------------------------------------------------------------
+// Verifier run-rate: how often the post-sync stage actually ran, and why it did not (T-597).
+// ---------------------------------------------------------------------------------------------
+
+/// The outcome bucket for a classification that carries **no** verifier reason at all. Every
+/// classifier path records one since T-589, so a non-zero count here is a defect, not a category.
+pub const VERIFIER_UNSTATED: &str = "verifier_unstated";
+/// The outcome bucket for a classification that carries **more than one** verifier reason: the
+/// stage cannot have both run and skipped, so this too is a defect, never a category.
+pub const VERIFIER_MULTIPLE: &str = "verifier_multiple";
+
+/// Upstream abstention reasons the classifier records ([`crate::classifier`]'s step 4), used to
+/// break `verifier_abstained_upstream` down by why the family was withheld.
+const UPSTREAM_ABSTENTIONS: &[&str] = &[
+    "no_family_scored",
+    "low_confidence",
+    "open_set",
+    "open_set_family",
+    "ambiguous",
+];
+
+/// Every verifier outcome code a classification can carry: the two "ran" codes and every
+/// [`SkipReason`](crate::verify::SkipReason).
+pub fn verifier_outcome_codes() -> Vec<&'static str> {
+    let mut codes = vec![
+        crate::verify::VERIFIER_CONFIRMED,
+        crate::verify::VERIFIER_RERANKED,
+    ];
+    codes.extend(crate::verify::SkipReason::ALL.iter().map(|r| r.as_str()));
+    codes
+}
+
+/// The one verifier outcome `c` records, or [`VERIFIER_UNSTATED`] / [`VERIFIER_MULTIPLE`] when it
+/// records none or several — both of which a report surfaces rather than drops.
+pub fn verifier_outcome(c: &Classification) -> &'static str {
+    let codes = verifier_outcome_codes();
+    let mut found = c
+        .reasons
+        .iter()
+        .filter_map(|r| codes.iter().copied().find(|code| *code == r.as_str()));
+    match (found.next(), found.next()) {
+        (None, _) => VERIFIER_UNSTATED,
+        (Some(one), None) => one,
+        (Some(_), Some(_)) => VERIFIER_MULTIPLE,
+    }
+}
+
+/// One `source × family × class × SNR bin` row of **verifier run-rate** (T-597).
+///
+/// A post-sync stage that never fires is indistinguishable, in the accuracy rows, from one that
+/// fires and agrees: both leave the tree's call standing. This row makes the difference a count.
+/// `outcomes` holds every classification in the cell under exactly one code — the two "ran" codes,
+/// a [`SkipReason`](crate::verify::SkipReason) code, or the defect buckets [`VERIFIER_UNSTATED`] /
+/// [`VERIFIER_MULTIPLE`] — so its values always **sum to `n`** ([`VerifierRow::accounted`]). A
+/// falling `ran` is the signal: a change that makes the tree more decisive silently removes the
+/// verifier from the shipped path, and this is where that shows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VerifierRow {
+    /// Source, as [`Row::source`].
+    pub source: String,
+    /// Truth family (`unknown` for a held-out generator).
+    pub family: String,
+    /// Truth class (or held-out generator label; `-` when the truth has no class).
+    pub class: String,
+    /// SNR bin, dB, at the same convention as [`Row::snr_bin_db`].
+    pub snr_bin_db: i64,
+    /// Classifications in the cell.
+    pub n: usize,
+    /// How many of them the verifier actually ran on (`verifier_confirmed` + `verifier_reranked`).
+    pub ran: usize,
+    /// Every outcome code seen, with its count. Sums to `n`.
+    pub outcomes: BTreeMap<String, usize>,
+    /// `verifier_abstained_upstream` broken down by the classifier's own abstention reason
+    /// (`low_confidence`, `open_set`, …; `other` for none of those). Sums to that outcome's count.
+    pub abstained_because: BTreeMap<String, usize>,
+}
+
+impl VerifierRow {
+    fn empty(source: &str, family: &str, class: &str, snr_bin_db: i64) -> Self {
+        Self {
+            source: source.to_owned(),
+            family: family.to_owned(),
+            class: class.to_owned(),
+            snr_bin_db,
+            n: 0,
+            ran: 0,
+            outcomes: BTreeMap::new(),
+            abstained_because: BTreeMap::new(),
+        }
+    }
+
+    /// Adds one classification to the row.
+    fn add(&mut self, c: &Classification) {
+        let code = verifier_outcome(c);
+        self.n += 1;
+        if code == crate::verify::VERIFIER_CONFIRMED || code == crate::verify::VERIFIER_RERANKED {
+            self.ran += 1;
+        }
+        *self.outcomes.entry(code.to_owned()).or_default() += 1;
+        if code == crate::verify::SkipReason::Abstained.as_str() {
+            let why = c
+                .reasons
+                .iter()
+                .find(|r| UPSTREAM_ABSTENTIONS.contains(&r.as_str()))
+                .map_or("other", |r| r.as_str());
+            *self.abstained_because.entry(why.to_owned()).or_default() += 1;
+        }
+    }
+
+    /// Folds another row's counts into this one (for per-family totals).
+    fn merge(&mut self, other: &VerifierRow) {
+        self.n += other.n;
+        self.ran += other.ran;
+        for (k, v) in &other.outcomes {
+            *self.outcomes.entry(k.clone()).or_default() += v;
+        }
+        for (k, v) in &other.abstained_because {
+            *self.abstained_because.entry(k.clone()).or_default() += v;
+        }
+    }
+
+    /// Share of the cell the verifier ran on, or `None` for an empty cell (never `0.0`: an empty
+    /// cell is unmeasured, not a stage that never runs).
+    pub fn run_rate(&self) -> Option<f64> {
+        (self.n > 0).then(|| self.ran as f64 / self.n as f64)
+    }
+
+    /// Count recorded under `code`.
+    pub fn count(&self, code: &str) -> usize {
+        self.outcomes.get(code).copied().unwrap_or(0)
+    }
+
+    /// Whether the parts account for the whole: every classification under exactly one stated
+    /// outcome, the outcomes summing to `n`, `ran` equal to the two "ran" codes, and the
+    /// upstream-abstention breakdown summing to its outcome.
+    pub fn accounted(&self) -> bool {
+        self.outcomes.values().sum::<usize>() == self.n
+            && self.count(VERIFIER_UNSTATED) == 0
+            && self.count(VERIFIER_MULTIPLE) == 0
+            && self.ran
+                == self.count(crate::verify::VERIFIER_CONFIRMED)
+                    + self.count(crate::verify::VERIFIER_RERANKED)
+            && self.abstained_because.values().sum::<usize>()
+                == self.count(crate::verify::SkipReason::Abstained.as_str())
+    }
+}
+
+/// A verifier run-rate table whose parts do not account for the whole — how a skipped stage hides.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifierUnaccounted {
+    /// The offending rows, as `source/family/class@bin`.
+    pub rows: Vec<String>,
+}
+
+impl fmt::Display for VerifierUnaccounted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "verifier outcomes do not account for every classification in {}: a classification \
+             with no verifier reason, or with two, reads like a stage that ran (T-589/T-597)",
+            self.rows.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for VerifierUnaccounted {}
+
+/// Running verifier tally, keyed `(source, family, class, bin)`.
+#[derive(Clone, Debug, Default)]
+struct VerifierTally {
+    cells: BTreeMap<(String, String, String, i64), VerifierRow>,
+}
+
+impl VerifierTally {
+    fn record(&mut self, source: &str, family: &str, class: &str, snr_db: f64, c: &Classification) {
+        // The same binning as `EvalReport` at the harness's 5 dB, so a verifier row lines up with
+        // the accuracy row for the same cell.
+        let bin = (snr_db / 5.0).floor() as i64 * 5;
+        self.cells
+            .entry((source.to_owned(), family.to_owned(), class.to_owned(), bin))
+            .or_insert_with(|| VerifierRow::empty(source, family, class, bin))
+            .add(c);
+    }
+
+    fn rows(&self) -> Vec<VerifierRow> {
+        self.cells.values().cloned().collect()
+    }
+}
+
 /// Summary figures a gate check reads directly, computed the same way every time (ADR-0016 §7:
 /// never one SNR-averaged number reported alone — this is a convenience index into `rows`/
 /// `class_rows`, not a replacement for them).
@@ -481,6 +670,10 @@ pub struct Report {
     /// Per-family open-set coverage: one row for **every** measurable family, including those no
     /// negative reached (`n_ood: 0`, rates `null`).
     pub coverage: Vec<FamilyCoverage>,
+    /// Verifier run-rate per `source × family × class × SNR bin` (T-597): how often the post-sync
+    /// stage ran and why it did not. Empty for a report built from an [`EvalReport`] alone.
+    #[serde(default)]
+    pub verifier: Vec<VerifierRow>,
     /// Convenience summary, computed from `rows`/`class_rows` by the same rules every time.
     pub summary: Summary,
 }
@@ -577,7 +770,41 @@ impl Report {
             rows,
             class_rows,
             coverage,
+            verifier: Vec::new(),
             summary,
+        }
+    }
+
+    /// Verifier run-rate totals for `family` over `source`, one row per SNR bin (class `*`), in
+    /// bin order. The per-family, per-SNR view the run-rate is watched at.
+    pub fn verifier_by_snr(&self, source: &str, family: &str) -> Vec<VerifierRow> {
+        let mut bins: BTreeMap<i64, VerifierRow> = BTreeMap::new();
+        for r in self
+            .verifier
+            .iter()
+            .filter(|r| r.source == source && r.family == family)
+        {
+            bins.entry(r.snr_bin_db)
+                .or_insert_with(|| VerifierRow::empty(source, family, "*", r.snr_bin_db))
+                .merge(r);
+        }
+        bins.into_values().collect()
+    }
+
+    /// **Fails when the verifier table does not account for every classification** (T-597): a row
+    /// whose outcomes do not sum to its `n`, or that holds a classification stating no verifier
+    /// outcome, or two.
+    pub fn require_verifier_accounted(&self) -> Result<(), VerifierUnaccounted> {
+        let rows: Vec<String> = self
+            .verifier
+            .iter()
+            .filter(|r| !r.accounted())
+            .map(|r| format!("{}/{}/{}@{}", r.source, r.family, r.class, r.snr_bin_db))
+            .collect();
+        if rows.is_empty() {
+            Ok(())
+        } else {
+            Err(VerifierUnaccounted { rows })
         }
     }
 
@@ -662,6 +889,58 @@ impl Report {
                 )),
             }
         }
+        if !self.verifier.is_empty() {
+            let codes = verifier_outcome_codes();
+            out.push_str(
+                "\n## Post-sync verifier run-rate (T-597)\n\n\
+                 How often the verifier actually ran, per truth family and SNR bin, and why it did \
+                 not. A stage that never fires reads exactly like one that fires and agrees in the \
+                 accuracy rows below; a **falling run count** here is the regression signal. The \
+                 outcome columns sum to n.\n\n\
+                 | source | family | SNR bin dB | n | ran | run rate |",
+            );
+            for code in &codes {
+                out.push_str(&format!(" {} |", code.trim_start_matches("verifier_")));
+            }
+            out.push_str(" unstated/multiple | abstained because |\n|---|---|---:|---:|---:|---:|");
+            for _ in &codes {
+                out.push_str("---:|");
+            }
+            out.push_str("---:|---|\n");
+            let mut keys: Vec<(String, String)> = self
+                .verifier
+                .iter()
+                .map(|r| (r.source.clone(), r.family.clone()))
+                .collect();
+            keys.sort();
+            keys.dedup();
+            for (source, family) in keys {
+                for r in self.verifier_by_snr(&source, &family) {
+                    out.push_str(&format!(
+                        "| {} | {} | {} | {} | {} | {:.2} |",
+                        r.source,
+                        r.family,
+                        r.snr_bin_db,
+                        r.n,
+                        r.ran,
+                        r.run_rate().unwrap_or(0.0)
+                    ));
+                    for code in &codes {
+                        out.push_str(&format!(" {} |", r.count(code)));
+                    }
+                    let because: Vec<String> = r
+                        .abstained_because
+                        .iter()
+                        .map(|(k, v)| format!("{k} {v}"))
+                        .collect();
+                    out.push_str(&format!(
+                        " {} | {} |\n",
+                        r.count(VERIFIER_UNSTATED) + r.count(VERIFIER_MULTIPLE),
+                        because.join(", ")
+                    ));
+                }
+            }
+        }
         out.push_str(
             "\n## Family rows\n\n\
              | source | family | SNR bin dB | n | top-1 | top-2 | unknown | wrong |\n\
@@ -736,6 +1015,7 @@ pub struct Harness {
     guard: SeedGuard,
     report: EvalReport,
     open_set: BTreeMap<&'static str, OodTally>,
+    verifier: VerifierTally,
 }
 
 impl Harness {
@@ -746,6 +1026,7 @@ impl Harness {
             guard: SeedGuard::new(Split::Acceptance),
             report: EvalReport::new(5.0),
             open_set: BTreeMap::new(),
+            verifier: VerifierTally::default(),
         }
     }
 
@@ -790,6 +1071,8 @@ impl Harness {
                         offset,
                         &c,
                     );
+                    self.verifier
+                        .record("synthetic-acceptance", family, class.label(), offset, &c);
                 }
             }
         }
@@ -808,6 +1091,8 @@ impl Harness {
                     let s = generate(*class, &SynthConfig::new(snr, seed));
                     let c = classify(&blind(&s, snr));
                     self.report.record("held-out", None, offset, &c);
+                    self.verifier
+                        .record("held-out", UNKNOWN, class.label(), offset, &c);
                     // Scored by the same rule as the aggregate (`family == unknown`), so these
                     // rows decompose the headline figure instead of restating it differently.
                     let tally = self.open_set.entry(probed).or_default();
@@ -828,6 +1113,13 @@ impl Harness {
         self.report.record(
             &format!("ota:{}", truth.session),
             Some(&truth.label),
+            snr_db,
+            c,
+        );
+        self.verifier.record(
+            &format!("ota:{}", truth.session),
+            &truth.label,
+            "-",
             snr_db,
             c,
         );
@@ -854,7 +1146,9 @@ impl Harness {
                 false_known_rate: Some((t.n - t.unknown) as f64 / t.n as f64),
             })
             .collect();
-        Report::build(&self.report, run, coverage)
+        let mut report = Report::build(&self.report, run, coverage);
+        report.verifier = self.verifier.rows();
+        report
     }
 }
 
@@ -1117,6 +1411,71 @@ mod tests {
         assert!(md.contains("| source | family | SNR bin dB |"));
     }
 
+    // -- Verifier run-rate (T-597) ---------------------------------------------------------------
+
+    /// A classification stating no verifier outcome, or two, is a defect bucket that fails the
+    /// check — never silently dropped from the count, which is how a skipped stage hides.
+    #[test]
+    fn a_classification_with_no_or_two_verifier_outcomes_is_counted_and_fails_the_check() {
+        let mut ran = stub("psk-qam", &[("psk-qam", 0.9), (UNKNOWN, 0.1)]);
+        ran.reasons = vec![crate::verify::VERIFIER_CONFIRMED.to_owned()];
+        let mut skipped = ran.clone();
+        skipped.reasons = vec![
+            "below_class_gate".to_owned(),
+            crate::verify::SkipReason::NoClassCall.as_str().to_owned(),
+        ];
+        let mut abstained = stub(UNKNOWN, &[(UNKNOWN, 0.9), ("fsk", 0.1)]);
+        abstained.reasons = vec![
+            "low_confidence".to_owned(),
+            crate::verify::SkipReason::Abstained.as_str().to_owned(),
+        ];
+        assert_eq!(verifier_outcome(&ran), "verifier_confirmed");
+        assert_eq!(verifier_outcome(&skipped), "verifier_no_class_call");
+
+        let mut tally = VerifierTally::default();
+        for c in [&ran, &skipped, &abstained] {
+            tally.record("t", "psk-qam", "qpsk", 20.0, c);
+        }
+        let row = &tally.rows()[0];
+        assert_eq!((row.n, row.ran), (3, 1));
+        assert_eq!(row.run_rate(), Some(1.0 / 3.0));
+        assert_eq!(row.abstained_because.get("low_confidence"), Some(&1));
+        assert!(row.accounted(), "{row:?}");
+
+        let mut silent = ran.clone();
+        silent.reasons.clear();
+        let mut both = ran.clone();
+        both.reasons.push(
+            crate::verify::SkipReason::SingleCandidate
+                .as_str()
+                .to_owned(),
+        );
+        assert_eq!(verifier_outcome(&silent), VERIFIER_UNSTATED);
+        assert_eq!(verifier_outcome(&both), VERIFIER_MULTIPLE);
+        tally.record("t", "psk-qam", "qpsk", 20.0, &silent);
+        tally.record("t", "psk-qam", "qpsk", 20.0, &both);
+        let row = &tally.rows()[0];
+        assert_eq!(row.n, 5);
+        assert_eq!(
+            row.outcomes.values().sum::<usize>(),
+            5,
+            "parts must sum to n"
+        );
+        assert!(!row.accounted());
+
+        let r = EvalReport::new(5.0);
+        let run = RunMeta::capture(GridSize::Small, &SeedGuard::new(Split::Acceptance));
+        let mut report = Report::build(&r, run, vec![]);
+        report.verifier = tally.rows();
+        let err = report.require_verifier_accounted().unwrap_err();
+        assert_eq!(err.rows, vec!["t/psk-qam/qpsk@20".to_owned()]);
+        let md = report.markdown();
+        assert!(md.contains("## Post-sync verifier run-rate"), "{md}");
+        let json = serde_json::to_string(&report).expect("serialise");
+        let back: Report = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back, report);
+    }
+
     // -- Open-set coverage (T-244) -------------------------------------------------------------
 
     /// **The defect this exists to prevent.** A family no out-of-taxonomy negative reached has no
@@ -1179,6 +1538,151 @@ mod tests {
         );
     }
 
+    /// `code=count` pairs, short codes, zeros omitted: the shape the T-597 table is pinned in.
+    fn breakdown(r: &VerifierRow) -> String {
+        r.outcomes
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, n)| format!("{}={n}", k.trim_start_matches("verifier_")))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// **How often the post-sync verifier actually runs, reported where a regression would be
+    /// seen** (T-597). Shares the small-grid run below rather than paying for a second one.
+    ///
+    /// A stage that never fires is indistinguishable, in accuracy numbers, from one that fires and
+    /// agrees. T-589 found the psk-qam verifier could not run on genuine 8-PSK at all (12 of 12)
+    /// and nobody was told; T-321 and T-594 are the same shape. What this pins is the whole outcome
+    /// breakdown, per truth family and SNR bin, for the two families with a likelihood model. A
+    /// **falling `ran`** is the regression it exists to catch: a change that makes the tree more
+    /// decisive silently removes the verifier from the shipped path (how T-246's fix came to be
+    /// exercised only at the likelihood level). Any other move changes *why* the stage does not
+    /// run and must be re-measured and explained, not just re-pinned. Counts, never wall-clock, and
+    /// the parts must account for the whole.
+    fn assert_verifier_run_rate(report: &Report) {
+        // -- The parts account for the whole ------------------------------------------------------
+        report
+            .require_verifier_accounted()
+            .expect("every classification states exactly one verifier outcome");
+        // Every accuracy cell has a verifier row of the same size, and nothing else does: the run-rate
+        // table covers exactly the classifications that were scored, no more and no fewer.
+        let mut accuracy: BTreeMap<(String, String, i64), usize> = BTreeMap::new();
+        for r in &report.rows {
+            *accuracy
+                .entry((r.source.clone(), r.family.clone(), r.snr_bin_db))
+                .or_default() += r.n;
+        }
+        let mut verifier: BTreeMap<(String, String, i64), usize> = BTreeMap::new();
+        for r in &report.verifier {
+            assert_eq!(
+                r.outcomes.values().sum::<usize>(),
+                r.n,
+                "{}/{}/{}@{}: outcomes {:?} do not sum to n",
+                r.source,
+                r.family,
+                r.class,
+                r.snr_bin_db,
+                r.outcomes
+            );
+            *verifier
+                .entry((r.source.clone(), r.family.clone(), r.snr_bin_db))
+                .or_default() += r.n;
+        }
+        assert_eq!(
+            verifier, accuracy,
+            "verifier rows must cover exactly the scored classifications"
+        );
+        assert_eq!(
+            verifier.values().sum::<usize>(),
+            report.summary.n_total,
+            "the verifier table must account for every classification in the run"
+        );
+
+        // -- The rate itself, per family and SNR, pinned ------------------------------------------
+        //
+        // (family, SNR bin relative to the family's gate, n, ran, outcome breakdown). Measured
+        // 2026-09-23 on the small grid. Read it as: at the family gate the class gate withholds a class
+        // call (`no_class_call`); five dB above it the tree is decisive (`single_candidate`) and the
+        // stage does not run. On clean psk-qam it ran on 0 of 30 — correct behaviour (T-589), and the
+        // exact number a more decisive tree would push further from the shipped path unnoticed.
+        const EXPECT: &[(&str, i64, usize, usize, &str)] = &[
+            ("psk-qam", -5, 10, 0, "abstained_upstream=10"),
+            ("psk-qam", 0, 10, 0, "no_class_call=10"),
+            (
+                "psk-qam",
+                5,
+                10,
+                0,
+                "geometry=3 no_clock_lock=1 single_candidate=6",
+            ),
+            ("fsk", -5, 8, 0, "abstained_upstream=8"),
+            ("fsk", 0, 8, 0, "no_class_call=8"),
+            // T-852 re-pinned `confirmed=1` → `reranked=1`: the run count is unchanged (1 of 8).
+            // Widening the `2fsk` generator's modulation index (h up to 5, `synth::waveform`)
+            // redrew which waveform each acceptance seed produces, so the one snippet the stage
+            // runs on here is a different 2-FSK emission, and the verifier re-ranks its class
+            // instead of agreeing.
+            (
+                "fsk",
+                5,
+                8,
+                1,
+                "abstained_upstream=1 reranked=1 single_candidate=6",
+            ),
+        ];
+        let mut got: Vec<String> = Vec::new();
+        let mut wrong: Vec<String> = Vec::new();
+        for family in ["psk-qam", "fsk"] {
+            let rows = report.verifier_by_snr("synthetic-acceptance", family);
+            assert!(
+                !rows.is_empty(),
+                "{family}: no verifier rows — the stage's own family was never measured"
+            );
+            for r in rows {
+                let line = format!(
+                    "{family} {:>3} dB: n {:>2}, ran {} ({:.2}), {}",
+                    r.snr_bin_db,
+                    r.n,
+                    r.ran,
+                    r.run_rate().unwrap_or(0.0),
+                    breakdown(&r)
+                );
+                got.push(line.clone());
+                match EXPECT
+                    .iter()
+                    .find(|(f, bin, ..)| *f == family && *bin == r.snr_bin_db)
+                {
+                    Some(&(_, _, n, ran, outcomes)) => {
+                        if r.ran < ran {
+                            wrong.push(format!(
+                                "{line}\n    RUN RATE FELL: ran {} < {ran} — the verifier has left the \
+                                 shipped path for this cell",
+                                r.ran
+                            ));
+                        } else if (r.n, r.ran, breakdown(&r).as_str()) != (n, ran, outcomes) {
+                            wrong.push(format!("{line}\n    was: n {n}, ran {ran}, {outcomes}"));
+                        }
+                    }
+                    None => wrong.push(format!("{line}\n    (no pinned row)")),
+                }
+            }
+        }
+        println!("T-597 verifier run-rate, small grid:\n{}", got.join("\n"));
+        assert_eq!(
+            got.len(),
+            EXPECT.len(),
+            "every pinned (family, SNR) cell must have been measured: {got:#?}"
+        );
+        assert!(
+            wrong.is_empty(),
+            "the post-sync verifier's run-rate moved. A fall means a stage silently left the shipped \
+             path; any other move changes why it does not run and must be re-measured and explained \
+             before re-pinning:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     /// The runtime half: a real grid run reaches every family, so the loud check passes because
     /// the negatives exist and not because nothing was looked for.
     #[test]
@@ -1207,6 +1711,7 @@ mod tests {
             })
             .expect("seed separation held");
         let report = harness.finish();
+        assert_verifier_run_rate(&report);
 
         report
             .require_open_set_coverage()

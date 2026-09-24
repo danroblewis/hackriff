@@ -1,6 +1,7 @@
 // Explore sidebar (inventory, selections) and focus panel mounts (ADR-0013 §8, T-151). Renders
 // only what the API served; explanations are always shown as ranked suggestions, never as truth
 // (CLAUDE.md "Product vision" §4).
+import { analyzeWatched } from "./analyze-slice";
 import { sameCursor, toast } from "../state";
 // T-386: the sidebar filters selections against the *same* frequency view the centre pane places
 // its boxes in — one definition, so a header-less session cannot list one set and draw another.
@@ -426,21 +427,40 @@ const mountFocus: MountFn = (el, ctx) => {
         outputPanelsEl,
       );
       ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
       return;
     }
     if (focus.kind === "selection") {
       const sel = s.selections.list.find((x) => x.id === focus.id);
       el.replaceChildren(sel ? renderSelectionFocus(ctx, sel) : h("div", { class: "empty" }, "Select a signal or a selection."), outputPanelsEl);
+      // T-862: a selection Analyze starts a job; its section lives in the output panels.
+      ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
       return;
     }
     el.replaceChildren(h("div", { class: "empty" }, "Select a signal or drag a region to focus it."), outputPanelsEl);
+    if (analyzeWatched(s.analyze.jobId)) {
+      // A watched analyze job keeps the panel (progress/results) on screen with nothing focused.
+      ensureOutputPanels(outputPanelsEl, ctx);
+      el.classList.remove("is-empty");
+      return;
+    }
+    // T-801 round 3: nothing is focused, so this panel is just the placeholder sentence — mark it
+    // so `map-layout.css` can hide it instead of covering the canvas's right edge with an empty
+    // box. `.focus:empty` never fired: `render()` always fills the slot with *something* (a real
+    // focus, a "not found" explanation, or this placeholder), so the element is never literally
+    // empty. This class is the one case that should collapse; a real focus or an explanatory
+    // "not here" state (the two branches above, which both `return` before reaching here) keeps it
+    // shown, unchanged.
+    el.classList.add("is-empty");
+    return;
   }
   // `inventory.window` is selected too (T-385): the window is what turns "not among the rows" into
   // a sentence, and it changes without the rows changing (a re-ask that returned the same set).
   ctx.store.select(
-    (s) => [s.focus, s.inventory.rows, s.inventory.window, s.selections.list, s.outputs] as const,
+    (s) => [s.focus, s.inventory.rows, s.inventory.window, s.selections.list, s.outputs, s.analyze.jobId] as const,
     render,
-    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] },
+    { immediate: true, eq: (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4] && a[5] === b[5] },
   );
 };
 

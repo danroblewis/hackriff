@@ -1,0 +1,32 @@
+{
+  "manifest_version": 1,
+  "id": "gr-lora-sdr",
+  "version": "0.0.1-spike",
+  "licence": "GPL-3.0-or-later",
+  "description": "T-556 SPIKE, not a product plugin. gr-lora_sdr (EPFL, GPL-3.0) RX chain in GNU Radio 3.10's own Python, behind hk_gr_lora.py: hackriff-v1 cf32_le in (no conversion), NDJSON decode lines out, sample_index re-stamped from host indices via a 2-file patch to the OOT. ready once tb.start() returns (0.28-0.8 s warm; 10.8 s first run after a rebuild, before macOS has verified the fresh dylibs - see README).",
+  "executable": "./hk-gr-lora",
+  "args": ["--rate", "{input.sample_rate_hz}", "--center", "{input.center_hz}", "--bw", "{param.bw}", "--sf", "{param.sf}"],
+  "params": { "bw": "125000", "sf": "7" },
+  "input": {
+    "kind": "iq",
+    "datatype": "cf32_le",
+    "sample_rates_hz": [250000],
+    "center_hz": { "min": 400000000, "max": 1000000000 },
+    "ready_signal": true
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.lora/1",
+    "content_class": "unrestricted"
+  },
+  "restart": { "backoff_initial_ms": 200, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300 },
+  "limits": {
+    "input_queue_bytes": 8388608,
+    "stall_timeout_ms": 10000,
+    "startup_timeout_ms": 60000,
+    "ready_timeout_ms": 5000,
+    "max_message_bytes": 1048576,
+    "stderr_lines": 200,
+    "nice": 10
+  }
+}

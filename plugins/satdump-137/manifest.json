@@ -1,0 +1,30 @@
+{
+  "manifest_version": 1,
+  "id": "satdump-137",
+  "version": "0.1.0",
+  "licence": "GPL-3.0-or-later",
+  "description": "T-275: 137 MHz polar-orbiter weather satellite imagery (SIGNAL-027 Meteor-M LRPT 137.1/137.9 MHz, SIGNAL-029 NOAA POES APT 137 MHz), native to the HackRF with a simple QFH/V-dipole (docs/use-cases.yaml hardware_fit: native) - no dish, no accessory. SatDump (GPLv3) exec'd as a subprocess behind hk-plugin-satdump (T-275), which owns the whole QPSK/FM demod, frame sync, Reed-Solomon and image chain: this is a reused decoder, not a reimplementation. The `pipeline` param selects SatDump's own pipeline id and is manifest-editable without rebuilding the wrapper (CLAUDE.md's no-rebuild-to-retune requirement); default targets Meteor-M2 LRPT. See docs/stream-contract.md §9, ADR-0010, ADR-0003.",
+  "executable": "hk-plugin-satdump",
+  "args": ["live", "{param.pipeline}"],
+  "params": {"pipeline": "meteor_m2-lrpt"},
+  "input": {
+    "kind": "iq",
+    "datatype": "ci8",
+    "sample_rates_hz": [],
+    "center_hz": { "min": 137000000, "max": 138000000 }
+  },
+  "output": {
+    "format": "ndjson",
+    "schema_id": "hackriff.satdump-137/1",
+    "content_class": "unrestricted"
+  },
+  "restart": { "backoff_initial_ms": 500, "backoff_max_ms": 30000, "max_restarts": 5, "window_s": 300 },
+  "limits": {
+    "input_queue_bytes": 16777216,
+    "stall_timeout_ms": 15000,
+    "startup_timeout_ms": 60000,
+    "max_message_bytes": 1048576,
+    "stderr_lines": 200,
+    "nice": 10
+  }
+}

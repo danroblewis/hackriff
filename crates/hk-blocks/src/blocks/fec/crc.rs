@@ -34,8 +34,10 @@ use crate::blocks::framing::common::{
     P, RateMeter, Span, drops_history, extend_bits, frames_io, frames_port, one_input, read_bits,
     update_hot,
 };
+use crate::evidence::CheckTally;
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
+use hk_model::synth::EvidenceSet;
 
 const HOT: &[&str] = &["drop_invalid"];
 const CACHE: usize = 4;
@@ -217,6 +219,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         blocks_bad: 0,
         corrected_bits: 0,
         correction_skipped: 0,
+        ev: CheckTally::default(),
         status: Status::default(),
     }))
 }
@@ -328,6 +331,8 @@ pub struct Crc {
     blocks_bad: u64,
     corrected_bits: u64,
     correction_skipped: u64,
+    /// Evidence (T-853), since `reset()`.
+    ev: CheckTally,
     status: Status,
 }
 
@@ -514,6 +519,15 @@ impl Block for Crc {
             extend_bits(&mut self.bits, f.bytes, 0, f.info.bit_len as usize);
             let r = self.check(f.bytes);
             let check = merge(f.info.check, r);
+            let clean = check == CrcStatus::Valid && r.corrected == 0;
+            let width = match &self.mode {
+                Mode::Span(_) => self.width as f64,
+                Mode::Blocks { offsets, .. } => offsets
+                    .iter()
+                    .map(|a| self.width as f64 - (a.len().max(1) as f64).log2())
+                    .sum(),
+            };
+            self.ev.record(&self.bits, clean, width);
             if check == CrcStatus::Valid {
                 self.frames_ok += 1;
             } else {
@@ -567,6 +581,13 @@ impl Block for Crc {
         if let Some(sc) = self.synced.as_mut() {
             sc.unsync();
         }
+        self.ev.clear();
+    }
+
+    /// S5 `check_distinct_valid` (ADR-0015 §2.2, ADR-0022 §4.2, analytic): independent frames
+    /// valid **without FEC correction** (T-210) among those tested — see `CheckTally`.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
     }
 
     fn update_params(

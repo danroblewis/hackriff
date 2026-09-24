@@ -50,8 +50,10 @@
 //!
 //! The chain writes a [`TrunkSystem`] row — a protocol, the measured control-channel frequency and
 //! times — plus, since T-268, the band plan its identifier updates announced and the grants it
-//! issued, plus, since T-269, the calls it followed. All of it metadata: no demodulated audio, no
-//! voice frames, no message payload, no recording, no stream, and nothing decrypted. There is no
+//! issued, plus, since T-269, the calls it followed, plus, since T-849, what each followed call's
+//! own voice-frame *headers* said (LDU1 link control, LDU2 encryption sync). All of it metadata: no
+//! demodulated audio — the IMBE voice codewords are skipped by position — no message payload, no
+//! recording, no stream, and nothing decrypted. There is no
 //! `CallAudio` in the workspace and no column that could hold one (docs/07 §2.29), so this is a
 //! property of the data model rather than a habit of this module. That is what lets it run under
 //! the fail-closed `metadata-only` class a 12.5 kHz LMR band derives, and the validator in
@@ -69,6 +71,28 @@
 //!   consume — and measures where energy on it starts and stops. Each transmission becomes a
 //!   [`CallRecord`] with boundaries that were *measured*, ended by an observed
 //!   [`SILENCE_TIMEOUT_S`], plus `call-start` / `call-end` events linking it to the grant stream.
+//!
+//! # Where the WINDOW ends, not the call (T-308)
+//!
+//! A transmission still keyed when the buffered window runs out has no observed end, and the one
+//! thing this module must not do is write the window's edge into `t_end`: that manufactures a
+//! boundary the radio never produced, and does it systematically — every call longer than the
+//! dwell would read as ending exactly when the receiver stopped looking.
+//!
+//! So such a call is written **open and explicitly truncated**: `t_end` stays NULL, and
+//! `observed_until` carries the last instant this channel was actually watched. Those two columns
+//! are what separate "still running" from "we stopped looking" (docs/07 §2.29): the row's
+//! [`hk_model::CallEnding`] is `Truncated`, its duration announces itself as a **lower bound**,
+//! and `cc_calls_truncated` counts how often the schedule — not the radio — decided where
+//! measurement stopped.
+//!
+//! A later pass may **continue** such a call rather than starting a second row, but only across a
+//! gap no end could have hidden in: [`CONTINUATION_GAP_S`], which *is* [`SILENCE_TIMEOUT_S`]
+//! rather than a second number, so one rule applies whether or not the receiver was looking. On
+//! the built-in duty cycle (0.5 s of every 10 s) the gap is 9.5 s — 105× the bound — so
+//! continuation does not fire and the truncated row stands, which is the honest answer: 9.5 s
+//! unwatched can hold a complete end, a new grant and a new call. [`continues_truncated`] is that
+//! decision, pure and stated clause by clause.
 //! - **Outside it:** the grant becomes an [`GrantKind::OutsideWindow`] row carrying the frequency
 //!   it resolved to and how far beyond the window that is, and a `CallRecord` whose `t_end` is
 //!   NULL and whose reason says why. **It is never dropped.** A dropped grant is indistinguishable
@@ -84,40 +108,48 @@
 //!
 //! # The encryption check (T-270)
 //!
-//! A grant's service-options octet is now read, and it is the only encryption indication this
-//! milestone can reach: a P25 ALGID lives in the voice frames on the *granted* channel (docs/04
-//! §8.3), and nothing here demodulates those. So a grant with the verified encryption bit set
-//! produces [`hk_model::Encryption::Encrypted`], and **every other path stays `Unknown`** — a grant
-//! update carries no such octet at all, a bit that is clear is a grant-time announcement rather
-//! than the call's own statement, and a call joined in progress never saw either. Nothing this
-//! module writes can say `clear`, because saying it needs an ALGID and no ALGID is reachable yet.
+//! A grant's service-options octet is read first: with the verified encryption bit set it produces
+//! [`hk_model::Encryption::Encrypted`], and every other grant path is `Unknown` — a grant update
+//! carries no such octet, a clear bit is a grant-time announcement rather than the call's own
+//! statement, and a call joined in progress never saw either. [`CallRecord::from_grant`] carries
+//! that verbatim.
 //!
-//! [`CallRecord::from_grant`] carries the grant's state verbatim, so a call inherits exactly what
-//! its grant said and no branch here sharpens it.
+//! The authoritative statement is the call's own ALGID, in the LDU2s on the *granted* channel
+//! (docs/04 §8.3). Those are demodulated per followed FDMA channel (T-849, [`voice_frames`]), and
+//! the ALGIDs of the LDU2s attributed to a call are folded into its state by
+//! [`CallHeader::fold`] (T-330): the header replaces an `Unknown` grant, and replaces a grant-time
+//! `Encrypted` with its own `Encrypted` naming the algorithm and key — but a clear header never
+//! walks back an encrypted grant; that contradiction stays encrypted and is recorded as
+//! `algid-contradicts-grant`. So the only thing here that can make a call `clear` is its own ALGID
+//! `0x80`, which is also the only thing that should — a late entry becomes known as soon as an
+//! LDU2 of the call is heard.
 //!
 //! Before each followed call, [`VoicePermit::open`] is consulted at the point a voice path would be
-//! opened, and its refusal is recorded on the call. M4 opens no voice path at all — there is no
-//! vocoder and no `CallAudio` — so today the permit always refuses and nothing consumes a sample
-//! for voice. That is the point: the check is in place *before* the thing it checks, so the thing
-//! cannot arrive without it.
+//! opened, and its refusal is recorded on the call. The ALGID fold produces an `Encryption`, never
+//! a permit, so a call that is clear by its own ALGID earns one the same way as any other — by
+//! asking. M4 opens no voice path at all — there is no vocoder and no `CallAudio` — so even a
+//! permitted call consumes no sample for voice. That is the point: the check is in place *before*
+//! the thing it checks, so the thing cannot arrive without it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use hk_core::{Discontinuity, ProvenanceHandle};
-use hk_demod::fsk::{C4fmConfig, C4fmDemod, measure_fm_structure};
+use hk_demod::fsk::{C4fmConfig, C4fmDemod, C4fmSymbols, measure_fm_structure};
 use hk_detect::trunk::{
-    CC_FRAMINGS, CSBK_BYTES, CcCandidate, CcConfirmer, CcFraming, ChannelMap, DmrGrant, Grant,
-    GridFit, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ, Resolved, VoicePermit,
-    best_lmr_raster, dmr_protocol_of, fit_grid_offset, nxdn_protocol_of, protocol_of, scan_blocks,
-    scan_cacs, scan_csbks,
+    AliasResolution, AliasScore, AliasUnresolved, CC_FRAMINGS, CSBK_BYTES, CallHeader, CcCandidate,
+    CcConfirmer, CcFraming, ChannelMap, DmrGrant, EncryptionSync, Grant, GridFit, LDU_DIBITS,
+    LduPayload, LduScan, MIN_CC_FCO, NXDN_L3_BYTES, NxdnAssignment, RASTER_TOLERANCE_HZ,
+    RECEIVER_CLOCK_BOUND_PPM, Resolved, VoicePermit, VoiceRefused, algid_name, best_lmr_raster,
+    clock_offset_mod_grid, dmr_protocol_of, fit_grid_offset, grid_aliases, nxdn_protocol_of,
+    protocol_of, resolve_alias, scan_blocks, scan_cacs, scan_csbks, scan_ldus,
 };
 use hk_dsp::{Ddc, DdcSpec, InputInfo, SegmentEngine, WelchConfig, WindowKind};
-use hk_model::repo::synthesis::ReceiverFit;
+use hk_model::repo::synthesis::{AliasEvidence, AliasState, ReceiverAlias, ReceiverFit};
 use hk_model::{
-    CallRecord, GrantEvent, GrantKind, SampleTime, Timestamp, TrunkProtocol, TrunkSystem,
-    TrunkSystemId,
+    CalibrationMethod, CalibrationState, CalibrationStateId, CallRecord, GrantEvent, GrantKind,
+    SampleTime, Timestamp, TrunkProtocol, TrunkSystem, TrunkSystemId,
 };
 use num_complex::{Complex, Complex32};
 use serde_json::json;
@@ -194,6 +226,23 @@ const FOLLOW_FRAME_S: f64 = 0.002;
 /// the band floor.
 const FOLLOW_REF_MAX_FCO: f64 = 0.05;
 
+/// Integrate-and-dump fractions the control-channel demodulation tries, the demodulator's default
+/// first (T-628).
+///
+/// **Chosen by the decode, not by a run**: each fraction is a demodulation of the same baseband,
+/// and the one yielding the most CRC-valid blocks across every framing is kept — the product
+/// vision's "tune from the processed output", with the CRC as the output-quality measure. Ties
+/// keep the earlier entry, so where the default already does as well nothing changes. Why these
+/// two: averaging a discriminator over more of a symbol averages away more noise until the
+/// transitions start to bleed in, and a raised-cosine-shaped C4FM symbol is flat over most of its
+/// period — half a symbol gives up ~3 dB of that averaging, four-fifths keeps it while staying off
+/// the transitions. On the T-545 scene at 20 dB the default recovers 12–13 of 32 blocks and 0.8
+/// recovers 29–30: the difference between a band plan being read and not.
+///
+/// A second fraction cannot make a false confirmation likely: each demodulation is one more
+/// trial against a ~1.4e-16-per-frame CRC chance rate (`hk_detect::trunk::confirm`).
+const DEMOD_INTEGRATE_LADDER: [f64; 2] = [0.5, 0.8];
+
 /// The instantaneous window a HackRF-class front end can hold, Hz (C23's span limit, docs/01 §7.3
 /// and `docs/capabilities/C23-trunking-follow.md` §Platform constraints). Recorded on the refusal
 /// so the row says *which* limit it hit, not merely that it hit one.
@@ -222,6 +271,53 @@ const WINDOW_ENDED: &str = "window-ended";
 /// Machine reason: the channel was already active in the window's first frame, so the call was
 /// joined in progress — and its encryption state is therefore `unknown`, never `clear`.
 const LATE_ENTRY: &str = "late-entry";
+/// Machine reason: the call is one slot of a TDMA carrier, so its boundaries were measured on the
+/// **shared** carrier envelope rather than on that slot's own bursts (T-272).
+///
+/// Both slots of a P25 Phase 2 channel key one carrier, and this build demodulates no TDMA burst
+/// timing, so the envelope says when the *channel* was up and the control channel says whose call
+/// it was. Recording the reason is what keeps a two-slot call list from reading as two
+/// independently timed measurements.
+const TDMA_SHARED_ENVELOPE: &str = "tdma-shared-envelope";
+/// Machine reason: this call is the continuation of a truncated one from an earlier pass, joined
+/// across an unobserved gap short enough that no end could have happened in it
+/// ([`CONTINUATION_GAP_S`], T-308).
+const CONTINUED: &str = "continued-across-passes";
+/// T-330: the grant announced encrypted and the call's own ALGID said clear. The call stays
+/// encrypted (the safer answer); this reason is how the disagreement stays visible.
+const ALGID_CONTRADICTS_GRANT: &str = "algid-contradicts-grant";
+/// Every reason [`VoicePermit::open`] can refuse with, so a call re-asked on a later pass carries
+/// only the current answer.
+const VOICE_REFUSALS: [&str; 3] = [
+    VoiceRefused::Encrypted { algid: None }.reason(),
+    VoiceRefused::Unknown.reason(),
+    VoiceRefused::UnauthoritativeClear.reason(),
+];
+
+/// How long an **unobserved** gap may be and still be crossed by one call, s (T-308).
+///
+/// It is [`SILENCE_TIMEOUT_S`] itself, and deliberately not a second number: inside a pass, a call
+/// ends when the channel is silent for 90 ms, so a gap *shorter* than that could not have
+/// contained an end even if it had been watched. Crossing it merges exactly what the in-pass
+/// splitter already merges — one rule, applied whether or not the receiver happened to be looking.
+///
+/// **Arithmetic, and the error it leaves.** The hunt observes `window_s` out of every `period_s`
+/// of stream time (the built-in chain uses 0.5 s in 10 s), so the ordinary gap between passes is
+/// `period_s − window_s ≈ 9.5 s` — **105×** this bound. Continuation therefore does **not** fire
+/// on a duty-cycled hunt, and must not: a P25 transmission is seconds long and its LLDU cadence is
+/// 180 ms, so 9.5 s unwatched can hold a complete end, a new grant and a new call, and joining
+/// across it would fuse distinct calls into one. It fires only where passes nearly abut (a
+/// continuously-tuned dwell, `period_s ≤ window_s + 0.09`), which is the one case where continuity
+/// is a measurement rather than a guess.
+///
+/// **Error direction, both ways.** Continuing over a gap ≤ 90 ms can over-state a call by at most
+/// that gap, and only by merging two keyings that the same 90 ms rule would have merged anyway.
+/// Refusing to continue never over-states: the earlier call stays **truncated** (its duration a
+/// lower bound, its `t_end` still NULL) and the later one starts as late entry. What is never done
+/// is the third option — closing the call at the window's edge — because that manufactures a
+/// boundary the radio never produced and would systematically under-state every call longer than
+/// the dwell.
+const CONTINUATION_GAP_S: f64 = SILENCE_TIMEOUT_S;
 
 /// A control channel this chain has already written, and the band plan decoded off it.
 ///
@@ -232,6 +328,14 @@ const LATE_ENTRY: &str = "late-entry";
 struct KnownCc {
     system: TrunkSystem,
     map: ChannelMap,
+    /// Calls left **truncated** by the previous pass, by rounded voice frequency and TDMA slot
+    /// (T-308; the slot since T-272, so one slot's call is never continued as another's): the
+    /// channel was still keyed when the buffered window ran out, so no end was observed. A later
+    /// pass may continue one — but only across a gap no longer than [`CONTINUATION_GAP_S`], and
+    /// the ordinary duty cycle's gap is 105× that, so ordinarily these simply expire unclaimed and
+    /// their rows stay truncated. One entry per followed channel slot, bounded by `max_follows`
+    /// channels times the plan's slot count.
+    tails: HashMap<(i64, Option<u8>), CallRecord>,
 }
 
 /// The `grant_event` a decoded grant produces, resolved through `map` as of `t`.
@@ -270,14 +374,25 @@ fn grant_event(system: TrunkSystemId, g: &Grant, map: &ChannelMap, t: Timestamp)
             f_hz,
             iden,
             channel_number,
+            slots,
+            slot,
             decoded_at,
         } => {
             ev.f_hz = Some(f_hz);
+            // The TDMA slot, when the band plan is a TDMA one. `None` on an FDMA plan: there is no
+            // slot, and writing 0 would claim a measurement nobody made (T-272).
+            ev.slot = slot;
             ev.detail = json!({
                 "opcode": opcode,
                 "iden": iden,
                 "channel_number": channel_number,
-                "mapping": "base + spacing * channel",
+                "slots": slots,
+                "slot": slot,
+                "mapping": if slots > 1 {
+                    "base + spacing * (channel / slots); slot = channel % slots"
+                } else {
+                    "base + spacing * channel"
+                },
                 "iden_decoded_at_ns": decoded_at.as_unix_nanos(),
             });
         }
@@ -576,6 +691,11 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
     // tolerance. Every emission moves by the same constant, so an uncorrected grid rejects the
     // whole band at once and candidacy never happens. A build that only works at 0 ppm works on
     // synthetic IQ and nothing else.
+    //
+    // The fit runs on every pass and is NOT replaced by a stored calibration (T-560): the phase it
+    // measures is the clock error PLUS where this tuned centre sits against the grid, and only the
+    // spectrum knows the second. The absolute clock the alias search settles is what is recorded
+    // as C05 state ([`record_receiver_clock`]).
     let grid = grid_fit(buf, fs, raster);
     let grid_offset = grid.map_or(0.0, |g| g.offset_hz);
     if let Some(g) = grid {
@@ -651,7 +771,6 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
 
     // ---- Confirmation: frame sync AND valid CRC, on demodulated symbols.
     let demod_cfg = C4fmConfig::default();
-    let demod = C4fmDemod::new(demod_cfg);
     let confirmer = CcConfirmer::default();
     let decim = (fs / (DEMOD_SPS * demod_cfg.symbol_rate_bd))
         .floor()
@@ -698,7 +817,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         };
         inc(&c.cc_demods);
         let rate = ddc.output_rate_hz();
-        let Ok(symbols) = demod.demodulate(&baseband, rate, 0.0) else {
+        let Some(symbols) = demodulate_best(&baseband, rate, &confirmer) else {
             continue;
         };
         // Every framing this build knows, not just P25 (T-271). Trying a second one cannot make a
@@ -747,6 +866,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         let k = known.entry(key).or_insert_with(|| KnownCc {
             system: TrunkSystem::new(cc.protocol(), Some(cc.cc_freq_hz()), t_end),
             map: ChannelMap::new(),
+            tails: HashMap::new(),
         });
         k.system.last_seen = t_end;
         k.system.updated_at = t_end;
@@ -867,6 +987,18 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
             }
         };
 
+        // ---- Settle what following needs BEFORE the repository lock (T-628): the in-window
+        // targets, the noise reference and — the new part — which absolute receiver offset the
+        // modulo-raster grid fit really is. It is DSP over the window in hand, and its answer is
+        // receiver provenance the analysis row below records.
+        let win = FollowWindow {
+            buf,
+            base,
+            t_start,
+            prov,
+        };
+        let plan = plan_follow(shared, node, &win, &ks, &fco, &events, grid_offset);
+
         // Metadata only: a protocol, the measured frequency, when it was heard, the band plan it
         // announced and the grants it issued. No audio, no payload, no recording.
         let mut repo = shared.repo();
@@ -881,6 +1013,18 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 eprintln!("hk-pipeline: trunk-cc write: {e}");
                 continue;
             }
+        }
+        // The alias the search just settled is the RECEIVER's clock, measured: C05 calibration
+        // state for this device, recorded when it is new or has moved (T-560).
+        if let Err(e) = record_receiver_clock(
+            &mut repo,
+            &prov.device_id,
+            &plan.alias,
+            tune_center,
+            t_start,
+        ) {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: trunk-cc receiver calibration: {e}");
         }
         for entry in &new_entries {
             match repo.append_channel_plan(system_id, entry) {
@@ -928,6 +1072,7 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
                 fco: fco_i,
                 protocol,
                 grid,
+                alias: plan.alias,
                 tune_center_hz: tune_center,
                 raster_hz: raster,
                 t: t_end,
@@ -939,28 +1084,40 @@ fn hunt(shared: &Shared, node: &TrunkCcNode, pass: &Pass<'_>, known: &mut HashMa
         // first — the following is DSP over the window already in hand, and holding a database
         // lock across it would serialise every other writer behind a channelizer run.
         drop(repo);
-        // A grant resolves to an ABSOLUTE transmit frequency through the announced band plan, and
-        // the grid fit is only known modulo the raster (see `grid_fit`) — +4300 Hz and −8200 Hz
-        // name the same grid. Applying it to an already-unambiguous frequency would down-convert
-        // the channel NEXT DOOR and report "granted channel not radiating", which is a wrong
-        // measurement rather than a missing one. So following is skipped while the receiver is
-        // measurably off-grid, and says so.
-        if grid_offset.abs() > RASTER_TOLERANCE_HZ {
-            if crate::debug_enabled() {
-                eprintln!(
-                    "hk-pipeline: trunk-cc not following {} grant(s): the receiver is \
-                     {grid_offset:+.0} Hz off the grid and that fit is only known modulo the \
-                     {raster:.0} Hz raster, so an absolute grant frequency cannot be reached \
-                     without resolving the alias",
-                    events.len(),
-                );
-            }
-        } else {
-            follow_grants(
-                shared, node, buf, base, t_start, prov, &ks, &fco, &events, system_id,
-            );
+        // The truncated-call tails live on the system, across passes: continuing a call is a
+        // statement about one channel of one system, and the borrow ends with this call (T-308).
+        if let Some(tails) = known.get_mut(&key).map(|k| &mut k.tails) {
+            follow_grants(shared, node, &win, &plan, system_id, tails);
         }
     }
+}
+
+/// Demodulates `baseband` once per [`DEMOD_INTEGRATE_LADDER`] entry and keeps the dibits with the
+/// most CRC-valid blocks across every framing this build knows (T-628). `None` only when no entry
+/// demodulated at all.
+fn demodulate_best(
+    baseband: &[Complex32],
+    rate_hz: f64,
+    confirmer: &CcConfirmer,
+) -> Option<C4fmSymbols> {
+    let mut best: Option<(u64, C4fmSymbols)> = None;
+    for integrate_fraction in DEMOD_INTEGRATE_LADDER {
+        let cfg = C4fmConfig {
+            integrate_fraction,
+            ..C4fmConfig::default()
+        };
+        let Ok(symbols) = C4fmDemod::new(cfg).demodulate(baseband, rate_hz, 0.0) else {
+            continue;
+        };
+        let crc: u64 = CC_FRAMINGS
+            .iter()
+            .map(|&f| u64::from(confirmer.scan_framing(f, &symbols.dibits).crc_valid))
+            .sum();
+        if best.as_ref().is_none_or(|(b, _)| crc > *b) {
+            best = Some((crc, symbols));
+        }
+    }
+    best.map(|(_, s)| s)
 }
 
 /// One raster channel of the buffered window, down-converted and reduced to per-frame mean power.
@@ -981,30 +1138,27 @@ struct ChannelFrames {
     frame_len: usize,
 }
 
-/// Allocates a channel on `offset_hz` over `buf` and measures its envelope.
+/// Allocates a channel on `offset_hz` over the window and measures its envelope.
 fn channel_frames(
-    buf: &[Complex<i8>],
-    base: u64,
-    t_start: Timestamp,
-    prov: &ProvenanceHandle,
+    win: &FollowWindow<'_>,
     offset_hz: f64,
     bandwidth_hz: f64,
 ) -> Option<ChannelFrames> {
     let mut ddc = Ddc::new(
         DdcSpec::new(offset_hz, bandwidth_hz),
-        prov.tune.sample_rate_hz,
+        win.prov.tune.sample_rate_hz,
     )
     .ok()?;
     let info = InputInfo {
         time: SampleTime {
-            sample_index: base,
-            host_time: t_start,
+            sample_index: win.base,
+            host_time: win.t_start,
         },
         discontinuity: Discontinuity::NONE,
         dropped_before: 0,
-        provenance: prov,
+        provenance: win.prov,
     };
-    let blk = ddc.process(info, buf).ok()?;
+    let blk = ddc.process(info, win.buf).ok()?;
     let frame_len = ((FOLLOW_FRAME_S * blk.header.sample_rate_hz).round() as usize).max(1);
     let powers: Vec<f64> = blk
         .samples
@@ -1057,6 +1211,59 @@ fn split_keyings(
     out
 }
 
+/// Appends a machine reason once. A call that spans passes is written more than once, and a
+/// reason list that grew a copy per pass would hit [`hk_model::CALL_REASONS_MAX`] and stop
+/// recording anything at all.
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|r| r == reason) {
+        reasons.push(reason.to_owned());
+    }
+}
+
+/// Whether a call an earlier pass left **truncated** is the same transmission as one already keyed
+/// in this pass's first frame (T-308).
+///
+/// Pure, so the bound can be tested without a pipeline — and it is a *decision about evidence*,
+/// which is why it is one function rather than a condition spread through the follower.
+///
+/// Every clause is a refusal to assume:
+///
+/// 1. **`first_frame`** — the channel was already keyed when observation resumed. A run that
+///    starts later means the receiver *watched* the channel go from silent to keyed, and that
+///    start is a measurement; joining it to an older call would overwrite it.
+/// 2. **The earlier call is truncated, not ended.** A call with an observed `t_end` ended; nothing
+///    continues it. A call with no `observed_until` was never watched at all (outside the window),
+///    so there is no boundary to continue *from*.
+/// 3. **The unobserved gap is `0 ≤ gap ≤` [`CONTINUATION_GAP_S`]** — short enough that no end
+///    could have occurred in it under the same 90 ms silence rule the in-pass splitter uses. On
+///    the built-in 0.5 s-in-10 s duty cycle the gap is 9.5 s and this clause refuses, which is the
+///    intended answer: the call stays truncated and the new one starts fresh.
+/// 4. **Nothing contradicts the identity.** Where both rows name a talkgroup they must name the
+///    same one; an absent talkgroup is not evidence of difference, so it neither joins nor splits.
+///
+/// Frequency and slot are not re-checked here because the caller keys the tails by rounded
+/// frequency and TDMA slot: only the same channel slot's tail is ever offered.
+fn continues_truncated(
+    prev: &CallRecord,
+    g: &GrantEvent,
+    start: Timestamp,
+    first_frame: bool,
+) -> bool {
+    if !first_frame || prev.t_end.is_some() {
+        return false;
+    }
+    let Some(observed_until) = prev.observed_until else {
+        return false;
+    };
+    let gap_ns = start.as_unix_nanos() - observed_until.as_unix_nanos();
+    let within = (0..=(CONTINUATION_GAP_S * 1e9) as i64).contains(&gap_ns);
+    let same_talkgroup = match (prev.talkgroup.as_deref(), g.talkgroup.as_deref()) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    within && same_talkgroup
+}
+
 /// The `outside-window` row a grant beyond the dwell gets.
 ///
 /// Split out and pure so the refusal can be tested without a pipeline. It keeps the frequency the
@@ -1075,9 +1282,11 @@ fn outside_window_event(
     ev.talkgroup = g.talkgroup.clone();
     ev.unit_id = g.unit_id.clone();
     ev.channel = g.channel.clone();
+    ev.slot = g.slot;
     ev.f_hz = g.f_hz;
     ev.detail = json!({
         "reason": OUTSIDE_WINDOW,
+        "slot": g.slot,
         "granted_by": g.kind.as_str(),
         "window_center_hz": tune_center,
         "window_usable_hz": usable_hz,
@@ -1089,32 +1298,107 @@ fn outside_window_event(
     ev
 }
 
-/// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
-/// channels outside it. See the module docs.
-#[allow(clippy::too_many_arguments)]
-fn follow_grants(
-    shared: &Shared,
-    node: &TrunkCcNode,
-    buf: &[Complex<i8>],
+/// The buffered window a pass follows grants over.
+struct FollowWindow<'a> {
+    buf: &'a [Complex<i8>],
     base: u64,
     t_start: Timestamp,
-    prov: &ProvenanceHandle,
+    prov: &'a ProvenanceHandle,
+}
+
+/// Everything following one pass's grants needs, settled **before** anything is written (T-628).
+struct FollowPlan<'e> {
+    /// Granted CHANNELS inside the window: one per distinct frequency, with every slot granted on
+    /// it (T-272: the slots of a TDMA carrier are one RF channel, measured once). Nearest the
+    /// tuned centre first, capped at `max_follows` channels.
+    channels: Vec<(f64, Vec<&'e GrantEvent>)>,
+    /// Granted frequencies beyond it (C23's span limit).
+    outside: Vec<&'e GrantEvent>,
+    /// Inside channels the `max_follows` cap refused.
+    refused: usize,
+    /// The quiet raster channel measured as the floor, and the occupancy threshold over it.
+    reference: Option<(i64, f64)>,
+    /// Which absolute receiver offset the modulo-raster grid fit is, and why.
+    alias: ReceiverAlias,
+    /// Per `channels` entry, its envelope under the resolved alias. Empty unless resolved.
+    frames: Vec<Option<ChannelFrames>>,
+}
+
+/// The absolute receiver offset a plan resolved, Hz, or `None`.
+fn resolved_offset(alias: &ReceiverAlias) -> Option<f64> {
+    (alias.state == AliasState::Resolved)
+        .then_some(alias.offset_hz)
+        .flatten()
+}
+
+/// Plans one pass's following: which grants are targets, the noise reference, and **the receiver
+/// alias** (T-628).
+///
+/// A grant resolves to an ABSOLUTE transmit frequency through the announced band plan, and the
+/// grid fit is only known modulo the raster (see `grid_fit`): +4300 Hz and −8200 Hz name the same
+/// grid, and down-converting at the wrong one measures the channel NEXT DOOR — a wrong
+/// measurement ("granted channel not radiating", or worse, a neighbour's traffic filed as the
+/// call). Until T-628 following was therefore skipped whenever the receiver was measurably
+/// off-grid, which on a HackRF One at 800 MHz is always.
+///
+/// Two constraints settle it, and neither is a band-plan lookup:
+///
+/// 1. **The crystal's bound** ([`RECEIVER_CLOCK_BOUND_PPM`]) limits the absolute offset to a
+///    handful of aliases ([`grid_aliases`]) — three at 851 MHz, one at VHF.
+/// 2. **Which alias has energy**: each is tried on every granted channel the pass targets, and
+///    the one that finds transmissions on more of them than any other wins
+///    ([`resolve_alias`]). A tie is recorded as unresolved and nothing is followed.
+///
+/// The on-grid case goes through the same search — "the offset is +300 Hz, not −12 200 Hz" is a
+/// claim too — so a receiver that is on frequency is *measured* to be, not assumed.
+///
+/// Cost, bounded a priori: one reference envelope, plus `aliases × min(targets, max_follows)`
+/// channelizer runs over the window already held — ≤ 3 × 8 at 800 MHz on a 12.5 kHz raster —
+/// and the winner's envelopes are reused for following rather than recomputed.
+#[allow(clippy::too_many_arguments)]
+fn plan_follow<'e>(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    win: &FollowWindow<'_>,
     ks: &[i64],
     fco: &[f64],
-    events: &[GrantEvent],
-    system: TrunkSystemId,
-) {
+    events: &'e [GrantEvent],
+    grid_offset: f64,
+) -> FollowPlan<'e> {
     let c = &shared.counters.chains;
-    let fs = prov.tune.sample_rate_hz;
-    let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
-    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
-        return;
-    }
+    let fs = win.prov.tune.sample_rate_hz;
+    let (tune_center, raster) = (win.prov.tune.center_hz, node.raster_hz);
     let usable_hz = USABLE_FRACTION * fs;
+    let mut alias = ReceiverAlias {
+        state: AliasState::NotTried,
+        evidence: AliasEvidence::NoGrantedChannel,
+        offset_hz: None,
+        ppm: None,
+        bound_ppm: RECEIVER_CLOCK_BOUND_PPM,
+        candidates: 0,
+        targets: 0,
+        occupied: 0,
+        runner_up: 0,
+    };
+    let mut plan = FollowPlan {
+        channels: Vec::new(),
+        outside: Vec::new(),
+        refused: 0,
+        reference: None,
+        alias,
+        frames: Vec::new(),
+    };
+    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
+        return plan;
+    }
 
-    // One target per distinct resolved frequency. A control channel repeats a grant and its
-    // updates many times in half a second, and that is one call, not twenty.
-    let key = |g: &GrantEvent| g.f_hz.unwrap_or(f64::NAN).round();
+    // One target per distinct resolved frequency **and slot**. A control channel repeats a grant
+    // and its updates many times in half a second, and that is one call, not twenty — but on a
+    // TDMA system two talkgroups share one carrier on alternating slots, and keying those on
+    // frequency alone would merge them into a single call attributed to whichever grant arrived
+    // first. That is C23's TDMA slot mix-up pitfall, and the slot in the key is what stops it
+    // (T-272). An FDMA grant carries `slot: None`, so nothing about the Phase 1 path changes.
+    let key = |g: &GrantEvent| (g.f_hz.unwrap_or(f64::NAN).round() as i64, g.slot);
     let mut targets: Vec<&GrantEvent> = Vec::new();
     for ev in events.iter().filter(|e| e.f_hz.is_some()) {
         match targets.iter_mut().find(|t| key(t) == key(ev)) {
@@ -1132,14 +1416,366 @@ fn follow_grants(
             .is_some_and(|f| (f - tune_center).abs() <= usable_hz / 2.0)
     };
     let mut inside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| reachable(e)).collect();
-    let outside: Vec<&GrantEvent> = targets.iter().copied().filter(|e| !reachable(e)).collect();
+    plan.outside = targets.iter().copied().filter(|e| !reachable(e)).collect();
+    // Deterministic and blind: nearest the tuned centre first, where the front end rolls off
+    // least; ties by frequency.
+    inside.sort_by(|a, b| {
+        let (fa, fb) = (a.f_hz.unwrap_or(f64::NAN), b.f_hz.unwrap_or(f64::NAN));
+        (fa - tune_center)
+            .abs()
+            .total_cmp(&(fb - tune_center).abs())
+            .then(fa.total_cmp(&fb))
+    });
+    // ---- One CHANNEL per distinct frequency, whatever the slot. The slots of a TDMA carrier are
+    // one RF channel: down-converting it twice would pay the DDC twice for the same samples and
+    // measure the same envelope twice — and would count one carrier twice when scoring an alias.
+    // So the targets are grouped by frequency here, each channel is measured once, and each
+    // slot's call is written from that one measurement (T-272). `inside` is already sorted by
+    // distance from the tuned centre, so the members of a group are adjacent.
+    let mut channels: Vec<(f64, Vec<&GrantEvent>)> = Vec::new();
+    for g in inside {
+        let f = g.f_hz.unwrap_or(f64::NAN);
+        match channels.last_mut() {
+            Some((cf, members)) if cf.to_bits() == f.to_bits() => members.push(g),
+            _ => channels.push((f, vec![g])),
+        }
+    }
+    if channels.len() > node.max_follows {
+        plan.refused = channels.len() - node.max_follows;
+        channels.truncate(node.max_follows);
+    }
+    plan.channels = channels;
+    if plan.channels.is_empty() {
+        return plan;
+    }
+    alias.targets = plan.channels.len() as u32;
+
+    // ---- The noise reference: an empty raster channel through the SAME DDC spec, so the granted
+    // channel and its floor are on one scale by construction. `k = 0` is excluded — on a HackRF
+    // the tuned centre carries a DC spike, and a reference sitting in it would read as a floor no
+    // real channel has, which would quietly cost calls rather than announce anything. It is
+    // measured on the FITTED grid, which is where `fco` measured it quiet.
+    plan.reference = ks
+        .iter()
+        .zip(fco)
+        .filter(|&(&k, &f)| k != 0 && f <= FOLLOW_REF_MAX_FCO)
+        .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.abs().cmp(&b.0.abs())))
+        .map(|(k, _)| *k)
+        .and_then(|k| channel_frames(win, k as f64 * raster + grid_offset, raster).map(|f| (k, f)))
+        .and_then(|(k, r)| {
+            let floor = median(&r.powers);
+            (floor.is_finite() && floor > 0.0)
+                .then(|| (k, floor * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0)))
+        });
+    let Some((_, threshold)) = plan.reference else {
+        alias.evidence = AliasEvidence::NoReference;
+        plan.alias = alias;
+        return plan;
+    };
+
+    // ---- The alias: bounded by the crystal, chosen by which alias has energy. The grid fit's
+    // phase is measured against the TUNED CENTRE, which need not sit on a channel (852.456 MHz is
+    // 6 kHz off the 800 MHz raster); a granted frequency is on the real grid, so its phase against
+    // the tuned centre is removed first and only the receiver's clock reaches the search (T-560).
+    let aliases = receiver_aliases(grid_offset, raster, tune_center, plan.channels[0].0);
+    alias.candidates = aliases.len() as u32;
+    let mut per_alias: Vec<Vec<Option<ChannelFrames>>> = Vec::with_capacity(aliases.len());
+    let mut scores: Vec<AliasScore> = Vec::with_capacity(aliases.len());
+    for &a in &aliases {
+        let frames: Vec<Option<ChannelFrames>> = plan
+            .channels
+            .iter()
+            .map(|(f, _)| channel_frames(win, f - tune_center + a, raster))
+            .collect();
+        let occupied = frames
+            .iter()
+            .flatten()
+            .filter(|ch| !keyings(ch, threshold, fs).0.is_empty())
+            .count();
+        scores.push(AliasScore {
+            offset_hz: a,
+            targets: plan.channels.len(),
+            occupied,
+        });
+        per_alias.push(frames);
+    }
+    match resolve_alias(&scores) {
+        AliasResolution::Resolved {
+            offset_hz,
+            by,
+            occupied,
+            runner_up,
+            ..
+        } => {
+            inc(&c.cc_alias_resolved);
+            alias.state = AliasState::Resolved;
+            alias.evidence = match by {
+                hk_detect::trunk::AliasEvidence::ClockBound => AliasEvidence::ClockBound,
+                hk_detect::trunk::AliasEvidence::GrantedChannelEnergy => {
+                    AliasEvidence::GrantedChannelEnergy
+                }
+            };
+            alias.offset_hz = Some(offset_hz);
+            alias.ppm = Some(1e6 * offset_hz / tune_center);
+            alias.occupied = occupied as u32;
+            alias.runner_up = runner_up as u32;
+            let i = aliases
+                .iter()
+                .position(|&a| a == offset_hz)
+                .unwrap_or_default();
+            plan.frames = per_alias.swap_remove(i);
+        }
+        AliasResolution::Unresolved { best, why, .. } => {
+            inc(&c.cc_alias_unresolved);
+            alias.state = AliasState::Unresolved;
+            alias.evidence = match why {
+                AliasUnresolved::NoAliasInBound => AliasEvidence::NoAliasInBound,
+                AliasUnresolved::NothingOccupied => AliasEvidence::NothingOccupied,
+                AliasUnresolved::Tied => AliasEvidence::Tied,
+            };
+            alias.occupied = best as u32;
+            alias.runner_up = best as u32;
+        }
+    }
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: trunk-cc receiver alias {:?} ({:?}) from grid fit {grid_offset:+.0} Hz: \
+             tried {:?} Hz on {} granted channel(s), occupied {:?}",
+            alias.state,
+            alias.evidence,
+            aliases.iter().map(|a| a.round()).collect::<Vec<_>>(),
+            plan.channels.len(),
+            scores.iter().map(|s| s.occupied).collect::<Vec<_>>(),
+        );
+    }
+    plan.alias = alias;
+    plan
+}
+
+/// Most voice frames of each kind one call-start event lists (T-849). A 0.5 s window holds at
+/// most three LDUs, so this bounds a pathological window rather than trimming an ordinary one.
+const VOICE_FRAMES_LISTED: usize = 16;
+
+/// One followed channel's P25 Phase 1 voice frames over the buffered window (T-849).
+struct VoiceFrames {
+    /// What the scan found, frames in stream order.
+    scan: LduScan,
+    /// Capture time of each frame's first sync symbol, parallel to `scan.frames`.
+    times: Vec<Timestamp>,
+    /// One LDU's duration on the air, ns (864 symbols at the demodulated symbol rate).
+    ldu_ns: i64,
+}
+
+impl VoiceFrames {
+    /// One transmission's frames as `grant_event` detail: those whose **midpoint** lies in
+    /// `[start, end)`. Link control and encryption sync are listed field by field; the message
+    /// indicator is carried verbatim and used for nothing.
+    ///
+    /// The midpoint, not the first symbol: the transmission's boundaries come from the channel
+    /// envelope in [`FOLLOW_FRAME_S`] steps, so a keying's first LDU can begin a step or two
+    /// before the measured start, while its midpoint — 90 ms in — can only lie inside the
+    /// transmission that carried it (a decoded LDU is 180 ms of continuous signal, and a
+    /// transmission only ends after [`SILENCE_TIMEOUT_S`] of silence).
+    fn detail(&self, start: Timestamp, end: Timestamp) -> serde_json::Value {
+        let inside = |i: usize| self.inside(i, start, end);
+        let mut lcs = Vec::new();
+        let mut ess = Vec::new();
+        for (i, f) in self
+            .scan
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| inside(*i))
+        {
+            let t = self.times[i].as_unix_nanos();
+            match &f.payload {
+                LduPayload::LinkControl(lc) => {
+                    let gv = lc.group_voice();
+                    lcs.push(json!({
+                        "t_ns": t,
+                        "nac": f.nid.nac,
+                        "lco": lc.lco(),
+                        "mfid": lc.mfid(),
+                        "protected": lc.protected(),
+                        "talkgroup": gv.map(|g| g.talkgroup),
+                        "source": gv.map(|g| g.source),
+                        "service_options": gv.map(|g| g.service_options),
+                        "raw_hex": hex(&lc.bytes),
+                        "rs_corrected": f.rs_corrected,
+                    }));
+                }
+                LduPayload::EncryptionSync(es) => {
+                    ess.push(json!({
+                        "t_ns": t,
+                        "nac": f.nid.nac,
+                        "algid": es.algid,
+                        "algid_name": algid_name(es.algid),
+                        "key_id": es.key_id,
+                        "mi_hex": hex(&es.mi),
+                        "rs_corrected": f.rs_corrected,
+                    }));
+                }
+            }
+        }
+        json!({
+            "attempted": true,
+            "decoder": "p25-phase1-ldu",
+            "ldu1": lcs.len(),
+            "ldu2": ess.len(),
+            "link_control": lcs.into_iter().take(VOICE_FRAMES_LISTED).collect::<Vec<_>>(),
+            "encryption_sync": ess.into_iter().take(VOICE_FRAMES_LISTED).collect::<Vec<_>>(),
+            // The whole window's scan, so a channel whose frames all fell outside this
+            // transmission (or never decoded) is legible rather than an empty list.
+            "window": {
+                "sync_hits": self.scan.sync_hits,
+                "nid_valid": self.scan.nid_valid,
+                "other_duid": self.scan.other_duid,
+                "rs_failed": self.scan.rs_failed,
+                "frames": self.scan.frames.len(),
+            },
+        })
+    }
+}
+
+impl VoiceFrames {
+    /// Whether frame `i`'s midpoint lies in `[start, end)` — the one attribution rule, shared by
+    /// the recorded detail and the encryption fold so the two can never disagree about which
+    /// frames were this call's.
+    fn inside(&self, i: usize, start: Timestamp, end: Timestamp) -> bool {
+        let mid = self.times[i].saturating_add_nanos(self.ldu_ns / 2);
+        mid >= start && mid < end
+    }
+
+    /// This transmission's LDU2 encryption syncs, in stream order (T-330).
+    fn syncs(&self, start: Timestamp, end: Timestamp) -> impl Iterator<Item = &EncryptionSync> {
+        self.scan
+            .frames
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| self.inside(*i, start, end))
+            .filter_map(|(_, f)| match &f.payload {
+                LduPayload::EncryptionSync(es) => Some(es),
+                LduPayload::LinkControl(_) => None,
+            })
+    }
+}
+
+/// Lower-case hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Demodulates one granted channel of the window and reads its P25 Phase 1 voice frames (T-849).
+///
+/// The same down-conversion and C4FM demodulation the control-channel confirmation uses, at the
+/// resolved receiver alias, and the same [`DEMOD_INTEGRATE_LADDER`] chosen by the decode: the
+/// fraction yielding the most Reed–Solomon-valid LDUs is kept, ties to the earlier. `None` only
+/// when the channel could not be down-converted or demodulated at all.
+///
+/// Cost per followed FDMA channel, bounded a priori: one DDC over the window already held, at most
+/// `DEMOD_INTEGRATE_LADDER.len()` C4FM demodulations of it, and one LDU scan per demodulation —
+/// a frame-sync correlation per symbol plus, per sync hit only, a 2^16-codeword NID search. The
+/// IMBE voice codewords are skipped by position: nothing here produces audio.
+fn voice_frames(win: &FollowWindow<'_>, offset_hz: f64, raster_hz: f64) -> Option<VoiceFrames> {
+    let fs = win.prov.tune.sample_rate_hz;
+    let demod_cfg = C4fmConfig::default();
+    let decim = (fs / (DEMOD_SPS * demod_cfg.symbol_rate_bd))
+        .floor()
+        .max(1.0);
+    let mut spec = DdcSpec::new(offset_hz, 2.0 * raster_hz);
+    spec.output_rate_hz = Some(fs / decim);
+    let mut ddc = Ddc::new(spec, fs).ok()?;
+    let info = InputInfo {
+        time: SampleTime {
+            sample_index: win.base,
+            host_time: win.t_start,
+        },
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: win.prov,
+    };
+    let (baseband, src0, spo): (Vec<Complex32>, f64, f64) = {
+        let blk = ddc.process(info, win.buf).ok()?;
+        (
+            blk.samples.to_vec(),
+            blk.header.time.source_index,
+            blk.header.time.source_per_output,
+        )
+    };
+    let rate = ddc.output_rate_hz();
+    let mut best: Option<(usize, LduScan, C4fmSymbols)> = None;
+    for integrate_fraction in DEMOD_INTEGRATE_LADDER {
+        let cfg = C4fmConfig {
+            integrate_fraction,
+            ..C4fmConfig::default()
+        };
+        let Ok(symbols) = C4fmDemod::new(cfg).demodulate(&baseband, rate, 0.0) else {
+            continue;
+        };
+        let scan = scan_ldus(&symbols.dibits);
+        let n = scan.frames.len();
+        if best.as_ref().is_none_or(|(b, _, _)| n > *b) {
+            best = Some((n, scan, symbols));
+        }
+    }
+    let (_, scan, symbols) = best?;
+    let sps = rate / symbols.rate_bd;
+    let ldu_ns = (LDU_DIBITS as f64 * 1e9 / symbols.rate_bd) as i64;
+    let times = scan
+        .frames
+        .iter()
+        .map(|f| {
+            let out_idx = symbols.timing_phase + f.start_dibit as f64 * sps;
+            let src = src0 + out_idx * spo;
+            win.t_start
+                .saturating_add_nanos(((src - win.base as f64).max(0.0) * 1e9 / fs) as i64)
+        })
+        .collect();
+    Some(VoiceFrames {
+        scan,
+        times,
+        ldu_ns,
+    })
+}
+
+/// A channel envelope's transmissions over `threshold`, and the frame length in seconds.
+fn keyings(ch: &ChannelFrames, threshold: f64, fs: f64) -> (Vec<(usize, usize, bool)>, f64) {
+    let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
+    let silence_frames = (SILENCE_TIMEOUT_S / frame_s).ceil().max(1.0) as usize;
+    (
+        split_keyings(&ch.powers, threshold, silence_frames),
+        frame_s,
+    )
+}
+
+/// Follows the grants of one window: calls for the channels inside it, a logged refusal for the
+/// channels outside it. See the module docs and [`plan_follow`].
+fn follow_grants(
+    shared: &Shared,
+    node: &TrunkCcNode,
+    win: &FollowWindow<'_>,
+    plan: &FollowPlan<'_>,
+    system: TrunkSystemId,
+    tails: &mut HashMap<(i64, Option<u8>), CallRecord>,
+) {
+    let (t_start, base, prov) = (win.t_start, win.base, win.prov);
+    let c = &shared.counters.chains;
+    let fs = prov.tune.sample_rate_hz;
+    let (tune_center, raster) = (prov.tune.center_hz, node.raster_hz);
+    if !(fs.is_finite() && fs > 0.0 && raster > 0.0) {
+        return;
+    }
+    let usable_hz = USABLE_FRACTION * fs;
+    let (channels, outside) = (&plan.channels, &plan.outside);
 
     // Everything written in one repository section at the end, so no lock is held across the DSP.
-    let mut writes: Vec<(CallRecord, Vec<GrantEvent>)> = Vec::new();
+    // `bool` = this row continues a call an earlier pass left truncated, so it is an UPDATE to an
+    // existing row rather than a new call (T-308) and is counted as such.
+    let mut writes: Vec<(CallRecord, Vec<GrantEvent>, bool)> = Vec::new();
 
     // ---- C23's span limit. A grant beyond the window the radio is holding is a ROW, not a
     // silence.
-    for g in &outside {
+    for g in outside {
         let mut ev = outside_window_event(system, g, tune_center, usable_hz, fs);
         // The call happened; this receiver could not observe it. `t_end` stays NULL, which the
         // model defines as "still open, **or when its end was never observed**", and the reason
@@ -1147,63 +1783,47 @@ fn follow_grants(
         let mut call = CallRecord::from_grant(&ev, g.kind == GrantKind::GrantUpdate);
         call.reasons.push(OUTSIDE_WINDOW.to_owned());
         ev.call = Some(call.id);
-        writes.push((call, vec![ev]));
+        writes.push((call, vec![ev], false));
         inc(&c.cc_grants_outside_window);
     }
 
-    // ---- The noise reference: an empty raster channel through the SAME DDC spec, so the granted
-    // channel and its floor are on one scale by construction. `k = 0` is excluded — on a HackRF
-    // the tuned centre carries a DC spike, and a reference sitting in it would read as a floor no
-    // real channel has, which would quietly cost calls rather than announce anything.
-    let reference = (!inside.is_empty())
-        .then(|| {
-            ks.iter()
-                .zip(fco)
-                .filter(|&(&k, &f)| k != 0 && f <= FOLLOW_REF_MAX_FCO)
-                .min_by(|a, b| a.1.total_cmp(b.1).then(a.0.abs().cmp(&b.0.abs())))
-                .map(|(k, _)| *k)
-        })
-        .flatten()
-        .and_then(|k| {
-            channel_frames(buf, base, t_start, prov, k as f64 * raster, raster).map(|f| (k, f))
-        });
-    let threshold = reference.as_ref().and_then(|(_, r)| {
-        let floor = median(&r.powers);
-        (floor.is_finite() && floor > 0.0).then(|| floor * 10f64.powf(OCCUPIED_MARGIN_DB / 10.0))
-    });
-    if !inside.is_empty() && threshold.is_none() {
+    if !channels.is_empty() && plan.reference.is_none() {
         // No quiet channel, or no measurable floor on one. Nothing is claimed rather than measured
         // against a reference the call is itself sitting in.
         inc(&c.cc_follow_no_reference);
     }
-
-    if let (Some(threshold), Some((ref_k, _))) = (threshold, &reference) {
-        // Deterministic and blind: nearest the tuned centre first, where the front end rolls off
-        // least; ties by frequency.
-        inside.sort_by(|a, b| {
-            let (fa, fb) = (a.f_hz.unwrap_or(f64::NAN), b.f_hz.unwrap_or(f64::NAN));
-            (fa - tune_center)
-                .abs()
-                .total_cmp(&(fb - tune_center).abs())
-                .then(fa.total_cmp(&fb))
-        });
-        if inside.len() > node.max_follows {
-            add(
-                &c.cc_follow_refused,
-                (inside.len() - node.max_follows) as u64,
+    if !channels.is_empty() && plan.alias.state == AliasState::Unresolved {
+        // Tried and not settled: every alias the crystal allows was measured and none stood out.
+        // Following at a guessed one would file a neighbour's traffic as the granted call, so the
+        // grants stand as rows and nothing is followed — and the analysis row records which
+        // aliases were tried and why none won, distinct from "never tried".
+        add(&c.cc_follow_unresolved, channels.len() as u64);
+        if crate::debug_enabled() {
+            eprintln!(
+                "hk-pipeline: trunk-cc not following {} granted channel(s): receiver alias \
+                 unresolved ({:?} over {} candidate(s))",
+                channels.len(),
+                plan.alias.evidence,
+                plan.alias.candidates,
             );
-            inside.truncate(node.max_follows);
         }
-        for g in &inside {
-            let f = g.f_hz.unwrap_or(f64::NAN);
-            let Some(ch) = channel_frames(buf, base, t_start, prov, f - tune_center, raster) else {
+    }
+
+    if let (Some((ref_k, threshold)), Some(offset_hz)) =
+        (plan.reference, resolved_offset(&plan.alias))
+    {
+        add(&c.cc_follow_refused, plan.refused as u64);
+        // One CHANNEL per distinct frequency, whatever the slot (T-272): `plan_follow` measured
+        // each once under the resolved alias, and each slot's call is written from that one
+        // envelope below.
+        for ((f, members), ch) in channels.iter().zip(&plan.frames) {
+            let f = *f;
+            let Some(ch) = ch else {
                 inc(&c.errors);
                 continue;
             };
             inc(&c.cc_follows);
-            let frame_s = ch.frame_len as f64 * ch.source_per_output / fs;
-            let silence_frames = (SILENCE_TIMEOUT_S / frame_s).ceil().max(1.0) as usize;
-            let runs = split_keyings(&ch.powers, threshold, silence_frames);
+            let (runs, frame_s) = keyings(ch, threshold, fs);
             if runs.is_empty() {
                 // Granted, and nothing was on it in this window. The grant row already records the
                 // grant; inventing a call would claim an observation nobody made.
@@ -1214,21 +1834,125 @@ fn follow_grants(
                 let src = ch.source_index + (frame * ch.frame_len) as f64 * ch.source_per_output;
                 t_start.saturating_add_nanos(((src - base as f64).max(0.0) * 1e9 / fs) as i64)
             };
-            for (first, last, ended) in runs {
+            // ---- The voice frames the granted channel carried (T-849): its LDU1 link control and
+            // LDU2 encryption sync, demodulated from the same window at the same resolved alias.
+            // An FDMA channel only — a P25 Phase 2 carrier's voice is TDMA bursts, not LDUs, and
+            // reading its two slots as one LDU stream would attribute frames to no slot at all.
+            let heard = members
+                .iter()
+                .all(|g| g.slot.is_none())
+                .then(|| voice_frames(win, f - tune_center + offset_hz, raster))
+                .flatten();
+            if let Some(v) = &heard {
+                inc(&c.cc_voice_frame_demods);
+                add(&c.cc_ldu1, v.scan.ldu1().count() as u64);
+                add(&c.cc_ldu2, v.scan.ldu2().count() as u64);
+            }
+            // Where observation of THIS channel stopped: the end of the last frame measured. It
+            // is a fact about the receiver's schedule, not about the call, and it is what lets a
+            // call with no observed end say "truncated here" instead of nothing at all (T-308).
+            let observed_until = at(ch.powers.len());
+            let fkey = f.round() as i64;
+            // Any truncated call each slot of this channel left behind last pass, keyed by
+            // frequency AND slot: two talkgroups on one TDMA carrier are two calls, and one must
+            // never be continued as the other (T-272). Taken out unconditionally, so a tail that
+            // cannot be continued expires here rather than accumulating.
+            let member_tails: Vec<Option<CallRecord>> = members
+                .iter()
+                .map(|g| tails.remove(&(fkey, g.slot)))
+                .collect();
+            let run_count = runs.len();
+            for (m, g, (i, (first, last, ended))) in members
+                .iter()
+                .enumerate()
+                .flat_map(|(m, g)| runs.iter().copied().enumerate().map(move |r| (m, g, r)))
+            {
                 let (start, end) = (at(first), ended.then(|| at(last + 1)));
                 // Active in the window's very first frame means the transmission began before this
                 // window: late entry. C23's pitfall is that its encryption state is then UNKNOWN
                 // rather than clear, and `from_grant` carries the grant's state verbatim — nothing
                 // here reads an encryption bit, so nothing is claimed (T-266, T-270).
                 let late = first == 0 || g.kind == GrantKind::GrantUpdate;
-                let mut call = CallRecord::from_grant(g, late);
-                call.t_start = start;
+                // ---- Cross-pass continuation (T-308). Only the run already keyed in this
+                // window's FIRST frame can be the same transmission as one truncated last pass,
+                // and only across a gap too short to have hidden an end — see
+                // `CONTINUATION_GAP_S`. Everything else starts a new call, and the truncated row
+                // it leaves behind stays truncated rather than being closed at a window edge.
+                let continued = (i == 0)
+                    .then_some(member_tails[m].as_ref())
+                    .flatten()
+                    .filter(|prev| continues_truncated(prev, g, start, first == 0))
+                    .cloned();
+                let is_continuation = continued.is_some();
+                let mut call = match continued {
+                    // The SAME row: same id, same measured `t_start`, same late-entry state. Its
+                    // duration grows by what this pass observed instead of a second row appearing
+                    // for a transmission that never stopped.
+                    Some(mut prev) => {
+                        // It is no longer truncated: the next thing observed on this channel was
+                        // the same transmission, so the reason that said "we stopped looking"
+                        // goes, and the one that says why this row spans a gap arrives.
+                        prev.reasons.retain(|r| r != WINDOW_ENDED);
+                        push_reason(&mut prev.reasons, CONTINUED);
+                        // Later evidence may sharpen encryption; it never walks back towards
+                        // clear (`Encryption::refine`, and the repository refuses it again).
+                        prev.refine_encryption(g.encryption);
+                        prev
+                    }
+                    None => {
+                        let mut call = CallRecord::from_grant(g, late);
+                        call.t_start = start;
+                        call
+                    }
+                };
                 call.t_end = end;
-                call.reasons
-                    .push(if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED }.to_owned());
-                if first == 0 {
-                    call.reasons.push(LATE_ENTRY.to_owned());
+                // What the receiver watched, for every followed call: with `t_end` it is what
+                // separates an observed end from "we stopped looking" (docs/07 §2.29).
+                call.observed_until = Some(observed_until);
+                push_reason(
+                    &mut call.reasons,
+                    if ended { SILENCE_TIMEOUT } else { WINDOW_ENDED },
+                );
+                if first == 0 && !is_continuation {
+                    push_reason(&mut call.reasons, LATE_ENTRY);
                 }
+                // The last run of a still-keyed channel is what the next pass may continue. Only
+                // the last one can be unended; the others were closed by observed silence.
+                if !ended && i + 1 == run_count {
+                    tails.insert((fkey, g.slot), call.clone());
+                }
+                // A TDMA call's boundaries are the SHARED CARRIER's, not that slot's. Both slots
+                // of a P25 Phase 2 channel key the same carrier, and nothing here demodulates the
+                // two-slot bursts, so the envelope this measured cannot say which slot was
+                // talking when. The slot attribution comes from the grant — which is exactly what
+                // the control channel stated — and the row says that the timing does not
+                // (T-272). Silence about it would present per-slot timing this build never
+                // measured, the same defect as implying resolution nobody captured.
+                if call.slot.is_some() {
+                    push_reason(&mut call.reasons, TDMA_SHARED_ENVELOPE);
+                }
+                // ---- The call's own header (T-330): the ALGIDs its LDU2s carried, folded into
+                // what the grant announced. The header outranks the grant, except that a clear
+                // header never walks back an encrypted grant — see `CallHeader`. This yields an
+                // `Encryption`, not a permit: the permit below is asked for like any other.
+                let call_end = end.unwrap_or(observed_until);
+                let header = heard
+                    .as_ref()
+                    .map(|v| CallHeader::fold(call.encryption, v.syncs(start, call_end)));
+                if let Some(h) = &header {
+                    call.encryption = h.call;
+                    if h.decided_by_algid() {
+                        inc(&c.cc_calls_algid);
+                    }
+                    if h.contradicts_grant {
+                        push_reason(&mut call.reasons, ALGID_CONTRADICTS_GRANT);
+                    }
+                }
+                // A continued call is re-asked every pass, so last pass's refusal must not outlive
+                // the evidence that produced it.
+                call.reasons
+                    .retain(|r| !VOICE_REFUSALS.contains(&r.as_str()));
+
                 // ---- The encryption check, at the point a voice path would be opened (C23
                 // §Methods "encryption check before the vocoder", T-270).
                 //
@@ -1242,7 +1966,7 @@ fn follow_grants(
                 let voice_reason = match &voice {
                     Ok(_) => "permitted",
                     Err(why) => {
-                        call.reasons.push(why.reason().to_owned());
+                        push_reason(&mut call.reasons, why.reason());
                         inc(&c.cc_voice_refused);
                         why.reason()
                     }
@@ -1250,14 +1974,27 @@ fn follow_grants(
                 if call.encryption.is_encrypted() {
                     inc(&c.cc_calls_encrypted);
                 }
+                // A continuation is the SAME call, so it gets no second `call-start`: the start
+                // it already has was measured, and announcing another would put two beginnings in
+                // the grant stream for one transmission. The row's `continued-across-passes`
+                // reason is where the join is recorded.
+                let mut evs: Vec<GrantEvent> = Vec::new();
                 let mut open = GrantEvent::new(system, GrantKind::CallStart, start);
                 open.call = Some(call.id);
                 open.talkgroup = g.talkgroup.clone();
                 open.unit_id = g.unit_id.clone();
                 open.channel = g.channel.clone();
+                open.slot = g.slot;
                 open.f_hz = g.f_hz;
                 open.detail = json!({
                     "reason": if late { LATE_ENTRY } else { "grant-followed" },
+                    "slot": g.slot,
+                    // What the boundaries are, and are not, on a shared TDMA carrier.
+                    "timing": if g.slot.is_some() {
+                        TDMA_SHARED_ENVELOPE
+                    } else {
+                        "channel envelope"
+                    },
                     // What the encryption check decided, and therefore why no audio exists.
                     "voice": voice_reason,
                     "encryption": call.encryption.state(),
@@ -1266,13 +2003,46 @@ fn follow_grants(
                     "frame_s": frame_s,
                     "margin_db": OCCUPIED_MARGIN_DB,
                     "reference_raster_channel": ref_k,
+                    // Where the granted frequency was actually measured: the transmit frequency
+                    // plus the receiver's resolved absolute offset (T-628), and what chose it.
+                    "receiver_offset_hz": offset_hz,
+                    "receiver_alias": plan.alias.evidence,
                 });
-                let mut evs = vec![open];
+                open.detail["continued_across_passes"] = json!(is_continuation);
+                // Where the call's encryption state came from (T-330): the header's own
+                // statement, and whether it disagreed with the grant.
+                open.detail["encryption_evidence"] =
+                    json!(call.encryption.evidence().map(|e| e.as_str()));
+                open.detail["header_encryption"] = match &header {
+                    Some(h) => json!({
+                        "read": h.read,
+                        "state": h.header.state(),
+                        "algid": h.header.algid(),
+                        "algid_name": h.header.algid().and_then(algid_name),
+                        "key_id": h.header.key_id(),
+                        "contradicts_grant": h.contradicts_grant,
+                    }),
+                    None => serde_json::Value::Null,
+                };
+                // What this transmission's own voice frames said (T-849), frame by frame. Their
+                // ALGIDs were folded into `call.encryption` above (T-330).
+                open.detail["voice_frames"] = match &heard {
+                    Some(v) => v.detail(start, call_end),
+                    None if g.slot.is_some() => json!({
+                        "attempted": false,
+                        "why": "tdma-carrier: phase 2 voice is not LDU-framed",
+                    }),
+                    None => json!({ "attempted": false, "why": "channel did not demodulate" }),
+                };
+                if !is_continuation {
+                    evs.push(open);
+                }
                 if let Some(t_end) = end {
                     let mut close = GrantEvent::new(system, GrantKind::CallEnd, t_end);
                     close.call = Some(call.id);
                     close.talkgroup = g.talkgroup.clone();
                     close.channel = g.channel.clone();
+                    close.slot = g.slot;
                     close.f_hz = g.f_hz;
                     close.detail = json!({
                         "reason": SILENCE_TIMEOUT,
@@ -1280,7 +2050,7 @@ fn follow_grants(
                     });
                     evs.push(close);
                 }
-                writes.push((call, evs));
+                writes.push((call, evs, is_continuation));
             }
         }
     }
@@ -1292,8 +2062,8 @@ fn follow_grants(
         eprintln!(
             "hk-pipeline: trunk-cc followed {} of {} granted channel(s) ({} outside the \
              {:.3} MHz window at {:.4} MHz): {} call(s)",
-            inside.len(),
-            inside.len() + outside.len(),
+            channels.len(),
+            channels.len() + outside.len(),
             outside.len(),
             usable_hz / 1e6,
             tune_center / 1e6,
@@ -1301,15 +2071,24 @@ fn follow_grants(
         );
     }
     let mut repo = shared.repo();
-    for (call, evs) in &writes {
+    for (call, evs, continued) in &writes {
         if let Err(e) = repo.put_call(call) {
             inc(&c.errors);
             eprintln!("hk-pipeline: trunk-cc call: {e}");
             continue;
         }
-        inc(&c.cc_calls);
+        if *continued {
+            // Not a new call: the same row, grown by what this pass observed.
+            inc(&c.cc_calls_continued);
+        } else {
+            inc(&c.cc_calls);
+        }
         if call.t_end.is_some() {
             inc(&c.cc_calls_closed);
+        } else if call.observed_until.is_some() {
+            // Watched, and still keyed when the window ran out. Written open and TRUNCATED, never
+            // closed at the window's edge — the boundary the radio never produced.
+            inc(&c.cc_calls_truncated);
         }
         for ev in evs {
             if let Err(e) = repo.append_grant(ev) {
@@ -1333,6 +2112,7 @@ struct AttachInput<'a> {
     fco: f64,
     protocol: TrunkProtocol,
     grid: Option<GridFit>,
+    alias: ReceiverAlias,
     tune_center_hz: f64,
     raster_hz: f64,
     t: Timestamp,
@@ -1407,6 +2187,7 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
         offset_hz: g.offset_hz,
         concentration: g.concentration,
         ppm: 1e6 * g.offset_hz / input.tune_center_hz,
+        alias: Some(input.alias),
     });
     let obs = CcObservation {
         center_hz: input.candidate.center_hz,
@@ -1453,6 +2234,69 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
     }
 }
 
+/// The absolute receiver offsets a pass's alias search tries, Hz: every alias of the receiver's
+/// clock within the crystal's bound, with the tuned centre's own phase against the grid removed
+/// first via `channel_hz`, one granted frequency (T-560; see [`clock_offset_mod_grid`]).
+fn receiver_aliases(grid_offset: f64, raster: f64, tune_center: f64, channel_hz: f64) -> Vec<f64> {
+    let clock = clock_offset_mod_grid(grid_offset, raster, tune_center, channel_hz);
+    grid_aliases(clock, raster, tune_center, RECEIVER_CLOCK_BOUND_PPM)
+}
+
+/// Records the receiver clock a pass's alias search settled as C05 [`CalibrationState`] for
+/// `device_id` (T-560; docs/19 §7.6a), and returns the row written, if one was.
+///
+/// **Only a resolved alias is a clock.** The grid fit alone is known modulo the raster and
+/// includes where the tuned centre sits against the grid, so it is never recorded as ppm; the
+/// alias is the absolute offset the crystal's bound and the granted channels' energy chose
+/// ([`plan_follow`]). An unresolved or untried pass records nothing rather than a guess.
+///
+/// **Sign.** [`ReceiverAlias::offset_hz`] is where an emission *lands* relative to its transmit
+/// frequency; [`CalibrationState::ppm`] is the oscillator's own error, positive = fast. A fast
+/// local oscillator puts every emission LOW, so `ppm = −offset / f`: the unit docs/19 §7.6a
+/// measured, whose emissions sat 8.2 kHz low at 852 MHz ("−9.6 ppm" as an offset), is an
+/// oscillator **+9.6 ppm fast**.
+///
+/// **Recorded once, not per pass.** A new version is written only when no raster calibration is
+/// on record for the device or the measurement has moved by more than [`RASTER_TOLERANCE_HZ`] at
+/// this centre — a smaller change cannot move any raster assignment, and re-writing it every
+/// half-second pass would bury the version history in noise. A new version `supersedes` the last.
+fn record_receiver_clock(
+    repo: &mut hk_model::Repository,
+    device_id: &str,
+    alias: &ReceiverAlias,
+    tune_center_hz: f64,
+    t: Timestamp,
+) -> Result<Option<CalibrationState>, hk_model::RepoError> {
+    if alias.state != AliasState::Resolved {
+        return Ok(None);
+    }
+    let Some(offset_ppm) = alias.ppm.filter(|p| p.is_finite()) else {
+        return Ok(None);
+    };
+    let ppm = -offset_ppm;
+    let prior =
+        repo.latest_calibration_state_for_device(device_id, &CalibrationMethod::LmrRaster)?;
+    let unchanged = prior
+        .as_ref()
+        .is_some_and(|p| (p.ppm - ppm).abs() * 1e-6 * tune_center_hz.abs() <= RASTER_TOLERANCE_HZ);
+    if unchanged {
+        return Ok(None);
+    }
+    let cal = CalibrationState {
+        id: CalibrationStateId::new(),
+        supersedes: prior.map(|p| p.id),
+        device_id: device_id.to_owned(),
+        ppm,
+        method: CalibrationMethod::LmrRaster,
+        measured_at: t,
+        valid: None,
+        temperature_c: None,
+        power_table: Vec::new(),
+    };
+    repo.insert_calibration_state(&cal)?;
+    Ok(Some(cal))
+}
+
 /// Fits the receiver's own offset from the `raster_hz` channel grid, over `buf` (T-546; docs/19
 /// §7.6a, §4.4 step 1).
 ///
@@ -1464,7 +2308,8 @@ fn attach_to_inventory(shared: &Shared, repo: &mut hk_model::Repository, input: 
 ///
 /// **The fit is modulo the raster, and that is all the data says.** It re-aligns the *grid*; it
 /// does not say which grid line an emission is on, so it is applied to the hunt's own channel
-/// arithmetic and never to a frequency that is already unambiguous (see [`follow_grants`]).
+/// arithmetic and never directly to a frequency that is already unambiguous: reaching one (a
+/// grant) goes through the alias [`plan_follow`] resolves (T-628).
 fn grid_fit(buf: &[Complex<i8>], fs: f64, raster_hz: f64) -> Option<GridFit> {
     let n = SWEEP_FFT_LEN;
     let frames = buf.len() / n;
@@ -1628,6 +2473,105 @@ mod tests {
         assert!(at(7) < MIN_CC_FCO, "empty channel: fco {:.3}", at(7));
     }
 
+    /// docs/19 §7.6a's own capture, through the hunt's arithmetic: tuned to 852.456 MHz (itself
+    /// 6 kHz off the 851.0125 + k·12.5 kHz raster) on a HackRF whose emissions all land 9.6 ppm
+    /// low. Blind, from the IQ alone: every on-raster emission still fits the raster (none is
+    /// reported off-raster), and the alias search is offered the receiver's TRUE clock — which it
+    /// is not if the tuned centre's own phase is left in the fit (T-560).
+    #[test]
+    fn a_minus_9_6_ppm_receiver_off_a_channel_still_fits_the_raster_and_offers_its_true_clock() {
+        let (fs, raster) = (500_000.0, 12_500.0);
+        let tune = 852.456e6;
+        let clock = -9.6e-6 * tune; // -8184 Hz: where every emission lands, relative to truth
+        // Four real channels on the published grid, including the one granted below.
+        let channels = [852.4625e6, 852.4375e6, 852.5e6, 852.375e6];
+        let buf = scene(1 << 17, fs, &channels.map(|f| (f - tune + clock, 1.0)));
+        let g = grid_fit(&buf, fs, raster).expect("four on-grid emissions concentrate");
+        let origin = tune + g.offset_hz;
+        for f in channels {
+            let seen = f + clock;
+            let fit = best_lmr_raster(seen, origin, RASTER_TOLERANCE_HZ);
+            assert!(
+                fit.is_some(),
+                "{:.4} MHz (seen at {:.4}) reported OFF-raster against origin {:.4} MHz",
+                f / 1e6,
+                seen / 1e6,
+                origin / 1e6
+            );
+            // And without the fit, the uncorrected grid rejects it: this is what T-546 fixed.
+            assert!(best_lmr_raster(seen, tune, RASTER_TOLERANCE_HZ).is_none());
+        }
+        let aliases = receiver_aliases(g.offset_hz, raster, tune, channels[0]);
+        assert!(
+            aliases.iter().any(|&a| (a - clock).abs() < 300.0),
+            "the true clock {clock:.0} Hz is not among the aliases tried: {aliases:?} (grid fit \
+             {:+.0} Hz)",
+            g.offset_hz
+        );
+    }
+
+    fn resolved(offset_hz: f64, tune: f64) -> ReceiverAlias {
+        ReceiverAlias {
+            state: AliasState::Resolved,
+            evidence: AliasEvidence::GrantedChannelEnergy,
+            offset_hz: Some(offset_hz),
+            ppm: Some(1e6 * offset_hz / tune),
+            bound_ppm: RECEIVER_CLOCK_BOUND_PPM,
+            candidates: 3,
+            targets: 2,
+            occupied: 2,
+            runner_up: 0,
+        }
+    }
+
+    /// The settled clock is C05 calibration state, with its provenance, recorded ONCE and read
+    /// back rather than re-derived; it is re-versioned only when it moves (T-560).
+    #[test]
+    fn a_resolved_clock_is_recorded_once_as_calibration_state_and_superseded_when_it_moves() {
+        let mut repo = hk_model::Repository::open_in_memory().unwrap();
+        let (dev, tune) = ("hackrf:t-560", 852.456e6);
+        let t = Timestamp::from_unix_nanos(1_000);
+        let first = record_receiver_clock(&mut repo, dev, &resolved(-8_184.0, tune), tune, t)
+            .unwrap()
+            .expect("a resolved alias is a measured clock");
+        // Emissions 9.6 ppm LOW = an oscillator 9.6 ppm FAST, in CalibrationState's convention.
+        assert!((first.ppm - 9.6).abs() < 0.01, "{}", first.ppm);
+        assert_eq!(first.method, CalibrationMethod::LmrRaster);
+        assert_eq!(first.device_id, dev);
+        assert_eq!(first.measured_at, t);
+        assert_eq!(first.supersedes, None);
+        let stored = repo
+            .latest_calibration_state_for_device(dev, &CalibrationMethod::LmrRaster)
+            .unwrap();
+        assert_eq!(stored.as_ref(), Some(&first));
+
+        // The next passes measure the same clock within the raster tolerance: nothing is written.
+        for jitter in [-300.0, 0.0, 450.0] {
+            let again =
+                record_receiver_clock(&mut repo, dev, &resolved(-8_184.0 + jitter, tune), tune, t);
+            assert_eq!(again.unwrap(), None, "re-recorded at {jitter:+} Hz");
+        }
+        // Unresolved or never-tried passes are not clocks.
+        let mut unresolved = resolved(4_316.0, tune);
+        unresolved.state = AliasState::Unresolved;
+        assert_eq!(
+            record_receiver_clock(&mut repo, dev, &unresolved, tune, t).unwrap(),
+            None
+        );
+
+        // A clock that has really moved (a warmer crystal, a different receiver on the port) is a
+        // new version that names the one it replaces.
+        let moved = record_receiver_clock(&mut repo, dev, &resolved(-4_000.0, tune), tune, t)
+            .unwrap()
+            .expect("moved by more than the raster tolerance");
+        assert_eq!(moved.supersedes, Some(first.id));
+        assert_eq!(
+            repo.latest_calibration_state_for_device(dev, &CalibrationMethod::LmrRaster)
+                .unwrap(),
+            Some(moved)
+        );
+    }
+
     /// The age half of C23's stale-IDEN pitfall, at the row it produces (T-268).
     ///
     /// The e2e suite proves the *unknown*-identifier refusal blind through the device; this proves
@@ -1750,6 +2694,128 @@ mod tests {
             2.0 * SILENCE_TIMEOUT_S < pass_window_s,
             "a {pass_window_s} s pass must fit a keying and the silence that closes it"
         );
+    }
+
+    /// T-308: the bound on continuing a call across passes is the silence timeout **itself**, and
+    /// the duty cycle the built-in hunt runs at is far outside it — so a long transmission is
+    /// recorded as truncated rather than joined across nine unwatched seconds, and never closed at
+    /// the window's edge.
+    #[test]
+    fn a_call_is_continued_across_passes_only_over_a_gap_no_end_could_hide_in() {
+        // Not a second threshold: one rule, applied whether or not the receiver was looking.
+        assert_eq!(
+            CONTINUATION_GAP_S, SILENCE_TIMEOUT_S,
+            "the gap a call may be joined across is the same silence that would have ended it"
+        );
+        // The built-in `trunk-cc-hunt` spec: 0.5 s of every 10 s, so 9.5 s is unwatched.
+        let (window_s, period_s) = (0.5_f64, 10.0_f64);
+        let duty_gap_s = period_s - window_s;
+        assert!(
+            duty_gap_s > 100.0 * CONTINUATION_GAP_S,
+            "the ordinary gap is {duty_gap_s} s, {:.0}x the bound: continuation must NOT fire on              a duty-cycled hunt, because that gap can hold a whole end and a new call",
+            duty_gap_s / CONTINUATION_GAP_S
+        );
+
+        let system = TrunkSystemId::new();
+        let ns = |s: f64| Timestamp::from_unix_nanos((s * 1e9) as i64);
+        let mut g = GrantEvent::new(system, GrantKind::Grant, ns(0.0));
+        g.talkgroup = Some("4242".into());
+        g.f_hz = Some(851.075e6);
+        // What the previous pass left: watched to 1.0 s, still keyed, no end observed.
+        let mut prev = CallRecord::from_grant(&g, false);
+        prev.t_start = ns(0.6);
+        prev.observed_until = Some(ns(1.0));
+        assert!(prev.duration_is_lower_bound(), "truncated, not ended");
+
+        // Gaps inside the bound join; the duty cycle's gap does not.
+        for gap in [0.0, CONTINUATION_GAP_S / 2.0, CONTINUATION_GAP_S] {
+            assert!(
+                continues_truncated(&prev, &g, ns(1.0 + gap), true),
+                "a {gap} s unobserved gap cannot have hidden an end"
+            );
+        }
+        for gap in [CONTINUATION_GAP_S * 1.5, duty_gap_s] {
+            assert!(
+                !continues_truncated(&prev, &g, ns(1.0 + gap), true),
+                "{gap} s unwatched can hold an end, a new grant and a new call"
+            );
+        }
+
+        // A start the receiver actually WATCHED happen is a measurement, not a continuation.
+        assert!(
+            !continues_truncated(&prev, &g, ns(1.05), false),
+            "the channel was seen going from silent to keyed; that start stands"
+        );
+        // A call whose end was observed is over, and one never watched has no boundary to
+        // continue from.
+        let mut ended = prev.clone();
+        ended.t_end = Some(ns(1.0));
+        assert!(!continues_truncated(&ended, &g, ns(1.05), true));
+        let mut never_watched = prev.clone();
+        never_watched.observed_until = None;
+        assert!(!continues_truncated(&never_watched, &g, ns(1.05), true));
+        // Time never runs backwards into a continuation either.
+        assert!(!continues_truncated(&prev, &g, ns(0.95), true));
+
+        // Where both name a talkgroup they must agree; an absent one is not evidence of
+        // difference, so it neither joins nor splits.
+        let mut other = g.clone();
+        other.talkgroup = Some("7".into());
+        assert!(!continues_truncated(&prev, &other, ns(1.05), true));
+        other.talkgroup = None;
+        assert!(continues_truncated(&prev, &other, ns(1.05), true));
+    }
+
+    /// T-308: the three answers a followed call can give about its end, and the one it may never
+    /// give — an end at the window's edge that nothing measured.
+    #[test]
+    fn an_unfinished_call_reads_as_truncated_and_never_as_an_observed_end() {
+        let system = TrunkSystemId::new();
+        let ns = |s: f64| Timestamp::from_unix_nanos((s * 1e9) as i64);
+        let mut g = GrantEvent::new(system, GrantKind::Grant, ns(0.0));
+        g.f_hz = Some(851.075e6);
+
+        // Still keyed when the buffered window (1.0 s) ran out.
+        let mut open = CallRecord::from_grant(&g, false);
+        open.t_start = ns(0.6);
+        open.observed_until = Some(ns(1.0));
+        push_reason(&mut open.reasons, WINDOW_ENDED);
+        open.validate().expect("a writable row");
+        assert_eq!(
+            open.ending(),
+            hk_model::CallEnding::Truncated {
+                observed_until: ns(1.0)
+            }
+        );
+        assert!(!open.end_is_observed());
+        assert_eq!(open.duration_ns(), None, "no end was measured");
+        assert_eq!(
+            open.observed_duration_ns(),
+            Some(400_000_000),
+            "0.4 s is how long it was WATCHED; the call may have run for minutes"
+        );
+
+        // The same call closed by an observed silence is a different claim entirely.
+        let mut closed = open.clone();
+        closed.t_end = Some(ns(0.9));
+        closed.reasons.retain(|r| r != WINDOW_ENDED);
+        push_reason(&mut closed.reasons, SILENCE_TIMEOUT);
+        closed.validate().expect("a writable row");
+        assert_eq!(closed.ending(), hk_model::CallEnding::Observed(ns(0.9)));
+        assert!(closed.end_is_observed() && !closed.duration_is_lower_bound());
+
+        // And a reason list cannot grow a copy per pass: a call written five times still says
+        // each thing once, so it never hits CALL_REASONS_MAX and starts dropping reasons.
+        let mut c = open.clone();
+        for _ in 0..5 {
+            push_reason(&mut c.reasons, WINDOW_ENDED);
+            push_reason(&mut c.reasons, CONTINUED);
+        }
+        assert_eq!(
+            c.reasons,
+            vec![WINDOW_ENDED.to_owned(), CONTINUED.to_owned()]
+        );
+        assert!(c.reasons.len() < hk_model::CALL_REASONS_MAX);
     }
 
     /// The frame walk: a transmission ends only when the silence after it was actually observed,

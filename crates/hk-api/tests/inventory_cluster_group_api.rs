@@ -26,8 +26,8 @@ use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_context::signature::assign_emitter;
 use hk_model::signature::field;
 use hk_model::{
-    EmissionFeatures, EmitterId, Feat, Fingerprint, LinkTarget, Repository, Sighting, TimeRange,
-    Timestamp, TrackId, cluster_label, is_cluster_id,
+    ClusterState, EmissionFeatures, EmitterId, Feat, Fingerprint, LinkTarget, Repository, Sighting,
+    SignatureCluster, TimeRange, Timestamp, TrackId, cluster_label, is_cluster_id, new_cluster_id,
 };
 use serde_json::Value;
 
@@ -335,10 +335,10 @@ fn clustering_changes_nothing_on_the_wire_except_the_cluster_fields() {
     for id in &ids {
         let id = id.to_string();
         let (mut b, mut a) = (before[&id].clone(), after[&id].clone());
-        // The two fields this ticket is about are the *only* ones allowed to move.
+        // The cluster fields (T-320, and T-593 cluster_status) are the *only* ones allowed to move.
         assert!(a["cluster_group"].is_object(), "{a}");
         assert!(a["cluster_id"].is_string(), "{a}");
-        for key in ["cluster_id", "cluster_group"] {
+        for key in ["cluster_id", "cluster_group", "cluster_status"] {
             b.as_object_mut().unwrap().remove(key);
             a.as_object_mut().unwrap().remove(key);
         }
@@ -349,4 +349,177 @@ fn clustering_changes_nothing_on_the_wire_except_the_cluster_fields() {
     }
     // And the rows are still three rows: grouping shows duplication, it does not collapse it.
     assert_eq!(after.len(), before.len(), "a row disappeared");
+}
+
+/// **T-593: an explained absence is served, not silent.** Four rows all read `cluster_id: null`
+/// and `cluster_group: null`, for four different reasons the clusterer recorded — and on the wire
+/// they must be four different answers:
+///
+/// - a row with **two** comparable fields, below the three-field evidence floor → `abstained`,
+///   `too_few_fields`;
+/// - a row with a full vector sitting between two mutually incompatible clusters → `abstained`,
+///   `ambiguous` — declined for a *different* cause, and distinguishable from the floor;
+/// - a lone row with a full vector, which seeded a group still below the visibility floor →
+///   `pending` (no id: a guess with an id reads as a finding);
+/// - a row nothing was measured on, which the clusterer never decided about → `unassessed`.
+///
+/// Asserted by counting states and reasons over the served page, never on a clock. Without the
+/// field every one of these rows reads identically, which is the failure the ticket names.
+#[test]
+fn a_null_cluster_id_carries_why_and_the_floor_reads_differently_from_other_abstentions() {
+    let mut r = Repository::open_in_memory().unwrap();
+
+    // Two active clusters that genuinely disagree with each other (deviation 9600 vs 2400).
+    for deviation in [9600.0_f64, 2400.0] {
+        let mut c = SignatureCluster::new(new_cluster_id(), t(0));
+        c.centroid.fold_member(
+            &[
+                (field::SYMBOL_RATE_HZ, Feat::num(4800.0, 5.0, "c14")),
+                (field::OBW_HZ, Feat::num(36e3, 200.0, "c14")),
+                (
+                    field::DEVIATION_HZ,
+                    Feat::num(deviation, deviation * 0.001, "c14"),
+                ),
+            ]
+            .into_iter()
+            .map(|(n, f)| (n.to_owned(), f))
+            .collect(),
+            0.0,
+        );
+        c.state = ClusterState::Active;
+        r.put_cluster(&c).unwrap();
+    }
+
+    // Below the floor: two comparable fields, nothing else.
+    let thin = an_emitter(&mut r, 433.0e6);
+    store_measurement(
+        &mut r,
+        thin,
+        "thin",
+        &[
+            (field::SYMBOL_RATE_HZ, Feat::num(1200.0, 2.0, "c14")),
+            (field::OBW_HZ, Feat::num(12e3, 200.0, "c14")),
+        ],
+    );
+    // Between the two clusters, with a deviation sigma wide enough to reach both.
+    let between = an_emitter(&mut r, 434.0e6);
+    store_measurement(
+        &mut r,
+        between,
+        "between",
+        &[
+            (field::SYMBOL_RATE_HZ, Feat::num(4800.0, 5.0, "c14")),
+            (field::OBW_HZ, Feat::num(36e3, 200.0, "c14")),
+            (field::DEVIATION_HZ, Feat::num(6000.0, 4000.0, "c14")),
+        ],
+    );
+    // A full vector like nothing else: it seeds its own group, which is not yet visible.
+    let lone = an_emitter(&mut r, 435.0e6);
+    store_measurement(
+        &mut r,
+        lone,
+        "lone",
+        &measurement(300.0, 150_000.0, 30.0, "hackrf:A"),
+    );
+    // Nothing measured: the clusterer has nothing to decide.
+    let blank = an_emitter(&mut r, 436.0e6);
+
+    let decided: Vec<_> = [thin, between, lone, blank]
+        .into_iter()
+        .map(|e| assign_emitter(&mut r, e, t(20)).unwrap().map(|a| a.reason))
+        .collect();
+    assert_eq!(
+        decided,
+        vec![
+            Some("too_few_fields"),
+            Some("ambiguous"),
+            Some("seeded"),
+            None
+        ],
+        "the scene must set up the four cases it claims to"
+    );
+
+    let (server, _repo) = serve(r);
+    let rows = rows(server.local_addr());
+    let status = |e: EmitterId| rows[&e.to_string()]["cluster_status"].clone();
+
+    // Every one of the four is a bare null to `cluster_id` and `cluster_group`…
+    for e in [thin, between, lone, blank] {
+        let row = &rows[&e.to_string()];
+        assert_eq!(row["cluster_id"], Value::Null, "{row}");
+        assert_eq!(row["cluster_group"], Value::Null, "{row}");
+    }
+
+    // …and `cluster_status` tells them apart.
+    let s = status(thin);
+    assert_eq!(s["state"], "abstained", "{s}");
+    assert_eq!(
+        s["reason"], "too_few_fields",
+        "the floor is named on the wire: {s}"
+    );
+    assert_eq!(s["t_s"].as_f64(), Some(1_789_000_020.0), "{s}");
+
+    let s = status(between);
+    assert_eq!(s["state"], "abstained", "{s}");
+    assert_eq!(
+        s["reason"], "ambiguous",
+        "a different cause reads that cause: {s}"
+    );
+
+    let s = status(lone);
+    assert_eq!(s["state"], "pending", "{s}");
+    assert_eq!(s["reason"], "seeded", "{s}");
+
+    let s = status(blank);
+    assert_eq!(s["state"], "unassessed", "{s}");
+    assert_eq!(s["reason"], Value::Null, "{s}");
+    assert_eq!(s["t_s"], Value::Null, "{s}");
+
+    // Counted over the page: four rows that `cluster_id` cannot tell apart are four distinct
+    // (state, reason) pairs here, and exactly one of them names the evidence floor.
+    let pairs: BTreeSet<(String, String)> = [thin, between, lone, blank]
+        .into_iter()
+        .map(|e| {
+            let s = status(e);
+            (s["state"].to_string(), s["reason"].to_string())
+        })
+        .collect();
+    assert_eq!(pairs.len(), 4, "explained absences collapsed: {pairs:?}");
+    let floor = rows
+        .values()
+        .filter(|r| r["cluster_status"]["reason"] == "too_few_fields")
+        .count();
+    assert_eq!(floor, 1, "exactly the sub-floor row names the floor");
+    let null_ids = rows.values().filter(|r| r["cluster_id"].is_null()).count();
+    assert_eq!(null_ids, 4);
+}
+
+/// A visibly clustered row says so, and how it got there — `cluster_status` never contradicts
+/// `cluster_id`: `clustered` exactly when the id is served.
+#[test]
+fn cluster_status_agrees_with_cluster_id_on_every_row() {
+    let (repo, _ids) = two_groups_and_a_loner();
+    let (server, _repo) = serve(repo);
+    let rows = rows(server.local_addr());
+    let mut clustered = 0;
+    for r in rows.values() {
+        let s = &r["cluster_status"];
+        assert!(
+            s.is_object(),
+            "an unwithheld row always explains itself: {r}"
+        );
+        assert_eq!(
+            s["state"] == "clustered",
+            r["cluster_id"].is_string(),
+            "cluster_status and cluster_id disagree: {r}"
+        );
+        if s["state"] == "clustered" {
+            clustered += 1;
+            assert!(
+                matches!(s["reason"].as_str(), Some("joined" | "seeded")),
+                "{s}"
+            );
+        }
+    }
+    assert_eq!(clustered, 6, "both groups of three read clustered");
 }

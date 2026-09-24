@@ -9,10 +9,23 @@ use serde_json::Value;
 use crate::fields::{Display, FieldMap, is_field_path};
 use crate::param::{BlockDescriptor, Catalogue, ParamSchema, Params};
 use crate::port::PortType;
-use crate::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSION, is_id};
+use crate::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSIONS, is_id};
 
 /// Block kind of the multi-channel merge point (ADR-0011 §2.5).
 pub const FOLLOW_HOPS_BLOCK: &str = "follow_hops";
+
+/// Block kind of the audio sink (ADR-0011 §8.4): the catalogue's first sink, an input and no
+/// outputs. An `audio` output names exactly one such node.
+pub const AUDIO_OUT_BLOCK: &str = "audio_out";
+
+/// The backlog a `live-edge` reader tolerates when the recipe does not say (ADR-0011 §8.5):
+/// Listen's per-consumer queue, ≈ 0.6 s.
+pub const DEFAULT_LIVE_EDGE_BACKLOG_S: f64 = 0.6;
+
+/// Largest `input.liveness.max_backlog_s` a recipe may declare, s. Beyond it "live" means
+/// nothing a listener would recognise, and the pipeline's own ring-protection skip applies
+/// anyway.
+pub const MAX_LIVE_EDGE_BACKLOG_S: f64 = 10.0;
 
 /// A recipe document (`recipes/<id>.recipe.json`, or a saved version in the data directory).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -20,7 +33,8 @@ pub const FOLLOW_HOPS_BLOCK: &str = "follow_hops";
 pub struct Recipe {
     /// `"hackriff.recipe"`.
     pub schema: String,
-    /// Format version (1).
+    /// Format version: 2, or 3 when the document uses a key schema 3 introduced
+    /// ([`crate::RECIPE_SCHEMA_VERSIONS`]).
     pub schema_version: u32,
     /// Stable id ([`is_id`]); names the recipe across versions.
     pub id: String,
@@ -92,6 +106,59 @@ pub struct InputSpec {
     /// One channel, or several followed by one pipeline.
     #[serde(default, skip_serializing_if = "is_single")]
     pub channels: ChannelsSpec,
+    /// How the pipeline's ring reader behaves when it falls behind (ADR-0011 §8.5, schema 3).
+    /// Absent: `live-edge` for a recipe with an `audio` output, `throughput` otherwise
+    /// ([`Recipe::liveness`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<LivenessSpec>,
+}
+
+impl InputSpec {
+    /// Whether `other` describes the same channel: every key but `liveness`, which changes how
+    /// the reader keeps up, not what it reads, so editing it re-plumbs nothing.
+    pub fn same_channel(&self, other: &InputSpec) -> bool {
+        self.port == other.port
+            && self.sample_rate_hz == other.sample_rate_hz
+            && self.bandwidth_hz == other.bandwidth_hz
+            && self.channels == other.channels
+    }
+}
+
+/// Reader liveness (ADR-0011 §8.5). **Latency is a contract for audio and merely a statistic for
+/// decoding.**
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LivenessSpec {
+    /// Policy.
+    pub mode: LivenessMode,
+    /// `live-edge` only: the backlog, s, beyond which the reader seeks to the live edge
+    /// (default [`DEFAULT_LIVE_EDGE_BACKLOG_S`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_backlog_s: Option<f64>,
+}
+
+/// Reader liveness policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LivenessMode {
+    /// Stay live: when the backlog exceeds `max_backlog_s`, seek the reader to the live edge,
+    /// count the skip and flag `DISCONTINUITY`. The default for an `audio` output.
+    LiveEdge,
+    /// Decode everything the ring still holds; the default for every other recipe. The runtime's
+    /// ring-protection skip (`hk_pipeline::recipes::runtime::MAX_BACKLOG_S`) still applies.
+    Throughput,
+}
+
+/// The liveness a pipeline runs with, after defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Liveness {
+    /// Seek to the live edge beyond this backlog, s.
+    LiveEdge {
+        /// Backlog bound, s.
+        max_backlog_s: f64,
+    },
+    /// Never seek for latency.
+    Throughput,
 }
 
 /// Channel topology.
@@ -190,6 +257,44 @@ pub enum OutputKind {
     Messages,
     /// A named default stage stream (any port is tappable on demand without declaring it).
     Stage,
+    /// Listenable audio from an `audio_out` sink node, served as the stream contract §12.2
+    /// audio profile on `audio/<pipeline>/<output>` (ADR-0011 §8.2, schema 3).
+    Audio,
+}
+
+impl OutputKind {
+    /// Wire token (`inspector`, `messages`, `stage`, `audio`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OutputKind::Inspector => "inspector",
+            OutputKind::Messages => "messages",
+            OutputKind::Stage => "stage",
+            OutputKind::Audio => "audio",
+        }
+    }
+}
+
+/// Channel layout of an `audio` output. Schema 3 accepts only `mono`; stereo is ADR-0015 §12.13
+/// (LP-9/LP-10), a block and a wire change of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AudioChannels {
+    /// One channel.
+    #[default]
+    Mono,
+}
+
+/// Header hints of an `audio` output (ADR-0011 §8.2): what the recipe says it demodulates.
+/// Measured values win wherever the runtime has them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioProfile {
+    /// Mode token for the header's `audio.mode` (`wfm`, `nbfm`, `am`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// De-emphasis time constant the chain applies, s, for `audio.deemphasis_s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deemphasis_s: Option<f64>,
 }
 
 /// Stage-stream rendering, reduced server-side (the UI is a thin client).
@@ -219,6 +324,12 @@ pub struct OutputSpec {
     /// `messages` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode: Option<DecodeMapping>,
+    /// `audio` only: channel layout (absent: mono).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<AudioChannels>,
+    /// `audio` only: header hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<AudioProfile>,
 }
 
 /// Parsed fields → Decode message (docs/07 §2.15).
@@ -418,6 +529,84 @@ impl Recipe {
         }
     }
 
+    /// The liveness this recipe runs with: the declared one, else `live-edge` at
+    /// [`DEFAULT_LIVE_EDGE_BACKLOG_S`] when it has an `audio` output, else `throughput`
+    /// (ADR-0011 §8.5).
+    pub fn liveness(&self) -> Liveness {
+        match &self.input.liveness {
+            Some(LivenessSpec {
+                mode: LivenessMode::Throughput,
+                ..
+            }) => Liveness::Throughput,
+            Some(LivenessSpec {
+                mode: LivenessMode::LiveEdge,
+                max_backlog_s,
+            }) => Liveness::LiveEdge {
+                max_backlog_s: max_backlog_s.unwrap_or(DEFAULT_LIVE_EDGE_BACKLOG_S),
+            },
+            None if self.has_audio_output() => Liveness::LiveEdge {
+                max_backlog_s: DEFAULT_LIVE_EDGE_BACKLOG_S,
+            },
+            None => Liveness::Throughput,
+        }
+    }
+
+    /// Whether the recipe declares an `audio` output.
+    pub fn has_audio_output(&self) -> bool {
+        self.outputs.iter().any(|o| o.kind == OutputKind::Audio)
+    }
+
+    /// The structural rules of one `audio` output (ADR-0011 §8.2): schema 3, `from` names an
+    /// `audio_out` node (a sink has no port to name), `channels` mono, profile hints sane.
+    fn audio_output(
+        &self,
+        i: usize,
+        o: &OutputSpec,
+        index: &BTreeMap<&str, usize>,
+        v3: bool,
+        e: &mut Errors,
+    ) {
+        let path = format!("outputs[{i}]");
+        if !v3 {
+            e.push(
+                format!("{path}.kind"),
+                "audio outputs need schema_version 3",
+            );
+        }
+        match PortRef::parse(&o.from) {
+            Some(PortRef::Node { node, port: None }) => {
+                if let Some(&j) = index.get(node)
+                    && self.nodes[j].block != AUDIO_OUT_BLOCK
+                {
+                    e.push(
+                        format!("{path}.from"),
+                        format!("an audio output reads an {AUDIO_OUT_BLOCK} node"),
+                    );
+                }
+            }
+            _ => e.push(
+                format!("{path}.from"),
+                format!("an audio output names an {AUDIO_OUT_BLOCK} node (a sink has no port)"),
+            ),
+        }
+        if let Some(p) = &o.profile {
+            if p.mode
+                .as_deref()
+                .is_some_and(|m| !hk_stream::policy::is_token(m))
+            {
+                e.push(format!("{path}.profile.mode"), "must be a token");
+            }
+            if p.deemphasis_s
+                .is_some_and(|t| !(t.is_finite() && (0.0..=1e-3).contains(&t)))
+            {
+                e.push(
+                    format!("{path}.profile.deemphasis_s"),
+                    "must be in [0, 1e-3] s",
+                );
+            }
+        }
+    }
+
     /// Validation that needs no block catalogue: schema, ids, references, acyclicity, field
     /// maps, output kinds, `follow_hops` placement, content policy, refinement target.
     pub fn validate_structure(&self) -> Result<(), Vec<RecipeError>> {
@@ -430,8 +619,31 @@ impl Recipe {
         if self.schema != RECIPE_SCHEMA {
             e.push("schema", format!("expected \"{RECIPE_SCHEMA}\""));
         }
-        if self.schema_version != RECIPE_SCHEMA_VERSION {
+        if !RECIPE_SCHEMA_VERSIONS.contains(&self.schema_version) {
             e.push("schema_version", "unsupported recipe format version");
+        }
+        // Keys schema 3 introduced (ADR-0011 §8.6) are errors in an older document, exactly as
+        // an unknown field would have been.
+        let v3 = self.schema_version >= 3;
+        if self.input.liveness.is_some() && !v3 {
+            e.push("input.liveness", "input.liveness needs schema_version 3");
+        }
+        if let Some(l) = &self.input.liveness {
+            match (l.mode, l.max_backlog_s) {
+                (LivenessMode::Throughput, Some(_)) => e.push(
+                    "input.liveness.max_backlog_s",
+                    "only a live-edge reader has a backlog bound",
+                ),
+                (LivenessMode::LiveEdge, Some(b))
+                    if !(b.is_finite() && b > 0.0 && b <= MAX_LIVE_EDGE_BACKLOG_S) =>
+                {
+                    e.push(
+                        "input.liveness.max_backlog_s",
+                        format!("must be in (0, {MAX_LIVE_EDGE_BACKLOG_S}] s"),
+                    )
+                }
+                _ => {}
+            }
         }
         if !is_id(&self.id) {
             e.push("id", "ids are [a-z0-9_-]{1,64}");
@@ -531,8 +743,18 @@ impl Recipe {
             ChannelsSpec::Single => {}
         }
         let mut out_ids = BTreeSet::new();
+        let mut audio_outputs = 0;
         for (i, o) in self.outputs.iter().enumerate() {
             let path = format!("outputs[{i}]");
+            if o.kind == OutputKind::Audio {
+                audio_outputs += 1;
+                self.audio_output(i, o, &index, v3, e);
+            } else if o.channels.is_some() || o.profile.is_some() {
+                e.push(
+                    format!("{path}.kind"),
+                    "only audio outputs have channels and a profile",
+                );
+            }
             if !is_id(&o.id) || !out_ids.insert(o.id.as_str()) {
                 e.push(
                     format!("{path}.id"),
@@ -601,6 +823,34 @@ impl Recipe {
         }
         if self.outputs.is_empty() {
             e.push("outputs", "a recipe needs at least one output");
+        }
+        if audio_outputs > 1 {
+            // Liveness and the listener budget are per pipeline (ADR-0011 §8.5, §8.8).
+            e.push("outputs", "at most one audio output per recipe");
+        }
+        let sinks = self
+            .nodes
+            .iter()
+            .filter(|n| n.block == AUDIO_OUT_BLOCK)
+            .count();
+        if sinks > audio_outputs {
+            e.push(
+                "nodes",
+                "an audio_out node is the sink of exactly one audio output",
+            );
+        }
+        if audio_outputs > 0 && !self.output_policy.content_class.permits_content() {
+            // It would serve permanently empty audio (ADR-0011 §8.3).
+            e.push(
+                "output_policy.content_class",
+                "a recipe with an audio output needs a class that permits content",
+            );
+        }
+        if audio_outputs > 0 && !matches!(self.input.channels, ChannelsSpec::Single) {
+            e.push(
+                "input.channels",
+                "audio outputs follow one channel, not follow-hops",
+            );
         }
         if !self.output_policy.content_class.permits_content()
             && self.output_policy.metadata_keys.is_none()
@@ -709,6 +959,23 @@ impl Recipe {
                 match self.source(&r, &index, &descriptors, &out_types) {
                     Err(m) => e.push(path, m),
                     Ok((from, ty)) => {
+                        // A diagnostic output is a presentation tap (a `stage` output), never a
+                        // data path: wiring one into a node would add an unreviewed port type
+                        // by the back door (ADR-0011 §9.2, T-609 — `psk_demod.symbols`).
+                        let diagnostic = match &from {
+                            Endpoint::Node { node, port } => index
+                                .get(node.as_str())
+                                .and_then(|&j| descriptors[j])
+                                .and_then(|sd| sd.output(port))
+                                .is_some_and(|p| p.diagnostic),
+                            Endpoint::Input => false,
+                        };
+                        if diagnostic {
+                            e.push(
+                                path.clone(),
+                                "a diagnostic output is a tap for outputs[], not a node input",
+                            );
+                        }
                         if !spec.types.contains(&ty) {
                             e.push(
                                 path,
@@ -755,6 +1022,21 @@ impl Recipe {
             out_types[i] = Some(types);
         }
         for (i, o) in self.outputs.iter().enumerate() {
+            if o.kind == OutputKind::Audio {
+                // The sink itself is the output; `structure` checked it names an `audio_out`,
+                // and the node's own input wiring was typed above. A registered `audio_out`
+                // must really be a sink.
+                if let Some(PortRef::Node { node, .. }) = PortRef::parse(&o.from)
+                    && let Some(&j) = index.get(node)
+                    && descriptors[j].is_some_and(|d| !d.outputs.is_empty())
+                {
+                    e.push(
+                        format!("outputs[{i}].from"),
+                        "the audio sink has output ports",
+                    );
+                }
+                continue;
+            }
             let Ok((_, ty)) = self.source(&o.from, &index, &descriptors, &out_types) else {
                 e.push(format!("outputs[{i}].from"), "unresolvable source port");
                 continue;
@@ -810,6 +1092,7 @@ impl Recipe {
                         let mut main = d.outputs.iter().filter(|p| !p.diagnostic);
                         match (main.next(), main.next()) {
                             (Some(p), None) => p.name.as_str(),
+                            (None, _) => return Err("a sink has no output to read"),
                             _ => return Err("source has several outputs; name the port"),
                         }
                     }
@@ -892,6 +1175,52 @@ mod tests {
         let mut v = minimal();
         v["nodse"] = json!([]);
         assert!(serde_json::from_value::<Recipe>(v).is_err());
+    }
+
+    #[test]
+    fn a_diagnostic_output_may_be_tapped_but_not_wired_into_a_node() {
+        // ADR-0011 §9.2 (T-609): `psk_demod.symbols` is a constellation tap. Wiring any
+        // diagnostic port into a node input would add a port type by the back door.
+        let mut cat = catalogue();
+        cat.push(BlockDescriptor {
+            name: "demod".into(),
+            version: 1,
+            group: "iq".into(),
+            doc: String::new(),
+            inputs: vec![PortSpec::new("in", PortType::Iq)],
+            outputs: vec![
+                PortSpec::new("out", PortType::Soft),
+                PortSpec::new("symbols", PortType::Iq).diagnostic(),
+            ],
+            params: vec![],
+            params_pinned: true,
+        });
+        let recipe = |from: &str| -> Recipe {
+            serde_json::from_value(json!({
+                "schema": "hackriff.recipe", "schema_version": 2, "id": "t", "version": 1,
+                "name": "T", "input": {"port": "iq"},
+                "nodes": [
+                    {"id": "d", "block": "demod"},
+                    {"id": "n", "block": "identity", "inputs": {"in": from}}
+                ],
+                "outputs": [
+                    {"id": "c", "kind": "stage", "from": "d.symbols"},
+                    {"id": "s", "kind": "stage", "from": "n"}
+                ],
+                "output_policy": {"content_class": "unrestricted"}
+            }))
+            .unwrap()
+        };
+        // Tapping it as a stage output, and wiring the main port, both validate.
+        recipe("d.out").validate(&cat).expect("main port wires");
+        recipe("d").validate(&cat).expect("default port wires");
+        let errors = recipe("d.symbols").validate(&cat).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.path == "nodes[1].inputs.in" && e.message.contains("diagnostic")),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -994,6 +1323,217 @@ mod tests {
             v
         });
         assert!(unknown.is_err(), "unknown mapping keys are errors");
+    }
+
+    fn audio_catalogue() -> Vec<BlockDescriptor> {
+        let mut cat = catalogue();
+        cat.push(BlockDescriptor {
+            name: "fm".into(),
+            version: 1,
+            group: "iq".into(),
+            doc: String::new(),
+            inputs: vec![PortSpec::new("in", PortType::Iq)],
+            outputs: vec![PortSpec::new("out", PortType::Real)],
+            params: vec![],
+            params_pinned: true,
+        });
+        cat.push(BlockDescriptor {
+            name: AUDIO_OUT_BLOCK.into(),
+            version: 1,
+            group: "audio".into(),
+            doc: String::new(),
+            inputs: vec![PortSpec::new("in", PortType::Real)],
+            outputs: vec![],
+            params: vec![],
+            params_pinned: true,
+        });
+        cat
+    }
+
+    /// A schema-3 WFM-shaped audio recipe: `iq` → `fm` → `audio_out`, one `audio` output.
+    fn audio_doc() -> Value {
+        json!({
+            "schema": "hackriff.recipe", "schema_version": 3, "id": "a", "version": 1,
+            "name": "A", "input": {"port": "iq", "sample_rate_hz": 240000},
+            "nodes": [{"id": "fm", "block": "fm"}, {"id": "out", "block": "audio_out"}],
+            "outputs": [{"id": "audio", "kind": "audio", "from": "out", "channels": "mono",
+                         "profile": {"mode": "wfm", "deemphasis_s": 75e-6}}],
+            "output_policy": {"content_class": "unrestricted"}
+        })
+    }
+
+    fn error_paths(v: Value) -> Vec<String> {
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        r.validate(&audio_catalogue())
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
+    }
+
+    /// ADR-0011 §8.2/§8.4/§8.6 (T-866): an `audio` output reads an `audio_out` sink, which may be
+    /// a graph leaf; it round-trips; and it defaults the pipeline to `live-edge` at 0.6 s.
+    #[test]
+    fn an_audio_output_reads_a_sink_and_defaults_to_live_edge() {
+        let r: Recipe = serde_json::from_value(audio_doc()).unwrap();
+        r.validate(&audio_catalogue()).expect("valid audio recipe");
+        assert!(r.has_audio_output());
+        assert_eq!(
+            r.liveness(),
+            Liveness::LiveEdge {
+                max_backlog_s: DEFAULT_LIVE_EDGE_BACKLOG_S
+            }
+        );
+        let round: Recipe = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+        assert_eq!(round, r, "round trip");
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["outputs"],
+            audio_doc()["outputs"],
+            "the audio keys serialise as written"
+        );
+        // A recipe with no audio output keeps today's behaviour.
+        let plain: Recipe = serde_json::from_value(minimal()).unwrap();
+        assert_eq!(plain.liveness(), Liveness::Throughput);
+    }
+
+    /// ADR-0011 §8.2: `from` names the sink itself (no port), the sink is an `audio_out`, at most
+    /// one audio output, mono only, and the sink cannot feed another node.
+    #[test]
+    fn audio_output_wiring_is_validated() {
+        let mut v = audio_doc();
+        v["outputs"][0]["from"] = "fm".into();
+        assert!(error_paths(v).contains(&"outputs[0].from".to_owned()));
+
+        let mut v = audio_doc();
+        v["outputs"][0]["from"] = "out.in".into();
+        assert!(error_paths(v).contains(&"outputs[0].from".to_owned()));
+
+        let mut v = audio_doc();
+        v["outputs"][0]["channels"] = "stereo".into();
+        assert!(
+            serde_json::from_value::<Recipe>(v).is_err(),
+            "schema 3 accepts only mono"
+        );
+
+        let mut v = audio_doc();
+        v["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "b", "kind": "audio", "from": "out"}));
+        assert!(error_paths(v).contains(&"outputs".to_owned()));
+
+        // A sink with no audio output, and a node reading a sink.
+        let mut v = audio_doc();
+        v["outputs"] = json!([{"id": "s", "kind": "stage", "from": "fm"}]);
+        assert!(error_paths(v).contains(&"nodes".to_owned()));
+        let mut v = audio_doc();
+        v["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "x", "block": "identity", "inputs": {"in": "out"}}));
+        v["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "s", "kind": "stage", "from": "x"}));
+        assert!(error_paths(v).contains(&"nodes[2].inputs.in".to_owned()));
+
+        // Only audio outputs carry channels / profile.
+        let mut v = audio_doc();
+        v["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "s", "kind": "stage", "from": "fm", "channels": "mono"}));
+        assert!(error_paths(v).contains(&"outputs[1].kind".to_owned()));
+
+        let mut v = audio_doc();
+        v["outputs"][0]["profile"] = json!({"mode": "not a token", "deemphasis_s": 1.0});
+        let p = error_paths(v);
+        assert!(p.contains(&"outputs[0].profile.mode".to_owned()), "{p:?}");
+        assert!(
+            p.contains(&"outputs[0].profile.deemphasis_s".to_owned()),
+            "{p:?}"
+        );
+    }
+
+    /// An audio output follows one channel: follow-hops recipes cannot declare one. (ADR-0011
+    /// §8.3's companion rule — an audio output under a class that forbids content is a
+    /// validation error — reads `ContentClass::permits_content`, which is dormant while content
+    /// gating is off, the default; that opt-in path is deliberately untested, hk-model
+    /// `content`.)
+    #[test]
+    fn audio_needs_a_single_channel() {
+        let mut v = audio_doc();
+        v["input"]["channels"] =
+            json!({"mode": "follow-hops", "channel_bandwidth_hz": 12500, "max_channels": 2});
+        assert!(error_paths(v).contains(&"input.channels".to_owned()));
+    }
+
+    /// ADR-0011 §8.6: schema 3's keys are errors in a version-2 document; a version-2 document
+    /// without them still reads; any other version is refused.
+    #[test]
+    fn schema_3_keys_need_schema_version_3() {
+        let mut v = audio_doc();
+        v["schema_version"] = 2.into();
+        assert!(error_paths(v).contains(&"outputs[0].kind".to_owned()));
+        let mut v = minimal();
+        v["input"]["liveness"] = json!({"mode": "throughput"});
+        let p = {
+            let r: Recipe = serde_json::from_value(v.clone()).unwrap();
+            r.validate_structure().unwrap_err()
+        };
+        assert!(p.iter().any(|e| e.path == "input.liveness"), "{p:?}");
+        v["schema_version"] = 3.into();
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        r.validate_structure().expect("liveness is a schema-3 key");
+        assert_eq!(r.liveness(), Liveness::Throughput);
+
+        let r: Recipe = serde_json::from_value(minimal()).unwrap();
+        r.validate_structure().expect("version 2 is still read");
+        for bad in [1, 4] {
+            let mut v = minimal();
+            v["schema_version"] = bad.into();
+            let r: Recipe = serde_json::from_value(v).unwrap();
+            assert!(
+                r.validate_structure()
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.path == "schema_version")
+            );
+        }
+    }
+
+    /// ADR-0011 §8.5: an explicit liveness wins over the audio default; a throughput reader has
+    /// no backlog bound; the bound is positive and capped.
+    #[test]
+    fn liveness_is_declared_and_bounded() {
+        let mut v = audio_doc();
+        v["input"]["liveness"] = json!({"mode": "live-edge", "max_backlog_s": 0.25});
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        r.validate(&audio_catalogue()).unwrap();
+        assert_eq!(
+            r.liveness(),
+            Liveness::LiveEdge {
+                max_backlog_s: 0.25
+            }
+        );
+        let mut v = audio_doc();
+        v["input"]["liveness"] = json!({"mode": "throughput"});
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        assert_eq!(r.liveness(), Liveness::Throughput);
+
+        for bad in [
+            json!({"mode": "throughput", "max_backlog_s": 1.0}),
+            json!({"mode": "live-edge", "max_backlog_s": 0.0}),
+            json!({"mode": "live-edge", "max_backlog_s": 11.0}),
+        ] {
+            let mut v = audio_doc();
+            v["input"]["liveness"] = bad;
+            assert!(error_paths(v).contains(&"input.liveness.max_backlog_s".to_owned()));
+        }
+        let mut v = audio_doc();
+        v["input"]["liveness"] = json!({"mode": "sometimes"});
+        assert!(serde_json::from_value::<Recipe>(v).is_err());
     }
 
     /// T-168 (ADR-0013 §4.9 gap 12): the per-node `doc` field is additive. A recipe written before

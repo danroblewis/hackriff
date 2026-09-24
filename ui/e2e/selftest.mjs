@@ -56,15 +56,31 @@ export const __selftestMark = __selftestPredicate(1);
   {
     name: "t454-ignore-the-cap",
     expect: "surface-nav.e2e.mjs",
-    what: "T-454: the client stops obeying the tile route's in-flight cap. The server answers 503 " +
-      "over cost.in_flight_limit, and the refusal reaches the user — a defect a client with a cap, " +
-      "an AbortController per request and measured cancellation still had.",
+    what: "T-454: the client stops obeying the tile route's in-flight cap — every address it wants " +
+      "goes on the wire at once. Since T-573 they ride in one or two batches, so the request count " +
+      "cannot see it; surface-nav counts outstanding ADDRESSES (T-846).",
     file: "surface/tilecache.ts",
+    // **Injected where the cap is OBEYED, not where it is first set** (T-846). This used to raise the
+    // constructor's starting cap to 64, and since T-630 the first tile answered clamps the ceiling
+    // back to the route's own `in_flight_limit`/`in_flight_share` — so the fault lived for one pump
+    // and then healed itself. `effectiveLimit` is the single number [[pump]] and the refresh lane
+    // compare against, so this is the client ignoring the cap for the whole session, as T-454's was.
+    //
+    // **And the per-viewport share with it**, because [[nextAddr]] divides `this.limit` between the
+    // viewports and would otherwise re-impose the cap one step down: measured with only
+    // `effectiveLimit` patched, the page never had more than 3 addresses out against a cap of 4.
     patch: (src) => {
-      const from = "this.ceiling = this.limit = Math.max(1, opts.inFlight ?? 4);";
-      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
-      return src.replace(from,
-        "this.ceiling = this.limit = 64; // injected by ui/e2e/selftest.mjs — ignore the server's cap");
+      const sites = [
+        ["    return this.silences > 0 ? 1 : this.limit;",
+          "    return 64; // injected by ui/e2e/selftest.mjs — ignore the route's cap"],
+        ["    const share = Math.max(1, Math.floor(this.limit / vs.length));",
+          "    const share = 64; // injected by ui/e2e/selftest.mjs — ignore the route's cap"],
+      ];
+      for (const [from, to] of sites) {
+        if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+        src = src.replace(from, to);
+      }
+      return src;
     },
   },
   {
@@ -91,6 +107,12 @@ export const __selftestMark = __selftestPredicate(1);
     // sits at the ceiling permanently and is refused for as long as it keeps rendering — the
     // difference between backpressure as a *probe* and backpressure as a *regime*, which is the
     // whole reason the bound is "none after convergence" rather than "none at all".
+    //
+    // **Caught since T-846 by surface-nav's injected-refusal test, not by the steady-state bound.**
+    // After T-573/T-630 the route refuses nothing on this fixture (batch workers retire on a 503; the
+    // share clamps the ceiling on every answer), so the steady-state bound judged an empty set and
+    // this fault stayed green. The new test puts one per-address 503 inside a real batch answer and
+    // requires the operating cap to fall across it — measured 4 -> 2 correct, 3 -> 3 with this fault.
     name: "t454-never-back-off",
     expect: "surface-nav.e2e.mjs",
     what: "T-454's controller removed: the client notices the 503 but does not halve its operating " +
@@ -130,6 +152,90 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // **The second standing fault for `fog-of-war.e2e.mjs`: the shadow ceiling lifted** (the
+    // deflake, 2026-09-23). That file's phase-3 brightness claim — a departed band is visibly
+    // dimmer than it was live — was the one going red in gates for a reason that was not this
+    // defect (a live baseline averaged over rows the store had not folded yet), and was fixed by
+    // measuring the live baseline over the band's own measured cells. That makes the baseline
+    // BRIGHTER on a bad run, so the claim must be shown still to see the defect it is for: T-520's
+    // defence 1 switched off, the ground drawn at the full ramp instead of `cmap(x) * gain`. The
+    // ink, the scanlines and every server-side claim are untouched; only the ceiling is gone.
+    name: "t520-shadow-ceiling-lifted",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-520 defence 1: the last-known tier is drawn at the full ramp instead of under its " +
+      "brightness ceiling, so a remembered carrier is as bright as a live one — the failure the " +
+      "ceiling exists to make impossible.",
+    file: "surface/cellrule.ts",
+    patch: (src) => {
+      const from = '{ kind: "shadow", gain: 0.32,';
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/cellrule.ts: SHADOW gain");
+      return src.replace(from, '{ kind: "shadow", gain: 1.0 /* injected by ui/e2e/selftest.mjs */,');
+    },
+  },
+  {
+    // **The third: never-swept spectrum drawn as nothing at all** (the deflake, 2026-09-23). Phase
+    // 4 now waits — counted in survey answers — for the survey's grey to reach the pane before it
+    // shoots, because on a busy box the grey's top trails the edge by more than a young pane is
+    // tall. A wait for the thing a claim asserts must still leave the claim able to fail: here the
+    // surface still skips the tile and still says "N never sampled", but draws nothing, so the
+    // pane is its not-loaded ground forever. Ten survey answers later the phase must go red as
+    // "band C drew NO grey at all".
+    name: "t580-survey-grey-never-drawn",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-580 rule 4: a place the coverage survey settles as never sampled is skipped (no tile " +
+      "request) but then not drawn either, so never-swept spectrum reads as 'not loaded' forever " +
+      "instead of THE grey.",
+    file: "surface/surface.ts",
+    patch: (src) => {
+      const from = "  private drawSurveyed(pane: PaneView, region: Box, rect: PaneRect): void {\n";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/surface.ts: drawSurveyed");
+      return src.replace(from, from + "    if (region) return; // injected by ui/e2e/selftest.mjs — the survey's grey is never drawn\n");
+    },
+  },
+  {
+    // **The fourth: a re-swept band that stays shadow** (review of the deflake, 2026-09-24). Phase 5
+    // waits for the shadow's ink to leave a re-swept pane and then asserts it has; this is the
+    // defect that assertion is for. The client remembers every frequency it has drawn as last-known
+    // since the radio was first retuned, and from then on keeps drawing that frequency's FRESH
+    // measurements as last-known too: the level is there, dimmed and scanlined as if it were an
+    // earlier time's, so a re-sweep never visibly restores the band.
+    //
+    // Armed by the retune rather than by the tiles' own contents, deliberately. Three versions keyed
+    // on what a tile holds (any shadow; measured-then-shadow in one column; that, before the tile's
+    // `as_of_s`) either armed at boot — a live band carries short shadow runs of its own (the rows
+    // between a tile's `as_of_s` and `shadow.edge_s`, clipped from the screen) — or never armed at
+    // all, so they tested phase 1 or nothing. The count of `POST /api/control/{window,center}` is
+    // read from a wrapper round the page's own `fetch`, which the API client calls lazily. Only the
+    // client changes; every server-side claim still passes.
+    name: "t520-reswept-band-stays-shadow",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-520/ADR-0020: a band the radio has come back to keeps being drawn as last-known — its " +
+      "fresh measurements dimmed and scanlined — so re-sweeping never visibly restores it.",
+    file: "surface/tile.ts",
+    patch: (src) => {
+      const shadowAt = "      if (Number.isFinite(sv)) { state[i] = CELL.SHADOW; value[i] = sv; } else { state[i] = CELL.UNOBSERVED; value[i] = NaN; }";
+      const levelAt = '    if (typeof v === "number" && Number.isFinite(v)) {\n';
+      const loop = "  for (let i = 0; i < n; i++) {\n    const s = cov(i);\n";
+      for (const a of [shadowAt, levelAt, loop]) {
+        if (!src.includes(a)) throw new Error(`selftest: anchor not found in surface/tile.ts: ${a.trim().slice(0, 60)}`);
+      }
+      const key = "Math.round(((__g.f_lo_hz ?? 0) + ((i % nf) + 0.5) * (__g.f_cell_hz ?? 0)) / 5e3)";
+      const prelude =
+        "// injected by ui/e2e/selftest.mjs — last-known sticks to a frequency once the radio has moved\n" +
+        "let __retunes = 0;\n" +
+        "{ const __f = globalThis.fetch.bind(globalThis);\n" +
+        "  globalThis.fetch = ((input: any, init?: any) => { if (/\\/api\\/control\\/(window|center)/.test(String(input?.url ?? input))) __retunes++; return __f(input, init); }) as typeof fetch; }\n" +
+        "const __departed = new Set<number>();\n";
+      return src
+        .replace("export function decodeTile(", prelude + "export function decodeTile(")
+        .replace(loop, "  const __g = (resp as any).grid ?? {};\n" + loop)
+        .replace(shadowAt, shadowAt.replace("state[i] = CELL.SHADOW; value[i] = sv;",
+          `state[i] = CELL.SHADOW; value[i] = sv; if (__retunes > 0) __departed.add(${key});`))
+        .replace(levelAt, levelAt +
+          `      if (__departed.has(${key})) { state[i] = CELL.SHADOW; value[i] = v; continue; }\n`);
+    },
+  },
+  {
     // **T-532, and the first standing fault for `canvas-journey.e2e.mjs`** (T-690). Same hole: the
     // file carries the live-edge grey claim and the grey-tracks-coverage claim and nothing ever
     // put either defect back.
@@ -139,6 +245,13 @@ export const __selftestMark = __selftestPredicate(1);
     // drawn from a plane that cannot speak about them — as UNOBSERVED, i.e. THE grey. That is the
     // pre-T-532 behaviour verbatim: measured 10-38 % of the live-edge zone grey before the fix and
     // 0.0 % after, over a band the server reports fully observed.
+    //
+    // **Its margin, since T-846.** Fresher tiles (T-573's batches) shrank the fault's grey band into
+    // the newest 6 % of the pane, which the zone then excluded, and the zone was judged on a mean:
+    // 4.2 % against a 5 % bound in one run, 0.4 % in another — a coin flip. The zone now starts at
+    // the top of the pane and is judged on its worst of eight frames: measured 10.5 % and 11.3 %
+    // worst frame with this fault (frames 0.0 / 6.9 / 10.5 and 1.6 / 1.5 / 4.1 / 8.0 / 11.3 %),
+    // 0.0 % in every frame without it — over 2x the 5 % bound on one side, zero on the other.
     name: "t532-draw-past-the-coverage-horizon",
     expect: "canvas-journey.e2e.mjs",
     what: "T-532: a tile is drawn beyond how far forward its own coverage evidence reaches, so the " +
@@ -252,6 +365,26 @@ export const __selftestMark = __selftestPredicate(1);
         "      // injected by ui/e2e/selftest.mjs — place each column 5 % of the span from its own frequency\n" +
         "      { f0Hz: box.f0Hz + c * colHz + span * 0.05, f1Hz: box.f0Hz + (c + 1) * colHz + span * 0.05," +
         " t0Ns: box.t0Ns, t1Ns: box.t1Ns },");
+    },
+  },
+  {
+    // **T-523, and the first standing fault for `live-edge.e2e.mjs` test 3** (T-846). The supervisor
+    // put it back by hand on 2026-09-23 and the file stayed green; nothing here re-checked it, so the
+    // file's claim to see this defect rested on the manual run T-523 made when it landed.
+    //
+    // The smallest edit that is the defect: the route's vocabulary widens back to "every status
+    // line", so a proxy's 502 reads as the route's own answer, and [[retryable]] makes the place
+    // terminal. That is the pre-T-523 predicate verbatim.
+    name: "t523-proxy-502-is-terminal",
+    expect: "live-edge.e2e.mjs",
+    what: "T-523: a 502 from a proxy between the client and `hk serve` is read as the route's own " +
+      "refusal, so a place the tunnel failed once is never asked for again and the pane draws an " +
+      "upscaled coarser ancestor there until something (the user's resize) re-addresses it.",
+    file: "surface/tilecache.ts",
+    patch: (src) => {
+      const from = "  return status < 500 || status === 500 || status === 501 || status === 503;";
+      if (!src.includes(from)) throw new Error(`selftest: anchor not found in tilecache.ts: ${from}`);
+      return src.replace(from, "  return true; // injected by ui/e2e/selftest.mjs — every status line is the route's");
     },
   },
   {
@@ -404,9 +537,15 @@ function build(fault) {
   return dist;
 }
 
-/** Run the real suite against a dist, and report which files failed. */
-function runSuite(dist) {
-  const r = spawnSync(process.execPath, [path.join(HERE, "run.mjs")], {
+/**
+ * Run the real suite against a dist, and report which files failed.
+ *
+ * `specs` narrows the run to those files (`--expected-only`, T-846). That is an ITERATION aid: it
+ * proves a fault turns its own guard red, and cannot prove no OTHER guard caught it instead, so the
+ * summary says which mode it ran in.
+ */
+function runSuite(dist, specs = []) {
+  const r = spawnSync(process.execPath, [path.join(HERE, "run.mjs"), ...specs], {
     cwd: UI_DIR, stdio: "pipe", encoding: "utf8",
     env: dist ? { ...process.env, HK_E2E_UI_DIST: dist } : process.env,
   });
@@ -427,14 +566,24 @@ function runSuite(dist) {
 const only = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const faults = FAULTS.filter((f) => only.length === 0 || only.some((o) => f.name.includes(o)));
 if (faults.length === 0) { console.error(`no fault matched; known: ${FAULTS.map((f) => f.name).join(", ")}`); process.exit(1); }
+// `--expected-only` (T-846): run just the guards the selected faults name, baseline included. A
+// whole-suite run per fault is ~13 specs x N faults; while re-aiming one fault that is hours for a
+// verdict about one file. The default stays the whole suite, because attribution ("the RIGHT guard
+// and no other") is only measurable there.
+const expectedOnly = process.argv.includes("--expected-only");
+const specs = expectedOnly
+  ? [...new Set(faults.flatMap((f) => (Array.isArray(f.expect) ? f.expect : [f.expect])))]
+  : [];
+if (expectedOnly) console.log(`selftest: --expected-only, running ${specs.join(", ")} (attribution to OTHER guards is not measured)`);
 
 // The baseline, first, because a fault whose guard is ALREADY red on this tree proves nothing about
 // the fault: the run would have been red either way. That distinction is the whole value of a
 // non-vacuity check, so it is measured rather than assumed.
 console.log("=== selftest: baseline (unmodified build) ===");
 const tBase = Date.now();
-const baseline = runSuite(null);
-console.log(baseline.out.split("\n").filter((l) => /^(e2e:|✔|✖|  \d)/.test(l)).join("\n"));
+const baseline = runSuite(null, specs);
+// Diagnostics (ℹ) too, as for each fault below: a guard that is already red says why only there.
+console.log(baseline.out.split("\n").filter((l) => /^(e2e:|✔|✖|ℹ|  \d)/.test(l)).join("\n"));
 console.log(`-> baseline ${baseline.status === 0 ? "GREEN" : `RED (${baseline.failedFiles.join(", ")})`}` +
   ` in ${((Date.now() - tBase) / 1000).toFixed(1)} s`);
 
@@ -443,7 +592,7 @@ for (const fault of faults) {
   console.log(`\n=== selftest: ${fault.name} ===\n${fault.what}\n`);
   const dist = build(fault);
   const t0 = Date.now();
-  const { status, out, failedFiles } = runSuite(dist);
+  const { status, out, failedFiles } = runSuite(dist, specs);
   const expects = Array.isArray(fault.expect) ? fault.expect : [fault.expect];
   const alreadyRed = expects.some((e) => baseline.failedFiles.includes(e));
   const caught = status !== 0;

@@ -141,8 +141,9 @@ use_cases:
   - context-feeds
   hardware_fit: needs-accessory
   accessory: small dish + LNA (2.8 GHz)
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a small dish and LNA at 2800 MHz to resolve the quiet Sun; the 8-bit front end with no preselector has no absolute NF, so treat the flux as a relative, site-calibrated number compared day-to-day against Penticton, not an absolute match to it.
   test_tier: field
 - id: SPACE-007
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -204,8 +205,9 @@ use_cases:
   - context-feeds
   hardware_fit: needs-accessory
   accessory: dish or Yagi (directional antenna) + LNA
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a directional antenna to resolve the Sun from sky background; the 8-bit front end with no preselector has no absolute NF and drifts with gain/temperature, so treat G/T as a relative, site-calibrated estimate rather than a lab-grade figure.
   test_tier: field
 - id: SPACE-010
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -222,8 +224,9 @@ use_cases:
   - context-feeds
   hardware_fit: needs-accessory
   accessory: Ku-band LNB + dish (IF 950-2150 MHz)
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Gated on a dish behind a Ku-band LNB; the LNB's own gain drift with temperature dominates the 8-bit front end's contribution, but neither is calibrated out of the box, so the outage depth is a relative drop against a same-day baseline, not an absolute-power measurement.
   test_tier: field
 - id: SPACE-011
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -952,10 +955,10 @@ use_cases:
   - spectrum-history
   - event-correlation
   - context-feeds
-  hardware_fit: needs-accessory
-  accessory: induction coil + soundcard/low-frequency ADC
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: null
+  fit_note: 'User decision 2026-09-23 (T-282): out-of-band. 3-50 Hz needs an induction-coil magnetometer and a low-frequency ADC - a separate non-radio instrument beside the HackRF, not an accessory that brings the signal into its 1 MHz-6 GHz range.'
   test_tier: field
 - id: SPACE-043
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1086,10 +1089,10 @@ use_cases:
   - radiometry
   - spectrum-history
   - event-correlation
-  hardware_fit: needs-accessory
-  accessory: induction coil magnetometer + low-frequency ADC
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: 0.5-10 Hz is below soundcard response; borderline non-radio instrument.
+  fit_note: 'User decision 2026-09-23 (T-282): out-of-band. 0.5-10 Hz is below soundcard response and needs an induction-coil magnetometer with a low-frequency ADC - a separate non-radio instrument, not an accessory for this device.'
   test_tier: field
 - id: SPACE-049
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1133,8 +1136,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: VLF/LF front end + soundcard for 10 kHz-1 MHz
-  fit_flags: null
-  fit_note: The 1 MHz-1 GHz portion is native; P.372 curves are built-in reference data.
+  fit_flags:
+  - marginal-8bit
+  fit_note: The 1 MHz-1 GHz portion is native; P.372 curves are built-in reference data. The 8-bit HackRF has no preselector, so urban IMD and out-of-band overload raise the measured floor above true ambient noise; report the survey as this receiver's floor, not an absolute site measurement, without a filtered front end.
   test_tier: field
 - id: SPACE-051
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1291,8 +1295,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA + 1420 MHz filter
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a horn or small dish, an LNA and a 1420 MHz filter since receiver noise dominates at this frequency; the 8-bit front end's dynamic range and IMD without a preselector still limit the achievable SNR after all that gain, so treat the line depth as approximate rather than lab-calibrated.
   test_tier: field
 - id: SPACE-058
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1313,8 +1318,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA + 1420 MHz filter
-  fit_flags: null
-  fit_note: position-time supplies galactic coordinates and LSR correction.
+  fit_flags:
+  - marginal-8bit
+  fit_note: position-time supplies galactic coordinates and LSR correction. Same horn/dish/LNA/filter chain as SPACE-057; the 8-bit front end's dynamic range and lack of a preselector limit achievable SNR after that gain, so treat tangent-point velocities as estimates, not lab-spectrometer precision.
   test_tier: field
 - id: SPACE-059
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1335,8 +1341,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA + 1420 MHz filter
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Same horn/dish/LNA/1420 MHz filter chain as SPACE-057; decomposing multi-peaked profiles needs SNR the 8-bit front end's dynamic range and lack of a preselector limit, so treat separated arm velocities as estimates.
   test_tier: field
 - id: SPACE-060
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1356,8 +1363,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA + 1420 MHz filter
-  fit_flags: null
-  fit_note: TCXO drift (~28 kHz at 1.4 GHz) is a fifth of the effect; frequency calibration matters.
+  fit_flags:
+  - marginal-8bit
+  fit_note: TCXO drift (~28 kHz at 1.4 GHz) is a fifth of the effect; frequency calibration matters. Same horn/dish/LNA/filter chain as SPACE-057; the 8-bit front end also limits the SNR needed to pin the line centre precisely enough to resolve the ±30 km/s swing.
   test_tier: field
 - id: SPACE-061
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1490,8 +1498,9 @@ use_cases:
   - position-time
   hardware_fit: native
   accessory: null
-  fit_flags: null
-  fit_note: A dipole drift scan suffices; the sky model is built-in reference data.
+  fit_flags:
+  - marginal-8bit
+  fit_note: A dipole drift scan suffices; the sky model is built-in reference data. "Absolutely calibrate" is aspirational on this front end — with no factory NF and 8-bit dynamic range, gain/temperature drift over the drift-scan integration limits the achievable calibration accuracy, so treat the fit as relative to the sky model rather than metrology-grade.
   test_tier: field
 - id: SPACE-067
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1536,8 +1545,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: Yagi or dish + LNA (for Cyg A / Cas A)
-  fit_flags: null
-  fit_note: Sun transits work natively with a modest antenna.
+  fit_flags:
+  - marginal-8bit
+  fit_note: Sun transits work natively with a modest antenna; Cyg A and Cas A are far weaker and need a Yagi or dish plus LNA to lift them out of the 8-bit front end's dynamic range floor, and without a preselector urban IMD can still masquerade as transit amplitude.
   test_tier: field
 - id: SPACE-069
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1627,8 +1637,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: directional antenna (Yagi) + LNA
-  fit_flags: null
-  fit_note: Marginal sensitivity versus LOFAR-scale detections.
+  fit_flags:
+  - marginal-8bit
+  fit_note: Marginal sensitivity versus LOFAR-scale detections. Needs a Yagi + LNA to bring the RFI above the 8-bit front end's floor; without a preselector the receiver's own IMD is a confound, not just the satellite emission being characterized.
   test_tier: field
 - id: SPACE-073
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1677,8 +1688,9 @@ use_cases:
   - spectrum-history
   hardware_fit: needs-accessory
   accessory: horn or small dish + LNA
-  fit_flags: null
-  fit_note: Umbrella item for SPACE-057/006/009.
+  fit_flags:
+  - marginal-8bit
+  fit_note: Umbrella item for SPACE-057/006/009; inherits the same accessory gating and the same 8-bit-front-end, no-preselector accuracy limits as those.
   test_tier: field
 - id: SPACE-075
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1788,8 +1800,9 @@ use_cases:
   - cfar-detection
   hardware_fit: needs-accessory
   accessory: dish + LNA (S-band, 2.2-2.3 GHz)
-  fit_flags: null
-  fit_note: S-band lunar missions are marginal but native-band with a dish + LNA; true deep-space X-band (8.4 GHz) targets are out-of-band (above the 6 GHz ceiling, no commodity X-band downconverter) as well as needing a large dish, out of scope for this device.
+  fit_flags:
+  - marginal-8bit
+  fit_note: S-band lunar missions are marginal but native-band with a dish + LNA; true deep-space X-band (8.4 GHz) targets are out-of-band (above the 6 GHz ceiling, no commodity X-band downconverter) as well as needing a large dish, out of scope for this device. The 8-bit front end with no preselector further limits detectable link margin against a weak spacecraft downlink.
   test_tier: field
 - id: SPACE-080
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -2425,8 +2438,9 @@ use_cases:
   - event-correlation
   hardware_fit: needs-accessory
   accessory: downconverter/LNB for X band; directional antenna
-  fit_flags: null
-  fit_note: the UHF part is native
+  fit_flags:
+  - marginal-8bit
+  fit_note: the UHF part is native; the X-band part is gated on a downconverter/LNB plus a directional antenna, and the 8-bit front end with no preselector limits the received-power accuracy behind that chain, so treat duct disruption as a relative drop, not calibrated attenuation.
   test_tier: field
 - id: PROP-027
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -2541,7 +2555,8 @@ use_cases:
   accessory: LNB/downconverter for 10 GHz; directional antennas
   fit_flags:
   - exceeds-window
-  fit_note: beacons below 6 GHz are native; multi-band logging is time-shared by the scheduler
+  - marginal-8bit
+  fit_note: beacons below 6 GHz are native; multi-band logging is time-shared by the scheduler. The 10 GHz leg needs an LNB/downconverter plus a directional antenna, and the 8-bit front end with no preselector limits absolute-level accuracy, so the multi-year record is a relative signal-strength trend, not calibrated received power.
   test_tier: field
 - id: PROP-032
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -2652,8 +2667,9 @@ use_cases:
   - event-correlation
   hardware_fit: needs-accessory
   accessory: Ku LNB + dish
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Gated on a dish behind a Ku-band LNB; the LNB's own gain drift dominates over the receiver, but the 8-bit front end with no preselector still limits absolute-level accuracy, so scintillation and fade depth are measured relative to the clear-sky baseline, not as calibrated attenuation.
   test_tier: field
 - id: PROP-037
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -2850,8 +2866,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: LNB/downconverter for 10-40 GHz; directional antenna
-  fit_flags: null
-  fit_note: receive-signal-level only, no content
+  fit_flags:
+  - marginal-8bit
+  fit_note: receive-signal-level only, no content. Gated on an LNB/downconverter plus a directional antenna, and the 8-bit front end with no preselector limits absolute-level accuracy, so the rain-rate estimate rides on relative RSL drops from a fair-weather baseline, not calibrated received power.
   test_tier: field
 - id: PROP-046
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -2873,8 +2890,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: LNB/downconverter for 10-40 GHz; directional antenna
-  fit_flags: null
-  fit_note: rain gauge readings are an external context feed
+  fit_flags:
+  - marginal-8bit
+  fit_note: rain gauge readings are an external context feed. Gated on an LNB/downconverter plus a directional antenna; the 8-bit front end with no preselector limits absolute-level accuracy, so separating wetting loss from path attenuation works on relative RSL excursions, not calibrated power.
   test_tier: field
 - id: PROP-047
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -2898,8 +2916,10 @@ use_cases:
   - event-correlation
   hardware_fit: needs-accessory
   accessory: Ku LNB + dish
-  fit_flags: null
-  fit_note: full DVB-S2 transponders exceed 20 MHz; C/N from spectrum or a narrow transponder
+  fit_flags:
+  - marginal-8bit
+  - exceeds-window
+  fit_note: full DVB-S2 transponders exceed 20 MHz; C/N from spectrum or a narrow transponder. Gated on a dish behind a Ku-band LNB; the 8-bit front end with no preselector limits absolute C/N accuracy, so rain rate rides on the SNR drop from a clear-sky baseline, not a calibrated measurement.
   test_tier: field
 - id: PROP-048
   theme: Propagation, Atmosphere, Remote Sensing & RF Sensing
@@ -8077,8 +8097,9 @@ use_cases:
   - calibration
   hardware_fit: needs-accessory
   accessory: calibrated noise source
-  fit_flags: null
-  fit_note: null
+  fit_flags:
+  - marginal-8bit
+  fit_note: Needs a calibrated ENR noise source cycled hot/cold; the 8-bit ADC's own quantization floor and any front-end IMD (no preselector) inflate the measured Y-factor, so the resulting NF is an estimate bounded by the receiver chain, not a lab-instrument-grade figure.
   test_tier: hil
 - id: RESEARCH-055
   theme: Unknown Signals, Security Research, Lab Engineering & ML
@@ -8697,7 +8718,7 @@ use_cases:
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems
   name: Automatic control-channel discovery
-  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?".'
+  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?". The hunt reads no band: it runs on whatever the radio is tuned to, and the built-in registry *spends* it only in the land-mobile allocations — a dwell budget, not a search prior (T-615); a plan widening that budget to 1 MHz–6 GHz finds the same channel anywhere.'
   band: VHF / UHF / 700 / 800 MHz
   tx: none
   receiver_hint: null

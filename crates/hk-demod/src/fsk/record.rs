@@ -17,7 +17,10 @@
 //!   emitter), a 2-FSK fingerprint (centre, bandwidth, symbol rate, deviation), the emitter hint
 //!   as context and the `2fsk` classification. Re-demodulating the same bursts is a
 //!   re-measurement (producer `hk-infer`, same span and channel): the count does not grow.
-//! - **Demodulation** per demodulated burst (mode `2fsk`).
+//! - **Demodulation** per demodulated burst whose two-level alphabet was measured (mode `2fsk`;
+//!   [`FskBurst::alphabet_evidence_framed`], T-614). A burst the estimator abstains on — analogue
+//!   FM demodulated at an unconfirmed standard-rate trial, or bits that merely repeat — gets no
+//!   row, and when no burst was measured the emitter gets no `2fsk` classification either.
 //! - **Decode** per burst with a located sync (decoder `hk-infer`): `frame_model`
 //!   `inferred:2fsk:<signature>`, structure metadata, `crc_status`, content (payload hex/bits)
 //!   only when the effective class permits it (and, for CRC models, the CRC validates).
@@ -44,14 +47,14 @@ use hk_model::{
 use serde_json::{Value, json};
 
 use super::demod::FSK_DEMOD_VERSION;
-use super::receiver::FskBurst;
+use super::receiver::{FrameEvidence, FskBurst};
 
 /// Decoder id of inferred-framing decodes.
 pub const INFER_DECODER_ID: &str = "hk-infer";
 /// Its version.
 pub const INFER_DECODER_VERSION: &str = "0.1.0";
 /// Identity scheme name of a framing signature.
-pub const FRAMING_IDENTITY_SCHEME: &str = "hk-framing";
+pub const FRAMING_IDENTITY_SCHEME: &str = hk_model::FRAMING_IDENTITY_SCHEME;
 
 /// A caller's positive classification of the emitter, e.g. the user's own device.
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +189,17 @@ fn decode_metadata(result: &FramingResult, burst: &FskBurst, index: usize) -> Va
     })
 }
 
+/// What framing found in burst `i` (T-614): the learned sync located, the CRC valid.
+fn frame_evidence(result: &FramingResult, i: usize) -> FrameEvidence {
+    result
+        .frames
+        .get(i)
+        .map_or_else(FrameEvidence::default, |f| FrameEvidence {
+            sync_found: result.model.sync.is_some() && f.sync_bit.is_some(),
+            crc_valid: f.crc_valid == Some(true),
+        })
+}
+
 /// Writes the records. See the [module docs](self). `bursts[i]` must be the burst whose bits
 /// were `result`'s input `i`.
 pub fn write_framed_bursts(
@@ -213,11 +227,37 @@ pub fn write_framed_bursts(
     .unwrap_or(0.0);
     let identity = framing_identity(result);
     let now = seen.end;
+    // T-614: which bursts' two-level alphabet was *measured*. A burst the estimator abstains on
+    // (analogue FM demodulated at a standard-rate trial nothing confirmed) gets no `2fsk`
+    // Demodulation row, and contributes nothing to the 2-FSK fingerprint: bits existing is not
+    // evidence of symbols.
+    let measured: Vec<bool> = bursts
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            b.alphabet_evidence_framed(frame_evidence(result, i))
+                .is_measured()
+        })
+        .collect();
+    let any_measured = measured.iter().any(|&m| m);
+    let measured_symbols = || {
+        bursts
+            .iter()
+            .zip(&measured)
+            .filter(|(_, m)| **m)
+            .filter_map(|(b, _)| b.symbols.as_ref())
+    };
     // Ids up front: the sighting is keyed by the first demodulation (a fresh id when no burst
     // demodulated), and the rows reference the emitter it resolves to.
     let demod_ids: Vec<Option<DemodulationId>> = bursts
         .iter()
-        .map(|b| b.symbols.as_ref().map(|_| DemodulationId::new()))
+        .zip(&measured)
+        .map(|(b, &m)| {
+            b.symbols
+                .as_ref()
+                .filter(|_| m)
+                .map(|_| DemodulationId::new())
+        })
         .collect();
     let source = demod_ids
         .iter()
@@ -232,19 +272,9 @@ pub fn write_framed_bursts(
         f_center_hz: f_center,
         bandwidth_hz: bandwidth,
         fingerprint: Some(Fingerprint {
-            family: Some(FSK_FAMILY.into()),
-            symbol_rate_hz: median(
-                bursts
-                    .iter()
-                    .filter_map(|b| b.symbols.as_ref().map(|s| s.rate_bd))
-                    .collect(),
-            ),
-            deviation_hz: median(
-                bursts
-                    .iter()
-                    .filter_map(|b| b.symbols.as_ref().and_then(|s| s.deviation_hz))
-                    .collect(),
-            ),
+            family: any_measured.then(|| FSK_FAMILY.into()),
+            symbol_rate_hz: median(measured_symbols().map(|s| s.rate_bd).collect()),
+            deviation_hz: median(measured_symbols().filter_map(|s| s.deviation_hz).collect()),
             ..Fingerprint::new(f_center, bandwidth)
         }),
         identity: identity.clone().map(|identity| IdentityClaim {
@@ -252,7 +282,8 @@ pub fn write_framed_bursts(
             content_class: class,
         }),
         context: ctx.emitter_hint,
-        classification: Some(Classification {
+        // T-614: no measured alphabet in any burst, no `2fsk` claim on the emitter.
+        classification: any_measured.then(|| Classification {
             t: now,
             family: FSK_FAMILY.into(),
             confidence: model.confidence,
@@ -278,7 +309,7 @@ pub fn write_framed_bursts(
             detection_ref: ctx.detection_ref,
             recording_ref: ctx.recording_ref,
             mode: FSK_FAMILY.into(),
-            params: burst.estimated_params(),
+            params: burst.estimated_params_framed(frame_evidence(result, i)),
             lock_quality: Some(sy.lock.lock_quality),
             evm_db: None,
             time: burst.time_range(),
@@ -338,12 +369,7 @@ pub fn write_framed_bursts(
         framing: Framing {
             payload: BitstreamPayload::HardBits,
             bits_per_symbol: Some(1),
-            symbol_rate_hz: median(
-                bursts
-                    .iter()
-                    .filter_map(|b| b.symbols.as_ref().map(|s| s.rate_bd))
-                    .collect(),
-            ),
+            symbol_rate_hz: median(measured_symbols().map(|s| s.rate_bd).collect()),
             schema_id: Some(format!("{FRAMING_IDENTITY_SCHEME}:{}", model.signature())),
             sync_word_hex: s.hex.clone(),
         },
