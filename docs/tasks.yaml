@@ -25974,7 +25974,7 @@ tasks:
   - id: T-880
     milestone: MCANVAS
     title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
-    status: todo
+    status: done
     priority: high
     deps: []
     parallel_group: UI
@@ -25989,6 +25989,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
+    commit: 71918b4c
   - id: T-881
     milestone: MCANVAS
     title: "Departed band shows never-observed grey at its newest rows (10-60% of a shadow pane) instead of shadow: gap between shadow.edge_s and as_of_s?"
