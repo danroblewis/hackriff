@@ -693,6 +693,20 @@ export class TileCache<T> {
    * rather than a second flag, so "are we backing off" has one source. */
   private silences = 0;
   private silentUntil = 0;
+  /**
+   * **Places a silent probe was spent on, owed the BACK of the queue when next wanted** (T-903).
+   *
+   * While the gate is armed the client asks one place per opening, and the queue is LIFO. A probe
+   * that fails is not re-queued here — the next frame's `acquire`/`prefetch` re-schedules it — and
+   * `schedule` pushes it on TOP, above every place that was already waiting, so the next opening
+   * asked for the very same place again, and the one after, for the whole outage. Every other
+   * wanted place was starved of a probe. Measured in `ui/e2e/live-edge` (T-523's case): a probe that
+   * went out mid-zoom landed on an intermediate level that stayed wanted as the final level's pin
+   * (`level_f + 1`), and in 75 s of outage the pane's own level was never asked once ("levels
+   * refused: 2/1 1/1"). So a place a silence answered re-enters at the bottom and the probes take
+   * turns across everything wanted. Cleared by an answer, when order stops mattering.
+   */
+  private silenced = new Set<string>();
   /** Measured mean production time, ms. See [[observe]]. */
   private serverMs: number;
   readonly stats: TileCacheStats = {
@@ -840,7 +854,9 @@ export class TileCache<T> {
     // The route has already said this place is not askable. A renderer calls `acquire` for it on
     // every frame, so without this the refusal is re-issued at frame rate (T-479).
     if (this.terminal.has(key)) return;
-    this.queue.push(addr);
+    // A place whose silent probe just failed waits behind the others (T-903, [[silenced]]).
+    if (this.silenced.delete(key)) this.queue.unshift(addr);
+    else this.queue.push(addr);
     this.queued.add(key);
     if (this.queue.length > this.maxQueue) {
       const dropped = this.queue.splice(0, this.queue.length - this.maxQueue);
@@ -1504,6 +1520,7 @@ export class TileCache<T> {
     this.terminal.clear();
     this.silences = 0;
     this.silentUntil = 0;
+    this.silenced.clear();
     this.lastBox.clear();
     this.speculating.clear();
     this.speculated.clear();
@@ -1865,6 +1882,7 @@ export class TileCache<T> {
     // exists to stop asking a server that is not there, and this one demonstrably is (T-499).
     this.silences = 0;
     this.silentUntil = 0;
+    this.silenced.clear();
     if (this.limit >= this.ceiling) { this.goodRuns = 0; return; }
     if (++this.goodRuns >= RECOVER_AFTER) { this.limit++; this.goodRuns = 0; }
   }
@@ -1974,6 +1992,7 @@ export class TileCache<T> {
     // server that comes back is a changed answer — but so is asking again on the next frame, which
     // is what the render loop does unless something here says when. See [[OFFLINE_BACKOFF_MS]].
     this.stats.silentFailures++;
+    this.silenced.add(keyOf(addr));
     this.silences++;
     this.silentUntil = this.now() +
       Math.min(OFFLINE_MAX_BACKOFF_MS, OFFLINE_BACKOFF_MS * 2 ** (this.silences - 1));
