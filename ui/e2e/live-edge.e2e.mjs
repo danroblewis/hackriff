@@ -309,12 +309,43 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   const browser = await Browser.open();
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: inject });
-  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
-  await page.waitFor("the app's surface to draw",
-    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
-    { timeoutMs: 60000 });
-  await page.waitFor("the chrome to report a viewport",
-    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
+  const open = async () => {
+    // A cross-document navigation, so the page really loads again: the same URL differing only in
+    // its fragment would be a same-document navigation, and no load event.
+    if (await page.eval("location.protocol !== 'about:'")) assert.equal(await page.goto("about:blank"), "load");
+    assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+    await page.waitFor("the app's surface to draw",
+      `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200`,
+      { timeoutMs: 60000 });
+    await page.waitFor("the chrome to report a viewport",
+      `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 30000 });
+    return page.eval(PANE_WINDOW);
+  };
+  // 0. **A pane long enough that a refused place is still WANTED when the gate reopens** — the
+  //    premise step 3 states ("the newest stays on screen for a whole pane-span, far longer than the
+  //    gate's 30 s ceiling"), which this test used to INHERIT from running third in its file. A
+  //    following pane opens on the observed extent (`surface/bootstrap.ts`), so its span is the
+  //    server's age at page load: measured 44-46 s in file order, 2.1-2.9 s with this test run alone
+  //    — and a 2.5 s pane carries every refused place out of view long before T-499's gate reopens,
+  //    so "never asked for again" is then the client correctly no longer wanting it (red 6 of 6
+  //    alone, with or without the fix under test). So wait on the CAPTURE clock — the pane's own
+  //    edge, not a sleep — until the recording is long enough, and open the page again on it.
+  const MIN_SPAN_NS = 45e9; // OFFLINE_MAX_BACKOFF_MS (30 s) + the wedge's own 4 s stall + margin
+  let win = await open();
+  if (win && win[1] - win[0] < MIN_SPAN_NS) {
+    const t0 = win[0];
+    const grown = await page.waitForValue(`the recording to reach ${MIN_SPAN_NS / 1e9} s`, PANE_WINDOW,
+      (w) => !!w && w[1] - t0 >= MIN_SPAN_NS, { timeoutMs: 120000 });
+    assert.ok(grown.ok, `the live edge did not advance ${MIN_SPAN_NS / 1e9} s past the pane's opening bottom ` +
+      `in ${grown.ms} ms (${JSON.stringify(grown.value)}), so no pane long enough for this claim can be opened`);
+    win = await open();
+  }
+  t.diagnostic(`the pane opened spanning ${win ? ((win[1] - win[0]) / 1e9).toFixed(1) : "?"} s`);
+  assert.ok(win && win[1] - win[0] >= MIN_SPAN_NS * 0.9,
+    `the pane opened spanning only ${win ? ((win[1] - win[0]) / 1e9).toFixed(1) : "?"} s: a refused place ` +
+    "may scroll out before the silence gate reopens, so nothing below would be a claim about 502s");
   const { rect } = await page.waitForCanvas(".sf-canvas", isRender, { timeoutMs: 90000 });
   const dpr = await page.eval("window.devicePixelRatio || 1");
   const pane = paneRectOf(rect, dpr);
@@ -412,8 +443,6 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
   t.diagnostic(`the wedged proxy was first asked after ${asked.ms} ms and stopped being asked at ` +
     `${wedge.value} refusal(s), ${wedge.ms} ms into the outage`);
   await page.eval("window.__t523.on = false");
-  const PANE_WINDOW = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
-    return v ? [Number(v.getAttribute('data-t0-ns')), Number(v.getAttribute('data-t1-ns'))] : null; })()`;
   const winAtLift = await page.eval(PANE_WINDOW);
   const liftedAt = Date.now();
   const injected = [...new Set(await page.eval("window.__t523.injected.slice()"))];
@@ -613,7 +642,7 @@ test("a FOLLOWING pane shorter than a tile keeps its rows across a row boundary,
   assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
 });
 
-test("a FOLLOWING pane's newest rows arrive PUSHED: its top stays at the live edge with every tile read slowed (T-893)", async (t) => {
+test("a FOLLOWING pane's newest rows arrive PUSHED: a row feed opens and every pushed row is on screen, with every tile read slowed (T-893)", async (t) => {
   // **The defect** (T-893, after T-890): rows reached a following pane only when the polling lane
   // re-asked its live tile, at most once per a share of what a tile costs. On a busy route that
   // period exceeds a short pane's span, so the TOP of the pane was drawn seconds behind the rows the
@@ -621,8 +650,9 @@ test("a FOLLOWING pane's newest rows arrive PUSHED: its top stays at the live ed
   // row crossing at all. `/ws/tiles/rows` pushes each row as it is recorded, and nothing used it.
   //
   // **Every** tile read is held here — the batch AND the lone revalidation — so polling alone cannot
-  // keep up on any machine; the row feed is the only path left that can. The assertion is the pane's
-  // own report: how far below its top it was drawn, sampled over several seconds and a row boundary.
+  // keep up on any machine; the row feed is the only path left that can. The assertions are that a
+  // feed opened and that the pane is drawn up to the newest row the server has PUSHED (the pane's
+  // own report against the rows seen on the socket), sampled over several seconds and a row boundary.
   const HOLD_MS = 2500;
   const inject = `(() => {
     const real = window.fetch.bind(window);
@@ -721,21 +751,19 @@ test("a FOLLOWING pane's newest rows arrive PUSHED: its top stays at the live ed
   t.diagnostic(`last sample: ${shorts[shorts.length - 1].counts}`);
   assert.ok(stats.held > 0, "no tile read was held, so the route was never slowed and this run proves nothing");
   assert.ok(stats.feeds > 0, "the following pane opened no /ws/tiles/rows subscription: its rows arrive only by polling (T-893)");
-  // **The median, and the share of bad samples — not the worst one.** The pushed rows are the
-  // server's to send, and it sends none past its tune record's reach (docs/api.md), which on a
-  // loaded server stalls for a second or so while tile reads hold the history lock; that stall is
-  // the backend's and would show here whatever the client did. What the client owns is the rest:
-  // measured on the pre-T-893 code this run reads p50 1.4 s with 60 of 75 samples over 0.5 s
-  // (polling alone, every read held); with the feed, p50 0 s and 12 of 75.
+  // **What is gated is STRUCTURAL: a feed opened, and the rows it pushed are on screen.** How far
+  // below the live edge the top sits is also how often the SERVER pushes, and under load that is
+  // the server's cadence (T-901 owns it: pushes stall 0.35-5 s about every 64 rows even on an idle
+  // box). A wall-clock bound on it went red alone at load 19-32 (median 1.1 s) while the client's
+  // lag behind the newest pushed row stayed at p90 0.03-0.04 s — so the shortfall is REPORTED here,
+  // never asserted. For the record: on the pre-T-893 code this run reads p50 1.4 s with 60 of 75
+  // samples over 0.5 s and opens 0 feeds (the `feeds` assertion above is what goes red there).
   const p50 = sorted[Math.floor(sorted.length / 2)];
+  t.diagnostic(`top shortfall p50 ${p50} s (reported only; server push cadence is T-901's)`);
   const lags = shorts.map((x) => x.lag).filter((x) => x !== null).sort((a, b) => a - b);
   const lag90 = lags[Math.floor(lags.length * 0.9)];
   t.diagnostic(`client lag behind the newest PUSHED row: p50 ${lags[Math.floor(lags.length / 2)]?.toFixed(2)} s, ` +
     `p90 ${lag90?.toFixed(2)} s, worst ${lags[lags.length - 1]?.toFixed(2)} s over ${lags.length} samples`);
-  assert.ok(p50 <= 0.5,
-    `a following pane's top was drawn a median ${p50} s short of the live edge (${late.length} of ${shorts.length} ` +
-    `samples over 0.5 s; worst ${worst.short} s: "${worst.counts}") with every tile read slowed: new rows still arrive ` +
-    "by polling, not as they are recorded (T-893)");
   // One readout decimal (0.1 s) plus a sample's worth of rows arriving between the two reads.
   assert.ok(lags.length > 0 && lag90 <= 0.35,
     `rows the server had already PUSHED were not on the pane: p90 ${lag90} s behind the newest pushed row — the ` +

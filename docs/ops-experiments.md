@@ -36,3 +36,19 @@ Baseline for the first week: 2026-09-23 00:00–13:00 (alone mode): landings 49 
 - The Flow dashboard panel over `flow.jsonl`.
 
 **E-001 closed 2026-09-23 18:34 — KEEP.** landings_per_h_24h: 0.92 → 3.63 over 8 gates / 3.0 h; real reds 1/8; full-gate p50 41 min; blocked 0.0 min; guards: real_reds_24h 1 <= 2.5 ok; full_gate_p50_min 41 <= 56.0 ok; blocked_minutes 0.0 < 30.0 ok. Confounds, stated: the 17:38 and 18:03 gates (2 of the 8) ran after task-pm-gate-threads restored nextest's 8 test threads (full gate 25-26 min vs 41), which lifts the tail of the window; the overlap gates before it (16:15 and 16:57 full, 41 min each, plus the 16:56 py gate) already carry landings/h well past the +30% bar (correction to the jsonl note: 17:38 ran at 8 threads, it carried the fix). The 3 lint rewinds at 16:11-16:14 were a ruff E702 in a pipeline-manager test, not overlap. The one real red (18:03) is fog-of-war beside T-845, isolated by the runner. Overlap mode (WORK_GATE_ALONE=0, WORKER_DRAIN_MAX=0) stays.
+
+---
+
+## E-002 — User decision 14:20: accepting a red after ONE solo pass for tests the flake led
+
+- **Opened:** 2026-09-24 14:26 · **owner:** pipeline-manager
+- **Hypothesis:** User decision 14:20: accepting a red after ONE solo pass for tests the flake ledger already shows passing alone (>=2, zero fail-alone, same window) saves the second isolated run (~1-4 min per accept) with no rise in real reds
+- **Knob:** FLAKE_SOLO_ONE=1
+- **Baseline window:** 2026-09-23 18:00..2026-09-24 14:00 — landings/h 1.6, real reds 14/63, full-gate p50 27 min, dispatch-hours 13, blocked 0.0 min
+- **Primary metric:** flake_solo_saved_min_24h (just flow: 'K after one solo pass, S min of it'); landings_per_h_6h as context
+- **Guards:** real_reds_24h <= baseline*1.25; full_gate_p50_min <= baseline*1.25; blocked_minutes < 30
+- **Duration:** 6 gates or 24.0 h
+- **Decision rule:** keep if >= 6 solo accepts, no guard broken, and no solo-accepted test fails alone within 7 d of its accept (hkpy.flakes); one such fail-alone = rollback
+- **Rollback:** `just knobs set FLAKE_SOLO_ONE=0 && restart ops/merge-runner.sh between gates`
+- **Status:** open
+- **Result:** —

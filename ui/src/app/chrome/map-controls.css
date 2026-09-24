@@ -4,13 +4,13 @@
    offer. Mounted inside `.sf-stage`, so it floats over the picture only — never over the surface's
    own toolbar or the rows below the stage.
 
-   `.map-ctl` is a pointer-transparent box inset from the stage by the floating side/focus columns'
-   footprint (`map-layout.css`'s `--panel-w`/`--panel-gap`), so no control is ever drawn under a
-   panel; only its children take the pointer, so every other pixel still reaches the canvas. */
+   `.map-ctl` is a pointer-transparent box inset 8 px from the stage (T-895: the inventory
+   column no longer shares its rows — collapsed it is a mid-height chip, open it starts below Go-to,
+   `map-layout.css`), so no control is ever drawn under a panel; only its children take the pointer, so every other pixel still reaches the canvas. */
 .map-ctl {
   position: absolute; z-index: 20; pointer-events: none;
   top: 8px; bottom: 8px;
-  left: calc(var(--panel-w, 0px) + var(--panel-gap, 8px) * 2);
+  left: var(--panel-gap, 8px);
   right: 8px;
   font: 12px var(--ui); color: var(--text);
 }

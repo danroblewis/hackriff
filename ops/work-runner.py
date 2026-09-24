@@ -1403,10 +1403,20 @@ def candidates(tasks, claims):
     return out
 
 
+_GATE_SEEN = [0.0]
+RESERVE_GRACE_S = 90   # > one tick (30 s) + the runner's gap between two gates (3-8 s, then its 8 s sleep)
+
+
 def dispatch_cap():
-    if not GATE_ALONE and gate_running():
-        return min(CAP, RESERVE_CAP)   # the gate keeps its GATE_RESERVE cores while it runs
-    return CAP
+    # The gate keeps its GATE_RESERVE cores while it runs - and for RESERVE_GRACE_S after it was last
+    # seen: an isolation's single gates leave 3-8 s gaps with no marker, and each gap a tick landed in
+    # filled the box to CAP (2026-09-24 14:30: 7 workers beside a gate, load 58 vs plan 32). Not keyed
+    # on the queue: held/parked branches sit there with no gate coming (review).
+    if GATE_ALONE:
+        return CAP
+    if gate_running():
+        _GATE_SEEN[0] = time.time()
+    return min(CAP, RESERVE_CAP) if time.time() - _GATE_SEEN[0] < RESERVE_GRACE_S else CAP
 
 
 def busy_workers(claims):

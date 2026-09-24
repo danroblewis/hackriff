@@ -31,6 +31,8 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitFor("the sheet to mount collapsed",
     "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 60000 });
+  // T-895: the lists are a chip by default; a real click on a row needs them open.
+  await page.click("document.querySelector('.side-chip')");
   await page.waitFor("blind detection to list a signal", ROW_PRESENT, { timeoutMs: 120000, everyMs: 1000 });
 
   const rowF = (await page.$text(".side-inv .row[data-id] .f")) ?? "";
@@ -55,12 +57,30 @@ test("selecting a detected signal opens its detail sheet over the still-live can
   assert.ok(labels.some((l) => /Decode|Open in Decode/.test(l)), `a Decode action in ${labels}`);
   assert.ok(labels.some((l) => /^Delete/.test(l)), `a Delete action in ${labels}`);
 
+  // docs/23 §10.6 P4: the device actions are a compact cluster of small buttons (>= 24 px hit
+  // targets, each far smaller than the sheet), not a large surface.
+  const sizes = JSON.parse(await page.eval(`JSON.stringify((() => {
+    const s = document.querySelector('.sheet').getBoundingClientRect();
+    const bar = document.querySelector('.focus .detail .actions[role=toolbar]');
+    const b = [...bar.querySelectorAll('button')].map((x) => x.getBoundingClientRect());
+    return { sheetW: s.width, minH: Math.min(...b.map((r) => r.height)), minW: Math.min(...b.map((r) => r.width)),
+      maxH: Math.max(...b.map((r) => r.height)), maxW: Math.max(...b.map((r) => r.width)) };
+  })())`));
+  assert.ok(sizes.minH >= 24 && sizes.minW >= 24, `>= 24 px hit targets: ${JSON.stringify(sizes)}`);
+  assert.ok(sizes.maxH <= 32 && sizes.maxW < sizes.sheetW / 3, `each action is a small button: ${JSON.stringify(sizes)}`);
+
   // Non-modal: the canvas beside the sheet is still the surface.
   const sheet = await page.$rect(".sheet");
   const canvas = await page.$rect(".sf-canvas");
   const at = { x: Math.max(canvas.x + 20, sheet.x - 120), y: canvas.y + canvas.h * 0.4 };
   assert.equal(await page.eval(`!!document.elementFromPoint(${at.x}, ${at.y})?.closest('.surface')`), true,
     "a point beside the open detail sheet is the surface");
+
+  // docs/23 §10.6 P1: a visible dismiss returns the sheet's pixels to the map.
+  await page.click("document.querySelector('.sheet .sheet-close')");
+  await page.waitFor("the dismiss to collapse the sheet", "document.querySelector('.sheet')?.dataset.snap === 'peek'", { timeoutMs: 5000 });
+  await page.waitFor("the sheet to shrink to its peek strip",
+    "document.querySelector('.sheet').getBoundingClientRect().height <= 60 && document.querySelector('.sheet .sheet-close').hidden", { timeoutMs: 5000 });
 
   assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), [],
     "selecting a signal or opening its sheet reached a device route");

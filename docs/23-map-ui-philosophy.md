@@ -543,6 +543,31 @@ partly planned; the tickets that close the gaps are named per principle.*
    retune: that action lives on a small, explicit per-row button. §11 rule 1 (device routes only from
    Go-to and Selected actions) still holds, and T-825 guards that no device route or view-jump handler
    is bound to a panel body element.
+   **Rule 4 applied to the MMAP tickets (re-spec, T-899, 2026-09-24).** These replace the matching
+   words in each ticket's acceptance; the tickets' 2026-09-24 notes point here.
+
+   | Ticket | Big panel | A bare row / body click does | The major action lives on |
+   |---|---|---|---|
+   | T-814 (MAP-14) Explore drawer, to ~90 vh | bottom sheet, Explore tab | selects the item and highlights its mark on the surface (if it has one on screen); nothing else | a small per-row **Go** button: pan/zoom there, or — where no tuned window covers it — raise the ordinary gated retune **offer** (band 4), which itself needs an explicit press |
+   | T-815 (MAP-15) past-surveys browse | bottom sheet, Explore tab | selects the survey window and outlines its (time x frequency) extent on the surface | a small per-row **Jump** button that restores the pane to that extent |
+   | T-821 (MAP-21) Research slide-in, 460 px full height | Research slide-in | selects the row and highlights its mark (table <-> canvas sync is a *highlight*, not a move); inline edits of a row's own fields are writes, not map changes | small per-row buttons: **Go** (view jump, or the gated retune offer when un-tuned) and, on a saved view, **Restore** |
+   | T-804 (MAP-04) Selected tab | bottom sheet, Selected tab | nothing on the body: it is read-only measurements, explanations and liveness | a **compact action cluster** of small buttons (Listen, Decode/RDS, Record clip, Stream out, Analyze, Promote/Delete, any retune) — one row of 36-48 px icon+label buttons or a small overflow menu, never a large surface of full-width action blocks |
+
+   Two things stay allowed on a big panel's body because they do not change the map in a major way:
+   **selecting / highlighting** a mark (the focus sheet raising itself to `half` is the panel's own
+   size, not the map's), and durable writes that **add or remove** a mark (a new annotation, deleting a
+   marker). A **follow-on** change is caught too: a subscriber to the selection (`focus`) may not jump the
+   view or reach a device either, or the rule would be defeated one hop away.
+
+   **The guard (T-825's, landed by T-899):** `ui/test/app-panel-influence.test.ts` reads every module
+   under `ui/src/app/` except a short named list of non-panels (the band-2 map controls, the canvas, the
+   nudge cluster, the decoder workbench — each with its reason), so a new panel file is covered the day
+   it lands. Every press handler (click, dblclick, key, pointer/mouse/touch down/up, contextmenu) bound
+   to anything but a `<button>`/`<input>`/`<select>`/`<textarea>` — a row, a panel body, a mount's host —
+   must name no device route and no view jump, following same-file helpers two calls deep. It is proven
+   red on injected violations (a row-click jump, a row-click retune, a keyboard twin, a body listener,
+   a jump behind a helper, and a jump swapped into each real Explore row) and green when the same call
+   moves onto a per-row button.
 5. **The existing small controls are right; keep them.** The +/- zoom cluster, the follow-live
    reticle FAB, the map-type/layers button and the Go-to frequency box (T-802) are the model for
    rule 4, and are not to be replaced or enlarged.
@@ -562,8 +587,9 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
+| Left inventory column (Candidate / Confirmed lists + selections), collapsed to a chip by default | T-895 (P1) | `explore` (existing `inventory` / `selections` slices; the chip's open/closed is presentation only) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the chip's counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening, closing and the counts reach no route) |
 | Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/history` | - |
-| Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` |
+| Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
 | Detections layer | MAP-08 | `explore` (existing rows) | `GET /api/events` | - |
@@ -578,8 +604,10 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 
 **Three rules this table encodes.**
 
-1. **Only two rows in the whole table reach a device route**, and both need an explicit press: Go-to,
-   and the Selected tab's actions. Everything else is a view change or a durable-state write.
+1. **Only two rows in the whole table reach a device route**, and both need an explicit press on a
+   **small** control: Go-to, and the Selected tab's compact action cluster (§10.6 rule 4). A per-row
+   **Go** button in the Explore drawer or Research may *raise* the gated retune offer, which is itself
+   the band-4 transient that needs its own press. Everything else is a view change or a durable-state write.
 2. **Every reserved route is named with its ticket and appears in `docs/api.md` before its client
    exists.** The client is thin because the route is the contract, not because the panel is small.
 3. **The guard is the request the client *builds*.** Contract tests prove the server serves a route

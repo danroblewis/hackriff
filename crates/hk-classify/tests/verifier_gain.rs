@@ -270,8 +270,16 @@ fn family_level_answers_are_bit_identical_with_and_without_the_verifier() {
             .and_then(thresholds_of)
             .and_then(|t| t.snr_gate_db)
             .unwrap_or(20.0);
+        // T-888: the verifier only runs where the tree is left undecided within a family, which on
+        // this grid is the fsk family above its gate — measured at about one snippet in ten
+        // (2fsk 2/8, gfsk 1/8, msk 2/8 at gate+5 dB; psk-qam 0 of 72). Two draws per fsk cell put
+        // the `ran > 0` guard below on ~1.4 expected runs: it read 1 before T-888's refit and 0
+        // after, by the luck of which seeds landed there. Eight draws per fsk cell make the
+        // non-vacuity guard rest on several runs rather than on one; the property asserted is
+        // unchanged, and every other cell keeps its two.
+        let draws = if class.family() == Some("fsk") { 8 } else { 2 };
         for offset in [-5.0, 0.0, 5.0, 10.0] {
-            for _ in 0..2 {
+            for _ in 0..draws {
                 seed += 1;
                 let snr = gate + offset;
                 let off = classify_one(&mut c14, *class, snr, seed, false);
