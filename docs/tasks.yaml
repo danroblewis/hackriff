@@ -26288,7 +26288,7 @@ tasks:
   - id: T-895
     milestone: MMAP
     title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
-    status: in-progress
+    status: done
     priority: high
     deps:
     - T-801
@@ -26313,6 +26313,7 @@ tasks:
       Commits: 8057e3f8
       Observed, not chased: No Rust touched, so precheck was run as its fmt half only (`cargo fmt --all --check`, exit 0); clippy with no crate list would lint the whole workspace. | Load flake (not a failure of the change): one earlier run of app-side-chip.e2e at 920 px timed out after 60 s in its initial 'surface/controls/sheet/chip mounted' wait at load avg ~30; the identical run passed right after (9.6 s). A separate first attempt died in run.mjs startLane -> backend.mjs tileCost with UND_ERR_HEADERS_TIMEOUT before any spec ran. | Pre-existing, not caused by this ticket (same with the side collapsed, and app-sheet.e2e already filters these to bySheet): at 420 px, 10 of the surface toolbar's .sf-actions buttons can't be clicked. Live is covered by another .mini, Trace/Auto-contrast/Viewport scale are under the wrapped top .bar, and Signals/Measure/Record IQ/Split/Close/Whole surface are off-screen (elementFromPoint returns nothing). The toolbar overflows at phone width instead of wrapping below the bar.
       Resources: 892 CPU-s, peak 5.5 GB
+    commit: 9225a972
   - id: T-896
     milestone: MMAP
     title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
