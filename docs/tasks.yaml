@@ -24916,7 +24916,7 @@ tasks:
   - id: T-850
     milestone: MAUTO
     title: C4FM synthetic generator lacks the check parameterisation (CRC width/searched/random polynomial, BCH, constant payload) that T-622 gave 2FSK
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: MAUTOD
@@ -24944,6 +24944,7 @@ tasks:
       Commits: fd997456
       Observed, not chased: mauto_corpus.rs manifest re-bless (HK_BLESS_MANIFEST=1) not run; manifest lines edited textually - the gate's mauto_corpus test will confirm
       Resources: 44 CPU-s, peak 0.8 GB
+    commit: f88ce1c8
   - id: T-851
     milestone: MAUTO
     title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
