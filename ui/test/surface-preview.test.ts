@@ -35,6 +35,7 @@ import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { ControlError } from "../src/controls/client";
 import { MAX_BACKOFF_MS, ORIENT_CELLS, ORIENT_ROWS, RETRY_BUDGET_MS, SurfacePreview, isBackpressure, probeSurface, retriesForBudget, wheelAxes, wheelDelta, wheelZoom, zoomFactor, type SurfaceProbe } from "../src/surface/preview";
 import { parseKey } from "../src/surface/tilecache";
+import type { RowOpener } from "../src/surface/rowfeed";
 import { stubGl } from "./surface-glstub";
 
 const S = 1e9;
@@ -523,7 +524,7 @@ const MAX_FRAMES = 600;
  */
 const CONTROL_FRAMES = 250;
 
-function liveHarness({ live = true } = {}) {
+function liveHarness({ live = true, rows = null as RowOpener | null } = {}) {
   const g = stubGl(1200, 600);
   const asked: TileAddr[] = [];
   /** The virtual capture clock, in ns advanced. [[drive]] steps it; nothing reads a wall clock. */
@@ -541,6 +542,7 @@ function liveHarness({ live = true } = {}) {
     canvas: g.canvas, probe, token: "t", fetchFn, chrome: null, minimapPx: 120,
     // The ONE difference between the two arms: whether a growing edge is reported in at all.
     edge: live ? () => probe.origin.edgeNs + clock.ns : null,
+    rows,
   });
   return { g, preview, asked, clock };
 }
@@ -665,10 +667,12 @@ test("a FOLLOWING pane re-asks for the live-edge tile: the rows recorded since a
     `${MAX_FRAMES} frames budgeted. ${refreshed.stats}`);
 
   // Every repeat is a live-edge tile at the level the pane was DRAWN at, never a parent pin and
-  // never a tile some other viewport wanted.
+  // never a tile some other viewport wanted — or (T-893) a coarser tile the renderer actually DREW
+  // as a stand-in over this following pane, which is on screen at its live edge just the same.
   const drawn = preview.lastFrame!.reports.find((r) => r.id === preview.activePane)!;
   for (const k of again()) {
     const a = parseKey(k)!;
+    if (cache.refreshedAsStandIn.has(k)) continue;
     assert.equal(a.levelT, drawn.levelT, `refreshed ${k}, which the pane is not drawing`);
     assert.equal(a.levelF, drawn.levelF, `refreshed ${k}, which the pane is not drawing`);
   }
@@ -1089,4 +1093,48 @@ test("the preview reaches the renderer it was built to mount, rather than a copy
     assert.ok(graph.has(normalize(f)), `${f} is not mounted: something here is a second implementation`);
   }
   assert.ok(!graph.has(normalize("src/surface/retune.ts")), "T-444's device action is unmounted in a preview");
+});
+
+test("T-893: a FOLLOWING pane subscribes /ws/tiles/rows for the columns it draws, pushed rows reach its tiles, and PAUSING closes them", async () => {
+  const opened: string[] = [];
+  const open = new Map<string, (t: string) => void>();
+  const closed: string[] = [];
+  const rows: RowOpener = (path, onText) => {
+    opened.push(path);
+    open.set(path, onText);
+    return { close: () => { closed.push(path); open.delete(path); } };
+  };
+  const { preview, clock } = liveHarness({ rows });
+  const cache = preview.view.surface.cache;
+  const filled = await drive(preview, clock, () => allResident(preview)() && opened.length > 0);
+  assert.ok(filled.ok, `a following pane opened no row subscription in ${filled.frames} frames (${filled.stats}): ` +
+    "new rows reach it only by polling (T-893)");
+  const drawn = preview.lastFrame!.reports.find((r) => r.id === preview.activePane)!;
+  for (const p of opened) {
+    // The request the client builds (CLAUDE.md: assert the request, not only the response).
+    const q = new URLSearchParams(p.split("?")[1]);
+    assert.ok(p.startsWith("/ws/tiles/rows?"), p);
+    assert.equal(Number(q.get("level_f")), drawn.levelF, `${p} is not at the level the pane draws`);
+    assert.equal(Number(q.get("level_t")), drawn.levelT, `${p} is not at the level the pane draws`);
+    assert.ok(Number.isSafeInteger(Number(q.get("t_from"))), `${p} has no start row`);
+    assert.equal(q.get("t_to"), null, `${p} is not open-ended`);
+  }
+  // A pushed row lands in a tile the pane has in hand.
+  const [path, push] = [...open.entries()][0];
+  const q = new URLSearchParams(path.split("?")[1]);
+  const cells = Number(q.get("cells") ?? 256), from = Number(q.get("t_from"));
+  push(JSON.stringify({ type: "subscribed", range: { t_from: from, t_to: null }, extent: { t_cell_s: 0.001 } }));
+  const n = Math.min(4, cells - (from % cells));
+  push(JSON.stringify({
+    type: "rows", row0: from, rows: n, nf: cells, max_db: new Array<number>(n * cells).fill(-50), final: false,
+    coverage: { states: ["unobserved", "observed"], nt: n, nf: cells, aligned: true, plane: { runs: [1, n * cells] } },
+  }));
+  assert.equal(cache.stats.rowsPushed, n, "the pushed rows were not filed");
+  // Pausing freezes the view: nothing follows, so every feed closes and no new one opens.
+  preview.view.panes.pause(preview.activePane);
+  preview.view.minimap.setFollowing(false);
+  const before = opened.length;
+  await drive(preview, clock, () => false, { frames: 20 });
+  assert.equal(open.size, 0, `a paused pane kept ${open.size} row subscription(s) open`);
+  assert.equal(opened.length, before, "a paused pane opened a row subscription");
 });

@@ -162,12 +162,20 @@ import {
   extentOf, fCellHz, fTileHz, inLattice, intersects, keyOf, tCellNs, tTileNs, tilesFor,
   type Box, type Lattice, type TileAddr,
 } from "./lattice";
-import { TileBusyError, TileDecodeError, type TileData } from "./tile";
+import { BYTES_PER_CELL, TileBusyError, TileDecodeError, type TileData } from "./tile";
+import { CELL } from "./cellrule";
+import { RowAccumulator, type ColumnAddr, type GapBlock, type RowBlock, type TileRows, type WantedColumn } from "./rowfeed";
 
 /** The GPU side, kept behind an interface so the cache is testable without a GL context. */
 export interface TileTextures<T> {
   upload(data: TileData): T;
   destroy(tex: T): void;
+  /**
+   * Rewrite rows `[row0, row0 + rows)` of `tex` from `data` in place (T-893): how a pushed row
+   * reaches the screen without re-uploading the whole tile. Optional — without it the cache
+   * uploads a fresh texture and destroys the old one.
+   */
+  patch?(tex: T, data: TileData, row0: number, rows: number): void;
 }
 
 export interface TileEntry<T> {
@@ -190,6 +198,13 @@ export interface TileEntry<T> {
    * at most one extra request.
    */
   edgeAtFetchNs: number;
+  /**
+   * **Built from pushed rows alone, not from an answer of `GET /api/tiles`** (T-893). The rows the
+   * live edge has entered arrive on `/ws/tiles/rows` before any tile read could, so the cache files
+   * them as a tile at once; the first real answer for the address replaces it (and the pushed rows
+   * past that answer's horizon are laid back over it — [[TileCache.insert]]).
+   */
+  synthetic?: boolean;
 }
 
 /**
@@ -331,6 +346,10 @@ export interface TileCacheStats {
   /** Next-row reads issued ahead of a following edge (T-890, [[TileCache.lookAhead]]): at most one
    * per address. */
   aheadIssued: number;
+  /** Rows filed from `/ws/tiles/rows` into a tile in hand (T-893). */
+  rowsPushed: number;
+  /** Tiles built from pushed rows before any answer for the address arrived (T-893). */
+  rowTilesSynthesized: number;
 }
 
 const MB = 1024 * 1024;
@@ -431,6 +450,11 @@ const AHEAD_SERVICES = 8;
 /** The [[InFlight.owner]] of a look-ahead read: on the global budget like an orphan (-1), but not
  * sent alone the way a revalidation is. */
 const AHEAD_OWNER = -2;
+/** How long after a push a column counts as fed, ms: a few row periods at the finest level, so a
+ * feed that stalls or closes hands its column back to the polling lane within seconds (T-893). */
+const FEED_FRESH_MS = 2000;
+/** A tile's column key: its address without the time index. */
+const columnOf = (a: TileAddr): string => keyOf({ ...a, tIndex: -1 });
 
 /**
  * How many speculated addresses [[TileCache.speculated]] remembers (T-538). It only has to be large
@@ -615,6 +639,27 @@ export class TileCache<T> {
   private aheadAsked = new Set<string>();
   private nextEdgeScan = 0;
   /**
+   * **Rows pushed by `/ws/tiles/rows`, filed by tile address** (T-893). Kept beside the tiles rather
+   * than only written into them, because a tile answer that lands later is older at its top than
+   * the rows already pushed — the route's horizon trails the feed — and without these the newest
+   * rows would vanish from the screen until the next push.
+   */
+  private pushed = new RowAccumulator();
+  /** When each column last had rows pushed, ms — the polling lane stands down while it is fresh. */
+  private pushedAt = new Map<string, number>();
+  /**
+   * Frame on which each resident tile was last drawn as a STAND-IN for a missing one (T-893). A
+   * stand-in drawn for a following pane is on screen at the live edge, so it is kept fresh like a
+   * tile drawn at its own level ([[refreshEdge]]); before, only exact-level tiles were, and a parent
+   * pin standing in for a new row stayed at whatever horizon it was first fetched at and drew nothing.
+   */
+  private standInFrame = new Map<string, number>();
+  /** Refreshes queued for a tile only because it was standing in ([[pumpRefresh]] re-checks it). */
+  private standInQueued = new Set<string>();
+  /** Every key revalidated because it was drawn as a stand-in over a following pane (T-893) — for
+   * the tests that assert a refresh is only ever for something on screen. */
+  readonly refreshedAsStandIn = new Set<string>();
+  /**
    * The newest capture instant the surface has been told about, as of the last [[refreshEdge]] —
    * stamped onto every tile this cache asks for, so a resident copy knows how much of its own span
    * it can possibly hold (T-495).
@@ -655,6 +700,7 @@ export class TileCache<T> {
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
     silentFailures: 0, speculativeIssued: 0, speculativeHits: 0, aheadIssued: 0,
+    rowsPushed: 0, rowTilesSynthesized: 0,
   };
 
   constructor(
@@ -955,7 +1001,16 @@ export class TileCache<T> {
       const key = e.key;
       if (this.refreshing.has(key) || this.refreshQueued.has(key) || this.inflight.has(key)) continue;
       if (!this.behindTheEdge(lat, e, edgeNs)) continue;
-      if (!following.some((v) => this.drawnBy(lat, v, e.addr))) continue;
+      // Drawn at its own level, or drawn as a stand-in for a missing tile on this or the last frame
+      // over a following pane (T-893): either way it is what that pane shows at its live edge.
+      const standIn = (this.standInFrame.get(key) ?? -2) >= this.frame - 1;
+      const own = following.some((v) => this.drawnBy(lat, v, e.addr));
+      if (!own && !(standIn && following.some((v) => e.addr.scheme === lat.scheme && intersects(lat, e.addr, v.box)))) continue;
+      if (!own) this.standInQueued.add(key);
+      // **A column the row feed is keeping current is not polled** (T-893): its rows arrive as they
+      // are recorded. The completing re-ask once the edge has left the tile still goes out — pushed
+      // rows may be provisional, and the sealed tile is then the authority (docs/api.md).
+      if (this.fedRecently(e.addr, t) && edgeNs < this.endOf(lat, e)) continue;
       // The newest cell of a tile is one cell tall, so a re-ask inside that period cannot come back
       // with a row the copy in hand does not already have. This is the cadence, and it scales itself
       // with the zoom: 1 s at level 0, 32 s five levels out.
@@ -1005,8 +1060,15 @@ export class TileCache<T> {
     const next = new Set<string>();
     const want: TileAddr[] = [];
     const leadNs = AHEAD_SERVICES * this.serverMs * 1e6;
-    for (const e of this.map.values()) {
-      const a = e.addr;
+    // **Every column the renderer has ASKED for, not only the ones that answered** (T-893). A
+    // full-width pane is six columns, and on a slow route some of the current row is still queued or
+    // in flight when the edge nears its end; extending only resident columns left exactly those with
+    // no next row. Queued and in-flight addresses are ones the renderer requested, so the coverage
+    // survey did not settle them as never sampled (T-580) — the same guarantee a resident one gives.
+    const known: TileAddr[] = [...this.map.values()].map((e) => e.addr);
+    for (const k of this.inflight.keys()) { const a = parseKey(k); if (a) known.push(a); }
+    for (const a of this.queue) if (!this.ahead.has(keyOf(a))) known.push(a);
+    for (const a of known) {
       if (a.scheme !== lat.scheme) continue;
       const ext = extentOf(lat, a);
       if (!(ext.t0Ns <= edgeNs && edgeNs < ext.t1Ns)) continue;
@@ -1015,6 +1077,7 @@ export class TileCache<T> {
       const n: TileAddr = { ...a, tIndex: a.tIndex + 1 };
       if (!inLattice(lat, n)) continue;
       const key = keyOf(n);
+      if (next.has(key)) continue;
       next.add(key);
       want.push(n);
     }
@@ -1035,6 +1098,191 @@ export class TileCache<T> {
       queued++;
     }
     return queued;
+  }
+
+  /** Was rows pushed for `a`'s column within the last few service times? */
+  private fedRecently(a: TileAddr, t: number): boolean {
+    const at = this.pushedAt.get(columnOf(a));
+    return at !== undefined && t - at < FEED_FRESH_MS;
+  }
+
+  /**
+   * **The columns a FOLLOWING pane draws at its live edge, and where a row subscription for each
+   * should start** (T-893) — what [[LiveRowFeeds.want]] is handed every frame.
+   *
+   * A column qualifies when the renderer has asked for one of its tiles near the edge (resident,
+   * in flight or queued): the same T-580 guarantee [[lookAhead]] relies on, so spectrum the coverage
+   * survey settles as never sampled opens no socket. Nearest the pane's centre first, so the
+   * client's cap ([[MAX_CLIENT_ROW_FEEDS]]) drops the edges of a wide pane, not its middle.
+   *
+   * The start row is where the rows in hand stop: the edge tile's own horizon when it is resident,
+   * else the edge tile's FIRST row — so the whole of the row the edge is in arrives pushed, and a
+   * pane that has no answer for it yet draws it anyway ([[applyRows]]).
+   */
+  liveColumns(lat: Lattice, edgeNs: number, following: readonly Viewport[]): WantedColumn[] {
+    if (!Number.isFinite(edgeNs) || !following.length) return [];
+    const known: TileAddr[] = [...this.map.values()].map((e) => e.addr);
+    for (const k of this.inflight.keys()) { const a = parseKey(k); if (a) known.push(a); }
+    known.push(...this.queue);
+    const out: { w: WantedColumn; d: number }[] = [];
+    const seen = new Set<string>();
+    for (const v of following) {
+      const mid = (v.box.f0Hz + v.box.f1Hz) / 2;
+      for (const a of known) {
+        if (a.scheme !== lat.scheme || a.levelF !== v.levelF || a.levelT !== v.levelT) continue;
+        const ext = extentOf(lat, a);
+        if (!(ext.f1Hz > v.box.f0Hz && ext.f0Hz < v.box.f1Hz)) continue;
+        // The tile the edge is in, or the one it has just left (whose successor may not be known yet).
+        if (!(ext.t0Ns <= edgeNs && edgeNs < ext.t1Ns + (ext.t1Ns - ext.t0Ns))) continue;
+        const col: ColumnAddr = { device: a.device, scheme: a.scheme, levelF: a.levelF, levelT: a.levelT, fIndex: a.fIndex, cells: a.cells };
+        const ck = columnOf(a);
+        if (seen.has(ck)) continue;
+        seen.add(ck);
+        const cell = tCellNs(lat, a.levelT), tile = tTileNs(lat, a.levelT);
+        const edgeTile: TileAddr = { ...a, tIndex: Math.floor(edgeNs / tile) };
+        const e = this.map.get(keyOf(edgeTile));
+        const start = edgeTile.tIndex * tile;
+        const asOf = e && !e.synthetic ? e.data.asOfNs : null;
+        const from = asOf !== null && Number.isFinite(asOf) ? Math.min(Math.max(asOf, start), edgeNs) : start;
+        out.push({ w: { col, fromRow: Math.floor(from / cell) }, d: Math.abs((ext.f0Hz + ext.f1Hz) / 2 - mid) });
+      }
+    }
+    out.sort((x, y) => x.d - y.d);
+    return out.map((x) => x.w);
+  }
+
+  /**
+   * **File a block pushed by `/ws/tiles/rows` and put it on screen** (T-893).
+   *
+   * A resident copy of the tile gets the rows written into it past its own horizon, and its
+   * horizon ([[TileData.asOfNs]]) is carried forward through every row now contiguous with it — so
+   * the renderer's one rule (draw a copy only as far as its evidence reaches) draws the new rows the
+   * frame after they arrive. A tile not yet in hand whose rows have arrived from its FIRST row on is
+   * built from them ([[TileEntry.synthetic]]): the row the live edge has just entered is on screen
+   * before any tile read for it could be. Every cell is decoded by the tile route's own rule — the
+   * block's `coverage` alone decides grey — so nothing here invents a state.
+   *
+   * An `unobserved` stretch is written only into tiles already in hand, as grey past their horizon;
+   * it is never expanded into tiles of its own (it may span billions of rows).
+   */
+  applyRows(col: ColumnAddr, block: RowBlock | GapBlock): void {
+    const lat = this.lat;
+    if (!lat || col.scheme !== lat.scheme) return;
+    this.pushedAt.set(columnOf({ ...col, tIndex: 0 }), this.now());
+    const cells = col.cells;
+    if (block.kind === "unobserved") {
+      const r0 = block.row0, r1 = block.row0 + block.rows;
+      for (const e of [...this.map.values()]) {
+        if (columnOf(e.addr) !== columnOf({ ...col, tIndex: 0 })) continue;
+        const t0 = e.addr.tIndex * cells;
+        const lo = Math.max(r0, t0), hi = Math.min(r1, t0 + cells);
+        if (hi <= lo) continue;
+        const grey: TileRows = {
+          addr: e.addr,
+          maxDb: new Float32Array(cells * cells).fill(NaN),
+          coverage: new Array<string | null>(cells * cells).fill("unobserved"),
+          rowsSeen: new Uint8Array(cells).map((_, y) => (y >= lo - t0 && y < hi - t0 ? 1 : 0)),
+        };
+        this.patchEntry(lat, e, grey);
+      }
+      return;
+    }
+    const addrs = this.pushed.apply(col, block);
+    this.stats.rowsPushed += block.rows;
+    for (const addr of addrs) {
+      const rows = this.pushed.get(addr)!;
+      const e = this.map.get(keyOf(addr));
+      if (e) this.patchEntry(lat, e, rows);
+      else if (rows.rowsSeen[0]) this.synthesize(lat, addr, rows);
+      // The column has moved on: the rows of tiles the edge left two rows ago are the sealed tile's.
+      this.pushed.prune(col, addr.tIndex - 1);
+    }
+  }
+
+  /** Mark a resident tile as drawn this frame as a stand-in for a missing one ([[standInFrame]]). */
+  standIn(e: TileEntry<T>): void { this.standInFrame.set(e.key, this.frame); }
+
+  /**
+   * Write `rows` into `e` past its horizon and carry the horizon forward through the contiguous run
+   * — the whole of how a pushed row reaches a texture. Returns the entry now in the map.
+   */
+  private patchEntry(lat: Lattice, e: TileEntry<T>, rows: TileRows): TileEntry<T> {
+    const c = e.addr.cells, d = e.data;
+    if (d.nf !== c || d.nt !== c) return e;
+    const ext = extentOf(lat, e.addr);
+    const cell = (ext.t1Ns - ext.t0Ns) / c;
+    const h = d.asOfNs;
+    // Rows before the horizon are the answer's, which is the authority for them (it is the newer
+    // read of a row that may have been provisional when pushed).
+    const first = h === null || !Number.isFinite(h) ? 0 : Math.max(0, Math.floor((h - ext.t0Ns) / cell));
+    let lo = c, hi = -1;
+    for (let y = first; y < c; y++) {
+      if (!rows.rowsSeen[y]) continue;
+      for (let f = 0; f < c; f++) {
+        const i = y * c + f;
+        const cov = rows.coverage[i];
+        if (cov === null) continue;
+        const v = rows.maxDb[i];
+        if (cov === "unobserved") {
+          // A last-known level the answer carried here is kept: coverage says nobody looked, and the
+          // shadow tier is exactly the mark for that (T-520).
+          if (d.state[i] !== CELL.SHADOW) { d.state[i] = CELL.UNOBSERVED; d.value[i] = NaN; }
+        } else if (cov === "unknown") { d.state[i] = CELL.UNKNOWN; d.value[i] = NaN; }
+        else if (Number.isFinite(v)) { d.state[i] = cov === "excluded" ? CELL.EXCLUDED : CELL.OBSERVED; d.value[i] = v; }
+        else { d.state[i] = CELL.NO_LEVEL; d.value[i] = NaN; }
+      }
+      lo = Math.min(lo, y);
+      hi = Math.max(hi, y);
+    }
+    let asOf = h;
+    if (h !== null && Number.isFinite(h)) {
+      let y = first;
+      while (y < c && rows.rowsSeen[y]) y++;
+      const reach = Math.min(ext.t1Ns, ext.t0Ns + y * cell);
+      if (reach > h) asOf = reach;
+    }
+    if (hi < 0 && asOf === h) return e;
+    const data: TileData = asOf === h ? d : { ...d, asOfNs: asOf };
+    let tex = e.tex;
+    if (hi >= 0) {
+      if (this.tex.patch) this.tex.patch(tex, data, lo, hi - lo + 1);
+      else { const old = tex; tex = this.tex.upload(data); this.tex.destroy(old); this.stats.uploads++; }
+    }
+    const next: TileEntry<T> = { ...e, data, tex };
+    this.map.set(e.key, next);
+    return next;
+  }
+
+  /** Build a tile from pushed rows alone ([[TileEntry.synthetic]]). */
+  private synthesize(lat: Lattice, addr: TileAddr, rows: TileRows): void {
+    const c = addr.cells, n = c * c;
+    const ext = extentOf(lat, addr);
+    // What the route would say about this tile's resolution, borrowed from the row below it in the
+    // same column when that is in hand — and otherwise the weaker claim (`spectrum-history`, which
+    // is what the tile route itself answers for a detail tile, T-484), never an over-claim.
+    const below = this.map.get(keyOf({ ...addr, tIndex: addr.tIndex - 1 }))?.data;
+    const data: TileData = {
+      addr, key: keyOf(addr), nf: c, nt: c, t1Ns: ext.t1Ns, asOfNs: ext.t0Ns,
+      value: new Float32Array(n).fill(NaN), state: new Uint8Array(n).fill(CELL.NO_LEVEL),
+      tier: below?.tier ?? "spectrum-history",
+      answeredLevel: below?.answeredLevel ?? addr.levelT,
+      fold: below?.fold ?? { frequency: "exact", time: "exact" },
+      measured: below?.measured ?? { nf: c, nt: c },
+      rangeDb: null, bytes: n * BYTES_PER_CELL,
+      serverInFlightLimit: null, serverInFlightShare: null,
+    };
+    const tex = this.tex.upload(data);
+    this.stats.uploads++;
+    this.stats.rowTilesSynthesized++;
+    const e: TileEntry<T> = {
+      key: data.key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame,
+      // Never asked for, so never fresh: the refresh lane fetches the real answer for it.
+      edgeAtFetchNs: Number.NEGATIVE_INFINITY, synthetic: true,
+    };
+    this.map.set(data.key, e);
+    this.bytes += data.bytes;
+    this.patchEntry(lat, e, rows);
+    this.evict();
   }
 
   /**
@@ -1229,6 +1477,8 @@ export class TileCache<T> {
     this.speculativeResident.delete(key);
     // A retune drops the look-ahead copy too; the next row may be asked for again.
     this.aheadAsked.delete(key);
+    this.pushed.drop(addr);
+    this.standInFrame.delete(key);
     this.bytes -= e.data.bytes;
     return true;
   }
@@ -1260,6 +1510,10 @@ export class TileCache<T> {
     this.speculativeResident.clear();
     this.ahead.clear();
     this.aheadAsked.clear();
+    this.pushed = new RowAccumulator();
+    this.pushedAt.clear();
+    this.standInFrame.clear();
+    this.standInQueued.clear();
   }
 
   /**
@@ -1342,6 +1596,11 @@ export class TileCache<T> {
     // Evicted, retuned away, or otherwise no longer in hand while it waited: there is nothing to
     // revalidate, and the ordinary miss path owns the address now.
     if (!this.map.has(key)) return;
+    // A stand-in whose missing tile has since arrived is no longer on screen: nothing to refresh.
+    if (this.standInQueued.delete(key)) {
+      if ((this.standInFrame.get(key) ?? -2) < this.frame - 1) return;
+      this.refreshedAsStandIn.add(key);
+    }
     this.refreshing.add(key);
     this.refreshingLane = lane;
     this.refreshedAt.set(key, t);
@@ -1753,8 +2012,9 @@ export class TileCache<T> {
     if (this.stale.delete(key)) return false;
     const prev = this.map.get(key);
     // A **live-edge revalidation replaces** the copy in hand (T-460); anything else that arrives for
-    // a resident key is a duplicate, and the same tile is never uploaded twice.
-    if (prev && !this.refreshing.has(key)) return true;
+    // a resident key is a duplicate, and the same tile is never uploaded twice — except a copy built
+    // from pushed rows, which any real answer replaces (T-893).
+    if (prev && !this.refreshing.has(key) && !prev.synthetic) return true;
     const tex = this.tex.upload(data);
     this.stats.uploads++;
     // The replaced texture is destroyed and its bytes returned: a refresh that leaked one would turn
@@ -1762,13 +2022,19 @@ export class TileCache<T> {
     if (prev) {
       this.tex.destroy(prev.tex);
       this.bytes -= prev.data.bytes;
-      this.stats.edgeRefreshApplied++;
+      if (!prev.synthetic) this.stats.edgeRefreshApplied++;
     }
     // A tile that has just arrived is pinned for the frame it arrived on: it cost the server 11.4 ms
     // and evicting it before it has been drawn once would spend that twice.
-    this.map.set(key, { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame, edgeAtFetchNs });
+    const entry: TileEntry<T> = { key, addr, data, tex, lastUsed: ++this.clock, pinnedFrame: this.frame, edgeAtFetchNs };
+    this.map.set(key, entry);
     this.bytes += data.bytes;
     this.refreshedAt.set(key, this.now());
+    // **Rows already pushed past this answer's horizon are laid back over it** (T-893). The route's
+    // horizon trails the feed, so an answer is usually older at its top than what is on screen, and
+    // replacing the copy without this would take the newest rows off the pane until the next push.
+    const rows = this.pushed.get(addr);
+    if (rows && this.lat && addr.scheme === this.lat.scheme) this.patchEntry(this.lat, entry, rows);
     this.evict();
     return true;
   }
@@ -1790,6 +2056,7 @@ export class TileCache<T> {
       this.map.delete(victim.key);
       this.refreshedAt.delete(victim.key);
       this.speculativeResident.delete(victim.key);
+      this.standInFrame.delete(victim.key);
       this.bytes -= victim.data.bytes;
       this.evicted.add(victim.key);
       this.stats.evictions++;
