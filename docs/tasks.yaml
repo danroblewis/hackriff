@@ -25763,7 +25763,7 @@ tasks:
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
-    status: in-progress
+    status: done
     branch: task-t875
     priority: normal
     deps:
@@ -25791,6 +25791,7 @@ tasks:
       Observed, not chased: The Rate DDC resampler (filter.rs, shared by resample/fm_demod/subcarrier and psk_demod) emits nothing for its first filter span. Its first output is stamped about 42 source samples (≈4 symbols at 48 kS/s → 14.4 kS/s) into a stream, so a capture cut exactly at a burst's first sample loses those symbols on either psk path. Evidence: burst_mode_decodes_a_capture_that_starts_and_ends_on_the_burst needed a 6-symbol lead; with no lead the first item was stamped at source 43.6. | One-chunk-per-process-call plus chunk-level flags (ADR-0011 s1.1) means a block cannot emit two bursts in one call. If bursts outnumber process calls (a dense ISM burst field fed in big chunks), burst mode overruns and counts bursts_dropped; a single END chunk holding two bursts drops the second. This is a contract question (e.g. multiple output chunks per call) for the ADR owner, not something to fix inside a block. | RRC OQPSK bursts shorter than 64 symbols do not pass the blind PSK test: the raw x^4 line is weak, coherence about 0.3. The symbol-rate y_I^2 - y_Q^2 line was tried and is weaker still (about 0.26 in theory), so it was not kept. A joint carrier-phase x timing search would be the next step. | Burst mode's per-burst estimation cost (up to 32 hypotheses x 256 symbols plus a 1024-point FFT each) has not been measured in a release build. | Streaming-path DBPSK decodes bursts whole from about 64 symbols at a 0.125*Rs offset: differential detection tolerates the unremoved carrier.
       Use cases: SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081
       Resources: 161 CPU-s, peak 1.4 GB
+    commit: 33629cd7
   - id: T-876
     milestone: M3
     title: "Burst-extent estimate overruns the burst (hk_estimate::params step 6b): 24.8-28.8 ms for a 23.5 ms burst, so noise-only samples push FSK envelope features out of every class"
