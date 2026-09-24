@@ -319,6 +319,21 @@ process(){
       echo "$branch $(git -C "$REPO" rev-parse HEAD) $tip" >> "$S/main-red-parked"
       return 1
     fi
+    # Main passed it alone just now, but the same spec failed alone on ANOTHER branch within a day:
+    # an intermittent defect on main, not this branch's (canvas-journey, 2026-09-24). Held like a main
+    # red - no attempt, parked until main or the branch moves - and a deflaker/ticket requested once.
+    # Once per branch tip: a second main-side verdict on the same tip is charged like any red (its
+    # worker gets the fix run) - two different real defects in one spec must not park a branch for a day.
+    local side=""; grep -qx "$branch $tip" "$S/main-side-seen" 2>/dev/null || side=$(main_side_of "$branch" | sed 's/^main-side //')
+    if [ -n "$side" ]; then
+      echo "$branch $tip" >> "$S/main-side-seen"
+      local what; what=$(tail -n +"$gate_line" "$LOG" | grep -m1 -E 'AssertionError|panicked at' | sed 's/^ *//' | cut -c1-240)
+      log "TRIAGE: MAIN-SIDE $(echo $side) -> $branch held, no attempt charged: the spec fails alone on 2+ branches in 24 h"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  BLOCKED_ON_SPEC - $(echo $side) - fails alone on 2+ different branches in 24 h: a MAIN-side defect, not this branch's. Assertion: ${what:-see merge-runner.log}. Request: a deflaker or a ticket for main (evidence: just flakes; the branches above). $branch is held and re-queued automatically when main moves." >> "$NEEDS"
+      notify_coordinator "main-side $(echo $side | cut -c1-120) - $ticket ($branch) held, not blamed; assertion: ${what:-see log}. Needs a deflaker or a ticket for main." "main-side defect - deflaker/ticket needed"
+      echo "$branch $(git -C "$REPO" rev-parse HEAD) $tip" >> "$S/main-red-parked"
+      return 1
+    fi
     record_attempt "$branch" "$tip"
     log "GATE FAILED $branch (attempt $((tries+1))/$MAX_ATTEMPTS, tip $tip) -> abort + flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate: $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} ${TRIAGE_WHAT:-} | cut -c1-300)" "gate failed - fix run"
@@ -543,13 +558,24 @@ limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
 # rollback is FLAKE_SOLO_ONE=0 = the twice rule): after the FIRST isolated pass, a red whose flake
 # ledger already shows every test passing alone >= 2 times and never failing alone in 7 d is accepted
 # without the second run. Prints `solo-ok N`; exit 1 (twice rule) when off, unknown, or not qualified.
+# A merge that changes the code judging its own red (the ledger, the runner) must not be excused by it
+# (review, 2026-09-24). Compared against the last gated commit - a bulk's base=, else HEAD for a staged merge.
+judge_changed(){
+  local ref=HEAD; [ -f "$BULKMARK" ] && ref=$(sed -n 's/^base=//p' "$BULKMARK" | head -1)
+  ! git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh 2>/dev/null
+}
 solo_ok(){
   [ "${FLAKE_SOLO_ONE:-0}" = 1 ] || return 1
-  # Never for a merge that changes the acceptance code itself: it would decide its own flake accept
-  # (review). Compared against the last gated commit - a bulk's base=, else HEAD for a staged merge.
-  local ref=HEAD; [ -f "$BULKMARK" ] && ref=$(sed -n 's/^base=//p' "$BULKMARK" | head -1)
-  git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh 2>/dev/null || return 1
+  judge_changed && return 1
   ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --solo-ok "$@" ) 2>/dev/null
+}
+# Supervisor for the user, 2026-09-24 14:55: a spec that fails alone on >= 2 DIFFERENT branches in 24 h
+# is main's defect (canvas-journey was pinned on three merges; each fail-alone counted as a branch
+# defect, so the deflake path never fired). Prints the ledger's `main-side TEST: other branches` lines.
+main_side_of(){ # branch  (runs after the merge is aborted: main's own ledger code decides)
+  local names="${TRIAGE_SPECS:-${TRIAGE_TESTS:-}}"
+  [ -n "$names" ] || return 0
+  ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --main-side $names --branch "$1" ) 2>/dev/null
 }
 flake_ledger(){
   ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --update ) >>"$LOG" 2>&1 || true
@@ -582,7 +608,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; FLAKE_PASSES=2; FLAKE_SOLO_S=0
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; FLAKE_PASSES=2; FLAKE_SOLO_S=0
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -616,6 +642,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (${TRIAGE_WHAT:-lint/build/ui-unit failure}) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
+  TRIAGE_TESTS="$(echo $tests)"   # the full nextest names - the flake ledger's keys (main_side_of)
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
   t0=$SECONDS
   if ( cd "$REPO" && HK_E2E_REQUIRE_SYNTH=1 HK_REQUIRE_FIXTURES=1 cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then

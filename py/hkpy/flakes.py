@@ -100,8 +100,13 @@ _FAILED = re.compile(r"^TRIAGE: (?:a test|a browser spec) FAILS alone")
 #: Explicitly NOT a gate red: the runner also re-runs the same specs on a rewound `main` to ask
 #: whether main itself is broken. Counting those would double every browser incident.
 _ON_MAIN = re.compile(r"^TRIAGE: (?:is main itself red\?|MAIN IS RED)")
-_BRANCH_INTRODUCED = re.compile(r"^TRIAGE: main is green on them")
-_SINGLE_GATE_FAILED = re.compile(r"^GATE FAILED \S+")
+#: A batch red pinned on the batch: the old wording, or (since the runner's shared main_is_red, whose
+#: "main is green on them -> not main's" line comes BEFORE the verdict) the isolation line that follows.
+_BRANCH_INTRODUCED = re.compile(r"^TRIAGE: main is green on them -> the batch introduced it|^BULK gate FAILED -> rewound .*isolate")
+_SINGLE_GATE_FAILED = re.compile(r"^GATE FAILED (\S+)")
+#: The runner's verdict when a spec fails alone on a second branch within a day (run_main_side):
+#: main's defect, counted as a failed-alone red of the SPEC, never a branch defect.
+_MAIN_SIDE = re.compile(r"^TRIAGE: MAIN-SIDE ")
 _MAIN_RED = re.compile(r"^TRIAGE: MAIN IS RED")
 
 PASSED_ALONE = "passed_alone"
@@ -134,6 +139,9 @@ class Incident:
     #: The specs the last isolated run named as failed (`_E2E_SUMMARY`); empty = not known, and a
     #: FAILED_ALONE then counts against every test in the set, as before.
     failed_alone_tests: tuple[str, ...] = ()
+    #: The single branch a failed-alone red was pinned on (`GATE FAILED <branch>`); "" for a batch
+    #: ("the batch introduced it") or when unknown.
+    blamed_on: str = ""
 
 
 def _first_load(text: str) -> float | None:
@@ -165,7 +173,7 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
                 pending.failed_alone_tests = tuple(t for t in hit.group(1).replace(",", " ").split() if t)
             continue
         mon, day, hh, mm, ss, rest = m.groups()
-        if not rest.startswith("TRIAGE:") and not (last_failed is not None and _SINGLE_GATE_FAILED.match(rest)):
+        if not rest.startswith("TRIAGE:") and not (last_failed is not None and (_SINGLE_GATE_FAILED.match(rest) or _BRANCH_INTRODUCED.match(rest))):
             continue
         try:
             when = datetime(cur_year, int(mon), int(day), int(hh), int(mm), int(ss))
@@ -183,10 +191,12 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
         seen.add(key)
 
         if last_failed is not None:
-            if _BRANCH_INTRODUCED.match(rest) or _SINGLE_GATE_FAILED.match(rest):
+            single = _SINGLE_GATE_FAILED.match(rest)
+            if _BRANCH_INTRODUCED.match(rest) or single:
                 last_failed.branch_defect = True
+                last_failed.blamed_on = single.group(1) if single else ""
                 last_failed = None
-            elif _MAIN_RED.match(rest):
+            elif _MAIN_RED.match(rest) or _MAIN_SIDE.match(rest):
                 last_failed = None            # main itself is red on it: that DOES count
         if _ON_MAIN.match(rest):
             # A re-run on the rewound main, not a gate red. It also ENDS the pending incident's
@@ -453,6 +463,30 @@ def solo_query(ops: str, tests: list[str], *, now: float | None = None, days: in
     return solo_decision(reconcile(log_incidents, jsonl_incidents), tests, max(now - days * 86400, covered))
 
 
+#: A spec that fails alone on this many DIFFERENT branches inside MAIN_SIDE_HOURS is main's defect
+#: (supervisor for the user, 2026-09-24 14:55: canvas-journey was pinned on three merges while the red
+#: was the live-edge defect on main, and because each fail-alone was classed a branch defect the
+#: deflake path never fired). The current red's branch counts as one.
+MAIN_SIDE_BRANCHES = 2
+MAIN_SIDE_HOURS = 24
+
+
+def main_side(incidents: list[Incident], tests: list[str], branch: str, now: float,
+              hours: int = MAIN_SIDE_HOURS) -> dict[str, list[str]]:
+    """{test: [other branches it failed alone on, pinned on each, within `hours`]} for the tests that
+    now reach MAIN_SIDE_BRANCHES distinct branches with `branch`; empty = none does."""
+    cut = now - hours * 3600
+    out: dict[str, list[str]] = {}
+    for t in tests:
+        others = sorted({inc.blamed_on for inc in incidents
+                         if inc.ts >= cut and inc.outcome == FAILED_ALONE and inc.blamed_on
+                         and inc.blamed_on != branch and t in inc.tests
+                         and (not inc.failed_alone_tests or t in inc.failed_alone_tests)})
+        if len(others) + 1 >= MAIN_SIDE_BRANCHES:
+            out[t] = others
+    return out
+
+
 def load_state(path: str) -> dict[str, int]:
     """`{test: notified_at}` from a previous run. A missing or corrupt file is simply empty."""
     try:
@@ -703,6 +737,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--solo-ok", nargs="+", metavar="TEST",
                         help="exit 0 and print 'solo-ok N' when every TEST qualifies for the one-solo-pass rule "
                         "(N = its smallest passed-alone count in the window), else exit 1")
+    parser.add_argument("--main-side", nargs="+", metavar="TEST",
+                        help="with --branch B: exit 0 and print 'main-side TEST: b1 b2 ...' for each TEST that has failed "
+                        f"alone on another branch within {MAIN_SIDE_HOURS} h, else exit 1")
+    parser.add_argument("--branch", default="", help="the branch the current red is on (for --main-side)")
     parser.add_argument("--json", action="store_true", help="the ledger as JSON")
     parser.add_argument("--days", type=int, default=WINDOW_DAYS, help=f"window (default {WINDOW_DAYS})")
     parser.add_argument("--ops", default=None, help="the ops directory (default $HACKRIFF_OPS)")
@@ -717,6 +755,11 @@ def main(argv: list[str] | None = None) -> int:
         if not filed:
             print("flakes: nothing new over the threshold")
     entries = ledger(ops, days=args.days)
+    if args.main_side:
+        hits = main_side(read_sources(ops), args.main_side, args.branch, time.time())
+        for t, others in hits.items():
+            print(f"main-side {t}: {' '.join(others)}")
+        return 0 if hits else 1
     if args.solo_ok:
         ok, n = solo_query(ops, args.solo_ok, days=args.days)
         print(f"{'solo-ok' if ok else 'solo-no'} {n}")

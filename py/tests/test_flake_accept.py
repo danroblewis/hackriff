@@ -253,6 +253,7 @@ RCS=({rcs}); N=0
 npm(){{ echo "npm $*" >> {calls}; local r=${{RCS[$N]:-0}}; N=$((N+1)); return $r; }}
 uv(){{ echo "uv $*" >> {calls}; echo "{solo_answer}"; case "{solo_answer}" in solo-ok*) return 0;; *) return 1;; esac; }}
 limited(){{ echo "limited $*" >> {calls}; return 0; }}
+{_function("judge_changed")}
 {_function("solo_ok")}
 {_function("_flake_retry")}
 {_function("flake_accept")}
@@ -297,3 +298,35 @@ def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path)
     assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
     assert any("diff --quiet HEAD -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh" in c for c in ran)
     assert not any(c.startswith("uv") for c in ran) and recs[-1]["passes_alone"] == 2
+
+
+def test_main_side_of_asks_the_ledger_with_the_triaged_names(tmp_path):
+    calls = tmp_path / "calls"
+
+    def run(specs, tests):
+        script = f"""
+set -u
+REPO={tmp_path}
+uv(){{ echo "uv $*" >> {calls}; echo "main-side x: task-t1"; }}
+TRIAGE_SPECS={specs!r}; TRIAGE_TESTS={tests!r}
+{_function("main_side_of")}
+main_side_of task-t9
+"""
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30).stdout
+
+    assert run("canvas-journey.e2e.mjs", "") == "main-side x: task-t1\n"
+    assert calls.read_text().splitlines()[-1].endswith("--main-side canvas-journey.e2e.mjs --branch task-t9")
+    run("", "hk-pipeline::sweep_residency a_sustained hk-api::x b_c")       # the ledger's full nextest names
+    assert calls.read_text().splitlines()[-1].endswith("--main-side hk-pipeline::sweep_residency a_sustained hk-api::x b_c --branch task-t9")
+    n = len(calls.read_text().splitlines())
+    assert run("", "") == "" and len(calls.read_text().splitlines()) == n   # nothing triaged: not asked
+
+
+def test_a_single_branch_main_side_red_is_held_once_per_tip_not_charged():
+    text = RUNNER.read_text()
+    block = text[text.index('    local side=""; grep -qx "$branch $tip" "$S/main-side-seen"'):]
+    block = block[:block.index("record_attempt")]
+    assert block.splitlines()[1].strip() == 'if [ -n "$side" ]; then'                   # the hold is what the verdict gates
+    assert 'echo "$branch $tip" >> "$S/main-side-seen"' in block                     # the second time on this tip is charged
+    assert '>> "$S/main-red-parked"' in block and "return 1" in block and "BLOCKED_ON_SPEC" in block
+    assert '"main-side defect - deflaker/ticket needed"' in block
