@@ -1523,6 +1523,8 @@ def reclaim_e2e_data(dry):
             continue
         shutil.rmtree(d, ignore_errors=True)
         log(f"RECLAIM {d} (leaked e2e backend data, idle {(time.time() - newest) / 60:.0f} min, no process names it)")
+
+
 def _target_written(t):
     """Newest write under target/. ctime too: `cp -c -R -p` (the worktree clone recipe) keeps main's old
     mtimes, so a target cloned a minute ago would read as idle; the clone cannot keep the old ctime."""

@@ -796,6 +796,8 @@ def test_a_leaked_e2e_data_dir_is_removed_and_a_live_one_kept(tmp_path, monkeypa
         os.utime(p, (old, old))
     R.reclaim_e2e_data(dry=False)
     assert (tmp_path / "hk-e2e-data-fresh").exists()
+
+
 def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
     """09-24 09:47: 55 GB of build output sat in twelve worktrees the reaper keeps (timeout, blocked,
     uncommitted); free disk was 22 GB against a 20 GB dispatch floor."""
