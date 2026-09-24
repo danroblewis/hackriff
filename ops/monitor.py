@@ -2313,6 +2313,7 @@ async function levTick(){ try{
   if(b.error){ el.innerHTML='<div style="color:var(--dim)">'+esc(String(b.error))+'</div>'; return; }
   const rows=(b.rows||[]).filter(r=>r.unblocks>0).slice(0,5);
   el.innerHTML=(e.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px">${esc(e.line)}</div>`:'')+
+    (e.graph&&e.graph.line?`<div style="color:var(--amber);font:11.5px var(--mono);margin-bottom:4px" title="max expected landing over every todo/in-progress ticket; deferred and blocked excluded (py/hkpy/graphclear.py)">${esc(e.graph.line)}</div>`:'')+
     rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline"><span style="font:12px var(--mono);color:var(--amber);min-width:2.2em;text-align:right" title="open tickets transitively behind it">${esc(String(r.unblocks))}</span><span class=tlink data-tid="${esc(r.id)}" style="font:12px var(--mono)">${esc(r.id)}</span><span style="color:var(--dim);font:11px var(--mono)">${esc(Object.entries(r.downstream_milestones||{}).map(([k,v])=>k+' '+v).join(', '))}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.title)}</span></div>`).join('')+
     `<div style="color:var(--dim);font:11px var(--mono);margin-top:3px">${esc(String(b.open))} open · frontier ${esc(String((b.frontier||[]).length))} ready now${(b.self_deps||[]).length?' · <span style="color:var(--coral)">self-dependency '+esc(b.self_deps.join(' '))+'</span>':''}</div>`;
 }catch(x){} }
@@ -2978,16 +2979,19 @@ _TASKORDER = {"t": 0.0, "v": None}
 _ETA = {"t": 0.0, "v": None}
 
 
-def eta_cached(max_age=60.0):
+def eta_cached(max_age=300.0):
     """The digest's ETA line (hkpy.flow.eta_line: queue clears / top Leverage ticket lands), for the
-    main page's Leverage card - built in a child (_child_json), cached 60 s."""
+    main page's Leverage card, plus the open-graph line (hkpy.graphclear) - built in a child
+    (_child_json), cached 5 min: the graph estimate reads the board and the runner logs."""
     if _ETA["v"] is not None and time.time() - _ETA["t"] < max_age:
         return _ETA["v"]
     v = _child_json(f"""
 import json
 from datetime import datetime
 from hkpy import flow
-print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}}))
+now = datetime.now()
+s = flow.summary({SCRATCH!r}, now)
+print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": flow.open_graph({SCRATCH!r}, now, s, repo={REPO!r})}}))
 """)
     _ETA.update(t=time.time(), v=v)
     return v
