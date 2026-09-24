@@ -23819,7 +23819,6 @@ tasks:
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
     status: in-progress
-    branch: task-t808
     priority: high
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23847,6 +23846,16 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): detections drawn as their own layer: confirmed signals prominent, candidates visibly weaker, and neither ever drawn over the grey fog. Say in your handback exactly what to open on staging to see it.
+    branch: task-t808
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 15:13).
+      T-806 already wired the detections overlay layer (stroke plane, so never over the coverage fog; candidates/unknowns visible by default; no overlap hiding or z-ordering). Remaining gap was that Confirmed and Candidate strokes were the same thickness. Added per-box strokePx to MarkBox: Confirmed 3px, Candidate/artifact 1px. Test asserts thickness ordering. Data source remains the inventory presence intervals (same backend rows), not a new /api/events call. On staging: open the canvas with the Detections layer on (default) and look at a region with both confirmed (teal, heavy) and candidate (lavender, thin) boxes.
+      Tests: node test/run.mjs surface-marks surface-layers -> exit 0 (19 passed)
+      precheck exit 0
+      Commits: 6113261b
+      Observed, not chased: Detections layer reads /api/inventory presence, not /api/events as the ticket text says
+      Use cases: AWARE-053
+      Resources: 56 CPU-s, peak 0.4 GB
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
