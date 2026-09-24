@@ -114,6 +114,7 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # a fresh agent (or the coordinator) rediscovering everything. Capped like the merge runner's own
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
+KILL_RESUMES = 2   # resumes of a run killed by a signal; not fix attempts - nothing failed
 # A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
@@ -815,7 +816,7 @@ def reap(claims, dry):
             # on 2026-09-24 a pkill took five workers; they were logged "NO_HANDBACK ... (done)", parked
             # as uncommitted/no-work and never run again). Keep the worktree and resume the session.
             record_done(c, "killed", res)
-            if c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
+            if c.get("session_id") and c.get("kill_resumes", 0) < KILL_RESUMES and os.path.isdir(c.get("wt", "")):
                 claims[tid] = launch_fix(dict(c, kind="work"), f"KILLED your run ended after {age_min:.0f} min with no result - "
                                          f"it was killed by a signal, not failed; {len(dirty)} modified files and {ahead} commits "
                                          f"are in {c['wt']}: check them and continue the ticket from there")
@@ -897,6 +898,17 @@ def launch_fix(c, fail_line):
     if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         attention(tid, branch, "FIX_HELD", f"fix attempt {n} NOT launched: dispatch is paused/gate pending ({fail_line[:160]})")
         return dict(c, state="fix-held", fail_line=fail_line[:300])
+    if fail_line.startswith("KILLED"):
+        k = c.get("kill_resumes", 0) + 1
+        prompt = f"""Your run on {tid} was KILLED from outside (a signal - not a failure of yours, not a gate result);
+this resumes the same session. {fail_line[len("KILLED "):]}.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you had done. Keep what is right, then carry on with the
+ticket exactly as your original brief says: targeted tests, commit on {branch}, write {d}/handback.json, and end your final
+message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main checkout, never the
+full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
+        return dict(r, kill_resumes=k)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
@@ -933,12 +945,12 @@ your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
     return _run_fix(c, n, prompt)
 
 
-def _run_fix(c, n, prompt):
+def _run_fix(c, n, prompt, out_name=None):
     tid, wt = c["ticket"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
-    out_path = f"{d}/fix{n}.json"
+    out_path = f"{d}/{out_name or f'fix{n}.json'}"
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
@@ -994,7 +1006,7 @@ def release_stale_claims(claims, tasks_by_id):
                 f"(landed as a rebuilt branch) - claim closed")
             c["state"] = "merged"; c["ended"] = time.time(); changed = True
     for tid, c in list(claims.items()):
-        if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
+        if c.get("state") in ("no-work", "error", "timeout", "killed") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
                 log(f"RELEASE {tid}: claim ended {c['state']} {RELEASE_AFTER_H:.0f}h+ ago and the ticket is still todo - eligible again")
                 del claims[tid]; changed = True
@@ -1226,7 +1238,7 @@ def dead_dispatches(claims, tasks, now, has_work=has_work, busy=None, prior=None
     revert, skipped = [], []
     for tid, c in claims.items():
         t = tasks.get(tid)
-        if not (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout")
+        if not (t and t.get("status") == "in-progress" and c.get("state") in ("no-work", "error", "timeout", "killed")
                 and now - c.get("started", 0) > RELEASE_AFTER_H * 3600):
             continue
         if busy.get(tid, 0) > c.get("started", 0) or t.get("branch") not in (None, branch_of(tid)) or has_work(tid):

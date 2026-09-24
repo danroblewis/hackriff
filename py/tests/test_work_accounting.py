@@ -810,6 +810,26 @@ def test_a_killed_worker_with_no_session_is_named_for_a_redispatch(killed_run):
     assert [k for _, k, _ in seen] == ["KILLED"] and "T-802 (needs a redispatch)" in alerts[0][2]
 
 
+def test_a_killed_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch, tmp_path):
+    """Review 2026-09-24: through the gate-failure prompt a killed worker would chase a gate that never
+    ran, and a later real gate failure would get one fix attempt instead of two."""
+    monkeypatch.setattr(R, "merge_target", lambda: "main")
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
+    c = {"ticket": "T-802", "branch": "task-t802", "wt": str(tmp_path), "session_id": "abc", "fix_attempts": 1, "kind": "work"}
+    r = R.launch_fix(c, "KILLED your run ended after 40 min with no result")
+    (n, prompt, out_name), = runs
+    assert n == 1 and r["fix_attempts"] == 1 and r["kill_resumes"] == 1 and out_name == "resume1.json"
+    assert "KILLED from outside" in prompt and "merge gate" not in prompt and "merge-runner.log" not in prompt
+
+
+def test_a_killed_claim_with_no_commits_is_released_like_no_work(df, monkeypatch):
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    claims = {"T-802": {"ticket": "T-802", "state": "killed", "started": 0, "branch": "task-t802"}}
+    R.release_stale_claims(claims, {"T-802": {"id": "T-802", "status": "todo"}})
+    assert "T-802" not in claims
+
+
 def test_a_worker_that_wrote_its_result_is_not_killed(killed_run, tmp_path):
     claim, fixes, alerts, seen = killed_run
     (tmp_path / "work" / "T-802" / "out.json").write_text(json.dumps({"result": "done", "session_id": "abc"}))
