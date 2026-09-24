@@ -51,6 +51,8 @@ The canvas is `100vw × 100vh` (`position: fixed; inset: 0`). Everything else fl
 | 3 | 30 | screen | sheets and the Research slide-in | on interaction |
 | 4 | 40 | screen | transients: MapTip, retune offer, mode banner, errors | on interaction |
 
+**No overlay is draggable or repositionable; users choose visibility only** (docs/23 §10.6 rule 3, amended 2026-09-24, T-896): each band-2/3 panel has the one dock docs/23 §10.2 assigns it, and no dock position is persisted — only visibility and the sheet's snap (size) state.
+
 **Chrome floats in screen space; data floats in content space.** Band 1 is the only DOM allowed to be content-anchored, and it pays for that by being laid out inside the render frame — never on a data poll, never on a timer. A band-1 element positioned from a poll is the T-388 bug re-introduced, and is a defect, not a style.
 
 HUD axis *rules* (ticks) are band 0 strokes; their *labels* are band 2 text positioned from the same per-frame mapping. Splitting them this way is deliberate: a tick is data geometry, a label is chrome that must remain selectable and legible at any DPR.

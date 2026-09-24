@@ -449,6 +449,10 @@ Two rules make the table load-bearing rather than decorative:
 Chrome docks to viewport edges as floating translucent panels: Go-to top-left; layers / tools /
 Research top-right; zoom right; follow-live FAB bottom-right above the sheet; pane status bottom-left.
 Chrome **fades to ~35 % opacity after ~6 s idle** and returns on any pointer, key or focus event.
+**No overlay is draggable or repositionable; users choose visibility only** (§10.6 rule 3): each
+dock above is the one position this section gives it, no dock position is read from or written to
+local or user state, and a reload restores which panels are shown, never where (guarded by
+`ui/test/map-overlay-position.test.ts`, T-896, part of T-825's suite).
 
 **Fade never applies to:** the bottom sheet, the Research slide-in, an open menu, a focused control,
 the retune offer, the mode banner, or any honesty statement (the per-pane tier/level readout, the
