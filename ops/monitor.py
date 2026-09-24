@@ -14,6 +14,10 @@ OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same d
 # else (the real instance) they run REPO's, never a path derived from a worktree.
 PREVIEW = os.environ.get("MONITOR_PREVIEW") == "1"
 CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO
+# The caches the dashboard itself WRITES: a preview keeps its own (ops/preview-dashboard.sh seeds them
+# with copies), so a branch's code never writes the real instance's usage.json, burndown-cache.json
+# or role-sessions.json.
+STATE = CODE_ROOT if PREVIEW else SCRATCH
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -1224,7 +1228,7 @@ def work_queue(smap, wts, ags, merge_ticket=""):
             "active_ms": sorted(m for m in active_ms if m),
             "todo_total": sum(1 for t in all_tasks if t.get("status") == "todo")}
 
-USAGE_FILE = os.path.join(SCRATCH, "usage.json")
+USAGE_FILE = os.path.join(STATE, "usage.json")
 USAGE_SESSION = "usagepoll"
 
 def _parse_usage(text):
@@ -3124,7 +3128,7 @@ class H(BaseHTTPRequestHandler):
                 if OPSDIR not in _sys.path:
                     _sys.path.insert(0, OPSDIR)
                 import worklog
-                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+                body = json.dumps(worklog.build(reg=worklog.discover(ops=STATE)) if PREVIEW else worklog.build()).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
@@ -3219,7 +3223,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/burndown.json"):
             try:
                 import burndown
-                body = json.dumps(burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))).encode(); self.send_response(200)
+                body = json.dumps(burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "rows": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
@@ -3337,12 +3341,13 @@ if __name__ == "__main__":
     threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
-    threading.Thread(target=_usage_poller, daemon=True).start()
+    if not PREVIEW:   # it owns the shared `usagepoll` tmux session and a Haiku login: the real instance's
+        threading.Thread(target=_usage_poller, daemon=True).start()
     threading.Thread(target=_metrics_poller, daemon=True).start()
     def _warm_burndown():
         try:
             import burndown
-            burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))
+            burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()

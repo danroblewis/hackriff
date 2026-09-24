@@ -22,11 +22,11 @@ from hkpy import gate
 def branch_class(repo: str, base: str, branch: str) -> str:
     """The gate class of what `branch` would put on `base`; `full` when git cannot say."""
     try:
-        out = subprocess.run(["git", "-C", repo, "diff", "--name-only", f"{base}...{branch}"],
+        out = subprocess.run(["git", "-C", repo, "diff", "--name-only", "--no-renames", "-z", f"{base}...{branch}"],
                              capture_output=True, text=True, timeout=60, check=True).stdout
     except Exception:
         return gate.FULL
-    return gate.classify(out.split()).label
+    return gate.classify([p for p in out.split("\0") if p]).label   # --no-renames: a move out of crates/ is full
 
 
 def partition(classes: dict[str, str], order: list[str]) -> tuple[list[str], list[str]]:

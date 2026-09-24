@@ -13,7 +13,9 @@ S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
 DIR="${PREVIEW_DIR:-$S/preview}"
 PORT="${PREVIEW_PORT:-8902}"
 branch="${1:?usage: preview-dashboard.sh <branch> [PATH ...]}"; shift
-[ "$PORT" = 8901 ] && { echo "refusing :8901 - that is the real dashboard"; exit 2; }
+case "$PORT" in ''|*[!0-9]*) echo "PREVIEW_PORT must be a number: $PORT"; exit 2 ;; esac
+[ "$((10#$PORT))" -eq 8901 ] && { echo "refusing :8901 - that is the real dashboard"; exit 2; }
+PORT=$((10#$PORT))
 git -C "$REPO" rev-parse -q --verify "$branch^{commit}" >/dev/null || { echo "no such branch: $branch"; exit 2; }
 # One preview slot: whatever dashboard holds the port is the previous preview (a tunnel may point at
 # the port, so the newest preview is what it shows). Anything else holding it is refused, not killed.
@@ -27,6 +29,9 @@ done
 for i in $(seq 1 20); do lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || break; sleep 0.5; done
 rm -rf "$DIR"; mkdir -p "$DIR"
 git -C "$REPO" archive "$branch" ops py | tar -x -C "$DIR" || { echo "git archive failed"; exit 1; }
+# its own copies of the caches the dashboard writes (monitor.py STATE), so it shows real data and
+# writes nothing the real :8901 reads
+for f in usage.json role-sessions.json burndown-cache.json metrics-cache.json; do cp -p "$S/$f" "$DIR/$f" 2>/dev/null; done
 MONITOR_PREVIEW=1 MONITOR_PORT="$PORT" HACKRIFF_OPS="$S" nohup python3 "$DIR/ops/monitor.py" >"$DIR/monitor.log" 2>&1 &
 pid=$!
 echo "preview of $branch ($(git -C "$REPO" rev-parse --short "$branch")) from $DIR, pid $pid, on :$PORT"
