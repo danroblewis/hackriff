@@ -433,3 +433,37 @@ def test_solo_query_counts_only_what_the_log_covers(tmp_path):
         "".join(f'{{"ts":"{iso(now - d * 86400)}","tests":"x.e2e.mjs","passes_alone":2,"accepted":true}}\n'
                 for d in (2, 3, 4)))
     assert flakes.solo_query(str(tmp_path), ["x.e2e.mjs"], now=now)[0] is False   # all three predate the log
+
+
+def test_a_spec_failing_alone_on_two_branches_in_a_day_is_main_side():
+    """Supervisor for the user, 2026-09-24 14:55: canvas-journey failed alone on three merges, each
+    counted a branch defect, so nothing ever said 'this is main's'."""
+    text = log(
+        "[09-24 11:19:06] TRIAGE: browser specs red: app-trace.e2e.mjs - re-running them alone",
+        "[09-24 11:19:39] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-24 11:19:39] GATE FAILED task-t858 (attempt 1/2, tip 6bc3bd71) -> abort + flag for AI",
+        "[09-24 11:23:53] TRIAGE: browser specs red: app-trace.e2e.mjs - re-running them alone",
+        "[09-24 11:24:27] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-24 11:24:28] GATE FAILED task-t802 (attempt 1/2, tip 7c2ee1c3) -> abort + flag for AI",
+        "[09-24 13:48:40] TRIAGE: browser specs red: canvas-journey.e2e.mjs - re-running them alone",
+        "[09-24 13:49:40] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-24 13:56:33] TRIAGE: main is green on them -> the batch introduced it; isolating",
+    )
+    incs = flakes.parse_runner_log(text, 2026)
+    assert [i.blamed_on for i in incs] == ["task-t858", "task-t802", ""]      # a batch pins no single branch
+    now = incs[1].ts + 600
+    assert flakes.main_side(incs, ["app-trace.e2e.mjs"], "task-t803", now) == {"app-trace.e2e.mjs": ["task-t802", "task-t858"]}
+    assert flakes.main_side(incs, ["app-trace.e2e.mjs"], "task-t858", now) == {"app-trace.e2e.mjs": ["task-t802"]}
+    assert flakes.main_side(incs, ["canvas-journey.e2e.mjs"], "task-t890", now) == {}   # only a batch before it
+    assert flakes.main_side(incs, ["app-trace.e2e.mjs"], "task-t803", now + 2 * 86400) == {}   # older than 24 h
+
+
+def test_a_main_side_verdict_counts_against_the_spec_not_the_branch():
+    text = log(
+        "[09-24 15:00:00] TRIAGE: browser specs red: canvas-journey.e2e.mjs - re-running them alone",
+        "[09-24 15:01:00] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+        "[09-24 15:05:00] TRIAGE: MAIN-SIDE main-side canvas-journey.e2e.mjs: task-t890 -> task-t804 held, no attempt charged",
+    )
+    (inc,) = flakes.parse_runner_log(text, 2026)
+    assert inc.outcome == flakes.FAILED_ALONE and not inc.branch_defect and inc.blamed_on == ""
+    assert flakes.build([inc])["canvas-journey.e2e.mjs"].failed_alone == 1
