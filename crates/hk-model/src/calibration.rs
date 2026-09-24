@@ -22,6 +22,12 @@ pub enum CalibrationMethod {
     Gnss,
     /// A known reference tone or signal generator.
     ReferenceTone,
+    /// A land-mobile-radio channel raster (docs/19 §7.6a, T-560): every emission on a channel
+    /// grid shares the receiver's own clock error, so the grid fitted blind over the occupied
+    /// channels, with its modulo-raster ambiguity settled by the crystal's ppm bound and by which
+    /// alias finds energy on granted channels (T-628), measures the receiver. No known-frequency
+    /// reference and no band-plan lookup: the raster is an a-priori standard, not a truth table.
+    LmrRaster,
     /// Entered by hand or a factory value.
     Manual,
 }
