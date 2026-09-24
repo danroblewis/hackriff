@@ -638,6 +638,18 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     for want in ["listen", "bits", "symbols", "playback"] {
         assert!(names.contains(&want), "on_demand openers: {names:?}");
     }
+    // T-874: Listen advertises its one opt-in parameter besides the target; still never a mode.
+    let listen = v["on_demand"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "listen")
+        .unwrap();
+    assert_eq!(
+        listen["params"],
+        json!(["emitter", "detection", "f_lo", "f_hi", "channels"]),
+        "{listen}"
+    );
     assert!(v["tcp"]["addr"].is_string(), "{v}");
     wait_for(
         "the spectrum stream to be offered",
@@ -4474,11 +4486,13 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     let (_dir_guard, serving, addr) = start_server();
     let (f_lo, f_hi) = (STATION_HZ - 100e3, STATION_HZ + 100e3);
 
-    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi);
+    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi, "");
     assert_eq!(header["schema"], json!("hackriff.stream"));
     assert_eq!(header["kind"], json!("audio"));
     assert_eq!(header["datatype"], json!("ri16_le"));
     assert!(header["audio"]["mode"].is_string(), "{header}");
+    // T-874: a client that does not ask gets mono.
+    assert_eq!(header["audio"]["channels"], json!(1), "{header}");
 
     // At least one binary data record (type 1: 32-byte header + i16 LE PCM payload) within a
     // bounded number of messages (status records, type 3, interleave).
@@ -4499,9 +4513,9 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
                 );
                 if record_type == 1 {
                     assert_eq!(
-                        (b.len() - 32) % 2,
-                        0,
-                        "ri16_le PCM payload must be a whole number of samples"
+                        b.len() - 32,
+                        2 * 960,
+                        "one 960-sample mono ri16_le frame per data record"
                     );
                     saw_data = true;
                 }
@@ -4514,6 +4528,37 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
     assert!(
         saw_data,
         "no PCM data record arrived on the station within 30 s"
+    );
+    let _ = ws.close(None);
+
+    // T-874 (ADR-0015 §12.13): `channels=2` opts in to stereo. The station is broadcast FM, so the
+    // stream carries two channels — 960 interleaved L/R frames per record — and its status records
+    // say whether L−R is decoded right now (`stereo`), whatever this recording's pilot does.
+    let (mut ws, header) = wait_for_listen(addr, f_lo, f_hi, "&channels=2");
+    assert_eq!(header["audio"]["mode"], json!("wfm"), "{header}");
+    assert_eq!(header["audio"]["channels"], json!(2), "{header}");
+    assert_eq!(header["max_frame_len"], json!(32 + 8 * 960), "{header}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut saw_data, mut saw_status) = (false, false);
+    while Instant::now() < deadline && !(saw_data && saw_status) {
+        match ws.read() {
+            Ok(Message::Binary(b)) if b[0] == 1 => {
+                assert_eq!(b.len() - 32, 4 * 960, "960 interleaved L/R frames");
+                saw_data = true;
+            }
+            Ok(Message::Binary(b)) if b[0] == 3 => {
+                let st: Value = serde_json::from_slice(&b[32..]).unwrap();
+                assert!(st["stereo"].is_boolean(), "{st}");
+                assert!(st["stereo_lock_losses"].is_u64(), "{st}");
+                saw_status = true;
+            }
+            Ok(_) => {}
+            Err(e) => panic!("stereo listen stream ended early: {e}"),
+        }
+    }
+    assert!(
+        saw_data && saw_status,
+        "no stereo data and status within 30 s"
     );
     let _ = ws.close(None);
 
@@ -4535,12 +4580,12 @@ fn ws_open_listen_streams_pcm_data_records_of_the_station() {
 /// Retries the `/ws/open/listen` handshake: the run may be mid-replumb (503 `replumbing`) right
 /// after start, before the mock's power-on window settles. Returns the connection *after* its
 /// header message, plus the parsed header (the caller's next read is the first data/status record).
-fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64) -> (Ws, Value) {
+fn wait_for_listen(addr: SocketAddr, f_lo: f64, f_hi: f64, extra: &str) -> (Ws, Value) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let mut ws = connect_ws(
             addr,
-            &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}&token={TOKEN}"),
+            &format!("/ws/open/listen?f_lo={f_lo}&f_hi={f_hi}{extra}&token={TOKEN}"),
         )
         .unwrap();
         match ws.read().unwrap() {

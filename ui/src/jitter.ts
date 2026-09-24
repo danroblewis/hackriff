@@ -7,6 +7,9 @@
 //   target (counted as an overflow).
 // - Rate conversion from the stream rate to the AudioContext rate by linear interpolation, with
 //   a ±0.2 % playback-rate nudge that keeps the fill near the target despite clock drift.
+// - Channels (T-874): `channels` interleaved samples make one frame; fill, latency and rate
+//   conversion count frames, so every channel stays in step. `pull` fills one output per channel;
+//   a single output from a multi-channel buffer gets the channels' average.
 
 export interface JitterOptions {
   /** Stream sample rate, Hz. */
@@ -17,6 +20,8 @@ export interface JitterOptions {
   targetMs?: number;
   /** Largest fill before dropping, ms. */
   maxMs?: number;
+  /** Interleaved channels per frame (default 1). */
+  channels?: number;
 }
 
 export interface JitterStats {
@@ -29,8 +34,10 @@ export interface JitterStats {
 
 export class JitterBuffer {
   private buf: Float32Array;
-  private w = 0; // total samples written
-  private r = 0; // total samples consumed (integer part of the read position)
+  private readonly ch: number;
+  private readonly frames: number; // capacity in frames
+  private w = 0; // total frames written
+  private r = 0; // total frames consumed (integer part of the read position)
   private frac = 0;
   private playing = false;
   private readonly ratio: number;
@@ -44,10 +51,15 @@ export class JitterBuffer {
     this.ratio = o.inputRate / o.outputRate;
     this.target = Math.round(((o.targetMs ?? 150) / 1000) * o.inputRate);
     this.max = Math.max(this.target + 1, Math.round(((o.maxMs ?? 600) / 1000) * o.inputRate));
-    this.buf = new Float32Array(this.max + 8192);
+    this.ch = Math.max(1, Math.floor(o.channels ?? 1));
+    this.frames = this.max + 8192;
+    this.buf = new Float32Array(this.frames * this.ch);
   }
 
-  /** Samples queued. */
+  /** Interleaved channels per frame. */
+  get channels() { return this.ch; }
+
+  /** Frames queued. */
   get available() { return this.w - this.r; }
 
   stats(): JitterStats {
@@ -58,33 +70,49 @@ export class JitterBuffer {
   /** Forgets everything queued (e.g. a new stream). */
   reset() { this.w = this.r = 0; this.frac = 0; this.playing = false; }
 
-  /** Queues stream samples. */
+  /** Queues stream samples (`channels` interleaved values per frame; a partial frame is ignored). */
   push(samples: Float32Array) {
-    const n = Math.min(samples.length, this.buf.length);
+    const ch = this.ch;
+    const total = Math.floor(samples.length / ch);
+    const n = Math.min(total, this.frames);
     if (this.available + n > this.max) {
       const newR = this.w + n - this.target;
       if (newR > this.r) { this.droppedSamples += newR - this.r; this.r = newR; this.frac = 0; this.overflows++; }
     }
-    const cap = this.buf.length;
-    for (let i = samples.length - n; i < samples.length; i++) this.buf[this.w++ % cap] = samples[i];
+    const cap = this.frames;
+    for (let f = total - n; f < total; f++) {
+      const at = (this.w++ % cap) * ch;
+      for (let c = 0; c < ch; c++) this.buf[at + c] = samples[f * ch + c];
+    }
   }
 
-  /** Fills `out` at the output rate (silence while prebuffering or after an underrun). */
-  pull(out: Float32Array) {
-    const cap = this.buf.length;
-    for (let i = 0; i < out.length; i++) {
+  /** Fills `outs` (one per channel; one output from a multi-channel buffer gets their average) at
+   * the output rate, all the same length (silence while prebuffering or after an underrun). */
+  pull(...outs: Float32Array[]) {
+    const cap = this.frames, ch = this.ch;
+    const len = outs.length ? outs[0].length : 0;
+    const mix = outs.length === 1 && ch > 1;
+    const silence = (i: number) => { for (const o of outs) o[i] = 0; };
+    for (let i = 0; i < len; i++) {
       if (!this.playing) {
         if (this.available >= this.target) this.playing = true;
-        else { out[i] = 0; continue; }
+        else { silence(i); continue; }
       }
       if (this.available < 2) {
         this.playing = false;
         this.underruns++;
-        out[i] = 0;
+        silence(i);
         continue;
       }
-      const a = this.buf[this.r % cap], b = this.buf[(this.r + 1) % cap];
-      out[i] = a + (b - a) * this.frac;
+      const ra = (this.r % cap) * ch, rb = ((this.r + 1) % cap) * ch;
+      const at = (c: number) => { const a = this.buf[ra + c], b = this.buf[rb + c]; return a + (b - a) * this.frac; };
+      if (mix) {
+        let acc = 0;
+        for (let c = 0; c < ch; c++) acc += at(c);
+        outs[0][i] = acc / ch;
+      } else {
+        for (let k = 0; k < outs.length; k++) outs[k][i] = at(Math.min(k, ch - 1));
+      }
       const avail = this.available;
       const nudge = avail > 1.5 * this.target ? 1.002 : avail < 0.5 * this.target ? 0.998 : 1;
       this.frac += this.ratio * nudge;

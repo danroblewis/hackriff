@@ -127,7 +127,10 @@ fn unrestricted_frames_carry_bytes_and_layers_and_read_back_as_a_recording() {
     let bytes = publish(p, &[rec.clone(), rec.clone()]);
 
     let mut r = RecordedFrames::open(&bytes[..]).unwrap();
-    assert_eq!(r.header().version, "1.2");
+    assert_eq!(
+        r.header().version,
+        format!("1.{}", hk_stream::STREAM_VERSION_MINOR)
+    );
     assert_eq!(r.header().inspector.as_ref().unwrap().recipe_id, "trial");
     let first = r.next_frame().unwrap().unwrap();
     let second = r.next_frame().unwrap().unwrap();
