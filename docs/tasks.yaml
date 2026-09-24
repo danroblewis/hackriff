@@ -23989,7 +23989,7 @@ tasks:
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
@@ -24020,7 +24020,10 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
+
+      2026-09-24 coordinator: landed on main inside task-t804 (merge e6f34ff2), which merged task-t814 to share one sheet dismiss. task-t814's own gate (14:26) was red only on fog-of-war T-521's server shadow-plane check (intermittent, unrelated to this UI-only branch; deflaker on task-deflake-fog-shadow-race). Includes the P4 fix (61529629): a bare row click highlights, a small per-row Go button pans; the sheet has a x dismiss.
     branch: task-t814
+    commit: e6f34ff2
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
