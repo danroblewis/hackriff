@@ -23741,7 +23741,7 @@ tasks:
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
@@ -23781,6 +23781,7 @@ tasks:
       Observed, not chased: ui/e2e/app-surface.e2e.mjs 'a drag on the app's surface moves the view…' timed out ('waiting for the per-viewport readout to change after a drag') in 3 of the first 4 runs, at load averages of 21 to 27. main's code passed it 2/2 at a similar load, and my branch then passed 4/4 in a row once load dropped to about 15-20. The drag starts 0.6 s after the canvas is >200 px wide, which looks like a readiness race under load. This is a flake for the deflaker, not a product failure. | precheck: only `cargo fmt --all --check` was run (exit 0). The diff touches no crate, and `just precheck` with no crate list runs clippy over the whole workspace, which was skipped. | docs/24 §13.4 says the `research` layer (saved measurements) is hidden by default. T-822's saved measurements, selections and in-progress gestures are still drawn as always-on interaction marks after the registry overlays, to avoid hiding a measurement right after it is saved. When MAP-20/22 take `research`, they should decide whether to move measurements into it. | The `coverage` and `tier` data layers and the other overlays (artifacts, priors, collection:*, pins) are defined in the registry but not yet offered in the menu. The menu lists only layers that have a renderer, and MAP-07/08/11/12/21 each add one to `overlayFns` in surface.ts. Phosphor currently changes the spectrum trace only; a phosphor tile ramp would be a data-plane change to the one ramp module.
       Use cases: AWARE-042
       Resources: 264 CPU-s, peak 2.4 GB
+    commit: 03c3b8c5
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
