@@ -23650,7 +23650,7 @@ tasks:
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23693,6 +23693,7 @@ tasks:
       Observed, not chased: Clicking the box of the signal that is ALREADY focused, while the sheet is collapsed, does not re-open the sheet. focus-sheet.ts only reveals on a focus CHANGE (T-803 design, asserted in app-sheet.test.ts: 're-asserting the same focus does not reopen it'). The ticket did not ask for this; it would need the surface's onClick to call a reveal directly. | The mockup's 'Seen by' line (device, centre/span, gains) is not shown: /api/inventory rows carry no per-row device/gain provenance. | The canvas has no pins yet, only signal boxes; the pin click path belongs to the ticket that adds pins. The e2e selects through the inventory row, which calls the same focusSignal the canvas box click calls (centre/surface.ts onClick). It does not click a WebGL box, because the spec cannot locate one.
       Use cases: AWARE-053
       Resources: 99 CPU-s, peak 2.3 GB
+    commit: e6f34ff2
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
