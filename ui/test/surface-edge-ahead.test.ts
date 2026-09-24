@@ -40,7 +40,7 @@ const FRAME_MS = 100;
 interface Pending { addr: TileAddr; due: number; issuedEdgeNs: number; resolve: (d: TileData) => void }
 
 /** A tile answered at `asOfNs`: the route's coverage horizon at the instant it was built. */
-function tile(a: TileAddr, asOfNs: number): TileData {
+function tile(a: TileAddr, asOfNs: number | null): TileData {
   const ext = extentOf(LAT, a);
   return {
     addr: a, key: keyOf(a), nf: 2, nt: 2, t1Ns: ext.t1Ns, asOfNs,
@@ -70,7 +70,7 @@ async function follow(ms: number) {
     }),
     { inFlight: 4, now: () => clock.t, serverMsGuess: COLD_MS },
   );
-  const frames: { t: number; edgeNs: number; drew: boolean; edgeRowInHand: boolean }[] = [];
+  const frames: { t: number; edgeNs: number; drew: boolean; edgeRowInHand: boolean; greyOverFuture: boolean }[] = [];
   for (let step = 0; step * FRAME_MS < ms; step++) {
     clock.t = step * FRAME_MS;
     const edgeNs = edgeAt(clock.t);
@@ -78,11 +78,14 @@ async function follow(ms: number) {
     const view: Viewport = { box, levelF: 0, levelT: 0 };
     // The renderer's pass: every address in the pane's box, drawn up to each copy's horizon.
     cache.beginFrame();
-    let drew = false, edgeRowInHand = false;
+    let drew = false, edgeRowInHand = false, greyOverFuture = false;
     for (const a of tilesFor(LAT, box, 0, 0)) {
       const r = cache.acquire(a);
       if (r.kind !== "resident") continue;
       const ext = extentOf(LAT, a);
+      // A copy with no horizon is drawn whole, `unobserved` plane and all — THE grey — so a copy
+      // asked for before its window began must never be one.
+      if (!Number.isFinite(r.entry.data.asOfNs as number) && r.entry.edgeAtFetchNs <= ext.t0Ns) greyOverFuture = true;
       const asOf = r.entry.data.asOfNs ?? ext.t1Ns;
       if (Math.min(asOf, ext.t1Ns) > Math.max(ext.t0Ns, box.t0Ns)) drew = true;
       if (ext.t0Ns <= edgeNs && edgeNs < ext.t1Ns) edgeRowInHand = true;
@@ -90,7 +93,7 @@ async function follow(ms: number) {
     cache.setViewports(LAT, [view]);
     cache.endFrame();
     cache.refreshEdge(LAT, edgeNs, [view]);
-    frames.push({ t: clock.t, edgeNs, drew, edgeRowInHand });
+    frames.push({ t: clock.t, edgeNs, drew, edgeRowInHand, greyOverFuture });
     await new Promise((r) => setImmediate(r));
     // Answer everything due, each at the horizon the route had when it was asked (under-stating
     // what it holds, as T-495 says a client must assume).
@@ -98,7 +101,9 @@ async function follow(ms: number) {
       const w = waiting[i];
       if (w.due > clock.t) continue;
       waiting.splice(i, 1);
-      w.resolve(tile(w.addr, w.issuedEdgeNs));
+      // The route's horizon is the newest tune record OVERLAPPING the window: none for a window
+      // that had not begun when it was asked for, so `as_of_s: null` (crates/hk-api coverage.rs).
+      w.resolve(tile(w.addr, w.issuedEdgeNs > extentOf(LAT, w.addr).t0Ns ? w.issuedEdgeNs : null));
       await new Promise((r) => setImmediate(r));
     }
   }
@@ -141,6 +146,10 @@ test("T-890: a following pane shorter than a tile NEVER draws nothing across a r
   const { firstDrawn, worstBlankMs, crossing } = measure(frames);
   assert.ok(firstDrawn >= 0, "the pane never drew at all — the harness proves nothing");
   assert.ok(frames.indexOf(crossing) > firstDrawn, "the pane first drew after the crossing — the harness proves nothing");
+  const grey = frames.filter((f) => f.greyOverFuture);
+  assert.equal(grey.length, 0,
+    `${grey.length} frame(s) drew a look-ahead copy with no horizon whole — its \`unobserved\` plane is THE grey ` +
+    `over rows recorded after it was asked for (first at t=${grey[0]?.t} ms)`);
   // One frame of slack: a revalidation's answer lands between frames.
   assert.ok(worstBlankMs <= FRAME_MS,
     `the pane drew NOTHING for ${worstBlankMs} ms at a stretch while following live (the crossing is at ` +

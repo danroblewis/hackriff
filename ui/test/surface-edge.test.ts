@@ -171,3 +171,48 @@ test("the horizon is read off the ANSWER, in the answer's own units", () => {
       `an answer that states no readable horizon says NOTHING (${JSON.stringify(bad)}), and nothing said is not a horizon`);
   }
 });
+
+// ——— T-890 follow-up: an answer for a window the live edge had not reached yet ———
+//
+// The route takes `as_of_s` from the tune records overlapping the tile's window, so a tile asked for
+// BEFORE the edge reaches it (the next-row look-ahead) answers `as_of_s: null` and a plane of
+// `unobserved`. Drawn as served that is THE grey over the rows the radio records next, from the
+// instant the edge enters the tile until a revalidation lands — canvas-journey measured 6-18 % of
+// a following pane's live-edge zone grey over a band the server reported fully observed.
+
+/** One pane over exactly tile 1, `[TILE_NS, 2·TILE_NS]`. */
+const pane1 = (): PaneView => ({
+  id: "a", rect: { x: 0, y: 0, w: W, h: H },
+  box: { f0Hz: 0, f1Hz: TILE_HZ, t0Ns: TILE_NS, t1Ns: 2 * TILE_NS },
+});
+
+test("T-890: a tile asked for BEFORE the edge reached it draws nothing, not grey, when it states no horizon", async () => {
+  const h = harness(null);
+  // The edge the client has been told is short of tile 1's start when the read goes out.
+  h.surface.cache.refreshEdge(LAT, TILE_NS - 5e9, []);
+  h.surface.render([pane1()]);
+  await flush();
+  h.g.reset();
+  const [report] = h.surface.render([pane1()]);
+  assert.equal(report.tiles, 1, "the tile arrived and is resident");
+  assert.equal(tileDraws(h.g).length, 0,
+    "a tile whose window had not begun when it was asked for was drawn as served: its `unobserved` plane is " +
+    "THE grey over rows that were not recorded yet — the canvas-journey live-edge-zone failure");
+  for (const d of h.g.draws()) {
+    assert.ok(!(d.u?.uFlat && near(d.u.uFlat, [...GREY])), "nothing may paint grey over a window the answer never saw");
+  }
+  assert.equal(report.behind, 1, "the copy stops short of the pane's edge, and the readout says so");
+});
+
+test("…and the CONTROL: asked for once the edge is inside it, a null horizon still draws the whole tile", async () => {
+  const h = harness(null);
+  h.surface.cache.refreshEdge(LAT, TILE_NS + 5e9, []);
+  h.surface.render([pane1()]);
+  await flush();
+  h.g.reset();
+  const [report] = h.surface.render([pane1()]);
+  assert.equal(report.behind, 0);
+  const drawn = tileDraws(h.g);
+  assert.equal(drawn.length, 1, "a past window with no record touching it is honestly grey, and stays drawn");
+  assert.ok(Math.abs(drawn[0].u!.uRect[3] - 1) < 1e-6);
+});
