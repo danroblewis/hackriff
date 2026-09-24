@@ -24860,6 +24860,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (MAUTO manifest refresh).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-23 22:03).
+      Added hkpy.synth.c4fm_burst (scenario c4fm_burst_train): periodic C4FM bursts with check_kind crc/bch/nocheck, check_width 8/16/24/32, crc_source template/searched(catalogue)/random(off-catalogue poly), check_poly_hex, constant_payload; hidden truth (check params, catalogue flag, frame, payload) in the annotations only. Tests added in py/tests/test_synth.py. The seven 4fsk-c4fm A1xA7 unreachable cells now point at T-565 (engine owner) in mauto_corpus.rs and the manifest text (edited by hand to match the declaration; Rust test not re-run).
+      Tests: pytest py/tests/test_synth.py -> exit 0 (88 passed, 2 skipped)
+      precheck exit 0
+      Commits: fd997456
+      Observed, not chased: mauto_corpus.rs manifest re-bless (HK_BLESS_MANIFEST=1) not run; manifest lines edited textually - the gate's mauto_corpus test will confirm
+      Resources: 44 CPU-s, peak 0.8 GB
   - id: T-851
     milestone: MAUTO
     title: Measure the calibrated-bit discount for CSS (LoRa) - T-619 measured AM/OOK and C4FM only, so docs/22 P9 has no owner
