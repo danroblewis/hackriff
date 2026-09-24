@@ -83,10 +83,22 @@ function render(){
   if(mm&&window.mermaid){ try{ mermaid.initialize({startOnLoad:false,theme:'dark',securityLevel:'strict'}); mermaid.run({nodes:[mm]}); }catch(e){ mm.textContent='mermaid: '+e; } }
 }
 let spk='lines';
-const SPK={lines:'product lines',unwrap:'unwrap/expect',pub:'pub items',undoc:'undocumented pub',unsafe:'unsafe',zstd:'zstd ratio',I:'instability',D:'distance'};
+const SPK={lines:'product lines',cog90:'cognitive p90',cogmax:'cognitive max',mi:'MI',unwrap:'unwrap/expect',pub:'pub items',undoc:'undocumented pub',unsafe:'unsafe',zstd:'zstd ratio',I:'instability',D:'distance'};
 function spark(vals){ const v=vals.filter(x=>x!=null); if(v.length<2) return '<span style="color:var(--dim)">'+(v.length?'1 day':'—')+'</span>';
   const mn=Math.min(...v), mx=Math.max(...v), W=90,H=18; const pts=vals.map((x,i)=>x==null?null:[i*(W/(vals.length-1)), H-2-((x-mn)/((mx-mn)||1))*(H-4)]).filter(Boolean);
   return `<svg class=spark width=${W} height=${H}><polyline fill=none stroke="#52C2AE" stroke-width=1.5 points="${pts.map(p=>p.join(',')).join(' ')}"/></svg>`; }
+function complexity(d){
+  const X=d.complexity||{}; if(X.error) return card('Complexity',`<div class=nz>${esc(X.error)}</div>`,'',true);
+  const CV=X.caveats||{};
+  const head=`<div class=big>${k(X.product_functions)} <i>product functions</i> · cognitive p90 <b>${X.cognitive_p90_all}</b> · median file MI <b>${X.median_mi==null?'—':X.median_mi.toFixed(1)}</b></div>`;
+  const areas=table([['crate / area',r=>esc(r.name)],['lang',r=>esc(r.lang||'')],['fns',r=>r.functions,'n'],['cog p50',r=>r.cognitive_p50,'n'],['cog p90',r=>r.cognitive_p90,'n'],['cog max',r=>r.cognitive_max,'n'],['cyc p90',r=>r.cyclomatic_p90,'n'],['cyc max',r=>r.cyclomatic_max,'n'],['MI',r=>r.mi,'n'],['cog sum',r=>k(r.cognitive_sum),'n']],X.areas||[]);
+  const B=X.buckets||[], D=X.distribution||{};
+  const dist=table([['cognitive per fn',r=>esc(r)],...Object.keys(D).map(l=>[esc(l),r=>D[l][r]||0,'n'])],B);
+  const worst=table([['fn',r=>esc(r.name)],['where',r=>esc(r.path.replace(/^crates\//,''))+':'+r.start,'p'],['cognitive',r=>`<b>${r.cognitive}</b>`,'n'],['cyclomatic',r=>r.cyclomatic,'n'],['MI',r=>r.mi,'n']],X.worst||[]);
+  const hot=table([['file',r=>esc(r.path),'p'],['churn 30d',r=>k(r.churn_30d),'n'],['cognitive',r=>k(r.cognitive),'n'],['MI',r=>r.mi,'n'],['churn x cog',r=>`<b>${k(r.score)}</b>`,'n']],X.hotspots||[]);
+  return card('Complexity per crate / area (product code)',head+areas,CV.complexity,true)+card('Cognitive complexity distribution',dist,'Functions per bucket, product code, by language.')+
+    card('20 most complex functions (cognitive)',worst,'')+card('Hotspots: churn x complexity (Tornhill)',hot,CV.hotspots,true);
+}
 function arch(d){
   const A=d.arch||{}; if(A.error) return card('Architecture',`<div class=nz>${esc(A.error)}</div>`,'',true);
   const C=A.caveats||{}, R=A.rules||{}, g=R.gpl||{};
@@ -110,7 +122,8 @@ function arch(d){
     card('Coupling per crate',coup,C.coupling)+card('Idioms per crate (product code)',idioms,C.idioms)+
     card('Public API, docs and compression',api,C.api+' '+C.compression)+card('Compression outliers',comp,C.compression+' Codec this build: '+(A.codec||'?')+'.')+
     card('Per-crate trends',sparks,'One point per daily sample (metrics.jsonl); the numbers, no composite score.',true)+
-    card('Not yet measured','<div class=p>Complexity (rust-code-analysis: cyclomatic, cognitive, Halstead, MI) and hotspots (churn x complexity) - part B. Duplication (jscpd), ui/src import cycles (madge) and the ui/src and py/hkpy directory graphs - part C.</div>','',true);
+    complexity(d)+
+    card('Not yet measured','<div class=p>Duplication (jscpd), ui/src import cycles (madge) and the ui/src and py/hkpy directory graphs - part C.</div>','',true);
 }
 document.addEventListener('click',e=>{const s=e.target.closest('.tabs>span[data-w]'); if(s&&D){win=s.dataset.w; render();}
   const k=e.target.closest('.sel span[data-spk]'); if(k&&D){spk=k.dataset.spk; render();}});

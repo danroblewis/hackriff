@@ -344,6 +344,11 @@ def build(repo: str, ops: str, now: float | None = None) -> dict:
         out["arch"] = codearch.analyse(files, repo, sha, now)
     except Exception as e:                      # a part that fails is named, the rest still ships
         out["arch"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        from hkpy import codecomplex
+        out["complexity"] = codecomplex.analyse(files, repo, sha, ops, now)
+    except Exception as e:
+        out["complexity"] = {"error": f"{type(e).__name__}: {e}"}
     out["build_s"] = round(time.time() - t0, 1)
     out["trend"] = sample(ops, out, now)
     return out
@@ -376,6 +381,11 @@ def sample(ops: str, m: dict, now: float) -> list[dict]:
                                          "zstd": p["zstd_ratio"], "I": coup.get(p["name"], {}).get("instability"),
                                          "D": coup.get(p["name"], {}).get("distance")} for p in a["per_crate"]}
             rules = a.get("rules") or {}
+            cx = m.get("complexity") or {}
+            for a in cx.get("areas") or []:
+                if a["name"] in rec["crates"]:
+                    rec["crates"][a["name"]].update(cog90=a["cognitive_p90"], cogmax=a["cognitive_max"], mi=a["mi"],
+                                                    fns=a["functions"])
             rec["rules"] = {"layer": len(rules.get("layer_violations") or []), "gpl": (rules.get("gpl") or {}).get("violations"),
                             "ui_dsp_suspects": len(rules.get("ui_dsp_suspects") or [])}
         rows.append(rec)
