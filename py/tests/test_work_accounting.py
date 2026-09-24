@@ -816,6 +816,23 @@ def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
     assert launched == [("deflake-a", 600.0, 2)]
 
 
+def test_a_deflake_waits_while_its_last_branch_gates_in_a_batch(df, monkeypatch):
+    """09-24 09:39:52: main held the batch carrying task-deflake-app-trace-e2e-mjs, so the branch read
+    0 commits ahead of main and a second deflaker was dispatched beside its own gating fix."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())         # module-global: the test above said this WAIT
+    write(_req("deflake-a", 600.0))
+    (tmp / "bulk-in-progress").write_text("base=gatedbase\nbranches=task-deflake-a\n")
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0 if t == "main" else 3)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    (tmp / "bulk-in-progress").unlink()                  # the batch landed: main is gated again
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
 def test_a_red_proof_is_not_a_failing_test(reaped):
     tmp, d, claim, hb, seen, reviews, fixes = reaped
     hb("done", tests=[{"cmd": "node run.mjs app-trace.e2e.mjs  # defect injected", "exit": 1, "expect": "red"},

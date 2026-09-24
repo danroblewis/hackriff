@@ -1541,9 +1541,12 @@ _DEFER_SAID = set()
 def deflake_deferred(slug, req, claims):
     """Why this deflake request must wait, or "". (a) its own last run left a branch with unmerged
     commits (held, blocked, review-failed): a second run would start over beside it; (b) an in-flight
-    ticket branch edits the same spec file."""
+    ticket branch edits the same spec file. Both are asked of merge_target(), not main: while a batch
+    gates, main holds it provisionally and every branch in it reads as merged (09-24 09:39:52: a second
+    app-trace deflaker went out 28 s after the batch carrying the first one's fix was committed)."""
+    target = merge_target()
     c = claims.get(DEFLAKE_PREFIX + slug)
-    if c and c.get("branch") and commits_ahead(c["branch"], "main") > 0:
+    if c and c.get("branch") and commits_ahead(c["branch"], target) > 0:
         return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
     test = str(req.get("test", ""))
     if not test.endswith(".e2e.mjs"):
@@ -1557,7 +1560,7 @@ def deflake_deferred(slug, req, claims):
             continue
         if t["state"] == "queued" and t["branch"] not in waiting:
             continue
-        if sh(["git", "diff", "--name-only", f"main...{t['branch']}", "--", path]).strip():
+        if sh(["git", "diff", "--name-only", f"{target}...{t['branch']}", "--", path]).strip():
             return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
     return ""
 
