@@ -917,12 +917,33 @@ def conflict_skip(c, branch, line, statuses):
         return "the line predates the claim's latest run"
     if branch in queued_branches():
         return "queued again"
+    if branch in merging_branches():
+        return "being merged now"
     target = merge_target()
     if commits_ahead(branch, target) == 0:
         return "nothing ahead of main"
     if merges_cleanly(branch, target):
         return "clean"
     return None
+
+
+def merging_branches():
+    """Branches the merge runner holds right now: a batch's (bulk marker `branches=`) or the single
+    merge staged in main (MERGE_HEAD's tip). Such a branch is not in merge-queue.txt, so without
+    this the conflict rule re-queued task-t613 at 17:06 while its own gate was running."""
+    out = set()
+    try:
+        for ln in open(BULKMARK):
+            if ln.startswith("branches="):
+                out.update(ln.split("=", 1)[1].split())
+    except OSError:
+        pass
+    try:
+        head = open(f"{REPO}/.git/MERGE_HEAD").read().split()[0]
+        out.update(b for b in sh(["git", "branch", "--format=%(refname:short)", "--points-at", head]).split())
+    except (OSError, IndexError):
+        pass
+    return out
 
 
 def queued_branches():

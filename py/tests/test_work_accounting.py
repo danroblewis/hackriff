@@ -304,3 +304,14 @@ def test_a_dispatch_that_ended_with_nothing_goes_back_to_todo_after_the_release_
 
 def test_has_work_fails_safe():
     assert R.has_work("T-does-not-exist-anywhere") is False
+
+
+def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflicts, monkeypatch):
+    tmp, launched = conflicts
+    (tmp / "bulk-in-progress").write_text("base=abc\nbranches=task-t627 task-x\n")
+    monkeypatch.setattr(R, "REPO", str(tmp))                          # no .git/MERGE_HEAD here
+    assert R.merging_branches() == {"task-t627", "task-x"}
+    claims = {"T-627": _claim("T-627", "task-t627")}
+    R.handle_gate_failures(claims, dry=False)
+    assert launched == [] and claims["T-627"]["gate_fails_seen"]
+    assert not (tmp / "merge-queue.txt").exists()
