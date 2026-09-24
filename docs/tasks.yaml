@@ -25796,7 +25796,8 @@ tasks:
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
-    status: todo
+    status: in-progress
+    branch: task-t874
     priority: normal
     deps:
     - T-873
