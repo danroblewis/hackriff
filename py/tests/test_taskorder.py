@@ -20,6 +20,36 @@ BOARD = [
 ]
 
 
+def test_value_weighs_what_is_released_and_states_its_formula():
+    board = [t("A"), t("B", deps=["A"], priority="high", use_cases=["X-1", "X-2"]),
+             t("C", deps=["B"], priority="low"), t("D", deps=["A"], found_by="user 2026-09-23"),
+             t("E", deps=["A"], priority="ahead of queued work (user)")]
+    a = taskorder.analyse(board)
+    by = {r["id"]: r for r in a["rows"]}
+    # downstream of A: B (2 + 2*0.5) + C (0.5) + D (user 3) + E (priority says user: 3)
+    assert by["A"]["unblocks"] == 4 and by["A"]["value"] == 9.5
+    assert by["A"]["downstream_milestones"] == {"M1": 4}
+    assert "3 if user-requested" in a["formula"] and "0.5 per use-case id" in a["formula"]
+
+
+def test_depth_groups_are_landings_away_and_gates_say_what_they_wait_on():
+    a = taskorder.analyse(BOARD)
+    by = {r["id"]: r for r in a["rows"]}
+    assert (by["T-801"]["depth"], by["T-802"]["depth"], by["T-803"]["depth"], by["T-804"]["depth"]) == (0, 1, 2, 2)
+    assert by["T-804"]["gate"] == ["T-801", "T-802"]
+    assert any(g.startswith("blocked:") for g in by["T-565"]["gate"]) and by["T-903"]["gate"] == ["needs user"]
+    assert by["T-568"]["depth"] is None and "cycle" in a["groups"]
+    assert a["groups"]["0"][0] == a["order"][0]
+
+
+def test_the_committed_board_is_the_gates_base_while_a_batch_gates(tmp_path):
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    assert taskorder.committed_ref("/x", str(ops)) == "main"
+    (ops / "bulk-in-progress").write_text("base=abc123\nbranches=a b\n")
+    assert taskorder.committed_ref("/x", str(ops)) == "abc123"
+
+
 def test_the_bottleneck_is_ranked_by_everything_behind_it():
     a = taskorder.analyse(BOARD)
     roots = [(r["id"], r["unblocks"], r["moves"]) for r in a["roots"]]
@@ -49,7 +79,7 @@ def test_the_cli_is_read_only(tmp_path, capsys):
     board = tmp_path / "tasks.yaml"
     board.write_text(yaml.safe_dump({"tasks": BOARD}))
     before = board.read_bytes()
-    assert tasks.main(["order", "--file", str(board), "--top", "3"]) == 0
+    assert tasks.main(["order", "--working", "--file", str(board), "--top", "3"]) == 0
     out = capsys.readouterr().out
-    assert "T-801" in out.splitlines()[2] and "frontier:" in out
+    assert "T-801" in out.splitlines()[4] and "frontier:" in out and "depth 1 (1 landing(s) away)" in out
     assert board.read_bytes() == before

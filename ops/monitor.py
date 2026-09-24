@@ -2931,18 +2931,20 @@ _TASKORDER = {"t": 0.0, "v": None}
 
 
 def taskorder_cached(max_age=60.0):
-    """`hkpy.taskorder.analyse` over `git show main:docs/tasks.yaml` (1.9 MB; ~0.6 s to parse), cached."""
+    """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
+    gates - never the provisional tip), cached: the board is 1.9 MB and takes ~0.6 s to parse."""
     if _TASKORDER["v"] is not None and time.time() - _TASKORDER["t"] < max_age:
         return _TASKORDER["v"]
     import sys as _sys
-    import yaml
     if os.path.join(REPO, "py") not in _sys.path:
         _sys.path.insert(0, os.path.join(REPO, "py"))
     from hkpy import taskorder
-    text = subprocess.run(["git", "-C", REPO, "show", "main:docs/tasks.yaml"], capture_output=True, text=True, timeout=30).stdout
-    a = taskorder.analyse((yaml.safe_load(text) or {}).get("tasks") or [])
-    v = {"open": a["open"], "top": [{k: r[k] for k in ("id", "title", "status", "unblocks", "moves", "blocked")} for r in a["roots"][:5]],
-         "frontier": a["frontier"][:12], "frontier_n": len(a["frontier"]), "cycle": a["cycle"], "self_deps": a["self_deps"]}
+    tasks, ref = taskorder.committed_tasks(REPO, SCRATCH)
+    a = taskorder.analyse(tasks)
+    keep = ("id", "title", "status", "milestone", "depth", "gate", "unblocks", "value", "downstream_milestones", "blocked")
+    v = {"board": ref, "formula": a["formula"], "open": a["open"],
+         "rows": [{k: r[k] for k in keep} for r in a["rows"]],
+         "groups": a["groups"], "frontier": a["frontier"], "cycle": a["cycle"], "self_deps": a["self_deps"]}
     _TASKORDER.update(t=time.time(), v=v)
     return v
 
@@ -2950,8 +2952,8 @@ def taskorder_cached(max_age=60.0):
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        # Bottlenecks (py/hkpy/taskorder.py, `just task order`): the open tickets holding the most
-        # work behind them, over main's committed board - shown on /worklog beside the role logs.
+        # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
+        # when they land, over main's committed board - the panel on /worklog beside the role logs.
         if self.path.startswith("/taskorder.json"):
             try:
                 body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
