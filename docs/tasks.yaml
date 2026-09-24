@@ -25635,6 +25635,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:15).
+      Added recipes/analog-wfm.recipe.json (schema 3): one fm_demod feeding two siblings — audio chain (squelch fm-noise, deemphasis 75us, agc, audio_out -> mono `audio` output, profile wfm) and the full RDS chain from rds.recipe.json (same nodes, field map, messages outputs groups/station/radiotext/ct). Match features left empty so audio is offered without a pilot. Stereo not claimed (LP-9/10). New test hk-blocks/tests/analog_wfm_recipe.rs validates against the catalogue and checks the audio + RDS outputs.
+      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed)
+      precheck exit 0
+      Commits: 9de1103a
+      Observed, not chased: Recipe not run end-to-end through the pipeline runtime (parity harness is LP-4's scope)
+      Resources: 63 CPU-s, peak 0.4 GB
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
