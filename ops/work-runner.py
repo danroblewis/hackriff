@@ -133,6 +133,11 @@ def attention(ticket, branch, kind, detail=""):
     with open(NEEDS, "a") as f:
         f.write(f"{time.strftime('%m-%d %H:%M')}  {branch}  {ticket}  {kind}  {detail}\n")
     log(f"ATTENTION {ticket} {kind} {detail}")
+    # Under pytest the record above is all a test may produce: never alert or type into a live
+    # tmux pane from a test (2026-09-23: test_work_accounting's fake CONFLICT_ESCALATE lines were
+    # being send-keys'd, with Enter, into the coordinator's session on every test-py run).
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
     # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
     # coordinator's routine and stay in the file only.
