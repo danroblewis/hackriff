@@ -19719,7 +19719,7 @@ tasks:
   - id: T-594
     milestone: M3
     title: Fingerprint.structure has no producer, so entity resolution's envelope-shape comparison is dead in a real run
-    status: todo
+    status: done
     priority: normal
     parallel_group: M3A
     model: opus
@@ -19782,6 +19782,7 @@ tasks:
       store on that capture. The census prints this table on every run (--no-capture).
       Note: `just task` is not in this branch's justfile (branch base predates it); the result was recorded with
       main's py/hkpy/tasks.py run from a temp copy.
+    commit: 4765c337
   - id: T-586
     milestone: M2-hardening
     title: Retune-diversity self-consistency - a real emitter keeps its absolute frequency across centres, an artefact moves with the LO
