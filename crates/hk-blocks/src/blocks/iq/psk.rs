@@ -77,10 +77,13 @@
 //!   takes effect at a fixed segment boundary (`SEGMENT_SYMBOLS`), so it is chunking-invariant.
 //! * Items are emitted throughout. `lock` and `quality` tell a consumer (the refinement loop,
 //!   the MAUTO search) whether to believe them.
-//! * **Not a burst receiver yet.** A packet shorter than the acquisition window (802.15.4 frames
-//!   run to about 2 000 symbols against a 512-symbol window) loses its start. A preamble-driven
-//!   burst mode, which would mark each burst's first item `DISCONTINUITY` (§9.2), is a later
-//!   step.
+//! * **Bursts: `burst: true` (T-875).** On this streaming path a packet shorter than the
+//!   acquisition window (802.15.4 frames run to about 2 000 symbols against a 512-symbol window)
+//!   loses its start. Burst mode ([`burst`]) finds each burst by energy, confirms and measures it
+//!   feed-forward over its own samples (carrier frequency and phase, symbol timing, amplitude)
+//!   and tracks it from its first sample, marking each burst's first item `DISCONTINUITY`
+//!   (§9.2). Measured, the shortest burst decoded whole went from none up to 2 048 symbols
+//!   (DBPSK aside) to 8 symbols (RRC OQPSK: 64); the table is in [`burst`]'s docs.
 
 use std::f64::consts::{PI, TAU};
 use std::ffi::{c_int, c_void};
@@ -95,10 +98,14 @@ use num_complex::{Complex32, Complex64};
 use super::common::*;
 use super::filter::Rate;
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
+use crate::buffer::ChunkFlags;
 use crate::evidence::calibrated;
 use crate::registry::BuildCtx;
 use crate::status::{Lock, Status};
 use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
+
+#[path = "psk_burst.rs"]
+mod burst;
 
 /// Parameters applied in place (the descriptor's `hot` keys).
 const HOT: &[&str] = &["rotation_deg", "iq_swap", "loop_bandwidth"];
@@ -555,6 +562,9 @@ fn matched_taps(pulse: Pulse, k: f64, rolloff: f64) -> Vec<f32> {
 struct OqSymbol {
     point: Complex64,
     timing_error: f64,
+    /// Where its I strobe fell, in resampled samples since restart (the input position, the
+    /// matched filter's delay removed).
+    at: f64,
 }
 
 /// Native OQPSK receiver: matched filter → carrier de-rotation → half-symbol interpolator with
@@ -741,6 +751,7 @@ impl Oqpsk {
                 emit(OqSymbol {
                     point: Complex64::new(zi.re, zq.im) / amp,
                     timing_error: te,
+                    at: self.cur_i_at - self.mf_delay,
                 });
             }
             self.next += half;
@@ -823,6 +834,9 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         res_count: 0,
         non_finite: 0,
         status: Status::default(),
+        burst_mode: bool_or(p, "burst", false),
+        burst: None,
+        lock_min: LOCK_MIN_SYMBOLS,
     };
     b.set_hot(p)?;
     Ok(Box::new(b))
@@ -884,6 +898,11 @@ struct Psk {
     res_count: u64,
     non_finite: u64,
     status: Status,
+    /// `burst: true`: [`burst`] mode, and its state once initialised.
+    burst_mode: bool,
+    burst: Option<Box<burst::Burst>>,
+    /// Symbols before `lock` may read locked.
+    lock_min: u64,
 }
 
 impl Psk {
@@ -943,6 +962,9 @@ impl Psk {
         self.locked = false;
         self.need_origin = true;
         self.res_count = 0;
+        if let Some(b) = &mut self.burst {
+            b.restart();
+        }
     }
 
     /// Normalises, scores and de-maps one recovered symbol.
@@ -975,9 +997,9 @@ impl Psk {
         // The lock detector runs per symbol, so the re-acquisition it drives is
         // chunking-invariant.
         let q = self.quality();
-        if self.symbols >= LOCK_MIN_SYMBOLS && q >= LOCK_ON {
+        if self.symbols >= self.lock_min && q >= LOCK_ON {
             self.locked = true;
-        } else if q < LOCK_OFF || self.symbols < LOCK_MIN_SYMBOLS {
+        } else if q < LOCK_OFF || self.symbols < self.lock_min {
             self.locked = false;
         }
         if self.locked || !self.coarse.acquired {
@@ -1067,16 +1089,31 @@ impl Psk {
             self.status.quality = None;
             self.status.snr_db = None;
         }
-        let mut w = self.coarse.w();
+        let mut w = match &self.burst {
+            Some(b) => b.w(),
+            None => self.coarse.w(),
+        };
         if let Some(Tracker::Oqpsk(o)) = &self.tracker {
             w += o.frequency();
         }
         let x = &mut self.status.extra;
         x.set("symbol_rate_bd", self.symbol_rate);
         x.set("bits_per_symbol", self.modulation.bits() as f64);
-        x.set("samples_per_symbol", self.k);
         x.set("offset_hz", w * self.fs_res / TAU);
-        x.set("symbols", self.symbols as f64);
+        match &self.burst {
+            // Six extras at most: burst mode reports bursts in place of the streaming path's
+            // `samples_per_symbol` and `symbols`.
+            Some(b) => {
+                x.set("bursts", b.bursts as f64);
+                if b.dropped > 0 {
+                    x.set("bursts_dropped", b.dropped as f64);
+                }
+            }
+            None => {
+                x.set("samples_per_symbol", self.k);
+                x.set("symbols", self.symbols as f64);
+            }
+        }
         report_non_finite(&mut self.status, self.non_finite);
     }
 
@@ -1228,14 +1265,37 @@ impl Block for Psk {
         self.zeros = vec![Complex32::new(0.0, 0.0); 4 * k as usize * TRACK_M as usize + 64];
         let span = max_res.max(self.segment).max(self.zeros.len());
         self.syms = vec![Complex32::new(0.0, 0.0); 2 * span];
-        let max_sym = (max_res as f64 / (k * (1.0 - MAX_TIMING_DEV))).ceil() as usize + 8;
-        self.oq_out = Vec::with_capacity(max_sym);
+        let per_span = |n: usize| (n as f64 / (k * (1.0 - MAX_TIMING_DEV))).ceil() as usize + 8;
+        let mut max_sym = per_span(max_res);
+        self.oq_out = Vec::with_capacity(per_span(span));
         let delay_symbols = if oqpsk {
             2.0 * OQPSK_SPAN + 1.0
         } else {
             LIQUID_DELAY_SYMBOLS
         };
-        let hold = rate_hold + (delay_symbols * fs / rs).ceil() as usize;
+        let mut hold = rate_hold + (delay_symbols * fs / rs).ceil() as usize;
+        self.burst = None;
+        self.lock_min = LOCK_MIN_SYMBOLS;
+        if self.burst_mode {
+            // Burst mode acquires each burst over its own samples: no streaming acquisition.
+            let side = TAU * side_hz / self.fs_res;
+            let acq = burst::Acquirer::new(
+                power,
+                side,
+                max_w,
+                k,
+                (self.pulse == Pulse::Rrc).then_some(self.rolloff),
+                oqpsk,
+                acq_len,
+            );
+            let b = burst::Burst::new(k, acq_len, max_res, span, acq);
+            max_sym = max_sym.max(per_span(b.max_samples()) + delay_symbols.ceil() as usize + 8);
+            hold += (b.latency() as f64 * fs / self.fs_res).ceil() as usize;
+            self.coarse = Coarse::off();
+            self.reacq_after = u64::MAX;
+            self.lock_min = burst::BURST_LOCK_MIN_SYMBOLS;
+            self.burst = Some(Box::new(b));
+        }
         self.status = Status::default();
         self.restart();
         self.update_status();
@@ -1309,6 +1369,47 @@ impl Block for Psk {
         let mut soft = std::mem::take(soft_out(io.output(0)?)?);
         let mut sym_diag = std::mem::take(iq_out(io.output(1)?)?);
         let mut te_diag = std::mem::take(real_out(io.output(2)?)?);
+        if let Some(mut b) = self.burst.take() {
+            let call = self.run_burst(
+                &mut b,
+                &mut tracker,
+                &mut soft,
+                &mut sym_diag,
+                &mut te_diag,
+                tapped,
+                m.flags.contains(ChunkFlags::END),
+            );
+            self.burst = Some(b);
+            self.tracker = Some(tracker);
+            let produced = soft.len();
+            let per_sym = self.k * per_res;
+            // A chunk with no items keeps the time map running at the input's position.
+            let centre = call
+                .first_centre
+                .unwrap_or((first_res - self.origin) / per_res);
+            let src = self.origin + centre * per_res;
+            let flags = if call.burst_start {
+                ChunkFlags::DISCONTINUITY
+            } else {
+                ChunkFlags::NONE
+            };
+            let out = io.output(0)?;
+            set_meta(out, &m, src, per_sym / bits as f64);
+            out.meta.flags |= flags;
+            *soft_out(out)? = soft;
+            let out = io.output(1)?;
+            set_meta(out, &m, src, per_sym);
+            out.meta.flags |= flags;
+            *iq_out(out)? = sym_diag;
+            let out = io.output(2)?;
+            set_meta(out, &m, src, per_sym);
+            out.meta.flags |= flags;
+            *real_out(out)? = te_diag;
+            self.status.items_in += x.len() as u64;
+            self.status.items_out += produced as u64;
+            self.update_status();
+            return Ok(());
+        }
         let symbols_before = self.symbols;
         let first_at = match &tracker {
             Tracker::Liquid(_) => {

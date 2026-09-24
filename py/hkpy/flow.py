@@ -318,9 +318,37 @@ def ticket_rows(ops: str, since: datetime, until: datetime) -> list[dict]:
     return out
 
 
+#: A merge-runner CONFLICT / GATE_FAIL line is the WORK RUNNER's input, not a person's: it re-queues a
+#: branch that merges cleanly again, or resumes the worker for a fix run. Counted as a touchpoint only
+#: when nothing took it within this long - a conflict run waits for a free worker slot, and T-613's
+#: re-queue came 1 h 40 min after its line. On 2026-09-24 20 of the 29 "touchpoints" in 24 h were
+#: such lines, and T-875's (conflict-fixed and re-queued by the runner in 7 min) fired a false
+#: Discord "trend break: touchpoint".
+HANDLED_WITHIN_S = 6 * 3600
+#: What the work runner hands to a person (work-needs-attention.txt) - its escalations, the
+#: coordinator's notes - which touchpoints() did not read at all before.
+_PERSON_KINDS = re.compile(r"^(BLOCKED|REVIEW_FAIL|ERROR|TIMEOUT|BOARD_UNREADABLE|NOTE|\w+_ESCALATE|\w+_NO_SESSION|"
+                           r"DEFLAKE_(?!REQUESTED)\w+)$")
+_ATT = re.compile(r"^(\d\d-\d\d \d\d:\d\d)\s+(\S+)\s+(\S+)\s+(\S+)")
+
+
+def _handled(wlog: list[tuple[float, str]], ticket: str, branch: str, t: float) -> bool:
+    marks = (f"FIX {ticket} attempt ", f"CONFLICT {ticket}: no fix run", f"QUEUED {branch} for merge")
+    return any(t <= ts <= t + HANDLED_WITHIN_S and any(m in ln for m in marks) for ts, ln in wlog)
+
+
 def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
-    """What a person had to do: attention lines that name a person's action, and holds."""
+    """What a person had to do: attention lines that name a person's action, the work runner's
+    escalations, and holds. A CONFLICT / GATE_FAIL the work runner took over is not one."""
     out = []
+    wlog = []
+    for ln in _read(os.path.join(ops, "work-runner.log")).splitlines():
+        m = re.match(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\] ", ln)
+        if m:
+            try:
+                wlog.append((datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S").timestamp(), ln))
+            except ValueError:
+                pass
     for raw in _read(os.path.join(ops, "merge-needs-attention.txt")).splitlines():
         m = re.match(r"^\[?(\d\d-\d\d \d\d:\d\d)", raw)
         if not m:
@@ -329,7 +357,26 @@ def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
             t = datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M")
         except ValueError:
             continue
-        if since <= t <= until and re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+        if not since <= t <= until:
+            continue
+        a = _ATT.match(raw)
+        if a and (a.group(4) == "GATE_FAIL" or a.group(4).startswith("CONFLICT(") or a.group(4) == "CONFLICT"):
+            # younger than the window and not yet taken: pending, not yet a person's (a real
+            # escalation arrives as its own work-needs line, counted below at once)
+            if until.timestamp() - t.timestamp() >= HANDLED_WITHIN_S and not _handled(wlog, a.group(3), a.group(2), t.timestamp()):
+                out.append(raw[:160] + "  (not taken by the work runner)")
+            continue
+        if re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+            out.append(raw[:160])
+    for raw in _read(os.path.join(ops, "work-needs-attention.txt")).splitlines():
+        a = _ATT.match(raw)
+        if not a or not _PERSON_KINDS.match(a.group(4)):
+            continue
+        try:
+            t = datetime.strptime(f"{since.year}-{a.group(1)}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if since <= t <= until:
             out.append(raw[:160])
     for h in _jsonl(os.path.join(ops, "hold.jsonl")):
         t = datetime.fromtimestamp(float(h.get("ts", 0)))

@@ -103,7 +103,9 @@ def test_summary_line_names_the_numbers_a_person_reads(tmp_path):
     s = flow.summary(ops, now=datetime(2026, 9, 23, 8))
     assert s["gates_24h"] == 2 and s["reds_24h"] == 1 and s["real_reds_24h"] == 1 and s["flakes_24h"] == 1
     assert s["queue_depth"] == 2 and s["worker_cap"] == 6 and s["conflicts_24h"] == 1
-    assert s["touchpoints_24h"] == 1                     # the CONFLICT line, not the supervisor's note
+    # the 05:58 CONFLICT line is 2 h old and untaken: pending (the work runner has 6 h to take it), and
+    # the supervisor's note names no action - so no touchpoint yet (the counted case: test below)
+    assert s["touchpoints_24h"] == 0
     assert s["hours_with_dispatch_24h"] == 1
     line = flow.summary_line(s)
     assert line.startswith("flow: ") and "reds 1/2 (1 real) · flakes 1" in line and "queue 2" in line
@@ -115,7 +117,7 @@ def test_touchpoints_count_holds(tmp_path):
         json.dumps({"ts": datetime(2026, 9, 23, 6, 50).timestamp(), "event": "hold", "minutes": 20, "why": "incident"}) + "\n",
         encoding="utf-8")
     tp = flow.touchpoints(ops, datetime(2026, 9, 23, 5), datetime(2026, 9, 23, 8))
-    assert len(tp) == 2 and any("hold 20 min" in x for x in tp)
+    assert len(tp) == 1 and "hold 20 min" in tp[0]          # the 05:58 CONFLICT is still pending
 
 
 def test_record_appends_one_json_line(tmp_path, capsys):
@@ -185,3 +187,27 @@ def test_accepted_flakes_reach_the_tick_line_and_the_digest(tmp_path):
     flow.digest(ops, s, now, lambda level, title, body, key: bodies.append((key, body)))
     digest = dict(bodies)["flow:digest"]
     assert "flake accepted 17:10: fog-of-war.e2e.mjs in `just test-ui-e2e` (T-1 T-2) - passed alone twice, ~13 min saved" in digest
+
+
+def test_a_conflict_the_work_runner_took_is_not_a_touchpoint_but_its_escalations_are(tmp_path):
+    """2026-09-24: 20 of 29 "touchpoints" in 24 h were CONFLICT-skip lines the work runner resolved
+    itself (T-875: conflict-fixed and re-queued in 7 min, yet a Discord "trend break: touchpoint"),
+    while its real escalations in work-needs-attention.txt were never read."""
+    (tmp_path / "merge-needs-attention.txt").write_text(
+        "09-23 02:33  task-t875  T-875  CONFLICT(skipped from bulk)\n"      # taken: a fix run, re-queued
+        "09-23 03:00  task-t9  T-9  CONFLICT(skipped from bulk)\n"          # never taken: a person rebuilt it
+        "09-23 11:30  task-t7  T-7  GATE_FAIL\n"                           # 30 min old, untaken: pending
+        "[09-23 04:00] supervisor: a person must restart stage\n", encoding="utf-8")
+    (tmp_path / "work-runner.log").write_text(
+        "[09-23 02:39:00] FIX T-875 attempt 1 [CONFLICT] no longer merges cleanly into main: resumed session x pid=1\n"
+        "[09-23 02:40:07] QUEUED task-t875 for merge\n", encoding="utf-8")
+    (tmp_path / "work-needs-attention.txt").write_text(
+        "09-23 05:00  task-t8  T-8  GATE_FAIL_ESCALATE  2 fix attempts spent; needs a person\n"
+        "09-23 06:00  task-t8  T-8  NO_WORK  routine\n"
+        "09-23 07:00  task-deflake-x  DEFLAKE:x  DEFLAKE_REQUESTED  routine\n"
+        "09-23 08:00  (deflake)  coordinator  NOTE  held by hand\n", encoding="utf-8")
+    tp = flow.touchpoints(str(tmp_path), datetime(2026, 9, 23, 0), datetime(2026, 9, 23, 12))
+    text = "\n".join(tp)
+    assert "T-875" not in text and "T-7 " not in text and "NO_WORK" not in text and "DEFLAKE_REQUESTED" not in text
+    assert "T-9  CONFLICT" in text and "GATE_FAIL_ESCALATE" in text and "coordinator  NOTE" in text and "a person must" in text
+    assert len(tp) == 4
