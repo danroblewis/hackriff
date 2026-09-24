@@ -758,6 +758,17 @@ if [ -f "$BULKMARK" ]; then
   fi
 fi
 while true; do
+  # RESTART ON REQUEST (pipeline manager, 2026-09-23). A landed runner change only takes effect on a
+  # restart, and a restart is only safe BETWEEN gates - but with the queue non-empty the runner goes
+  # straight from one gate to the next, so "wait for a gap" meant hours (three restarts were needed
+  # on 2026-09-23 alone; the flake-acceptance rule waited on one). `$S/merge-runner-restart` (its
+  # content is the reason, logged) is honoured HERE, the only point in the loop with no gate
+  # running and no merge staged, by re-executing the repo's copy of this script in place.
+  if [ -e "$S/merge-runner-restart" ] && [ ! -e "$S/bulk-in-progress" ] && [ ! -e "$REPO/.git/MERGE_HEAD" ]; then
+    why=$(head -c 200 "$S/merge-runner-restart" 2>/dev/null | tr '\n' ' '); rm -f "$S/merge-runner-restart"
+    log "RESTART: requested (${why:-no reason given}) - re-executing $REPO/ops/merge-runner.sh between gates"
+    exec bash "$REPO/ops/merge-runner.sh"
+  fi
   # read every queued (non-comment) branch, in order
   # NOTE: strip whitespace PER LINE — a plain `tr -d '[:space:]'` deletes the newlines
   # too and glues every queued branch into one unmergeable name (observed 2026-09-20).
