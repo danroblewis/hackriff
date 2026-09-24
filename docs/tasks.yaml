@@ -25887,7 +25887,7 @@ tasks:
   - id: T-879
     milestone: M3
     title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: M3A
@@ -25914,6 +25914,7 @@ tasks:
       Use cases: AWARE-011, AWARE-036
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
+    commit: 3421c16d
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
