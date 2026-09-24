@@ -174,6 +174,44 @@ board_sync_now(){
 }
 
 # returns: 0 = handled (merged/skipped/flagged), 1 = transient (requeue + wait)
+# IS MAIN ITSELF RED on this triage's own reds? Run on the clean main (a bulk rewound, a single merge
+# aborted). 0 = yes, MAIN_RED_WHAT says on what; 1 = green, or nothing to check. A test that fails alone
+# on main+branch and ALSO alone on main is main's defect: gating branch after branch only re-proves it
+# (15:45 on 2026-09-22 three branches, 11:19-11:30 on 2026-09-24 T-858/T-802/T-803 - each blamed and
+# charged an attempt for app-trace's T-475 colour check, which main failed until the deflake landed).
+main_is_red(){
+  MAIN_RED_WHAT=""
+  [ "${TRIAGE_KIND:-test}" = "test" ] || return 1
+  if [ -n "${TRIAGE_FILTER:-}" ]; then
+    log "TRIAGE: is main itself red? re-running the failing tests alone on main"
+    # --no-tests=pass: a test the branch ADDED does not exist on main, and nextest's "no tests to run"
+    # exit read as red - 09-24 10:15, T-870's own new test declared MAIN IS RED and never isolated.
+    if ! ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
+      MAIN_RED_WHAT="$TRIAGE_FILTER"; return 0
+    fi
+    log "TRIAGE: main is green on them -> not main's"; return 1
+  fi
+  # The same question for browser specs (fog-of-war on 2026-09-22 16:22: red on main since
+  # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
+  if [ -n "${TRIAGE_SPECS:-}" ]; then
+    log "TRIAGE: is main itself red? re-running the browser specs alone on main: $TRIAGE_SPECS"
+    # REBUILD FIRST. The spec runner serves whatever `target/debug/hk` and `ui/dist` already exist
+    # (ui/e2e/backend.mjs), and those were built from the BATCH tree by the gate that just failed.
+    # At 13:47 on 2026-09-23 this step ran main's spec against the batch's UI bundle - which
+    # carried the very tilecache.ts change surface-nav was red on - and declared MAIN IS RED,
+    # re-queueing eight branches behind a defect that belonged to one of them. `just test-ui-e2e`
+    # rebuilds both before it runs; this path must too, or its verdict is about the wrong tree.
+    log "TRIAGE: rebuilding hk and ui/dist from main before the spec re-run"
+    ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
+      || log "TRIAGE: WARN rebuild failed; the spec re-run below may test the branch's artefacts"
+    if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
+      MAIN_RED_WHAT="browser spec(s) $TRIAGE_SPECS"; return 0
+    fi
+    log "TRIAGE: main is green on them -> not main's"; return 1
+  fi
+  return 1
+}
+
 process(){
   local branch=$1 ticket; ticket=$(ticket_of "$branch")
   cd "$REPO" || return 1
@@ -265,6 +303,14 @@ process(){
     notify_ok "MERGED $ticket ($branch); queue now $q waiting." "1 landed · gate $(( (SECONDS - ${GATE_T0:-$SECONDS} + 30) / 60 )) min · queue now $q waiting" "$branch"
   else
     git merge --abort 2>/dev/null || true
+    if main_is_red; then
+      # Not this branch's red: no attempt charged, re-queued by the caller; an isolation stops here.
+      log "TRIAGE: MAIN IS RED on: $MAIN_RED_WHAT -> $branch re-queued, no attempt charged; queue the fix"
+      echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the branch is re-queued behind the fix" >> "$NEEDS"
+      notify_coordinator "main itself fails $MAIN_RED_WHAT - $ticket ($branch) is re-queued, not blamed; queue a fix for main."
+      MAIN_RED_STOP=1
+      return 1
+    fi
     record_attempt "$branch" "$tip"
     log "GATE FAILED $branch (attempt $((tries+1))/$MAX_ATTEMPTS, tip $tip) -> abort + flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate (tests)."
@@ -709,49 +755,15 @@ try_bulk(){
       rm -f "$BULKMARK"
       return 0
     fi
-    # IS MAIN ITSELF RED? A test that fails alone on main+batch and ALSO fails alone on the
-    # rewound main is main's defect, and isolating would only re-prove it once per branch
-    # (15:45 on 2026-09-22: three branches isolated against a lattice test that main had
-    # failed since a hand-landed batch; the fix branch was sitting in the queue). Costs one
-    # scoped nextest run on the clean main; saves a full gate per branch.
-    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -n "${TRIAGE_FILTER:-}" ]; then
-      log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
-      # --no-tests=pass: a test the batch ADDED does not exist on main, and nextest's "no tests to run"
-      # exit read as red - 09-24 10:15, T-870's own new test declared MAIN IS RED and never isolated.
-      if ! ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
-        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-        batch_sig "${branches[@]}" > "$S/suite-broken"
-        log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
-        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - the failing test(s) fail on main itself ($TRIAGE_FILTER); fix main, the batch is re-queued behind the fix" >> "$NEEDS"
-        notify_coordinator "main itself fails $TRIAGE_FILTER - the batch ($tickets) is re-queued and held; queue a fix for main."
-        rm -f "$BULKMARK"
-        return 0
-      fi
-      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
-    fi
-    # The same question for browser specs (fog-of-war on 2026-09-22 16:22: red on main since
-    # T-580 landed in the hand fast-forward, and the batch would have been isolated four times).
-    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -z "${TRIAGE_FILTER:-}" ] && [ -n "${TRIAGE_SPECS:-}" ]; then
-      log "TRIAGE: is main itself red? re-running the browser specs alone on the rewound main: $TRIAGE_SPECS"
-      # REBUILD FIRST. The spec runner serves whatever `target/debug/hk` and `ui/dist` already exist
-      # (ui/e2e/backend.mjs), and those were built from the BATCH tree by the gate that just failed.
-      # At 13:47 on 2026-09-23 this step ran main's spec against the batch's UI bundle - which
-      # carried the very tilecache.ts change surface-nav was red on - and declared MAIN IS RED,
-      # re-queueing eight branches behind a defect that belonged to one of them. `just test-ui-e2e`
-      # rebuilds both before it runs; this path must too, or its verdict is about the wrong tree.
-      log "TRIAGE: rebuilding hk and ui/dist from the rewound main before the spec re-run"
-      ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
-        || log "TRIAGE: WARN rebuild failed; the spec re-run below may test the batch's artefacts"
-      if ! ( cd "$REPO/ui" && npm run e2e -- $TRIAGE_SPECS ) >>"$LOG" 2>&1; then
-        for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-        batch_sig "${branches[@]}" > "$S/suite-broken"
-        log "TRIAGE: MAIN IS RED on browser spec(s): $TRIAGE_SPECS -> batch re-queued in order, NOT isolated; queue the fix"
-        echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - browser spec(s) $TRIAGE_SPECS fail on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
-        notify_coordinator "main itself fails browser spec(s) $TRIAGE_SPECS - the batch ($tickets) is re-queued and held; queue a fix for main."
-        rm -f "$BULKMARK"
-        return 0
-      fi
-      log "TRIAGE: main is green on them -> the batch introduced it; isolating"
+    # IS MAIN ITSELF RED? Costs one scoped re-run on the rewound main; saves a gate per branch.
+    if main_is_red; then
+      for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+      batch_sig "${branches[@]}" > "$S/suite-broken"
+      log "TRIAGE: MAIN IS RED on: $MAIN_RED_WHAT -> batch re-queued in order, NOT isolated; queue the fix"
+      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
+      notify_coordinator "main itself fails $MAIN_RED_WHAT - the batch ($tickets) is re-queued and held; queue a fix for main."
+      rm -f "$BULKMARK"
+      return 0
     fi
     log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
   else
@@ -954,7 +966,13 @@ while true; do
         # a second time and writes a duplicate flag.
         isolate="${BULK_MERGED_LIST:-$*}"
         log "falling back to individual gates for: $isolate"
-        for b in $isolate; do process "$b" || echo "$b" >> "$QUEUE"; done
+        MAIN_RED_STOP=""
+        for b in $isolate; do
+          # Main is red: the rest would each fail the same way - back to the queue, whose next batch
+          # meets the batch path's MAIN IS RED hold.
+          if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi
+          process "$b" || echo "$b" >> "$QUEUE"
+        done
       fi
     fi
   fi

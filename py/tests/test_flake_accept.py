@@ -145,6 +145,46 @@ def test_the_main_is_red_rerun_treats_a_test_main_lacks_as_green():
     """09-24 10:15: T-870's own new test was re-run on the rewound main, where it does not exist;
     nextest's "no tests to run" exit (4) read as red -> MAIN IS RED, and T-870 was never isolated."""
     text = RUNNER.read_text()
-    i = text.index("TRIAGE: is main itself red? re-running the failing tests alone on the rewound main")
+    i = text.index("TRIAGE: is main itself red? re-running the failing tests alone on main")
     rerun = next(ln for ln in text[i:].splitlines() if "cargo nextest run" in ln)
     assert "--no-tests=pass" in rerun
+
+
+def _main_is_red(tmp_path, filt="", specs="", kind="test", cargo_rc=0, npm_rc=0):
+    calls = tmp_path / "calls"
+    script = f"""
+set -u
+LOG={tmp_path}/log; REPO={tmp_path}; mkdir -p {tmp_path}/ui
+log(){{ echo "LOG $*"; }}
+cargo(){{ echo "cargo $*" >> {calls}; [ "$2" = build ] && return 0; return {cargo_rc}; }}
+npm(){{ echo "npm $*" >> {calls}; [ "$2" = build ] && return 0; return {npm_rc}; }}
+TRIAGE_KIND={kind}; TRIAGE_FILTER={filt!r}; TRIAGE_SPECS={specs!r}
+{_function("main_is_red")}
+main_is_red; echo "RC $? WHAT=[$MAIN_RED_WHAT]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout, (calls.read_text().splitlines() if calls.exists() else [])
+
+
+def test_main_is_red_answers_for_this_triages_own_reds(tmp_path):
+    """2026-09-24 11:19-11:30: T-858, T-802, T-803 each gated alone and were blamed for app-trace's
+    T-475 check, which main itself failed - the single-branch path never asked main."""
+    out, calls = _main_is_red(tmp_path, specs="app-trace.e2e.mjs", npm_rc=1)
+    assert "RC 0 WHAT=[browser spec(s) app-trace.e2e.mjs]" in out
+    assert calls[-1] == "npm run e2e -- app-trace.e2e.mjs" and any("build" in c for c in calls)   # rebuilt first
+    out, _ = _main_is_red(tmp_path, specs="app-trace.e2e.mjs", npm_rc=0)
+    assert "RC 1 WHAT=[]" in out
+    out, calls = _main_is_red(tmp_path, filt="test(t_band)", cargo_rc=100)
+    assert "RC 0 WHAT=[test(t_band)]" in out and "--no-tests=pass" in calls[-1]
+    out, calls = _main_is_red(tmp_path / "s", filt="test(x)", kind="suite")
+    assert "RC 1 WHAT=[]" in out and calls == []                          # lint/build: nothing to ask
+
+
+def test_a_single_branch_red_that_main_shares_is_not_charged_and_stops_an_isolation():
+    text = RUNNER.read_text()
+    single = text[text.index("    git merge --abort 2>/dev/null || true\n    if main_is_red; then"):]
+    single = single[:single.index("record_attempt")]
+    assert "return 1" in single and "MAIN_RED_STOP=1" in single           # re-queued by the caller, no attempt
+    loop = text[text.index('        MAIN_RED_STOP=""'):]
+    assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:600]
