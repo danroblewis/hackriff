@@ -18615,7 +18615,7 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: todo
+    status: in-progress
     branch: task-t565
     priority: normal
     parallel_group: SYN-E
@@ -19461,7 +19461,8 @@ tasks:
   - id: T-590
     milestone: M3
     title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
-    status: todo
+    status: in-progress
+    branch: task-t590
     priority: normal
     parallel_group: M3A
     model: opus
