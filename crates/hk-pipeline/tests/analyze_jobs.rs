@@ -356,6 +356,7 @@ fn spec(budget: hk_synth::search::SynthBudget, profile: Profile) -> SearchSpec {
             sample_rate_hz: Some(FS),
             bandwidth_hz: Some(20_000.0),
             channels: Default::default(),
+            liveness: None,
         },
         output_policy: OutputPolicy {
             content_class: ContentClass::Unrestricted,

@@ -195,6 +195,8 @@ pub fn split(recipe: &Recipe, registry: &Registry) -> Result<Split, RuntimeError
             from: merge_src,
             view: None,
             decode: None,
+            channels: None,
+            profile: None,
         }],
         refine: None,
         ..recipe.clone()
@@ -205,6 +207,7 @@ pub fn split(recipe: &Recipe, registry: &Registry) -> Result<Split, RuntimeError
             sample_rate_hz: None,
             bandwidth_hz: None,
             channels: recipe.input.channels.clone(),
+            liveness: recipe.input.liveness.clone(),
         },
         nodes: nodes(true),
         refine: recipe

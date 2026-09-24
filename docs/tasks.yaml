@@ -25583,7 +25583,6 @@ tasks:
     milestone: MAUTO
     title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
     status: in-progress
-    branch: task-t866
     priority: normal
     deps:
     - T-865
@@ -25600,7 +25599,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Review fail (3/10 red of recipe_audio hand_started): the tone DFT spanned a flagged loop-splice break (phase jump, non-multiple-of-period sample_index jump); now measured over the longest unflagged run — 10/10 alone. Also removed the per-chunk graph.outputs.clone() in publish_outputs (review finding 2). Merged main b0347d95 (block.rs conflict: kept audio_frames + evidence). Finding 3 (squelch second open stretch in one chunk) left as a follow-up.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 03:27).
+      Review fix round 1. The flaky e2e assertion (recipe_audio.rs hand_started, 3/10 red) came from the test's measurement, not the product. Every 960-sample frame reads the 1 kHz tone at -1 dB, but the looping recording's splice restarts the chain, producing a correctly flagged sample_index jump that is not a whole number of tone periods. The test's single-bin DFT over audio[30..] spanned that phase break, so the result depended on where the reader attached (-1 to -7 dB). The tone and pilot are now measured over the longest unflagged run of records, after 5 settling records; 10/10 green alone. Also fixed review finding 2: publish_outputs no longer clones graph.outputs on every chunk on the pipeline thread (it iterates by index; Src is Copy). Merged main b0347d95; the block.rs conflict was two new default trait methods (audio_frames and T-853's evidence), and both are kept. Finding 3 (squelch drops a second open stretch within one chunk) is left as a follow-up, as the reviewer allowed.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(recipe_audio)' (x10, alone) -> exit 0 (10/10 runs, 2 passed each); cargo nextest run -p hk-pipeline -E 'binary(recipe_runtime) or binary(follow_hops) or binary(listen_conformance) or binary(decoded_capture) or binary(recipe_alloc_free) or binary(recipe_audio) or kind(lib)' -> exit 0 (255 passed); cargo nextest run -p hk-recipe -p hk-stream -E 'test(/reparsing_a_recorded_stream_of_10k_frames_is_instant|slow_consumer_is_dropped_not_blocking/)' (x3, alone, triage) -> exit 0 (reparsing passed 3/3; slow_consumer passed 2/3 at load average 30 — load flakes in untouched code, see observed_but_not_chased)
+      precheck exit 0
+      Commits: d172cc82, fca4f9a3, 2a3bb857
+      Observed, not chased: Load flakes in code this branch does not touch, seen in the post-merge `cargo nextest run -p hk-recipe -p hk-blocks -p hk-synth -p hk-stream` (336/338 passed at load average ~30). (1) hk-stream::stream_contract slow_consumer_is_dropped_not_blocking failed once in the suite and 1 of 3 runs alone. (2) hk-recipe::field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant failed in the suite and passed 3/3 alone. Both are wall-clock bounds. They are candidates for the deflaker / timing tier. | Review finding 3 (follow-up): squelch passes on only the first open stretch in a chunk. A second open stretch in the same chunk is dropped and not counted in squelched_items. The next chunk's DISCONTINUITY flag keeps timing honest; it only happens with a very short hang_s. | Carried from the first hand-back: LP-3 (T-867) must de-emphasise after squelch (fm_demod without deemphasis_s -> squelch -> deemphasis), otherwise the fm-noise squelch opens on noise. An audio pipeline is not yet counted against max_listeners (LP-8, T-872).
+      Use cases: SIGNAL-062, SIGNAL-011, SIGNAL-012
+      Resources: 222 CPU-s, peak 2.6 GB
+    branch: task-t866
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
