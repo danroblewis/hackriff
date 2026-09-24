@@ -556,6 +556,59 @@ Nothing changes without an explicit amendment (§8.1's rule, unchanged). When on
 4. **Tables are per support, and the discount grows with `n`.** Nothing measured here lets a
    table be shared across supports, in either direction.
 
+## 11 — The CSS (LoRa) ladder (T-851)
+
+T-619 measured AM/OOK and C4FM only, leaving docs/22 P9 (CSS) report-only with no owner. This closes
+the measurement. **Scope caveat first:** `css_demod` is a catalogue descriptor with no
+implementation, so the ladder here is the block's own first stage in numpy — dechirp, FFT, fold to
+the chirp bandwidth — not a shipped block, and the evidence metrics are the two that stage yields.
+Harness: `py/scripts_t851_css_ladder.py` (single-use; nothing under `fixtures/` written).
+
+**Setup.** SF9, BW 125 kHz, fs 500 kHz (2048 samples/symbol), window = 8 and 32 symbols (the 8-symbol
+preamble is the natural support). Same 11-state ADC gain grid and the same δ definition as §1
+(per-null table on its own float IQ; δ = claim − realised). Nulls: **A** noise (2000 / 600 windows),
+**B1** wrong SF (an SF9 chirp read at SF7), **B2** wrong bandwidth (250 kHz chirp read as 125 kHz),
+**B3** wrong family (2-FSK). Alternative: matched SF9 at 6 dB per-sample SNR, symbol-aligned.
+Metrics: `peak_ratio` (mean over symbols of max/mean of the folded dechirped spectrum) and
+`bin_run` (symbols sharing the modal peak bin — the preamble-repeat count). Bucket is applied to each
+stream's own σ (noise floor) and clip fraction, as §10.4 requires.
+
+Worst δ over nulls and admitted ADC states, at a 6-bit claim (8-bit in brackets), n = 8 / 32 symbols:
+
+| bucket | `peak_ratio` | `bin_run` |
+|---|---|---|
+| no restriction | +6.00 / +6.00 (+8.0) | +1.89 / +0.36 |
+| ADR-0015 §13.3 `nominal` (σ ≥ 0.5, clip ≤ 30 %) | **+6.00 / +6.00** (+8.0) | +0.49 / +0.36 (+1.03 / +2.36) |
+| tight (σ ≥ 1.0, clip ≤ 10 %) | **+1.68 / +3.09** (+2.36 / +3.94) | +0.20 / −0.23 (+0.03 / +1.77) |
+
+Findings:
+
+1. **`peak_ratio` is NO-GO under `nominal` and δ grows with support even under the tight bucket**
+   (+1.68 → +3.09 bits at 6 bits, 8 → 32 symbols; +3.94 at 8 bits). +6.00 is saturation: every
+   null window beats the float threshold (P = 1). Two mechanisms, both amplitude-side like §10.4's
+   AM/OOK: an under-filled stream (σ 0.11 LSB) makes the folded spectrum spiky for *every* input;
+   and a hard-clipped strong wrong-SF chirp becomes tonal, raising its own peak ratio. Both ends of
+   the ADC range are hazards, as for OOK, not just under-fill as for FSK/C4FM.
+2. **`bin_run` has small δ but cannot carry a calibrated claim.** It is a count over 8 (or 32)
+   symbols: **2 distinct values on the noise null at n = 8, 3 at n = 32** — §10.6's atom problem in
+   its extreme form. It expresses ≈ 1–2 bits; a 6-bit ask is refused (§13.2), not answered. Its
+   right home is an *analytic* bound (a run of k of n symbols on one of 2^SF bins has an exact
+   binomial null), which is `L_check`-style analytic evidence, not a table.
+3. Recall on the aligned matched alternative is 1.00 in every bucket at this SNR — **not
+   informative**: a real ISM burst has unknown symbol alignment, CFO/SFO and lower SNR, none of
+   which were exercised. Real LoRa captures were not used.
+4. Gain is a no-op as on every other path (§4/§10.7 hold structurally: gain only matters through
+   the ADC); not re-run as a separate control.
+
+**Verdict.** CSS: **`peak_ratio` NO-GO** under §13.3's `nominal` bucket, CONDITIONAL-and-support-
+sensitive under the tight bucket (a table per `n`, δ ≥ 1.7 bits at 6); **`bin_run` GO only as an
+analytic bit, NO-GO as a calibrated one.** The §10.10 recommendation (tighten the fill bucket
+globally, measure fill on the noise floor) is confirmed on a fourth path. **P9 stays report-only**:
+the measurement supports no calibrated bar, and its only sound evidence (`bin_run` as an analytic
+bound) requires a `css_demod` implementation that does not yet exist. Numbers above are the
+reason, not an omission. Sample noise: ±0.7 bits at 6 bits on the nulls at n = 32 (≈ 9 tail windows
+of 600); 8-bit columns are indicative only.
+
 ## Follow-ups filed
 
 T-616 (`snr`/`evm` are one statistic — ADR-0015 §1.3 must not sum correlated metric bits),
