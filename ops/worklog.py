@@ -267,7 +267,7 @@ PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 </style></head><body>
 <div class=top><span class=nm>hack<b>riff</b> · role work log</span><a href="/">← dashboard</a><span class=sub id=sub>loading…</span></div>
 <div class=wrap>
-<div class=bn id=bn></div>
+<a id=leverage></a><div class=bn id=bn></div>
 <div class=tabs id=tabs></div>
 <div class=ctl><label><input type=checkbox id=flowonly> <code>flow:</code> lines only</label><span class=sess id=sess></span></div>
 <div id=list></div>
