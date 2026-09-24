@@ -332,3 +332,12 @@ def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflict
     R.handle_gate_failures(claims, dry=False)
     assert launched == [] and claims["T-627"]["gate_fails_seen"]
     assert not (tmp / "merge-queue.txt").exists()
+
+
+
+def test_every_worker_gets_its_own_e2e_port_block_clear_of_the_gate():
+    ports = {R.e2e_port_for(f"/x/.claude/worktrees/t{n}") for n in range(400, 900)}
+    assert min(ports) >= 9100 and max(ports) + 216 < 65536
+    assert all((p - 9100) % 256 == 0 for p in ports)
+    assert R.e2e_port_for("/x/.claude/worktrees/t845/") == R.e2e_port_for("/x/.claude/worktrees/t845")
+    assert len(ports) > 150                                    # spread, not one block

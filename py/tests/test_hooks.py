@@ -18,6 +18,7 @@ Two properties matter more than the individual patterns:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import pathlib
 import shutil
@@ -229,3 +230,46 @@ def test_settings_bounds_every_session_build(tmp_path):
     assert env["CARGO_BUILD_JOBS"] == "3"
     assert env["NEXTEST_TEST_THREADS"] == "2"
     assert env["CARGO_INCREMENTAL"] == "0"
+
+
+
+# ------------------------------------------------------------------ commands, not text (2026-09-23)
+_spec = importlib.util.spec_from_file_location("cmd_code", HOOKS / "cmd_code.py")
+CC = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(CC)
+
+
+@pytest.mark.parametrize("cmd", [
+    "tmux send-keys -t super -l 'relay: they ran hk serve --bind 127.0.0.1:8899 then npm run e2e'",
+    "python3 - <<'EOF'\nnote = 'hk serve and npm run e2e and just test appear in this file'\nEOF\necho done",
+    "git commit -q -m 'hk serve: fix the npm run e2e wait'",
+    "echo \"just gate is what the runner runs\"",
+    "cat > /tmp/x <<EOF\nwhile :; do :; done\nEOF",
+])
+def test_quoted_text_and_heredoc_bodies_are_not_commands(cmd, tmp_path):
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert bash(cmd, ops=tmp_path) is None, CC.code(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    "bash -c 'npm run e2e'",
+    "cd ui && npm run e2e -- fog-of-war.e2e.mjs",
+    "zsh -c \"just gate --base abc\"",
+    "bash <<'EOF'\nnpm run e2e\nEOF",
+])
+def test_shell_payloads_are_still_commands(cmd, tmp_path):
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert decision(bash(cmd, ops=tmp_path)) == "deny", CC.code(cmd)
+
+
+def test_a_spec_run_on_its_own_ports_may_go_beside_a_gate(tmp_path):
+    """The 2026-09-22 reds were port sharing; ports are per-run now. A base >= 9100 clears the
+    gate's lanes (8791/8951/8983 + a 24-port sweep)."""
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert bash("cd ui && HK_E2E_PORT=9356 npm run e2e -- a.e2e.mjs", ops=tmp_path) is None
+    assert bash("cd ui && npm run e2e -- a.e2e.mjs", ops=tmp_path, env={"HK_E2E_PORT": "9612"}) is None
+    assert bash("./target/debug/hk serve --bind 127.0.0.1:9400 --data /tmp/d", ops=tmp_path) is None
+    for cmd, env in (("HK_E2E_PORT=8791 npm run e2e", {}), ("npm run e2e", {"HK_E2E_PORT": "8951"}),
+                     ("./target/debug/hk serve --bind 127.0.0.1:8770", {})):
+        out = bash(cmd, ops=tmp_path, env=env)
+        assert decision(out) == "deny" and "HK_E2E_PORT=<9100 or above>" in reason(out), cmd

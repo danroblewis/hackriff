@@ -34,6 +34,7 @@ Usage: python3 ops/work-runner.py [--once] [--dry-run] [--poll SECONDS]
 """
 import argparse
 import json
+import zlib
 import os
 import re
 import shutil
@@ -120,6 +121,15 @@ MODEL_ALIAS = {"haiku": "haiku", "sonnet": "sonnet", "opus": "opus", "fable": "c
 EFFORTS = ("low", "medium", "high")
 PRI = {"high": 0, "medium": 1, "normal": 2, "low": 3}
 CARGO_ENV = {"CARGO_BUILD_JOBS": WORKER_JOBS, "NEXTEST_TEST_THREADS": WORKER_TEST_THREADS, "CARGO_INCREMENTAL": "0", "CARGO_PROFILE_DEV_DEBUG": "line-tables-only"}
+
+
+def e2e_port_for(wt):
+    """This worker's own HK_E2E_PORT base: 9100 + 256 * (crc32(worktree name) % 200). A 3-lane run
+    uses base .. base+216, so a 256 block holds it; >= 9100 clears the gate's lanes (8791/8951/8983
+    + a 24-port sweep) and backend.mjs's reserved 8788/8789/8899/8900, and the hook lets a spec run
+    on such a base go beside a gate. Two workers hashing to one block share it the way two runs did
+    before (backend.mjs's freePort steps past a taken port) - 1 in 200 per pair."""
+    return 9100 + 256 * (zlib.crc32(os.path.basename(str(wt).rstrip("/")).encode()) % 200)
 
 
 def log(msg):
@@ -380,7 +390,7 @@ def launch(t, dry):
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
     clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
-    env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S)
+    env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, HK_E2E_PORT=str(e2e_port_for(wt)))
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
     # The bound, inherited by the whole tree, three layers: (1) CPULIMIT - the HiGarfield fork of
@@ -849,7 +859,7 @@ def _run_fix(c, n, prompt):
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
-                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S), start_new_session=True, text=True)
+                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, HK_E2E_PORT=str(e2e_port_for(wt))), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
     log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
