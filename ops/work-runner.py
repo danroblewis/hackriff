@@ -1480,6 +1480,32 @@ def read_deflake_requests(path=None):
     return out
 
 
+# A ticket branch still on its way to main - what a deflaker must not race (T-801, 2026-09-23 23:30:
+# the runner dispatched deflakers on app-trace and fog-of-war while T-801's worker was rewriting both
+# specs under the user's authorization; the coordinator had to hold one by hand).
+_INFLIGHT = ("running", "queued", "review-failed", "gate-failed", "fix-held", "conflict")
+_DEFER_SAID = set()
+
+
+def deflake_deferred(slug, req, claims):
+    """Why this deflake request must wait, or "". (a) its own last run left a branch with unmerged
+    commits (held, blocked, review-failed): a second run would start over beside it; (b) an in-flight
+    ticket branch edits the same spec file."""
+    c = claims.get(DEFLAKE_PREFIX + slug)
+    if c and c.get("branch") and commits_ahead(c["branch"], "main") > 0:
+        return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+    test = str(req.get("test", ""))
+    if not test.endswith(".e2e.mjs"):
+        return ""
+    path = f"ui/e2e/{test}"
+    for tid, t in claims.items():
+        if tid.startswith(DEFLAKE_PREFIX) or t.get("state") not in _INFLIGHT or not t.get("branch"):
+            continue
+        if sh(["git", "diff", "--name-only", f"main...{t['branch']}", "--", path]).strip():
+            return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
+    return ""
+
+
 def pending_deflakes(claims, reqs):
     """([(slug, newest unconsumed request)] that may dispatch now, oldest waiting first; changed).
     A request waits while the slug's previous run is still open or its branch unmerged (claim
@@ -1515,6 +1541,12 @@ def pending_deflakes(claims, reqs):
                 new = [r for r in new if r["ts"] > ended]
                 if not new:
                     continue
+        why = deflake_deferred(slug, latest, claims)
+        if why:
+            if (slug, latest["ts"]) not in _DEFER_SAID:
+                _DEFER_SAID.add((slug, latest["ts"]))
+                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} - {why}")
+            continue
         ready.append((min(r["ts"] for r in new), slug, max(new, key=lambda r: r["ts"])))
     ready.sort(key=lambda x: x[0])
     return [(slug, r) for _, slug, r in ready], changed
@@ -1574,7 +1606,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "precheck": {{"exit": 0}},
    "blocked": {{"needs": "<if blocked: fails alone - the evidence; or what else unblocks it>"}},
    "observed_but_not_chased": ["<anything outside scope, with the exact evidence>", ...]}}
-"done" is refused over a non-zero test exit. Also end your final message with one line
+"done" is refused over a non-zero test exit - except a red-when-the-defect-returns proof, which you record
+with "expect": "red" beside its non-zero "exit". Also end your final message with one line
 HANDBACK: DONE   or   HANDBACK: BLOCKED <why>
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 """
@@ -1661,8 +1694,12 @@ def reap_deflake(claims, key, c):
     if hb is None and hb_err and " names " in hb_err:
         hb, hb_err = load_handback(d, c["deflake"])         # the bare slug is an acceptable name too
     outcome, why = handback_outcome(hb, text)
-    if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-        bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+    # A deflaker's red-when-the-defect-returns proof exits non-zero by design; it says so with
+    # "expect": "red" (01:33 on 2026-09-24 a DONE deflake read as BLOCKED on exactly those runs).
+    fails = [t for t in hb.get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0
+             and t.get("expect") != "red"] if hb else []
+    if hb and outcome == "done" and fails:
+        bad = fails[0]
         outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
     if hb_err:
         log(f"HANDBACK {key}: {hb_err} ({outcome})")

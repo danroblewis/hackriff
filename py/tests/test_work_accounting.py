@@ -770,3 +770,45 @@ def test_only_regenerable_is_strict():
     assert R.only_regenerable([".githooks/", "target/"])
     assert not R.only_regenerable([".githooks/", "src/new.rs"])
     assert not R.only_regenerable([])
+
+
+def test_a_deflake_waits_while_a_ticket_branch_edits_its_spec(df, monkeypatch):
+    """2026-09-23 23:30: the runner dispatched deflakers on app-trace and fog-of-war while T-801's
+    worker was rewriting both under the user's authorization; the coordinator held one by hand."""
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"))
+    edits = {"task-t801": "ui/e2e/app-trace.e2e.mjs\n"}
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        edits.get(args[3].split("...")[1], "") if args[:3] == ["git", "diff", "--name-only"] else "")
+    claims = {"T-801": {"ticket": "T-801", "branch": "task-t801", "state": "review-failed", "kind": "work"},
+              "T-9": {"ticket": "T-9", "branch": "task-t9", "state": "running", "kind": "work"}}
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    assert (tmp / "work-runner.log").read_text().count("DEFLAKE WAIT deflake-a: request for app-trace.e2e.mjs - T-801's") == 1
+    claims["T-801"]["state"] = "queued"
+    edits.clear()                                        # landed: main now has it, the three-dot diff is empty
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+
+
+def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 600.0))
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 1)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_red_proof_is_not_a_failing_test(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done", tests=[{"cmd": "node run.mjs app-trace.e2e.mjs  # defect injected", "exit": 1, "expect": "red"},
+                      {"cmd": "node run.mjs app-trace.e2e.mjs", "exit": 0}])
+    claims = claim()
+    R.reap(claims, dry=False)
+    assert len(reviews) == 1 and seen == []
