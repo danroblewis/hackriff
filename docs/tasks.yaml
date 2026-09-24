@@ -26192,7 +26192,8 @@ tasks:
   - id: T-892
     milestone: M2-hardening
     title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
-    status: todo
+    status: in-progress
+    branch: task-t892
     priority: normal
     deps:
     - T-356
@@ -26250,7 +26251,8 @@ tasks:
   - id: T-895
     milestone: MMAP
     title: Left inventory column collapses to a chip (<=56 px) with a visible dismiss when expanded - the map is the default (user P1)
-    status: todo
+    status: in-progress
+    branch: task-t895
     priority: high
     deps:
     - T-801
