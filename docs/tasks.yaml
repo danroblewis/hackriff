@@ -26516,6 +26516,27 @@ tasks:
     notes: |
       FOUND BY supervisor, staging DB measurement 2026-09-24 (user asked 13:55).
     core_interface: true
+  - id: T-906
+    milestone: MMAP
+    title: "Past-surveys drawer follow-ups: Go restores the frequency SPAN too; honest 'nothing looked at' text; sweep records (T-815 review)"
+    status: todo
+    priority: normal
+    deps:
+    - T-815
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-815's Opus review (~/.hackriff-ops/work/T-815/review.json), non-blocking findings on the past-surveys drawer (ui/src/app/chrome/explore-drawer.ts):
+      1. PARTIAL RESTORE: Go restores the time extent (reviewAt) and the centre frequency (requestGoto) but NOT the frequency span, while T-815 asks to restore the saved (time x frequency) extent. Restore the span too - snapped to a realizable state, view arithmetic only, never a device route (a span wider than the instantaneous bandwidth is a view zoom over history, not a retune).
+      2. HONESTY TEXT: explore-drawer.ts ~:157 says "outside this band and window nothing was looked at", which claims more than the code knows - other bands can be observed in the same window, and pastSurveyItems ignores sweep records. State only what this window's records show (the coverage-map honesty rule: grey = genuinely unobserved, computed from what was sampled).
+      3. Sweep records are ignored by pastSurveyItems - decide (and state in the drawer) whether survey sweeps are listed as past surveys.
+      DELIVER each with a ui/test that goes red on the old behaviour. Thin client: presentation only.
+      WHAT THE USER WILL SEE ON STAGING: pressing Go on a past survey restores exactly the time window and frequency range that survey covered, and the drawer never claims nothing was looked at elsewhere.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-815 Opus review 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
