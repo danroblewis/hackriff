@@ -84,6 +84,8 @@
 //!   **stays on the tuning it had** (the stream itself keeps working, so a later read succeeds). No
 //!   fault is armed by default; `hk serve --device mock:…` arms one from `HK_MOCK_FAULT`
 //!   ([`MockFault::parse`]) and a test from [`MockSdrControl::arm_retune_faults`].
+//!   [`MockFault::OpenAccessDenied`] (T-892) refuses the open itself, as libhackrf does when
+//!   another process holds the HackRF.
 //! - **Bias tee:** a flag (accepted, settles, no effect on samples). **Baseband filter:** recorded
 //!   in provenance only.
 //! - **Legal class:** the mock carries no class of its own. Callers derive it from the tuned window
@@ -267,11 +269,17 @@ pub enum MockFault {
         /// How many rate changes are refused (`u32::MAX`: all of them).
         count: u32,
     },
+    /// **T-892: every open is refused the way libhackrf refuses a HackRF another process holds**
+    /// — `hackrf_open_by_serial` returning `HACKRF_ERROR_LIBUSB` (-1000) named
+    /// `Access denied (insufficient permissions)`, which is also what a user without USB
+    /// permissions gets. The refusal goes through the HackRF driver's own classification
+    /// (`hackrf::open_failure`), so the mock reports exactly what the radio's source layer would.
+    OpenAccessDenied,
 }
 
 impl MockFault {
     /// Parses a harness fault spec: `retune-apply-fails` (one), `retune-apply-fails:N`,
-    /// `retune-apply-fails:always`, or `gone-on-retune`. `None` for an empty spec (or `none`);
+    /// `retune-apply-fails:always`, `gone-on-retune` or `open-access-denied`. `None` for an empty spec (or `none`);
     /// `Err` names what was not understood.
     pub fn parse(spec: &str) -> Result<Option<Self>, String> {
         let spec = spec.trim();
@@ -280,6 +288,9 @@ impl MockFault {
         }
         if spec == "gone-on-retune" {
             return Ok(Some(Self::GoneOnRetune));
+        }
+        if spec == "open-access-denied" {
+            return Ok(Some(Self::OpenAccessDenied));
         }
         let (name, arg) = spec.split_once(':').unwrap_or((spec, "1"));
         let count = || -> Result<u32, String> {
@@ -302,7 +313,8 @@ impl MockFault {
             })),
             _ => Err(format!(
                 "unknown mock fault {name:?}: use retune-apply-fails[:N|:always], \
-                 refuse-rate[:N|:always], read-fails-every:N or gone-on-retune"
+                 refuse-rate[:N|:always], read-fails-every:N, gone-on-retune or \
+                 open-access-denied"
             )),
         }
     }
@@ -671,6 +683,13 @@ impl MockSdrDriver {
     pub fn open_mock(&self, request: &OpenRequest) -> Result<MockSdrSource, SourceError> {
         let caps = &self.capabilities;
         let rec = &self.recording;
+        if self.options.fault == Some(MockFault::OpenAccessDenied) {
+            return Err(super::hackrf::open_failure(
+                super::hackrf::HACKRF_ERROR_LIBUSB,
+                super::hackrf::LIBUSB_ACCESS_TEXT,
+                format!("mock:{}", rec.provenance.device_id),
+            ));
+        }
         let center = checked(
             caps.supports_frequency(request.center_hz),
             "centre frequency (Hz)",
