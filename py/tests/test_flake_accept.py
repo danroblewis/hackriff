@@ -295,5 +295,5 @@ def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path)
     """Review 2026-09-24: a batch editing hkpy/flakes.py or the runner would decide its own flake accept."""
     out, ran, recs = _solo_run(tmp_path, "solo-ok 11", code_changed=True)
     assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
-    assert any("diff --quiet HEAD -- py/hkpy/flakes.py ops/merge-runner.sh" in c for c in ran)
+    assert any("diff --quiet HEAD -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh" in c for c in ran)
     assert not any(c.startswith("uv") for c in ran) and recs[-1]["passes_alone"] == 2

@@ -548,7 +548,7 @@ solo_ok(){
   # Never for a merge that changes the acceptance code itself: it would decide its own flake accept
   # (review). Compared against the last gated commit - a bulk's base=, else HEAD for a staged merge.
   local ref=HEAD; [ -f "$BULKMARK" ] && ref=$(sed -n 's/^base=//p' "$BULKMARK" | head -1)
-  git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy/flakes.py ops/merge-runner.sh 2>/dev/null || return 1
+  git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy py/pyproject.toml py/uv.lock ops/merge-runner.sh 2>/dev/null || return 1
   ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --solo-ok "$@" ) 2>/dev/null
 }
 flake_ledger(){
