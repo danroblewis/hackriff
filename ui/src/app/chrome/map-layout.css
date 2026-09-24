@@ -32,6 +32,10 @@
    own rule already covers the rest: the bar wraps rather than overflows when its row does not fit,
    so narrowing it between the panels grows it down instead of hiding a button under a neighbour,
    exactly as it already does on an ordinary narrow window. */
+/* T-802: in Explore, Go-to is the floating one docked over the canvas (`map-controls.ts`), which
+   submits through the same `requestGoto`; the bar's copy stays for Decode/History, where it
+   switches to Explore first. One Go-to on screen, not two. */
+.app:has(#view-explore:not([hidden])) > .bar #goto-form { display: none; }
 #view-explore > .centre .sf-bar { padding-left: calc(var(--panel-w) + var(--panel-gap) * 2); padding-right: calc(var(--panel-w) + var(--panel-gap) * 2); box-sizing: border-box; }
 @media (max-width: 900px) {
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
