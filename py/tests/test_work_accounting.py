@@ -332,3 +332,317 @@ def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflict
     R.handle_gate_failures(claims, dry=False)
     assert launched == [] and claims["T-627"]["gate_fails_seen"]
     assert not (tmp / "merge-queue.txt").exists()
+
+
+# --------------------------------------------------------------------- deflake dispatch (2026-09-23)
+# The user's decision: the 3rd isolation-pass of one test within 7 days auto-spawns a deflaker.
+# py/hkpy/flakes.py appends the request; the work runner dispatches it as a worker whose claim is
+# keyed DEFLAKE:<slug> - not a board ticket, so no ticket-shaped path may act on it.
+
+DAY = 86400.0
+
+
+def _req(rid, ts, test="fog-of-war.e2e.mjs", kind="spec", **kw):
+    return dict({"ts": ts, "id": rid, "test": test, "kind": kind, "count_7d": 3,
+                 "incidents": [{"ts": "09-23 10:00", "batch": "task-t1 task-t2", "load_before": "31.2",
+                                "outcome": "passed-alone"}],
+                 "evidence": "merge-runner.log 09-23 10:00: red, passed alone twice"}, **kw)
+
+
+@pytest.fixture
+def df(tmp_path, monkeypatch):
+    """Everything the deflake path touches, pointed at tmp; nothing is ever spawned."""
+    reqs = tmp_path / "deflake-requests.jsonl"
+    for name, val in [("S", str(tmp_path)), ("DEFLAKE_REQUESTS", str(reqs)), ("WORKDIR", str(tmp_path / "work")),
+                      ("LOG", str(tmp_path / "work-runner.log")), ("NEEDS", str(tmp_path / "work-needs-attention.txt")),
+                      ("DONE", str(tmp_path / "work-done.jsonl")), ("MERGE_QUEUE", str(tmp_path / "merge-queue.txt")),
+                      ("MERGE_NEEDS", str(tmp_path / "merge-needs-attention.txt")),
+                      ("BULKMARK", str(tmp_path / "bulk-in-progress"))]:
+        monkeypatch.setattr(R, name, val)
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda t, b, k, d="": seen.append((t, k, d)))
+    launched = []
+
+    def fake_launch(slug, req, prior, dry):
+        launched.append((slug, req["ts"], (prior or {}).get("run", 0) + 1))
+        return {"ticket": "DEFLAKE:" + slug, "deflake": slug, "kind": "deflake", "state": "running", "pid": 1,
+                "started": 1e9, "branch": "task-" + slug, "wt": "/nonexistent", "request_ts": req["ts"],
+                "run": (prior or {}).get("run", 0) + 1}
+    monkeypatch.setattr(R, "launch_deflake", fake_launch)
+
+    def write(*rows):
+        reqs.write_text("".join((r if isinstance(r, str) else json.dumps(r)) + "\n" for r in rows))
+    return tmp_path, write, launched, seen
+
+
+def test_requests_parse_and_garbage_lines_are_skipped(df):
+    tmp, write, _, _ = df
+    write("not json", "[1, 2]", "", {"id": "x", "test": "t"},                       # no ts
+          {"ts": True, "id": "x", "test": "t"}, {"ts": 1.0, "id": "", "test": "t"},  # a bool ts, an empty id
+          {"ts": 1.0, "id": "!!!", "test": "t"}, {"ts": 1.0, "id": "x", "test": " "},
+          _req("deflake-fog-of-war-e2e-mjs", 5.0),
+          _req("deflake-hk-cli::api_contract the/band collapsed", 6.0, test="hk-cli::api_contract x", kind="rust"))
+    got = R.read_deflake_requests()
+    assert [r["slug"] for r in got] == ["deflake-fog-of-war-e2e-mjs", "deflake-hk-cli-api-contract-the-band-collapsed"]
+    assert got[1]["kind"] == "rust" and got[1]["incidents"][0]["outcome"] == "passed-alone"
+    assert R.read_deflake_requests(str(tmp / "absent.jsonl")) == []
+
+
+def test_one_claim_per_id_and_none_while_it_is_open(df):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 100.0), _req("deflake-a", 200.0))       # the same id twice (3rd and 4th flake)
+    claims = {}
+    assert R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 200.0, 1)]                      # one run, from the newest request
+    assert list(claims) == ["DEFLAKE:deflake-a"] and claims["DEFLAKE:deflake-a"]["state"] == "running"
+    write(_req("deflake-a", 100.0), _req("deflake-a", 200.0), _req("deflake-a", 300.0))
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    assert len(launched) == 1                                         # open: the 5th flake waits
+    log = (tmp / "work-runner.log").read_text()
+    assert log.count("DEFLAKE WAIT deflake-a") == 1 and "still running" in log   # logged once, not per tick
+
+
+def test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped(df, monkeypatch):
+    tmp, write, launched, _ = df
+    now = [10 * DAY]
+    monkeypatch.setattr(R.time, "time", lambda: now[0])
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "review",
+                                    "state": "queued", "branch": "task-deflake-a", "run": 1,
+                                    "request_ts": now[0] - 2 * DAY, "ended": now[0] - 2 * 3600}}
+    write(_req("deflake-a", now[0] - 2 * DAY), _req("deflake-a", now[0] - 60))   # a flake while the fix waits to land
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    log = (tmp / "work-runner.log").read_text()
+    assert launched == [] and log.count("DEFLAKE WAIT deflake-a") == 1 and "not merged yet" in log
+    now[0] += 3600                                                     # the fix lands; the claim closes
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        "0" if args[:2] == ["git", "rev-list"] else "abc123")
+    assert R.release_stale_claims(claims, {}) and claims["DEFLAKE:deflake-a"]["state"] == "merged"
+    R.dispatch_deflakes(claims, dry=False)
+    R.dispatch_deflakes(claims, dry=False)
+    log = (tmp / "work-runner.log").read_text()
+    assert launched == [] and log.count("DEFLAKE DROP deflake-a") == 1          # predates the fix: dropped, once
+    assert claims["DEFLAKE:deflake-a"]["request_ts"] == now[0] - 3600 - 60
+    write(_req("deflake-a", now[0] - 2 * DAY), _req("deflake-a", now[0] - 3600 - 60), _req("deflake-a", now[0] + 5))
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", now[0] + 5, 2)]                 # a flake AFTER the fix: run 2 at once
+
+
+def test_a_finished_unmerged_run_does_not_hold_newer_evidence(df, monkeypatch):
+    """No time window: a blocked / no-work run is over, so only its older evidence is dropped."""
+    tmp, write, launched, _ = df
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake",
+                                    "state": "blocked", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    write(_req("deflake-a", 100.0), _req("deflake-a", 400.0), _req("deflake-a", 600.0))
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+    assert "DEFLAKE DROP deflake-a: 1 request(s)" in (tmp / "work-runner.log").read_text()
+
+
+def test_the_cap_and_one_per_tick(df, monkeypatch):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 1.0), _req("deflake-b", 2.0), _req("deflake-c", 3.0))
+    busy = {f"T-{i}": {"state": "running", "kind": k} for i, k in enumerate(["work", "fix", "work", "deflake"])}
+    claims = dict(busy)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []                                             # 4 busy (a deflake counts) >= cap 4
+    del claims["T-0"]
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]               # oldest first, one per tick
+    R.dispatch_deflakes(claims, dry=False)
+    assert len(launched) == 1                                         # the new deflake took the free slot
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 8)
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a", "deflake-b"]
+
+
+def test_holds_are_respected(df, monkeypatch):
+    tmp, write, launched, _ = df
+    write(_req("deflake-a", 1.0))
+    (tmp / "dispatch-paused").write_text("")
+    R.dispatch_deflakes({}, dry=False)
+    (tmp / "dispatch-paused").unlink()
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)
+    R.dispatch_deflakes({}, dry=False)
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 3.0)
+    R.dispatch_deflakes({}, dry=False)
+    assert launched == []
+    monkeypatch.setattr(R, "disk_free_gb", lambda: 500.0)
+    R.dispatch_deflakes({}, dry=False)
+    assert len(launched) == 1
+
+
+def test_busy_workers_counts_deflake_runs():
+    claims = {"A": {"state": "running", "kind": "work"}, "DEFLAKE:x": {"state": "running", "kind": "deflake"},
+              "DEFLAKE:y": {"state": "running", "kind": "review", "deflake": "y"}}
+    assert R.busy_workers(claims) == 2
+
+
+def test_launch_cuts_from_the_gated_base_and_runs_the_deflaker_bounded(df, monkeypatch):
+    tmp, _, _, _ = df
+    monkeypatch.undo()                                                # the real launch_deflake, tmp paths again
+    for name, val in [("S", str(tmp)), ("WORKDIR", str(tmp / "work")), ("LOG", str(tmp / "work-runner.log")),
+                      ("BULKMARK", str(tmp / "bulk-in-progress"))]:
+        monkeypatch.setattr(R, name, val)
+    (tmp / "bulk-in-progress").write_text("base=eab4bfae\nbranches=a\n")
+    calls, popens = [], []
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: calls.append(args) or "")
+
+    class P:
+        pid = 4242
+
+    monkeypatch.setattr(R.subprocess, "Popen", lambda cmd, **kw: popens.append((cmd, kw)) or P())
+    c = R.launch_deflake("deflake-a", _req("deflake-a", 7.0), {"run": 1}, dry=False)
+    assert ["git", "worktree", "add", f"{R.REPO}/.claude/worktrees/deflake-a-r2", "-b", "task-deflake-a-r2", "eab4bfae"] in calls
+    cmd, kw = popens[0]
+    script = cmd[-1]
+    assert "'--agent' 'deflaker'" in script and "'--model' 'opus'" in script and "'--effort' 'high'" in script
+    assert "taskpolicy" in cmd and kw["start_new_session"] and kw["env"]["HK_WORKER"] == "1"
+    assert kw["env"]["CARGO_BUILD_JOBS"] == R.WORKER_JOBS
+    brief = (tmp / "work" / "deflake-a-r2" / "brief.md").read_text()
+    for s in ("fog-of-war.e2e.mjs", "passed-alone", "merge-runner.log 09-23 10:00", "ALONE", "REAL BUG",
+              "NEVER a retry", f"{tmp}/work/deflake-a-r2/handback.json", '"ticket": "DEFLAKE:deflake-a"', "HANDBACK: DONE"):
+        assert s in brief, s
+    assert c["ticket"] == "DEFLAKE:deflake-a" and c["kind"] == "deflake" and c["run"] == 2 and c["request_ts"] == 7.0
+    assert c["base"] == "eab4bfae" and c["pid"] == 4242 and c["review"] is True
+
+
+def test_deflake_claims_are_invisible_to_board_sync_and_candidates(df, monkeypatch):
+    tmp, _, _, _ = df
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "state": "running",
+                                    "kind": "deflake", "branch": "task-deflake-a", "group": None}}
+    tasks = [{"id": "T-1", "status": "todo"}, {"id": "DEFLAKE:deflake-a", "status": "todo"}]  # even a colliding id
+    monkeypatch.setattr(R, "main_safe_to_commit", lambda: True)
+    monkeypatch.setattr(R, "board", lambda: [t for t in tasks if t["id"] == "T-1"])
+    monkeypatch.setattr(R, "landed_tickets", lambda: {})
+    R.sync_board(claims, dry=True)
+    assert "would flip" not in (tmp / "work-runner.log").read_text() if (tmp / "work-runner.log").exists() else True
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    assert [t["id"] for t in R.candidates(tasks[:1], claims)] == ["T-1"]
+    assert R.release_stale_claims(dict(claims, **{"DEFLAKE:deflake-a": dict(claims["DEFLAKE:deflake-a"], state="no-work", started=0)}),
+                                  {"T-1": tasks[0]}) is False    # never released as a "todo ticket"
+
+
+@pytest.fixture
+def reaped(df, monkeypatch):
+    tmp, _, _, seen = df
+    d = tmp / "work" / "deflake-a"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: "")
+    reviews = []
+    monkeypatch.setattr(R, "launch_review", lambda c: reviews.append(c) or dict(c, kind="review", pid=2))
+    fixes = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or c)
+
+    def claim(kind="deflake", ahead=2):
+        monkeypatch.setattr(R, "commits_ahead", lambda b, t: ahead)
+        return {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "test": "fog-of-war.e2e.mjs",
+                                      "kind": kind, "state": "running", "pid": 1, "started": 0, "branch": "task-deflake-a",
+                                      "wt": str(tmp / "nowt"), "dir": str(d), "review": True}}
+
+    def hb(outcome, **kw):
+        (d / "handback.json").write_text(json.dumps(dict({"ticket": "DEFLAKE:deflake-a", "outcome": outcome,
+                                                          "summary": "rAF stopped in a hidden tab", "tests": []}, **kw)))
+    return tmp, d, claim, hb, seen, reviews, fixes
+
+
+def test_reap_done_with_commits_goes_to_review(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done", tests=[{"cmd": "node ui/e2e/run.mjs fog-of-war.e2e.mjs", "exit": 0}])
+    claims = claim()
+    R.reap(claims, dry=False)
+    assert len(reviews) == 1 and claims["DEFLAKE:deflake-a"]["state"] == "running"
+    assert claims["DEFLAKE:deflake-a"]["kind"] == "review" and seen == []
+    assert json.loads((tmp / "work-done.jsonl").read_text())["outcome"] == "done-to-review"
+
+
+def test_reap_without_commits_is_deflake_no_work(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done")
+    claims = claim(ahead=0)
+    R.reap(claims, dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_NO_WORK"] and reviews == []
+    assert claims["DEFLAKE:deflake-a"]["state"] == "no-work" and claims["DEFLAKE:deflake-a"]["ended"]
+
+
+def test_reap_blocked_carries_the_summary(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("blocked", blocked={"needs": "fails alone 3/3: a real bug in the reveal path"})
+    claims = claim(ahead=1)
+    R.reap(claims, dry=False)
+    (t, k, detail), = seen
+    assert k == "DEFLAKE_BLOCKED" and "fails alone 3/3" in detail and "rAF stopped" in detail and reviews == []
+
+
+def test_reap_done_over_a_failing_test_is_blocked(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    hb("done", tests=[{"cmd": "x", "exit": 1}])
+    R.reap(claim(), dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"] and reviews == []
+
+
+def test_reap_the_fallback_line_and_the_bare_slug_are_accepted(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    (d / "out.json").write_text(json.dumps({"type": "result", "result": "...\nHANDBACK: BLOCKED fails alone"}))
+    R.reap(claim(), dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"]
+    seen.clear()
+    (d / "out.json").write_text("{}")
+    hb("blocked", ticket="deflake-a", blocked={"needs": "slug-named"})
+    R.reap(claim(), dry=False)
+    assert "slug-named" in seen[0][2]
+
+
+def test_review_pass_queues_and_review_fail_is_escalated_not_resumed(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    (d / "review.json").write_text(json.dumps({"result": "fine\nVERDICT: PASS"}))
+    claims = claim(kind="review")
+    R.reap(claims, dry=False)
+    assert claims["DEFLAKE:deflake-a"]["state"] == "queued"
+    assert (tmp / "merge-queue.txt").read_text().split() == ["task-deflake-a"]
+    (d / "review.json").write_text(json.dumps({"result": "VERDICT: FAIL widened a timeout at x.mjs:10"}))
+    claims = claim(kind="review")
+    claims["DEFLAKE:deflake-a"]["session_id"] = "s"
+    R.reap(claims, dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_REVIEW_FAIL"] and fixes == []
+    R.handle_gate_failures(claims, dry=False)                          # the review-failed resume loop skips it too
+    assert fixes == []
+
+
+def test_a_gate_failure_on_a_deflake_branch_is_escalated_not_resumed(reaped):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    (tmp / "merge-needs-attention.txt").write_text("09-23 16:20  task-deflake-a  task-deflake-a  GATE_FAIL\n")
+    claims = claim()
+    claims["DEFLAKE:deflake-a"].update(state="queued", session_id="s")
+    assert R.handle_gate_failures(claims, dry=False)
+    assert fixes == [] and [k for _, k, _ in seen] == ["DEFLAKE_GATE_FAIL"]
+    assert claims["DEFLAKE:deflake-a"]["state"] == "gate-failed"
+    R.handle_gate_failures(claims, dry=False)
+    assert len(seen) == 1
+
+
+def test_a_conflict_on_a_deflake_branch_takes_the_conflict_skip_path(reaped, monkeypatch):
+    tmp, d, claim, hb, seen, reviews, fixes = reaped
+    (tmp / "merge-needs-attention.txt").write_text("09-23 16:20  task-deflake-a  task-deflake-a  CONFLICT(skipped from bulk)\n")
+    monkeypatch.setattr(R, "board_statuses", lambda: {"T-1": "todo"})   # no DEFLAKE key there: harmless
+    monkeypatch.setattr(R, "_line_ts", lambda line: None)
+    monkeypatch.setattr(R, "merging_branches", lambda: set())
+    monkeypatch.setattr(R, "merges_cleanly", lambda b, target="main": True)
+    claims = claim()
+    claims["DEFLAKE:deflake-a"].update(state="queued", session_id="s")
+    R.handle_gate_failures(claims, dry=False)
+    assert (tmp / "merge-queue.txt").read_text().split() == ["task-deflake-a"]   # clean now: re-queued
+    assert seen == [] and fixes == [] and claims["DEFLAKE:deflake-a"]["state"] == "queued"
+    (tmp / "merge-needs-attention.txt").write_text("09-23 16:30  task-deflake-a  task-deflake-a  CONFLICT\n")
+    monkeypatch.setattr(R, "merges_cleanly", lambda b, target="main": False)
+    (tmp / "merge-queue.txt").write_text("")
+    R.handle_gate_failures(claims, dry=False)
+    assert fixes == [] and [k for _, k, _ in seen] == ["DEFLAKE_CONFLICT"]     # where a ticket gets launch_fix
+    assert claims["DEFLAKE:deflake-a"]["state"] == "conflict" and claims["DEFLAKE:deflake-a"]["ended"]

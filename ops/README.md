@@ -131,6 +131,30 @@ in the result.
 validates it, refuses `done` over a failing test, writes the ticket's `result:` (and a cancel's
 status) on the worker's branch through `just task`, routes on `outcome` (cancel → an Opus review
 confirms the evidence), and only then queues the branch. Workers never edit `docs/tasks.yaml`.
+**Deflakers are dispatched from the flake ledger (user, 2026-09-23: the 3rd flake of a test in 7 days
+auto-spawns a deflaker).** `py/hkpy/flakes.py` appends one JSON line per due test to
+`$HACKRIFF_OPS/deflake-requests.jsonl` (`ts`, `id`, `test`, `kind` rust|spec, `count_7d`, `incidents`,
+`evidence`); each tick the runner reads it (garbage lines skipped), and for a request newer than the
+one its claim last consumed it launches `claude -p --agent deflaker` (opus/high, the same `bounded()`
+cpulimit + QoS wrapper, `CARGO_ENV` and budget as a worker) in `.claude/worktrees/<slug>` on
+`task-<slug>` (`-r<n>` for a later run), cut from `merge_target()` — `main`, or the bulk marker's
+`base=` while a batch gates. The brief carries the test, the incidents and evidence verbatim, and the
+triage rules: alone first; fails alone → hand back BLOCKED; passes alone → a deterministic fix (never a
+retry, skip, quarantine, timeout change or deleted assertion) proven red with the defect back. The claim
+is keyed **`DEFLAKE:<slug>`**, never a T-id, and carries `deflake: <slug>`, so board sync, candidates
+and stale-claim release (all looked up by board id) never see it and it never gets a `result:` block or a
+fix resume. It is a worker: `busy_workers()` counts kind `deflake` against the same `dispatch_cap()`, at
+most one deflake dispatch per tick (before ordinary dispatch), never while `dispatch-paused` exists or
+`gate_holds_dispatch()`, never under the disk floor. One open deflaker per id: a new request waits
+while the previous run is running or its branch is queued and unmerged (`DEFLAKE WAIT`, logged once);
+after that, a request whose `ts` is at or before the claim's `ended` (the run's end, or when its branch
+landed) is dropped as evidence from before the fix (`DEFLAKE DROP`, logged once). Reap:
+commits ahead and a clean tree → an Opus review (told to FAIL any masking) → the merge queue;
+otherwise one line in `work-needs-attention.txt` — `DEFLAKE_NO_WORK`, `DEFLAKE_BLOCKED` (with the
+hand-back summary), `DEFLAKE_ERROR`, `DEFLAKE_UNCOMMITTED`, `DEFLAKE_REVIEW_FAIL`, or `DEFLAKE_GATE_FAIL`
+for a queued deflake branch that goes red (escalated to a person, not resumed). A CONFLICT line takes
+the ticket path's `conflict_skip` (a branch that merges cleanly now is re-queued); only where a ticket
+would get a fix run is it escalated, as `DEFLAKE_CONFLICT`.
 **The resource model is a fixed budget (user, 2026-09-22).** 28 cores: the merge gate is reserved
 14 (`WORK_GATE_RESERVE`), each worker is bounded to ~3 (`WORK_WORKER_CORES`) by limits its whole
 process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a
