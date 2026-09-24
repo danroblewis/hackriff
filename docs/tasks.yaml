@@ -24633,7 +24633,7 @@ tasks:
       core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
-    core_interface: "true"
+    core_interface: true
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ

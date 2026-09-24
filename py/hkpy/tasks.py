@@ -161,7 +161,7 @@ def _ready(t: dict, by_id: dict[str, dict]) -> bool:
         return False
     if t.get("needs") in ("user", "hardware"):
         return False
-    for dep in t.get("deps") or []:
+    for dep in t.get("depends_on") or t.get("deps") or []:  # the runner reads both spellings
         dep_t = by_id.get(str(dep))
         if dep_t is None or dep_t.get("status") not in ("done", "cancelled"):
             return False
@@ -266,6 +266,8 @@ def _field_value(value: str) -> str:
     while every other value keeps `scalar`'s auto-quoting. `[]` writes an empty list.
     """
     v = value.strip()
+    if v in ("true", "false"):
+        return v  # a real boolean, as the board writes core_interface / is_hil (never the string)
     if v.startswith("[") and v.endswith("]"):
         items = [x.strip() for x in v[1:-1].split(",") if x.strip()]
         return "[" + ", ".join(scalar(x) for x in items) + "]"

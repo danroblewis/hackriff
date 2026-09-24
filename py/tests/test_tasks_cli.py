@@ -481,3 +481,17 @@ def test_unset_refuses_blocked_on_while_still_blocked(board: Path, capsys) -> No
 def test_unset_refuses_required_keys_and_missing_keys(board: Path) -> None:
     assert run(["unset", "T-002", "status", "--file", str(board)]) != 0
     assert run(["unset", "T-002", "no_such_key", "--file", str(board)]) != 0
+
+
+def test_set_true_and_false_are_real_booleans(board: Path) -> None:
+    assert run(["set", "T-002", "core_interface=true", "is_hil=false", "--file", str(board)]) == 0
+    t2 = _t(board, "T-002")
+    assert t2["core_interface"] is True and t2["is_hil"] is False
+
+
+def test_ready_honours_depends_on_as_well_as_deps(board: Path, capsys) -> None:
+    assert run(["set", "T-003", "status=todo", "depends_on=[T-002]", "--file", str(board)]) == 0
+    assert run(["unset", "T-003", "blocked_on", "--file", str(board)]) == 0
+    capsys.readouterr()
+    assert run(["list", "--ready", "--file", str(board)]) == 0
+    assert "T-003" not in capsys.readouterr().out  # T-002 is still todo
