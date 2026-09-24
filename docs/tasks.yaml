@@ -25114,7 +25114,6 @@ tasks:
     milestone: MAUTO
     title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
     status: in-progress
-    branch: task-t855
     priority: normal
     deps:
     - T-848
@@ -25136,6 +25135,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    branch: task-t855
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:09).
+      Added proposal adapters in hk-synth::proposal: propose_sync (analyze_stream), propose_codes (search_codes), propose_fields (suggest_fields). A ProposalLedger charges every call against ProposalBudget{max_ops, per_call_ops, wall_s}: budget is by operation count (assist::Budget), wall time only a backstop (docs/27). Calls are refused (Refused::OpsExhausted/WallExhausted) once spent; hypotheses and partial calls are tallied for look-elsewhere. Suggestion score feeds prior_bits only, never evidence_bits. Unit tests cover charging, per-call cap, refusal, wall backstop, partial.
+      Tests: cargo nextest run -p hk-synth -E 'test(/proposal/)' -> exit 0 (6 passed)
+      precheck exit 0
+      Commits: 0b4ede6f
+      Resources: 42 CPU-s, peak 0.4 GB
   - id: T-856
     milestone: MAUTO
     title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
