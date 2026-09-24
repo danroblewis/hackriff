@@ -8,6 +8,16 @@ SCRATCH = os.environ.get("HACKRIFF_OPS", os.path.expanduser("~/.hackriff-ops"))
 os.makedirs(SCRATCH, exist_ok=True)
 PROJ = "/Users/daniellewis/.claude/projects/-Users-daniellewis-hackriff"
 OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same dir) resolves
+# A PREVIEW (ops/preview-dashboard.sh, user 2026-09-24: "he does not want to wait behind a merge batch
+# to SEE a dashboard change") runs a branch's ops/ + py/ copied out of git into a scratch directory,
+# on :8902 beside the real :8901. Its child builds must run that copy's code, not main's; everywhere
+# else (the real instance) they run REPO's, never a path derived from a worktree.
+PREVIEW = os.environ.get("MONITOR_PREVIEW") == "1"
+CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO
+# The caches the dashboard itself WRITES: a preview keeps its own (ops/preview-dashboard.sh seeds them
+# with copies), so a branch's code never writes the real instance's usage.json, burndown-cache.json
+# or role-sessions.json.
+STATE = CODE_ROOT if PREVIEW else SCRATCH
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -1218,7 +1228,7 @@ def work_queue(smap, wts, ags, merge_ticket=""):
             "active_ms": sorted(m for m in active_ms if m),
             "todo_total": sum(1 for t in all_tasks if t.get("status") == "todo")}
 
-USAGE_FILE = os.path.join(SCRATCH, "usage.json")
+USAGE_FILE = os.path.join(STATE, "usage.json")
 USAGE_SESSION = "usagepoll"
 
 def _parse_usage(text):
@@ -1871,7 +1881,7 @@ def gather():
 
 def _flow_modules():
     import sys as _sys
-    py_dir = os.path.join(REPO, "py")
+    py_dir = os.path.join(CODE_ROOT, "py")
     if py_dir not in _sys.path:
         _sys.path.insert(0, py_dir)
     from hkpy import flow as flow_mod, experiment as exp_mod
@@ -1997,7 +2007,7 @@ def flow_panel_cached(ops, max_age=30.0):
         # built in a child process (_child_json): the log parse's heap goes when the child exits
         data = _child_json(f"""
 import importlib.util, json
-spec = importlib.util.spec_from_file_location("mon", {os.path.join(REPO, "ops", "monitor.py")!r})
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(CODE_ROOT, "ops", "monitor.py")!r})
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.build_flow_panel({ops!r})))
 """)
@@ -2969,7 +2979,8 @@ def _child_json(code, timeout=90):
     is a threaded server, and a forked child can deadlock on a lock another thread held."""
     import sys as _sys
     out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
-                         env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "py"), HACKRIFF_OPS=SCRATCH))
+                         env=dict(os.environ, PYTHONPATH=os.path.join(CODE_ROOT, "py"), HACKRIFF_OPS=SCRATCH,
+                                  **({"HK_METRICS_NO_SAMPLE": "1"} if PREVIEW else {})))
     if out.returncode != 0:
         raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
     return json.loads(out.stdout)
@@ -2998,7 +3009,7 @@ print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": f
 
 
 _METRICS = {"sha": None, "v": None, "err": None}
-METRICS_CACHE = os.path.join(SCRATCH, "metrics-cache.json")
+METRICS_CACHE = os.path.join(CODE_ROOT if PREVIEW else SCRATCH, "metrics-cache.json")
 
 
 def _committed_sha():
@@ -3133,7 +3144,7 @@ class H(BaseHTTPRequestHandler):
                 if OPSDIR not in _sys.path:
                     _sys.path.insert(0, OPSDIR)
                 import worklog
-                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+                body = json.dumps(worklog.build(reg=worklog.discover(ops=STATE)) if PREVIEW else worklog.build()).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
@@ -3228,7 +3239,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/burndown.json"):
             try:
                 import burndown
-                body = json.dumps(burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))).encode(); self.send_response(200)
+                body = json.dumps(burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "rows": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
@@ -3346,12 +3357,13 @@ if __name__ == "__main__":
     threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
-    threading.Thread(target=_usage_poller, daemon=True).start()
+    if not PREVIEW:   # it owns the shared `usagepoll` tmux session and a Haiku login: the real instance's
+        threading.Thread(target=_usage_poller, daemon=True).start()
     threading.Thread(target=_metrics_poller, daemon=True).start()
     def _warm_burndown():
         try:
             import burndown
-            burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))
+            burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()

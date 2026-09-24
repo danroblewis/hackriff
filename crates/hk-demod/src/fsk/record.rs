@@ -54,7 +54,7 @@ pub const INFER_DECODER_ID: &str = "hk-infer";
 /// Its version.
 pub const INFER_DECODER_VERSION: &str = "0.1.0";
 /// Identity scheme name of a framing signature.
-pub const FRAMING_IDENTITY_SCHEME: &str = "hk-framing";
+pub const FRAMING_IDENTITY_SCHEME: &str = hk_model::FRAMING_IDENTITY_SCHEME;
 
 /// A caller's positive classification of the emitter, e.g. the user's own device.
 #[derive(Clone, Debug, PartialEq)]

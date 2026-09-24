@@ -97,8 +97,8 @@ pub use detection::{
 };
 pub use emitter::{
     Appearance, Classification, DecodedIdentity, Emitter, EmitterLink, EmitterObservation,
-    Identity, IdentityScheme, KnownStatus, KnownStatusChange, LifecycleAuthor, LifecycleChange,
-    LifecycleState, LinkTarget, Recurrence, StatusAuthor,
+    FRAMING_IDENTITY_SCHEME, Identity, IdentityScheme, KnownStatus, KnownStatusChange,
+    LifecycleAuthor, LifecycleChange, LifecycleState, LinkTarget, Recurrence, StatusAuthor,
 };
 pub use frames::{
     FrameKey, Persistence, PowerUnit, SpectrumFrame, SpectrumTile, SweepFrame, TileKey, TileStats,

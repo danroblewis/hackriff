@@ -44,6 +44,16 @@ in `$HACKRIFF_OPS/role-sessions.json`; a role session started any other way — 
 the user's own terminal — is added there by hand: `{"<session id>": {"role": "supervisor",
 "source": "manual"}}`. Transcripts are parsed once, then incrementally. Data: `/worklog.json`.
 
+**Preview a dashboard branch — `bash ops/preview-dashboard.sh <branch> [PATH ...]`** (user,
+2026-09-24: he does not wait behind a merge batch to see a dashboard change). Copies the branch's
+committed `ops/` + `py/` out of git into `$HACKRIFF_OPS/preview` (`PREVIEW_DIR`) and runs that copy
+on **:8902** (`PREVIEW_PORT`; :8901 is refused) with `MONITOR_PREVIEW=1`, which makes its child
+builds run the copy's code, keeps its metrics cache in the preview directory and writes no daily
+`metrics.jsonl` sample. It replaces whichever dashboard holds the port (one preview at a time; a
+tunnel pointed at :8902 shows the newest), refuses a port held by anything else, verifies that ITS
+pid is the listener, and prints `OK`/`FAIL` with the size for each PATH (a JSON route's own
+`"error"` is a FAIL). The real :8901 restarts from main when the branch lands.
+
 **`/metrics` — code metrics** (`ops/metricspage.py` + `py/hkpy/codemetrics.py`, linked "metrics ↗"
 in the top bar): lines per language / crate / area (product vs test), churn per area over 24h/7d/30d
 and the hottest files, tests and test-seconds per crate from the gate's kept JUnit (seconds per 1k
@@ -71,6 +81,13 @@ an uncached build took ~1.2 s in testing, a cached one ~13 ms. Tests: `py/tests/
 re-executes the repo's copy of itself at the top of its loop, the only point with no gate running and
 no merge staged, and logs `RESTART: requested (<why>)`. Use it after a runner change lands; never
 kill the runner mid-gate for that.
+
+**CHEAP FIRST (user, 2026-09-24):** when the queue holds both kinds, the branches whose diff
+classifies as anything but `full` (`hkpy.gatepri`, the gate's own `classify`) — a dashboard or
+pipeline branch is `py+ops`, a UI one `ui` — are the next attempt, by themselves, and the rest go
+back in queue order: a two-minute py+ops gate no longer waits for, or rides, a 30-minute full batch.
+It narrows no gate (the attempt is `just gate`, classified as always); it logs `CHEAP FIRST: …` with
+each branch's class, and forms the batch as before whenever classification fails.
 
 **Red triage (the user's rule, 2026-09-23):** on a red, the failing tests or browser specs are re-run
 ALONE. Pass alone **twice** → a load flake: that suite passes on the evidence, and the gate resumes

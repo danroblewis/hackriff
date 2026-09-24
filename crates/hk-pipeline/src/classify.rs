@@ -51,7 +51,9 @@
 
 use hk_classify::{Classifier, ClassifyRequest, SymbolEstimator};
 use hk_dsp::{InputInfo, IqSample};
-use hk_estimate::{Hints, ParamEstimator, SnippetExtractor, SnippetRequest};
+use hk_estimate::{
+    ChannelSnippet, Hints, ParamEstimator, ParameterSet, SnippetExtractor, SnippetRequest,
+};
 use hk_model::classify::{ArbRank, Classification, Stage, TaxonomyRef, family_of};
 use hk_model::cluster::RecordedClassification;
 use hk_model::{EmitterId, RepoError, Repository, Timestamp};
@@ -78,6 +80,23 @@ pub fn keeps_family(current: Option<&RecordedClassification>) -> bool {
         // modulation at all (a service family such as `adsb`) leaves room for it.
         _ => family_of(&r.classification.family, &TaxonomyRef::current()).is_some(),
     }
+}
+
+/// The C13 half of [`classify_box`]: the box's channel snippet and its parameter set — among
+/// them the burst **extent** the normalised snippet is cut to, so every C15 envelope feature is
+/// measured over it (T-876). `None` when the box cannot be extracted.
+///
+/// Public so a test can hold the extent this call site measures against a scene's hidden truth
+/// (`tests/device_fsk_classify.rs`) without a second copy of the steps drifting from this one.
+pub fn measure_box<T: IqSample>(
+    info: InputInfo<'_>,
+    iq: &[T],
+    request: &SnippetRequest,
+) -> Option<(ChannelSnippet, ParameterSet)> {
+    let mut extractor = SnippetExtractor::new(Default::default());
+    let snippet = extractor.extract(info, iq, request).ok()?;
+    let params = ParamEstimator::new(Default::default()).estimate(&snippet, &Hints::default());
+    Some((snippet, params))
 }
 
 /// Runs the cascade over one detection box, through the same C13 chain the demodulators use:
@@ -125,9 +144,7 @@ pub fn classify_box<T: IqSample>(
     t: Timestamp,
 ) -> Option<Classification> {
     survey.apply(c14, info.provenance.get());
-    let mut extractor = SnippetExtractor::new(Default::default());
-    let snippet = extractor.extract(info, iq, request).ok()?;
-    let params = ParamEstimator::new(Default::default()).estimate(&snippet, &Hints::default());
+    let (snippet, params) = measure_box(info, iq, request)?;
     let window = c14.window_from_snippet(&snippet, &params);
     let normalised =
         hk_estimate::normalise::normalise(&snippet, &params, &Default::default()).ok()?;
