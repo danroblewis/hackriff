@@ -26322,7 +26322,7 @@ tasks:
   - id: T-896
     milestone: MMAP
     title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: MAP-TEST
@@ -26346,6 +26346,7 @@ tasks:
       Commits: 4642f712
       Observed, not chased: T-825 (MAP-25) is still todo; when it lands it should list ui/test/map-overlay-position.test.ts as part of its suite rather than re-implement the P3 guard. | The guard is a static source scan scoped to ui/src/app for drag handlers; chrome mounted from ui/src/surface (if the layers panel ever moves there) would need that directory added to chromeSrc.
       Resources: 55 CPU-s, peak 1.2 GB
+    commit: da858df8
   - id: T-897
     milestone: MMAP
     title: "Path layer: (t, f) polylines on the surface in the tile pass - chirp, hop sequence, sweep path as first producers (user P2)"
