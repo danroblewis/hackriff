@@ -262,7 +262,7 @@ fn declarations() -> Vec<Unreachable> {
         reason: "check/payload parameterisation (CRC width, off-catalogue polynomial, constant \
                  payload) is on the 2-level FSK generator only (T-622); the C4FM trunk scenes \
                  carry the fixed P25 framing and nothing else",
-        ticket: Ticket::Unfiled,
+        ticket: Ticket::Filed("T-850"),
     });
     for fam in ["2fsk", "4fsk-c4fm", "msk"] {
         // The F ladder: the generator is built (hkpy.synth.fill, T-625) and T-619 measured the
