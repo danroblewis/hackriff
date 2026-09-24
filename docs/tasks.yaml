@@ -22401,7 +22401,7 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: in-progress
+    status: done
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
@@ -22518,6 +22518,7 @@ tasks:
 
       Worktree clean after commit; nothing left on disk outside the repo (target/ seeded via `cp -c -R
       -p`, not touched by this diff).
+    commit: f860365a
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
