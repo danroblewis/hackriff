@@ -1392,6 +1392,8 @@ impl<'a, E: Evaluator> Engine<'a, E> {
                 from,
                 view: None,
                 decode: None,
+                channels: None,
+                profile: None,
             }],
             output_policy: self.spec.head.output_policy.clone(),
             refine: None,

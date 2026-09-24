@@ -5,6 +5,7 @@ use hk_recipe::{Params, PortType};
 
 use crate::buffer::{Input, Output};
 use crate::registry::BuildCtx;
+use crate::sink::AudioFrames;
 use crate::status::Status;
 
 /// What a port carries, negotiated at `init`.
@@ -168,6 +169,13 @@ pub trait Block: Send {
     /// Current readout: cheap (`Copy`), callable after any `process`. Polled by the runtime
     /// about every 250 ms for status records and the objective of output-driven refinement.
     fn status(&self) -> Status;
+
+    /// An audio sink's finished frames (ADR-0011 §8.4, `audio_out`): the product of a block
+    /// with no output port. The runtime reads them after `process` and clears them once
+    /// published; every other block answers `None` (the default).
+    fn audio_frames(&mut self) -> Option<&mut AudioFrames> {
+        None
+    }
 
     /// Synthesis evidence (ADR-0015 §2.1, T-853): at most four [`hk_model::synth::Evidence`]
     /// summaries of everything processed since the last [`Block::reset`], appended to `out`.

@@ -95,10 +95,11 @@ pub const MAX_RETUNE_BAND_HZ: f64 = 500e6;
 /// through its currently-linked tracks, or linked directly, most recent first — with the LO each
 /// was measured under, read from the detection's own provenance.
 const RETUNE_DETECTION_SQL: &str = "\
-     SELECT detection_id, f_center, obw, lo FROM ( \
+     SELECT detection_id, f_center, obw, lo, span FROM ( \
        SELECT d.detection_id AS detection_id, d.f_center AS f_center, d.obw AS obw, \
               d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
+              json_extract(p.canonical, '$.tune.center_hz') AS lo, \
+              json_extract(p.canonical, '$.tune.sample_rate_hz') AS span \
        FROM emitter_link el \
        JOIN track_detection td ON td.track_id = el.target_id \
        JOIN detection d ON d.detection_id = td.detection_id \
@@ -107,7 +108,8 @@ const RETUNE_DETECTION_SQL: &str = "\
        UNION ALL \
        SELECT d.detection_id AS detection_id, d.f_center AS f_center, d.obw AS obw, \
               d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
+              json_extract(p.canonical, '$.tune.center_hz') AS lo, \
+              json_extract(p.canonical, '$.tune.sample_rate_hz') AS span \
        FROM emitter_link el \
        JOIN detection d ON d.detection_id = el.target_id \
        JOIN provenance p ON p.provenance_id = d.provenance_id \
@@ -327,21 +329,25 @@ fn row_observations(
     id: EmitterId,
 ) -> Result<Vec<(DetectionId, RetuneObservation)>, RepoError> {
     let mut stmt = conn.prepare_cached(RETUNE_DETECTION_SQL)?;
-    let raw: Vec<([u8; 16], f64, f64, f64)> = stmt
+    type Raw = ([u8; 16], f64, f64, f64, Option<f64>);
+    let raw: Vec<Raw> = stmt
         .query_map(params![blob(id), MAX_RETUNE_DETECTIONS as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<Result<_, _>>()?;
     Ok(raw
         .into_iter()
-        .filter(|(_, f, _, lo)| f.is_finite() && lo.is_finite())
-        .map(|(d, f_center_hz, bandwidth_hz, lo_hz)| {
+        .filter(|(_, f, _, lo, _)| f.is_finite() && lo.is_finite())
+        .map(|(d, f_center_hz, bandwidth_hz, lo_hz, span)| {
             (
                 DetectionId::from_uuid(uuid::Uuid::from_bytes(d)),
                 RetuneObservation {
                     lo_hz,
                     f_center_hz,
                     bandwidth_hz,
+                    // T-879: the window this line was measured in, so a verdict is only claimed
+                    // where the absolute hypothesis could have been refuted.
+                    span_hz: span.filter(|w| w.is_finite() && *w > 0.0),
                 },
             )
         })

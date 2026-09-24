@@ -10,6 +10,7 @@
 //!   [`ChunkMeta`] (element index, source time map, channel, flags).
 //! - [`status`]: [`Status`], a `Copy` readout (lock, SNR, error rate, quality, extras).
 //! - [`registry`]: [`BlockFactory`] and the [`Registry`] (an [`hk_recipe::Catalogue`]).
+//! - [`sink`]: what a sink block (`audio_out`) hands the runtime ([`AudioFrames`]).
 //! - [`catalogue`]: the M1 library's pinned descriptors ([`catalogue::planned`]).
 //! - [`blocks`]: implementations, one module per group (ownership in ADR-0011 §7).
 //! - [`evidence`]: the per-block evidence accumulators behind [`Block::evidence`] (ADR-0015
@@ -52,6 +53,7 @@ pub mod catalogue;
 pub mod evidence;
 pub mod registry;
 pub mod schema;
+pub mod sink;
 pub mod status;
 pub mod window;
 
@@ -61,5 +63,6 @@ pub use buffer::{
 };
 pub use hk_model::synth::{Evidence, EvidenceSet, GroupId, MetricId, Stage};
 pub use registry::{BlockFactory, BuildCtx, Registry};
+pub use sink::{AudioFrame, AudioFrames};
 pub use status::{Extras, Lock, MAX_EXTRAS, Status};
 pub use window::{NodeEvidence, WindowError, WindowRun, run_window};

@@ -8,6 +8,16 @@ SCRATCH = os.environ.get("HACKRIFF_OPS", os.path.expanduser("~/.hackriff-ops"))
 os.makedirs(SCRATCH, exist_ok=True)
 PROJ = "/Users/daniellewis/.claude/projects/-Users-daniellewis-hackriff"
 OPSDIR = os.path.dirname(os.path.abspath(__file__))   # so `import perf` (same dir) resolves
+# A PREVIEW (ops/preview-dashboard.sh, user 2026-09-24: "he does not want to wait behind a merge batch
+# to SEE a dashboard change") runs a branch's ops/ + py/ copied out of git into a scratch directory,
+# on :8902 beside the real :8901. Its child builds must run that copy's code, not main's; everywhere
+# else (the real instance) they run REPO's, never a path derived from a worktree.
+PREVIEW = os.environ.get("MONITOR_PREVIEW") == "1"
+CODE_ROOT = os.path.dirname(OPSDIR) if PREVIEW else REPO
+# The caches the dashboard itself WRITES: a preview keeps its own (ops/preview-dashboard.sh seeds them
+# with copies), so a branch's code never writes the real instance's usage.json, burndown-cache.json
+# or role-sessions.json.
+STATE = CODE_ROOT if PREVIEW else SCRATCH
 
 # A self-contained ticket-detail modal: any element with data-tid opens it (fetches
 # /ticket.json and shows every field). Injected before </body> of any page, so a
@@ -1218,7 +1228,7 @@ def work_queue(smap, wts, ags, merge_ticket=""):
             "active_ms": sorted(m for m in active_ms if m),
             "todo_total": sum(1 for t in all_tasks if t.get("status") == "todo")}
 
-USAGE_FILE = os.path.join(SCRATCH, "usage.json")
+USAGE_FILE = os.path.join(STATE, "usage.json")
 USAGE_SESSION = "usagepoll"
 
 def _parse_usage(text):
@@ -1871,7 +1881,7 @@ def gather():
 
 def _flow_modules():
     import sys as _sys
-    py_dir = os.path.join(REPO, "py")
+    py_dir = os.path.join(CODE_ROOT, "py")
     if py_dir not in _sys.path:
         _sys.path.insert(0, py_dir)
     from hkpy import flow as flow_mod, experiment as exp_mod
@@ -1997,7 +2007,7 @@ def flow_panel_cached(ops, max_age=30.0):
         # built in a child process (_child_json): the log parse's heap goes when the child exits
         data = _child_json(f"""
 import importlib.util, json
-spec = importlib.util.spec_from_file_location("mon", {os.path.join(REPO, "ops", "monitor.py")!r})
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(CODE_ROOT, "ops", "monitor.py")!r})
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.build_flow_panel({ops!r})))
 """)
@@ -2123,7 +2133,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><a class=maplink href="/metrics" title="Code metrics over committed main: lines, churn, test cost, outliers, hygiene, trends">metrics ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -2969,7 +2979,8 @@ def _child_json(code, timeout=90):
     is a threaded server, and a forked child can deadlock on a lock another thread held."""
     import sys as _sys
     out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
-                         env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "py"), HACKRIFF_OPS=SCRATCH))
+                         env=dict(os.environ, PYTHONPATH=os.path.join(CODE_ROOT, "py"), HACKRIFF_OPS=SCRATCH,
+                                  **({"HK_METRICS_NO_SAMPLE": "1"} if PREVIEW else {})))
     if out.returncode != 0:
         raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
     return json.loads(out.stdout)
@@ -2995,6 +3006,58 @@ print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, now, {REPO!r}), "graph": f
 """)
     _ETA.update(t=time.time(), v=v)
     return v
+
+
+_METRICS = {"sha": None, "v": None, "err": None}
+METRICS_CACHE = os.path.join(CODE_ROOT if PREVIEW else SCRATCH, "metrics-cache.json")
+
+
+def _committed_sha():
+    ref = "main"
+    try:
+        for ln in open(os.path.join(SCRATCH, "bulk-in-progress"), encoding="utf-8"):
+            if ln.startswith("base=") and ln.split("=", 1)[1].strip():
+                ref = ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return subprocess.run(["git", "-C", REPO, "rev-parse", ref], capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+def metrics_refresh():
+    """Code metrics (hkpy.codemetrics, user 2026-09-24) over committed main: rebuilt in a child
+    process only when that sha moves - i.e. on each landing - and kept on disk so a restart does not
+    rebuild. The build appends the day's sample to metrics.jsonl."""
+    if _METRICS["v"] is None:
+        try:
+            _METRICS.update(v=json.load(open(METRICS_CACHE)), err=None)
+            _METRICS["sha"] = _METRICS["v"].get("sha")
+        except Exception:
+            pass
+    sha = _committed_sha()
+    if sha and sha != _METRICS["sha"]:
+        try:
+            v = _child_json(f"""
+import json
+from hkpy import codemetrics
+print(json.dumps(codemetrics.build({REPO!r}, {SCRATCH!r})))
+""", timeout=300)
+            _METRICS.update(sha=v.get("sha"), v=v, err=None)
+            tmp = METRICS_CACHE + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(v, fh)
+            os.replace(tmp, METRICS_CACHE)
+        except Exception as e:
+            _METRICS["err"] = f"{type(e).__name__}: {e}"
+    return _METRICS
+
+
+def _metrics_poller():
+    while True:
+        try:
+            metrics_refresh()
+        except Exception:
+            pass
+        time.sleep(300)
 
 
 _FIXES = {"t": 0.0, "v": None}
@@ -3044,6 +3107,22 @@ class H(BaseHTTPRequestHandler):
                 body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics.json"):
+            m = _METRICS if _METRICS["v"] is not None else metrics_refresh()
+            if m["v"] is not None:
+                body = json.dumps(dict(m["v"], stale_error=m["err"]) if m["err"] else m["v"]).encode(); self.send_response(200)
+            else:
+                body = json.dumps({"error": m["err"] or "not built yet"}).encode(); self.send_response(503)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import metricspage
+            body = metricspage.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/fixes.json"):
             try:
                 body = json.dumps(fixes_cached()).encode(); self.send_response(200)
@@ -3065,7 +3144,7 @@ class H(BaseHTTPRequestHandler):
                 if OPSDIR not in _sys.path:
                     _sys.path.insert(0, OPSDIR)
                 import worklog
-                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+                body = json.dumps(worklog.build(reg=worklog.discover(ops=STATE)) if PREVIEW else worklog.build()).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
@@ -3160,7 +3239,7 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/burndown.json"):
             try:
                 import burndown
-                body = json.dumps(burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))).encode(); self.send_response(200)
+                body = json.dumps(burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "rows": []}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
@@ -3278,11 +3357,13 @@ if __name__ == "__main__":
     threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
-    threading.Thread(target=_usage_poller, daemon=True).start()
+    if not PREVIEW:   # it owns the shared `usagepoll` tmux session and a Haiku login: the real instance's
+        threading.Thread(target=_usage_poller, daemon=True).start()
+    threading.Thread(target=_metrics_poller, daemon=True).start()
     def _warm_burndown():
         try:
             import burndown
-            burndown.series(REPO, os.path.join(SCRATCH, "burndown-cache.json"))
+            burndown.series(REPO, os.path.join(STATE, "burndown-cache.json"))
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()

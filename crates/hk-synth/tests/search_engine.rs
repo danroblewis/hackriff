@@ -383,6 +383,7 @@ fn head() -> RecipeHead {
             sample_rate_hz: Some(48_000.0),
             bandwidth_hz: Some(20_000.0),
             channels: Default::default(),
+            liveness: None,
         },
         output_policy: OutputPolicy {
             content_class: ContentClass::Unrestricted,

@@ -42,7 +42,8 @@ pub struct EditPlan {
     /// Field maps added, removed or changed. Nodes referencing them are `Params` changes on
     /// their field-map param (hot: applied in place at the swap, no reset downstream).
     pub field_maps_changed: BTreeSet<String>,
-    /// `input` changed: the channel is re-plumbed and every node is rebuilt.
+    /// `input` changed (any key but `liveness`, [`crate::InputSpec::same_channel`]): the channel
+    /// is re-plumbed and every node is rebuilt.
     pub input_changed: bool,
     /// Outputs changed: streams for removed outputs finish; new ones are offered.
     pub outputs_changed: bool,
@@ -52,7 +53,7 @@ impl EditPlan {
     /// Plans `old` → `new` against the block descriptors in `catalogue` (which params are hot,
     /// which name field maps). A key the catalogue doesn't know is cold.
     pub fn between(old: &Recipe, new: &Recipe, catalogue: &dyn Catalogue) -> EditPlan {
-        let input_changed = old.input != new.input;
+        let input_changed = !old.input.same_channel(&new.input);
         let schema = |block: &str, key: &str| {
             catalogue
                 .descriptor(block)
