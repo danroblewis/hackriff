@@ -25678,7 +25678,8 @@ tasks:
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
-    status: todo
+    status: in-progress
+    branch: task-t870
     priority: normal
     deps:
     - T-866
