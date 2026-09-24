@@ -25047,7 +25047,8 @@ tasks:
   - id: T-853
     milestone: MAUTO
     title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
-    status: todo
+    status: in-progress
+    branch: task-t853
     priority: normal
     deps:
     - T-848
@@ -25075,7 +25076,8 @@ tasks:
   - id: T-854
     milestone: MAUTO
     title: "MAUTO M-3: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle"
-    status: todo
+    status: in-progress
+    branch: task-t854
     priority: normal
     deps:
     - T-848
