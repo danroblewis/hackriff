@@ -26145,7 +26145,7 @@ tasks:
   - id: T-890
     milestone: MLIVE
     title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI
@@ -26162,6 +26162,9 @@ tasks:
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
     effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
     branch: task-t890
+    commit: 78b92378
+    result: |
+      DONE 2026-09-24: landed on main via task-t893 (merge 78b92378), which is built on task-t890 (c2160635). Root cause: a following pane only requested tiles inside its own box (which ends at the live edge), so the next time row was asked for only after the edge entered it, behind coarser parents; coarse stand-ins (never refreshed) drew nothing -> 8-10+ s blank live edge. Fix: low-priority look-ahead for the next row in ui/src/surface/tilecache.ts; T-893 then added the /ws/tiles/rows push. task-t890's OWN gate (14:09) went red on canvas-journey #1 (14-18 % of the live-edge zone grey during aggressive pan/zoom, failed alone); with T-893's row feed on top the same spec passed in T-893's gate (265 s). A 3x alone run of canvas-journey on main is being done to confirm; a residual would be filed separately.
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
