@@ -25638,12 +25638,12 @@ tasks:
 
       Gate failed on test_work_accounting.py (2 tests, release_stale_claims) - unrelated to this recipe-only diff; both pass alone on the merged tree (60 passed). Load/order-sensitive, flag for deflaker. No code change.
     result: |
-      DONE (work-runner, from handback.json, 2026-09-24 04:15).
-      Added recipes/analog-wfm.recipe.json (schema 3): one fm_demod feeding two siblings — audio chain (squelch fm-noise, deemphasis 75us, agc, audio_out -> mono `audio` output, profile wfm) and the full RDS chain from rds.recipe.json (same nodes, field map, messages outputs groups/station/radiotext/ct). Match features left empty so audio is offered without a pilot. Stereo not claimed (LP-9/10). New test hk-blocks/tests/analog_wfm_recipe.rs validates against the catalogue and checks the audio + RDS outputs.
-      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed)
+      DONE (work-runner, from handback.json, 2026-09-24 04:22).
+      Gate failure was 2 py tests in test_work_accounting.py (release_stale_claims), unrelated to this recipe-only diff; both pass alone on the tree merged with 1fef1a41 (60 passed). Load/order-sensitive, flagged for deflaker. No code change; merged main in. Recipe test still passes, precheck clean.
+      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed); pytest py/tests/test_work_accounting.py -> exit 0 (60 passed)
       precheck exit 0
-      Commits: 9de1103a
-      Observed, not chased: Recipe not run end-to-end through the pipeline runtime (parity harness is LP-4's scope)
+      Commits: 9de1103a, 54e9b3de
+      Observed, not chased: test_work_accounting: test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed failed in gate, pass alone
       Resources: 63 CPU-s, peak 0.4 GB
     branch: task-t867
   - id: T-868
