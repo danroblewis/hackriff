@@ -5135,6 +5135,8 @@ tasks:
       2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
 
       2026-09-24 coordinator: a stale cancel-proposed claim held this ticket out of dispatch; the cancel stays REJECTED (see 09-22 note: the deliverable is the accessory-fed HF/VLF front ends + analyses, tested on synthetic/recorded IQ; the needs-accessory tags constrain it). Released and redispatched 11:04.
+
+      2026-09-24 coordinator: RE-SCOPED after its Opus review FAILED the 'done' (review.json): T-277 = the VLF/LF science analyses (task-t277, hk-dsp::vlf, reviewed correct: PROP-019 sign, SPACE-001 step, accessory gating). The accessory-fed hk-core source and the pipeline/API wiring that make them reachable are split to T-891, which now carries SPACE-001/SPACE-041/PROP-019 end to end. T-277 lands done on that narrower scope; the retiered_2026_09_21 note's 'tagging only' reading was already wrong (the tags predated the ticket).
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
@@ -26029,6 +26031,34 @@ tasks:
     notes: |
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
     effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
+  - id: T-891
+    milestone: M5
+    title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
+    status: todo
+    priority: normal
+    deps:
+    - T-277
+    parallel_group: M5C
+    use_cases:
+    - SPACE-001
+    - SPACE-041
+    - PROP-019
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      SPLIT FROM T-277 on 2026-09-24 (coordinator, per T-277's Opus review, ~/.hackriff-ops/work/T-277/review.json): T-277 landed the VLF/LF science ANALYSES only (crates/hk-dsp/src/vlf.rs: SPACE-001 SID step, PROP-019 phase -> reflection height, sferic detection; accessory-gated, unit-tested) - nothing calls them, so SPACE-001 / SPACE-041 / PROP-019 are not reachable even with the accessory attached.
+      DELIVER:
+      - An ACCESSORY-FED SOURCE in hk-core behind the generic device interface (a soundcard / audio-rate VLF/LF receiver as a source, per the "keep the device interface generic / several SDRs" rule): tune/rate/start/stop/timestamps/overruns as for any source, with provenance recording the accessory (device_id + accessory kind) so every detection says it came through the accessory. No HackRF specifics.
+      - A MOCK of it that replays recorded or synthetic VLF (SigMF) behind the same interface, for e2e.
+      - Wiring: the hk-dsp::vlf analyses run on that source through the pipeline and surface through the API (docs/api.md + api_contract.rs together, T-079), so the three use cases are exercised end to end through the device interface.
+      - Each use case stays hardware_fit needs-accessory; the base device alone still claims none of them.
+      - detect_sferics floor (review minor): if more than half the samples are exactly zero (muted/gated soundcard) the median is 0, the threshold becomes 0 and every non-zero sample is a sferic - floor the threshold; test it.
+      Acceptance tests: blind, through the mock accessory source (hidden truth: an injected SID step, a known phase advance, known sferic times).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-277 Opus review 2026-09-24 (split).
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
