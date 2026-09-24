@@ -84,8 +84,9 @@ use crate::search::{JobState, Profile, StopReason, SynthBudget};
 use crate::skeleton::Skeleton;
 use crate::stage::{Stage, default_cap_bits, default_floor_bits};
 use crate::trace::{
-    BeamCause, BudgetCoverage, Coverage, FamilyCoverage, FamilyState, Measured, Outcome,
-    OutcomeKind, Reason, SkeletonCoverage, Spent, Swept, TraceHypothesis, TraceNode,
+    BeamCause, BlockVersion, BudgetCoverage, Coverage, FamilyCoverage, FamilyState, Measured,
+    Outcome, OutcomeKind, Reason, ReplayBudget, ReplayKey, SkeletonCoverage, Spent, Swept,
+    TraceBounds, TraceHypothesis, TraceNode,
 };
 use crate::trace_sink::{Trace, TraceSink};
 
@@ -322,6 +323,9 @@ pub struct SearchSpec {
     pub solve: SolveRule,
     /// When the job started (coverage `t`), supplied by the caller.
     pub started_at: String,
+    /// Trace residency bounds; [`Profile::trace_bounds`] unless a caller (a test, a
+    /// memory-constrained host) narrows them. Applied on insert (ADR-0021 §2.3).
+    pub trace_bounds: TraceBounds,
 }
 
 impl SearchSpec {
@@ -335,6 +339,7 @@ impl SearchSpec {
             budget: profile.budget(),
             solve: SolveRule::default(),
             started_at: String::new(),
+            trace_bounds: profile.trace_bounds(),
         }
     }
 }
@@ -408,6 +413,10 @@ pub struct Used {
 pub struct TraceCost {
     /// Wall spent building and retaining trace nodes, s.
     pub wall_s: f64,
+    /// The part of `wall_s` spent inside the sink (serialising for the byte bound, retention).
+    pub retention_s: f64,
+    /// Nodes that left the frontier (recorded + elided): what `wall_s` was spent on.
+    pub decisions: u64,
     /// Retained trace bytes at the end.
     pub bytes: u64,
     /// `wall_s` over the job's wall.
@@ -436,8 +445,12 @@ pub struct SearchOutcome {
     pub used: Used,
     /// The trace's cost.
     pub trace_cost: TraceCost,
-    /// Some decision depended on wall/CPU time, a throttle or a thermal pause (ADR-0021 §5).
+    /// Some decision depended on wall/CPU time, a cancel, a throttle, a thermal pause or a power
+    /// change (ADR-0021 §5). Every [`TraceNode::nondeterministic`] node implies it.
     pub nondeterministic: bool,
+    /// What the trace can be reproduced from (ADR-0021 §5). The engine fills everything but
+    /// `window` and `calibration_hash`, which the job layer knows.
+    pub replay_key: ReplayKey,
     /// How often capture losses throttled the job.
     pub throttle_events: u32,
     /// The power policy that refused further expansion, if one did.
@@ -497,6 +510,9 @@ struct Node {
     label: Option<(String, String)>,
     /// Appended to the rendered summary.
     note: Option<String>,
+    /// The [`MAX_DISCRETE_CHILDREN`] overflow row: deferred by a count cap at planning time,
+    /// never by the stop.
+    overflow: bool,
 }
 
 struct Plan {
@@ -516,6 +532,17 @@ struct Plan {
     key: String,
     parent_output: Option<usize>,
     max_evals: u64,
+}
+
+/// Where a not-tried hypothesis would have gone: (parent, root, stage, slot alternative).
+type Slot = (Option<u32>, u32, Stage, usize);
+
+/// Counts `slot` into `groups`, keeping first-seen order (so node ids stay deterministic).
+fn group_into(groups: &mut Vec<(Slot, usize)>, slot: Slot) {
+    match groups.iter_mut().find(|(s, _)| *s == slot) {
+        Some((_, n)) => *n += 1,
+        None => groups.push((slot, 1)),
+    }
 }
 
 /// One discrete option: bindings, the prior bits they add, and whether a proposal made them.
@@ -849,6 +876,9 @@ struct Engine<'a, E: Evaluator> {
     refused_power: Option<PowerPolicy>,
     error: Option<String>,
     nondeterministic: bool,
+    /// The stop was caused by time or an external event (a wall/CPU backstop, a wall-measured
+    /// plateau, a cancel), so the not-tried nodes it leaves behind are flagged.
+    time_stop: bool,
     complete: Vec<u32>,
     best: Option<(Stage, f32)>,
     last_gain_progress: f64,
@@ -882,7 +912,7 @@ pub fn search<E: Evaluator>(
         nodes: Vec::new(),
         memo: HashMap::new(),
         cache: Cache::new(spec.budget.max_cache_bytes),
-        sink: TraceSink::new(spec.profile.trace_bounds()),
+        sink: TraceSink::new(spec.trace_bounds),
         counts: [0; 7],
         used: Used::default(),
         cpu: Duration::ZERO,
@@ -893,6 +923,7 @@ pub fn search<E: Evaluator>(
         refused_power: None,
         error: None,
         nondeterministic: false,
+        time_stop: false,
         complete: Vec::new(),
         best: None,
         last_gain_progress: 0.0,
@@ -986,13 +1017,23 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         }
     }
 
+    /// A stop decided by time or an external event: whatever it leaves unexplored is not
+    /// reproducible from the replay key (ADR-0021 §5).
+    fn halt_timed(&mut self, why: StopReason) {
+        if self.stop.is_none() {
+            self.time_stop = true;
+            self.nondeterministic = true;
+        }
+        self.halt(why);
+    }
+
     /// Between chunks: cancel, power, throttle, thermal, backstops, plateau.
     fn check_control(&mut self) {
         if self.stop.is_some() {
             return;
         }
         if self.control.is_cancelled() {
-            self.halt(StopReason::Cancelled);
+            self.halt_timed(StopReason::Cancelled);
             return;
         }
         let power = self.control.power();
@@ -1027,14 +1068,13 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             }
             self.set_state(JobState::Searching);
             if self.control.is_cancelled() {
-                self.halt(StopReason::Cancelled);
+                self.halt_timed(StopReason::Cancelled);
                 return;
             }
         }
         let b = &self.spec.budget;
         if self.start.elapsed().as_secs_f64() >= b.wall_s || self.cpu.as_secs_f64() >= b.cpu_s {
-            self.nondeterministic = true;
-            self.halt(StopReason::Budget);
+            self.halt_timed(StopReason::Budget);
         }
     }
 
@@ -1047,9 +1087,10 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         let (p, wall_max) = self.progress_fraction();
         if p - self.last_gain_progress >= PLATEAU_FRACTION {
             if wall_max {
-                self.nondeterministic = true;
+                self.halt_timed(StopReason::Plateau);
+            } else {
+                self.halt(StopReason::Plateau);
             }
-            self.halt(StopReason::Plateau);
         }
     }
 
@@ -1297,6 +1338,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             finalised: false,
             label: None,
             note: None,
+            overflow: false,
         }
     }
 
@@ -1385,6 +1427,9 @@ impl<'a, E: Evaluator> Engine<'a, E> {
 
     fn finalise(&mut self, id: u32, outcome: Outcome) {
         let t = Instant::now();
+        // Everything from here to the sink's retention is trace work: its wall is `trace_wall`,
+        // and its allocations are what a counting allocator attributes to the trace.
+        let _scope = crate::trace_sink::TraceScope::enter();
         // A memoised hit is recorded as `memoised {reused}` whatever its beam fate: the trace's
         // job for it is to show that the engine did not pay twice (ADR-0021 §1 rule 3). It still
         // competes in the beam, under its own prior, and its children name it as their parent.
@@ -1396,6 +1441,16 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         };
         let tried = outcome.tried();
         let kind = outcome.kind();
+        // ADR-0021 §5: a not-tried node whose cause is time or an external event. A
+        // `deferred_budget` left by a time-caused stop is; the over-cap discrete node (which
+        // carries a note) and one behind a count cap are not.
+        let nondeterministic = match &outcome {
+            Outcome::RefusedPower { .. } => true,
+            Outcome::DeferredBudget { stop, .. } => {
+                self.time_stop && self.stop == Some(*stop) && !self.nodes[id as usize].overflow
+            }
+            _ => false,
+        };
         let evidence = tried.then(|| self.evidence(id));
         let mut summary = self.summary(id, &outcome);
         if let Some(note) = &self.nodes[id as usize].note {
@@ -1425,6 +1480,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             outcome,
             evaluations: n.evaluations,
             cpu_ms: n.cpu.as_millis() as u64,
+            nondeterministic,
             summary,
         };
         let (parent, family) = (n.parent, n.family.clone());
@@ -1515,7 +1571,25 @@ impl<'a, E: Evaluator> Engine<'a, E> {
     }
 
     fn not_tried_child(&mut self, parent: Option<u32>, root: u32, stage: Stage, alt: usize) {
+        self.not_tried_group(parent, root, stage, alt, 1);
+    }
+
+    /// `count` hypotheses under one slot alternative of one parent that the stop left: ONE
+    /// not-tried node, whose summary says how many (ADR-0021 §2.3: not-tried rows are few —
+    /// one per deferred alternative, never one per parameter combination — which is what lets
+    /// retention keep every one of them).
+    fn not_tried_group(
+        &mut self,
+        parent: Option<u32>,
+        root: u32,
+        stage: Stage,
+        alt: usize,
+        count: usize,
+    ) {
         let mut n = self.blank(parent, root, stage, Some(alt));
+        if count > 1 {
+            n.note = Some(format!("{count} parameter combinations, none reached"));
+        }
         if let Some(f) = &self.skeleton(root).alternatives(stage)[alt].family
             && n.family.is_none()
         {
@@ -1774,21 +1848,29 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             i = end;
             self.emit();
         }
-        // Plans the stop left: not tried.
+        // Plans the stop left: not tried, one node per (parent, slot alternative).
+        let mut left = Vec::new();
         for plan in plans.drain(i..) {
-            self.not_tried_child(plan.parent, plan.root, plan.stage, plan.alt);
-            if let Some(p) = plan.parent {
+            group_into(&mut left, (plan.parent, plan.root, plan.stage, plan.alt));
+        }
+        for ((parent, root, stage, alt), count) in left {
+            self.not_tried_group(parent, root, stage, alt, count);
+            if let Some(p) = parent {
                 *child_count.entry(p).or_default() += 1;
             }
         }
         drop(outputs);
         // Same-level duplicates: memoised on the one that ran, not tried if it did not.
         self.pending_keys.clear();
+        let mut left = Vec::new();
         for d in std::mem::take(&mut self.later) {
             match self.memo.get(&d.key).copied() {
                 Some(reused) => children.push(self.memoised(d, reused)),
-                None => self.not_tried_child(d.parent, d.root, d.stage, d.alt),
+                None => group_into(&mut left, (d.parent, d.root, d.stage, d.alt)),
             }
+        }
+        for ((parent, root, stage, alt), count) in left {
+            self.not_tried_group(parent, root, stage, alt, count);
         }
 
         // Score and prune the level's children.
@@ -1989,6 +2071,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         if over_cap > 0 {
             let mut n = self.blank(parent, root, stage, Some(alt));
             n.family = family.clone();
+            n.overflow = true;
             n.note = Some(format!(
                 "{over_cap} lower-prior parameter combinations over the {MAX_DISCRETE_CHILDREN} cap"
             ));
@@ -2711,6 +2794,90 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         Some(Reason::NothingScored)
     }
 
+    /// ADR-0021 §5's key: everything the decisions are a function of, bar the input IQ.
+    fn replay_key(&self) -> ReplayKey {
+        let spec = self.spec;
+        let mut templates: Vec<TemplateRef> = spec
+            .roots
+            .iter()
+            .filter_map(|r| r.template.clone())
+            .collect();
+        templates.sort_by(|a, b| a.id.cmp(&b.id).then(a.version.cmp(&b.version)));
+        templates.dedup();
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for r in &spec.roots {
+            for alts in r.skeleton.slots.values() {
+                for a in alts {
+                    names.extend(a.nodes.iter().map(|n| n.block.as_str()));
+                }
+            }
+        }
+        let blocks = names
+            .into_iter()
+            .filter_map(|name| {
+                self.catalogue.descriptor(name).map(|d| BlockVersion {
+                    name: name.to_owned(),
+                    version: d.version,
+                })
+            })
+            .collect();
+        let roots: Vec<Value> = spec
+            .roots
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "skeleton": r.skeleton,
+                    "template": r.template,
+                    "free": r.free,
+                    "prior_bits": r.prior_bits,
+                    "seed_source": r.seed_source,
+                    "family": r.family,
+                    "deferred": r.deferred,
+                })
+            })
+            .collect();
+        let unsupported: Vec<Value> = spec
+            .unsupported
+            .iter()
+            .map(|u| {
+                serde_json::json!({
+                    "structure": u.structure,
+                    "missing_block": u.missing_block,
+                    "reference": u.reference,
+                    "family": u.family,
+                    "posterior": u.posterior,
+                    "slot": u.slot,
+                })
+            })
+            .collect();
+        let seeding = serde_json::json!({
+            "head": spec.head,
+            "roots": roots,
+            "unsupported": unsupported,
+            "solve": spec.solve,
+            "trace_bounds": spec.trace_bounds,
+        });
+        let seed_ref = hk_model::hash::ContentHash::of(&seeding)
+            .map(|h| h.to_hex())
+            .unwrap_or_default();
+        let b = spec.budget;
+        ReplayKey {
+            engine: crate::ENGINE.to_owned(),
+            templates,
+            blocks,
+            calibration_hash: None,
+            window: None,
+            profile: spec.profile,
+            budget: ReplayBudget {
+                max_evaluations: b.max_evaluations,
+                max_proposal_calls: b.max_proposal_calls,
+                max_assist_ops: b.max_assist_ops,
+                max_cache_bytes: b.max_cache_bytes,
+            },
+            seed_ref,
+        }
+    }
+
     fn finish(mut self) -> SearchOutcome {
         let stop = if self.error.is_some() {
             None
@@ -2738,9 +2905,13 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         self.used.hypotheses = self.counts.iter().sum();
         self.used.cache_bytes = self.cache.peak;
         let trace_wall = self.trace_wall.as_secs_f64();
+        let replay_key = self.replay_key();
+        let retention_s = self.sink.cost().as_secs_f64();
         let trace = self.sink.finish();
         let trace_cost = TraceCost {
             wall_s: trace_wall,
+            retention_s,
+            decisions: trace.nodes.len() as u64 + trace.nodes_elided,
             bytes: trace.bytes,
             fraction: if wall.as_secs_f64() > 0.0 {
                 trace_wall / wall.as_secs_f64()
@@ -2759,6 +2930,7 @@ impl<'a, E: Evaluator> Engine<'a, E> {
             used: self.used,
             trace_cost,
             nondeterministic: self.nondeterministic,
+            replay_key,
             throttle_events: self.throttle_events,
             refused_power: self.refused_power,
         }

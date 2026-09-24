@@ -417,6 +417,29 @@ fn check_outcome(o: &SearchOutcome, world: &World) {
     }
     assert!(o.trace_cost.fraction >= 0.0 && o.trace_cost.fraction <= 1.0);
     assert!(o.trace_cost.bytes > 0 || o.trace.nodes.is_empty());
+    // ADR-0021 §5: only a not-tried node whose cause was time or an external event is flagged,
+    // and any flagged node makes the whole job non-replayable.
+    for n in o.trace.nodes.iter().filter(|n| n.nondeterministic) {
+        assert!(
+            matches!(
+                n.outcome.kind(),
+                OutcomeKind::DeferredBudget | OutcomeKind::RefusedPower
+            ),
+            "{} flagged as {:?}",
+            n.id,
+            n.outcome.kind()
+        );
+        assert!(
+            o.nondeterministic,
+            "{} flagged but the job is replayable",
+            n.id
+        );
+    }
+    // ADR-0021 §2.3: the peak (sampled after every insert) is never below the end state.
+    assert!(o.trace.peak_nodes >= o.trace.nodes.len() as u64);
+    assert!(o.trace.peak_bytes >= o.trace.bytes);
+    assert_eq!(o.replay_key.engine, hk_synth::ENGINE);
+    assert_eq!(o.replay_key.seed_ref.len(), 64);
 }
 
 fn param<'a>(r: &'a hk_synth::PipelineResult, node: &str, name: &str) -> &'a Value {
@@ -922,4 +945,437 @@ fn memoised_prefixes_survive_cache_eviction_by_recomputing() {
         o.used.evaluations > cached,
         "recomputation is charged, not free"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-565: the trace, produced inside the beam (ADR-0021 §1–§3, §5)
+// ---------------------------------------------------------------------------------------------
+
+/// Many hypotheses: `polys` CRC polynomials under every surviving S4 node of three skeletons,
+/// never solving, so the whole space is walked and the trace bound has to bite.
+fn crowded_spec(n_polys: usize, profile: Profile) -> SearchSpec {
+    let polys: Vec<String> = (0..n_polys)
+        .map(|i| format!("0x{:04X}", 0x1000 + i))
+        .collect();
+    let mut polys: Vec<&str> = polys.iter().map(String::as_str).collect();
+    polys.push(FSK.poly);
+    let roots = vec![
+        root(skeleton("fsk-a", fsk_s1(), false, &polys), -0.5, &polys),
+        root(skeleton("fsk-b", fsk_s1(), false, &polys), -0.6, &polys),
+        root(skeleton("ook-a", ook_s1(), false, &polys), -1.0, &polys),
+    ];
+    let mut s = spec(roots, profile);
+    s.budget.max_proposal_calls = Some(100);
+    s.budget.max_evaluations = Some(20_000);
+    s.solve.min_holdout_bits = 1e9;
+    s
+}
+
+fn unsupported(structure: &str, block: &str) -> UnsupportedStructure {
+    UnsupportedStructure {
+        structure: structure.into(),
+        missing_block: block.into(),
+        reference: "ADR-0011 §1.5".into(),
+        family: Some(structure.into()),
+        slot: Stage::S1,
+        posterior: Some(0.05),
+    }
+}
+
+/// The trace minus its only non-deterministic field (`cpu_ms` is measured time).
+fn deterministic_bytes(o: &SearchOutcome) -> Vec<u8> {
+    let nodes: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut n = n.clone();
+            n.cpu_ms = 0;
+            n
+        })
+        .collect();
+    serde_json::to_vec(&(&nodes, &o.trace.elided, o.trace.nodes_elided)).unwrap()
+}
+
+#[test]
+fn the_trace_accounts_for_all_of_the_work() {
+    // ADR-0021 §1's identity, with the bound biting so the elided side is not empty: the trace
+    // names a subset of the decisions and accounts for ALL of the work.
+    let world = World::new(FSK);
+    let o = run(&crowded_spec(120, Profile::Quick), &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(o.trace.nodes_elided > 0 && !o.trace.elided.is_empty());
+    let recorded: u64 = o.trace.nodes.iter().map(|n| n.evaluations).sum();
+    let elided: u64 = o.trace.elided.iter().map(|e| e.evaluations).sum();
+    assert!(elided > 0, "some of the work is only in the elided buckets");
+    assert_eq!(recorded + elided, o.used.evaluations);
+    assert_eq!(world.calls.load(Ordering::SeqCst), o.used.evaluations);
+    // Every drop is counted in exactly one bucket, and only tried kinds are ever dropped.
+    let counted: u64 = o.trace.elided.iter().map(|e| e.count).sum();
+    assert_eq!(counted, o.trace.nodes_elided);
+    for e in &o.trace.elided {
+        assert!(e.outcome.tried(), "{:?} was elided", e.outcome);
+        assert!(e.count > 0 && e.bits_min <= e.bits_max);
+    }
+}
+
+#[test]
+fn residency_never_exceeds_the_bound_during_the_search() {
+    // The node cap binding: peak residency is sampled after EVERY insert, so a transient
+    // overshoot mid-search would show here even though the finished trace is back under.
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Quick);
+    s.trace_bounds.max_trace_nodes = 48;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(!o.trace.over_bound, "the protected set fits 48 nodes");
+    assert!(o.trace.nodes_elided > 0);
+    assert!(o.trace.peak_nodes <= 48, "peak {} > 48", o.trace.peak_nodes);
+    assert!(o.trace.peak_bytes <= u64::from(s.trace_bounds.max_trace_bytes));
+    // The byte cap binding instead (ADR-0021 §2.3: the hard limit, first to bind at `deep`).
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Deep);
+    s.trace_bounds.max_trace_bytes = 24 * 1024;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert!(!o.trace.over_bound);
+    assert!(o.trace.nodes_elided > 0);
+    assert!(
+        o.trace.peak_bytes <= 24 * 1024,
+        "peak {} bytes > 24 KiB",
+        o.trace.peak_bytes
+    );
+    assert!(o.trace.bytes <= 24 * 1024);
+    assert!(o.trace.peak_nodes < u64::from(Profile::Deep.trace_bounds().max_trace_nodes));
+}
+
+#[test]
+fn a_grid_sweep_is_one_node_with_a_swept_descriptor() {
+    // ADR-0021 §1 rule 2: the symbol-rate grid around the seed is evaluated point by point but
+    // recorded as ONE node per S2 hypothesis, carrying a `swept` descriptor and the points'
+    // evaluations — never one node per grid point.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.trace_bounds.max_trace_nodes = 100_000;
+    s.trace_bounds.max_trace_bytes = u32::MAX;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(
+        o.trace.nodes_elided, 0,
+        "nothing elided: every node is visible"
+    );
+    let s2: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.stage == Stage::S2 && n.tried)
+        .collect();
+    assert!(!s2.is_empty());
+    let mut per_parent: BTreeMap<&str, usize> = BTreeMap::new();
+    for n in &s2 {
+        *per_parent
+            .entry(n.parent.as_deref().unwrap_or(""))
+            .or_default() += 1;
+        if n.outcome.kind() == OutcomeKind::Memoised {
+            continue;
+        }
+        assert_eq!(n.hypothesis.swept.len(), 1, "{}: one swept axis", n.id);
+        let sw = &n.hypothesis.swept[0];
+        assert_eq!(sw.path, "nodes[clock].params.symbol_rate_bd");
+        assert!(sw.points >= 7 && sw.lo < sw.hi, "{sw:?}");
+        assert!(
+            n.evaluations >= u64::from(sw.points),
+            "{}: the node carries its points' evaluations ({} < {})",
+            n.id,
+            n.evaluations,
+            sw.points
+        );
+    }
+    // One S2 slot alternative and no discrete S2 parameter: one node per parent.
+    for (parent, count) in per_parent {
+        assert_eq!(
+            count, 1,
+            "{parent} has {count} S2 children: a node per grid point?"
+        );
+    }
+}
+
+#[test]
+fn the_same_replay_key_gives_the_same_trace_byte_for_byte() {
+    // ADR-0021 §5: count-bounded, so a re-run makes every decision again — including the
+    // `deferred_budget` nodes a COUNT cap leaves, which are therefore not flagged.
+    let run_once = || {
+        let world = World::new(FSK);
+        let mut s = crowded_spec(120, Profile::Quick);
+        s.budget.max_evaluations = Some(150);
+        s.unsupported.push(unsupported("css", "css_demod"));
+        let o = run(&s, &world, &Control::new());
+        check_outcome(&o, &world);
+        o
+    };
+    let (a, b) = (run_once(), run_once());
+    assert_eq!(a.replay_key, b.replay_key);
+    assert_eq!(a.stop, Some(StopReason::Budget));
+    assert!(
+        !a.nondeterministic && !b.nondeterministic,
+        "count-bounded: replayable"
+    );
+    let deferred: Vec<_> = a
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.outcome.kind() == OutcomeKind::DeferredBudget)
+        .collect();
+    assert!(!deferred.is_empty(), "the count cap left work untried");
+    assert!(deferred.iter().all(|n| !n.nondeterministic));
+    assert!(a.trace.nodes_elided > 0, "retention decisions replay too");
+    assert_eq!(deterministic_bytes(&a), deterministic_bytes(&b));
+    assert_eq!(a.used.evaluations, b.used.evaluations);
+    assert_eq!(a.results, b.results);
+    // The key really keys: a different budget or seeding is a different key.
+    let world = World::new(FSK);
+    let mut s = crowded_spec(120, Profile::Quick);
+    s.budget.max_evaluations = Some(151);
+    s.unsupported.push(unsupported("css", "css_demod"));
+    let c = run(&s, &world, &Control::new());
+    assert_ne!(c.replay_key.budget, a.replay_key.budget);
+    assert_eq!(c.replay_key.seed_ref, a.replay_key.seed_ref);
+    let mut s2 = crowded_spec(121, Profile::Quick);
+    s2.budget.max_evaluations = Some(150);
+    let d = run(&s2, &World::new(FSK), &Control::new());
+    assert_ne!(d.replay_key.seed_ref, a.replay_key.seed_ref);
+    // It names what the decisions depend on: the blocks at their versions, the profile.
+    let names: Vec<&str> = a
+        .replay_key
+        .blocks
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    for want in [
+        "fsk_demod",
+        "am_demod",
+        "clock_recovery",
+        "sync_search",
+        "crc",
+        "nrzi",
+    ] {
+        assert!(names.contains(&want), "{want} missing from {names:?}");
+    }
+    assert_eq!(a.replay_key.profile, Profile::Quick);
+}
+
+#[test]
+fn a_time_caused_stop_flags_what_it_left_and_the_job_is_not_replayable() {
+    // The wall backstop decides the stop: whatever it left untried is flagged, and the job says
+    // it cannot be replayed.
+    let world = World::new(FSK);
+    let mut s = spec(standard_roots(), Profile::Standard);
+    s.budget.wall_s = 1e-9;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+    assert_eq!(o.stop, Some(StopReason::Budget));
+    assert!(o.nondeterministic);
+    let deferred: Vec<_> = o
+        .trace
+        .nodes
+        .iter()
+        .filter(|n| n.outcome.kind() == OutcomeKind::DeferredBudget)
+        .collect();
+    assert!(!deferred.is_empty());
+    assert!(deferred.iter().all(|n| n.nondeterministic));
+    let v = serde_json::to_value(deferred[0]).unwrap();
+    assert_eq!(v["nondeterministic"], true);
+    // …and the flag is absent, not `false`, on every deterministic node.
+    let settled = o
+        .trace
+        .nodes
+        .iter()
+        .find(|n| n.tried)
+        .map(|n| serde_json::to_value(n).unwrap());
+    if let Some(v) = settled {
+        assert!(v.get("nondeterministic").is_none());
+    }
+}
+
+#[test]
+fn not_tried_nodes_survive_a_cap_that_drops_95_percent_of_the_tried() {
+    let mut deferred = root(
+        skeleton("generic-ook-framed", ook_s1(), false, &POLYS),
+        -6.0,
+        &POLYS,
+    );
+    deferred.deferred = Some(0.01);
+    deferred.family = Some("ook".into());
+    let world = World::new(FSK);
+    let mut s = crowded_spec(250, Profile::Deep);
+    let polys: Vec<String> = (0..250).map(|i| format!("0x{:04X}", 0x2000 + i)).collect();
+    let polys: Vec<&str> = polys.iter().map(String::as_str).collect();
+    for (i, prior) in [-0.7f32, -0.8, -0.9].into_iter().enumerate() {
+        s.roots.push(root(
+            skeleton(&format!("fsk-x{i}"), fsk_s1(), false, &polys),
+            prior,
+            &polys,
+        ));
+    }
+    s.roots.push(deferred);
+    for (st, b) in [
+        ("css", "css_demod"),
+        ("ofdm", "ofdm_demod"),
+        ("psk", "psk_demod"),
+    ] {
+        s.unsupported.push(unsupported(st, b));
+    }
+    // The whole space is ~530 evaluations: a 420 cap stops the main pass part-way, so the
+    // budget leaves live nodes untried and the side queue is never reached.
+    s.budget.max_evaluations = Some(420);
+    s.trace_bounds.max_trace_nodes = 40;
+    let o = run(&s, &world, &Control::new());
+    check_outcome(&o, &world);
+
+    let tried_kept = o.trace.nodes.iter().filter(|n| n.tried).count() as u64;
+    let tried_elided: u64 = o.trace.elided.iter().map(|e| e.count).sum();
+    let tried_total = tried_kept + tried_elided;
+    let dropped = tried_elided as f64 / tried_total as f64;
+    assert!(
+        dropped >= 0.95,
+        "the cap drops {:.1} % of {tried_total} tried nodes",
+        dropped * 100.0
+    );
+    let not_tried: Vec<_> = o.trace.nodes.iter().filter(|n| !n.tried).collect();
+    // Every not-tried node the engine made is still here: none was elided …
+    assert!(o.trace.elided.iter().all(|e| e.outcome.tried()));
+    // … and they are the honesty rows: the budget's leftovers, the deferred family and one
+    // row per unsupported structure.
+    let kinds: std::collections::BTreeSet<OutcomeKind> =
+        not_tried.iter().map(|n| n.outcome.kind()).collect();
+    assert!(kinds.contains(&OutcomeKind::DeferredBudget), "{kinds:?}");
+    assert!(kinds.contains(&OutcomeKind::DeferredPrior), "{kinds:?}");
+    let structures: std::collections::BTreeSet<&str> = not_tried
+        .iter()
+        .filter_map(|n| match &n.outcome {
+            Outcome::Unsupported { structure, .. } => Some(structure.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        structures,
+        ["css", "ofdm", "psk"].into_iter().collect(),
+        "one node per distinct unsupported structure"
+    );
+    let not_tried_made = {
+        // The live progress counter saw every not-tried decision the engine made.
+        let world = World::new(FSK);
+        let mut last = Progress::default();
+        let mut obs = |p: &Progress| last = *p;
+        let _ = search(&s, &Registry::builtin(), &world, &Control::new(), &mut obs);
+        last.not_tried
+    };
+    assert_eq!(not_tried.len() as u64, not_tried_made);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The trace's cost, measured (ADR-0021 §3; T-453's constraint: measured, not assumed)
+// ---------------------------------------------------------------------------------------------
+
+/// Counts every allocation on the current thread, and separately those made while the engine
+/// is building or retaining a trace node (`hk_synth::trace_sink::in_trace_scope`). Thread-local,
+/// so tests running in parallel in this binary do not pollute each other; the measured search
+/// runs at `threads = 1`, where evaluation happens on the calling thread too.
+struct Counting;
+
+thread_local! {
+    static ALLOC_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static ALLOC_TRACE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_alloc(bytes: usize) {
+    let b = bytes as u64;
+    let _ = ALLOC_TOTAL.try_with(|c| c.set(c.get() + b));
+    if hk_synth::trace_sink::in_trace_scope() {
+        let _ = ALLOC_TRACE.try_with(|c| c.set(c.get() + b));
+    }
+}
+
+// SAFETY: every call is forwarded unchanged to the system allocator; counting touches only
+// const-initialised, destructor-free thread-locals, which never allocate.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_alloc(layout.size());
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        count_alloc(layout.size());
+        unsafe { std::alloc::System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        count_alloc(new_size.saturating_sub(layout.size()));
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// One measured search: (outcome, total bytes allocated, bytes allocated for the trace).
+fn measured(s: &SearchSpec) -> (SearchOutcome, u64, u64) {
+    let world = World::new(FSK);
+    let control = Control::new();
+    let registry = Registry::builtin();
+    ALLOC_TOTAL.with(|c| c.set(0));
+    ALLOC_TRACE.with(|c| c.set(0));
+    let o = search(s, &registry, &world, &control, &mut ());
+    let total = ALLOC_TOTAL.with(std::cell::Cell::get);
+    let trace = ALLOC_TRACE.with(std::cell::Cell::get);
+    check_outcome(&o, &world);
+    (o, total, trace)
+}
+
+#[test]
+fn the_trace_cost_is_measured_not_assumed() {
+    // Two shapes: quick's 128-node bound under a crowded space (retention busy on almost every
+    // insert), and deep's 2 048-node / 256 KiB bound (the largest retained set to scan).
+    let mut rows = Vec::new();
+    for (label, profile) in [("quick", Profile::Quick), ("deep", Profile::Deep)] {
+        let mut s = crowded_spec(250, profile);
+        s.budget.threads = 1;
+        let (o, total, trace) = measured(&s);
+        assert!(trace > 0 && trace <= total, "{trace} of {total}");
+        let c = o.trace_cost;
+        assert!(c.retention_s <= c.wall_s + 1e-9);
+        assert_eq!(
+            c.decisions,
+            o.trace.nodes.len() as u64 + o.trace.nodes_elided
+        );
+        // The synthetic evaluator is nearly free, so `fraction` here is an upper bound on what a
+        // real search pays. Projected against docs/27 §3's measured ≤ 5 ms per cached-stage
+        // evaluation, the same trace work is:
+        let projected = c.wall_s / (c.wall_s + o.used.evaluations as f64 * 5e-3);
+        rows.push(format!(
+            "{label}: {} decisions ({} kept, {} elided), {} evaluations; trace wall {:.1} ms \
+             ({:.1} us/decision, retention {:.1} ms) = {:.1} % of a free-evaluator search, \
+             {:.2} % projected at 5 ms/evaluation; trace allocations {} of {} bytes = {:.1} %; \
+             retained {} bytes (peak {} nodes / {} bytes)",
+            c.decisions,
+            o.trace.nodes.len(),
+            o.trace.nodes_elided,
+            o.used.evaluations,
+            c.wall_s * 1e3,
+            c.wall_s * 1e6 / c.decisions.max(1) as f64,
+            c.retention_s * 1e3,
+            c.fraction * 100.0,
+            projected * 100.0,
+            trace,
+            total,
+            trace as f64 * 100.0 / total as f64,
+            c.bytes,
+            o.trace.peak_nodes,
+            o.trace.peak_bytes,
+        ));
+    }
+    for r in &rows {
+        eprintln!("T-565 trace cost: {r}");
+    }
 }

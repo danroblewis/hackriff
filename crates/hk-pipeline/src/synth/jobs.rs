@@ -69,7 +69,7 @@ use hk_stream::{
 use hk_synth::admission::{AutoProfile, Origin, Refusal, Slots, admit};
 use hk_synth::engine::{Observer, Progress, SearchOutcome, Used};
 use hk_synth::search::{StopReason, SynthBudget};
-use hk_synth::trace::{OutcomeKind, Reason, Resolution, ResolutionKind, TraceNode};
+use hk_synth::trace::{OutcomeKind, Reason, ReplayKey, Resolution, ResolutionKind, TraceNode};
 use hk_synth::{Control, PipelineResult, Stage, Trace, Verdict};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -431,6 +431,9 @@ pub struct AnalyzeJob {
     pub results: Vec<PipelineResult>,
     /// ADR-0021 §4.1.
     pub trace_summary: Option<TraceSummary>,
+    /// ADR-0021 §5: what the trace can be reproduced from, `window` filled from the read
+    /// ledger; `null` until the engine hands back.
+    pub replay_key: Option<ReplayKey>,
     /// ADR-0021 §7A.2: present whenever the job finished without a solved result.
     pub resolution: Option<Resolution>,
     /// The emitter the job analyses (an emitter target) or attached to (M-9).
@@ -754,6 +757,7 @@ impl AnalyzeJobs {
             },
             results: Vec::new(),
             trace_summary: None,
+            replay_key: None,
             resolution: None,
             emitter_id: req.emitter_id.map(|e| e.to_string()),
             confirm: None,
@@ -886,7 +890,7 @@ impl AnalyzeJobs {
             "engine": hk_synth::ENGINE,
             // `final: false` while the job runs: the engine hands its trace over when it stops.
             "final": job.trace.is_some(),
-            "replay_key": Value::Null,
+            "replay_key": job.snap.replay_key,
             "bounds": {
                 "max_nodes": bounds.max_trace_nodes,
                 "max_bytes": bounds.max_trace_bytes,
@@ -1361,12 +1365,20 @@ fn finish_search(
     }
     let summary = TraceSummary::of(&o.trace, !o.nondeterministic);
     let ended = now_s();
-    let resolution = resolution_of(&o, &summary, &ended.to_string());
+    let mut resolution = resolution_of(&o, &summary, &ended.to_string());
     let mut g = inner.lock();
     let Some(job) = g.jobs.get_mut(&n) else {
         return;
     };
     let s = &mut job.snap;
+    let mut replay_key = o.replay_key.clone();
+    replay_key.window = s.window.as_ref().and_then(|w| serde_json::to_value(w).ok());
+    if let Some(r) = &mut resolution
+        && r.kind != ResolutionKind::NotSearched
+    {
+        r.replay_key = serde_json::to_value(&replay_key).ok();
+    }
+    s.replay_key = Some(replay_key);
     let cancelled = s.state == JobState::Cancelled;
     s.ended = s.ended.or(Some(ended));
     s.end_reason = o.stop;
