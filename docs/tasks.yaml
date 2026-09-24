@@ -17018,7 +17018,7 @@ tasks:
   - id: T-560
     milestone: M2-hardening
     title: "800 MHz raster fits must estimate and remove the receiver's clock error: this HackRF is -9.6 ppm, two thirds of a channel"
-    status: in-progress
+    status: done
     branch: task-t560
     priority: normal
     parallel_group: PIPE
@@ -17067,6 +17067,7 @@ tasks:
         "family.rs raster_fit (the off-raster flag in ranked explanations) does not subtract the device's recorded clock; only the US FM raster exists there today, where 9.6 ppm is ~1 kHz against a 20 kHz tolerance, so it is harmless now but would matter the day an 800 MHz LMR raster is added to CHANNEL_RASTERS.",
         "ReceiverFit.ppm in the EmitterSynthesis row is still 1e6*grid_offset/tune_centre, i.e. the modulo-raster phase including the tune's grid phase, not a clock; the alias.ppm next to it is the real figure (opposite sign convention to CalibrationState.ppm)."
        ]}
+    commit: a3f9c0e9
   - id: T-544
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
