@@ -23818,7 +23818,7 @@ tasks:
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -23856,6 +23856,7 @@ tasks:
       Observed, not chased: Detections layer reads /api/inventory presence, not /api/events as the ticket text says
       Use cases: AWARE-053
       Resources: 56 CPU-s, peak 0.4 GB
+    commit: 8e7c82e9
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
