@@ -26233,6 +26233,24 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-893 worker 2026-09-24.
+  - id: T-903
+    milestone: MLIVE
+    title: live-edge T-523 + T-890 cases red together 1 in 6 on task-t890 in file order (own-level probe never re-asked) - establish the rate, then root-cause
+    status: todo
+    priority: normal
+    deps:
+    - T-890
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the coordinator's live-edge triage deflaker: on task-t890 (c2160635) a whole-file run of ui/e2e/live-edge.e2e.mjs (T-523 premise met, pane 51.1 s) hit T-523's failure mode 1 - "in 75075 ms of outage the client never asked ... level 0/1 (levels refused: 2/1 1/1)" - and T-890's own new case went red in the same run ("+17860 ms: 0 tiles · 4 coarse stand-ins ... 4 drew nothing"). Rate: 1 of 6 long-pane runs on task-t890, 0 of 6 on the gate base 8b1681d6; the merge-runner log's 50 gate runs of the case since T-846 met the premise every time (151-913 ms, median 305) with no such shape. UNPROVEN guess: while the silence gate admits one probe at a time, the pin is re-scheduled on top of the LIFO queue every frame and starves the own-level probe; T-890's look-ahead reads sit at the bottom so should not take it. No request log was captured (the instrumented loop was killed by a bulk gate).
+      DELIVER: establish the rate on a quiet box (`just timing` window or nightly, docs/10 §3.6) with a request log per run; if real, root-cause and fix with a regression test that goes red on the old code; if it does not reproduce in >= 20 quiet runs, record that and close.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator live-edge triage deflaker 2026-09-24.
+    effort_reason: an unexplained intermittent starvation on the tile-probe path; needs a quiet-box rate measurement and hard debugging
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
