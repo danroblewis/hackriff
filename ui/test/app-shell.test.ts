@@ -23,7 +23,8 @@ const css = cssImports.map((f) => readFileSync(`src/app/${f}`, "utf8")).join("\n
 // strip) and the two edge navigators "timenav"/"freqnav" — with ONE: "surface".
 // T-409's "nudge" stays: the tuning-nudge buttons in the top bar, beside the Go to control they sit
 // next to and the Centre readout they change.
-const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
+// T-803's "sheet": the bottom sheet that wraps the focus slot (index.html nests "focus" inside it).
+const SLOTS = ["inventory", "selections", "surface", "nudge", "focus", "sheet", "pipelines", "stages", "plots", "inspector", "params", "outputs", "review", "catalogue"];
 const replayState = JSON.parse(readFileSync("test/control_state_replay.json", "utf8")) as ControlState;
 
 test("backoff doubles from 250 ms and caps at 10 s", () => {
@@ -144,7 +145,7 @@ test("every panel slot is mounted by exactly one area index", () => {
 });
 
 test("app.css is an import list: base first, then one file per area", () => {
-  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/map-controls.css"]);
+  assert.deepEqual(cssImports, ["base.css", "explore/explore.css", "centre/centre.css", "dock/dock.css", "decode/decode.css", "decode/inspector.css", "explore/output-panel.css", "review/review.css", "history/history.css", "menu/menu.css", "chrome/map-layout.css", "chrome/sheet.css", "chrome/map-controls.css"]);
   assert.doesNotMatch(entryCss.replace(/\/\*[\s\S]*?\*\//g, "").replace(/@import "[^"]+";/g, ""), /\S/, "no rules in app.css itself");
 });
 

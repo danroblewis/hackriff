@@ -6,6 +6,7 @@ import { sameCursor, toast } from "../state";
 // T-386: the sidebar filters selections against the *same* frequency view the centre pane places
 // its boxes in — one definition, so a header-less session cannot list one set and draw another.
 import { centreView, centreViewKey } from "../centre/view";
+import { mountFocusSheet } from "../chrome/focus-sheet";
 import type { AppContext, AreaMounts, MountFn } from "../context";
 import { h } from "../dom";
 import { bindContextTrigger, openSelectionMenu, openSignalMenu } from "../menu";
@@ -464,4 +465,6 @@ const mountFocus: MountFn = (el, ctx) => {
   );
 };
 
-export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus };
+// T-803: `sheet` wraps `focus` (index.html nests the slot), so it mounts after it and never replaces
+// the focus panel's subtree.
+export const mounts: AreaMounts = { inventory: mountInventory, selections: mountSelections, focus: mountFocus, sheet: mountFocusSheet };
