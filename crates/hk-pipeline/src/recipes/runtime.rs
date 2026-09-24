@@ -1898,9 +1898,11 @@ impl Runner {
             stat,
             ..
         } = self;
-        for (k, b) in graph.outputs.clone().iter().enumerate() {
+        // By index: `Src` is `Copy`, so nothing is cloned on the pipeline thread per chunk.
+        for k in 0..graph.outputs.len() {
+            let src = graph.outputs[k].src;
             if let (Some(OutputSink::Audio(a)), Some(f)) =
-                (sinks.get_mut(k), graph.audio_frames(b.src))
+                (sinks.get_mut(k), graph.audio_frames(src))
             {
                 let n = a
                     .publish(f, &t_of, *read_at)

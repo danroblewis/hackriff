@@ -330,7 +330,28 @@ fn a_hand_started_wfm_recipe_streams_audible_audio_in_the_listen_profile() {
         );
     }
     // Audible: the programme's 1 kHz tone dominates the settled audio; the pilot is gone.
-    let pcm: Vec<f32> = audio[30..]
+    // Measured over the longest run of records with no break: the looping recording's splice
+    // restarts the chain (a flagged `sample_index` jump that is not a whole number of tone
+    // periods), and a single-bin DFT across that phase break would measure where the reader
+    // happened to attach rather than the audio (the T-866 review's 3-in-10 flake).
+    let mut best = (0, 0);
+    let mut start = 0;
+    for k in 1..=audio.len() {
+        let breaks = k == audio.len() || audio[k].1.contains(RecordFlags::DISCONTINUITY);
+        if breaks {
+            if k - start > best.1 - best.0 {
+                best = (start, k);
+            }
+            start = k;
+        }
+    }
+    // Skip the run's first records (filter, squelch and AGC settling after a restart).
+    let settled = (best.0 + 5, best.1);
+    assert!(
+        settled.1 >= settled.0 + 20,
+        "a contiguous run of ≥ 25 records among 80 (breaks only at the 2 s loop splice): {best:?}"
+    );
+    let pcm: Vec<f32> = audio[settled.0..settled.1]
         .iter()
         .flat_map(|(_, _, s)| s.iter().map(|&v| f32::from(v) / 32767.0))
         .collect();
