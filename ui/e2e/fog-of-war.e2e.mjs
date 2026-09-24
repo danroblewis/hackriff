@@ -1589,7 +1589,11 @@ test("T-521: sweep then leave = shadow, never swept = grey, re-sweep = bright �
     (askedC.none ? `, carrying ${askedC.why.answers} tile answer(s), of which ${askedC.why.elsewhere} covered other spectrum` : ""));
   assert.ok(askedC.none,
     "the pane REQUESTED a tile over band C, spectrum the coverage survey settles as never sampled " +
-    "— T-580's short-circuit did not fire, and every grey pixel here cost a round trip");
+    "— T-580's short-circuit did not fire, and every grey pixel here cost a round trip" +
+    (askedC.none ? "" : ` (the request: ${askedC.url}; its tile [${askedC.json.grid.f_lo_hz} Hz + ` +
+      `${askedC.spanHz} Hz] x [${askedC.json.grid.t0_s} s + ${askedC.json.grid.nt * askedC.json.grid.t_cell_s} s], ` +
+      `coverage ${JSON.stringify(askedC.json.coverage?.planes?.[askedC.json.coverage?.selected?.plane]?.runs?.slice(0, 8))} ` +
+      `in states ${JSON.stringify(askedC.json.coverage?.states)})`));
 
   // THE CLAIM, server-side, from the request the pane DID make. The survey is `/api/coverage`'s
   // four-state answer over the same record-derived map the tile route's `coverage` plane comes from
