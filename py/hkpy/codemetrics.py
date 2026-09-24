@@ -357,7 +357,8 @@ def sample(ops: str, m: dict, now: float) -> list[dict]:
     except OSError:
         pass
     day = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
-    if not any(r.get("date") == day for r in rows):
+    # a dashboard PREVIEW (ops/preview-dashboard.sh) runs a branch's code: it never writes the trend
+    if not os.environ.get("HK_METRICS_NO_SAMPLE") and not any(r.get("date") == day for r in rows):
         rec = {"date": day, "ts": now, "sha": m["sha"], "product": m["lines"]["total"].get("product", 0),
                "test": m["lines"]["total"].get("test", 0),
                "by_lang": {r["name"]: [r["product"], r["test"]] for r in m["lines"]["by_lang"]},
