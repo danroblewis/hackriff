@@ -25582,7 +25582,7 @@ tasks:
   - id: T-866
     milestone: MAUTO
     title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-865
@@ -25612,6 +25612,7 @@ tasks:
       Use cases: SIGNAL-062, SIGNAL-011, SIGNAL-012
       Resources: 222 CPU-s, peak 2.6 GB
     branch: task-t866
+    commit: 61deca30
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
