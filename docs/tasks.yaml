@@ -23517,6 +23517,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
     result: |
       Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
       siblings of `.centre` which is z-index:auto) painted above `.centre`
@@ -23576,7 +23578,6 @@ tasks:
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
     status: in-progress
-    branch: task-t802
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23605,6 +23606,10 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a floating control cluster over the canvas - Go-to, a layers button, and a live/my-location FAB in the corner - like Google Maps' map controls; the old toolbar row is gone. Say in your handback exactly what to open on staging to see it.
+    branch: task-t802
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
@@ -23637,6 +23642,9 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): panels open as bottom sheets you can drag between peek, half and full height, and the canvas stays usable behind them (non-modal). Say in your handback exactly what to open on staging to see it.
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
@@ -23669,6 +23677,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): clicking a pin or box slides up a detail sheet for that signal (its centre, bandwidth, time extent and explanations) without leaving the canvas. Say in your handback exactly what to open on staging to see it.
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
@@ -23700,6 +23710,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): floating frequency ruler along the bottom and time ruler along the left edge, with ticks that track pan and zoom, instead of the old framed axes. Say in your handback exactly what to open on staging to see it.
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -23731,6 +23743,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a layers menu that lists base styles and overlays per pane; toggling one changes that pane only. Say in your handback exactly what to open on staging to see it.
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
@@ -23762,6 +23776,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): never-observed spectrum shows as an explicit fog you can switch on and off in the layers menu, distinct from shadow and from unknown. Say in your handback exactly what to open on staging to see it.
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
@@ -23791,6 +23807,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): detections drawn as their own layer: confirmed signals prominent, candidates visibly weaker, and neither ever drawn over the grey fog. Say in your handback exactly what to open on staging to see it.
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
@@ -23821,6 +23839,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): signals and events appear as pins; hovering one shows a tooltip (MapTip), and clicking selects it with a visible selected state. Say in your handback exactly what to open on staging to see it.
   - id: T-810
     milestone: MMAP
     title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
@@ -23850,6 +23870,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
@@ -23879,6 +23901,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
@@ -23912,6 +23936,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a band-plan layer that shades allocations in the viewport as suggestions (labelled as priors, never as detections), from the new /api/priors route. Say in your handback exactly what to open on staging to see it.
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
@@ -23941,6 +23967,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
@@ -23971,6 +23999,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
@@ -24000,6 +24030,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a browse list of past surveys; choosing one jumps the canvas to that saved coverage window. Say in your handback exactly what to open on staging to see it.
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
@@ -24211,6 +24243,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): you can draw a box, marker or label directly on the canvas and it persists as an annotation (visible after reload). Say in your handback exactly what to open on staging to see it.
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
@@ -24239,6 +24273,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a Collections panel with a table view; selecting a row highlights its mark on the canvas and vice versa. Say in your handback exactly what to open on staging to see it.
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
@@ -24310,11 +24346,13 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): an Export action that downloads collections, measurements and annotations as a file (or copies a link). Say in your handback exactly what to open on staging to see it.
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
     status: todo
-    priority: normal
+    priority: high
     parallel_group: MAP-CHROME
     model: opus
     effort: medium
@@ -24341,6 +24379,9 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): at phone width the floating chrome rearranges to fit, and in immersive mode the controls fade away until you touch or move the pointer. Say in your handback exactly what to open on staging to see it.
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
@@ -24372,6 +24413,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): nothing new to look at: this adds the UI tests and honesty guards; SEE = the staging build still shows every MMAP feature above working. Say in your handback exactly what to open on staging to see it.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
