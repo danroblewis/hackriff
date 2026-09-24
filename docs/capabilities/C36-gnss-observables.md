@@ -78,6 +78,8 @@ Runs a software GNSS receiver (GNSS-SDR class) on raw L-band IQ. It produces per
 
 **Not built by T-274:** tracking loops, nav decode, ephemeris, PVT. Acquisition without tracking cannot produce a fix, and none is claimed from it.
 
+**Ephemeris forensics (T-324, SIGNAL-032):** `hk_context::ephemeris` parses GPS LNAV ephemerides from RINEX 2/3 nav (the receiver's own log, e.g. GNSS-SDR's, and the IGS BRDC reference share one parser), evaluates them with IS-GPS-200 Table 20-IV, and compares them against cached IGS SP3 precise orbits, falling back to reference broadcast ephemerides (`feeds::gnss_orbits`, C29). A wrong orbit (spoofing, bad upload) and a clock step are flagged separately; an absent reference reads as not-yet-fetched, never as agreement. It compares navigation *data*, so it cannot seed a detector (ADR-0018 unaffected). Tested on a synthetic constellation only; not yet wired to C30 or to the GNSS-SDR plugin's nav output.
+
 ## GNSS-SDR plugin (T-323)
 
 The track-and-fix half comes from **GNSS-SDR wrapped as a C22 plugin**, as Methods recommends, not from reimplemented loops.

@@ -21,9 +21,10 @@
 //!
 //! - the level hypotheses *were tried* and the loser carries its measurement — "two-level fits
 //!   badly: 48 % of symbols sit on the inner pair, where a two-level alphabet puts none";
-//! - the **linear** families (PSK/QAM) were *not* tried, with outcome `unsupported`, because this
-//!   build has no `psk_demod` block (ADR-0015 §1.1's stated catalogue gap). "We did not look" and
-//!   "we looked and it scored badly" are different answers and are never rendered alike;
+//! - the **linear** families (PSK/QAM) were *not* tried, with outcome `unsupported`: `psk_demod`
+//!   exists since T-609, but this S1 search does not yet run a linear-modulation hypothesis
+//!   through it (and QAM has no block at all). "We did not look" and "we looked and it scored
+//!   badly" are different answers and are never rendered alike;
 //! - every framing in the catalogue *was tried* and the two that lost carry their own sync-hit and
 //!   CRC counts, so "why P25 and not DMR" is answered from measurements rather than asserted.
 //!
@@ -397,9 +398,10 @@ fn level_nodes(obs: &CcObservation<'_>) -> Vec<TraceNode> {
         .child_of("n0")
         .not_tried(
             Outcome::Unsupported,
-            "no psk_demod/Costas block exists in this build (ADR-0015 §1.1, ADR-0011 §1.5), so a \
-             linear modulation was never looked at here. That is not the same as looking and \
-             finding nothing.",
+            "this search does not yet run a linear-modulation hypothesis (psk_demod exists since \
+             T-609, ADR-0011 §9, but S1 does not try it, and QAM has no block), so a linear \
+             modulation was never looked at here. That is not the same as looking and finding \
+             nothing.",
         );
     let Some(s) = obs.structure else {
         return vec![

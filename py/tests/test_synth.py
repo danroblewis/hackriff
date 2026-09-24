@@ -30,8 +30,13 @@ from hkpy.synth.__main__ import main as cli_main
 #: Small parameter sets so the suite stays fast.
 SMALL: dict[str, dict] = {
     "tone": {},
+    "nbfm_voice": {"duration_s": 0.3},
+    "am_voice": {"duration_s": 0.3},
     "fsk_burst_train": {"duration_s": 0.3},
     "noise_floor_rise": {"duration_s": 0.1, "t0_s": 0.05},
+    # T-222's scenario reached main (2026-09-23 03:41) without this entry: sorted(SCENARIOS) is the
+    # parametrisation, so every registered scenario needs a SMALL row or the suite KeyErrors.
+    "multipath_echo": {"duration_s": 0.6},
     "injected_floor": {"segment_duration_s": 0.02},
     "occupancy_multi_hour": {"hours": 1.0, "windows": 1, "window_duration_s": 0.1},
     "occupancy_markov_scene": {"span_hours": 2.0, "novelty_start_hour": 1.0, "n_iq_windows": 1,
@@ -50,6 +55,9 @@ SMALL: dict[str, dict] = {
                        "packet_period_s": 0.06, "fsk_period_s": 0.05},
     "retune_diversity": {"dwell_s": 0.05},
     "mismatched_hypothesis": {"duration_s": 0.3},
+    "ofdm_nonstandard_cp": {"duration_s": 0.1},
+    "dsss_m_sequence": {"duration_s": 0.4, "n_bits": 100},
+    "qam16_unframed": {"duration_s": 0.1},
 }
 
 

@@ -8,13 +8,17 @@
 //!   same limits: name 1–[`BOOKMARK_NAME_MAX`] characters after trimming, centre finite and
 //!   positive, bandwidth finite and positive when set, note at most [`BOOKMARK_NOTE_MAX`]
 //!   characters.
-//! - Databases created before T-050 (same pre-release schema version) get the table on first use.
+//! - **A facade over the reserved `Bookmarks` collection (T-817, docs/25 §10.6).** A bookmark
+//!   *is* a frequency-only marker of [`super::collections::BOOKMARKS_COLLECTION`] — the same row,
+//!   read and written through `repo/collections.rs` — so `/api/bookmarks` and `/api/collections`
+//!   can never disagree. Rows in the legacy T-050 `bookmark` table move into that collection on
+//!   first use, keeping id, kind, name, note and timestamps.
 
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::{RepoError, Repository, blob, enum_text};
-use crate::ids::BookmarkId;
+use super::collections::{AuthoredProvenance, BOOKMARKS_COLLECTION, Marker};
+use super::{RepoError, Repository};
+use crate::ids::{BookmarkId, MarkerId};
 use crate::time::Timestamp;
 
 /// Longest bookmark name, characters.
@@ -23,18 +27,6 @@ pub const BOOKMARK_NAME_MAX: usize = 120;
 pub const BOOKMARK_NOTE_MAX: usize = 2000;
 /// Most bookmarks [`Repository::bookmarks`] returns.
 pub const BOOKMARKS_MAX: usize = 10_000;
-
-const ENSURE_TABLE: &str = "\
-CREATE TABLE IF NOT EXISTS bookmark (
-    bookmark_id  BLOB    PRIMARY KEY CHECK (length(bookmark_id) = 16),
-    kind         TEXT    NOT NULL CHECK (kind IN ('marker', 'bookmark')),
-    name         TEXT    NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
-    f_center     REAL    NOT NULL CHECK (f_center > 0),
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    body         TEXT    NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_bookmark_f_center ON bookmark (f_center);";
 
 /// What the user placed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,101 +117,104 @@ impl Bookmark {
     }
 }
 
+/// The reserved-collection marker a bookmark is (T-817): same id, same row.
+pub(super) fn marker_from_bookmark(b: &Bookmark, provenance: AuthoredProvenance) -> Marker {
+    Marker {
+        id: MarkerId::from_uuid(*b.id.as_uuid()),
+        collection_id: BOOKMARKS_COLLECTION,
+        name: b.name.clone(),
+        note: b.note.clone(),
+        f_center_hz: b.f_center_hz,
+        bandwidth_hz: b.bandwidth_hz,
+        t_center: None,
+        duration_s: None,
+        bookmark_kind: Some(b.kind),
+        provenance,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+    }
+}
+
+/// The bookmark view of a reserved-collection marker.
+fn bookmark_from_marker(m: &Marker) -> Bookmark {
+    Bookmark {
+        id: BookmarkId::from_uuid(*m.id.as_uuid()),
+        kind: m.bookmark_kind.unwrap_or_default(),
+        name: m.name.clone(),
+        f_center_hz: m.f_center_hz,
+        bandwidth_hz: m.bandwidth_hz,
+        note: m.note.clone(),
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+    }
+}
+
 impl Repository {
-    fn ensure_bookmark_table(&self) -> Result<(), RepoError> {
-        self.conn.execute_batch(ENSURE_TABLE)?;
-        Ok(())
+    /// The reserved-collection marker behind bookmark `id`; a marker in any other collection is
+    /// not a bookmark and reads as not found.
+    fn bookmark_marker(&self, id: BookmarkId) -> Result<Marker, RepoError> {
+        match self.marker(MarkerId::from_uuid(*id.as_uuid())) {
+            Ok(m) if m.collection_id == BOOKMARKS_COLLECTION => Ok(m),
+            Ok(_) | Err(RepoError::NotFound { .. }) => Err(not_found(id)),
+            Err(e) => Err(e),
+        }
     }
 
-    /// Stores a new bookmark (validated). Its id must be new.
+    /// Stores a new bookmark (validated) as a frequency-only marker of the reserved collection.
+    /// Its id must be new.
     pub fn insert_bookmark(&mut self, bookmark: &Bookmark) -> Result<(), RepoError> {
-        bookmark.validate()?;
-        self.ensure_bookmark_table()?;
-        let tx = self.write_tx()?;
-        tx.execute(
-            "INSERT INTO bookmark (bookmark_id, kind, name, f_center, created_at, updated_at, body) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                blob(bookmark.id),
-                enum_text(&bookmark.kind)?,
-                bookmark.name,
-                bookmark.f_center_hz,
-                bookmark.created_at.as_unix_nanos(),
-                bookmark.updated_at.as_unix_nanos(),
-                serde_json::to_string(bookmark)?
-            ],
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.insert_bookmark_authored(bookmark, None)
     }
 
-    /// Replaces a stored bookmark (validated). `created_at` is kept from the stored row.
+    /// [`Repository::insert_bookmark`], recording who authored it (a token fingerprint, never the
+    /// token) in the marker's provenance.
+    pub fn insert_bookmark_authored(
+        &mut self,
+        bookmark: &Bookmark,
+        actor: Option<String>,
+    ) -> Result<(), RepoError> {
+        bookmark.validate()?;
+        let m = marker_from_bookmark(
+            bookmark,
+            AuthoredProvenance::bare(bookmark.created_at, actor),
+        );
+        self.insert_marker(&m)
+    }
+
+    /// Replaces a stored bookmark (validated). `created_at` is kept from the stored row, and so is
+    /// the marker's provenance.
     pub fn update_bookmark(&mut self, bookmark: &Bookmark) -> Result<Bookmark, RepoError> {
-        self.ensure_bookmark_table()?;
-        let stored = self.bookmark(bookmark.id)?;
+        let stored = self.bookmark_marker(bookmark.id)?;
         let mut next = bookmark.clone();
         next.created_at = stored.created_at;
         if next.updated_at < next.created_at {
             next.updated_at = next.created_at;
         }
         next.validate()?;
-        let tx = self.write_tx()?;
-        let n = tx.execute(
-            "UPDATE bookmark SET kind = ?2, name = ?3, f_center = ?4, updated_at = ?5, body = ?6 \
-             WHERE bookmark_id = ?1",
-            params![
-                blob(next.id),
-                enum_text(&next.kind)?,
-                next.name,
-                next.f_center_hz,
-                next.updated_at.as_unix_nanos(),
-                serde_json::to_string(&next)?
-            ],
-        )?;
-        tx.commit()?;
-        if n == 0 {
-            return Err(not_found(next.id));
-        }
-        Ok(next)
+        let m = marker_from_bookmark(&next, stored.provenance);
+        let saved = self.update_marker(&m)?;
+        Ok(bookmark_from_marker(&saved))
     }
 
     /// Deletes a bookmark; returns what was deleted.
     pub fn delete_bookmark(&mut self, id: BookmarkId) -> Result<Bookmark, RepoError> {
-        self.ensure_bookmark_table()?;
-        let stored = self.bookmark(id)?;
-        let tx = self.write_tx()?;
-        tx.execute("DELETE FROM bookmark WHERE bookmark_id = ?1", [blob(id)])?;
-        tx.commit()?;
-        Ok(stored)
+        let stored = self.bookmark_marker(id)?;
+        self.delete_marker(stored.id)
+            .map(|m| bookmark_from_marker(&m))
     }
 
     /// One bookmark.
     pub fn bookmark(&self, id: BookmarkId) -> Result<Bookmark, RepoError> {
-        self.ensure_bookmark_table()?;
-        let body: Option<String> = self
-            .conn
-            .prepare_cached("SELECT body FROM bookmark WHERE bookmark_id = ?1")?
-            .query_row([blob(id)], |r| r.get(0))
-            .optional()?;
-        match body {
-            Some(b) => Ok(serde_json::from_str(&b)?),
-            None => Err(not_found(id)),
-        }
+        self.bookmark_marker(id).map(|m| bookmark_from_marker(&m))
     }
 
     /// Every bookmark, by centre frequency then creation (at most [`BOOKMARKS_MAX`]).
     pub fn bookmarks(&self) -> Result<Vec<Bookmark>, RepoError> {
-        self.ensure_bookmark_table()?;
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT body FROM bookmark ORDER BY f_center, created_at, bookmark_id LIMIT ?1",
-        )?;
-        let texts = stmt
-            .query_map([BOOKMARKS_MAX as i64], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        texts
+        Ok(self
+            .bookmark_markers(BOOKMARKS_MAX)?
             .iter()
-            .map(|t| serde_json::from_str(t).map_err(RepoError::from))
-            .collect()
+            .map(bookmark_from_marker)
+            .collect())
     }
 }
 
@@ -291,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_database_without_the_table_gets_it_on_first_use() {
+    fn a_database_without_the_legacy_table_still_stores_bookmarks() {
         let mut repo = Repository::open_in_memory().unwrap();
         repo.conn.execute_batch("DROP TABLE bookmark").unwrap();
         let b = Bookmark::new(BookmarkKind::Bookmark, "ADS-B", 1090e6);

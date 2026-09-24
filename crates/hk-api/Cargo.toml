@@ -15,6 +15,7 @@ hk-recipe.workspace = true
 hk-estimate.workspace = true
 hk-store.workspace = true
 hk-stream.workspace = true
+flate2.workspace = true
 httparse.workspace = true
 libc.workspace = true
 serde_json.workspace = true

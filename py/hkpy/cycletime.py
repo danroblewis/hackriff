@@ -620,6 +620,8 @@ def rolling_medians(
             continue
         if run.get("result") not in (None, "pass"):
             continue
+        if str(run.get("phase") or "").startswith("resume"):
+            continue          # the suffix after an accepted flake: not a whole gate
         secs = run.get("seconds")
         klass = run.get("class")
         if isinstance(secs, (int, float)) and isinstance(klass, str):

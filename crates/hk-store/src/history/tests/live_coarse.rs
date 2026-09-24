@@ -25,8 +25,17 @@
 //! producer tiles, generation runs on the read path — before the live store is asserted to show
 //! none of it. A test that judged nothing would fail on the control first, and the pair is also
 //! the standing "prove it goes red without the fix" evidence, permanently, rather than once.
+//!
+//! **T-585** then took back the residency T-571 paid for it: a coarse node holds its committed
+//! rows in the codec's stored form and only its in-progress row as accumulator
+//! (`history::live`). `a_coarse_node_holds_its_committed_rows_encoded_and_one_row_of_accumulator`
+//! measures that from the buffers themselves against the arithmetic of T-571's one-full-tile-per-
+//! node rule, and checks every node cell for cell against the on-demand control; the restart
+//! test now runs an ODD number of rows, because replaying a node's pending row at reopen (the
+//! defect T-585 found on the way) only shows with one in flight.
 
 use super::*;
+use crate::history::store::OpenTile;
 
 /// A lattice big enough for the fold-from-nothing cost to be real: node (3, 3) sits eight folds
 /// above node (0, 0). 16 cells per tile keeps the run short.
@@ -69,6 +78,11 @@ const N_BINS: usize = 16 * 8;
 const BW: f64 = 1000.0;
 
 fn run(p: &mut Pyramid, secs: i64) {
+    run_each(p, secs, |_| {});
+}
+
+/// [`run`], calling `each` after every frame (T-585: residency is sampled per frame).
+fn run_each(p: &mut Pyramid, secs: i64, mut each: impl FnMut(&Pyramid)) {
     let mut rng = Rng(0xC0FF_EE00_1234_5678);
     for s in 0..secs {
         let psd: Vec<f32> = (0..N_BINS)
@@ -78,6 +92,7 @@ fn run(p: &mut Pyramid, secs: i64) {
             })
             .collect();
         p.ingest(&frame(T0 + s * S, S, 0.0, BW, &psd)).unwrap();
+        each(p);
     }
 }
 
@@ -228,7 +243,7 @@ fn a_viewport_read_triggers_no_tile_generation_at_any_level() {
 #[test]
 fn per_arriving_row_fold_work_is_bounded_and_does_not_grow_with_node_count() {
     let secs = 1200;
-    let measure = |shape: ViewLattice, tag: &str| -> (f64, u64, u64) {
+    let measure = |shape: ViewLattice, tag: &str| -> (f64, u64, f64) {
         let dir = TempDir::new(tag);
         let mut p = Pyramid::open(&dir.0, cfg_for(shape)).unwrap();
         run(&mut p, secs);
@@ -238,28 +253,45 @@ fn per_arriving_row_fold_work_is_bounded_and_does_not_grow_with_node_count() {
         let blocks = N_BINS as u64 / u64::from(shape.cells_per_block);
         let rows = secs as u64 * blocks;
         let per_row = st.coarse_cells_folded as f64 / rows as f64;
+        // T-585: cells COMMITTED (encoded) per arriving row, the same series one step up.
+        let committed_per_row = st.coarse_cells_committed as f64 / rows as f64;
         println!(
             "  {tag}: {} nodes, {rows} level-0 rows closed, {} producer rows folded, \
              {} producer cells folded = {per_row:.1} cells per arriving row \
-             ({:.2}x one row of {} cells)",
+             ({:.2}x one row of {} cells); {} footprints committed, {} cells encoded = \
+             {committed_per_row:.1} cells encoded per arriving row",
             shape.f_levels * shape.t_levels,
             st.coarse_rows_folded,
             st.coarse_cells_folded,
             per_row / f64::from(shape.cells_per_block),
             shape.cells_per_block,
+            st.coarse_rows_committed,
+            st.coarse_cells_committed,
         );
-        (per_row, st.coarse_rows_folded, st.tiles_written)
+        assert!(
+            st.coarse_cells_committed <= st.coarse_cells_folded,
+            "a consumer cell is committed at most once per producer cell folded into it"
+        );
+        (per_row, st.coarse_rows_folded, committed_per_row)
     };
 
     let small = lat(43);
-    let (small_per_row, small_rows, _) = measure(small, "4x4");
+    let (small_per_row, small_rows, small_committed) = measure(small, "4x4");
     let big = ViewLattice {
         scheme: 44,
         f_levels: 8,
         t_levels: 8,
         ..lat(44)
     };
-    let (big_per_row, big_rows, _) = measure(big, "8x8");
+    let (big_per_row, big_rows, big_committed) = measure(big, "8x8");
+    // T-585: the encode work per arriving row converges the same way the fold work does — a
+    // committed footprint halves at every frequency step and a time step commits once per
+    // `t_factor` rows — so quadrupling the node count cannot 4x it either.
+    assert!(
+        big_committed < 1.5 * small_committed,
+        "64 nodes encode {big_committed:.1} cells per row against 16 nodes' {small_committed:.1}: \
+         the per-row commit cost is growing with the node count"
+    );
 
     assert!(small_rows > 0 && big_rows > 0, "no rows were folded at all");
     // Bounded per level: the whole cascade costs a small multiple of ONE producer row, whatever
@@ -464,7 +496,13 @@ fn a_checkpoint_does_not_swallow_the_row_it_closes() {
 /// observed**, which the display invariant calls a bug twice over.
 #[test]
 fn a_restart_keeps_the_open_tiles_rows_in_every_coarse_node() {
-    let secs = 600;
+    // **Odd, deliberately (T-585).** 601 closed rows leaves node (0, 1) with a PENDING row at the
+    // restart (300 complete pairs and one half); 600 left none, and the reopen replay of a
+    // pending row was never exercised. Replaying it as though committed folded its partial
+    // contents into the level above, and its completion then folded them again: measured on
+    // T-571's code, every node above (0, 1) came back with MORE frames than the control —
+    // (3, 3) 77568 against 76928. The replay now walks a live node's committed footprints only.
+    let secs = 601;
     let shape = lat(47);
     let cfg = || PyramidConfig {
         checkpoint_interval: Some(Duration::from_secs(60)),
@@ -715,10 +753,18 @@ fn newest_committed_row_ns(p: &Pyramid, level: usize) -> Option<i64> {
     p.open[level]
         .iter()
         .filter_map(|(&(_, tb), t)| {
-            (0..t.nt)
-                .rev()
-                .find(|&r| (0..t.nf).any(|f| t.count[r * t.nf + f] > 0))
-                .map(|r| (tb * t.nt as i64 + r as i64) * g.t_cell_ns)
+            // T-585: a coarse node of a live lattice holds its committed rows encoded and its
+            // in-progress row as accumulator; both are what the cascade has put there.
+            let (nt, newest) = match t {
+                OpenTile::Full(t) => (
+                    t.nt,
+                    (0..t.nt)
+                        .rev()
+                        .find(|&r| (0..t.nf).any(|f| t.count[r * t.nf + f] > 0)),
+                ),
+                OpenTile::Live(t) => (t.nt, t.newest_row()),
+            };
+            newest.map(|r| (tb * nt as i64 + r as i64) * g.t_cell_ns)
         })
         .max()
 }
@@ -764,7 +810,10 @@ fn a_coarse_node_shows_its_in_progress_row_instead_of_trailing_the_live_edge() {
     // --- the trail, measured in the accumulators, per node ---
     let closed_ns = p.open[0]
         .iter()
-        .filter_map(|(&(_, tb), t)| t.col_done.map(|c| (tb * t.nt as i64 + c as i64) * S))
+        .filter_map(|(&(_, tb), t)| match t {
+            OpenTile::Full(t) => t.col_done.map(|c| (tb * t.nt as i64 + c as i64) * S),
+            OpenTile::Live(_) => None,
+        })
         .max()
         .expect("the finest level has closed a row");
     let mut trail = vec![0i64; n_levels];
@@ -907,4 +956,222 @@ fn previewing_the_in_progress_row_costs_capture_nothing_and_elapsed_reads_nothin
         0,
         "generation ran on the read path"
     );
+}
+
+/// **T-585: a coarse node holds its committed rows ENCODED, and only one row as accumulator.**
+///
+/// T-571 stated its residency decision rather than hiding it: every node held a whole open
+/// accumulator for the tile it was filling, because the tile is the write unit and a committed
+/// row had to live somewhere until the seal. That is the defect this test is for, and it no
+/// longer exists in the code to run as a control — so the control is its **arithmetic**: at the
+/// same sample, what every open coarse tile would hold as a full [`Tile`], taken from that type's
+/// own buffers. The on-demand store is still the control for **correctness**: every node's sealed
+/// cells must agree with it, so the encode → hold → decode → seal path is proven to lose nothing
+/// beyond the quantisation the sealed file already applies.
+///
+/// Every assertion is a measured byte count or an event count. No wall clock.
+#[test]
+fn a_coarse_node_holds_its_committed_rows_encoded_and_one_row_of_accumulator() {
+    use super::super::tile::Tile;
+    use hk_model::TileKey;
+
+    let secs = 600;
+    let shape = lat(48);
+    let n_levels = shape.f_levels * shape.t_levels;
+    let whole = FreqRange::new(0.0, N_BINS as f64 * BW);
+    let span = TimeRange::new(ts(T0), ts(T0 + secs * S));
+    // Sealed past EVERY coarse block before the comparison, for the reason
+    // `a_checkpoint_does_not_swallow_the_row_it_closes` gives: an unsealed live store lags at
+    // each time level by design (T-583), and that lag has the same shape as a loss.
+    let flush = ts(T0 + 2048 * S);
+
+    // --- the correctness control: the on-demand fold ---
+    let ctl_dir = TempDir::new("live-enc-ctl");
+    let mut ctl = Pyramid::open(&ctl_dir.0, on_demand(shape)).unwrap();
+    run(&mut ctl, secs);
+    ctl.seal_through(flush).unwrap();
+    for l in 0..n_levels {
+        ctl.materialize(l, whole, span).unwrap();
+    }
+
+    // --- live, residency sampled after every frame ---
+    let dir = TempDir::new("live-enc");
+    let mut p = Pyramid::open(&dir.0, cfg_for(shape)).unwrap();
+    let g = p.geometry().clone();
+    let bins = usize::from(p.config().histogram.bins);
+    let nt = shape.cells_per_block as usize;
+    // What ONE open tile of each level costs as a full accumulator: T-571's unit of residency.
+    let full_tile: Vec<usize> = (0..n_levels)
+        .map(|l| {
+            let key = TileKey {
+                scheme: shape.scheme,
+                level: l as u8,
+                f_block: 0,
+                t_block: 0,
+            };
+            Tile::new(key, g.nf, &g.levels[l], bins).resident_bytes()
+        })
+        .collect();
+    /// Stored-form bytes one committed cell can cost before compression: `max`/`mean` i16,
+    /// `occupancy`/`occupancy_max`/`coverage` u16, `frames` varint (≤ 3 B at these counts),
+    /// plus its bit of the observed bitmap. The bound is over the RAW form so it does not depend
+    /// on how well zstd did.
+    const ENC_RAW_MAX: usize = 2 + 2 + 2 + 2 + 2 + 3 + 1;
+    /// Generous per-segment bookkeeping (the `Segment` struct itself), and a row is committed in
+    /// at most two footprints here (a frequency-coarser node's row is filled by two producer
+    /// tiles), so at most `2 * nt` segments per tile.
+    const SEGMENT_OVERHEAD: usize = 64;
+
+    let mut peak = ResidentBytes::default();
+    let mut peak_t571 = 0usize;
+    let mut ever_live = 0usize;
+    let mut worst_rows_per_tile = 0.0f64;
+    run_each(&mut p, secs, |p| {
+        let r = p.resident_bytes();
+        ever_live = ever_live.max(r.live_tiles);
+        if r.live_tiles > 0 {
+            worst_rows_per_tile =
+                worst_rows_per_tile.max(r.live_acc_rows as f64 / r.live_tiles as f64);
+        }
+        if r.live_bytes() > peak.live_bytes() {
+            peak = r;
+            peak_t571 = (1..n_levels)
+                .map(|l| p.open_keys(l).len() * full_tile[l])
+                .sum();
+        }
+    });
+    let st = p.stats().clone();
+    let bound = peak.live_tiles
+        * (3 * g.nf * Pyramid::ROW_ACC_BYTES_PER_CELL
+            + nt * g.nf * ENC_RAW_MAX
+            + 2 * nt * SEGMENT_OVERHEAD);
+    let kb = |b: usize| b as f64 / 1024.0;
+    println!(
+        "  T-585: {n_levels} nodes; at the coarse-residency peak {} live tiles held {} \
+         accumulator rows ({:.1} KB) and {} encoded segments ({:.1} KB) = {:.1} KB, where T-571 \
+         held {:.1} KB of full accumulators ({:.1}%); raw bound {:.1} KB. Worst rows per tile \
+         {worst_rows_per_tile:.2}. {} footprints committed: {} cells at {:.2} B/cell stored \
+         ({:.2} B/cell raw, zstd {:.2}x)",
+        peak.live_tiles,
+        peak.live_acc_rows,
+        kb(peak.live_acc_bytes),
+        peak.live_segments,
+        kb(peak.live_encoded_bytes),
+        kb(peak.live_bytes()),
+        kb(peak_t571),
+        100.0 * peak.live_bytes() as f64 / peak_t571.max(1) as f64,
+        kb(bound),
+        st.coarse_rows_committed,
+        st.coarse_cells_committed,
+        st.coarse_row_bytes_stored as f64 / st.coarse_cells_committed.max(1) as f64,
+        st.coarse_row_bytes_raw as f64 / st.coarse_cells_committed.max(1) as f64,
+        st.coarse_row_bytes_raw as f64 / st.coarse_row_bytes_stored.max(1) as f64,
+    );
+
+    // The mechanism: every coarse node is live-maintained (the inverse of T-453's zero) ...
+    assert!(
+        ever_live >= n_levels - 1,
+        "only {ever_live} of {} coarse nodes ever held an open tile",
+        n_levels - 1
+    );
+    assert!(
+        st.coarse_rows_committed > 1000,
+        "the run was too short to judge"
+    );
+    // ... and what each one holds is ONE row of accumulator (two while a gap flush's row waits
+    // for its consumers), never the tile.
+    assert!(
+        worst_rows_per_tile <= 2.0,
+        "{worst_rows_per_tile:.2} accumulator rows per live tile: committed rows are staying \
+         resident as accumulator"
+    );
+    assert!(
+        peak.live_acc_rows <= 2 * peak.live_tiles,
+        "{} accumulator rows over {} live tiles",
+        peak.live_acc_rows,
+        peak.live_tiles
+    );
+    // The bytes, against a bound that is arithmetic over the raw stored form.
+    assert!(
+        peak.live_bytes() <= bound,
+        "coarse residency {} B exceeds its raw bound {bound} B",
+        peak.live_bytes()
+    );
+    // And against what T-571 held at the same instant. At this lattice's 16-row tiles the raw
+    // form alone is about half a full accumulator; the shipped 64-row tile is where it pays
+    // (`hk-pipeline/tests/live_edge_tiles.rs::the_view_lattices_floor_costs_what_the_settings_\
+    // doc_says_it_costs` measures that one).
+    assert!(
+        peak.live_bytes() * 4 < peak_t571 * 3,
+        "coarse residency {} B is not under 75% of T-571's {peak_t571} B of full accumulators",
+        peak.live_bytes()
+    );
+    // The stored form is the codec's: well under a full cell's 44 B even before compression.
+    assert!(
+        st.coarse_row_bytes_raw <= st.coarse_cells_committed * ENC_RAW_MAX as u64,
+        "{} raw bytes for {} committed cells",
+        st.coarse_row_bytes_raw,
+        st.coarse_cells_committed
+    );
+
+    // --- correctness: every node, cell for cell, against the on-demand control ---
+    p.seal_through(flush).unwrap();
+    let mut compared = 0usize;
+    for l in 0..n_levels {
+        let want = query(
+            &ctl,
+            (0.0, N_BINS as f64 * BW),
+            (T0, T0 + secs * S),
+            Resolution::Level(l as u8),
+        );
+        let got = query(
+            &p,
+            (0.0, N_BINS as f64 * BW),
+            (T0, T0 + secs * S),
+            Resolution::Level(l as u8),
+        );
+        assert_eq!(want.cells.len(), got.cells.len(), "level {l}: grid shape");
+        let (i, j) = shape.coords(l);
+        for (k, (a, b)) in got.cells.iter().zip(&want.cells).enumerate() {
+            assert_eq!(a.observed(), b.observed(), "({i},{j}) cell {k}: observed");
+            if !a.observed() {
+                continue;
+            }
+            compared += 1;
+            assert_eq!(a.frames, b.frames, "({i},{j}) cell {k}: frames");
+            assert!(
+                (a.max_db - b.max_db).abs() <= 0.05,
+                "({i},{j}) cell {k}: max {} vs {}",
+                a.max_db,
+                b.max_db
+            );
+            // One centi-dB re-quantisation per level above the first, at most.
+            assert!(
+                (a.mean_db - b.mean_db).abs() <= 0.1,
+                "({i},{j}) cell {k}: mean {} vs {}",
+                a.mean_db,
+                b.mean_db
+            );
+            assert!(
+                (a.coverage - b.coverage).abs() <= 2e-3,
+                "({i},{j}) cell {k}: coverage {} vs {}",
+                a.coverage,
+                b.coverage
+            );
+            assert!(
+                (a.occupancy - b.occupancy).abs() <= 2e-3,
+                "({i},{j}) cell {k}: occupancy {} vs {}",
+                a.occupancy,
+                b.occupancy
+            );
+            assert!(
+                (a.occupancy_max - b.occupancy_max).abs() <= 2e-3,
+                "({i},{j}) cell {k}: occupancy_max {} vs {}",
+                a.occupancy_max,
+                b.occupancy_max
+            );
+        }
+    }
+    println!("  {compared} observed cells over {n_levels} nodes agree with the on-demand control");
+    assert!(compared > 0, "nothing was compared");
 }

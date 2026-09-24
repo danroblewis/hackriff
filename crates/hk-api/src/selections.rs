@@ -204,7 +204,8 @@ pub struct WatchSkipView {
     pub emitter: String,
     /// `deferred` or `already-alerted`.
     pub reason: String,
-    /// The T-219 claim that stopped it (`suppressed-by`, `duplicate-of`, `artifact-of`).
+    /// The claim that stopped it (`suppressed-by`, `duplicate-of`, `artifact-of` from T-219,
+    /// `retune-sibling-of` from T-598, `multipath-of` from T-222).
     pub relation: Option<String>,
     /// The mechanism, for an `artifact-of` claim (`image`, `harmonic`, `intermod`).
     pub artifact: Option<String>,

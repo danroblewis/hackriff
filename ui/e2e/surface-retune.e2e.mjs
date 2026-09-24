@@ -314,7 +314,9 @@ after(async () => {
 });
 
 async function openMock() {
-  const backend = await startBackend({ port: 8795, mockDevice: true });
+  // Lane base + 16, not the constant 8795: a literal port is shared by every lane and every
+  // concurrent run on the box (the fog-of-war / scan-everything collision of 2026-09-23).
+  const backend = await startBackend({ port: Number(process.env.HK_E2E_PORT ?? 8791) + 16, mockDevice: true });
   let browser;
   try {
     browser = await Browser.open();

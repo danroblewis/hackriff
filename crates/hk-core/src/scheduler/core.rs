@@ -11,8 +11,8 @@ use hk_model::{
 
 use super::bandit::{
     ArmStatus, AttentionStatus, Bandit, BanditKind, Choice, CoverageRing, CoverageVisit, Lease,
-    MAX_LEASES, MAX_SCHEDULED, RegionPoi, ScheduledDwell, Share, TierWindow, Undo, arm_key,
-    region_poi,
+    MAX_LEASES, MAX_RESERVATIONS, MAX_SCHEDULED, RegionPoi, Reservation, ScheduledDwell, Share,
+    TierWindow, Undo, arm_key, region_poi,
 };
 use super::clock::{Clock, SyntheticClock};
 use super::config::{MAX_GAIN_STEP_PAIRS, SchedulerConfig};
@@ -215,6 +215,15 @@ pub struct ScheduleStats {
     /// Steps above the bandit tier emitted while discovery was below the sweep floor (bandit
     /// enabled): the floor was unmeetable, disclosed rather than hidden.
     pub floor_violations: u64,
+    /// Reservations begun as leases (T-276).
+    pub reservations_started: u64,
+    /// Reservations begun after their start (interactive intent held the radio, or the lease
+    /// table was full): window time was lost, disclosed rather than hidden.
+    pub reservations_late: u64,
+    /// Reservations whose window elapsed before they could begin (dropped).
+    pub reservations_missed: u64,
+    /// Steps clipped to keep a reservation's window free.
+    pub reservation_clips: u64,
 }
 
 /// A step minus its sequence number, start time and plan version.
@@ -360,6 +369,10 @@ pub struct Scheduler<C: Clock> {
     leases: Vec<ActiveLease>,
     lease_rr: usize,
     scheduled: Vec<ScheduledEntry>,
+    reservations: Vec<Reservation>,
+    /// The last emitted step was clipped (or trimmed) to keep a reservation's window free; its
+    /// slot is rolled back when a reservation begins (T-276).
+    clipped: bool,
     tiers: TierWindow,
     current_share: Share,
     current_visits: usize,
@@ -401,6 +414,8 @@ impl<C: Clock> Scheduler<C> {
             leases: Vec::with_capacity(MAX_LEASES),
             lease_rr: 0,
             scheduled: Vec::with_capacity(MAX_SCHEDULED),
+            reservations: Vec::with_capacity(MAX_RESERVATIONS),
+            clipped: false,
             tiers: tier_window(&BanditConfig::default()),
             current_share: Share::Other,
             current_visits: 0,
@@ -465,9 +480,10 @@ impl<C: Clock> Scheduler<C> {
         now
     }
 
-    /// The next step, starting now. Order (ADR-0012 §5.4): user intent, pinned leases, a running
-    /// verification group, due scheduled-plan dwells, then the sweep/dwell cycle (bandit or WRR
-    /// dwell slots and discovery).
+    /// The next step, starting now. Order (ADR-0012 §5.4): user intent, pinned leases (including
+    /// reservations whose window has begun), a running verification group, due scheduled-plan
+    /// dwells, then the sweep/dwell cycle (bandit or WRR dwell slots and discovery). Any step but
+    /// user intent ends no later than the next reservation's start (T-276).
     pub fn next_step(&mut self) -> ScheduleStep {
         let now = self.now();
         let now_ns = now.as_unix_nanos();
@@ -477,9 +493,10 @@ impl<C: Clock> Scheduler<C> {
         {
             self.intent = None;
         }
+        self.begin_reservations(now);
         self.leases
             .retain(|l| l.until.is_none_or(|until| now < until));
-        let t = if let Some(active) = self.intent {
+        let mut t = if let Some(active) = self.intent {
             self.slot = None;
             self.intent_template(now, &active)
         } else if !self.leases.is_empty() {
@@ -492,6 +509,17 @@ impl<C: Clock> Scheduler<C> {
         } else {
             self.slot_template()
         };
+        self.clipped = false;
+        if !matches!(t.purpose, Purpose::UserIntent { .. }) {
+            if let Some(start_ns) = self.next_reservation_start_ns(now_ns) {
+                let gap = start_ns - now_ns;
+                if gap < t.duration_ns {
+                    t.duration_ns = gap;
+                    self.clipped = true;
+                    self.stats.reservation_clips += 1;
+                }
+            }
+        }
         let step = ScheduleStep {
             seq: self.seq,
             t_start: now,
@@ -754,6 +782,75 @@ impl<C: Clock> Scheduler<C> {
         self.scheduled.iter().filter(|e| !e.done).count() < before
     }
 
+    /// Reserves a future lease window (T-276; pre-emption is stated on [`Reservation`]). Reserving
+    /// an id already pending replaces it. A window that has already begun starts at the next step,
+    /// cutting the running slot as [`Self::add_lease`] does; one that begins inside the running
+    /// step trims that step to end at its start (compare [`Self::running_end`]).
+    pub fn reserve(&mut self, r: Reservation) -> Result<(), SchedulerError> {
+        self.check_window(
+            "reservation",
+            r.lease.center_hz,
+            r.lease.rate_hz,
+            r.lease.gains.as_ref(),
+        )?;
+        match r.lease.duration_ns {
+            Some(ns) if ns > 0 => {}
+            other => {
+                return Err(SchedulerError::OutOfCapability {
+                    what: "reservation duration (ns)",
+                    value: other.unwrap_or(0) as f64,
+                });
+            }
+        }
+        let now = self.now();
+        if r.end() <= now {
+            return Err(SchedulerError::OutOfCapability {
+                what: "reservation end (already past, unix ns)",
+                value: r.end().as_unix_nanos() as f64,
+            });
+        }
+        if let Some(e) = self
+            .reservations
+            .iter_mut()
+            .find(|e| e.lease.id == r.lease.id)
+        {
+            *e = r;
+        } else if self.reservations.len() >= MAX_RESERVATIONS {
+            return Err(SchedulerError::TableFull("reservation"));
+        } else {
+            self.reservations.push(r);
+        }
+        if self.intent.is_none() {
+            if r.start <= now {
+                self.cut(now);
+            } else if r.start < self.current_end {
+                self.trim_running(r.start);
+                self.clipped = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Cancels a pending reservation (one already begun is a lease: [`Self::release_lease`]).
+    /// Returns whether it was pending. A step clipped for it is rolled back, so its slot is
+    /// revisited in full rather than left short.
+    pub fn cancel_reservation(&mut self, id: u64) -> bool {
+        let Some(i) = self.reservations.iter().position(|r| r.lease.id == id) else {
+            return false;
+        };
+        self.reservations.remove(i);
+        if self.clipped {
+            self.rollback_slot();
+            self.clipped = false;
+        }
+        true
+    }
+
+    /// Pending reservations (not yet begun), in no particular order.
+    pub fn reservations(&self) -> impl Iterator<Item = &Reservation> {
+        self.reservations.iter()
+    }
+
     /// Low-power profile (ADR-0012 §5.8): half the dwell slots per cycle and a sweep floor of at
     /// least 50 % (sweeping needs no demodulation or classification).
     pub fn set_low_power(&mut self, on: bool) {
@@ -779,6 +876,7 @@ impl<C: Clock> Scheduler<C> {
             interactive: self.intent.is_some(),
             leases: self.leases.len(),
             scheduled: self.scheduled.iter().filter(|e| !e.done).count(),
+            reservations: self.reservations.len(),
             low_power: self.low_power,
             bandit: self.bandit.as_ref().map(|b| b.status(now_ns)),
         }
@@ -1315,36 +1413,94 @@ impl<C: Clock> Scheduler<C> {
     }
 
     /// Rolls back the running slot if `now` is inside it or a verification group is unfinished.
+    /// Begins every reservation whose window has started (allocation-free: both tables are
+    /// preallocated). Drops, and counts, any whose window elapsed unstarted.
+    fn begin_reservations(&mut self, now: Timestamp) {
+        let mut i = 0;
+        while i < self.reservations.len() {
+            let r = self.reservations[i];
+            if r.end() <= now {
+                self.reservations.swap_remove(i);
+                self.stats.reservations_missed += 1;
+                continue;
+            }
+            if r.start > now {
+                i += 1;
+                continue;
+            }
+            let existing = self.leases.iter().position(|l| l.lease.id == r.lease.id);
+            if existing.is_none() && self.leases.len() >= MAX_LEASES {
+                i += 1;
+                continue;
+            }
+            // The slot clipped to keep this window free, or a verification group running into
+            // it, is rolled back and revisited later (the same rule as a lease cut).
+            if self.clipped || self.verify.is_some() {
+                self.rollback_slot();
+                self.clipped = false;
+            }
+            let entry = ActiveLease {
+                lease: r.lease,
+                until: Some(r.end()),
+            };
+            match existing {
+                Some(j) => self.leases[j] = entry,
+                None => self.leases.push(entry),
+            }
+            self.stats.reservations_started += 1;
+            if now > r.start {
+                self.stats.reservations_late += 1;
+            }
+            self.reservations.swap_remove(i);
+        }
+    }
+
+    /// Start of the earliest pending reservation still in the future, ns. One already due but
+    /// blocked (lease table full) clips nothing: it begins when a lease frees up.
+    fn next_reservation_start_ns(&self, now_ns: i64) -> Option<i64> {
+        self.reservations
+            .iter()
+            .map(|r| r.start.as_unix_nanos())
+            .filter(|&start| start > now_ns)
+            .min()
+    }
+
     fn cut(&mut self, now: Timestamp) {
         let running = now < self.current_end;
         self.trim_running(now);
         if running || self.verify.is_some() {
-            if let Some(s) = self.slot.take() {
-                self.cursor = s.cursor;
-                if let (Some(u), Some(b)) = (s.bandit, self.bandit.as_mut()) {
-                    b.undo(u);
-                }
-                if let Some((id, due_ns, done)) = s.scheduled {
-                    if let Some(e) = self.scheduled.iter_mut().find(|e| e.dwell.id == id) {
-                        e.due_ns = due_ns;
-                        e.done = done;
-                    }
-                }
-                if let Some((key, served)) = s.served {
-                    if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == key) {
-                        e.served = served;
-                        if s.verification && e.verified {
-                            e.verified = false;
-                            self.stats.verifications_completed =
-                                self.stats.verifications_completed.saturating_sub(1);
-                        }
-                    }
-                }
-                self.stats.truncated_slots += 1;
-            }
-            self.verify = None;
+            self.rollback_slot();
         }
         self.current_end = self.current_end.min(now);
+    }
+
+    /// Restores the state before the last slot (cursor, bandit, scheduled dwell, POI service) and
+    /// abandons a running verification group, so the slot is revisited later.
+    fn rollback_slot(&mut self) {
+        if let Some(s) = self.slot.take() {
+            self.cursor = s.cursor;
+            if let (Some(u), Some(b)) = (s.bandit, self.bandit.as_mut()) {
+                b.undo(u);
+            }
+            if let Some((id, due_ns, done)) = s.scheduled {
+                if let Some(e) = self.scheduled.iter_mut().find(|e| e.dwell.id == id) {
+                    e.due_ns = due_ns;
+                    e.done = done;
+                }
+            }
+            if let Some((key, served)) = s.served {
+                if let Some(e) = self.pois.iter_mut().find(|e| e.poi.key == key) {
+                    e.served = served;
+                    if s.verification && e.verified {
+                        e.verified = false;
+                        self.stats.verifications_completed =
+                            self.stats.verifications_completed.saturating_sub(1);
+                    }
+                }
+            }
+            self.stats.truncated_slots += 1;
+        }
+        self.verify = None;
     }
 
     fn intent_template(&self, now: Timestamp, active: &ActiveIntent) -> Template {

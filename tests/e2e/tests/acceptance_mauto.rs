@@ -21,6 +21,7 @@
 //! | `e_a_sensible_explanation_ranks_among_the_top_suggestions` | (5) a sensible explanation ranks | already passed — the control |
 //! | `e2_the_explanation_rests_on_measured_evidence_not_only_the_allocation` | (5), quality bar | a `p25-tsbk`/`dmr-csbk`/`nxdn-cac` → `public-safety` mapping, so the ranking carries a decode |
 //! | `f_the_receiver_clock_error_is_measured_not_assumed_zero` | the one thing phase 1 measured off the air | `hk_detect::trunk::raster::fit_grid_offset`: the receiver's grid offset is fitted, not assumed zero |
+//! | `g_a_grant_is_followed_off_grid_once_the_receiver_alias_is_resolved` | T-628: follow grants on an off-grid receiver | `hk_detect::trunk::raster::{grid_aliases, resolve_alias}`: the modulo-raster fit's alias is bounded by the crystal's ppm and chosen by which alias has energy on the granted channels; the CC demod keeps the integration with the most CRC-valid blocks |
 //!
 //! **The two controls are still the reason the rest means anything.** `a_…` proves the fixture,
 //! the mock device and the truth plumbing are sound; `e_…` proves the explanation path runs. A
@@ -83,8 +84,10 @@
 //!
 //! Nothing here passes a frequency, modulation or protocol into the system. The only frequency
 //! anything is given is where the mock device says it is tuned, exactly as a real HackRF reports
-//! it; the built-in chain registry's `[851, 869] MHz` trigger band is a *band gate*, not a
-//! frequency lookup, and [`signal_087::NO_LOOKUP`] records that reading and its limit. Truth is
+//! it; the built-in chain registry's LMR trigger bands are a *dwell-budget gate*, not a
+//! frequency lookup and not a search prior: [`signal_087::NO_LOOKUP`] records that reading, and
+//! [`signal_085`] measures it (T-615) — the hunt finds the control channel at VHF with the
+//! built-in registry and at 300 MHz once a plan widens the budget to the whole device. Truth is
 //! sealed by `TruthVault` and opened only after the run, only to check the answer.
 
 // The shared harness modules carry helpers only the other suites use.
@@ -98,3 +101,9 @@ mod blind;
 
 #[path = "acceptance/signal_087.rs"]
 mod signal_087;
+
+#[path = "acceptance/signal_085.rs"]
+mod signal_085;
+// T-627: the coverage manifest, the sealed hold-out and the expected-failure rows (docs/22 §6).
+#[path = "acceptance/mauto_corpus.rs"]
+mod mauto_corpus;

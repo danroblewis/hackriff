@@ -12,6 +12,7 @@ that don't know it can ignore it.
 | `hackriff:provenance` | `global` (whole recording) or a `captures` entry (that segment; overrides global) | A Provenance object (docs/07 §2.6), the JSON form of `hk_model::Provenance`. |
 | `hackriff:clip_count` | `captures` entry | Non-negative integer: ADC samples clipped within that segment. Optional; omit when not measured. |
 | `hackriff:truth` | `annotations` entry | A free-form ground-truth object, e.g. `{"kind": "cw", "frequency_hz": 1.0001e8}` or decoded fields from a CRC-valid decode. The synthetic generator (T-023) and valid decodes write it; tests assert against it. |
+| `hackriff:annotation` | `annotations` entry | A **human-authored** annotation (T-816, docs/25 §5): `{"authored": true, "kind": "text"\|"box"\|"marker", "id", "author", "collection_id", "provenance": {device_id, center_hz, span_hz, sample_rate_hz, t_capture, tier, authored_s, actor, authored}}`. The entry's `core:label`/`core:comment`/`core:freq_*_edge`/`core:sample_*` carry the geometry and text. Written by `hk_model::AuthoredAnnotation::to_sigmf`. **Never ground truth**: an entry carrying it carries no `hackriff:truth`, and tests never assert against it. |
 
 ## `hackriff:provenance` fields
 

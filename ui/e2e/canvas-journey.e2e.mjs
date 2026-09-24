@@ -66,7 +66,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import path from "node:path";
-import { Browser, census } from "./harness.mjs";
+import { Browser, census, until, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 /**
@@ -452,6 +452,26 @@ const LIVE_EDGE_ZONE = 0.40;
  * every frame of every run; before it, 10–38 %.
  */
 const EDGE_GREY_MAX = 0.05;
+// ——— T-846: WHERE the zone starts, and why the claim is on the WORST frame ———
+//
+// The zone used to start 6 % below the top of the pane — `bodyRect`'s default, "rows legitimately
+// not yet folded" — and to be judged on the MEAN of three frames. Both were inherited from before
+// T-532, and both hid the defect once tiles got fresher. T-532's fault paints grey exactly between a
+// tile's `as_of` and the live edge, so its height is the tile's STALENESS; since T-573's batches and
+// the refresh lane made that a second or two, the band sits almost entirely inside the top 6 % that
+// was cut off. Measured with `t532-draw-past-the-coverage-horizon` injected: the old 6-40 % zone read
+// 0.4 / 0.0 / 0.0 % (and 4.2 % in the supervisor's run — a coin flip against 5 %), while the same
+// frames from the top read 0.0 / 6.9 / 10.5 %, 71 % and 38 % of the zone's two newest tenths grey.
+// Without the fault the zone from the top is **0.0 % in every frame**: after T-532 an unfolded row
+// is drawn as the PENDING ground, never grey, so the reason for the 6 % margin is gone.
+//
+// And the claim is "none, in EVERY frame", so it is judged on the worst of eight, 700 ms apart: the
+// staleness saw-tooths as each revalidation lands (the 0.0 % frame above is one just after a
+// refresh), and a mean averages the defect away. A second run with the fault read 1.6 / 1.5 / 4.1 /
+// 8.0 / 11.3 % — its first three frames all under 5 %, so three frames would have missed it and a
+// mean of five (5.3 %) was the same coin flip as before; eight frames span more than one refresh
+// cycle. Margin, stated: fault worst frame 10.5-11.3 % against 5 % (over 2x); baseline 0.0 % in
+// every one of 3 + 5 frames across two runs.
 
 /** The pane's data rect minus the newest few per cent, which are legitimately not yet folded. */
 function bodyRect(pane, from = 0.06, to = 1.0) {
@@ -592,19 +612,18 @@ async function sampleGrey(page, rect, { n = 5, gapMs = 2000 } = {}) {
  * It **reports** rather than throws when the pane will not converge: a surface that never becomes
  * resident is a finding the assertion after it should describe.
  */
-async function waitForResident(page, { timeoutMs = 25000, everyMs = 400 } = {}) {
-  const t0 = Date.now();
-  let last = "";
-  for (;;) {
-    const row = await pane0(page);
-    last = row.counts;
-    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(row.counts);
-    if (m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0) {
-      return { resident: true, counts: last, ms: Date.now() - t0 };
-    }
-    if (Date.now() - t0 > timeoutMs) return { resident: false, counts: last, ms: Date.now() - t0 };
-    await new Promise((r) => setTimeout(r, everyMs));
-  }
+async function waitForResident(page, { timeoutMs = 120000, everyMs = 400, stallMs = 12000 } = {}) {
+  // **Bounded by whether the pane is still WORKING, not by a fixed 25 s.** A deadline here is a bet
+  // on the tile route's service rate, and this file has measured that rate at 167 ms a tile beside
+  // one other spec and 3612 ms a tile in the full suite — so on a busy box it reported a pane that
+  // was filling as one that had stopped, and the grey measurements below were then taken mid-fill
+  // (an unarrived tile draws a hatched stand-in, never grey, so a pane still filling reads LESS
+  // grey than the truth: the premise this function exists to establish, silently inverted).
+  const r = await waitWhileWorking(page, async () => (await pane0(page)).counts, (counts) => {
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(counts);
+    return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
+  }, { everyMs, stallMs, timeoutMs });
+  return { resident: r.ok, counts: r.value, ms: r.ms, stalledMs: r.stalledMs };
 }
 
 /**
@@ -838,16 +857,36 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     // The gesture: zoom out hard on both axes and on each axis alone, then pan to each corner at
     // that zoom — an INDEX bound is reached by panning, a LEVEL bound by zooming, and the two halves
     // of the clamp fail independently (T-480).
+    //
+    // **Each step is drawn AND given the chance to reach the wire before the next one is made**
+    // (the deflake, 2026-09-22). How many addresses this gesture puts on the wire is not a property
+    // of the gesture unless it is driven that way: the client enumerates from the render loop and
+    // issues through a LIFO queue behind an AIMD cap, so a step whose successor arrives before the
+    // queue has been served contributes NOTHING to the wire — its addresses are dropped, unsent,
+    // when the viewport moves off them. Measured on this same file, same gestures, same product:
+    // 61 requests alone, and 2 and 3 under the gate's pooled lanes, where the route was answering
+    // at seconds a tile. The old pacing (`if (i % 5 === 0) await page.frames(2)`) asked the box how
+    // fast it was; this asks the page whether the step got out, and the drain loop below keeps its
+    // job of waiting for a slow route rather than doubling as this one.
+    const askedNow = () => page.requests.slice(firstIdx).filter((r) => r.url.includes("/api/tiles")).length;
+    const paced = async (what, fn) => {
+      const was = askedNow();
+      await fn();
+      await page.frames(2);
+      await until(`${what} to put its own addresses on the wire`, async () => askedNow() > was,
+        { timeoutMs: 4000, everyMs: 100 }).catch(() => { /* a step may legitimately want nothing new */ });
+    };
     for (let i = 0; i < 20; i++) {
-      await page.wheel(at, 120);
-      if (i % 3 === 0) await page.wheel(at, 120, { shift: true });
-      if (i % 3 === 1) await page.wheel(at, 120, { alt: true });
-      if (i % 5 === 0) await page.frames(2);
+      await paced(`zoom step ${i}`, async () => {
+        await page.wheel(at, 120);
+        if (i % 3 === 0) await page.wheel(at, 120, { shift: true });
+        if (i % 3 === 1) await page.wheel(at, 120, { alt: true });
+      });
     }
     await page.frames(6);
     for (const [dx, dy] of [[1, 0], [-2, 0], [0, 1], [0, -2]]) {
-      await page.drag(at, { x: at.x + at.rect.w * dx * 0.4, y: at.y + at.rect.h * dy * 0.4 }, 6);
-      await page.frames(3);
+      await paced(`pan ${dx},${dy}`, () =>
+        page.drag(at, { x: at.x + at.rect.w * dx * 0.4, y: at.y + at.rect.h * dy * 0.4 }, 6));
     }
     await page.frames(10);
 
@@ -947,6 +986,16 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     const insideAge = await waitForRecordToCover(page, backend, zi.view);
     t.diagnostic(`recording began ${insideAge.ageS.toFixed(1)} s ago; the pane spans at most ` +
       `${insideAge.paneS.toFixed(1)} s (ruler: ${insideAge.ruler}); waited ${insideAge.waitedMs} ms`);
+    // **…and the same question test 3 asks, asked here too** (the deflake, 2026-09-22).
+    // `waitForRecordToCover` says the server is OLDER than the pane; it does not say the server
+    // OBSERVED the pane's own band across it, and a retune's settle gap or a slow first dwell
+    // leaves honestly-grey rows inside a window this leg is about to require to be <5 % grey.
+    // That is the same shape as test 3's "the pane is already N % grey before anything is panned",
+    // one leg along, and it is asked of the server rather than waited out.
+    const insideBody = await waitForBodyObserved(page, backend, zi.view);
+    t.diagnostic(`the server reports the pane body observed after ${insideBody.waitedMs} ms: ` +
+      `${insideBody.last.observed}/${insideBody.last.known} cells over the ` +
+      `${insideBody.bodyS.toFixed(0)} s below the live-edge zone`);
     const insideRes = await waitForResident(page);
     // **The two facts a flat pane is decided by, read at the same moment as the residency.** A pane
     // can be fully resident, fully observed and still come out a flat fill for two reasons that
@@ -971,7 +1020,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     if (movedBy > 0) t.diagnostic(`the canvas moved ${movedBy} px while the waits above ran — ` +
       "the rectangle sampled below is re-read for exactly this reason");
     const insideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE));
-    const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0.06, LIVE_EDGE_ZONE), { n: 3, gapMs: 700 });
+    // **From the very top of the pane, and eight frames** (T-846) — see the note under [[EDGE_GREY_MAX]].
+    const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0, LIVE_EDGE_ZONE), { n: 8, gapMs: 700 });
     const insidePix = insideG.last;
     const { cov: insideCov, cellHz: insideCellHz, n: insideN } = await atPaneLevel(zi.view);
     t.diagnostic(`pane level: ${insideN} cells of ${(insideCellHz / 1e3).toFixed(1)} kHz across the viewport`);
@@ -984,7 +1034,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     t.diagnostic(`INSIDE grey by vertical tenth over the WHOLE pane (newest first): ` +
       `${insideG.all[insideG.all.length - 1].bandsText}`);
     t.diagnostic(`INSIDE the live-edge zone (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of the pane): ` +
-      `${(insideEdge.mean * 100).toFixed(1)} % THE grey (${insideEdge.text}) over spectrum the server ` +
+      `worst frame ${(insideEdge.max * 100).toFixed(1)} % THE grey (${insideEdge.text}; by tenth of the zone, ` +
+      `newest first, last frame: ${insideEdge.last.bandsText}) over spectrum the server ` +
       "reports fully observed");
 
     // State B: zoomed OUT until the tuned window is a minority of the pane, so most of what is on
@@ -1052,8 +1103,8 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     // what it cost to leave this as a diagnostic. Its premise is the same `insideCov` the assertion
     // above already checked: the server says this band is >90 % observed, so any grey in the newest
     // rows is the surface claiming the radio never looked at rows it recorded.
-    assert.ok(insideEdge.mean < EDGE_GREY_MAX,
-      `${(insideEdge.mean * 100).toFixed(1)} % of the LIVE-EDGE ZONE (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of ` +
+    assert.ok(insideEdge.max < EDGE_GREY_MAX,
+      `${(insideEdge.max * 100).toFixed(1)} % of the LIVE-EDGE ZONE in its worst frame (newest ${(LIVE_EDGE_ZONE * 100).toFixed(0)} % of ` +
       `a pane over a band the server reports ${(insideCov.observedShare * 100).toFixed(1)} % OBSERVED) is drawn as ` +
       `THE grey (${insideEdge.text}; by vertical tenth over the whole pane, newest first: ${insidePix.bandsText}). ` +
       "The newest rows were recorded, folded and served — a resident tile's coverage plane is evidence only up to " +
@@ -1312,7 +1363,8 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     const fresh = await waitForResident(page);
     t.diagnostic(`onto the freshly-live tile: ${spanOf(windowOf((await pane0(page)).where))}, ` +
       `resident after ${fresh.ms} ms (${fresh.counts})`);
-    await new Promise((r) => setTimeout(r, 6000)); // let it accumulate rows while it is being watched
+    // No sleep here: the wait that matters is `waitForBodyObserved` below, which asks the server
+    // whether the rows exist rather than betting on how many seconds it takes to record them.
 
     // **The control measurement is only a control over rows the radio SAMPLED** — asked of the
     // server, over the pane body's own time window, and waited on. A following pane spans ~80 s
@@ -1390,9 +1442,19 @@ test("3. a live tile panned off-screen and back shows no grey gap: its coverage 
     // Let the off-screen rows scroll out of the live-edge zone and into the band this test can read.
     // Under the defect they are grey FOREVER ("never fills", T-495), so waiting cannot hide it; under
     // a correct client there was never a gap to wait out.
-    const SCROLL_MS = 12000;
-    await new Promise((r) => setTimeout(r, SCROLL_MS));
+    //
+    // **Asked of the server, not waited out** (the deflake, 2026-09-22). This was a flat 12 s, and
+    // 12 s of wall clock is however many rows the box got round to recording — which is exactly the
+    // race the baseline above already lost three times ("the pane is already 62.3 % grey…"), here
+    // on the other side of the round trip, where it would have shown up as extra grey attributed to
+    // T-495. `waitForBodyObserved` is the same question in the same words: is every row of the
+    // pane's body one the radio sampled? A client that never refills the returned tile still draws
+    // grey over rows the server calls observed, so this cannot hide the defect.
     const afterWin = windowOf((await pane0(page)).where);
+    const afterBody = await waitForBodyObserved(page, backend, afterWin);
+    t.diagnostic(`after the return, the server reports the pane body observed after ` +
+      `${afterBody.waitedMs} ms: ${afterBody.last.observed}/${afterBody.last.known} cells over the ` +
+      `${afterBody.bodyS.toFixed(0)} s below the live-edge zone`);
     // The comparison is only meaningful over the same band: compared as NUMBERS with the readout's
     // own ±500 Hz rounding, never as strings (T-478).
     assert.ok(Math.abs(afterWin.centerHz - beforeWin.centerHz) < 5e3 &&

@@ -71,8 +71,9 @@ pub use nxdn::{
 };
 pub use raster::GridFit;
 pub use raster::{
-    LMR_RASTERS_HZ, MIN_GRID_CONCENTRATION, RASTER_TOLERANCE_HZ, RasterFit, best_lmr_raster,
-    fit_grid_offset, fit_raster,
+    AliasEvidence, AliasResolution, AliasScore, AliasUnresolved, LMR_RASTERS_HZ,
+    MIN_GRID_CONCENTRATION, RASTER_TOLERANCE_HZ, RECEIVER_CLOCK_BOUND_PPM, RasterFit,
+    best_lmr_raster, fit_grid_offset, fit_raster, grid_aliases, resolve_alias,
 };
 pub use support::{
     SupportLevel, TRUNK_SUPPORT, TrunkSupport, support_for, support_json, unsupported,

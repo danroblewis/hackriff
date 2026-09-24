@@ -1869,3 +1869,761 @@ fn t511_one_device_may_omit_the_selector() {
     assert_eq!(rep.status, 400, "{:?}", rep.body);
     assert_eq!(rep.body["code"], json!("invalid"));
 }
+
+/// T-818 (MAP-18, docs/25 §4 and §10.4, RESEARCH-003): a saved measurement is cursors in, a
+/// server-computed value+unit+place out, with a server-stamped provenance. A supplied `value`/`unit`
+/// is refused, a moved cursor is re-measured, the list pages with an optional window and collection
+/// filter, every mutation is audited with no `device` key, nothing reaches the front end, and
+/// without an audit log the store is `503`.
+#[test]
+fn t818_measurements_are_computed_server_side_stamped_paged_and_reach_no_device() {
+    let device = Device::new(true);
+    let r = rig(
+        "t818",
+        Token::from_config(TOKEN).unwrap(),
+        Arc::clone(&device),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let view = format!(
+        r#"{{"center_hz": 433.92e6, "span_hz": 2e6, "t_capture": [1000.0, 1012.5], "tier": "live-iq", "device_id": "{DEVICE_ID}"}}"#
+    );
+    let post = |body: &str| authed(addr, "POST", "/api/measurements", Some(body));
+
+    // Symbol rate: 10 symbols over 2 ms is 5 kBd. The cursors are sent out of order; the place is
+    // still lo..hi, first..last.
+    let rate = post(&format!(
+        r#"{{"kind": "symbol_rate", "cursors": [{{"f_hz": 433.93e6, "t_s": 1001.002}}, {{"f_hz": 433.91e6, "t_s": 1001.0}}], "n": 10, "note": "OOK preamble", "view": {view}}}"#
+    ));
+    assert_eq!(rate.status, 201, "{}", rate.body);
+    let m = &rate.body;
+    assert_eq!(m["kind"], "symbol_rate");
+    assert_eq!(m["unit"], "Bd");
+    assert_eq!(m["basis"], "cursors");
+    assert!(
+        (m["value"].as_f64().unwrap() - 5000.0).abs() < 1e-3,
+        "{}",
+        m["value"]
+    );
+    assert_eq!(
+        (m["f_lo_hz"].as_f64(), m["f_hi_hz"].as_f64()),
+        (Some(433.91e6), Some(433.93e6))
+    );
+    assert_eq!(m["t0_s"].as_f64(), Some(1001.0));
+    assert!((m["t1_s"].as_f64().unwrap() - 1001.002).abs() < 1e-6);
+    assert_eq!(m["n"], 10);
+    assert_eq!(m["cursors"].as_array().unwrap().len(), 2);
+    let p = &m["provenance"];
+    assert_eq!(p["authored"], true);
+    assert_eq!(p["tier"], "live-iq");
+    assert_eq!(
+        p["t_capture"],
+        json!([1000.0, 1012.5]),
+        "capture clock, as sent"
+    );
+    assert_eq!(p["device_id"], DEVICE_ID);
+    assert!(p["sample_rate_hz"].as_f64().is_some_and(|r| r > 0.0), "{p}");
+    let token_id = Token::from_config(TOKEN).unwrap().id();
+    assert_eq!(
+        p["actor"],
+        token_id.as_str(),
+        "fingerprint, never the token"
+    );
+    assert!(!m.to_string().contains(TOKEN));
+    assert!(p["authored_s"].as_f64().unwrap() > 1.7e9, "wall clock");
+    let rate_id = m["id"].as_str().unwrap().to_owned();
+
+    // Δf in a collection, taken over history.
+    let coll = "01890000-0000-7000-8000-000000000818";
+    let hist_view = r#"{"center_hz": 100e6, "span_hz": 20e6, "t_capture": [0, 3600], "tier": "spectrum-history"}"#;
+    let df = post(&format!(
+        r#"{{"kind": "delta_f", "cursors": [{{"f_hz": 100.1e6, "t_s": 2000}}, {{"f_hz": 100.3e6, "t_s": 2000}}], "collection_id": "{coll}", "view": {hist_view}}}"#
+    ));
+    assert_eq!(df.status, 201, "{}", df.body);
+    assert_eq!(
+        (df.body["unit"].as_str(), df.body["collection_id"].as_str()),
+        (Some("Hz"), Some(coll))
+    );
+    assert!((df.body["value"].as_f64().unwrap() - 200e3).abs() < 1e-3);
+    assert!(
+        df.body["provenance"]["sample_rate_hz"].is_null(),
+        "no device named, no rate claimed"
+    );
+    let df_id = df.body["id"].as_str().unwrap().to_owned();
+
+    // Cursors in, never a value: a supplied value/unit/place or provenance is refused by name, as
+    // are bad cursors and a missing view.
+    let two = r#"[{"f_hz": 1e8, "t_s": 1}, {"f_hz": 2e8, "t_s": 2}]"#;
+    for (body, needle) in [
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "value": 12.5, "view": {view}}}"#),
+            "value",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "unit": "Hz", "view": {view}}}"#),
+            "unit",
+        ),
+        (
+            format!(
+                r#"{{"kind": "delta_f", "cursors": {two}, "view": {view}, "provenance": {{}}}}"#
+            ),
+            "provenance",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}}}"#),
+            "view",
+        ),
+        (
+            format!(r#"{{"kind": "area", "cursors": {two}, "view": {view}}}"#),
+            "kind",
+        ),
+        (
+            format!(
+                r#"{{"kind": "delta_f", "cursors": [{{"f_hz": 1e8, "t_s": 1}}], "view": {view}}}"#
+            ),
+            "cursors",
+        ),
+        (
+            format!(r#"{{"kind": "period", "cursors": {two}, "view": {view}}}"#),
+            "n",
+        ),
+        (
+            format!(r#"{{"kind": "delta_f", "cursors": {two}, "n": 3, "view": {view}}}"#),
+            "n",
+        ),
+        (
+            format!(
+                r#"{{"kind": "bandwidth", "cursors": [{{"f_hz": 1e8, "t_s": 1}}, {{"f_hz": 1e8, "t_s": 2}}], "view": {view}}}"#
+            ),
+            "bandwidth",
+        ),
+    ] {
+        let rep = post(&body);
+        assert_eq!(rep.status, 400, "{body} -> {}", rep.body);
+        assert!(
+            rep.body["error"].as_str().unwrap().contains(needle),
+            "{needle}: {}",
+            rep.body
+        );
+    }
+    let dup = post(&format!(
+        r#"{{"id": "{rate_id}", "kind": "delta_t", "cursors": {two}, "view": {view}}}"#
+    ));
+    assert_eq!(
+        (dup.status, dup.body["code"].as_str()),
+        (409, Some("conflict"))
+    );
+
+    // The list: unwindowed returns all (durable), newest capture time first; a window, a
+    // collection and paging narrow it.
+    let all = authed(addr, "GET", "/api/measurements", None);
+    assert_eq!(all.status, 200, "{}", all.body);
+    assert_eq!(
+        (all.body["matched"].as_u64(), all.body["limit"].as_u64()),
+        (Some(2), Some(500))
+    );
+    assert_eq!(all.body["measurements"][0]["id"], df_id.as_str());
+    let page = authed(addr, "GET", "/api/measurements?limit=1", None);
+    assert_eq!(page.body["count"], 1);
+    let cursor = page.body["next_cursor"].as_str().unwrap().to_owned();
+    let page2 = authed(
+        addr,
+        "GET",
+        &format!("/api/measurements?limit=1&cursor={cursor}"),
+        None,
+    );
+    assert_eq!(page2.body["measurements"][0]["id"], rate_id.as_str());
+    assert!(page2.body["next_cursor"].is_null());
+    let win = authed(
+        addr,
+        "GET",
+        "/api/measurements?f_lo=433e6&f_hi=435e6&t0=900&t1=1100",
+        None,
+    );
+    assert_eq!(
+        (
+            win.body["matched"].as_u64(),
+            win.body["measurements"][0]["id"].as_str()
+        ),
+        (Some(1), Some(rate_id.as_str()))
+    );
+    let in_coll = authed(
+        addr,
+        "GET",
+        &format!("/api/measurements?collection={coll}"),
+        None,
+    );
+    assert_eq!(
+        (
+            in_coll.body["matched"].as_u64(),
+            in_coll.body["measurements"][0]["id"].as_str()
+        ),
+        (Some(1), Some(df_id.as_str()))
+    );
+    for bad in [
+        "/api/measurements?f_lo=1",
+        "/api/measurements?limit=2001",
+        "/api/measurements?collection=x",
+    ] {
+        assert_eq!(authed(addr, "GET", bad, None).status, 400, "{bad}");
+    }
+
+    // Moving a cursor re-measures server-side; a value in a PUT is refused; the provenance stays
+    // until a new view re-stamps it.
+    let path = format!("/api/measurements/{rate_id}");
+    let moved = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(
+            r#"{"cursors": [{"f_hz": 433.91e6, "t_s": 1001.0}, {"f_hz": 433.93e6, "t_s": 1001.004}], "note": null}"#,
+        ),
+    );
+    assert_eq!(moved.status, 200, "{}", moved.body);
+    assert!(
+        (moved.body["value"].as_f64().unwrap() - 2500.0).abs() < 1e-3,
+        "{}",
+        moved.body
+    );
+    assert!(moved.body["note"].is_null());
+    assert_eq!(moved.body["provenance"], m["provenance"]);
+    assert_eq!(moved.body["created_s"], m["created_s"]);
+    let forged = authed(addr, "PUT", &path, Some(r#"{"value": 9600}"#));
+    assert_eq!(forged.status, 400, "{}", forged.body);
+    let as_n = authed(addr, "PUT", &path, Some(r#"{"n": 20}"#));
+    assert!(
+        (as_n.body["value"].as_f64().unwrap() - 5000.0).abs() < 1e-3,
+        "{}",
+        as_n.body
+    );
+    assert_eq!(authed(addr, "GET", &path, None).body["n"], 20);
+
+    let del = authed(addr, "DELETE", &path, None);
+    assert_eq!(
+        (del.status, del.body["deleted"]["id"].as_str()),
+        (200, Some(rate_id.as_str()))
+    );
+    assert_eq!(authed(addr, "GET", &path, None).status, 404);
+    assert_eq!(authed(addr, "POST", &path, Some("{}")).status, 405);
+
+    // A view act: nothing reached the front end, and no audit entry carries a `device` key.
+    assert!(device.calls().is_empty(), "{:?}", device.calls());
+    let entries: Vec<Value> = audit_entries(&r.audit)
+        .into_iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("measurement_"))
+        })
+        .collect();
+    for action in [
+        "measurement_create",
+        "measurement_update",
+        "measurement_delete",
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["action"] == action && e["result"] == "ok"),
+            "{action} audited: {entries:?}"
+        );
+    }
+    assert!(entries.iter().all(|e| e.get("device").is_none()));
+    assert!(entries.iter().all(|e| e["token_id"] == token_id.as_str()));
+
+    // No audit log: every mutating measurement route is 503.
+    let bare = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        ApiState {
+            bookmarks: Some(Arc::new(Mutex::new(Repository::open_in_memory().unwrap()))),
+            ..ApiState::default()
+        },
+    )
+    .unwrap();
+    let rep = authed(
+        bare.local_addr(),
+        "POST",
+        "/api/measurements",
+        Some(&format!(
+            r#"{{"kind": "delta_t", "cursors": {two}, "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (rep.status, rep.body["code"].as_str()),
+        (503, Some("unavailable"))
+    );
+}
+
+/// T-816 (MAP-16, docs/25 §5 and §10): the annotation store answers as documented, stamps
+/// provenance on the server, refuses client-supplied provenance, pages a required window, is
+/// audited with no `device` key, never reaches the front end, and is `503` without an audit log.
+#[test]
+fn t816_annotations_are_stamped_paged_audited_and_reach_no_device() {
+    let device = Device::new(true);
+    let r = rig(
+        "t816",
+        Token::from_config(TOKEN).unwrap(),
+        Arc::clone(&device),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let view = format!(
+        r#"{{"center_hz": 100.3e6, "span_hz": 2.4e6, "t_capture": [1000.0, 1012.5], "tier": "live-iq", "device_id": "{DEVICE_ID}"}}"#
+    );
+    let created = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "box", "f_lo_hz": 100.2e6, "f_hi_hz": 100.4e6, "t0_s": 1001.0, "t1_s": 1004.0, "label": " pager? ", "body": "two bursts", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(created.status, 201, "{}", created.body);
+    let a = &created.body;
+    assert_eq!(a["label"], "pager?", "trimmed");
+    assert_eq!(a["kind"], "box");
+    let p = &a["provenance"];
+    assert_eq!(p["authored"], true);
+    assert_eq!(p["tier"], "live-iq");
+    assert_eq!(
+        p["t_capture"],
+        json!([1000.0, 1012.5]),
+        "capture clock, as sent"
+    );
+    assert_eq!(p["device_id"], DEVICE_ID);
+    assert!(
+        p["sample_rate_hz"].as_f64().is_some_and(|r| r > 0.0),
+        "the server stamps the named device's rate: {p}"
+    );
+    let token_id = Token::from_config(TOKEN).unwrap().id();
+    assert_eq!(
+        p["actor"],
+        token_id.as_str(),
+        "fingerprint, never the token"
+    );
+    assert_eq!(a["author"], token_id.as_str());
+    assert!(!a.to_string().contains(TOKEN));
+    // Wall clock (authoring) and capture clock (the air) are separate quantities.
+    let authored_s = p["authored_s"].as_f64().unwrap();
+    assert!(authored_s > 1.7e9, "wall clock: {authored_s}");
+    let id = a["id"].as_str().unwrap().to_owned();
+
+    // Provenance is evidence, not input; an incomplete view or bad geometry is refused.
+    for (body, needle) in [
+        (
+            format!(
+                r#"{{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}, "provenance": {{}}}}"#
+            ),
+            "provenance",
+        ),
+        (
+            r#"{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {"center_hz": 1e8, "span_hz": 1e6, "t_capture": [0, 1], "tier": "live-iq", "actor": "me"}}"#.to_owned(),
+            "actor",
+        ),
+        (
+            r#"{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x"}"#.to_owned(),
+            "view",
+        ),
+        (
+            format!(
+                r#"{{"kind": "box", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 2, "label": "x", "view": {view}}}"#
+            ),
+            "box",
+        ),
+        (
+            format!(
+                r#"{{"kind": "ellipse", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+            ),
+            "kind",
+        ),
+    ] {
+        let rep = authed(addr, "POST", "/api/annotations", Some(&body));
+        assert_eq!(rep.status, 400, "{body} -> {}", rep.body);
+        assert!(
+            rep.body["error"].as_str().unwrap().contains(needle),
+            "{needle}: {}",
+            rep.body
+        );
+    }
+    // A client-chosen id that exists is a conflict.
+    let dup = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"id": "{id}", "kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (dup.status, dup.body["code"].as_str()),
+        (409, Some("conflict"))
+    );
+
+    // A second, point-shaped note elsewhere in time; the window pages both, newest first.
+    let note = authed(
+        addr,
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "text", "f_lo_hz": 100.3e6, "f_hi_hz": 100.3e6, "t0_s": 1010.0, "t1_s": 1010.0, "label": "quiet here", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(note.status, 201, "{}", note.body);
+    let window = "/api/annotations?f_lo=100e6&f_hi=101e6&t0=900&t1=2000";
+    let list = authed(addr, "GET", &format!("{window}&limit=1"), None);
+    assert_eq!(list.status, 200, "{}", list.body);
+    assert_eq!(list.body["count"], 1);
+    assert_eq!(list.body["matched"], 2);
+    assert_eq!(list.body["annotations"][0]["label"], "quiet here");
+    let cursor = list.body["next_cursor"].as_str().unwrap().to_owned();
+    let page2 = authed(
+        addr,
+        "GET",
+        &format!("{window}&limit=1&cursor={cursor}"),
+        None,
+    );
+    assert_eq!(page2.body["annotations"][0]["id"], id.as_str());
+    assert!(page2.body["next_cursor"].is_null(), "{}", page2.body);
+    // The window is required, and outside it nothing answers.
+    let unbounded = authed(addr, "GET", "/api/annotations", None);
+    assert_eq!(unbounded.status, 400, "{}", unbounded.body);
+    let elsewhere = authed(
+        addr,
+        "GET",
+        "/api/annotations?f_lo=400e6&f_hi=500e6&t0=900&t1=2000",
+        None,
+    );
+    assert_eq!(elsewhere.body["matched"], 0);
+    let too_big = authed(addr, "GET", &format!("{window}&limit=2001"), None);
+    assert_eq!(too_big.status, 400);
+
+    // Update: a label edit keeps the provenance; a new view re-stamps it.
+    let path = format!("/api/annotations/{id}");
+    let upd = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(r#"{"label": "POCSAG pager", "body": null}"#),
+    );
+    assert_eq!(upd.status, 200, "{}", upd.body);
+    assert_eq!(upd.body["label"], "POCSAG pager");
+    assert!(upd.body["body"].is_null());
+    assert_eq!(upd.body["provenance"], a["provenance"]);
+    let restamp = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(
+            r#"{"view": {"center_hz": 100e6, "span_hz": 20e6, "t_capture": [0, 3600], "tier": "survey-overview"}}"#,
+        ),
+    );
+    assert_eq!(restamp.status, 200, "{}", restamp.body);
+    assert_eq!(restamp.body["provenance"]["tier"], "survey-overview");
+    assert!(
+        restamp.body["provenance"]["sample_rate_hz"].is_null(),
+        "no device named, so no rate is claimed"
+    );
+    assert_eq!(
+        authed(addr, "GET", &path, None).body["label"],
+        "POCSAG pager"
+    );
+    let del = authed(addr, "DELETE", &path, None);
+    assert_eq!(del.status, 200, "{}", del.body);
+    assert_eq!(del.body["deleted"]["id"], id.as_str());
+    assert_eq!(authed(addr, "GET", &path, None).status, 404);
+    assert_eq!(authed(addr, "POST", &path, Some("{}")).status, 405);
+
+    // Authoring is a view act: nothing reached the front end, and the audit entries carry no
+    // `device` key.
+    assert!(device.calls().is_empty(), "{:?}", device.calls());
+    let entries: Vec<Value> = audit_entries(&r.audit)
+        .into_iter()
+        .filter(|e| {
+            e["action"]
+                .as_str()
+                .is_some_and(|a| a.starts_with("annotation_"))
+        })
+        .collect();
+    for action in [
+        "annotation_create",
+        "annotation_update",
+        "annotation_delete",
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["action"] == action && e["result"] == "ok"),
+            "{action} audited: {entries:?}"
+        );
+    }
+    assert!(entries.iter().all(|e| e.get("device").is_none()));
+    assert!(entries.iter().all(|e| e["token_id"] == token_id.as_str()));
+
+    // No audit log: every mutating annotation route is 503.
+    let bare = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        ApiState {
+            bookmarks: Some(Arc::new(Mutex::new(Repository::open_in_memory().unwrap()))),
+            ..ApiState::default()
+        },
+    )
+    .unwrap();
+    let rep = authed(
+        bare.local_addr(),
+        "POST",
+        "/api/annotations",
+        Some(&format!(
+            r#"{{"kind": "text", "f_lo_hz": 1e8, "f_hi_hz": 1e8, "t0_s": 1, "t1_s": 1, "label": "x", "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (rep.status, rep.body["code"].as_str()),
+        (503, Some("unavailable"))
+    );
+}
+
+/// T-819 (MAP-19, docs/25 §6 and §10, ADR-0023 §5, AWARE-042): a saved view is a named point in
+/// view-arithmetic state — a (time × frequency) window extent — stored, listed, edited, shared and
+/// deleted with a server-stamped provenance, and **never a device command**: no route here reaches
+/// the front end, no audit entry carries a `device` key, and without an audit log it is `503`.
+#[test]
+fn t819_saved_views_are_view_state_shareable_paged_and_reach_no_device() {
+    let device = Device::new(true);
+    let r = rig(
+        "t819",
+        Token::from_config(TOKEN).unwrap(),
+        Arc::clone(&device),
+        true,
+    );
+    let addr = r.server.local_addr();
+    let view = format!(
+        r#"{{"center_hz": 433.92e6, "span_hz": 2e6, "t_capture": [1000.0, 1012.5], "tier": "live-iq", "device_id": "{DEVICE_ID}"}}"#
+    );
+    let post = |body: &str| authed(addr, "POST", "/api/views", Some(body));
+
+    // A frozen window on an ISM burst, with a two-pane layout.
+    let frozen = post(&format!(
+        r#"{{"name": "ISM burst", "note": "keyfob?", "center_f_hz": 433.92e6, "span_f_hz": 2e6, "center_t_s": 1005.0, "span_t_s": 10.0, "follow_live": false, "pane_layout": [{{"center_f_hz": 433.92e6, "span_f_hz": 2e6}}, {{"center_f_hz": 915e6, "span_f_hz": 20e6}}], "view": {view}}}"#
+    ));
+    assert_eq!(frozen.status, 201, "{}", frozen.body);
+    let v = &frozen.body;
+    assert_eq!(v["name"], "ISM burst");
+    assert_eq!(
+        (v["center_f_hz"].as_f64(), v["span_f_hz"].as_f64()),
+        (Some(433.92e6), Some(2e6))
+    );
+    assert_eq!(
+        (v["center_t_s"].as_f64(), v["span_t_s"].as_f64()),
+        (Some(1005.0), Some(10.0)),
+        "capture clock, as sent"
+    );
+    assert_eq!(v["follow_live"], false);
+    assert_eq!(v["pane_layout"].as_array().map(Vec::len), Some(2));
+    let p = &v["provenance"];
+    assert_eq!(p["authored"], true);
+    assert_eq!(p["device_id"], DEVICE_ID);
+    let token_id = Token::from_config(TOKEN).unwrap().id();
+    assert_eq!(p["actor"], token_id.as_str());
+    assert!(!v.to_string().contains(TOKEN));
+    assert!(p["authored_s"].as_f64().unwrap() > 1.7e9, "wall clock");
+    let frozen_id = v["id"].as_str().unwrap().to_owned();
+
+    // A follow-live view over the FM band.
+    let live = post(&format!(
+        r#"{{"name": "FM live", "center_f_hz": 98e6, "span_f_hz": 20e6, "span_t_s": 30, "follow_live": true, "view": {view}}}"#
+    ));
+    assert_eq!(live.status, 201, "{}", live.body);
+    assert!(live.body["center_t_s"].is_null());
+    let live_id = live.body["id"].as_str().unwrap().to_owned();
+
+    // Invalid shapes are refused by name.
+    for (body, needle) in [
+        (
+            format!(
+                r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "follow_live": false, "view": {view}}}"#
+            ),
+            "center_t_s",
+        ),
+        (
+            format!(
+                r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "center_t_s": 5, "follow_live": true, "view": {view}}}"#
+            ),
+            "live edge",
+        ),
+        (
+            format!(r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "view": {view}}}"#),
+            "follow_live",
+        ),
+        (
+            r#"{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "follow_live": true}"#.into(),
+            "view",
+        ),
+        (
+            format!(
+                r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 0, "follow_live": true, "view": {view}}}"#
+            ),
+            "span_f_hz",
+        ),
+        (
+            format!(
+                r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "follow_live": true, "provenance": {{}}, "view": {view}}}"#
+            ),
+            "provenance",
+        ),
+        (
+            format!(
+                r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "follow_live": true, "device": "hackrf", "view": {view}}}"#
+            ),
+            "device",
+        ),
+    ] {
+        let rep = post(&body);
+        assert_eq!(rep.status, 400, "{body} -> {}", rep.body);
+        assert!(
+            rep.body["error"].as_str().unwrap().contains(needle),
+            "{needle}: {}",
+            rep.body
+        );
+    }
+
+    // Shareable: `share` is the POST body that re-creates it (with `view` added by the receiver);
+    // re-posting it here collides on the preserved id.
+    let mut share = v["share"].clone();
+    share["view"] = serde_json::from_str(&view).unwrap();
+    let dup = post(&share.to_string());
+    assert_eq!(
+        (dup.status, dup.body["code"].as_str()),
+        (409, Some("conflict")),
+        "{}",
+        dup.body
+    );
+
+    // The list: newest first, paged, and windowed (a follow-live view matches on frequency alone).
+    let all = authed(addr, "GET", "/api/views", None);
+    assert_eq!(all.status, 200, "{}", all.body);
+    assert_eq!(
+        (all.body["matched"].as_u64(), all.body["limit"].as_u64()),
+        (Some(2), Some(500))
+    );
+    assert_eq!(all.body["views"][0]["id"], live_id.as_str());
+    let page = authed(addr, "GET", "/api/views?limit=1", None);
+    let cursor = page.body["next_cursor"].as_str().unwrap().to_owned();
+    let page2 = authed(
+        addr,
+        "GET",
+        &format!("/api/views?limit=1&cursor={cursor}"),
+        None,
+    );
+    assert_eq!(page2.body["views"][0]["id"], frozen_id.as_str());
+    assert!(page2.body["next_cursor"].is_null());
+    for (q, want) in [
+        (
+            "f_lo=433e6&f_hi=434e6&t0=1000&t1=1001",
+            Some(frozen_id.as_str()),
+        ),
+        ("f_lo=433e6&f_hi=434e6&t0=2000&t1=2001", None),
+        ("f_lo=99e6&f_hi=100e6&t0=0&t1=1", Some(live_id.as_str())),
+    ] {
+        let w = authed(addr, "GET", &format!("/api/views?{q}"), None);
+        assert_eq!(w.status, 200, "{q}: {}", w.body);
+        assert_eq!(w.body["views"][0]["id"].as_str(), want, "{q}: {}", w.body);
+    }
+    for bad in [
+        "/api/views?f_lo=1",
+        "/api/views?limit=2001",
+        "/api/views?cursor=x",
+    ] {
+        assert_eq!(authed(addr, "GET", bad, None).status, 400, "{bad}");
+    }
+
+    // Edit: switch the frozen view to follow live (clearing its centre time); the provenance
+    // stays until a new view re-stamps it.
+    let path = format!("/api/views/{frozen_id}");
+    let upd = authed(
+        addr,
+        "PUT",
+        &path,
+        Some(r#"{"follow_live": true, "center_t_s": null, "name": "ISM live", "note": null}"#),
+    );
+    assert_eq!(upd.status, 200, "{}", upd.body);
+    assert_eq!(
+        (upd.body["follow_live"].as_bool(), upd.body["name"].as_str()),
+        (Some(true), Some("ISM live"))
+    );
+    assert!(upd.body["center_t_s"].is_null() && upd.body["note"].is_null());
+    assert_eq!(upd.body["provenance"], v["provenance"]);
+    assert_eq!(upd.body["created_s"], v["created_s"]);
+    let half = authed(addr, "PUT", &path, Some(r#"{"follow_live": false}"#));
+    assert_eq!(
+        half.status, 400,
+        "a frozen view needs its window: {}",
+        half.body
+    );
+    let forged = authed(addr, "PUT", &path, Some(r#"{"actor": "someone"}"#));
+    assert_eq!(forged.status, 400, "{}", forged.body);
+
+    // Share round trip: delete, then re-create from `share` alone (plus a view).
+    let share = authed(addr, "GET", &path, None).body["share"].clone();
+    let del = authed(addr, "DELETE", &path, None);
+    assert_eq!(
+        (del.status, del.body["deleted"]["id"].as_str()),
+        (200, Some(frozen_id.as_str()))
+    );
+    assert_eq!(authed(addr, "GET", &path, None).status, 404);
+    let mut again = share.clone();
+    again["view"] = serde_json::from_str(&view).unwrap();
+    let back = post(&again.to_string());
+    assert_eq!(back.status, 201, "{}", back.body);
+    assert_eq!(
+        back.body["share"], share,
+        "the same view-arithmetic state and id"
+    );
+    assert_eq!(authed(addr, "POST", &path, Some("{}")).status, 405);
+
+    // A view act: nothing reached the front end, and no audit entry carries a `device` key.
+    assert!(device.calls().is_empty(), "{:?}", device.calls());
+    let entries: Vec<Value> = audit_entries(&r.audit)
+        .into_iter()
+        .filter(|e| e["action"].as_str().is_some_and(|a| a.starts_with("view_")))
+        .collect();
+    for action in ["view_create", "view_update", "view_delete"] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["action"] == action && e["result"] == "ok"),
+            "{action} audited: {entries:?}"
+        );
+    }
+    assert!(entries.iter().all(|e| e.get("device").is_none()));
+
+    // No audit log: every mutating view route is 503.
+    let bare = Server::start(
+        ServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Token::from_config(TOKEN).unwrap(),
+        ),
+        ApiState {
+            bookmarks: Some(Arc::new(Mutex::new(Repository::open_in_memory().unwrap()))),
+            ..ApiState::default()
+        },
+    )
+    .unwrap();
+    let rep = authed(
+        bare.local_addr(),
+        "POST",
+        "/api/views",
+        Some(&format!(
+            r#"{{"name": "x", "center_f_hz": 1e8, "span_f_hz": 1e6, "follow_live": true, "view": {view}}}"#
+        )),
+    );
+    assert_eq!(
+        (rep.status, rep.body["code"].as_str()),
+        (503, Some("unavailable"))
+    );
+}
