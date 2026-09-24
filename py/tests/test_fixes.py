@@ -110,7 +110,7 @@ def test_tally_per_day_and_line(ops):
     assert t == {"2026-09-23": {"REVIEW_FAIL": 2, "UNCOMMITTED": 1, "GATE_FAIL": 1, "CONFLICT": 1}}
     assert fixes.tally_line(rs).startswith("fix runs 24h: REVIEW_FAIL 2 · ")
     assert fixes.tally_line([]) == "fix runs 24h: none"
-    s = fixes.summary(str(ops), days=7, now=_ts("22:00:00"))
+    s = fixes.summary(str(ops), now=_ts("22:00:00"))
     assert len(s["rows"]) == 5 and s["line"].startswith("fix runs 24h: REVIEW_FAIL 2")
 
 

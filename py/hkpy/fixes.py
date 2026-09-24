@@ -218,8 +218,8 @@ def tally_line(rs: list[dict]) -> str:
     return "fix runs 24h: " + (" · ".join(f"{k} {v}" for k, v in c.most_common()) or "none")
 
 
-def summary(ops: str, days: int = 7, now: float | None = None) -> dict:
-    """What /fixes.json serves (ops/monitor.py): the last `days` of fix runs, newest first, the
+def summary(ops: str, now: float | None = None) -> dict:
+    """What /fixes.json serves (ops/monitor.py): the last 7 days of fix runs, newest first, the
     per-day tally by class and the digest's 24 h line. Reads the last 4 MB of merge-runner.log for
     a GATE_FAIL's triage detail."""
     import time as _time
@@ -232,6 +232,6 @@ def summary(ops: str, days: int = 7, now: float | None = None) -> dict:
             mlog = f.read().decode("utf-8", "replace")
     except OSError:
         pass
-    rs = rows(ops, now - days * 86400, mlog)
-    return {"rows": rs, "tally": tally(rs), "classes": list(CLASSES),
+    rs = rows(ops, now - 7 * 86400, mlog)
+    return {"rows": rs, "tally": tally(rs),
             "line": tally_line([r for r in rs if r["ts"] >= now - 86400])}
