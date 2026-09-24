@@ -25999,7 +25999,7 @@ tasks:
   - id: T-889
     milestone: M2-hardening
     title: "fog-of-war.e2e.mjs band-A wait gives up on a 10 s wall-clock stall: make it event-counted (load flake that sank the 10:15 batch)"
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI-E2E
@@ -26012,10 +26012,11 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
+    branch: task-t889
   - id: T-890
     milestone: MLIVE
     title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: UI
@@ -26031,6 +26032,7 @@ tasks:
     notes: |
       FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
     effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
+    branch: task-t890
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
