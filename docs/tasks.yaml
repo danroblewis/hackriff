@@ -25139,7 +25139,8 @@ tasks:
   - id: T-856
     milestone: MAUTO
     title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
-    status: todo
+    status: in-progress
+    branch: task-t856
     priority: normal
     deps:
     - T-848
