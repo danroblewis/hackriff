@@ -260,9 +260,10 @@ Hot edits don't save. `POST /api/pipelines/{id}/save` writes the running revisio
 
 ### 2.4 Versioning, save, list, re-run, matching
 
-- `schema_version` is the format version (2). An unknown version is refused; new optional keys need a new schema version, because unknown fields are errors.
+- `schema_version` is the format version (2 or 3). An unknown version is refused; new optional keys need a new schema version, because unknown fields are errors.
   - **2** (T-085 review, 2026-09-15, before anything shipped): variable-length framing (`length_from`, `terminator`, `bit_order` on `sync_search`; `ppm_demod` → frames; `assemble`), field-map `char_bits: 4` + `pocsag-bcd`, `parity`, `skip_bits`, `scale`/`add`/`value_unit`. Version 1 was never released and is not read.
   - T-111 (2026-09-15, still before anything shipped) adds the optional `decode.service` key to version 2 instead of bumping it: no version 2 document had been released, and existing documents stay valid.
+  - **3** (T-858 = MAUTO M-7, 2026-09-24): `refine.objective` takes a second form, `{"evidence": "deepest"}` (ADR-0015 §2.3), exactly one form per document; under it `refine.tune` may also list numeric node parameters by path (`nodes[<id>].params.<name>`), beside `center_hz` and `bandwidth_hz`. Version 2 documents are still read unchanged (`hk_recipe::RECIPE_SCHEMA_VERSIONS`); the evidence form in a version-2 document is a validation error. It shares version 3 with §8.6's other keys ("one bump, three keys"): `audio` and `input.liveness` (T-866) landed in 3 first; `refine.objective.builtin` is reserved there.
 - `version` is per recipe id, from 1, monotonic, and **immutable once saved**. Saving always creates `latest + 1`, so old versions stay re-runnable and a stored decoded stream names the exact version (and `edit_rev`) that produced it.
 - A node may pin a block `version`; a mismatch is a validation error. A block's descriptor version bumps when a change would invalidate or alter existing recipes.
 - **Storage:**
