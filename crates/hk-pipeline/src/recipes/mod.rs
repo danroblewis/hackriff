@@ -7,6 +7,7 @@ pub mod graph; // T-088
 pub mod hops;
 pub mod messages; // T-111
 pub mod openers; // T-088
+pub mod refine; // T-870
 pub mod runtime; // T-088
 pub mod store; // T-088
 pub mod swap; // T-088
