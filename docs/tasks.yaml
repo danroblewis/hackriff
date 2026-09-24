@@ -25653,7 +25653,6 @@ tasks:
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
     status: in-progress
-    branch: task-t867
     priority: normal
     deps:
     - T-866
@@ -25670,6 +25669,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate failed on test_work_accounting.py (2 tests, release_stale_claims) - unrelated to this recipe-only diff; both pass alone on the merged tree (60 passed). Load/order-sensitive, flag for deflaker. No code change.
+
+      Gate attempt 2 failed again on the same 2 py tests (test_work_accounting: waits_while_last_branch_unmerged, claim_landed_as_rebuilt_branch). They pass alone (60 passed). Cause is on main, not this recipe-only diff: ops/work-runner.py release_stale_claims/branches_waiting read the real REPO/.git/MERGE_HEAD (lines ~954, 1040), which exists during gate-merge, and the tests do not isolate it. Needs a pipeline fix (monkeypatch REPO in those tests); branch is otherwise ready.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:22).
+      Gate failure was 2 py tests in test_work_accounting.py (release_stale_claims), unrelated to this recipe-only diff; both pass alone on the tree merged with 1fef1a41 (60 passed). Load/order-sensitive, flagged for deflaker. No code change; merged main in. Recipe test still passes, precheck clean.
+      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed); pytest py/tests/test_work_accounting.py -> exit 0 (60 passed)
+      precheck exit 0
+      Commits: 9de1103a, 54e9b3de
+      Observed, not chased: test_work_accounting: test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed failed in gate, pass alone
+      Resources: 63 CPU-s, peak 0.4 GB
+    branch: task-t867
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
