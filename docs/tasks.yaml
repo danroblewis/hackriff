@@ -26061,7 +26061,8 @@ tasks:
   - id: T-887
     milestone: M3
     title: "Device-path FSK features disagree with the dev grid: cyclic_db ~7 dB low on short bursts, sigma_aa ~2x - the rows T-877 cannot claim"
-    status: todo
+    status: in-progress
+    branch: task-t887
     priority: high
     deps:
     - T-876
@@ -26081,7 +26082,8 @@ tasks:
   - id: T-888
     milestone: M3
     title: blind_qpsk/blind_bpsk carry a default when unmeasured (0.200 veto floor), breaking T-311's absent-not-default rule
-    status: todo
+    status: in-progress
+    branch: task-t888
     priority: normal
     deps: []
     parallel_group: M3C
