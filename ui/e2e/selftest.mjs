@@ -152,6 +152,47 @@ export const __selftestMark = __selftestPredicate(1);
     },
   },
   {
+    // **The second standing fault for `fog-of-war.e2e.mjs`: the shadow ceiling lifted** (the
+    // deflake, 2026-09-23). That file's phase-3 brightness claim — a departed band is visibly
+    // dimmer than it was live — was the one going red in gates for a reason that was not this
+    // defect (a live baseline averaged over rows the store had not folded yet), and was fixed by
+    // measuring the live baseline over the band's own measured cells. That makes the baseline
+    // BRIGHTER on a bad run, so the claim must be shown still to see the defect it is for: T-520's
+    // defence 1 switched off, the ground drawn at the full ramp instead of `cmap(x) * gain`. The
+    // ink, the scanlines and every server-side claim are untouched; only the ceiling is gone.
+    name: "t520-shadow-ceiling-lifted",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-520 defence 1: the last-known tier is drawn at the full ramp instead of under its " +
+      "brightness ceiling, so a remembered carrier is as bright as a live one — the failure the " +
+      "ceiling exists to make impossible.",
+    file: "surface/cellrule.ts",
+    patch: (src) => {
+      const from = '{ kind: "shadow", gain: 0.32,';
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/cellrule.ts: SHADOW gain");
+      return src.replace(from, '{ kind: "shadow", gain: 1.0 /* injected by ui/e2e/selftest.mjs */,');
+    },
+  },
+  {
+    // **The third: never-swept spectrum drawn as nothing at all** (the deflake, 2026-09-23). Phase
+    // 4 now waits — counted in survey answers — for the survey's grey to reach the pane before it
+    // shoots, because on a busy box the grey's top trails the edge by more than a young pane is
+    // tall. A wait for the thing a claim asserts must still leave the claim able to fail: here the
+    // surface still skips the tile and still says "N never sampled", but draws nothing, so the
+    // pane is its not-loaded ground forever. Ten survey answers later the phase must go red as
+    // "band C drew NO grey at all".
+    name: "t580-survey-grey-never-drawn",
+    expect: "fog-of-war.e2e.mjs",
+    what: "T-580 rule 4: a place the coverage survey settles as never sampled is skipped (no tile " +
+      "request) but then not drawn either, so never-swept spectrum reads as 'not loaded' forever " +
+      "instead of THE grey.",
+    file: "surface/surface.ts",
+    patch: (src) => {
+      const from = "  private drawSurveyed(pane: PaneView, region: Box, rect: PaneRect): void {\n";
+      if (!src.includes(from)) throw new Error("selftest: anchor not found in surface/surface.ts: drawSurveyed");
+      return src.replace(from, from + "    if (region) return; // injected by ui/e2e/selftest.mjs — the survey's grey is never drawn\n");
+    },
+  },
+  {
     // **T-532, and the first standing fault for `canvas-journey.e2e.mjs`** (T-690). Same hole: the
     // file carries the live-edge grey claim and the grey-tracks-coverage claim and nothing ever
     // put either defect back.
