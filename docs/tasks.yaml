@@ -25333,6 +25333,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      Review fix (attempt 1): the review failed the branch for changing ACCEPTED ADR-0015 §2.3 without the user. Changed: bandwidth axis restored (it is the S0 channel filter's width behind a flat channeliser), schema v3 no longer refuses bandwidth_hz, and the ADR block is reworded as a PROPOSED AMENDMENT PENDING THE USER (S0 not counted in quality or the lock; bandwidth read as the S0 filter width; measured S1-S3 saturation). The coordinator should raise the amendment with the user. No gate failure: this was a review finding. Tests: hk-recipe + hk-synth 142/142, precheck clean.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 03:10).
