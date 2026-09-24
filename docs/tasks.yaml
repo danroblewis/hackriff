@@ -23683,7 +23683,7 @@ tasks:
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23723,6 +23723,7 @@ tasks:
       Observed, not chased: Nothing sets the chrome idle-fade class yet (no body.chrome-idle in ui/src). The HUD reads that class, so it will fade as soon as MAP-24/T-824 (or MAP-02) adds the idle timer. | #view-explore > .centre still has 56px top / 70px bottom padding (map-layout.css), so the canvas stage is not fully edge-to-edge. The rulers sit on the pane edges inside that stage. | No browser/e2e run was made (targeted protocol). The label CSS offsets (freq 30px above the pane bottom, time 14px right of the left edge) were checked only by unit geometry, not by eye. | The /surface.html preview (preview-main.ts) does not pass a hud element, so it has no rulers. Only the app's Explore surface was wired.
       Use cases: AWARE-042
       Resources: 72 CPU-s, peak 0.4 GB
+    commit: 18586f9b
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
