@@ -25915,6 +25915,46 @@ tasks:
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
     commit: 3421c16d
+  - id: T-884
+    milestone: MAUTO
+    title: "T-860 follow-ups: wire ConfirmPolicy.synthesized config, republish synthesized decodes to the stream, provenance strings, TemplateFixed seeding, withheld-row leak"
+    status: todo
+    priority: normal
+    deps:
+    - T-860
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-860 Opus review (and the T-860 worker), non-blocking findings on task-t860 left for after it lands:
+      1. crates/hk-cli/src/pipeline.rs:1132 builds SynthesizedConfirm::default(), so the ConfirmPolicy.synthesized config field is never read - wire it.
+      2. Known-emitter attach path (hk-pipeline/src/synth/attach.rs ~343-356) inserts and links decodes directly, skipping Ingest's republish, so synthesized decodes never reach the messages stream (ADR-0015 §5.5) - give the attacher a publisher.
+      3. template_provenance writes "builtin-or-user"/"template" (attach.rs:292-294) while hk-model/src/decode.rs documents builtin/user/discovered - make them agree.
+      4. No production seeding sets CheckOrigin::TemplateFixed (every root is Searched: fail-safe, but the ADR-0015 U1=B single-squitter template confirm cannot happen); and a template-fixed check is charged L_check = l5 where ADR-0022 says 0.
+      5. L_j is the job-wide per-stage count, not the winning path's (ADR-0022 §2.3 pt 2) - conservative, pre-existing.
+      6. The bare {"emitter_id"} analyze read (hk-api/src/analyze.rs:447-463) returns `job` details on withheld rows while /api/inventory hides `synthesis` there - withhold consistently.
+      7. is_analytic counts SyncRegularity/Plausibility as analytic; ADR-0022 §2.1's table does not list them.
+      DELIVER each with a test that goes red on the old behaviour; items 4-5 may be split out if they need ADR-0022 text. Update docs/api.md + api_contract.rs together for item 6 (T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-860 Opus review 2026-09-24.
+  - id: T-885
+    milestone: MAUTO
+    title: "Rule on synthesized confirm with zero in-window detections: T-860 fails closed, narrowing ADR-0015 §6's one-burst confirm (ADR clarification)"
+    status: todo
+    priority: normal
+    deps:
+    - T-860
+    needs: user
+    model: fable
+    effort: high
+    acceptance: |
+      DECISION NEEDED (user + Fable; ADR-0015 is ACCEPTED, so its reading is not a coding call). T-860 implemented ConfirmPolicy.synthesized per ADR-0022 §6 and chose to FAIL CLOSED on the front-end trust step when no detection of the emitter falls in the job's window (0 suspect of 0 detections) or overload is Unknown. Consequence: a candidate created by a job's own decodes (no inventory emitter in the window) can never auto-confirm in that job - and, since it has no linked detections, possibly never. That narrows ADR-0015 §6 ("One burst ... attaches, and confirms on its own"). The T-860 Opus review judged it consistent with ADR-0022's one-way-door stance but a stricter reading of an accepted ADR, stated today only in docs/07, docs/api.md and code; it also noted window_trust counts only detections LINKED to that emitter, not all detections in band x window.
+      DELIVER: the user's ruling, written as a clarification in ADR-0022 §6 step 5 / ADR-0015 §5.5 condition 4 (and §6's example), and - if the ruling differs from fail-closed - the code change in hk-pipeline/src/inventory.rs's confirm gate with a test.
+    notes: |
+      FOUND BY T-860 worker + Opus review 2026-09-24.
+    effort_reason: "an ACCEPTED-ADR clarification of a one-way confirm rule (CLAUDE.md: changing an ACCEPTED ADR goes to Fable + the user)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
