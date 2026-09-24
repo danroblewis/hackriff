@@ -57,6 +57,11 @@ re-parses the ops logs itself — and is cached ~30 s (`flow_panel_cached`) beca
 an uncached build took ~1.2 s in testing, a cached one ~13 ms. Tests: `py/tests/test_monitor_flow.py`.
 
 ### `merge-runner.sh` — automated, no-AI merge runner
+**Restart between gates on request:** `echo "<why>" > $HACKRIFF_OPS/merge-runner-restart` - the runner
+re-executes the repo's copy of itself at the top of its loop, the only point with no gate running and
+no merge staged, and logs `RESTART: requested (<why>)`. Use it after a runner change lands; never
+kill the runner mid-gate for that.
+
 **Red triage (the user's rule, 2026-09-23):** on a red, the failing tests or browser specs are re-run
 ALONE. Pass alone **twice** → a load flake: that suite passes on the evidence, and the gate resumes
 after the suite that stopped it (`just gate … --resume-after <suite>`, a strict suffix of the
