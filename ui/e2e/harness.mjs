@@ -544,10 +544,16 @@ export class Page {
       const ys = [];
       for (let i = 0; i < n; i++) ys.push(Math.min(r.bottom - 0.5, Math.max(r.top + 0.5, top + (bot - top) * (i + 0.5) / n)));
       const x0 = Math.ceil(r.left), x1 = Math.floor(r.right);
+      // T-802: the floating controls are small boxes that can sit BETWEEN the sampled rows, so they
+      // are also excluded by their own rectangles: any column under a visible control whose box
+      // meets [top, bot] is occluded, sampled row or not.
+      const chrome = [...document.querySelectorAll('[data-band="chrome"] > *')]
+        .map((c) => c.getBoundingClientRect())
+        .filter((b) => b.width > 0 && b.height > 0 && b.bottom > top && b.top < bot);
       let best = { x: x0, w: 0 }, run = null, occluded = 0;
       for (let x = x0; x < x1; x++) {
-        let clear = true;
-        for (const y of ys) {
+        let clear = !chrome.some((b) => x + 1 > b.left && x < b.right);
+        if (clear) for (const y of ys) {
           const hit = document.elementFromPoint(x + 0.5, y);
           // T-802: screen-space chrome mounted inside the surface (the floating control cluster,
           // \`data-band="chrome"\`) is still chrome — its pixels are not the surface's.
