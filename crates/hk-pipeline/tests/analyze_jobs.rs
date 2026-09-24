@@ -222,7 +222,9 @@ impl Evaluator for World {
     type Output = Sig;
 
     fn evaluate(&self, req: &EvalRequest<'_, Sig>) -> Result<Evaluated<Sig>, EvalError> {
-        let upstream = req.parent.is_none_or(|p| p.on_truth);
+        // ADR-0021 §8.2's null windows keep the PSD and destroy the structure after S0.
+        let null = matches!(req.window, hk_synth::engine::EvalWindow::Null(_));
+        let upstream = req.parent.is_none_or(|p| p.on_truth) && !(null && req.stage > Stage::S0);
         let nodes = &req.candidate.recipe.nodes[req.new_nodes.clone()];
         let last = nodes.last().expect("nodes");
         let p = |k: &str| last.params.get(k).cloned().unwrap_or(Value::Null);
@@ -291,6 +293,32 @@ impl Evaluator for World {
             }
             _ => (EvidenceSet::new(), upstream),
         };
+        let check = (req.stage == Stage::S5).then(|| hk_synth::result::CheckSummary {
+            kind: "crc".into(),
+            model: "CRC-16/0x8005".into(),
+            width: 16,
+            pass_rate: if on { 1.0 } else { 0.0 },
+            distinct_valid: if on { 12 } else { 0 },
+            corrected_excluded: 0,
+            tested: 12,
+            holdout,
+        });
+        // The hold-out run's decoded frames: what the attach step stores (ADR-0015 §5.5).
+        let frames = if holdout && on && req.stage == Stage::S5 {
+            (0..12)
+                .map(|i| hk_synth::result::HoldoutFrame {
+                    t_ns: T0_NS + 5 * S + 700_000_000 + i * 10_000_000,
+                    check_valid: true,
+                    corrected: false,
+                    frame_model: "hk-framing".into(),
+                    identity: None,
+                    metadata: json!({ "frame_bits": 64, "i": i }),
+                    content: Some(json!({ "payload_hex": format!("{i:04x}") })),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Evaluated {
             evidence: vec![NodeEvidence {
                 node: last.id.clone(),
@@ -298,7 +326,8 @@ impl Evaluator for World {
             }],
             output: Sig { on_truth: on },
             output_bytes: 256,
-            check: None,
+            check,
+            frames,
         })
     }
 }
@@ -346,6 +375,7 @@ fn root(sk: Skeleton, prior_bits: f32) -> Root {
         seed_source: hk_synth::candidate::SeedSource::Open,
         family: None,
         deferred: None,
+        check_origin: hk_synth::result::CheckOrigin::Searched,
     }
 }
 
@@ -847,4 +877,565 @@ fn only_the_last_fifty_finished_jobs_are_kept_and_the_rest_answer_gone() {
         Some(Stage::S3)
     );
     assert_eq!(hk_pipeline::synth::jobs::parse_name::<Stage>("S9"), None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// MAUTO M-9 (T-860): attach, synthesized decode provenance, ConfirmPolicy.synthesized
+// ---------------------------------------------------------------------------------------------
+
+mod m9 {
+    use super::*;
+    use hk_model::repo::synthesis::Verdict as RowVerdict;
+    use hk_model::{
+        CrcStatus, DecodeProvenance, Fingerprint, LifecycleAuthor, LifecycleState, LinkTarget,
+        Repository, Sighting, Track, TrackId, TrackState,
+    };
+    use hk_pipeline::inventory::{CONFIRM_SYNTH_RULE, SynthesizedConfirm};
+    use hk_pipeline::synth::jobs::{Attacher, RepoAttacher};
+
+    /// A fresh directory under the system temp dir.
+    fn tempdir(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A candidate emitter on the analysed channel, seen across the analysed window with
+    /// `detections` detections linked through its track, `suspect` of them flagged spur
+    /// candidates — found by blind detection upstream, never looked up by the test's truth. The
+    /// detections are what ADR-0015 §5.5's front-end trust clause reads.
+    fn seed_emitter_with(db: &std::path::Path, detections: usize, suspect: usize) -> EmitterId {
+        use hk_model::{
+            Detection, DetectionFlags, DetectionId, PlanRegion, ScanPlan, ScanPlanId, ScanPolicy,
+            Schedule, Survey, SurveyId, SurveyState,
+        };
+        let mut repo = Repository::open(db).unwrap();
+        let seen = TimeRange::new(
+            Timestamp::from_unix_nanos(T0_NS + 4 * S),
+            Timestamp::from_unix_nanos(T0_NS + 7 * S),
+        );
+        let plan = ScanPlan {
+            id: ScanPlanId::new(),
+            version: 1,
+            name: "ism".into(),
+            created_at: seen.start,
+            regions: vec![PlanRegion {
+                freq: FreqRange::new(902e6, 928e6),
+                priority: 1.0,
+                revisit_ns: None,
+            }],
+            policy: ScanPolicy::SweepThenDwell,
+            gain_table: vec![],
+            schedule: Schedule::Cron {
+                expr: "* * * * *".into(),
+            },
+            extra: Value::Null,
+        };
+        repo.insert_scan_plan(&plan).unwrap();
+        let survey = Survey {
+            id: SurveyId::new(),
+            plan_id: plan.id,
+            plan_version: plan.version,
+            device_id: "mock:test".into(),
+            state: SurveyState::Open,
+            t_start: seen.start,
+            t_end: None,
+            summary: None,
+        };
+        repo.insert_survey(&survey).unwrap();
+        let prov = repo.intern_provenance(&provenance()).unwrap();
+        let track = Track {
+            id: TrackId::new(),
+            state: TrackState::Closed,
+            split_from: None,
+            time: seen,
+            f_center_hz: CENTER_HZ,
+            bandwidth_hz: 12e3,
+            detection_count: detections as u64,
+            timing: Default::default(),
+            updated_at: seen.end,
+        };
+        let dets: Vec<Detection> = (0..detections)
+            .map(|i| {
+                let t = T0_NS + 4 * S + i as i64 * (3 * S / detections.max(1) as i64);
+                let flags = DetectionFlags {
+                    spur_candidate: i < suspect,
+                    ..DetectionFlags::default()
+                };
+                Detection {
+                    id: DetectionId::new(),
+                    survey_id: survey.id,
+                    time: TimeRange::new(
+                        Timestamp::from_unix_nanos(t),
+                        Timestamp::from_unix_nanos(t + S / 10),
+                    ),
+                    f_center_hz: CENTER_HZ,
+                    obw_hz: 12e3,
+                    xdb_bandwidth_hz: None,
+                    xdb_level_db: None,
+                    snr_peak_db: 20.0,
+                    snr_mean_db: 17.0,
+                    peak_level_dbfs: -30.0,
+                    peak_level_dbm: None,
+                    sk: None,
+                    clip_count: 0,
+                    detector_version: "test@1".into(),
+                    provenance_ref: prov,
+                    flags,
+                }
+            })
+            .collect();
+        repo.insert_detections(&dets).unwrap();
+        repo.upsert_track(&track).unwrap();
+        let ids: Vec<_> = dets.iter().map(|d| d.id).collect();
+        repo.link_detections_to_track(track.id, &ids, seen.end)
+            .unwrap();
+        let s = Sighting::track(&track, Fingerprint::new(CENTER_HZ, 12e3));
+        repo.record_sighting(&s, None).unwrap().emitter_id
+    }
+
+    fn seed_emitter(db: &std::path::Path) -> EmitterId {
+        seed_emitter_with(db, 20, 0)
+    }
+
+    fn attaching(ring: &Arc<Ring>, db: &std::path::Path) -> AnalyzeJobs {
+        AnalyzeJobs::with_attacher(
+            Arc::new(Env::new(Arc::clone(ring))),
+            Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
+            PowerPolicy::Mains,
+            Some(
+                Arc::new(RepoAttacher::new(db, SynthesizedConfirm::default())) as Arc<dyn Attacher>,
+            ),
+        )
+    }
+
+    /// ADR-0015 §5.4–§5.5 end to end at the job level: a blind open search solves the hidden
+    /// sensor on hold-out, attaches to the inventory emitter already on that channel in that
+    /// window, stores its hold-out frames as synthesized decodes, appends the `emitter_synthesis`
+    /// row, and confirms through ADR-0022's gate — with the arithmetic in the reason.
+    #[test]
+    fn a_solved_job_attaches_stores_synthesized_decodes_and_confirms() {
+        let dir = tempdir("t860-attach");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+        assert_eq!(done.results[0].verdict, Verdict::Solved);
+
+        // The job says where its results went and what they did.
+        assert_eq!(done.emitter_id, Some(emitter.to_string()));
+        assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        let confirm = done
+            .confirm
+            .clone()
+            .expect("a finished job states its confirm outcome");
+        assert_eq!(confirm["rule"], json!(CONFIRM_SYNTH_RULE));
+        assert_eq!(confirm["outcome"], json!("confirmed"), "{confirm}");
+        let reason = confirm["reason"].as_str().unwrap();
+        assert!(
+            reason.starts_with("decoded by synthesized pipeline"),
+            "{reason}"
+        );
+        assert!(reason.contains("12 differing frame(s)"), "{reason}");
+        assert!(reason.contains("against a 24-bit threshold"), "{reason}");
+        assert!(reason.contains("null control passed"), "{reason}");
+
+        let repo = Repository::open(&db).unwrap();
+        // The irreversible transition, by the synthesized rule and no other.
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Confirmed
+        );
+        let last = repo
+            .emitter_lifecycle_history(emitter)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(last.author, LifecycleAuthor::Auto);
+        assert_eq!(last.actor, CONFIRM_SYNTH_RULE);
+        assert_eq!(last.reason, reason);
+
+        // The append-only row: the job, the recipe inline with its hash, the hold-out evidence,
+        // the trace summary and replay key, the null control; the emitter's measured values
+        // untouched.
+        let row = repo
+            .synthesis(emitter)
+            .unwrap()
+            .expect("attach appends a row");
+        assert_eq!(row.verdict, RowVerdict::Solved);
+        assert!(row.resolution.is_none());
+        let job = row.job.as_ref().expect("a job row");
+        assert_eq!(job.job_id, "a1");
+        assert_eq!(job.profile, "standard");
+        assert!(job.recipe_hash.starts_with("sha256:"));
+        assert!(
+            job.recipe["nodes"]
+                .as_array()
+                .is_some_and(|n| !n.is_empty()),
+            "the rank-1 recipe is stored inline: {}",
+            job.recipe
+        );
+        assert!(job.analytic_holdout_bits.unwrap() >= 24.0);
+        assert!(job.trace_summary.is_some());
+        assert!(
+            job.replay_key.as_ref().unwrap()["window"]
+                .get("clip_id")
+                .is_some()
+        );
+        assert_eq!(job.null_control.as_ref().unwrap()["capped"], json!(false));
+        assert_eq!((job.decodes_stored, job.decodes_valid), (12, 12));
+        assert_eq!(job.confirm.as_ref().unwrap()["outcome"], json!("confirmed"));
+        let e = repo.emitter(emitter).unwrap();
+        assert_eq!(
+            e.f_center_hz, CENTER_HZ,
+            "measured values are never overwritten"
+        );
+
+        // Each stored decode is linked, CRC-valid, and carries the arithmetic the gate read.
+        let decodes: Vec<_> = repo
+            .emitter_links(emitter)
+            .unwrap()
+            .into_iter()
+            .filter_map(|l| match l.target {
+                LinkTarget::Decode(id) => Some(repo.decode(id).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decodes.len(), 12);
+        for d in &decodes {
+            assert_eq!(d.decoder_id, "synth:open");
+            assert!(
+                d.decoder_version
+                    .starts_with(&format!("{}+sha256:", hk_synth::ENGINE))
+            );
+            assert_eq!(d.crc_status, CrcStatus::Valid);
+            let id = d.identity.as_ref().expect("the structural identity");
+            assert_eq!(id.scheme.as_string(), "other:hk-framing");
+            match d.provenance.as_ref().expect("synthesized provenance") {
+                DecodeProvenance::Synthesized {
+                    job_id,
+                    holdout,
+                    analytic_holdout_bits,
+                    check_bits,
+                    l_check,
+                    check_searched,
+                    template_provenance,
+                    ..
+                } => {
+                    assert_eq!(job_id, "a1");
+                    assert!(*holdout && *check_searched);
+                    assert!(*analytic_holdout_bits >= 24.0);
+                    assert!(check_bits.unwrap() >= 16.0);
+                    assert!(l_check.unwrap() > 0.0);
+                    assert!(template_provenance.is_none());
+                }
+            }
+        }
+        // …and never counts toward the identity route: only the synthesized rule confirms it.
+        assert_eq!(repo.identity_decode_evidence(emitter).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `quick` never confirms (ADR-0022 §6 step 6), a user delete wins, and a job with no
+    /// emitter in its window and nothing solved attaches nowhere — each said on the job.
+    #[test]
+    fn quick_never_confirms_a_user_delete_wins_and_nothing_found_is_not_attached() {
+        let dir = tempdir("t860-quick");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Quick))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("`quick` never confirms"),
+            "{confirm}"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate
+        );
+        drop(repo);
+
+        // The user deletes the entry; a later standard job may not resurrect it.
+        let mut repo = Repository::open(&db).unwrap();
+        repo.change_emitter_lifecycle(
+            emitter,
+            LifecycleState::Deleted,
+            LifecycleAuthor::User,
+            "test-user",
+            "not interesting",
+            Timestamp::from_unix_nanos(T0_NS + 8 * S),
+        )
+        .unwrap();
+        drop(repo);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a2");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_ne!(
+            done.emitter_id,
+            Some(emitter.to_string()),
+            "never attach to a deleted row"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Deleted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without an inventory emitter in the window, the solved job's decodes create the candidate
+    /// through ordinary ingestion, and the results attach to it (ADR-0015 §5.4's third case).
+    #[test]
+    fn with_no_emitter_the_decodes_create_the_candidate() {
+        let dir = tempdir("t860-new");
+        let db = dir.join("hackriff.db");
+        drop(Repository::open(&db).unwrap());
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let id: EmitterId = done
+            .emitter_id
+            .as_deref()
+            .expect("the decodes created an emitter")
+            .parse()
+            .unwrap();
+        let repo = Repository::open(&db).unwrap();
+        let row = repo
+            .synthesis(id)
+            .unwrap()
+            .expect("attached to the new candidate");
+        assert_eq!(row.job.as_ref().unwrap().job_id, "a1");
+        assert_eq!(done.decodes, Some(json!({ "stored": 12, "valid": 12 })));
+        // Exactly ONE candidate for one emission (review B1): the first frame's sighting creates
+        // it and every later frame is linked to it, rather than each structural-identity sighting
+        // minting a ghost of its own.
+        let all = repo
+            .emitters_in_region(&hk_model::Region::new(
+                FreqRange::new(1e6, 6e9),
+                TimeRange::new(
+                    Timestamp::from_unix_nanos(0),
+                    Timestamp::from_unix_nanos(T0_NS + 3600 * S),
+                ),
+            ))
+            .unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![id],
+            "one emission, one inventory entry"
+        );
+        let linked = repo
+            .emitter_links(id)
+            .unwrap()
+            .into_iter()
+            .filter(|l| matches!(l.target, LinkTarget::Decode(_)))
+            .count();
+        assert_eq!(
+            linked, 12,
+            "every stored decode belongs to the one candidate"
+        );
+        // The new candidate has no detection in the window, so the front end's trust over it is
+        // unknown: it stays a candidate (ADR-0015 §5.5 condition 4 fails closed).
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no detection of this emitter"),
+            "{confirm}"
+        );
+        assert_eq!(
+            repo.emitter_lifecycle_state(id).unwrap(),
+            LifecycleState::Candidate
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review B2: a job whose emitter target the user deleted while it searched attaches nothing
+    /// to it — no decodes stored or linked, no `emitter_synthesis` row — and says why. A user
+    /// delete wins.
+    #[test]
+    fn a_target_deleted_during_the_search_is_never_attached_to() {
+        let dir = tempdir("t860-deleted-target");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let mut repo = Repository::open(&db).unwrap();
+        repo.change_emitter_lifecycle(
+            emitter,
+            LifecycleState::Deleted,
+            LifecycleAuthor::User,
+            "test-user",
+            "not interesting",
+            Timestamp::from_unix_nanos(T0_NS + 8 * S),
+        )
+        .unwrap();
+        drop(repo);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        let mut req = band_request(one_second(), Profile::Standard);
+        req.emitter_id = Some(emitter);
+        jobs.start(req).unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("not-attached"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                .contains("deleted by the user"),
+            "{confirm}"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert!(
+            repo.synthesis(emitter).unwrap().is_none(),
+            "no row under a deleted entry"
+        );
+        assert!(
+            !repo
+                .emitter_links(emitter)
+                .unwrap()
+                .iter()
+                .any(|l| matches!(l.target, LinkTarget::Decode(_))),
+            "no decode linked to a deleted entry"
+        );
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Deleted
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review L2: a cancel observed at the end of the attach transaction rolls the whole attach
+    /// back — no decodes, no row, no confirmation — because a cancelled job never attaches
+    /// (docs/api.md). The attacher here runs the real attach over the real job's input with the
+    /// cancel check answering "cancelled", the latest a cancel can be seen.
+    #[test]
+    fn a_cancel_seen_at_the_end_of_attach_rolls_everything_back() {
+        use hk_pipeline::synth::attach::{AttachInput, Attached, attach};
+        struct CancelledAtCommit {
+            db: std::path::PathBuf,
+        }
+        impl Attacher for CancelledAtCommit {
+            fn attach(&self, input: &AttachInput<'_>) -> Result<Option<Attached>, String> {
+                let always = || true;
+                let cancelled = AttachInput {
+                    job_id: input.job_id,
+                    profile: input.profile,
+                    target: input.target,
+                    band: input.band,
+                    window: input.window,
+                    outcome: input.outcome,
+                    trace_summary: input.trace_summary.clone(),
+                    replay_key: input.replay_key.clone(),
+                    resolution: input.resolution,
+                    content_class: input.content_class,
+                    overload: input.overload,
+                    cancelled: Some(&always),
+                };
+                let repo = Repository::open(&self.db).map_err(|e| e.to_string())?;
+                let mut ingest = hk_plugins::Ingest::new(repo);
+                let out = attach(&mut ingest, &SynthesizedConfirm::default(), &cancelled)
+                    .map_err(|e| e.to_string())?;
+                assert!(out.is_none(), "a cancelled attach reports nothing attached");
+                Ok(out)
+            }
+        }
+        let dir = tempdir("t860-cancel");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter(&db);
+        let ring = ring10();
+        let jobs = AnalyzeJobs::with_attacher(
+            Arc::new(Env::new(Arc::clone(&ring))),
+            Some(Arc::new(Backend::default()) as Arc<dyn SearchBackend>),
+            PowerPolicy::Mains,
+            Some(Arc::new(CancelledAtCommit { db: db.clone() }) as Arc<dyn Attacher>),
+        );
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_eq!(
+            done.results[0].verdict,
+            Verdict::Solved,
+            "it would have confirmed"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate,
+            "no confirmation"
+        );
+        assert!(repo.synthesis(emitter).unwrap().is_none(), "no row");
+        assert!(
+            !repo
+                .emitter_links(emitter)
+                .unwrap()
+                .iter()
+                .any(|l| matches!(l.target, LinkTarget::Decode(_))),
+            "no decodes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A window whose detections are mostly suspect (spur candidates) never confirms, however
+    /// clean the decode: the front end manufactures real-looking ghosts, and a CRC-valid image of
+    /// a real signal is one (ADR-0015 §5.5 condition 4). The row and decodes are still kept.
+    #[test]
+    fn a_mostly_suspect_window_attaches_but_never_confirms() {
+        let dir = tempdir("t860-suspect");
+        let db = dir.join("hackriff.db");
+        let emitter = seed_emitter_with(&db, 10, 6);
+        let ring = ring10();
+        let jobs = attaching(&ring, &db);
+        jobs.start(band_request(one_second(), Profile::Standard))
+            .unwrap();
+        let done = wait_terminal(&jobs, "a1");
+        assert_eq!(done.state, JobState::Done, "{:?}", done.error);
+        assert_eq!(done.emitter_id, Some(emitter.to_string()));
+        let confirm = done.confirm.clone().unwrap();
+        assert_eq!(confirm["outcome"], json!("insufficient"), "{confirm}");
+        assert!(
+            confirm["reason"]
+                .as_str()
+                .unwrap()
+                // Only the window's detections count: of the ten (one every 0.3 s from 4 s),
+                // those at 5.2, 5.5 and 5.8 s overlap [5 s, 6 s), and the first two are suspect.
+                .contains("67 % of the window's detections are suspect"),
+            "{confirm}"
+        );
+        let repo = Repository::open(&db).unwrap();
+        assert_eq!(
+            repo.emitter_lifecycle_state(emitter).unwrap(),
+            LifecycleState::Candidate
+        );
+        let row = repo.synthesis(emitter).unwrap().expect("attached anyway");
+        assert_eq!(row.job.as_ref().unwrap().decodes_stored, 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

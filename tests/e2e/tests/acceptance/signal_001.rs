@@ -347,6 +347,7 @@ fn signal_001_adsb_pipeline_and_plugin_output_plumbing() {
             }),
             content_class: ContentClass::Unrestricted,
             t: t0.saturating_add_nanos((m.t_start_s * 1e9) as i64),
+            provenance: None,
         };
         ingest
             .store_decode(d, None, None, Some(1090e6), Some(2.0e6))

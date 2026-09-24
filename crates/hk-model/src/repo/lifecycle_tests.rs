@@ -376,3 +376,90 @@ fn t403_a_confirmations_reason_strengthens_without_inventing_a_state_change() {
     );
     assert!(r.emitter_lifecycle_history(other).unwrap().is_empty());
 }
+
+/// ADR-0015 §5.5 (MAUTO M-9, T-860): a synthesized decode never counts toward the identity
+/// confirm route, and an identity that rests only on synthesized decodes says so.
+#[test]
+fn t860_synthesized_decodes_never_count_toward_identity_and_are_marked() {
+    let mut r = repo();
+    let identity = DecodedIdentity {
+        scheme: IdentityScheme::AdsbIcao,
+        value: "4CA2B1".into(),
+    };
+    let e = r
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Demodulation(DemodulationId::new()),
+                seen: tr(0.0, 1.0),
+                count: 1,
+                f_center_hz: 1090e6,
+                bandwidth_hz: 2e6,
+                fingerprint: None,
+                identity: Some(IdentityClaim {
+                    identity: identity.clone(),
+                    content_class: ContentClass::Unrestricted,
+                }),
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap()
+        .emitter_id;
+    let decode = |decoder_id: &str, at: f64| Decode {
+        id: DecodeId::new(),
+        demodulation_ref: None,
+        recording_ref: None,
+        decoder_id: decoder_id.into(),
+        decoder_version: "1".into(),
+        frame_model: "adsb-df17".into(),
+        metadata: serde_json::json!({}),
+        content: None,
+        crc_status: CrcStatus::Valid,
+        identity: Some(identity.clone()),
+        content_class: ContentClass::Unrestricted,
+        t: t(at),
+        provenance: None,
+    };
+    let no_identity = r
+        .record_sighting(
+            &Sighting {
+                source: LinkTarget::Demodulation(DemodulationId::new()),
+                seen: tr(0.0, 1.0),
+                count: 1,
+                f_center_hz: 433.92e6,
+                bandwidth_hz: 50e3,
+                fingerprint: Some(Fingerprint::new(433.92e6, 50e3)),
+                identity: None,
+                context: None,
+                classification: None,
+                tags: Vec::new(),
+            },
+            None,
+        )
+        .unwrap()
+        .emitter_id;
+    assert_eq!(r.identity_synthesized(no_identity).unwrap(), None);
+    // An identity sighting with no decode behind it is not "synthesized".
+    assert_eq!(r.identity_synthesized(e).unwrap(), Some(false));
+
+    for i in 0..3 {
+        r.insert_decode(&decode("synth:adsb", f64::from(i)))
+            .unwrap();
+    }
+    assert_eq!(
+        r.identity_decode_evidence(e).unwrap(),
+        Some((IdentityScheme::AdsbIcao, 0)),
+        "synthesized decodes never feed the identity route"
+    );
+    assert_eq!(r.identity_synthesized(e).unwrap(), Some(true));
+
+    // One ordinary decoder's decode: the identity is no longer synthesized-only.
+    r.insert_decode(&decode("dump1090", 5.0)).unwrap();
+    assert_eq!(
+        r.identity_decode_evidence(e).unwrap(),
+        Some((IdentityScheme::AdsbIcao, 1))
+    );
+    assert_eq!(r.identity_synthesized(e).unwrap(), Some(false));
+}

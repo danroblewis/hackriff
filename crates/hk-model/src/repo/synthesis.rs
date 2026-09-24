@@ -32,11 +32,13 @@
 //! [`MAX_TRACE_NODES`] is a safety bound rather than an elision policy. A producer that can exceed
 //! it is a producer that needs ADR-0021 §2.3 implemented.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use super::{RepoError, Repository, blob};
+use crate::detection::DetectionFlags;
 use crate::ids::EmitterId;
+use crate::region::TimeRange;
 use crate::time::Timestamp;
 
 /// Provenance of every synthesis row.
@@ -474,6 +476,63 @@ pub struct ReceiverAlias {
     pub runner_up: u32,
 }
 
+/// Most bytes one stored recipe document may take (a recipe is a handful of nodes; this bounds a
+/// row, not a design).
+pub const MAX_RECIPE_BYTES: usize = 64 * 1024;
+
+/// A region-analyze job's contribution to its row (ADR-0015 §5.4 as amended by ADR-0021 §11.2 and
+/// ADR-0022 §11.3; MAUTO M-9). Absent on rows a chain's own analysis wrote (the trunking chain).
+///
+/// The types it carries live in `hk-synth`, which depends on this crate; they are stored as their
+/// served JSON, exactly as the job serves them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SynthesisJob {
+    /// The analyze job, `a<n>`.
+    pub job_id: String,
+    /// Profile (`quick`, `standard`, `deep`).
+    pub profile: String,
+    /// Rank-1 `evidence_bits` (search rank key). Reported; never the confirm key.
+    pub evidence_bits: f64,
+    /// Rank-1 `prior_bits`. Reported only; never ranks.
+    pub prior_bits: f64,
+    /// Rank-1 hold-out analytic bits (ADR-0022 §2), the confirm key; `None` when not validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytic_holdout_bits: Option<f64>,
+    /// The template rank 1 came from (`{id, version}`), or `None` for open search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<serde_json::Value>,
+    /// The rank-1 recipe document, inline. Startable as-is (`POST /api/pipelines`).
+    pub recipe: serde_json::Value,
+    /// `sha256:<hex>` of the recipe's canonical JSON — the `decoder_version` suffix of its stored
+    /// decodes.
+    pub recipe_hash: String,
+    /// The check summary, when S5 was reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<serde_json::Value>,
+    /// The rank-1 hold-out evidence (ADR-0022 §6's inputs), when validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holdout: Option<serde_json::Value>,
+    /// ADR-0021 §4.1, persisted so a second look reads what earlier looks covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_summary: Option<serde_json::Value>,
+    /// ADR-0021 §5: what makes this search reproducible, and so comparable with a later one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_key: Option<serde_json::Value>,
+    /// ADR-0021 §8.2, whether or not it fired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_control: Option<serde_json::Value>,
+    /// The `hk-synth`-sealed resolution (ADR-0021 §7A.2), when nothing solved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_resolution: Option<serde_json::Value>,
+    /// Decode rows stored from the hold-out run, and how many were valid without correction.
+    pub decodes_stored: u64,
+    /// Of those, CRC-valid.
+    pub decodes_valid: u64,
+    /// The `ConfirmPolicy.synthesized` decision (`{rule, outcome, evidence_bits, reason}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<serde_json::Value>,
+}
+
 /// One analysis of one emitter.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EmitterSynthesis {
@@ -505,6 +564,9 @@ pub struct EmitterSynthesis {
     /// What the receiver contributed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receiver: Option<ReceiverFit>,
+    /// The region-analyze job that wrote this row (M-9); `None` for a chain's own analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<SynthesisJob>,
 }
 
 impl EmitterSynthesis {
@@ -582,11 +644,120 @@ impl EmitterSynthesis {
         if finite.into_iter().any(|v| !v.is_finite()) {
             return bad("non-finite number".into());
         }
+        if let Some(j) = &self.job {
+            if j.job_id.trim().is_empty() {
+                return bad("a job row names its job".into());
+            }
+            if !j.recipe_hash.starts_with("sha256:") {
+                return bad("recipe_hash must be `sha256:<hex>`".into());
+            }
+            if !j.recipe.is_object() {
+                return bad("the recipe is stored inline as a document".into());
+            }
+            if serde_json::to_string(&j.recipe).map_or(true, |t| t.len() > MAX_RECIPE_BYTES) {
+                return bad(format!("the recipe exceeds {MAX_RECIPE_BYTES} bytes"));
+            }
+            let nums = [
+                Some(j.evidence_bits),
+                Some(j.prior_bits),
+                j.analytic_holdout_bits,
+            ];
+            if nums.into_iter().flatten().any(|v| !v.is_finite()) {
+                return bad("non-finite job number".into());
+            }
+            if j.decodes_valid > j.decodes_stored {
+                return bad("more valid decodes than stored ones".into());
+            }
+        }
         Ok(())
     }
 }
 
+/// Most detections [`Repository::window_trust`] reads.
+pub const MAX_TRUST_DETECTIONS: usize = 4096;
+
+/// An emitter's detections over a window, read for ADR-0015 §5.5 condition 4 (front-end trust).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowTrust {
+    /// Linked detections overlapping the window (capped at [`MAX_TRUST_DETECTIONS`]).
+    pub detections: u64,
+    /// Of those, suspect: clipped, spur, image, IMD or compressed — the measurement's own flags
+    /// OR'd with a standing retune verdict's (the same reading as the relation evidence).
+    pub suspect: u64,
+}
+
+impl WindowTrust {
+    /// Suspect share, `0` when nothing was detected (no detection is no suspicion).
+    pub fn suspect_fraction(&self) -> f64 {
+        if self.detections == 0 {
+            0.0
+        } else {
+            self.suspect as f64 / self.detections as f64
+        }
+    }
+}
+
+/// The flag bits of an emitter's linked detections overlapping `[?2, ?3)`, with the standing
+/// retune verdict's bits; reached through current track links or direct links, like the relation
+/// evidence. `?4` caps the rows.
+const WINDOW_TRUST_SQL: &str = "\
+     SELECT flags, retune_bits FROM ( \
+       SELECT d.flags AS flags, d.t_start AS t_start, \
+              coalesce((SELECT dr.flag_bits FROM detection_retune dr \
+                        WHERE dr.detection_id = d.detection_id AND dr.active = 1 \
+                          AND dr.verdict_id = (SELECT max(verdict_id) FROM detection_retune \
+                                               WHERE detection_id = d.detection_id)), 0) \
+                AS retune_bits \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+         AND d.t_end > ?2 AND d.t_start < ?3 \
+       UNION ALL \
+       SELECT d.flags AS flags, d.t_start AS t_start, \
+              coalesce((SELECT dr.flag_bits FROM detection_retune dr \
+                        WHERE dr.detection_id = d.detection_id AND dr.active = 1 \
+                          AND dr.verdict_id = (SELECT max(verdict_id) FROM detection_retune \
+                                               WHERE detection_id = d.detection_id)), 0) \
+                AS retune_bits \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+         AND d.t_end > ?2 AND d.t_start < ?3 \
+     ) ORDER BY t_start DESC LIMIT ?4";
+
 impl Repository {
+    /// Front-end trust of `emitter`'s detections over `window` (ADR-0015 §5.5 condition 4:
+    /// "≤ 50 % suspect detections"). Follows merges to the live id.
+    pub fn window_trust(
+        &self,
+        emitter: EmitterId,
+        window: TimeRange,
+    ) -> Result<WindowTrust, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        let mut stmt = self.conn.prepare_cached(WINDOW_TRUST_SQL)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    blob(id),
+                    window.start.as_unix_nanos(),
+                    window.end.as_unix_nanos(),
+                    MAX_TRUST_DETECTIONS as i64
+                ],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut t = WindowTrust::default();
+        for (flags, retune) in rows {
+            let f = DetectionFlags::from_bits(u32::try_from(flags | retune).unwrap_or(0));
+            t.detections += 1;
+            if f.clipped || f.spur_candidate || f.image_candidate || f.suspect_imd || f.compressed {
+                t.suspect += 1;
+            }
+        }
+        Ok(t)
+    }
+
     pub(super) fn ensure_synthesis_table(&self) -> Result<(), RepoError> {
         self.conn.execute_batch(ENSURE_TABLE)?;
         Ok(())
@@ -626,6 +797,15 @@ impl Repository {
         &self,
         emitter: EmitterId,
     ) -> Result<Vec<EmitterSynthesis>, RepoError> {
+        self.synthesis_rows(emitter, SYNTHESIS_HISTORY_MAX)
+    }
+
+    /// At most `limit` analyses of `emitter`, newest first.
+    fn synthesis_rows(
+        &self,
+        emitter: EmitterId,
+        limit: usize,
+    ) -> Result<Vec<EmitterSynthesis>, RepoError> {
         self.ensure_synthesis_table()?;
         let id = self.live_emitter_id(emitter)?;
         let mut stmt = self.conn.prepare_cached(
@@ -638,9 +818,7 @@ impl Repository {
              ORDER BY t DESC, synthesis_id DESC LIMIT ?2",
         )?;
         let texts = stmt
-            .query_map(params![blob(id), SYNTHESIS_HISTORY_MAX as i64], |r| {
-                r.get::<_, String>(0)
-            })?
+            .query_map(params![blob(id), limit as i64], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         texts
             .iter()
@@ -653,7 +831,36 @@ impl Repository {
     /// `None` means **not searched** ([`Resolution::not_searched`]), never "searched and found
     /// nothing" — the caller must not collapse the two (ADR-0021 §7A.4).
     pub fn synthesis(&self, emitter: EmitterId) -> Result<Option<EmitterSynthesis>, RepoError> {
-        Ok(self.synthesis_history(emitter)?.into_iter().next())
+        // One row, not the history: `/api/inventory` reads this for every row it serves.
+        Ok(self.synthesis_rows(emitter, 1)?.into_iter().next())
+    }
+
+    /// Whether `emitter`'s decoded identity rests **only** on synthesized decodes (decoder id
+    /// `synth:…`, ADR-0015 §5.5 trust rules): `None` without an identity; `Some(true)` when at
+    /// least one synthesized decode carries it and no ordinary decoder's does. `/api/inventory`
+    /// shows it beside the identity, so a synthesized identity — even a real one such as
+    /// `adsb-icao` from a template-bound pipeline — is strong evidence, never an unexplained fact.
+    /// Metadata only: the value never leaves this call.
+    pub fn identity_synthesized(&self, emitter: EmitterId) -> Result<Option<bool>, RepoError> {
+        let id = self.live_emitter_id(emitter)?;
+        let tx = self.read_tx()?;
+        let row: Option<(Option<String>, Option<String>)> = tx
+            .prepare_cached(
+                "SELECT identity_scheme, identity_value FROM emitter WHERE emitter_id = ?1",
+            )?
+            .query_row([blob(id)], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((Some(scheme), Some(value))) = row else {
+            return Ok(None);
+        };
+        let (synth, other): (i64, i64) = tx
+            .prepare_cached(
+                "SELECT coalesce(sum(decoder_id LIKE 'synth:%'), 0), \
+                        coalesce(sum(decoder_id NOT LIKE 'synth:%'), 0) \
+                 FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2",
+            )?
+            .query_row(params![scheme, value], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(Some(synth > 0 && other == 0))
     }
 }
 
@@ -693,6 +900,7 @@ mod tests {
             trace,
             resolution: res,
             receiver: None,
+            job: None,
         }
     }
 
