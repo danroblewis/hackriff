@@ -1376,6 +1376,19 @@ def dispatch(claims, dry):
     return changed
 
 
+#: Untracked paths a worktree regenerates on its own - build output, installed hooks, envs. A
+#: worktree with no commits ahead and no tracked edits whose ONLY untracked files are these holds
+#: nothing of anyone's: t356 (claim `blocked`, 0 commits, only an untracked `.githooks/`) held
+#: 31 GB and failed `worktree remove` on EVERY tick - 1,499 REAP failures by 2026-09-24 00:18,
+#: beside 1,730 for gateaudit, a worktree whose directory was already gone.
+REGENERABLE = (".githooks/", "target/", "node_modules/", "ui/node_modules/", "ui/dist/", "py/.venv/", ".venv/")
+_REAP_SAID: set = set()
+
+
+def only_regenerable(untracked):
+    return bool(untracked) and all(any(u == r or u.startswith(r) for r in REGENERABLE) for u in untracked)
+
+
 def reap_worktrees(claims, dry):
     """Disk is the binding resource (29 GB free on 2026-09-22, ~10 GB per built worktree), and the
     merge runner removes a worktree only when IT merges the branch. Orphans - killed sessions,
@@ -1386,6 +1399,8 @@ def reap_worktrees(claims, dry):
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
     live = {c.get("wt") for c in claims.values() if c.get("state") == "running"}
+    if not dry:
+        sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])
     paths = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("worktree ") and "/.claude/worktrees/" in l]
     for wt in paths:
@@ -1396,9 +1411,11 @@ def reap_worktrees(claims, dry):
         branch = sh(["git", "branch", "--show-current"], cwd=wt).strip()
         if not branch:
             continue
-        dirty = any(not l.startswith("??") for l in sh(["git", "status", "--porcelain"], cwd=wt).splitlines())
+        status = sh(["git", "status", "--porcelain"], cwd=wt).splitlines()
+        dirty = any(not l.startswith("??") for l in status)
         if dirty:
             continue
+        untracked = [l[3:] for l in status if l.startswith("??")]
         ahead = int(sh(["git", "rev-list", "--count", f"main..{branch}"]).strip() or 0)
         if ahead:
             continue   # unmerged commits, whatever main says: 2026-09-22 a provisional bulk merge on main
@@ -1410,7 +1427,14 @@ def reap_worktrees(claims, dry):
         # Untracked files block `worktree remove`. On a MERGED branch or a claim that ended without
         # commits (no-work / error / timeout) they are abandoned scratch: force. Otherwise refuse, and say so.
         claim = next((c for c in claims.values() if c.get("wt") == wt), {})
-        force = merged or claim.get("state") in ("no-work", "error", "timeout")
+        force = merged or claim.get("state") in ("no-work", "error", "timeout") or only_regenerable(untracked)
+        if untracked and not force:
+            # Someone's uncommitted new files: never forced. Said ONCE (not on every tick).
+            key = (wt, tuple(sorted(untracked)))
+            if key not in _REAP_SAID:
+                _REAP_SAID.add(key)
+                log(f"REAP {wt} ({branch}: no commits) kept - untracked files that are not build output: {' '.join(untracked)[:160]}")
+            continue
         r = subprocess.run(["git", "worktree", "remove"] + (["--force"] if force else []) + [wt], cwd=REPO, capture_output=True, text=True)
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
