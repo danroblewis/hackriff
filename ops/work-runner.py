@@ -1498,8 +1498,18 @@ def deflake_deferred(slug, req, claims):
     if not test.endswith(".e2e.mjs"):
         return ""
     path = f"ui/e2e/{test}"
+    # A `queued` claim counts only while its branch really is queued or gating: 15 claims were
+    # `queued` 25-40 h after landing under another name (T-538 as task-t538-rl) - a forever wait.
+    waiting = set()
+    for f in (MERGE_QUEUE, BULKMARK):
+        try:
+            waiting |= set(open(f).read().replace("branches=", " ").split())
+        except OSError:
+            pass
     for tid, t in claims.items():
         if tid.startswith(DEFLAKE_PREFIX) or t.get("state") not in _INFLIGHT or not t.get("branch"):
+            continue
+        if t["state"] == "queued" and t["branch"] not in waiting:
             continue
         if sh(["git", "diff", "--name-only", f"main...{t['branch']}", "--", path]).strip():
             return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
@@ -1696,8 +1706,9 @@ def reap_deflake(claims, key, c):
     outcome, why = handback_outcome(hb, text)
     # A deflaker's red-when-the-defect-returns proof exits non-zero by design; it says so with
     # "expect": "red" (01:33 on 2026-09-24 a DONE deflake read as BLOCKED on exactly those runs).
-    fails = [t for t in hb.get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0
-             and t.get("expect") != "red"] if hb else []
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)     # a red proof needs a green run beside it
+    fails = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
     if hb and outcome == "done" and fails:
         bad = fails[0]
         outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"

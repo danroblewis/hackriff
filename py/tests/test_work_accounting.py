@@ -786,7 +786,15 @@ def test_a_deflake_waits_while_a_ticket_branch_edits_its_spec(df, monkeypatch):
     R.dispatch_deflakes(claims, dry=False)
     assert launched == []
     assert (tmp / "work-runner.log").read_text().count("DEFLAKE WAIT deflake-a: request for app-trace.e2e.mjs - T-801's") == 1
-    claims["T-801"]["state"] = "queued"
+    claims["T-801"]["state"] = "queued"                   # a queued claim whose branch is in no queue: stale
+    R.dispatch_deflakes(claims, dry=False)
+    assert [s for s, _, _ in launched] == ["deflake-a"]
+    launched.clear()
+    (tmp / "merge-queue.txt").write_text("task-t801\n")    # ...but really queued: it waits
+    claims["DEFLAKE:deflake-a"]["state"] = "no-work"
+    write(_req("deflake-a", 100.0, test="app-trace.e2e.mjs"), _req("deflake-a", 2e9, test="app-trace.e2e.mjs"))
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
     edits.clear()                                        # landed: main now has it, the three-dot diff is empty
     R.dispatch_deflakes(claims, dry=False)
     assert [s for s, _, _ in launched] == ["deflake-a"]
@@ -812,3 +820,6 @@ def test_a_red_proof_is_not_a_failing_test(reaped):
     claims = claim()
     R.reap(claims, dry=False)
     assert len(reviews) == 1 and seen == []
+    hb("done", tests=[{"cmd": "x", "exit": 1, "expect": "red"}])     # a "proof" with no green run beside it
+    R.reap(claim(), dry=False)
+    assert [k for _, k, _ in seen] == ["DEFLAKE_BLOCKED"]
