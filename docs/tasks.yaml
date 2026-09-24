@@ -25712,7 +25712,6 @@ tasks:
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
     status: in-progress
-    branch: task-t870
     priority: normal
     deps:
     - T-866
@@ -25729,6 +25728,16 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:44).
+      ADR-0015 LP-6 (§12.6) / ADR-0011 §8.7 delivered. hk-recipe: refine.objective is either {builtin} (schema 3) or {node, metric, goal}, never a mix; a mixed or partial object is refused at parse with a named rule. builtin must be registered (REFINE_BUILTINS = wfm-pilot) and needs an iq input on one channel. EditPlan::with_channel_moved treats a moved centre as an `input` change, so every node rebuilds. hk-pipeline: new recipes::refine. A per-pipeline hk-refine worker runs T-070's RefinementLoop + WfmObjective with Listen's settings and hysteresis: once from the target, then every 15 s. The pipeline thread only copies a ring window into a buffer made at start and handed back; it never allocates or spawns. Each locked, accepted result is applied as an ordinary hot edit through RecipeRuntime::apply_refinement, the same staged edit PUT /api/pipelines/{id}/recipe makes: the refined centre becomes the channel, the refined bandwidth goes into input.bandwidth_hz, the channel is re-plumbed at a chunk boundary, edit_rev goes up by one, outputs keep their consumers, and a save keeps the refined revision. It is stored as an emitter_refined_tuning row (source "recipe"). Pipeline JSON gains `refinement`, and `channel` now reports the channel in force. Audio status records carry refined_center_hz / refined_bandwidth_hz / refine_updates. The {node, metric} form is still validated but not run. docs/api.md and ADR-0011 §8's status line are updated.
+      Tests: cargo nextest run -p hk-recipe -> exit 0 (52 passed (incl. builtin-objective schema tests and a_moved_channel_rebuilds_every_surviving_node)); cargo nextest run -p hk-pipeline -E 'binary(recipe_refine) or binary(recipe_runtime) or binary(recipe_audio) or binary(follow_hops) or binary(recipe_alloc_free) or binary(decoded_capture) or (kind(lib) and test(/recipes::/))' -> exit 0 (51 passed; recipe_refine: refines a band drawn 25 kHz off the hidden-truth station onto it (within 2 kHz) and applies it as one hot edit per result, the pre-edit audio consumer keeps the 1 kHz programme; an unlocked result never retunes)
+      precheck exit 0
+      Commits: d95e1d2d
+      Observed, not chased: hk-cli api_contract recipe_and_pipeline_routes_match_the_documented_shapes fails on the BASE commit too (checked by restoring HEAD~1's crates/ in this worktree): api_contract.rs:4756 (4761 on this branch) expects POST /api/pipelines on band 90.0-90.1 MHz to be 409 outside_window but gets 201; the started pipeline shows chunks 0. That looks like planning_tune's provisional window (T-175: before the capture publishes a tune, the window is centred on the target), not T-870. It failed 3/3 alone at load ~19. My added assertion (refinement: null) runs before that line and passes. | hk-pipeline runtime_attach chains_attached_and_detached_mid_run_drop_no_always_on_samples fails alone at load 13-20 ('attached 9' / 'attached 8' < 18). It is the known load-flake already recorded in docs/tasks.yaml (~line 21282): fsk-bursts chain, 50 ms wall-clock sleeps, no recipe code involved. | The {node, metric, goal} refine objective (e.g. recipes/rds.recipe.json crc.error_rate -> min) is still parsed and validated but never run by the recipe runtime. T-870 serves only {builtin}; running node-metric objectives through the same apply_refinement path is follow-up work. | A pipeline's content_class (streams_ctx.class) is fixed at start. An applied refinement (or any input edit) re-runs the audio pre-attach gate on the new channel but does not re-derive the class for non-audio outputs. Moves are bounded by the WFM objective's 100 kHz search margin; noted, not changed.
+      Use cases: SIGNAL-062
+      Resources: 180 CPU-s, peak 3.0 GB
+    branch: task-t870
   - id: T-871
     milestone: MAUTO
     title: "LP-7: MUI: one output model across the dock and the per-signal panels"

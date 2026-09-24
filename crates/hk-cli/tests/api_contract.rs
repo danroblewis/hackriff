@@ -4727,6 +4727,11 @@ fn recipe_and_pipeline_routes_match_the_documented_shapes() {
         "{p}"
     );
     assert_eq!(
+        p["refinement"],
+        Value::Null,
+        "only a recipe declaring refine.objective.builtin has a refinement (T-870): {p}"
+    );
+    assert_eq!(
         p["outputs"][0]["stream_id"],
         json!(format!("stage/{pid}/base"))
     );
