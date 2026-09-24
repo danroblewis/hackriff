@@ -135,12 +135,16 @@ is keyed **`DEFLAKE:<slug>`**, never a T-id, and carries `deflake: <slug>`, so b
 and stale-claim release (all looked up by board id) never see it and it never gets a `result:` block or a
 fix resume. It is a worker: `busy_workers()` counts kind `deflake` against the same `dispatch_cap()`, at
 most one deflake dispatch per tick (before ordinary dispatch), never while `dispatch-paused` exists or
-`gate_holds_dispatch()`, never under the disk floor. One open deflaker per id; a new request for an id
-whose last run ended within `WORK_DEFLAKE_COOLDOWN_H` (24) waits, logged once (`DEFLAKE WAIT`). Reap:
+`gate_holds_dispatch()`, never under the disk floor. One open deflaker per id: a new request waits
+while the previous run is running or its branch is queued and unmerged (`DEFLAKE WAIT`, logged once);
+after that, a request whose `ts` is at or before the claim's `ended` (the run's end, or when its branch
+landed) is dropped as evidence from before the fix (`DEFLAKE DROP`, logged once). Reap:
 commits ahead and a clean tree → an Opus review (told to FAIL any masking) → the merge queue;
 otherwise one line in `work-needs-attention.txt` — `DEFLAKE_NO_WORK`, `DEFLAKE_BLOCKED` (with the
 hand-back summary), `DEFLAKE_ERROR`, `DEFLAKE_UNCOMMITTED`, `DEFLAKE_REVIEW_FAIL`, or `DEFLAKE_GATE_FAIL`
-for a queued deflake branch that goes red (escalated to a person, not resumed).
+for a queued deflake branch that goes red (escalated to a person, not resumed). A CONFLICT line takes
+the ticket path's `conflict_skip` (a branch that merges cleanly now is re-queued); only where a ticket
+would get a fix run is it escalated, as `DEFLAKE_CONFLICT`.
 **The resource model is a fixed budget (user, 2026-09-22).** 28 cores: the merge gate is reserved
 14 (`WORK_GATE_RESERVE`), each worker is bounded to ~3 (`WORK_WORKER_CORES`) by limits its whole
 process tree inherits — `CARGO_BUILD_JOBS=2` and `NEXTEST_TEST_THREADS=2` in the environment, and a

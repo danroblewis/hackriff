@@ -146,7 +146,7 @@ def attention(ticket, branch, kind, detail=""):
     # coordinator's routine and stay in the file only.
     level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
              "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
-             "DEFLAKE_GATE_FAIL": "amber"}.get(kind)
+             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
     if level:
         try:
             subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
@@ -1021,7 +1021,7 @@ def handle_gate_failures(claims, dry):
         c = claims[tid]
         if line in c.get("gate_fails_seen", []) or c.get("state") != "queued":
             continue
-        if c.get("deflake"):
+        if c.get("deflake") and not is_conflict(line):
             # A deflake branch has no ticket to note and no worker brief a fix run could resume
             # against; its red goes to a person, and the ledger's next request re-dispatches it.
             c.setdefault("gate_fails_seen", []).append(line)
@@ -1042,6 +1042,13 @@ def handle_gate_failures(claims, dry):
                     enqueue(branch, c.get("wt"))
                     why = "merges cleanly now - re-queued"
                 log(f"CONFLICT {tid}: no fix run - {why} ({line[:80]})")
+                continue
+            if c.get("deflake"):
+                # Where a ticket would get a fix run: escalate instead (no ticket brief to resume), no slot spent.
+                c.setdefault("gate_fails_seen", []).append(line)
+                c["state"], c["ended"] = "conflict", time.time()
+                changed = True
+                attention(tid, branch, "DEFLAKE_CONFLICT", f"{line[:200]} - does not merge cleanly; not resumed automatically")
                 continue
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
@@ -1377,7 +1384,6 @@ def reap_worktrees(claims, dry):
 # reap, no result: block, no fix resume. One claim per slug, reused across runs: it remembers the
 # newest request it consumed (`request_ts`), the run number, and when the last run ended.
 DEFLAKE_PREFIX = "DEFLAKE:"
-DEFLAKE_COOLDOWN_H = float(os.environ.get("WORK_DEFLAKE_COOLDOWN_H", "24"))
 
 
 def deflake_slug(rid):
@@ -1409,12 +1415,12 @@ def read_deflake_requests(path=None):
     return out
 
 
-def pending_deflakes(claims, reqs, now=None):
+def pending_deflakes(claims, reqs):
     """([(slug, newest unconsumed request)] that may dispatch now, oldest waiting first; changed).
-    A slug whose deflaker is running waits; so does one whose last run ended under
-    DEFLAKE_COOLDOWN_H ago (its fix may not have landed yet, and a flake counted before it landed is
-    not evidence against it). Each wait is logged once per request, not once per tick."""
-    now = now or time.time()
+    A request waits while the slug's previous run is still open or its branch unmerged (claim
+    running - deflaker or review - or queued), logged once per request. Once that run has ended, a
+    request whose ts <= the claim's `ended` is DROPPED: its evidence predates the last fix (a merged
+    claim's `ended` is when release_stale_claims saw it land), and it is logged once and consumed."""
     by = {}
     for r in reqs:
         by.setdefault(r["slug"], []).append(r)
@@ -1426,21 +1432,25 @@ def pending_deflakes(claims, reqs, now=None):
         if not new:
             continue
         latest = max(new, key=lambda r: r["ts"])
-        why = None
-        if c and c.get("state") == "running":
-            why = f"its deflaker is still running ({c.get('kind')})"
-        elif c:
-            ended = c.get("ended") or c.get("started") or 0
-            if now - ended < DEFLAKE_COOLDOWN_H * 3600:
-                why = (f"its last deflaker ended {(now - ended) / 3600:.1f} h ago ({c.get('state')}); "
-                       f"waits until {DEFLAKE_COOLDOWN_H:.0f} h")
-        if why:
+        if c and c.get("state") in ("running", "queued"):
             if c.get("wait_logged") != latest["ts"]:
-                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} ({latest.get('count_7d')} in 7 d) - {why}")
+                what = f"its {c.get('kind')} run is still running" if c["state"] == "running" else f"its branch {c.get('branch')} is not merged yet"
+                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} ({latest.get('count_7d')} in 7 d) - {what}")
                 c["wait_logged"] = latest["ts"]
                 changed = True
             continue
-        ready.append((min(r["ts"] for r in new), slug, latest))
+        if c:
+            ended = c.get("ended") or c.get("started") or 0
+            stale = [r for r in new if r["ts"] <= ended]
+            if stale:
+                c["request_ts"] = max(r["ts"] for r in stale)
+                changed = True
+                log(f"DEFLAKE DROP {slug}: {len(stale)} request(s) for {latest['test']} predate the last run's end "
+                    f"({c.get('state')} at {time.strftime('%m-%d %H:%M', time.localtime(ended))}) - evidence from before the fix")
+                new = [r for r in new if r["ts"] > ended]
+                if not new:
+                    continue
+        ready.append((min(r["ts"] for r in new), slug, max(new, key=lambda r: r["ts"])))
     ready.sort(key=lambda x: x[0])
     return [(slug, r) for _, slug, r in ready], changed
 
