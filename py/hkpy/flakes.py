@@ -100,7 +100,9 @@ _FAILED = re.compile(r"^TRIAGE: (?:a test|a browser spec) FAILS alone")
 #: Explicitly NOT a gate red: the runner also re-runs the same specs on a rewound `main` to ask
 #: whether main itself is broken. Counting those would double every browser incident.
 _ON_MAIN = re.compile(r"^TRIAGE: (?:is main itself red\?|MAIN IS RED)")
-_BRANCH_INTRODUCED = re.compile(r"^TRIAGE: main is green on them")
+#: A batch red pinned on the batch: the old wording, or (since the runner's shared main_is_red, whose
+#: "main is green on them -> not main's" line comes BEFORE the verdict) the isolation line that follows.
+_BRANCH_INTRODUCED = re.compile(r"^TRIAGE: main is green on them -> the batch introduced it|^BULK gate FAILED -> rewound .*isolate")
 _SINGLE_GATE_FAILED = re.compile(r"^GATE FAILED (\S+)")
 #: The runner's verdict when a spec fails alone on a second branch within a day (run_main_side):
 #: main's defect, counted as a failed-alone red of the SPEC, never a branch defect.
@@ -171,7 +173,7 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
                 pending.failed_alone_tests = tuple(t for t in hit.group(1).replace(",", " ").split() if t)
             continue
         mon, day, hh, mm, ss, rest = m.groups()
-        if not rest.startswith("TRIAGE:") and not (last_failed is not None and _SINGLE_GATE_FAILED.match(rest)):
+        if not rest.startswith("TRIAGE:") and not (last_failed is not None and (_SINGLE_GATE_FAILED.match(rest) or _BRANCH_INTRODUCED.match(rest))):
             continue
         try:
             when = datetime(cur_year, int(mon), int(day), int(hh), int(mm), int(ss))

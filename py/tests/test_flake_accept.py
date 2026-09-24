@@ -303,14 +303,12 @@ def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path)
 def test_main_side_of_asks_the_ledger_with_the_triaged_names(tmp_path):
     calls = tmp_path / "calls"
 
-    def run(specs, filt, changed=False):
+    def run(specs, tests):
         script = f"""
 set -u
-REPO={tmp_path}; BULKMARK={tmp_path}/no-bulk
-git(){{ return {1 if changed else 0}; }}
+REPO={tmp_path}
 uv(){{ echo "uv $*" >> {calls}; echo "main-side x: task-t1"; }}
-TRIAGE_SPECS={specs!r}; TRIAGE_FILTER={filt!r}
-{_function("judge_changed")}
+TRIAGE_SPECS={specs!r}; TRIAGE_TESTS={tests!r}
 {_function("main_side_of")}
 main_side_of task-t9
 """
@@ -318,16 +316,17 @@ main_side_of task-t9
 
     assert run("canvas-journey.e2e.mjs", "") == "main-side x: task-t1\n"
     assert calls.read_text().splitlines()[-1].endswith("--main-side canvas-journey.e2e.mjs --branch task-t9")
-    run("", "test(a_b) | test(c_d)")
-    assert calls.read_text().splitlines()[-1].endswith("--main-side a_b c_d --branch task-t9")
+    run("", "hk-pipeline::sweep_residency a_sustained hk-api::x b_c")       # the ledger's full nextest names
+    assert calls.read_text().splitlines()[-1].endswith("--main-side hk-pipeline::sweep_residency a_sustained hk-api::x b_c --branch task-t9")
     n = len(calls.read_text().splitlines())
-    assert run("canvas-journey.e2e.mjs", "", changed=True) == "" and len(calls.read_text().splitlines()) == n   # judges itself: no
+    assert run("", "") == "" and len(calls.read_text().splitlines()) == n   # nothing triaged: not asked
 
 
-def test_a_single_branch_main_side_red_is_held_not_charged():
+def test_a_single_branch_main_side_red_is_held_once_per_tip_not_charged():
     text = RUNNER.read_text()
-    block = text[text.index('    local side; side=$(main_side_of "$branch")'):]
+    block = text[text.index('    local side=""; grep -qx "$branch $tip" "$S/main-side-seen"'):]
     block = block[:block.index("record_attempt")]
     assert block.splitlines()[1].strip() == 'if [ -n "$side" ]; then'                   # the hold is what the verdict gates
+    assert 'echo "$branch $tip" >> "$S/main-side-seen"' in block                     # the second time on this tip is charged
     assert '>> "$S/main-red-parked"' in block and "return 1" in block and "BLOCKED_ON_SPEC" in block
     assert '"main-side defect - deflaker/ticket needed"' in block

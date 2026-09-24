@@ -437,20 +437,24 @@ def test_solo_query_counts_only_what_the_log_covers(tmp_path):
 
 def test_a_spec_failing_alone_on_two_branches_in_a_day_is_main_side():
     """Supervisor for the user, 2026-09-24 14:55: canvas-journey failed alone on three merges, each
-    counted a branch defect, so nothing ever said 'this is main's'."""
-    text = log(
-        "[09-24 11:19:06] TRIAGE: browser specs red: app-trace.e2e.mjs - re-running them alone",
-        "[09-24 11:19:39] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
-        "[09-24 11:19:39] GATE FAILED task-t858 (attempt 1/2, tip 6bc3bd71) -> abort + flag for AI",
-        "[09-24 11:23:53] TRIAGE: browser specs red: app-trace.e2e.mjs - re-running them alone",
-        "[09-24 11:24:27] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
-        "[09-24 11:24:28] GATE FAILED task-t802 (attempt 1/2, tip 7c2ee1c3) -> abort + flag for AI",
-        "[09-24 13:48:40] TRIAGE: browser specs red: canvas-journey.e2e.mjs - re-running them alone",
-        "[09-24 13:49:40] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
-        "[09-24 13:56:33] TRIAGE: main is green on them -> the batch introduced it; isolating",
-    )
+    counted a branch defect, so nothing ever said 'this is main's'. The lines are the runner's real
+    order since main_is_red: its 'main is green on them -> not main's' comes BEFORE the verdict
+    (review: fixtures without it hid that blamed_on was always empty)."""
+    def single(t, branch, spec):
+        return (f"[09-24 {t}:06] TRIAGE: browser specs red: {spec} - re-running them alone",
+                f"[09-24 {t}:39] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+                f"[09-24 {t}:40] TRIAGE: is main itself red? re-running the browser specs alone on main: {spec}",
+                f"[09-24 {t}:50] TRIAGE: main is green on them -> not main's",
+                f"[09-24 {t}:51] GATE FAILED {branch} (attempt 1/2, tip 6bc3bd71) -> abort + flag for AI")
+    text = log(*single("11:19", "task-t858", "app-trace.e2e.mjs"), *single("11:24", "task-t802", "app-trace.e2e.mjs"),
+               "[09-24 13:48:40] TRIAGE: browser specs red: canvas-journey.e2e.mjs - re-running them alone",
+               "[09-24 13:49:40] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
+               "[09-24 13:49:41] TRIAGE: is main itself red? re-running the browser specs alone on main: canvas-journey.e2e.mjs",
+               "[09-24 13:56:33] TRIAGE: main is green on them -> not main's",
+               "[09-24 13:56:33] BULK gate FAILED -> rewound to 93e9ce27; isolate by merging each individually")
     incs = flakes.parse_runner_log(text, 2026)
     assert [i.blamed_on for i in incs] == ["task-t858", "task-t802", ""]      # a batch pins no single branch
+    assert all(i.branch_defect for i in incs)
     now = incs[1].ts + 600
     assert flakes.main_side(incs, ["app-trace.e2e.mjs"], "task-t803", now) == {"app-trace.e2e.mjs": ["task-t802", "task-t858"]}
     assert flakes.main_side(incs, ["app-trace.e2e.mjs"], "task-t858", now) == {"app-trace.e2e.mjs": ["task-t802"]}
@@ -462,7 +466,9 @@ def test_a_main_side_verdict_counts_against_the_spec_not_the_branch():
     text = log(
         "[09-24 15:00:00] TRIAGE: browser specs red: canvas-journey.e2e.mjs - re-running them alone",
         "[09-24 15:01:00] TRIAGE: a browser spec FAILS alone -> a real defect in this merge",
-        "[09-24 15:05:00] TRIAGE: MAIN-SIDE main-side canvas-journey.e2e.mjs: task-t890 -> task-t804 held, no attempt charged",
+        "[09-24 15:01:01] TRIAGE: is main itself red? re-running the browser specs alone on main: canvas-journey.e2e.mjs",
+        "[09-24 15:04:00] TRIAGE: main is green on them -> not main's",
+        "[09-24 15:05:00] TRIAGE: MAIN-SIDE canvas-journey.e2e.mjs: task-t890 -> task-t804 held, no attempt charged",
     )
     (inc,) = flakes.parse_runner_log(text, 2026)
     assert inc.outcome == flakes.FAILED_ALONE and not inc.branch_defect and inc.blamed_on == ""
