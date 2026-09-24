@@ -34,7 +34,9 @@ ICON = {"red": "🔴", "amber": "🟠", "green": "🟢", "info": "🔵"}
 #: arrives as a message. Its own dedupe (same key, DEDUPE_S), independent of Discord's, so an
 #: unconfigured or failing Discord never turns a looping condition into a message every tick.
 WAKE_PREFIXES = ("watchdog:", "mr:", "hold:", "timeout:", "contended-gate", "flake:")
-PM_SESSION = os.environ.get("HK_PM_SESSION") or "flow"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from roles import ROLE_SESSION, SESSION_ROLE  # noqa: E402  ops/roles.py, the one role->session map
+PM_SESSION = os.environ.get("HK_PM_SESSION") or ROLE_SESSION["pipeline-manager"]
 
 
 def _config() -> dict:
@@ -112,6 +114,16 @@ def _woke_recently(key: str) -> bool:
     return False
 
 
+def no_receiver(session: str, what: str) -> bool:
+    """A relay found its tmux session gone: say so, red, once per DEDUPE_S per session. Incident
+    2026-09-24 04:07: the role sessions were dead for 5.5 h and four "needs a person" alarms were
+    typed at nothing - the relays returned quietly, so nobody learnt the receivers were gone."""
+    role = SESSION_ROLE.get(session, "?")
+    return notify("red", f"no receiver for alerts: tmux '{session}' ({role}) is not running",
+                  f"This reached no one: {' '.join(what.split())[:600]}\nRelaunch: ops/launch.sh {role}",
+                  key=f"noreceiver:{session}")
+
+
 def wake_pipeline_manager(level: str, title: str, body: str, key: str, run=subprocess.run) -> bool:
     """Type a pipeline alarm into the pipeline manager's tmux session. True when it was sent.
     Never raises; a missing session (the role is not running) is simply not woken."""
@@ -121,6 +133,7 @@ def wake_pipeline_manager(level: str, title: str, body: str, key: str, run=subpr
     msg = f"[pipeline alarm {level}] {one} (key {key}, via ops/alert.py) - triage it now, then resume your tick."
     try:
         if run(["tmux", "has-session", "-t", PM_SESSION], capture_output=True, timeout=5).returncode != 0:
+            no_receiver(PM_SESSION, msg)
             return False
         run(["tmux", "send-keys", "-t", PM_SESSION, "-l", msg], capture_output=True, timeout=5)
         run(["tmux", "send-keys", "-t", PM_SESSION, "Enter"], capture_output=True, timeout=5)
@@ -130,6 +143,9 @@ def wake_pipeline_manager(level: str, title: str, body: str, key: str, run=subpr
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["--no-receiver"] and len(argv) == 3:      # a shell relay found its session gone
+        no_receiver(argv[1], argv[2])
+        return 0
     key = None
     if "--key" in argv:
         i = argv.index("--key"); key = argv[i + 1]; argv = argv[:i] + argv[i + 2:]
