@@ -17046,6 +17046,27 @@ tasks:
       Filed 2026-09-20 from T-544's measurements. Cheap, self-contained, and independent of whether
       the BART target is ever reachable.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      {"ticket": "T-560", "outcome": "done",
+       "summary": "Merged main (T-628/T-272/T-308/T-849) into task-t560; one conflict in trunk.rs (grid_fit doc) resolved to main's text. T-546/T-628 on main already fit the 800 MHz grid per pass and resolve the absolute alias, so the raster/candidacy half of the ticket was covered; what was missing was (a) recording the clock as C05 calibration state and (b) a correct ppm to record. WIP evaluation: KEPT CalibrationMethod::LmrRaster and Repository::latest_calibration_state_for_device (+ its repo test; added rowid tiebreak). REDONE: the WIP's receiver_grid cached the modulo-raster grid-fit phase as ppm (a -8.2 kHz clock fits as +4.3 kHz so it stored ~+5 ppm), that phase also includes where the tuned centre sits against the grid, and the cached value replaced the fit at every later tune forever - wrong at any other frequency; removed. DROPPED the CalibrationState.confidence model field and its hk-dsp edits. FIX: (1) hk_detect::trunk::clock_offset_mod_grid removes the tuned centre's own phase against the channel grid (from a granted absolute frequency, not a lookup) before the alias search; T-628 assumed an on-channel tune, and 852.456 MHz (the docs/19 7.6a capture) is 6 kHz off the raster, so its alias search never offered the true clock. (2) record_receiver_clock writes a resolved alias as CalibrationState {method lmr-raster, device_id, measured_at, supersedes}, ppm = -offset/f (model convention: positive = oscillator fast, so emissions 9.6 ppm low = +9.6 ppm), once per device, re-versioned only when it moves by more than RASTER_TOLERANCE_HZ. docs/07 2.7 updated. RED/GREEN: pipeline test a_minus_9_6_ppm_receiver_off_a_channel... goes red with the phase correction reverted (true clock -8184 Hz not among aliases [-1682, 10818, -14182]); e2e signal_087 (H) goes red with the record call removed ('THE RECEIVER CLOCK WAS NOT RECORDED') and green with it: shifted run records +9.57 ppm, one version; clean run records ~0.",
+       "commits": ["d02a9cb6b79a9c5eff5a99a1aa1377cfe0cd7d95"],
+       "files": ["crates/hk-detect/src/trunk/raster.rs", "crates/hk-detect/src/trunk/mod.rs", "crates/hk-model/src/calibration.rs", "crates/hk-model/src/repo/measure.rs", "crates/hk-model/src/repo/tests.rs", "crates/hk-pipeline/src/chains/trunk.rs", "tests/e2e/tests/acceptance/signal_087.rs", "docs/07-data-model.md"],
+       "tests": [
+        {"cmd": "just test-crate hk-detect", "exit": 0, "summary": "223 passed, 1 skipped"},
+        {"cmd": "just test-crate hk-model", "exit": 0, "summary": "362 passed"},
+        {"cmd": "cargo nextest run -p hk-pipeline -E 'test(/trunk/)' --test-threads 2", "exit": 0, "summary": "16 passed"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_m4)' --test-threads 2", "exit": 0, "summary": "10 passed"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto) & test(/signal_087::/)' --test-threads 2 (HK_E2E_REQUIRE_SYNTH=1)", "exit": 0, "summary": "9 passed incl. new (H)"},
+        {"cmd": "cargo nextest run -p hk-e2e -E 'binary(acceptance_mauto)' --test-threads 2", "exit": 100, "summary": "22 passed, 1 failed: mauto_corpus::manifest_declarations_cite_open_tickets_and_none_is_a_catch_all - pre-existing board-state failure (cites T-623 which is now done), independent of this diff"}
+       ],
+       "precheck": {"exit": 0},
+       "use_cases": ["SIGNAL-087"],
+       "observed_but_not_chased": [
+        "tests/e2e mauto_corpus::manifest_declarations_cite_open_tickets_and_none_is_a_catch_all fails on current main: the ofdm declaration cites T-623, whose board status is now done - needs a re-point to an open ticket or Ticket::Unfiled.",
+        "The stored LmrRaster calibration is recorded but not yet consumed: the trunk hunt still re-fits the grid per pass (it must, for the tune phase) and does not use the stored ppm to settle a Tied/NothingOccupied alias or to seed it; nor is calibration_state_ref set on subsequent Provenance. Both are follow-ups.",
+        "family.rs raster_fit (the off-raster flag in ranked explanations) does not subtract the device's recorded clock; only the US FM raster exists there today, where 9.6 ppm is ~1 kHz against a 20 kHz tolerance, so it is harmless now but would matter the day an 800 MHz LMR raster is added to CHANNEL_RASTERS.",
+        "ReceiverFit.ppm in the EmitterSynthesis row is still 1e6*grid_offset/tune_centre, i.e. the modulo-raster phase including the tune's grid phase, not a clock; the alias.ppm next to it is the real figure (opposite sign convention to CalibrationState.ppm)."
+       ]}
   - id: T-544
     milestone: MAUTO
     title: "BART 851 MHz, phase 1: research the system and capture real IQ as a SigMF fixture with HIDDEN ground truth"
