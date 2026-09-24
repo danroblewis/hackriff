@@ -140,10 +140,19 @@ export function clipToUnoccluded(pane, canvasRect, unocc) {
  */
 export async function waitWhileWorking(page, read, done, {
   everyMs = 400, stallMs = 12000, timeoutMs = 180000, busy = (u) => u.includes("/api/tiles"),
+  openIsWork = false,
 } = {}) {
   const t0 = Date.now();
   const wire = () => page.requests.filter((r) => busy(r.url))
     .reduce((n, r) => n + 1 + (r.endedMs !== null ? 1 : 0), 0);
+  // **A request still on the wire is the page working** — what the paragraph above says, and what
+  // the start/end count alone does not see: one tile the route takes longer than `stallMs` to
+  // answer changes neither the report nor the count, and used to read as a stall. Opt-in, so the
+  // callers written against the count keep the bound they were measured with (live-edge's wedge
+  // probe times "stopped being asked", which an open request must not extend). A request that is
+  // never answered is still bounded by `timeoutMs`; a pane that is STUCK with nothing on the wire —
+  // T-523's wedge — still stalls exactly as before.
+  const open = () => page.requests.some((r) => busy(r.url) && r.endedMs === null);
   let value = await read(), lastSeen = JSON.stringify(value), lastWire = wire(), movedAt = Date.now();
   for (;;) {
     if (done(value)) return { ok: true, value, ms: Date.now() - t0, stalledMs: 0 };
@@ -153,7 +162,7 @@ export async function waitWhileWorking(page, read, done, {
     await new Promise((r) => setTimeout(r, everyMs));
     value = await read();
     const seen = JSON.stringify(value), w = wire();
-    if (seen !== lastSeen || w !== lastWire) movedAt = Date.now();
+    if (seen !== lastSeen || w !== lastWire || (openIsWork && open())) movedAt = Date.now();
     lastSeen = seen; lastWire = w;
   }
 }
