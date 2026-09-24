@@ -717,3 +717,56 @@ def test_board_sync_runs_under_one_lock(tmp_path, monkeypatch):
         return "synced"
     monkeypatch.setattr(R, "_sync_board", inner)
     assert R.sync_board({}, False) == "synced" and held == [True]
+
+
+
+# --------------------------------------------------------------------- reaping stuck worktrees (2026-09-24)
+def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_quietly(tmp_path, monkeypatch):
+    """t356 (0 commits, claim blocked, only an untracked .githooks/) held 31 GB and failed
+    `worktree remove` 1,499 times; a worktree whose directory was gone failed 1,730 times."""
+    import os
+    import shutil
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    g = lambda *a, cwd=repo: sp.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                    check=True, capture_output=True, text=True)
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    wts = repo / ".claude" / "worktrees"
+    for name in ("t356", "t900", "tgone"):
+        g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
+    (wts / "t356" / ".githooks").mkdir()
+    (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
+    (wts / "t356" / "target").mkdir()
+    (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
+    shutil.rmtree(wts / "tgone")                                   # registered, directory gone
+    old = 1_000_000_000
+    for name in ("t356", "t900"):
+        os.utime(wts / name, (old, old))
+
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: real_sh(args, cwd=cwd or str(repo), **k))
+    monkeypatch.setattr(R, "REPO", str(repo))
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "no-bulk"))
+    monkeypatch.setattr(R, "REAP_AFTER_MIN", 0)
+    monkeypatch.setattr(R, "_REAP_SAID", set())
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")}}
+
+    R.reap_worktrees(claims, dry=False)
+    assert not (wts / "t356").exists()                             # only build output: reaped
+    assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
+    assert "tgone" not in g("worktree", "list").stdout             # pruned
+    kept = [m for m in said if "kept - untracked" in m]
+    assert len(kept) == 1 and "notes-i-never-committed.md" in kept[0]
+    R.reap_worktrees(claims, dry=False)
+    assert len([m for m in said if "kept - untracked" in m]) == 1  # said once, not every tick
+    assert not any("fatal" in m for m in said)
+
+
+def test_only_regenerable_is_strict():
+    assert R.only_regenerable([".githooks/", "target/"])
+    assert not R.only_regenerable([".githooks/", "src/new.rs"])
+    assert not R.only_regenerable([])

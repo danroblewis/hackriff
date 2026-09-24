@@ -112,8 +112,12 @@ reconcile *args:
 #   just task note T-nnn (--from|--text)     append to the `notes:` block
 #   just task new --title T --milestone M [...]   file a ticket, allocating its id
 #   just task validate                    strict-parse + the board's own invariants
+# `[positional-arguments]` + "$@": the args reach the CLI as separate, quoted words, so a note or
+# title containing ( ) ; & or quotes works (unquoted {{args}} was spliced into the shell line and
+# broke four times on 2026-09-23 on parentheses in `--text`).
+[positional-arguments]
 task *args:
-    uv run --locked --project py python -m hkpy.tasks {{args}}
+    uv run --locked --project py python -m hkpy.tasks "$@"
 
 # IS IT SAFE TO LAUNCH ANOTHER BUILDING AGENT (T-559)? CLAUDE.md's worktree-launch cap is "at
 # most 4 Rust-building agents" - but a count-the-cargo-processes check misses the `hk serve`

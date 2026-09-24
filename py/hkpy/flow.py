@@ -509,6 +509,16 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
             f"\nflake accepted {o['_t'].strftime('%H:%M')}: {o.get('tests')} in `just {o.get('suite')}` "
             f"({o.get('batch')}) - passed alone twice, ~{round(float(o.get('saved_s') or 0) / 60)} min saved"
             for o in events)
+        # ...and what landed since the last one, as release notes (user, 2026-09-23)
+        since = last or now.timestamp() - DIGEST_EVERY_S
+        landed = [o for o in _jsonl(os.path.join(ops, "landed.jsonl")) if float(o.get("merge_ts") or 0) > since]
+        if landed:
+            try:
+                from hkpy import landnotes
+                body += "\n\n" + landnotes.notes(f"landed since last digest: {len(landed)}",
+                                                  [str(o.get("branch")) for o in landed], ops=ops, limit=1900 - len(body))
+            except Exception:
+                body += f"\n\nlanded since last digest: {len(landed)}"
         send("green", "pipeline digest", body, "flow:digest")
         posted.append("flow:digest")
     return posted

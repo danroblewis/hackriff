@@ -27,6 +27,29 @@ pub const fn default_cap_bits(stage: Stage) -> Option<f32> {
 ///
 /// A floor is a bits → raw test and so is subject to §13.2's refusal: it is snapped **up** to an
 /// expressible level, or the cell is `floor_unreachable` ([`crate::calibration::Threshold`]).
+///
+/// **T-660's §13.5 falsifier-2 measurement, reported (not silently tuned) here.** No hk-synth
+/// engine and no docs/22 acceptance corpus exist yet to run the search itself (docs/22 §9/§11),
+/// so this is an analytical worked example from docs/21 §2's *already-measured* per-metric
+/// realised bits at a 6-bit claim (worst over Null B1/B2 — wrong symbol rate / wrong centre —
+/// `realised = 6 − δ`), combined by §13.1's rule with the M1 FSK ladder's declared groups:
+///
+/// | Stage | Group(s) | `b_j` under the old sum | `b_j` under §13.1's max | Clears `floor_j = 6`? |
+/// |---|---|---|---|---|
+/// | S2 | `soft_quality{snr,evm,timing_var}` + `eye{eye_open}` (admissible-capped to 3.0, §13.2) | 17.1 | 8.2 | **yes** |
+/// | S3 | `bit_shape{line_violations,bit_structure}` — the **only** declared S3 group | 8.8 | 4.5 | **no** |
+///
+/// **S2 keeps `floor_j = 6` at these levels; S3 does not** — S3 has only one declared group, so
+/// its `b_j` is capped at whichever single metric realises more, and neither S3 metric clears 6
+/// bits alone at this realistic (not best-case) level. This is exactly §13.1's own prediction
+/// ("S2/S3 lose roughly 6–12 bits of headroom per stage... some true-but-weak signals will prune
+/// where they previously survived"), now with the arithmetic against docs/21's numbers. Per
+/// §13.5 item 2's rule ("the answer is a restated floor... never a return to the sum"): **a
+/// future block-version bump to `hk-synth`'s stage-cap table should consider lowering S3's floor
+/// to roughly 4–5 bits, restated against this measurement**, not this ticket's job to decide —
+/// this is the falsifier's report, not the amendment. §1.3's "pruning is never total" means an
+/// S3 node that misses the floor still survives as a partial result, so the cost is search
+/// recall, not silent loss (§13.1's own §1's cost list, item 1).
 pub const fn default_floor_bits(stage: Stage) -> Option<f32> {
     match stage {
         Stage::S0 | Stage::S1 | Stage::S2 | Stage::S3 => Some(6.0),

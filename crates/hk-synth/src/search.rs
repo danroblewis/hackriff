@@ -1,13 +1,25 @@
 //! Search budgets, profiles, stop reasons, job states and the ML slot (ADR-0015 §3.3, §5.2).
 //!
-//! **The engine is M-3's**: staged beam search with prefix memoisation, floor and
-//! optimistic-bound pruning, the `synth` chain kind below real-time chains, throttling on
-//! `lost_samples`, the power policy, and — per ADR-0021 §3 — the `TraceSink` at every
-//! frontier-removal site. This module fixes the vocabulary it runs under.
+//! The engine that runs under this vocabulary is [`crate::engine`] (M-3, T-854); admission and
+//! the power/throttle inputs are [`crate::admission`].
 //!
-//! The profile numbers are ADR-0015 §3.3's **unverified guesses**, to be measured in M-3 on the
-//! Mac and in M-13 on the Jetson (T-552 owns the measurement). docs/20 §U2 recommends (not yet
-//! answered by the user) that auto-queued jobs run at `quick` only, on mains only.
+//! # The budget unit (T-854, settling ADR-0015 §16.8 item 2 per docs/27 §6)
+//!
+//! T-552 measured (docs/27 §3–§4) that a proposal-operator call costs 0.3–2.4 s while a DSP
+//! re-evaluation of one cached stage costs ≤ 5 ms, and that the per-operation cost of
+//! `hk_estimate::assist` is near machine-independent (1.2–1.6 ns/op). A wall-clock budget
+//! therefore buys wildly different amounts of search. So **how much search happens is budgeted
+//! by count** — [`SynthBudget::max_proposal_calls`], a shared [`SynthBudget::max_assist_ops`]
+//! pool handed to each call as an `assist::Budget{max_ops}`, and
+//! [`SynthBudget::max_evaluations`] — and `wall_s` / `cpu_s` are **backstops** for the API and
+//! power story, not the unit. A job bounded only by counts is deterministic (ADR-0021 §5);
+//! one that stops on a wall or CPU cap is not, and says so.
+//!
+//! The counts are first guesses sized to fit inside the §3.3 wall backstops at docs/27's
+//! measured rates (≈ 1.5 ns/assist op, ≤ 5 ms per cached-stage evaluation); M-13 re-baselines
+//! them on the Jetson. `quick`'s six proposal calls are exactly docs/27 §4's "two open skeletons
+//! × sync + codes + fields" minimum: no margin for a wrong first guess, which is docs/27 §6
+//! item 3's finding, kept visible rather than hidden.
 
 use std::collections::BTreeMap;
 
@@ -32,37 +44,52 @@ pub enum Profile {
 pub const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Per-job caps (ADR-0015 §3.3, `SynthBudget { wall_s, cpu_s, max_evaluations, max_iq_samples,
-/// max_cache_bytes, threads }`). A `None` count cap means the profile does not bound it; wall and
-/// CPU always do.
+/// max_cache_bytes, threads }`, plus T-854's count caps for proposal operators, docs/27 §6).
+///
+/// The count caps decide how much search happens; wall and CPU are backstops (module docs).
+/// A `None` count cap means the budget does not bound it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SynthBudget {
-    /// Wall-clock cap, s.
+    /// Wall-clock backstop, s. Hitting it makes the job non-replayable (ADR-0021 §5).
     pub wall_s: f64,
-    /// CPU cap, s.
+    /// CPU backstop, s (busy time summed over search threads).
     pub cpu_s: f64,
-    /// Evaluation cap (ADR-0021 §8.4's acceptance jobs set one for determinism).
+    /// Evaluation cap: one evaluation is one stage run over one window (a grid point, a hold-out
+    /// re-run, or an evicted prefix recomputed). ADR-0021 §8.4's acceptance jobs set it for
+    /// determinism.
     pub max_evaluations: Option<u64>,
-    /// IQ-sample cap for acquisition.
+    /// Proposal-operator calls (`assist.sync` / `assist.codes` / `assist.fields`), the expensive,
+    /// variable part (docs/27 §4).
+    #[serde(default)]
+    pub max_proposal_calls: Option<u64>,
+    /// Shared `hk_estimate::assist` word-operation pool across every proposal call. Each call is
+    /// granted a fair share of what remains, never more than the assist crate's own default cap.
+    #[serde(default)]
+    pub max_assist_ops: Option<u64>,
+    /// IQ-sample cap for acquisition (M-6; the engine does not read IQ).
     pub max_iq_samples: Option<u64>,
-    /// Memo-cache cap, bytes.
+    /// Memo-cache cap, bytes. Not a stop: the least-recently-used stage output is evicted and
+    /// recomputed (charged as evaluations) if needed again.
     pub max_cache_bytes: u64,
-    /// Search threads (halved when throttled or on battery).
+    /// Search threads (halved when throttled or on battery, never below 1).
     pub threads: u32,
 }
 
 impl Profile {
-    /// The profile's default budget (§3.3 table).
+    /// The profile's default budget (§3.3 table for wall/CPU/threads; T-854's count caps).
     pub const fn budget(self) -> SynthBudget {
-        let (wall_s, cpu_s, threads) = match self {
-            Profile::Quick => (3.0, 3.0, 1),
-            Profile::Standard => (20.0, 40.0, 2),
-            Profile::Deep => (120.0, 400.0, 4),
+        let (wall_s, cpu_s, threads, evals, calls, ops) = match self {
+            Profile::Quick => (3.0, 3.0, 1, 128, 6, 1_000_000_000),
+            Profile::Standard => (20.0, 40.0, 2, 2_048, 40, 8_000_000_000),
+            Profile::Deep => (120.0, 400.0, 4, 20_000, 240, 50_000_000_000),
         };
         SynthBudget {
             wall_s,
             cpu_s,
-            max_evaluations: None,
+            max_evaluations: Some(evals),
+            max_proposal_calls: Some(calls),
+            max_assist_ops: Some(ops),
             max_iq_samples: None,
             max_cache_bytes: DEFAULT_MAX_CACHE_BYTES,
             threads,
@@ -173,6 +200,18 @@ mod tests {
         let d = Profile::Deep.budget();
         assert_eq!((d.wall_s, d.cpu_s, d.threads), (120.0, 400.0, 4));
         assert_eq!(d.max_cache_bytes, DEFAULT_MAX_CACHE_BYTES);
+        // T-854: the count caps are the unit (docs/27 §6) and grow with the profile.
+        for (a, b) in [(q, s), (s, d)] {
+            assert!(a.max_evaluations < b.max_evaluations);
+            assert!(a.max_proposal_calls < b.max_proposal_calls);
+            assert!(a.max_assist_ops < b.max_assist_ops);
+        }
+        // `quick` affords docs/27 §4's minimum: two open skeletons × sync + codes + fields.
+        assert!(q.max_proposal_calls.unwrap() >= 6);
+        // The shared op pool fits under the wall backstop at docs/27 §3's ≈1.5 ns/op.
+        for b in [q, s, d] {
+            assert!(b.max_assist_ops.unwrap() as f64 * 1.5e-9 <= b.wall_s);
+        }
         assert_eq!(serde_json::to_value(Profile::Deep).unwrap(), "deep");
     }
 

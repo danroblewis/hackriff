@@ -1994,7 +1994,13 @@ def flow_panel_cached(ops, max_age=30.0):
     with _FLOW_LOCK:
         if _FLOW_CACHE["data"] is not None and time.time() - _FLOW_CACHE["at"] < max_age:
             return _FLOW_CACHE["data"]
-        data = build_flow_panel(ops)
+        # built in a child process (_child_json): the log parse's heap goes when the child exits
+        data = _child_json(f"""
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(OPSDIR, "monitor.py")!r})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print(json.dumps(m.build_flow_panel({ops!r})))
+""")
         _FLOW_CACHE.update(at=time.time(), data=data)
         return data
 
@@ -2927,9 +2933,54 @@ load(); setInterval(load,30000);
 let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
 </script></body></html>"""
 
+def _child_json(code, timeout=90):
+    """Run a heavy build in a short-lived child Python and return its JSON. The dashboard is a
+    long-lived process, and each board parse (1.9 MB YAML) or flow build (merge-runner.log, ~500k
+    lines) left ~6 MB of heap it never returned: measured 2026-09-24, RSS 470 -> 667 MB in 19 min,
+    the watchdog's 1536 MB ceiling in ~1.5 h (the 2026-09-22 dashboard reached 2.1 GB and stopped
+    answering). A child's memory goes back to the OS when it exits. A subprocess, not a fork: this
+    is a threaded server, and a forked child can deadlock on a lock another thread held."""
+    import sys as _sys
+    out = subprocess.run([_sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=timeout,
+                         env=dict(os.environ, PYTHONPATH=os.path.join(REPO, "py"), HACKRIFF_OPS=SCRATCH))
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or "child failed").strip().splitlines()[-1][:300])
+    return json.loads(out.stdout)
+
+
+_TASKORDER = {"t": 0.0, "v": None}
+
+
+def taskorder_cached(max_age=60.0):
+    """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
+    gates - never the provisional tip), built in a child process (_child_json) and cached 60 s."""
+    if _TASKORDER["v"] is not None and time.time() - _TASKORDER["t"] < max_age:
+        return _TASKORDER["v"]
+    v = _child_json(f"""
+import json
+from hkpy import taskorder
+tasks, ref = taskorder.committed_tasks({REPO!r}, {SCRATCH!r})
+a = taskorder.analyse(tasks)
+keep = ("id", "title", "status", "milestone", "depth", "gate", "unblocks", "value", "downstream_milestones", "blocked")
+print(json.dumps({{"board": ref, "formula": a["formula"], "open": a["open"], "rows": [{{k: r[k] for k in keep}} for r in a["rows"]],
+                  "groups": a["groups"], "frontier": a["frontier"], "cycle": a["cycle"], "self_deps": a["self_deps"]}}))
+""")
+    _TASKORDER.update(t=time.time(), v=v)
+    return v
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
+        # when they land, over main's committed board - the panel on /worklog beside the role logs.
+        if self.path.startswith("/taskorder.json"):
+            try:
+                body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
         if self.path.startswith("/worklog.json"):
             try:

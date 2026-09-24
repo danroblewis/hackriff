@@ -92,7 +92,7 @@ This ADR specifies the two halves together because they are one thing: **the tra
 
 ### 2.2 The `outcome` enum (closed; adding a variant is a contract change)
 
-**Tried** — the node was evaluated, `measured` is non-null, `tried: true`:
+**Tried** — the node was evaluated, `measured` is non-null, `tried: true`. **Exception (ADR-0015 §16.2 C3, accepted 2026-09-23):** a `memoised` node may carry no measurement (§1 rule 3); `TraceNode::check` requires `measured` on every tried node except `memoised`.
 
 | Outcome | Meaning | `outcome_detail` |
 |---|---|---|
