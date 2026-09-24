@@ -54,6 +54,7 @@ try:
 except Exception:                                  # never let the alert path stop the watchdog
     def notify(level, title, body="", key=None):   # type: ignore[misc]
         return False
+from roles import LIVE_ROLES, ROLE_SESSION        # ops/roles.py, the one role->session map
 
 S = os.environ.get("HACKRIFF_OPS") or os.path.expanduser("~/.hackriff-ops")
 STATE = os.path.join(S, "watchdog.json")
@@ -72,6 +73,11 @@ DASH_CPU = 200.0            # (d) the dashboard's own ceiling
 DASH_RSS_MB = 1536.0
 DASH_FOR = 120
 LOAD_FOR = 300              # (e) load over budget for five minutes
+LIVENESS_EVERY = 60         # (f) check the role sessions at most once a minute ...
+LIVENESS_MISSES = 2         #     ... relaunch after this many consecutive missed checks ...
+RELAUNCH_GAP = 600          #     ... and never the same role twice inside ten minutes
+LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "launch.sh")
+CLAUDE_RE = re.compile(r"(\S*/)?claude(\s|$)")
 
 #: Core budget per owner, from ops/README.md: the gate's reserve is 14, a worker is bounded to 3
 #: by cpulimit, a role session to `ROLE_CPU_PCT` (800 = 8). `sccache` gets the build reserve it
@@ -460,6 +466,107 @@ def evaluate(rows: list[dict], agg: dict, unowned: list[dict], load1: float,
     return alarms, kills
 
 
+# ---------------------------------------------------------------- role-session liveness
+# WHY (2026-09-24 04:07): a supervisor `pkill` took the coordinator (`dev`) and the pipeline
+# manager (`flow`) down with five workers, and nothing noticed for five and a half hours - every
+# runner kept going, and the alerts they relay were typed into sessions that no longer existed.
+def _tmux(*args: str) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+
+
+def session_missing(session: str, rows: list[dict]) -> str | None:
+    """"" when `session` exists and runs claude; what is missing when it does not; None when we
+    cannot tell. `=` makes the target exact: tmux prefix-matches `-t dev` against any `dev…`.
+    ops/launch.sh `exec`s claude into the pane, so the pane pid is normally claude itself, but a
+    claude below it counts too. A `remain-on-exit` pane whose claude has exited has no claude."""
+    r = _tmux("has-session", "-t", f"={session}")
+    if r is None:
+        return None
+    if r.returncode != 0:
+        return "no tmux session"
+    r = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_pid}")
+    if r is None or r.returncode != 0:
+        return None                                  # a failed query is not a dead session
+    kids: dict[int, list[dict]] = {}
+    for row in rows:
+        kids.setdefault(row["ppid"], []).append(row)
+    todo = [row for row in rows if str(row["pid"]) in r.stdout.split()]
+    seen: set[int] = set()
+    while todo:
+        row = todo.pop()
+        if row["pid"] in seen:
+            continue
+        seen.add(row["pid"])
+        if CLAUDE_RE.match(row["cmd"]):
+            return ""
+        todo.extend(kids.get(row["pid"], []))
+    return "session exists, no claude process in its pane"
+
+
+def relaunch(role: str, session: str, kill_first: bool, dry: bool) -> str:
+    """Kill a claude-less session (ops/launch.sh refuses an existing one), then launch the role
+    in its own process group. Returns what happened, for the alert and the log."""
+    steps = [f"tmux kill-session -t ={session}"] if kill_first else []
+    steps.append(f"{LAUNCH} {role}")
+    if dry:
+        logline(f"DRY-RUN would relaunch {role}: " + " && ".join(steps))
+        return "dry-run: would run " + " && ".join(steps)
+    if kill_first:
+        _tmux("kill-session", "-t", f"={session}")
+    try:
+        p = subprocess.run([LAUNCH, role], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+        rc, out = p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as e:
+        rc, out = -1, f"{type(e).__name__}: {e}"
+    tail = " | ".join(out.splitlines()[-4:])
+    logline(f"RELAUNCH {role} session={session} killed_first={kill_first} rc={rc} -- {tail[:600]}")
+    return f"ran {' && '.join(steps)}: exit {rc}\n{tail}"
+
+
+def liveness(rows: list[dict], since: dict, now: float, dry: bool = False) -> list[dict]:
+    """(f) Red for each LIVE_ROLES session found dead; on the LIVENESS_MISSES-th consecutive miss,
+    relaunch it - at most once per RELAUNCH_GAP, so a launch that dies at once alerts instead of
+    looping. Counts live in `since`, like the rule clocks, so they reset with the watchdog."""
+    if not rows or now - since.get("liveness:at", -1e18) < LIVENESS_EVERY:
+        return []                                    # no ps table is "unknown", never "dead"
+    since["liveness:at"] = now
+    alarms: list[dict] = []
+    for role in LIVE_ROLES:
+        session = ROLE_SESSION[role]
+        missing = session_missing(session, rows)
+        mk, lk = f"liveness:miss:{role}", f"liveness:launched:{role}"
+        if missing is None:
+            continue
+        if not missing:
+            since.pop(mk, None)
+            continue
+        n = since[mk] = since.get(mk, 0) + 1
+        a = {"rule": "liveness", "level": "red", "key": f"watchdog:liveness:{role}",
+             "title": f"{role} is dead: tmux session '{session}': {missing}",
+             "body": f"Missed check {n} of {LIVENESS_MISSES} before a relaunch."}
+        alarms.append(a)
+        if n < LIVENESS_MISSES:
+            continue
+        ago = now - since.get(lk, -1e18)
+        if ago < RELAUNCH_GAP:
+            a["body"] += (f" Not relaunching: relaunched {ago:.0f}s ago (at most once per "
+                          f"{RELAUNCH_GAP}s). Relaunch by hand: ops/launch.sh {role}")
+            continue
+        kill_first = missing != "no tmux session"
+        what = relaunch(role, session, kill_first, dry)
+        since[lk] = now
+        since.pop(mk, None)
+        alarms.append({"rule": "relaunch", "level": "red", "key": f"watchdog:relaunch:{role}",
+                       "title": f"relaunched {role} in tmux session '{session}'"
+                                + (" (killed the claude-less session first)" if kill_first else ""),
+                       "body": what})
+    return alarms
+
+
 # ---------------------------------------------------------------- tick
 def logline(msg: str) -> None:
     try:
@@ -502,6 +609,7 @@ def tick(since: dict, dry: bool = False) -> dict:
     except Exception:
         load1 = 0.0
     alarms, kills = evaluate(rows, agg, unowned, load1, since, time.time(), claims)
+    alarms += liveness(rows, since, time.time(), dry)
     killed = [] if dry else kill_now(kills)
     snap = {
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
