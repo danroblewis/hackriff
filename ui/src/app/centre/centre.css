@@ -105,3 +105,21 @@
   font: 10.5px var(--mono); color: var(--muted); padding: 4px 12px;
   overflow-wrap: anywhere;
 }
+
+/* T-805 (MAP-05): the HUD axes' labels. Band 2 — screen-space text over the canvas — but every label
+   is placed per render frame by `surface/hud.ts` from the same ruler the ticks (band 0, on the canvas)
+   were stroked from, so a label cannot sit anywhere but on its tick. `pointer-events: none` so a
+   label never takes a pan from the surface; a text shadow instead of a backing wash, because a wash
+   would tint the measurement under it. Fades with the floating chrome (`chrome-idle`, docs/23 §10.2). */
+.sf-hud { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; transition: opacity .4s; }
+.sf-hud:is(body.chrome-idle *) { opacity: .45; }
+.sf-hud-label {
+  position: absolute; left: 0; top: 0; white-space: nowrap; font: 11px var(--mono); line-height: 1.2;
+  color: #d5dee2; text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 0 1px rgba(0, 0, 0, 1);
+}
+.sf-hud-label span { color: #8595a0; margin-left: 6px; }
+.sf-hud-label span:empty { display: none; }
+/* Frequency: centred on its tick, sitting just above the pane's bottom edge (the ticks rise from it). */
+.sf-hud-label.freq { margin-top: -30px; translate: -50% 0; }
+/* Time: just right of the tick, vertically centred on it. */
+.sf-hud-label.time { margin-left: 14px; translate: 0 -50%; }

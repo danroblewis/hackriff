@@ -26,7 +26,7 @@
 //! thread's writer with no second queue and no runtime; consumer counts are single digits on a
 //! handheld; idle connections cost no CPU.
 
-pub mod analyze; // T-190
+pub mod analyze; // T-190, T-859
 pub mod annotations; // T-816 MAP-16
 pub mod assist;
 pub mod auth;
@@ -76,6 +76,9 @@ pub mod trunking; // T-273
 pub use hk_stream as stream;
 pub use tcp::{StreamServer, StreamServerConfig, StreamServerStats};
 
+pub use analyze::{
+    AnalyzeControl, AnalyzeFailure, AnalyzeStart, AnalyzeTemplates, AnalyzeTraceQuery,
+};
 pub use auth::{Token, default_token_path};
 pub use bridge::{FINISHED_LINGER, MAX_STREAMS, StreamInfo, StreamRegistry};
 pub use control::{

@@ -124,6 +124,38 @@ pub struct RetuneObservation {
     pub f_center_hz: f64,
     /// Measured occupied bandwidth, Hz. Widens the grouping tolerance only; `0.0` is fine.
     pub bandwidth_hz: f64,
+    /// Width of the instantaneous window this line was measured in, Hz — the complex sample rate
+    /// (`provenance.tune.sample_rate_hz`), so the window is `lo_hz ± span_hz / 2`. `None` when
+    /// the record does not say, which is "coverage unknown" (T-879: [`classify`]).
+    pub span_hz: Option<f64>,
+}
+
+impl RetuneObservation {
+    /// Whether this observation's window held absolute frequency `f_hz`: had a line been standing
+    /// at `f_hz` while this one was measured, it was in view. Unknown coverage holds nothing.
+    pub fn window_holds(&self, f_hz: f64) -> bool {
+        self.span_hz
+            .is_some_and(|span| span > 0.0 && (f_hz - self.lo_hz).abs() <= span / 2.0)
+    }
+}
+
+/// Whether the absolute hypothesis was **testable** for these observations (T-879): some line,
+/// measured under one LO, sits at an absolute frequency another member's window — under a
+/// different LO — also covered.
+///
+/// An artefact verdict says "this line moved with the LO", and that is a measurement only when
+/// the place it would have stayed, had it been on the air, was looked at from another centre and
+/// the line was not there. Three windows that share no spectrum — a survey stepping a whole
+/// window at a time — see three lines at one LO offset whether that is one spur or three
+/// emitters on three channels on a common raster, and the physics cannot tell them apart. Before
+/// T-879 that geometry was called LO-locked, and three units of one sensor type on three channels
+/// 1.5 MHz apart (500 kHz windows) became one hidden "artefact".
+fn absolute_hypothesis_tested(members: &[RetuneObservation], lo_tol_hz: f64) -> bool {
+    members.iter().any(|a| {
+        members
+            .iter()
+            .any(|b| (a.lo_hz - b.lo_hz).abs() > lo_tol_hz && b.window_holds(a.f_center_hz))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -301,6 +333,14 @@ fn finish(
     if los.len() < tol.min_centres {
         return None;
     }
+    if slope.is_receiver_artefact()
+        && !absolute_hypothesis_tested(
+            &members.iter().map(|&i| obs[i]).collect::<Vec<_>>(),
+            tol.min_tolerance_hz,
+        )
+    {
+        return None;
+    }
     let lo = points.first().map(|p| p.0).unwrap_or(f64::NAN);
     let hi = points.last().map(|p| p.0).unwrap_or(f64::NAN);
     let sum: f64 = points.iter().map(|p| p.0).sum();
@@ -317,7 +357,9 @@ fn finish(
 ///
 /// Each slope in [`SLOPES`] is tried: the observations are projected into that slope's invariant
 /// coordinate `f − slope·f_LO`, single-linkage clustered within tolerance, and a cluster spanning
-/// at least [`RetuneTolerance::min_centres`] distinct LOs becomes a candidate group. Candidates
+/// at least [`RetuneTolerance::min_centres`] distinct LOs becomes a candidate group — and an
+/// artefact slope only where the absolute hypothesis was actually tested (T-879: some member's
+/// absolute frequency lay inside another centre's window; see `absolute_hypothesis_tested`). Candidates
 /// then claim observations greedily, best first, and an observation already claimed cannot be
 /// claimed again — so one line gets one verdict.
 ///
@@ -356,7 +398,10 @@ pub fn classify(obs: &[RetuneObservation], tol: &RetuneTolerance) -> RetuneSumma
         }
         let kept: Vec<RetuneObservation> = g.members.iter().map(|&i| obs[i]).collect();
         g.los_hz = distinct_los(&kept, tol.min_tolerance_hz);
-        if g.los_hz.len() < tol.min_centres {
+        if g.los_hz.len() < tol.min_centres
+            || (g.slope.is_receiver_artefact()
+                && !absolute_hypothesis_tested(&kept, tol.min_tolerance_hz))
+        {
             continue;
         }
         let factor = g.slope.factor();
@@ -391,12 +436,54 @@ mod tests {
 
     const LOS: [f64; 3] = [100.0e6, 100.5e6, 101.0e6];
 
+    /// Window width of every observation built by [`obs`]: wide enough that each centre in
+    /// [`LOS`] sees the others' spectrum, as a real retune-diversity survey is laid out.
+    const SPAN: f64 = 2.0e6;
+
     fn obs(lo: f64, f: f64) -> RetuneObservation {
         RetuneObservation {
             lo_hz: lo,
             f_center_hz: f,
             bandwidth_hz: 0.0,
+            span_hz: Some(SPAN),
         }
+    }
+
+    /// **T-879: an artefact verdict needs windows that could have refuted it.** Three emitters on
+    /// three channels, each seen only from its own centre at the same offset from it (500 kHz
+    /// windows 1.5 MHz apart), fit "LO-locked" exactly — and so does one spur. Nothing measured
+    /// separates them, so nothing is claimed. The same lines under windows that overlap are the
+    /// spur, and are called one.
+    #[test]
+    fn a_common_lo_offset_in_windows_that_share_no_spectrum_is_no_verdict() {
+        let los = [433.92e6, 435.42e6, 436.92e6];
+        let at = |span: Option<f64>| -> Vec<RetuneObservation> {
+            los.iter()
+                .map(|&lo| RetuneObservation {
+                    span_hz: span,
+                    ..obs(lo, lo + 53e3)
+                })
+                .collect()
+        };
+        let tol = RetuneTolerance::default();
+
+        for span in [Some(500e3), None] {
+            let s = classify(&at(span), &tol);
+            assert_eq!(s.centres(), 3, "three centres were compared");
+            assert_eq!(
+                s.with_slope(RetuneSlope::LoLocked).count(),
+                0,
+                "span {span:?}: no window covered another's line, so moving with the LO was never                  tested: {s:?}"
+            );
+            assert_eq!(s.unexplained.len(), 3, "{s:?}");
+        }
+
+        // Windows wide enough to see each other's line: the same geometry is now a measurement.
+        let s = classify(&at(Some(4e6)), &tol);
+        let g = s
+            .find(RetuneSlope::LoLocked, 53e3, 1e3)
+            .expect("overlapping windows measure the slope");
+        assert_eq!(g.centres(), 3);
     }
 
     /// A line at a fixed absolute frequency, seen from each LO.

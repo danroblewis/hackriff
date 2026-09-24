@@ -126,6 +126,31 @@ fn fsk_iq(fs: f64, rate: f64, dev: f64) -> Signal {
     )
 }
 
+/// T-875: BPSK bursts (80 symbols at 4 800 Bd, 300 Hz off) every 3 000 samples at 48 kS/s over
+/// a quiet floor, so `psk_demod`'s burst mode finds, acquires, tracks, closes and sometimes
+/// defers a burst inside the measured chunks.
+fn bpsk_bursts() -> Signal {
+    let mut rng = Rng(9);
+    let mut sym = 1.0f32;
+    Signal::Iq(
+        (0..items())
+            .map(|i| {
+                let t = i % 3_000;
+                let on = (500..1_300).contains(&t);
+                if t % 10 == 0 {
+                    sym = rng.sym();
+                }
+                let ph = std::f64::consts::TAU * 300.0 * i as f64 / 48_000.0;
+                let a = if on { sym } else { 0.0 };
+                Complex32::new(
+                    a * ph.cos() as f32 + 0.01 * (rng.next() as f32 - 0.5),
+                    a * ph.sin() as f32 + 0.01 * (rng.next() as f32 - 0.5),
+                )
+            })
+            .collect(),
+    )
+}
+
 /// Mode S-like frames (preamble + 112 data bits) every 1 500 samples at 2 Msps, over noise.
 fn ppm_iq() -> Signal {
     let mut rng = Rng(2);
@@ -261,6 +286,7 @@ fn flags_of(k: usize) -> ChunkFlags {
 fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
     let iq_fs = 240_000.0;
     let fsk = fsk_iq(48_000.0, 1_200.0, 2_400.0);
+    let bursts = bpsk_bursts();
     let fm = fsk_iq(iq_fs, 1_187.5, 50_000.0);
     let ppm = ppm_iq();
     let mpx = mpx(iq_fs);
@@ -370,6 +396,20 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
             "psk_demod",
             json!({"modulation": "oqpsk", "symbol_rate_bd": 4800, "pulse": "half-sine"}),
             &fsk,
+            48_000.0,
+        ),
+        // T-875: burst mode — detector, per-burst estimators (two FFTs), fractional-delay feed,
+        // flush and the one-burst-per-chunk deferral — on bursts, and on the native path.
+        (
+            "psk_demod",
+            json!({"modulation": "bpsk", "symbol_rate_bd": 4800, "burst": true}),
+            &bursts,
+            48_000.0,
+        ),
+        (
+            "psk_demod",
+            json!({"modulation": "oqpsk", "symbol_rate_bd": 4800, "burst": true}),
+            &bursts,
             48_000.0,
         ),
         ("slicer", json!({}), &soft, 2_400.0),

@@ -898,6 +898,22 @@ while true; do
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     # A task-pm-* branch the scope check held stays queued (it merges by itself once released).
     [ -s "$S/pm-held" ] && cat "$S/pm-held" >> "$QUEUE"
+    # CHEAP FIRST (user, 2026-09-24: a py+ops or ui-only branch queued behind a batch "should be the
+    # very next attempt, alone, so it lands in ~2 min after the batch rather than joining the next
+    # full one"). hkpy.gatepri classifies each branch with the gate's own rule; the cheap ones go now,
+    # the rest back in order. It narrows no gate: the attempt is gated by `just gate` as always. Any
+    # failure to classify prints nothing and the batch is formed as before. It runs BEFORE the
+    # SUITE_BROKEN hold below, so the hold compares the batch that will actually gate (review: after
+    # it, a red cheap batch's signature never matched the mixed queue, and it re-gated forever).
+    if [ "$(printf '%s\n' $ready | grep -c .)" -ge 2 ]; then
+      part=$(cd "$REPO" && uv run --locked --project py python -m hkpy.gatepri main $ready 2>/dev/null)
+      cheap=$(printf '%s\n' "$part" | sed -n 's/^cheap: //p'); rest=$(printf '%s\n' "$part" | sed -n 's/^rest: //p')
+      if [ -n "$cheap" ] && [ -n "$rest" ]; then
+        log "CHEAP FIRST: $cheap goes alone before $rest ($(printf '%s\n' "$part" | sed -n 's/^classes: //p'))"
+        for b in $rest; do echo "$b" >> "$QUEUE"; done
+        ready="$cheap"
+      fi
+    fi
     # After a SUITE_BROKEN rewind the same batch would only fail the same way every ~15 min:
     # hold it until the queue changes (a fix branch appears, a branch is withdrawn, or a queued
     # branch's tip moves - a fix pushed to the branch itself releases the hold too).
