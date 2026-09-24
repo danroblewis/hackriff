@@ -20,11 +20,9 @@
 //! integration has been written, there being nothing to test it against).
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hk_api::{
@@ -34,7 +32,7 @@ use hk_api::{
 use hk_cli::pipeline::PipelineRecipes;
 use hk_cli::record::http;
 use hk_e2e::{SynthRequest, TruthItem};
-use hk_stream::{OpenerRegistry, Record, StreamReader};
+use hk_stream::OpenerRegistry;
 use serde_json::{Value, json};
 
 use crate::blind::{BlindLive, BlindSource, blind_live_streams};
@@ -133,65 +131,7 @@ impl Served {
     }
 }
 
-/// A TCP consumer collecting a stream's JSON records until [`Tail::finish`].
-struct Tail {
-    sock: TcpStream,
-    join: JoinHandle<Vec<Value>>,
-}
-
-/// Opens a stage/inspector tap and returns it reading, re-issuing a refusal.
-///
-/// **T-632.** The header used to be read on the spawned thread and any failure carried to
-/// `finish()` as a panic, so a refusal frame failed the test at a point that said nothing about
-/// what refused or when. A tap open is refused for reasons that are not this test's subject —
-/// none of these files asserts a refusal at all: the TCP server's connection cap (`503 busy`), a
-/// chain/tap budget, or a `404` in the moment before the recipe pipeline finishes registering.
-/// So the header is read HERE, and a refusal is re-issued on a fresh connection a BOUNDED NUMBER
-/// of times (attempts, never wall clock), printing each. Running out is the failure, and it names
-/// the target.
-fn tail(tcp: SocketAddr, target: &str) -> Tail {
-    for attempt in 1..=OPEN_TRIES {
-        let mut s = TcpStream::connect(tcp).unwrap();
-        s.set_read_timeout(Some(LIMIT)).unwrap();
-        let sep = if target.contains('?') { '&' } else { '?' };
-        s.write_all(format!("{target}{sep}token={API_TOKEN}\n").as_bytes())
-            .unwrap();
-        let sock = s.try_clone().unwrap();
-        let mut r = StreamReader::new(s);
-        if let Err(e) = r.read_header() {
-            eprintln!(
-                "[{TAG}] tail {target} attempt {attempt}/{OPEN_TRIES}: no stream header ({e:?}), \
-                 re-requesting"
-            );
-            let _ = sock.shutdown(Shutdown::Both);
-            continue;
-        }
-        let join = std::thread::spawn(move || {
-            let mut out = Vec::new();
-            while let Ok(Some(rec)) = r.next_record() {
-                match rec {
-                    Record::Message(m) => out.push(m.value),
-                    Record::Unknown(b) => {
-                        if let Ok(v) = serde_json::from_slice(&b) {
-                            out.push(v);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out
-        });
-        return Tail { sock, join };
-    }
-    panic!("[{TAG}] tail {target}: {OPEN_TRIES} opens in a row produced no stream header");
-}
-
-impl Tail {
-    fn finish(self) -> Vec<Value> {
-        let _ = self.sock.shutdown(Shutdown::Both);
-        self.join.join().expect("the tail reader thread")
-    }
-}
+// --- Frame records (§14.2), flattened: leaf values by path ------------------------------------
 
 /// A §14.2 frame record, flattened: leaf values by path.
 #[derive(Debug)]
@@ -323,7 +263,7 @@ fn signal_062_acars_recipe_decodes_blind_through_the_mock_sdr() {
     let s = serve(&fx.meta_path, "t096-syn");
     let (emitter, f_center, bw) = found_blind(s.addr(), &truth, 0.0);
     let id = start_acars(&s, &emitter);
-    let blocks = tail(s.tcp, &format!("inspector/{id}/blocks"));
+    let blocks = tail(s.tcp, &format!("inspector/{id}/blocks"), TAG);
 
     // Several loops of this recording (three bursts each): the block is decoded many times.
     let start = s.pipeline(&id)["stats"]["samples"].as_u64().unwrap();

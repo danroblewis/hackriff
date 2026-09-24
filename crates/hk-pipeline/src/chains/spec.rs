@@ -48,6 +48,19 @@ pub enum Trigger {
     /// The tuned window **overlaps** the spec's band, and the chain then decides for itself, from
     /// measured frequency-channel occupancy, whether there is anything to work on (T-287).
     ///
+    /// **The band is a dwell-budget gate, not a search prior (T-615).** Nothing inside the hunt
+    /// reads it: the raster origin is the tuned centre, candidacy is measured occupancy against
+    /// the window's own floor, and confirmation is frame sync plus CRC — so the same hunt finds a
+    /// continuous four-level control channel at any frequency the window holds (asserted by
+    /// `tests/e2e/tests/acceptance/signal_085.rs` at 300 MHz, outside every LMR allocation). What
+    /// the band decides is only whether to *spend* a pass: each one holds `window_s × fs` samples
+    /// and runs up to `max_demods` down-conversions plus C4FM demodulations, and outside the
+    /// land-mobile allocations every continuously-occupied raster channel (a WFM station fills
+    /// sixteen, a DTV channel ~480) reaches candidacy and costs a demodulation that sync + CRC
+    /// then rejects. The built-in registry therefore gates on the LMR allocations `SIGNAL-085`
+    /// names (VHF, UHF, 700, 800 and 900 MHz); a plan that wants the hunt everywhere sets
+    /// `freq_hz: [[1e6, 6e9]]` and pays for it, with no other change.
+    ///
     /// This is the FCO-driven trigger C23 needs and the one [`Coverage`](Self::Coverage) cannot
     /// be: a hunt band is wider than any window (851–869 MHz against 20 MHz at best), so
     /// [`ChainSpec::covered_by`]'s containment never fires, and the band is a *prior about where
@@ -596,8 +609,8 @@ pub const BUILTIN_CHAINS: &str = r#"[
   {
     "id": "trunk-cc-hunt",
     "trigger": "occupancy",
-    "freq_hz": [[450.0e6, 470.0e6], [769.0e6, 775.0e6], [799.0e6, 805.0e6],
-                [851.0e6, 869.0e6], [935.0e6, 940.0e6]],
+    "freq_hz": [[150.8e6, 174.0e6], [450.0e6, 470.0e6], [769.0e6, 775.0e6],
+                [799.0e6, 805.0e6], [851.0e6, 869.0e6], [935.0e6, 940.0e6]],
     "raster_hz": 12.5e3,
     "nodes": [
       { "node": "trunk-cc", "window_s": 0.5, "max_channels": 64, "max_demods": 8,
@@ -747,7 +760,7 @@ mod tests {
     /// T-287: the hunt is in the **built-in** registry, so a normal run carries it, and the
     /// contract refuses to let it become a content chain.
     #[test]
-    fn the_trunk_cc_hunt_is_built_in_metadata_only_and_band_gated() {
+    fn the_trunk_cc_hunt_is_built_in_metadata_only_and_budget_gated_on_every_lmr_band() {
         let specs = builtin_chains();
         let hunt = specs
             .iter()
@@ -766,12 +779,26 @@ mod tests {
         assert!(!hunt.covered_by(851.0125e6, 500e3));
         // A window straddling the lower edge still counts: the hunt sweeps what it can see.
         assert!(hunt.overlaps_window(850.9e6, 500e3));
-        // Bands where nothing trunked lives are left alone, so an FM, 433 MHz or 1090 MHz run is
-        // not made to carry a hunt it would only ever find nothing in.
+        // T-615: every LMR allocation SIGNAL-085 names is gated in, VHF included — before T-615
+        // the VHF high band was missing, so a VHF trunked system never got a hunt at all.
+        for f in [
+            155.0125e6, 460.0125e6, 770.0125e6, 800.0125e6, 860.0125e6, 937.0125e6,
+        ] {
+            assert!(hunt.overlaps_window(f, 500e3), "{} MHz", f / 1e6);
+        }
+        // Outside them the gate is a dwell budget, not a statement that nothing could be found
+        // there: an FM, 433 MHz or 1090 MHz run is not made to spend demodulations on channels
+        // sync + CRC would only reject. A plan widens the band to hunt everywhere.
         assert!(!hunt.overlaps_window(100e6, 2e6));
+        assert!(!hunt.overlaps_window(300e6, 2e6));
         assert!(!hunt.overlaps_window(433.92e6, 2e6));
         assert!(!hunt.overlaps_window(1090e6, 2.4e6));
-        assert!(!hunt.overlaps_window(152.36e6, 2e6));
+        let mut anywhere = hunt.clone();
+        anywhere.freq_hz = vec![[1e6, 6e9]];
+        anywhere.validate().unwrap();
+        for f in [100e6, 300e6, 433.92e6, 1090e6] {
+            assert!(anywhere.overlaps_window(f, 2e6), "{} MHz", f / 1e6);
+        }
     }
 
     #[test]

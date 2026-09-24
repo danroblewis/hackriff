@@ -18,7 +18,7 @@ Changing an ACCEPTED ADR goes to Fable plus the user, never a silent code change
 | [0008](0008-offline-first-context.md) | Offline-first external context |
 | [0009](0009-hardware-platform.md) | Hardware platform sketch |
 | [0010](0010-language-and-licence-ledger.md) | Language, toolchain, and dependency licence ledger |
-| [0011](0011-decoder-workbench-contracts.md) | Decoder workbench contracts: blocks, recipes, field maps, inspector stream; §8 amendment: audio output — an `audio_out` sink block, an `audio` output kind over the existing audio stream profile, a live-edge liveness policy, and `refine.objective.builtin` (schema 3) |
+| [0011](0011-decoder-workbench-contracts.md) | Decoder workbench contracts: blocks, recipes, field maps, inspector stream; §8 amendment: audio output — an `audio_out` sink block, an `audio` output kind over the existing audio stream profile, a live-edge liveness policy, and `refine.objective.builtin` (schema 3); §9 amendment (T-606): the coverage catalogue rows (ports pinned, `viterbi_frames` added, `ofdm_demod` reserved), PSK de-maps inside the block to one `soft` item per bit (no new port type; the framed-soft type is DAB+'s cost), `fec`'s two shapes, and §1.6's "in the build?" column |
 | [0012](0012-attention-memory-contracts.md) | Attention + memory contracts: observation log, occupancy, baselines, interestingness, bandit, reports, alarms |
 | [0013](0013-ui-architecture.md) | MUI web UI architecture: vanilla TS + small store, component tree, state slices, frontend↔API map with API gaps, migration, per-panel briefs |
 | [0014](0014-iq-capture-ring.md) | IQ capture ring: pre-allocated persistent on-disk ring for the rolling IQ buffer (slots, CRC-framed journal, recovery, quota change, free space, runs) |

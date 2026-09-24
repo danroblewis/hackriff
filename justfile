@@ -145,6 +145,40 @@ builders *args:
 cycle-time *args:
     uv run --locked --project py python -m hkpy.cycletime {{args}}
 
+# THE PIPELINE MANAGER'S INSTRUMENTS (2026-09-23; .claude/roles/pipeline-manager.md). All read the
+# ops logs; none touches main. `flow` is where the hours went (per hour / per gate / per ticket);
+# `experiment` is the one-at-a-time ledger with baseline, guards and a prepared rollback;
+# `knobs` is the persistent knob store every ops restart reads; `hold` is the bounded (<= 30 min,
+# auto-expiring, ended by the first queued branch) merge-queue hold. Skills: .claude/skills/{flow,
+# experiment,knobs}; invariants: .claude/rules/pipeline-invariants.md. They pass their arguments
+# through as "$@" ([positional-arguments]): `{{args}}` re-split `--hypothesis "a b (c)"` and
+# `--guard "x <= baseline*1.25"` into shell words, and the first E-001 registration died on `(`.
+[positional-arguments]
+flow *args:
+    uv run --locked --project py python -m hkpy.flow "$@"
+
+[positional-arguments]
+experiment *args:
+    uv run --locked --project py python -m hkpy.experiment "$@"
+
+[positional-arguments]
+knobs *args:
+    uv run --locked --project py python -m hkpy.knobs "$@"
+
+[positional-arguments]
+hold *args:
+    uv run --locked --project py python -m hkpy.knobs hold "$@"
+
+[positional-arguments]
+touchpoints *args:
+    uv run --locked --project py python -m hkpy.flow --touchpoints "$@"
+
+# The pipeline manager's scope check (user, 2026-09-23): `check <branch>` says whether the merge
+# runner would hold it (no `Serves:` reason, or a file outside the pipeline paths); `release
+# <branch>` is a person's word to let a held one through; `status` reports lines landed today.
+pm-budget *args:
+    uv run --locked --project py python -m hkpy.pmbudget {{args}}
+
 # Is the merge suite within its duration budget? Exits 1 if not (T-762). Deliberately NOT part
 # of any suite: it reads this machine's recorded history, so no diff can clear it and a merge
 # must never hang on it.
@@ -164,6 +198,13 @@ ops-check:
 gate-stats:
     uv run --locked --project py python -m hkpy.cycletime --stats
 
+# Which tests have cost merge gates, which WAY (passed alone = a load flake, failed alone = a
+# real defect), and under what load - from $HACKRIFF_OPS/flaky.jsonl plus the merge runner's
+# TRIAGE lines. `ops/merge-runner.sh` calls `--update` after every triage, which files a test
+# once in merge-needs-attention.txt when it has cost two gates in seven days; this is the read.
+flakes *args:
+    uv run --locked --project py python -m hkpy.flakes {{args}}
+
 # Build the Rust workspace (CPU path; `gpu` off)
 build:
     cargo build --workspace
@@ -182,7 +223,11 @@ build:
 # `cargo test` if nextest isn't installed.
 # See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
-test: (_coordinator-only "test") nextest-config-check test-rust test-doc test-py test-ui
+# test-rust runs LAST (pipeline manager, 2026-09-23): the cheap suites go red first, and a Rust
+# red - the only kind the merge runner may accept as a load flake (a test that passes alone twice,
+# the user's rule) - never leaves a sibling step unrun behind it, so the gate can resume after this
+# recipe without skipping anything.
+test: (_coordinator-only "test") nextest-config-check test-doc test-py test-ui test-rust
 
 # HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
 # (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
@@ -194,6 +239,7 @@ test-rust:
     #!/usr/bin/env bash
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
+    t0=$SECONDS
     # T-492: hk-plugins::host spawns these via CARGO_BIN_EXE_*, resolved at the *test binary's*
     # compile time. `--workspace` does not reliably rebuild them if hk-plugins' own fingerprint
     # is otherwise fresh — the same one line `acceptance` (below) already runs before its
@@ -201,12 +247,17 @@ test-rust:
     # Unconditional: it is cheap, and it is a build the *selected* set may still spawn.
     cargo build -p hk-plugins --bins
     scope=$(just _crate-scope hk-e2e)
+    tbuild=$((SECONDS-t0))
     if command -v cargo-nextest >/dev/null 2>&1; then
         cargo nextest run $scope
     else
         echo "test-rust: cargo-nextest not found; falling back to plain 'cargo test' (see just test-seq)" >&2
         cargo test $scope
     fi
+    # nextest prints its own `Summary [Ns]`, which covers the RUN only. The difference between
+    # that and this is the compile plus the **list** phase — every test binary spawned once with
+    # `--list` — which is most of what `just test` used to spend unattributed (R7).
+    echo "test-rust: $((SECONDS-t0)) s total, of which $tbuild s before cargo nextest run" >&2
 
 # T-631: a nextest override must be reachable by a nextest run that reads it.
 #
@@ -236,11 +287,60 @@ conflict-check:
 nextest-config-check:
     uv run --locked --project py python -m hkpy.nextest_config
 
+# Block until no merge gate is running, and SAY SO while waiting. A worker that needs a spec run
+# or an `hk serve` while the gate holds the ports (the block-full-gate hook refuses them) used
+# to hand-roll a sleep loop - and ops/merge-runner.sh, which waits for every claimed worker
+# before it gates, counted that idle worker as running: on 2026-09-23 the two waited on each
+# other for the full 45-minute drain cap. The marker under $HACKRIFF_OPS/gate-waiters/ is this
+# recipe's pid; the runner does not count a worker whose wait is declared here, and drops a
+# marker whose pid is gone.
+#
+# Block until no merge gate is running, telling the merge runner this worker is idle meanwhile
+wait-for-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    S="${HACKRIFF_OPS:-$HOME/.hackriff-ops}"
+    mkdir -p "$S/gate-waiters"; m="$S/gate-waiters/$$"; printf '%s\n' "$PWD" > "$m"
+    trap 'rm -f "$m"' EXIT
+    t0=$SECONDS
+    # Anchored: a shell whose own argv quotes the pattern (a hand-rolled `pgrep -f "just gate"` loop)
+    # matched itself and never exited - three of them on 2026-09-23. The gate's argv STARTS with it.
+    while [ -e "$S/bulk-in-progress" ] || pgrep -f '^just gate' >/dev/null 2>&1; do
+        [ $(( (SECONDS - t0) % 300 )) -lt 15 ] && echo "wait-for-gate: a merge gate is running ($(( (SECONDS - t0) / 60 )) min so far)" >&2
+        sleep 15
+    done
+    echo "wait-for-gate: clear after $(( (SECONDS - t0) / 60 )) min" >&2
+
+# The crates whose `src/` holds a code fence rustdoc would actually run — DERIVED, never a
+# maintained list (`py/hkpy/doctests.py`). Prints the selection and the skipped crates on stderr,
+# and falls back to the whole workspace on any scan failure.
+_doctest-scope exclude="":
+    @uv run --locked --project py python -m hkpy.doctests {{exclude}}
+
 # nextest doesn't run doctests, so `just test` runs them separately.
+#
+# **Only over the crates that can have one.** `--workspace --exclude hk-e2e` invoked rustdoc over
+# 19 crates to execute 3 doctests (hk-blocks, hk-pipeline::region, hk-recipe); the other 16 print
+# `0 passed; 0 failed` and each of those zeroes is still a full `rustdoc --test` of the crate, paid
+# on every gate because doctest runs are not fingerprinted. `_doctest-scope` finds the crates by
+# **scanning for a runnable doc fence**, so this narrows what is *invoked*, never what is *tested*:
+# write a doctest in any crate and that crate is selected again with no edit here. (48 of the 58
+# doc fences in this workspace are ```text and 4 more are ```json — rustdoc runs none of them, which
+# is why "has a fence" and "has a doctest" are different questions.)
+#
+# Times itself, because a quarter of `just test` had no owner at all until it was measured
+# (docs/test-speed-review-2026-09-22.md §1.2, R7).
 test-doc:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo test $(just _crate-scope hk-e2e) --doc
+    t0=$SECONDS
+    scope=$(just _doctest-scope hk-e2e)
+    if [ -z "$scope" ]; then
+        echo "test-doc: no crate in scope holds a runnable doc fence — nothing to run ($((SECONDS-t0)) s)" >&2
+        exit 0
+    fi
+    cargo test $scope --doc
+    echo "test-doc: $((SECONDS-t0)) s" >&2
 
 # T-543. The ONE place `$HK_GATE_CRATES` becomes cargo arguments, printed on stderr so a
 # narrowed run always says so. `$1` is a package to drop from the selection (hk-e2e, which
@@ -318,7 +418,7 @@ timing:
 # set did locally) cannot recur either. Adding a target means adding it here, deliberately.
 e2e_slice := "acceptance_m0"
 e2e_harness := "canvas_fidelity concurrent_demod floor_acceptance listen_live mock_device outputs_record refine smoke spectrum_axis stream_external"
-e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_mauto"
+e2e_milestones := "acceptance_m2 acceptance_m3 acceptance_m4 acceptance_chirp acceptance_ism acceptance_multipath acceptance_mauto"
 
 # THE ONE PLACE an hk-e2e target set becomes a test command (T-631). Every recipe below calls
 # this, so hk-e2e's runner and its parallelism are defined once rather than copied eight times —
@@ -396,7 +496,7 @@ acceptance-ci: (_coordinator-only "acceptance-ci") e2e-targets-check acceptance 
 # have pinned CI red), because m2/m3 are explicitly kept apart for wall time, and because scene
 # simulations with wall-clock dwell budgets already flake under load on a 28-core Mac and would be
 # worse on a 2-vCPU runner. Each also has its own recipe for running one alone.
-acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-mauto
+acceptance-milestones: acceptance-m2 acceptance-m3 acceptance-m4 acceptance-chirp acceptance-ism acceptance-multipath acceptance-mauto
 
 # Census: every hk-e2e target on disk must appear in exactly one of the three lists above, and
 # every listed target must exist. This is the guard that makes the explicit `--test` lists safe —
@@ -471,6 +571,13 @@ acceptance-chirp *args:
     set -euo pipefail
     export HK_E2E_REQUIRE_SYNTH=1
     just _e2e-run acceptance_chirp {{args}}
+
+# Multipath acceptance (T-222, AWARE-053, C40 content half): one 2-FSK transmission received twice - a delayed, attenuated copy on another channel - beside an independent station of the same family, through the mock SDR. Only content separates the pair from the decoy. Extra args go to the runner (see `_e2e-run`).
+acceptance-multipath *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export HK_E2E_REQUIRE_SYNTH=1
+    just _e2e-run acceptance_multipath {{args}}
 
 # ISM burst acceptance (T-254, CLAUDE.md invariant 1): the 902-928 MHz short-burst playground through the mock SDR and the IQ ring - bounded time extents, one emitter per burst, ephemera catalogued as past events, plus the 100.3 MHz field case. Extra args go to the runner (see `_e2e-run`).
 acceptance-ism *args:
@@ -625,6 +732,15 @@ test-ui-e2e-selftest:
 # ~15 s. Not part of any gate, same as test-ui-e2e-selftest above.
 test-ui-e2e-selftest-timeout:
     cd ui && npm run e2e:selftest-timeout
+
+# T-740's own non-vacuity check: proves cleanup of a spec's Chrome/backend does not depend on how
+# `run.mjs` itself exits. Kills a real `run.mjs` (driving the hang fixture) with SIGINT, SIGTERM and
+# the untrappable SIGKILL in turn, asserting process counts (not wall-clock) at each step; the SIGKILL
+# leg proves the orphans genuinely survive it, then proves the NEXT `run.mjs` invocation sweeps them
+# to baseline before starting anything of its own. ~1 minute. Not part of any gate, same as the two
+# selftests above.
+test-ui-e2e-selftest-orphans:
+    cd ui && npm run e2e:selftest-orphans
 
 # Serve the web UI over a replayed recording, e.g. `just serve fixtures/hackrf/2026-09-13/fm_100p8M_2p4M_l32g30a1_t1p5_5s.sigmf-meta --loop`
 serve fixture *args:

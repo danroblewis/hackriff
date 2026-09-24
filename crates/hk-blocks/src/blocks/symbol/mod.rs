@@ -1,6 +1,8 @@
 //! Symbol blocks (T-086): timing recovery, decisions and line decoding. The biphase
 //! max-contrast timing ports hk-demod `rds::demod`; Gardner/Mueller–Müller are classic
-//! interpolating loops over the same matched-filter statistic (ADR-0011 §1.6).
+//! interpolating loops over the same matched-filter statistic (ADR-0011 §1.6). `descramble`
+//! (T-608) is the first ADR-0011 §9.1 row implemented: a generic LFSR de-whitener;
+//! `mlevel_slicer` (T-612) is the M-ary decision (4-level C4FM, 8-ary FSK).
 
 use hk_recipe::PortType::{Bits, Iq, Real, Soft};
 use hk_recipe::{BlockDescriptor, PortSpec};
@@ -9,8 +11,12 @@ use crate::Registry;
 use crate::blocks::iq::common;
 use crate::schema::{ParamExt, boolean, descriptor, float, one_of, param};
 
+pub mod bitstuff;
 mod clock;
+mod descramble;
 mod line;
+pub mod mauto;
+mod mlevel;
 
 /// Pinned descriptors of this group.
 pub fn planned() -> Vec<BlockDescriptor> {
@@ -154,4 +160,9 @@ pub fn register(r: &mut Registry) {
     add("diff_decode", line::build_diff);
     add("nrzi", line::build_nrzi);
     add("manchester", line::build_manchester);
+    // ADR-0011 §9.1 rows, implemented as their tickets land.
+    let mauto = mauto::planned();
+    common::register_pinned(r, &mauto, "descramble", descramble::build);
+    common::register_pinned(r, &mauto, "mlevel_slicer", mlevel::build);
+    common::register_pinned(r, &mauto, "bitstuff", bitstuff::build);
 }

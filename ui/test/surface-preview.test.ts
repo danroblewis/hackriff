@@ -158,10 +158,10 @@ test("probeSurface asks exactly five read-only routes, in dependency order", asy
       : coverage(ORIENT_CELLS, ORIENT_ROWS, { f0: 60, f1: 62, t0: 0, t1: 31 });
   });
   assert.deepEqual(asked, [
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16",
     // T-505: the second tier, probed the same cheap way. Both lattices are READ OFF an answer;
     // neither is ever chosen here.
-    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8",
+    "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&scheme=overview&cells=8&planes=f16",
     "/api/navigation",
     coverageUrl({ f0Hz: 1e6, f1Hz: 6e9, t0Ns: T0 * S, t1Ns: T1 * S }, ORIENT_CELLS, ORIENT_ROWS),
     coverageUrl(surfaceWide.box!, ORIENT_CELLS, ORIENT_ROWS),
@@ -236,7 +236,7 @@ test("the route's backpressure is answered by ASKING AGAIN, never by a banner qu
     undefined,
     { backoffMs: 4, sleep: async (ms) => { slept.push(ms); } },
   );
-  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8";
+  const probePath = "/api/tiles?level_f=0&level_t=0&f_index=0&t_index=0&cells=8&planes=f16";
   assert.deepEqual(asked.slice(0, 3), [probePath, probePath, probePath],
     "the request the client builds on a refusal is the SAME request, again");
   assert.deepEqual(slept, [4, 8], "and it waits longer each time rather than re-asking on one cadence");
@@ -340,16 +340,46 @@ function harness() {
   const g = stubGl(1200, 600);
   const asked: TileAddr[] = [];
   const fetchFn = async (url: string) => {
-    asked.push(parseTileUrl(url));
+    const addrs = parseTileRequest(url);
+    for (const a of addrs) asked.push(a);
     return {
       ok: true, status: 200, statusText: "OK",
-      json: async () => tileAnswer(parseTileUrl(url)),
+      json: async () => answerFor(url, addrs, LAT),
     };
   };
   const preview = new SurfacePreview({
     canvas: g.canvas, probe: probeFor(), token: "t", fetchFn, chrome: null, minimapPx: 120,
   });
   return { g, preview, asked };
+}
+
+/**
+ * Every address one tile request names — one for `GET /api/tiles`, many for `/api/tiles/batch`
+ * (T-573). The client batches, so a fixture that only understood the single-address route would
+ * answer nothing and every assertion below it would be about a failed decode.
+ */
+function parseTileRequest(url: string): TileAddr[] {
+  const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+  const addresses = q.get("addresses");
+  if (addresses === null) return [parseTileUrl(url)];
+  const base = parseTileUrl(url);
+  return addresses.split(",").map((spelling) => {
+    const [lf, lt, fi, ti] = spelling.split(".").map(Number);
+    return { ...base, levelF: lf, levelT: lt, fIndex: fi, tIndex: ti };
+  });
+}
+
+/** The body for either spelling: one tile, or a batch entry per address. */
+function answerFor(url: string, addrs: TileAddr[], lat: Lattice) {
+  if (!url.includes("/api/tiles/batch")) return tileAnswer(addrs[0], lat);
+  return {
+    requested: addrs.length, returned: addrs.length, truncated: false, remaining: [],
+    tiles: addrs.map((a) => ({
+      address: { level_f: a.levelF, level_t: a.levelT, f_index: a.fIndex, t_index: a.tIndex,
+                 spelling: `${a.levelF}.${a.levelT}.${a.fIndex}.${a.tIndex}` },
+      status: 200, tile: tileAnswer(a, lat),
+    })),
+  };
 }
 
 function parseTileUrl(url: string): TileAddr {
@@ -499,9 +529,9 @@ function liveHarness({ live = true } = {}) {
   /** The virtual capture clock, in ns advanced. [[drive]] steps it; nothing reads a wall clock. */
   const clock = { ns: 0 };
   const fetchFn = async (url: string) => {
-    const a = parseTileUrl(url);
-    asked.push(a);
-    return { ok: true, status: 200, statusText: "OK", json: async () => tileAnswer(a, LIVE_LAT) };
+    const addrs = parseTileRequest(url);
+    for (const a of addrs) asked.push(a);
+    return { ok: true, status: 200, statusText: "OK", json: async () => answerFor(url, addrs, LIVE_LAT) };
   };
   const probe: SurfaceProbe = {
     ...probeFor({ freq: { centerHz: 100.8e6, spanHz: 2.4e6 }, centerNs: T1 * S - S, spanNs: 2 * S, onCoverage: true }),

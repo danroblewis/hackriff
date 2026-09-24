@@ -405,6 +405,73 @@ pub struct ReceiverFit {
     pub concentration: f64,
     /// The same offset expressed against the tuned centre, parts per million.
     pub ppm: f64,
+    /// Which **absolute** offset the modulo-grid fit above really is, and the evidence (T-628).
+    ///
+    /// `offset_hz` names a grid, not a receiver: +4300 Hz and −8200 Hz are the same 12.5 kHz grid.
+    /// Reaching an absolute frequency — a trunking grant — needs the alias settled. Absent on rows
+    /// written before T-628, which is the same answer as [`AliasState::NotTried`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<ReceiverAlias>,
+}
+
+/// Whether the receiver's grid alias was tried, and what came of it (T-628).
+///
+/// ADR-0021's rule: **not tried is a different answer from tried and unsettled**, and a client
+/// must not have to guess which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AliasState {
+    /// Nothing asked for an absolute frequency, or nothing could be measured against.
+    NotTried,
+    /// One alias chosen; [`ReceiverAlias::offset_hz`] carries it.
+    Resolved,
+    /// Tried, and the evidence did not single one out. Nothing absolute was measured.
+    Unresolved,
+}
+
+/// What decided — or failed to decide — the alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AliasEvidence {
+    /// The receiver's clock bound admits a single alias.
+    ClockBound,
+    /// Exactly one alias found energy on more granted channels than any other.
+    GrantedChannelEnergy,
+    /// No granted channel inside the window: nothing needed an absolute frequency.
+    NoGrantedChannel,
+    /// No quiet channel to set a threshold against, so energy could not be measured.
+    NoReference,
+    /// The fitted offset is beyond the clock bound: no alias is admissible.
+    NoAliasInBound,
+    /// No alias found energy on any granted channel.
+    NothingOccupied,
+    /// Two or more aliases found energy on equally many granted channels.
+    Tied,
+}
+
+/// The settled (or unsettled) absolute receiver offset (T-628).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReceiverAlias {
+    /// Tried or not, and what came of it.
+    pub state: AliasState,
+    /// Why.
+    pub evidence: AliasEvidence,
+    /// The absolute offset, Hz, only when [`AliasState::Resolved`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_hz: Option<f64>,
+    /// The same, ppm of the tuned centre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ppm: Option<f64>,
+    /// The receiver clock bound the aliases were drawn from, ppm.
+    pub bound_ppm: f64,
+    /// Aliases the bound admitted (and so were tried, when measured).
+    pub candidates: u32,
+    /// Granted channels measured under each alias.
+    pub targets: u32,
+    /// Granted channels the best alias found carrying a transmission.
+    pub occupied: u32,
+    /// The best any other alias managed.
+    pub runner_up: u32,
 }
 
 /// One analysis of one emitter.
@@ -748,5 +815,50 @@ mod tests {
             summary: String::new(),
         });
         assert!(r.validate().is_err());
+    }
+
+    /// T-628: a receiver fit written before alias resolution existed still reads, as "not
+    /// tried"; a resolved one states its absolute offset and evidence in kebab-case words; and an
+    /// unresolved one carries NO offset, so nothing downstream can mistake it for a measurement.
+    #[test]
+    fn a_receiver_alias_round_trips_and_its_absence_reads_as_not_tried() {
+        let old: ReceiverFit = serde_json::from_value(serde_json::json!({
+            "grid_hz": 12500.0, "offset_hz": 4300.0, "concentration": 0.7, "ppm": 5.05,
+        }))
+        .unwrap();
+        assert_eq!(old.alias, None);
+
+        let resolved = ReceiverAlias {
+            state: AliasState::Resolved,
+            evidence: AliasEvidence::GrantedChannelEnergy,
+            offset_hz: Some(-8200.0),
+            ppm: Some(-9.6),
+            bound_ppm: 20.0,
+            candidates: 3,
+            targets: 3,
+            occupied: 3,
+            runner_up: 2,
+        };
+        let fit = ReceiverFit {
+            alias: Some(resolved),
+            ..old
+        };
+        let v = serde_json::to_value(fit).unwrap();
+        assert_eq!(v["alias"]["state"], "resolved");
+        assert_eq!(v["alias"]["evidence"], "granted-channel-energy");
+        assert_eq!(v["alias"]["offset_hz"], -8200.0);
+        assert_eq!(serde_json::from_value::<ReceiverFit>(v).unwrap(), fit);
+
+        let unresolved = ReceiverAlias {
+            state: AliasState::Unresolved,
+            evidence: AliasEvidence::Tied,
+            offset_hz: None,
+            ppm: None,
+            ..resolved
+        };
+        let v = serde_json::to_value(unresolved).unwrap();
+        assert_eq!(v["state"], "unresolved");
+        assert_eq!(v["evidence"], "tied");
+        assert!(v.get("offset_hz").is_none(), "{v}");
     }
 }

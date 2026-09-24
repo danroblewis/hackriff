@@ -256,6 +256,16 @@ pub fn view_geometry(
 /// edge. At 64 time cells the finest node's tile spans **64 s** — 512× less residency — and the
 /// client's tile stays 256 × 256 output cells regardless, because `/api/tiles` lays its grid on the
 /// tile's own extent and reads however many store blocks that covers (T-438).
+///
+/// **Since T-585 this knob sizes node (0, 0) and little else.** A live lattice's coarse nodes hold
+/// their committed rows in the codec's stored form and only the in-progress row as accumulator
+/// ([`hk_store::Pyramid::resident_bytes`]), so their residency no longer scales with the tile
+/// height. Measured on the same frames at the shipped 20 MHz edge
+/// (`live_edge_tiles::the_view_lattices_floor_costs_what_the_settings_doc_says_it_costs`): 64 rows
+/// → 6.7 MB peak (5.9 MB of it two level-0 tiles mid-seal, 0.8 MB the coarse nodes); 16 rows →
+/// 1.6 MB (0.9 MB level 0, 0.7 MB coarse). Going to 16 would still buy ~4× on level 0, at 4× the
+/// tile files, a scheme bump and more tiles per read; it is no longer needed to keep the coarse
+/// nodes in check, which is what the ticket weighed it for.
 pub const VIEW_T_CELLS_PER_BLOCK: u32 = 64;
 
 /// **Frequency** cells per tile at every node — scheme 1's own 1024, and deliberately NOT the same
@@ -485,6 +495,18 @@ pub const VIEW_T_LEVELS: usize = 4;
 /// `view_f_cell_hz` is the knob and it divides all of that linearly (a 25 kHz floor is ~18 MB at a
 /// 20 MHz live edge, worst case). It is a **frequency** knob deliberately: the time floor is F1's
 /// fix and is not negotiable.
+///
+/// **T-571 then made the coarse nodes live** (`coarse_live`), and every node held a full open
+/// accumulator for the tile it was filling: measured 73 MB (bound 93.5 MB) at a 20 MHz live edge,
+/// 3.65 MB/MHz — the read-time fold that had kept 0.91 MB/MHz was the thing T-571 deleted.
+/// **T-585 took that back**: a coarse node holds its committed rows in stored form and one row of
+/// accumulator ([`hk_store::Pyramid::resident_bytes`] measures it), so the same run peaks at
+/// **6.7 MB** (0.34 MB/MHz; 5.9 MB of it is two level-0 tiles mid-seal) against a bound of
+/// 35.5 MB computed over the RAW stored form with a seal-lag overlap on every node. The coarse
+/// nodes themselves hold 0.8 MB where T-571 held 52.6 MB. The frames that measurement runs are a
+/// flat synthetic PSD, which zstd folds to almost nothing; on real noise the store's own tiles
+/// encode at ~3.5 B/cell and a 16-cell test lattice measured 8.9 B/cell stored (11.2 raw), so the
+/// honest per-cell figure for the encoded remainder is single-digit bytes against 44 resident.
 ///
 /// The histogram is coarse (5 dB bins) rather than scheme 1's 0.5 dB, because a de-welded fold
 /// **cannot carry percentiles at all** ([`hk_store::LevelConfig::t_factor`]: the parent's histogram

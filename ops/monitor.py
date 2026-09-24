@@ -228,6 +228,8 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         _claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
         for tid, c in _claims.items():
+            if c.get("deflake"):
+                continue   # a DEFLAKE:<slug> claim (ops/work-runner.py dispatch_deflakes) is not a board ticket
             cs, ck = c.get("state"), c.get("kind")
             if cs == "running" and ck == "review":
                 put(tid, "review", "reviewer stage")
@@ -319,7 +321,8 @@ def runtime_states(smap, tl=None, limit=10):
 
 
 def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=True, at=None, ms=None,
-               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=()):
+               keep_merging=True, keep_next=True, keep_failed=True, keep_queue=True, keep_review=True, open_ms=(),
+               collapse_done=False):
     try:
         tl = load_tasks_yaml()      # mtime-cached; a fresh PyYAML parse per poll had the monitor at 65 % CPU (2026-09-22)
         if not tl:
@@ -405,6 +408,31 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
     for tid in opened:
         if tid not in nodes:
             nodes[tid] = node_for(tid)
+    # COLLAPSE DONE (user, 2026-09-23): contract every done/cancelled node out of the drawn graph
+    # while keeping reachability - an edge that ran through a chain of done tickets becomes ONE
+    # edge from the nearest live ancestor to the live descendant, labelled "via N done". A done
+    # ticket that is an anchor for another reason (a live agent, a runtime state) stays.
+    collapsed = set()
+    if collapse_done:
+        collapsed = {tid for tid, x in nodes.items()
+                     if x.get("status") in ("done", "cancelled") and tid not in running and not rt.get(tid)}
+    eff_memo = {}
+    def eff_preds(tid, _stack=()):
+        """{live ancestor: min number of collapsed nodes between it and `tid`}."""
+        if tid in eff_memo:
+            return eff_memo[tid]
+        out = {}
+        for dp in deps(nodes[tid]):
+            if dp not in nodes or dp in _stack:
+                continue
+            if dp in collapsed:
+                for anc, via in eff_preds(dp, _stack + (tid,)).items():
+                    if anc not in out or via + 1 < out[anc]:
+                        out[anc] = via + 1
+            else:
+                out[dp] = 0   # a direct live edge beats any route through collapsed nodes
+        eff_memo[tid] = out
+        return out
     cls = {"in-progress": "inprog", "todo": "todo", "blocked": "blocked", "paused": "blocked",
            "review": "review", "deferred": "deferred", "done": "done", "cancelled": "done"}
     def label(x):
@@ -467,26 +495,51 @@ def task_graph(scope="frontier", show_done=True, show_todo=True, show_blocked=Tr
             lines.append(f'MS_{ms}(["▼ {ms} · {cnt} · open"]):::msopen')
         else:
             lines.append(f'MS_{ms}(["{ms} · {cnt}"]):::{mscls[ms_status(ms)]}')
+    # Mermaid styles an edge by its INDEX in order of definition (`linkStyle i,j stroke:…`), so
+    # every edge below is counted as it is emitted.
+    edge_n = 0
     chain = [m for m in ORDER if m != "MUI"]
     for a, b in zip(chain, chain[1:]):
-        lines.append(f"MS_{a} --> MS_{b}")
-    lines.append("MS_M1 --> MS_MUI")
+        lines.append(f"MS_{a} --> MS_{b}"); edge_n += 1
+    lines.append("MS_M1 --> MS_MUI"); edge_n += 1
     for nid, x in nodes.items():
+        if nid in collapsed:
+            continue
         c = {"failed": "failed", "testing": "testing", "queued": "queued", "review": "reviewing", "next": "next", "stopped": "stopped", "blocked": "blocked"}.get(rt.get(nid)) \
             or ("running" if nid in running else cls.get(x.get("status"), "done"))
         shape = {"failed": ('{{"', '"}}'), "testing": ('(["', '"])'), "queued": ('[["', '"]]'), "blocked": ('(["', '"])'),
                  "reviewing": ('>"', '"]'), "next": ('[/"', '"/]')}.get(c, ('["', '"]'))
         lines.append(f"{nid}{shape[0]}{label(x)}{shape[1]}:::{c}")
-    # dependency edges (solid) — draw among all nodes in scope, not just from active tasks
+    # dependency edges (solid) — draw among all nodes in scope, not just from active tasks.
+    # An edge whose BOTH ends belong to an open milestone is coloured in that milestone's colour
+    # (user, 2026-09-23: "I want to know which nodes those are") — only those; an edge into or
+    # out of the milestone keeps the default stroke.
+    MS_PALETTE = ["#FFD98a", "#5EE0C4", "#C7B8FF", "#FF9F7A", "#8FD3FF", "#F0A542"]
+    ms_colour = {m: MS_PALETTE[i % len(MS_PALETTE)] for i, m in enumerate(open_ms)}
+    ms_edges = {m: [] for m in open_ms}
     for nid, x in nodes.items():
-        for dp in deps(x):
-            if dp in nodes:
+        if nid in collapsed:
+            continue
+        preds = eff_preds(nid) if collapse_done else {dp: 0 for dp in deps(x) if dp in nodes}
+        for dp, via in preds.items():
+            if via:
+                lines.append(f'{dp} -. "via {via} done" .-> {nid}')
+            else:
                 lines.append(f"{dp} --> {nid}")
+            m = norm_ms(x.get("milestone"))
+            if m in ms_edges and norm_ms(nodes[dp].get("milestone")) == m:
+                ms_edges[m].append(edge_n)
+            edge_n += 1
     # membership links (dotted) — connect every task to its milestone node
     for nid, x in nodes.items():
+        if nid in collapsed:
+            continue
         ms = norm_ms(x.get("milestone"))
         if ms in ORDER and not (ms in set(open_ms) and x.get("status") in ("done", "cancelled")):
-            lines.append(f"MS_{ms} -.-> {nid}")
+            lines.append(f"MS_{ms} -.-> {nid}"); edge_n += 1
+    for m, idx in ms_edges.items():
+        if idx:
+            lines.append(f"linkStyle {','.join(map(str, idx))} stroke:{ms_colour[m]},stroke-width:3px")
     total = len(tl)
     done = sum(1 for x in tl if x.get("status") in ("done", "cancelled"))
     counts = {}
@@ -550,7 +603,7 @@ a:hover{color:var(--txt)}.sub{color:var(--dim);font:12px ui-monospace,monospace}
 </style></head><body>
 <div class=top><span>hack<b>riff</b> task map</span><span class=sub id=sub></span>
 <span class=scopes><button id=sc-frontier class=on>frontier</button><button id=sc-all>all tasks</button></span>
-<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button>
+<span class=filters>show: <button id=f-done>done</button><button id=f-todo>todo</button><button id=f-blocked>blocked</button><button id=f-collapse title="contract done/cancelled tickets out of the graph; a chain through them becomes one edge labelled 'via N done'">collapse done</button>
 <button id=f-next class="on rt rt-next">UP NEXT</button><button id=f-merging class="on rt rt-merging">MERGING</button><button id=f-queue class="on rt rt-queue">IN QUEUE</button><button id=f-review class="on rt rt-review">IN REVIEW</button><button id=f-failed class="on rt rt-failed">FAILED</button></span>
 <span class=filters>milestone: <select id=msfilter><option value="">all milestones</option></select></span>
 <span class=filters id=openms></span>
@@ -567,7 +620,10 @@ let last='',scope='frontier',flt={done:false,todo:false,blocked:false},msFilter=
 // is open and close it.
 let openMs=new Set(); try{ localStorage.removeItem('graph.openMs'); openMs=new Set(JSON.parse(sessionStorage.getItem('graph.openMs')||'[]')); }catch(e){}
 function renderOpenChips(){ const el=document.getElementById('openms'); if(!el) return;
-  el.innerHTML=openMs.size?('open: '+[...openMs].map(m=>`<button class="chipx" data-ms="${m}" title="close ${m}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
+  // Same palette and order as task_graph()'s MS_PALETTE: the chip's border is the colour of that
+  // milestone's internal dependency edges on the map.
+  const PAL=["#FFD98a","#5EE0C4","#C7B8FF","#FF9F7A","#8FD3FF","#F0A542"];
+  el.innerHTML=openMs.size?('open: '+[...openMs].map((m,i)=>`<button class="chipx" data-ms="${m}" title="close ${m} · its internal edges are this colour" style="border-color:${PAL[i%PAL.length]};box-shadow:inset 0 -2px 0 ${PAL[i%PAL.length]}">${m} ✕</button>`).join('')+`<button class="chipx all" id=closeall title="close all">close all</button>`):'';
   el.querySelectorAll('button[data-ms]').forEach(b=>b.onclick=()=>toggleMs(b.dataset.ms)); const ca=document.getElementById('closeall'); if(ca) ca.onclick=()=>{openMs.clear(); saveMs(); last=''; draw();}; }
 function saveMs(){ try{sessionStorage.setItem('graph.openMs',JSON.stringify([...openMs]));}catch(e){} renderOpenChips(); }
 function toggleMs(m){ if(openMs.has(m)) openMs.delete(m); else openMs.add(m); saveMs(); last=''; draw(); }
@@ -576,9 +632,13 @@ document.getElementById('sc-frontier').onclick=()=>setScope('frontier');
 document.getElementById('sc-all').onclick=()=>setScope('all');
 function setScope(s){scope=s;document.getElementById('sc-frontier').classList.toggle('on',s==='frontier');document.getElementById('sc-all').classList.toggle('on',s==='all');last='';draw();}
 ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(flt[k]===undefined) flt[k]=true; document.getElementById('f-'+k).onclick=()=>{flt[k]=!flt[k];document.getElementById('f-'+k).classList.toggle('on',flt[k]);last='';draw();};});
+// "collapse done" is off by default (it removes nodes); it is remembered like the other filters.
+if(flt.collapse===undefined) flt.collapse=false; document.getElementById('f-collapse').classList.toggle('on',flt.collapse);
+document.getElementById('f-collapse').onclick=()=>{flt.collapse=!flt.collapse;document.getElementById('f-collapse').classList.toggle('on',flt.collapse);last='';draw();};
 async function draw(){
  try{
   let q='/graph.json?scope='+scope; ['done','todo','blocked','next','merging','queue','review','failed'].forEach(k=>{ if(!flt[k]) q+='&'+k+'=0'; });
+  if(flt.collapse) q+='&collapse=1';
   if(openMs.size) q+='&open='+encodeURIComponent([...openMs].join(','));
   const d=await (await fetch(q,{cache:'no-store'})).json();
   const hid=['done','todo','blocked','next','merging','queue','review','failed'].filter(k=>!flt[k]);
@@ -936,15 +996,35 @@ def last_gates(n=4):
                 nxt = next((lines[j].strip() for j in range(i + 1, min(i + 4, len(lines))) if lines[j].strip()), "")
                 tgt["msg"] = nxt[:300]
             continue
+        # The gate's own timing verdict (py/hkpy/gatediag.py), printed after each suite. The
+        # structured copy in gate-timings.jsonl is the primary source (gate_timing below); this
+        # is the fallback, and it is per SUITE where the record carries one verdict per run.
+        if l.startswith("gate: CONTENDED") or l.startswith("gate: DEARER") or l.startswith("gate: timing ok"):
+            cur.setdefault("timing", [])
+            if l.strip() not in cur["timing"]:
+                cur["timing"].append(l.strip()[:200])
+            continue
         if l.startswith("[") and "TRIAGE:" in l:
-            cur["triage"].append(l.split("] ", 1)[-1][:200]); continue
+            cur["triage"].append(l.split("] ", 1)[-1][:200])
+            if "retry PASSED" in l:
+                cur["retry_passed"] = True
+            continue
         if not cur["error"] and re.match(r"^(error(\[E\d+\])?: |gate: FAILED )", l) and "test run failed" not in l and "recipe" not in l:
             cur["error"] = l.strip()[:300]
         e = _GATE_END.search(l)
         if e:
             cur["ended"] = e.group(1)
-            cur["outcome"] = "passed" if "MERGED" in e.group(2) else "failed"
-            cur["end_line"] = e.group(2)[:160]
+            end = e.group(2)
+            # A gate whose retry PASSED but whose merge was then refused (the branch moved
+            # mid-gate) is not a failed gate: the tests were green. Say what happened instead
+            # of "failed" (user, 2026-09-23: the 21:33 task-gate-speed gate read as a red).
+            if "MERGE STATE LOST" in end:
+                cur["outcome"] = "not-merged"
+            else:
+                cur["outcome"] = "passed" if "MERGED" in end else "failed"
+            if cur.get("retry_passed") and cur["outcome"] != "failed":
+                cur["error"] = ""   # the first red was a flake the retry cleared
+            cur["end_line"] = end[:160]
             cur = None
     for g in gates:
         try:
@@ -955,7 +1035,43 @@ def last_gates(n=4):
             g["seconds"] = 0
         for k in ("suites", "fails", "triage"):
             g[k] = g[k][:12]
+        g["timing"] = g.get("timing", [])[:6]
     return gates[-n:][::-1]
+
+def gate_timing():
+    """The newest gate's SELF-DIAGNOSIS: contended, or timing ok, and which crates.
+
+    `py/hkpy/gatediag.py` folds one verdict per run into the `gate_end` record — whether crates
+    the diff never touched ran dearer than their own history. A 36-minute gate and a 36-minute
+    gate on a loaded box are the same number and different facts (docs/test-speed-review §1:
+    untouched crates 18-79x while the diff's own new tests cost 0 s), so the dashboard says
+    which one this was instead of leaving a person to guess from the total.
+    """
+    path = os.path.join(SCRATCH, "gate-timings.jsonl")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2); sz = f.tell(); f.seek(max(0, sz - 400_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("kind") != "gate_end" or "contended" not in rec:
+            continue
+        return {
+            "contended": bool(rec.get("contended")),
+            "crates": [[c[0], c[1]] for c in (rec.get("contended_crates") or [])][:6],
+            "dearer": [[c[0], c[1]] for c in (rec.get("dearer") or [])][:6],
+            "max_untouched": rec.get("max_untouched_ratio"),
+            "suite": rec.get("timing_suite") or "",
+            "runs": rec.get("timing_baseline_runs") or 0,
+            "load": (rec.get("loadavg") or [None])[0],
+            "age_s": int(time.time() - float(rec.get("ts") or 0)) if rec.get("ts") else None,
+        }
+    return None
 
 def latest_junit():
     """The newest gate's per-test record: $HACKRIFF_OPS/junit/<run-id>/<n>-<suite>-<profile>.xml,
@@ -993,6 +1109,36 @@ def latest_junit():
                       "slowest": sorted(cases, key=lambda c: -c["s"])[:10],
                       "total_s": round(sum(c["s"] for c in cases))})
     return {"run": run, "age_s": int(time.time() - os.path.getmtime(os.path.join(root, run))), "files": files}
+
+def flake_top(n=5):
+    """The flake ledger's worst offenders — `$HACKRIFF_OPS/flakes.json` (py/hkpy/flakes.py).
+
+    The merge runner forgives a load flake on every single gate and forgets it, so the same
+    spec can cost four gates in a day with nothing counting to two. The ledger counts; this
+    shows the top of it, with which WAY each test went, because "passes alone" (a wait to make
+    deterministic) and "fails alone" (a real defect) are opposite jobs.
+    """
+    try:
+        with open(os.path.join(SCRATCH, "flakes.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+        tests = data.get("tests") or {}
+    except Exception:
+        return []
+    rows = []
+    for name, rec in tests.items():
+        if not isinstance(rec, dict):
+            continue
+        rows.append({
+            "test": str(name),
+            "red": int(rec.get("red_in_gate") or 0),
+            "recent": int(rec.get("recent_red") or 0),
+            "pass_alone": int(rec.get("passed_alone") or 0),
+            "fail_alone": int(rec.get("failed_alone") or 0),
+            "loads": [x for x in (rec.get("loads") or [])][-4:],
+            "last": rec.get("last_seen") or 0,
+        })
+    rows.sort(key=lambda r: (-r["red"], -r["recent"], r["test"]))
+    return rows[:n]
 
 def work_queue(smap, wts, ags, merge_ticket=""):
     """Two queues the dashboard couldn't show before:
@@ -1266,18 +1412,48 @@ def ticket_transcript(tid):
     one-liners from the best-matching subagent transcript (largest, then newest)."""
     tid = (tid or "").upper()
     best = None  # (size, mtime, path)
-    for p in glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True):
+    # Three places an agent's transcript can live (user, 2026-09-23: every modal said "no agent
+    # transcript" while workers were busy): (1) a work-runner worker runs `claude -p` with its
+    # WORKTREE as cwd, so its transcript is under the per-worktree project dir; (2) a subagent of
+    # ANY session (coordinator or supervisor), matched by the ticket id in its launch prompt;
+    # (3) the legacy coordinator-only path, now covered by (2).
+    cands = []
+    m = re.match(r"T-0*(\d+)$", tid)
+    if m:
+        cands += [(p, True) for p in glob.glob(f"{PROJ}--claude-worktrees-t{m.group(1)}/*.jsonl")]
+    cands += [(p, False) for p in glob.glob(f"{PROJ}/*/**/*.jsonl", recursive=True)]
+    for p, by_dir in cands:
         try:
             head, _, sz = head_tail(p)
         except Exception:
             continue
-        if _tid_of_label(first_user(head)) != tid:
+        if not by_dir and _tid_of_label(first_user(head)) != tid:
             continue
         mt = os.path.getmtime(p)
         if best is None or (sz, mt) > (best[0], best[1]):
             best = (sz, mt, p)
     if not best:
-        return None
+        # No transcript, but the work runner may still have a record: say what it knows.
+        d = os.path.join(SCRATCH, "work", tid)
+        bits = []
+        try:
+            hb = json.load(open(os.path.join(d, "handback.json")))
+            bits.append(f"**Hand-back** ({hb.get('outcome')}): {str(hb.get('summary', ''))[:1500]}")
+        except Exception:
+            pass
+        try:
+            res = json.load(open(os.path.join(d, "out.json"))).get("result", "")
+            if res:
+                bits.append("**Worker's last words:** " + str(res)[-1500:])
+        except Exception:
+            pass
+        try:
+            c = json.load(open(os.path.join(SCRATCH, "work-claims.json"))).get(tid)
+            if c:
+                bits.append(f"**Runner claim:** state `{c.get('state')}`, branch `{c.get('branch')}`, model {c.get('model')}")
+        except Exception:
+            pass
+        return {"id": tid, "markdown": "\n\n".join(bits), "file": "work-runner record", "size_kb": 0} if bits else None
     PER = 20000          # per tool-call input / tool-result char cap
     TOTAL = 4_000_000    # overall cap (a safety valve for the browser)
     parts, total, truncated = [], [0], [False]
@@ -1424,22 +1600,81 @@ def ticket_detail(tid):
         out["timing"] = None
     return out
 
+def _registry_ticket(label):
+    """Ticket recorded at spawn by .claude/hooks/register-agent.sh, matched on the prompt head."""
+    try:
+        head = (label or "")[:120]
+        if not head:
+            return None
+        with open(os.path.join(SCRATCH, "agent-registry.jsonl")) as f:
+            for line in f.readlines()[-400:][::-1]:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if o.get("ticket") and (o.get("prompt_head") or "")[:120] == head:
+                    return o["ticket"]
+    except Exception:
+        pass
+    return None
+
+
+def _tid_of_cwd(path):
+    """The transcript's own cwd names the worktree: …/worktrees/rl-t740 or …/t513 → the ticket."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(60000).decode("utf-8", "replace")
+        # The cwd first; else the first worktree path the agent touches (a coordinator subagent
+        # keeps the coordinator's cwd and `cd`s into .claude/worktrees/rl-t740 in its commands).
+        m = re.search(r'"cwd"\s*:\s*"([^"]+)"', head)
+        for text in ([m.group(1)] if m else []) + [head]:
+            mm = re.search(r"worktrees/[A-Za-z-]*t0*(\d{2,4})(?:[/\s\"'&]|$)", text)
+            if mm:
+                return f"T-{mm.group(1)}"
+    except Exception:
+        pass
+    return None
+
+
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
     mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
-    coord_path = f"{PROJ}/{COORD}.jsonl"
-    if os.path.exists(coord_path):
-        s = session_summary(coord_path, "coordinator")
-        if s: s["status"] = None; s["running"] = s["age_s"] < 180; out.append(s)
-    subs = glob.glob(f"{PROJ}/{COORD}/**/*.jsonl", recursive=True)
-    subs = [p for p in subs if os.path.getmtime(p) > time.time() - 1800]
-    subs.sort(key=os.path.getmtime, reverse=True)
-    ACTIVE = 210   # a subagent quiet longer than this is treated as no longer running
+    # EVERY live session and its subagents, not only the coordinator's (user, 2026-09-22: the
+    # supervisor's triage/fix/merge/SDET agents were invisible here). A session is a top-level
+    # transcript under PROJ; its subagents live in <session>/subagents/. The coordinator is the
+    # id in $HACKRIFF_OPS/coordinator-session when that file exists (the COORD constant went
+    # stale the first time the coordinator was relaunched), else the COORD constant; the
+    # session whose subagent dir this monitor's own launcher used is the supervisor.
+    coord_id = COORD
+    try:
+        coord_id = open(os.path.join(SCRATCH, "coordinator-session")).read().strip() or COORD
+    except Exception:
+        pass
+    sessions = [p for p in glob.glob(f"{PROJ}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+    role_of = {}
+    for p in sorted(sessions, key=os.path.getmtime, reverse=True):
+        sid = os.path.basename(p)[:-6]
+        role = "coordinator" if sid == coord_id else ("supervisor" if os.path.isdir(f"{PROJ}/{sid}/subagents") else "session")
+        role_of[sid] = role
+        s = session_summary(p, role)
+        if s: s["status"] = None; s["running"] = s["age_s"] < 180; s["session"] = sid[:8]; out.append(s)
+    subs = [p for sid in role_of for p in glob.glob(f"{PROJ}/{sid}/subagents/*.jsonl") + glob.glob(f"{PROJ}/{sid}/**/*.jsonl", recursive=True)]
+    subs = sorted({p for p in subs if os.path.getmtime(p) > time.time() - 1800}, key=os.path.getmtime, reverse=True)
+    # A subagent quiet longer than this is treated as no longer running. 900 s, not 210: a
+    # triage agent running one browser spec or a scoped nextest binary writes nothing to its
+    # transcript for 5-10 minutes, and 210 s hid the supervisor's fix agent mid-run (2026-09-22).
+    # Work-runner workers have pid liveness from the claims file and do not depend on this.
+    ACTIVE = 900
     best = {}       # dedupe by task id, keep the freshest transcript
     for p in subs:
         s = session_summary(p, "agent")
         if not s: continue
+        parent = p[len(PROJ) + 1:].split("/", 1)[0]
+        s["parent"] = role_of.get(parent, "session")
+        # No ticket in the label: name the agent by what it was asked to do.
+        kw = re.search(r"\b(deflak\w*|SDET|hand-merge|merge|fix|review|audit|triage|capture)\b", s["label"], re.IGNORECASE)
+        s["kind"] = (kw.group(1).lower() if kw else "agent")
         m = re.search(r"(?:task|fixing task|implementing task)\s+(T-\d+)", s["label"], re.IGNORECASE)
         if m:
             tid = m.group(1).upper()
@@ -1448,12 +1683,19 @@ def agents(status_map):
             # still in it somewhere — take the first T-### we see.
             m2 = re.search(r"\bT-\d+\b", s["label"], re.IGNORECASE)
             tid = m2.group(0).upper() if m2 else None
+        if not tid:
+            # The orchestrator knew at spawn time (user, 2026-09-23): the PreToolUse(Agent) hook
+            # wrote {ticket, prompt_head, cwd} to agent-registry.jsonl; match by prompt head,
+            # else read the ticket out of the transcript's own cwd (…/worktrees/rl-t740 → T-740).
+            tid = _registry_ticket(s["label"]) or _tid_of_cwd(p)
         st = status_map.get(tid)
         if st in ("done", "cancelled"): continue     # merged already
         if s["age_s"] > ACTIVE: continue              # gone quiet: not actually running
         key = tid or p
         if key not in best or s["age_s"] < best[key]["age_s"]:
-            s["name"] = tid or "agent"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            s["name"] = tid or f"{s['parent']} · {s['kind']}"; s["status"] = st; s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
+            if not tid:
+                s["label"] = f"{s['parent']}'s agent · " + str(s.get("label", ""))[:100]
             best[key] = s
     # Workers launched by ops/work-runner.py run `claude -p` with the WORKTREE as cwd, so their
     # transcripts live under a per-worktree project dir (…-hackriff--claude-worktrees-t514), not
@@ -1481,7 +1723,10 @@ def agents(status_map):
             continue
         c = claims.get(tid, {})
         alive = c.get("state") == "running" and _alive(c.get("pid"))
-        if not alive and s["age_s"] > ACTIVE:
+        # The runner's claim is the truth when it exists: a worker it has reaped (killed, done,
+        # uncommitted, no-work) is NOT running, however fresh its transcript - four killed workers
+        # showed as running for 210 s on 2026-09-22 while the user was asking for a full stop.
+        if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
         s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
@@ -1520,9 +1765,28 @@ def system_load():
     return {"load1": round(l1, 1), "load5": round(l5, 1), "cores": cores,
             "rustc": count(r"bin/rustc"), "cargo": count(r"cargo (build|nextest|test)")}
 
+def watchdog_box():
+    """The last tick of ops/watchdog.py: who on this box owns the CPU, and what nothing owns.
+
+    Read from the file, never recomputed here - the dashboard already costs 440 % CPU when it
+    does its own scanning (2026-09-22), and the whole point of the watchdog being a separate
+    process is that one thing builds the process table. A missing or stale file says so rather
+    than showing nothing: "no watchdog" is itself the condition that let sixteen busy loops run
+    for two hours unseen.
+    """
+    try:
+        d = json.load(open(os.path.join(SCRATCH, "watchdog.json")))
+    except Exception:
+        return {"state": "absent"}
+    age = time.time() - float(d.get("ts", 0))
+    d["age_s"] = round(age)
+    d["state"] = "stale" if age > 120 else "live"
+    return d
+
+
 def sysstats():
     if psutil is None:
-        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}}
+        return {"cores": os.cpu_count() or 1, "per": [], "mem": {}, "box": watchdog_box()}
     series = [[round(x) for x in snap] for snap in CPU_HIST]   # up to 5 one-second samples, oldest→newest
     per = series[-1] if series else [round(x) for x in psutil.cpu_percent(percpu=True)]
     vm = psutil.virtual_memory()
@@ -1537,7 +1801,24 @@ def sysstats():
         "busy": round(sum(per) / 100, 1),   # core-equivalents of work
         "mem": {"pct": round(vm.percent), "used_gb": round(vm.used / 1e9, 1), "total_gb": round(vm.total / 1e9)},
         "disk": disk,
+        "box": watchdog_box(),
     }
+
+_GATHER_LOCK = threading.Lock()
+_GATHER_CACHE = {"at": 0.0, "data": None}
+
+def gather_cached(max_age=2.5):
+    """One gather() per ~2.5 s, shared by every client. gather() costs ~3 s (ps, git per
+    worktree, the board) and the server is threaded, so every poller used to start its own:
+    on 2026-09-22 the process sat at 440 % CPU and 2.1 GB and stopped answering. Late
+    threads wait on the lock and get the fresh copy instead of computing another.
+    """
+    with _GATHER_LOCK:
+        if _GATHER_CACHE["data"] is not None and time.time() - _GATHER_CACHE["at"] < max_age:
+            return _GATHER_CACHE["data"]
+        data = gather()
+        _GATHER_CACHE.update(at=time.time(), data=data)
+        return data
 
 def gather():
     tk = tasks()
@@ -1557,15 +1838,165 @@ def gather():
     # A gate with no end line and no gate process is one that was killed (a stopped runner, a
     # reboot): say so rather than "running" for ever.
     if gates and gates[0]["outcome"] == "running" and not mg.get("gate"):
-        gates[0]["outcome"] = "killed"
+        # merge_status's ps scan can time out under load; ask once more before saying "killed".
+        try:
+            alive = subprocess.run(["pgrep", "-f", "just gate"], capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            alive = "?"
+        if not alive:
+            gates[0]["outcome"] = "killed"
+    # The JUnit record belongs to the newest gate that RAN nextest; a later docs/board-only gate
+    # writes none. Say which gate it came from so a passed gate is not read as still failing.
+    junit = latest_junit()
+    if junit and gates:
+        junit["stale"] = gates[0]["outcome"] in ("passed", "running") and junit["age_s"] > gates[0].get("seconds", 0) + 120
     return {
         "now": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "worktrees": wt, "tasks": tk, "log": git_log(),
         "coord": coord_pane(), "agents": ags, "sys": system_load(), "stage": stage_status(),
         "merge": mg, "queue": work_queue(smap, wt, ags, mg.get("ticket", "")),
-        "gates": gates, "junit": latest_junit(),
+        "gates": gates, "junit": junit,
+        "timing": gate_timing(), "flakes": flake_top(),
         "budget": budget_status(),
     }
+
+# ------------------------------------------------------------------------------
+# /flow — pipeline throughput visibility (pipeline manager, 2026-09-23): landings/h
+# with the rolling 6h/24h lines, per-hour occupancy, per-gate durations by class,
+# red rate by cause, touchpoints, and the open experiment (if any). Reads through
+# hkpy.flow / hkpy.experiment (py/hkpy/flow.py, py/hkpy/experiment.py) — never
+# re-parses the ops logs itself. build_flow_panel() is a pure function of `ops`
+# and `now` so it is the pytest target directly; the route only adds the cache.
+# ------------------------------------------------------------------------------
+
+def _flow_modules():
+    import sys as _sys
+    py_dir = os.path.join(REPO, "py")
+    if py_dir not in _sys.path:
+        _sys.path.insert(0, py_dir)
+    from hkpy import flow as flow_mod, experiment as exp_mod
+    return flow_mod, exp_mod
+
+
+def _flow_jsonl_points(ops, since_ts, until_ts):
+    """Raw flow.jsonl records in [since_ts, until_ts] — the few real ticks recorded so far
+    (the file started 2026-09-23 ~15:30), overlaid on the series backfilled from the logs.
+    A missing or garbage file degrades to an empty list, never an exception."""
+    out = []
+    try:
+        with open(os.path.join(ops, "flow.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                ts = r.get("ts")
+                if isinstance(ts, (int, float)) and since_ts <= ts <= until_ts:
+                    out.append({"ts": ts, "landings_per_h_6h": r.get("landings_per_h_6h"),
+                                "landings_per_h_24h": r.get("landings_per_h_24h")})
+    except (FileNotFoundError, OSError):
+        pass
+    return out
+
+
+def _landings_series(hourly_rows, since):
+    """One point per hour: rolling 6h/24h landings/h, from flow.hourly()'s per-hour landed
+    counts — this is the backfill; flow.jsonl (above) has too few ticks yet to stand alone."""
+    from datetime import timedelta
+    landed = [r["landed"] for r in hourly_rows]
+    h0 = since.replace(minute=0, second=0, microsecond=0)
+    out = []
+    for i in range(len(landed)):
+        t = h0 + timedelta(hours=i)
+        w6 = landed[max(0, i - 5):i + 1]
+        w24 = landed[max(0, i - 23):i + 1]
+        out.append({"hour": hourly_rows[i]["hour"], "ts": t.timestamp(), "landed": landed[i],
+                    "roll6": round(sum(w6) / len(w6), 2) if w6 else 0.0,
+                    "roll24": round(sum(w24) / len(w24), 2) if w24 else 0.0})
+    return out
+
+
+def build_flow_panel(ops, now=None):
+    """Everything /flow.json serves, as one pure function over `ops` — never raises: any
+    failure (hkpy unimportable, unreadable/garbage logs) comes back as {"error": ...} so a
+    broken panel never takes the rest of the dashboard down with it."""
+    from datetime import datetime, timedelta
+    now = now or datetime.now()
+    at = now.strftime("%Y-%m-%d %H:%M")
+    try:
+        flow_mod, exp_mod = _flow_modules()
+    except Exception as e:
+        return {"error": f"hkpy.flow unavailable: {e}", "at": at}
+    try:
+        warmup_since = now - timedelta(hours=72)   # 48h shown + 24h so roll24 is full at hour 0
+        hourly72 = flow_mod.hourly(ops, warmup_since, now)
+        landings_all = _landings_series(hourly72, warmup_since)
+        display_h0 = (now - timedelta(hours=48)).replace(minute=0, second=0, microsecond=0)
+        landings = [p for p in landings_all if p["ts"] >= display_h0.timestamp()]
+        flow_points = _flow_jsonl_points(ops, display_h0.timestamp(), now.timestamp())
+
+        hourly24 = flow_mod.hourly(ops, now - timedelta(hours=24), now)
+        gates48 = flow_mod.gate_rows(ops, now - timedelta(hours=48), now)
+        gates24 = flow_mod.gate_rows(ops, now - timedelta(hours=24), now)
+        closed24 = [g for g in gates24 if g["verdict"] in ("green", "red")]
+        full24 = sorted(g["minutes"] for g in closed24 if g["class"] == "full" and g["minutes"])
+        full_p50 = full24[len(full24) // 2] if full24 else None
+        reds24 = [g for g in closed24 if g["verdict"] == "red"]
+        causes = collections.Counter(g["cause"] if g["cause"] in ("real", "flake", "flake-then-real") else "other"
+                                      for g in reds24)
+
+        tp_all = flow_mod.touchpoints(ops, now - timedelta(hours=24), now)
+
+        cur, m, checks = exp_mod.status_of(ops, now)
+        if cur is None:
+            experiment = {"open": False}
+        else:
+            metric = cur["metric"].split()[0]
+            base = cur["baseline"].get(metric)
+            val = (m or {}).get(metric)
+            delta = None if base in (None, 0) or val is None else round((val - base) / base * 100, 1)
+            experiment = {
+                "open": True, "id": cur["id"], "hypothesis": cur["hypothesis"], "knobs": cur["knobs"],
+                "opened": cur["opened"], "opened_ts": cur["ts"], "rollback": cur["rollback"],
+                "gates_counted": (m or {}).get("gates"), "gates_target": cur["gates"],
+                "hours_counted": (m or {}).get("hours"), "hours_target": cur["hours"],
+                "metric": metric, "metric_now": val, "metric_baseline": base, "metric_delta_pct": delta,
+                "baseline_landings_per_h_24h": cur["baseline"].get("landings_per_h_24h"),
+                "guards": [{"ok": ok, "text": text} for ok, text in checks],
+            }
+        # Baseline horizontal line for the full-gate p50 chart: the open experiment's own
+        # baseline when one is running (what it's being measured against), else this window's.
+        baseline_full_p50 = (cur["baseline"].get("full_gate_p50_min") if cur else None)
+        if baseline_full_p50 is None:
+            baseline_full_p50 = full_p50
+
+        return {
+            "at": at, "ts": now.timestamp(),
+            "landings": {"series": landings, "flow_jsonl": flow_points},
+            "hourly_24h": hourly24,
+            "gates_48h": gates48,
+            "full_gate_p50_min": full_p50, "baseline_full_gate_p50_min": baseline_full_p50,
+            "causes_24h": dict(causes), "reds_24h": len(reds24), "gates_24h": len(closed24),
+            "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
+            "experiment": experiment,
+        }
+    except Exception as e:
+        return {"error": str(e), "at": at}
+
+
+_FLOW_LOCK = threading.Lock()
+_FLOW_CACHE = {"at": 0.0, "data": None}
+
+def flow_panel_cached(ops, max_age=30.0):
+    """One build_flow_panel() per ~30 s, shared by every client — hourly()/gate_rows()/
+    touchpoints() each re-read merge-runner.log in full (~500k lines), so this is the hard
+    cache the brief asks for rather than a per-poller cost."""
+    with _FLOW_LOCK:
+        if _FLOW_CACHE["data"] is not None and time.time() - _FLOW_CACHE["at"] < max_age:
+            return _FLOW_CACHE["data"]
+        data = build_flow_panel(ops)
+        _FLOW_CACHE.update(at=time.time(), data=data)
+        return data
 
 PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff agents</title>
@@ -1651,6 +2082,10 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
 .mem-lbl{display:flex;justify-content:space-between;gap:6px;font:11px var(--mono);color:var(--mut);margin-bottom:3px;white-space:nowrap}
 .mem-bar{height:12px;border-radius:6px;background:#0a0f12;border:1px solid var(--line);overflow:hidden}
 .mem-bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#3a6ea5,#52C2AE);transition:width .4s ease}
+.boxline{margin-top:9px;font:11px var(--mono);color:var(--mut);line-height:1.6;overflow-wrap:anywhere}
+.boxline .ow{color:var(--teal)}.boxline .ow.hot{color:var(--amber)}
+.boxline .un{color:var(--coral)}
+.boxline .hd{color:var(--dim);letter-spacing:.06em;text-transform:uppercase;font-size:10px}
 @media(max-width:1000px){.cols{grid-template-columns:1fr 1fr}}
 @media(max-width:640px){
   body{overflow:auto;overflow-x:hidden;font-size:12px}
@@ -1670,7 +2105,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -1687,6 +2122,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
         <div><div class="mem-lbl"><span>Memory</span><span id=mem-txt></span></div><div class="mem-bar"><i id=mem-fill></i></div></div>
         <div><div class="mem-lbl"><span>Disk free</span><span id=disk-txt></span></div><div class="mem-bar"><i id=disk-fill></i></div></div>
       </div>
+      <div class=boxline id=boxline title="ops/watchdog.py: per-owner CPU, and anything no worker/gate/role/demo owns"></div>
     </div>
     <div class="card" style="flex:0 0 auto;max-height:52%"><h2>Tasks <em id=tkn></em></h2><div class="bd log" id=active></div></div>
     <div class="card fill"><h2>Recent commits <em>main</em></h2><div class="bd log" id=log></div></div>
@@ -1706,7 +2142,8 @@ async function tick(){
   el.style.color=busy?'#E47B68':(((y.load1||0)>(y.cores||28)*0.6)?'#F0A542':'#52C2AE');
   const mg=d.merge||{state:'idle'};
   const mgEl=$('#merge');
-  if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
+  if(mg.state==='merging'&&!mg.gate){ mgEl.textContent='■ staged merge, NO gate running · '+dur(mg.merge_age_s||0)+' — needs `git merge --abort` + runner restart'; mgEl.style.color='#E47B68'; mgEl.title='MERGE_HEAD exists but no gate process: a killed gate left it (user 2026-09-22: read as a 59-minute gate)'; }
+  else if(mg.state==='merging'){ mgEl.textContent='⇄ merging'+(mg.gate?' · gate '+dur(mg.elapsed_s):''); mgEl.style.color='#A395E0'; mgEl.title='Merging: '+(mg.msg||'?'); }
   else if(mg.state==='gating'){ mgEl.textContent='⚙ '+mg.gate+' · '+dur(mg.elapsed_s); mgEl.style.color='#F0A542'; mgEl.title='Gate running before merge'; }
   else { mgEl.textContent='idle'+(mg.queue?' · '+mg.queue+' in-progress':''); mgEl.style.color='#5A6973'; mgEl.title='No merge or gate running'; }
   // Merge queue panel: what's IN the current test run vs. ahead-of-main and waiting.
@@ -1733,21 +2170,54 @@ async function tick(){
       const fails=(g.fails||[]).map(f=>`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">✗ ${esc(f.test)} <span style="color:#5A6973">${esc(f.binary)} · ${f.s.toFixed(1)}s</span>${f.at?`<div style="color:#8595A0;padding-left:14px">${esc(f.at)} — ${esc(f.msg)}</div>`:''}</div>`).join('');
       const err=(!g.fails.length&&g.error)?`<div style="${mono};padding:1px 0 1px 12px;color:#E47B68">${esc(g.error)}</div>`:'';
       const tri=(g.triage||[]).map(t=>`<div style="${mono};padding-left:12px;color:#A395E0">${esc(t)}</div>`).join('');
-      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':'✗ failed'}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
+      return `<div style="padding:3px 0;border-top:1px solid #1e2830"><span style="color:${col};font-weight:600">${g.outcome==='running'?'⚙ running':g.outcome==='killed'?'■ killed (no gate process)':g.outcome==='passed'?'✓ passed':g.outcome==='not-merged'?'✓ tests passed · NOT merged (branch moved mid-gate; re-queued)':'✗ failed'}${g.retry_passed&&g.outcome!=='not-merged'?' <span style="color:#F0A542">(after one flake retry)</span>':''}</span> <span style="color:#8595A0">${esc(g.started)} · ${dur(g.seconds)} · ${who}</span>${g.bulk?`<div style="color:#5A6973;${mono}">${g.branches.map(esc).join(' ')}</div>`:''}<div style="color:#5A6973">${suites||'(no suite finished)'}</div>${fails}${err}${tri}</div>`;
     };
-    const gates=G.length?G.map(gateRow).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
+    // Only the NEWEST gate is shown in full; earlier ones collapse to one line each, their
+    // failures behind a toggle - a failure that was fixed must not keep reading as current.
+    const oneLine=g=>{const col=g.outcome==='passed'?'#52C2AE':g.outcome==='failed'?'#E47B68':'#8595A0'; const who=g.bulk?`bulk · ${g.branches.length}`:esc(g.branches[0]||'?'); const nf=(g.fails||[]).length; return `<details style="padding:2px 0;border-top:1px solid #1e2830"><summary style="cursor:pointer;color:#8595A0"><span style="color:${col}">${g.outcome}</span> ${esc(g.started)} · ${dur(g.seconds)} · ${who}${nf?` · ${nf} failed`:''}${(!nf&&g.error)?' · suite error':''}</summary>${gateRow(g)}</details>`;};
+    const gates=G.length?gateRow(G[0])+G.slice(1).map(oneLine).join(''):'<div style="color:#5A6973">— no gate in the log tail —</div>';
     const J=d.junit; let ju='';
     if(J){
       const fl=J.files||[]; const nf=fl.reduce((a,f)=>a+f.failures.length,0), nt=fl.reduce((a,f)=>a+f.tests,0);
       const slow=fl.flatMap(f=>f.slowest.map(c=>({...c,file:f.file}))).sort((a,b)=>b.s-a.s).slice(0,8);
-      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)
-        +fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('')
+      const stale=J.stale?` <span style="color:#F0A542">· from an EARLIER gate (the newest ran no nextest)</span>`:'';
+      const fails=J.stale?'':fl.flatMap(f=>f.failures.map(c=>`<div style="${mono};color:#E47B68;padding-left:12px">✗ ${esc(c.class)}::${esc(c.name)} <span style="color:#5A6973">${c.s.toFixed(1)}s</span><div style="color:#8595A0;padding-left:14px">${esc(c.msg)}</div></div>`)).join('');
+      ju=hdr(`JUnit · run ${esc(J.run)} · ${dur(J.age_s)} ago · ${nt} tests · ${nf} failed`)+(J.stale?`<div style="color:#F0A542">${stale}</div>`:'')+fails
         +`<div style="color:#8595A0;margin-top:3px">slowest:</div>`+slow.map(c=>`<div style="${mono};padding-left:12px"><span style="color:#F0A542">${dur(c.s)}</span> ${esc(c.class)}::${esc(c.name)}</div>`).join('');
     }
+    // Was the gate SLOW, or was the BOX slow? (py/hkpy/gatediag.py, from the gate_end record;
+    // the per-suite line in the log is the fallback.) A 36-minute gate on a quiet box and one
+    // on a loaded box are the same number and opposite facts, so the dashboard names which.
+    const T=d.timing; let tm='';
+    if(T){
+      if(T.contended){
+        const cr=(T.crates||[]).map(c=>`${esc(c[0])} ${Number(c[1]).toFixed(1)}x`).join(', ');
+        tm=`<div style="color:#F0A542;padding:2px 0"><b>CONTENDED</b> <span style="color:#8595A0">${esc(T.suite||'')}</span> — ${cr||'untouched crates over 3x'} <span style="color:#5A6973">(untouched by the diff${T.load!=null?' · load '+Number(T.load).toFixed(1):''})</span></div>`;
+      } else if(T.max_untouched!=null){
+        tm=`<div style="color:#52C2AE;padding:2px 0">timing ok <span style="color:#5A6973">· max untouched crate ${Number(T.max_untouched).toFixed(1)}x · ${esc(T.suite||'')} vs ${T.runs} green run(s)</span></div>`;
+      }
+      if((T.dearer||[]).length)
+        tm+=`<div style="color:#A395E0;padding:1px 0">DEARER — ${T.dearer.map(c=>`${esc(c[0])} ${Number(c[1]).toFixed(1)}x`).join(', ')} <span style="color:#5A6973">(touched: the change cost this)</span></div>`;
+    }
+    if(!tm){
+      // Fallback: the line the gate printed, per suite, straight out of merge-runner.log.
+      const tl=(G[0]&&G[0].timing)||[];
+      if(tl.length) tm=tl.map(l=>`<div style="${mono};color:${l.startsWith('gate: CONTENDED')?'#F0A542':l.startsWith('gate: DEARER')?'#A395E0':'#52C2AE'}">${esc(l)}</div>`).join('');
+    }
+    // The flake ledger: which tests keep costing gates, and which WAY they go when re-run alone.
+    const FL=d.flakes||[];
+    const fl=FL.length?FL.map(f=>{
+      const real=f.fail_alone>0, col=real?'#E47B68':'#F0A542';
+      const how=real?(f.pass_alone?'both ways — triage in isolation':'fails alone — a real defect'):'passes alone — a load flake';
+      const ld=(f.loads||[]).length?` · loads ${f.loads.map(x=>Number(x).toFixed(0)).join(',')}`:'';
+      return `<div style="${mono};padding:1px 0"><span style="color:${col}">${f.red}x</span> <span style="color:#5A6973">(${f.recent} in 7d)</span> ${esc(f.test)}<div style="color:#8595A0;padding-left:14px">${how}${ld}</div></div>`;
+    }).join(''):'';
     // Gate results FIRST (user, 2026-09-22: the waiting list grew past the viewport and hid them),
     // and the waiting list capped: the full set is in the Work trees card.
     const CAP=12; const wtShown=ahead.length>CAP?ahead.slice(0,CAP).map(t=>{const [tag,col]=TAG[t.state]||['⏳ '+(t.state||'waiting'),'#8595A0']; return row(t,tag,col);}).join('')+`<div style="color:#5A6973;padding:2px 0">… and ${ahead.length-CAP} more (see Work trees)</div>`:wt;
-    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+gates+ju+hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
+    const mq=$('#mergeq'); if(mq) mq.innerHTML=warn+gl+hdr('Last gate results')+tm+gates+ju
+      +(fl?hdr('Flake ledger · tests that cost gates')+fl:'')
+      +hdr('In the current test run')+ts+hdr('Ahead of main · not being tested')+wtShown;
     const mqn=$('#mqn'); if(mqn) mqn.textContent=testing.length+' in test · '+ahead.length+' waiting';
   }
   const b=d.budget||{}; const bEl=$('#budget');
@@ -1840,7 +2310,24 @@ async function sysTick(){
     $('#disk-fill').style.background=col;
     $('#disk-txt').style.color=free<10?'#E47B68':free<25?'#F0A542':'var(--mut)';
   }
+  renderBox(s.box||{});
  }catch(e){}
+}
+// "Box": who owns the CPU right now, from ops/watchdog.py's last tick. Unowned is drawn in red
+// and never hidden — sixteen unowned busy loops ran for 2 h 18 m on 2026-09-22 because nothing
+// displayed them. "no watchdog running" is itself shown, for the same reason.
+function renderBox(b){
+  const el=$('#boxline'); if(!el) return;
+  if(b.state==='absent'){ el.innerHTML='<span class=un>⚠ no watchdog running</span> <span class=hd>— start ops/watchdog.py</span>'; return; }
+  const ow=Object.entries(b.owners||{}).filter(([k,v])=>v.cpu>=1).slice(0,9)
+    .map(([k,v])=>`<span class="ow${v.cpu>=150?' hot':''}">${esc(k)} ${Math.round(v.cpu)}%</span>`).join(' · ');
+  const un=(b.unowned||[]).filter(u=>u.cpu>=20);
+  const alarms=(b.alarms||[]).map(a=>`<span class=un>${esc(a.title)}</span>`).join(' · ');
+  const over=(b.load||0)>(b.budget||1e9);
+  el.innerHTML=`<div class=hd>Box · load <span style="color:${over?'#E47B68':'var(--mut)'}">${b.load}</span>/${b.budget} budget${b.state==='stale'?` · <span class=un>stale ${b.age_s}s</span>`:''}</div>`
+    +`<div>${ow||'<span class=hd>idle</span>'}</div>`
+    +(un.length?`<div class=un>unowned: ${un.map(u=>`${Math.round(u.cpu)}% pid ${u.pid} ${esc((u.cmd||'').slice(0,58))}`).join(' · ')}</div>`:'')
+    +(alarms?`<div>${alarms}</div>`:'');
 }
 sysTick(); setInterval(sysTick,5000); setInterval(playFrame,1000);
 </script></body></html>"""
@@ -2231,9 +2718,238 @@ let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout((
 load();
 </script></body></html>"""
 
+# ------------------------------------------------------------------------------
+# /flow — pipeline throughput visibility. Same dark tokens as PAGE/PERF_PAGE,
+# hand-drawn inline SVG (no chart library loaded anywhere in this file but
+# mermaid, which is for /graph only). Data from /flow.json (build_flow_panel).
+# ------------------------------------------------------------------------------
+FLOW_PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>hackriff flow</title>
+<style>
+:root{--bg:#0D1317;--panel:#131B20;--line:#243039;--txt:#D5DEE2;--mut:#8595A0;--dim:#5A6973;--teal:#52C2AE;--amber:#F0A542;--lav:#A395E0;--coral:#E47B68;--blue:#3a6ea5;--mono:"SFMono-Regular",Menlo,monospace}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--txt);font:13px/1.5 -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto}
+.top span.nm b{color:var(--amber)}
+a{color:var(--mut);text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:3px 9px;font-size:12px}
+a:hover{color:var(--txt)}
+.sub{color:var(--dim);font:12px var(--mono);margin-left:auto}
+.wrap{flex:1;min-height:0;overflow:auto;padding:14px}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:14px;align-items:start}   /* minmax(0,..): a chart's width attr must not set the column's minimum */
+@media(max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}.wrap{padding:10px}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0}
+.card.wide{grid-column:1/-1}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 10px;display:flex;justify-content:space-between;gap:8px}
+.card h2 em{font-style:normal;color:var(--dim);text-transform:none;letter-spacing:0}
+.chart{width:100%;min-height:20px}
+svg{display:block;width:100%;height:auto}
+.tlink{cursor:pointer}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font:11px var(--mono);color:var(--mut);margin-top:9px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:0}
+.legend i.dash{background:none;border-top:2px dashed var(--dim);width:12px;height:0;vertical-align:2px}
+table{width:100%;border-collapse:collapse;font:11.5px var(--mono);table-layout:fixed}
+th,td{text-align:left;padding:4px 6px;border-top:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+th{color:var(--dim);font-weight:400;text-transform:uppercase;letter-spacing:.06em;font-size:10px}
+td.num{text-align:right;color:var(--amber)}
+.empty{color:var(--dim);font-size:12px;padding:10px 0}
+.errbox{color:var(--coral);font:12px var(--mono);padding:10px 0}
+.tp-row{padding:3px 0;border-top:1px solid var(--line);font:11.5px var(--mono);color:var(--mut);overflow-wrap:anywhere}
+.tp-row:first-child{border-top:0}
+.guard{padding:2px 0;font:11.5px var(--mono)}
+.guard.ok{color:var(--teal)}.guard.bad{color:var(--coral)}.guard.nodata{color:var(--dim)}
+.kv{display:flex;flex-wrap:wrap;gap:10px 18px;font:11.5px var(--mono);color:var(--mut);margin-bottom:8px}
+.kv b{color:var(--txt)}
+.rollback{font:11px var(--mono);color:var(--amber);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin-top:8px;overflow-wrap:anywhere}
+*{scrollbar-width:thin;scrollbar-color:transparent transparent}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+:hover::-webkit-scrollbar-thumb{background:rgba(133,149,160,.4)}::-webkit-scrollbar-thumb:hover{background:rgba(133,149,160,.7)}
+:hover{scrollbar-color:rgba(133,149,160,.4) transparent}
+</style></head><body>
+<div class=top><span class=nm>hack<b>riff</b> · flow</span><a href="/">← dashboard</a><a href="/perf">perf ↗</a><span class=sub id=sub>loading…</span></div>
+<div class=wrap><div id=charts>loading…</div></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const FM='ui-monospace,Menlo,monospace';
+const C={txt:'#D5DEE2',mut:'#8595A0',dim:'#5A6973',teal:'#52C2AE',amber:'#F0A542',lav:'#A395E0',coral:'#E47B68',blue:'#3a6ea5'};
+const CLASSCOL={full:C.teal,ui:C.lav,py:C.amber,docs:C.blue};
+function classColor(k){ return CLASSCOL[k]||C.mut; }
+const F={
+  dur(m){ if(m==null) return '—'; if(m<60) return Math.round(m)+'m'; return (m/60).toFixed(1)+'h'; },
+  n(x){ return x==null?'—':x; },
+  pct(x){ return x==null?'—':(x>0?'+':'')+x+'%'; },
+  date(ts){ if(!ts) return '—'; return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+};
+function rect(x,y,w,h,fill){ return `<rect x="${(+x).toFixed(1)}" y="${(+y).toFixed(1)}" width="${Math.max(0,+w).toFixed(1)}" height="${h}" rx="2" fill="${fill}"/>`; }
+
+// 1. landings/h line chart: rolling 6h/24h over the last 48h, flow.jsonl points overlaid,
+// the open experiment's opening time as a vertical line and its baseline as a dashed line.
+function drawLandings(el, d){
+  const pts=(d.landings&&d.landings.series)||[];
+  const W=el.clientWidth||700, H=170, padL=34, padR=8, padT=10, padB=18;
+  if(!pts.length){ el.innerHTML='<div class=empty>no hourly data yet</div>'; return; }
+  const xs=pts.map(p=>p.ts), t0=Math.min.apply(null,xs), t1=Math.max.apply(null,xs)||t0+3600;
+  const vals=pts.flatMap(p=>[p.roll6,p.roll24]).filter(v=>v!=null);
+  const exp=d.experiment&&d.experiment.open?d.experiment:null;
+  const base=exp?exp.baseline_landings_per_h_24h:null;
+  const maxV=Math.max.apply(null,vals.concat(base||0,0.1));
+  const x=ts=>padL+(W-padL-padR)*((ts-t0)/Math.max(1,t1-t0));
+  const y=v=>padT+(H-padT-padB)*(1-(v||0)/maxV);
+  const line=(key,col)=>{
+    let d2='', started=false;
+    pts.forEach(p=>{ const v=p[key]; if(v==null){ started=false; return; } const cmd=started?'L':'M'; d2+=`${cmd}${x(p.ts).toFixed(1)},${y(v).toFixed(1)} `; started=true; });
+    return d2.trim()?`<path d="${d2}" fill="none" stroke="${col}" stroke-width="2"/>`:'';
+  };
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  // gridlines + y labels
+  for(let i=0;i<=3;i++){ const v=maxV*i/3, yy=y(v); s+=`<line x1="${padL}" x2="${W-padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.dim}" stroke-opacity=".25"/>`; s+=`<text x="2" y="${(yy+3).toFixed(1)}" fill="${C.dim}" font-size="9.5" font-family="${FM}">${v.toFixed(1)}</text>`; }
+  if(base!=null) s+=`<line x1="${padL}" x2="${W-padR}" y1="${y(base).toFixed(1)}" y2="${y(base).toFixed(1)}" stroke="${C.dim}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  if(exp&&exp.opened_ts) s+=`<line x1="${x(exp.opened_ts).toFixed(1)}" x2="${x(exp.opened_ts).toFixed(1)}" y1="${padT}" y2="${H-padB}" stroke="${C.amber}" stroke-width="1.5" stroke-dasharray="2,2"/>`;
+  s+=line('roll24',C.blue)+line('roll6',C.teal);
+  (d.landings.flow_jsonl||[]).forEach(p=>{ if(p.landings_per_h_24h!=null) s+=`<circle cx="${x(p.ts).toFixed(1)}" cy="${y(p.landings_per_h_24h).toFixed(1)}" r="2.6" fill="${C.amber}"/>`; });
+  s+=`<text x="${padL}" y="${H-4}" fill="${C.dim}" font-size="10" font-family="${FM}">${F.date(t0)}</text>`;
+  s+=`<text x="${W-padR}" y="${H-4}" text-anchor="end" fill="${C.dim}" font-size="10" font-family="${FM}">${F.date(t1)}</text>`;
+  s+='</svg>';
+  el.innerHTML=s;
+}
+
+// 2. per-hour, last 24h: dispatch-hours + gate occupancy as bars, landed count, red count.
+function drawHourly(el, rows){
+  if(!rows||!rows.length){ el.innerHTML='<div class=empty>no hourly data</div>'; return; }
+  const W=el.clientWidth||700, rh=16, lblW=54, barX=lblW+12, barW=Math.max(20,W-barX-122);   // 122: room for '0 landed · 3 red' beside a full bar
+  const H=8+rows.length*rh;
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  rows.forEach((r,i)=>{
+    const y=4+i*rh, bh=11, by=y+1;
+    s+=`<text x="${lblW}" y="${by+9}" text-anchor="end" fill="${C.mut}" font-size="10" font-family="${FM}">${esc(r.hour.split(' ')[1]||r.hour)}</text>`;
+    const gateFrac=Math.max(0,Math.min(1,(r.gate_min||0)/60));
+    s+=rect(barX,by,barW,bh,'#0a0f12');
+    if(gateFrac>0) s+=rect(barX,by,barW*gateFrac,bh,C.amber);
+    if(r.dispatch>0) s+=rect(lblW+4,by,5,bh,C.teal);   // its own mark left of the bar, not hidden under a full one
+    const meta=`${r.landed||0} landed${r.red?` · ${r.red} red`:''}`;
+    s+=`<text x="${W-2}" y="${by+9}" text-anchor="end" fill="${r.red?C.coral:C.mut}" font-size="10" font-family="${FM}">${esc(meta)}</text>`;
+  });
+  s+='</svg>';
+  el.innerHTML=s;
+  el.insertAdjacentHTML('afterend','<div class=legend><span><i style="background:'+C.amber+'"></i>gate occupancy (of the hour)</span><span><i style="background:'+C.teal+'"></i>dispatch happened</span></div>');
+}
+
+// 3. per-gate durations by class, last 48h; baseline full-gate p50 as a horizontal line.
+function drawGates(el, gates, baseline){
+  const rows=(gates||[]).filter(g=>g.minutes!=null);
+  if(!rows.length){ el.innerHTML='<div class=empty>no closed gates in range</div>'; return; }
+  const W=el.clientWidth||700, H=170, padL=34, padR=8, padT=10, padB=22;
+  const maxM=Math.max.apply(null,rows.map(g=>g.minutes).concat(baseline||0,1));
+  const x=i=>padL+(W-padL-padR)*(rows.length<=1?0.5:i/(rows.length-1));
+  const y=v=>padT+(H-padT-padB)*(1-v/maxM);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" preserveAspectRatio="xMinYMin meet">`;
+  for(let i=0;i<=3;i++){ const v=maxM*i/3, yy=y(v); s+=`<line x1="${padL}" x2="${W-padR}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${C.dim}" stroke-opacity=".25"/>`; s+=`<text x="2" y="${(yy+3).toFixed(1)}" fill="${C.dim}" font-size="9.5" font-family="${FM}">${Math.round(v)}</text>`; }
+  if(baseline!=null) s+=`<line x1="${padL}" x2="${W-padR}" y1="${y(baseline).toFixed(1)}" y2="${y(baseline).toFixed(1)}" stroke="${C.mut}" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  rows.forEach((g,i)=>{
+    const cx=x(i), cy=y(g.minutes), red=g.verdict==='red', open=g.verdict==='open';
+    const col = open? C.dim : (red?C.coral:classColor(g.class));
+    s+=`<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${red?4.2:3.2}" fill="${col}"${red?` stroke="${C.coral}" stroke-width="1.5" fill-opacity=".35"`:''}><title>${esc(g.start)} · ${g.class} · ${Math.round(g.minutes)}m · ${g.verdict}${g.cause?' · '+g.cause:''}</title></circle>`;
+  });
+  s+=`<text x="${padL}" y="${H-4}" fill="${C.dim}" font-size="10" font-family="${FM}">${esc((rows[0]||{}).start||'')}</text>`;
+  s+=`<text x="${W-padR}" y="${H-4}" text-anchor="end" fill="${C.dim}" font-size="10" font-family="${FM}">${esc((rows[rows.length-1]||{}).start||'')}</text>`;
+  s+='</svg>';
+  el.innerHTML=s;
+  const classes=[...new Set(rows.map(g=>g.class))];
+  el.insertAdjacentHTML('afterend','<div class=legend>'+classes.map(k=>`<span><i style="background:${classColor(k)}"></i>${esc(k)}</span>`).join('')
+    +'<span><i style="background:'+C.coral+'"></i>red</span>'+(baseline!=null?'<span><i class=dash></i>baseline p50 '+Math.round(baseline)+'m</span>':'')+'</div>');
+}
+
+// 4. red rate by cause, 24h.
+function drawCauses(el, d){
+  const c=d.causes_24h||{}; const order=['real','flake','flake-then-real','other'];
+  const total=d.gates_24h||0, reds=d.reds_24h||0;
+  let h=`<div class=kv><span>reds <b>${reds}/${total}</b></span></div>`;
+  const max=Math.max.apply(null,order.map(k=>c[k]||0).concat(1));
+  h+='<table><thead><tr><th>cause</th><th>count</th></tr></thead><tbody>';
+  order.forEach(k=>{ const v=c[k]||0; const w=100*v/max;
+    h+=`<tr><td style="color:${C.txt}">${k}</td><td class=num><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><span style="width:${w.toFixed(0)}%;max-width:80px;height:8px;background:${k==='real'?C.coral:k==='other'?C.mut:C.amber};border-radius:4px;display:inline-block"></span>${v}</div></td></tr>`;
+  });
+  h+='</tbody></table>';
+  el.innerHTML=h;
+}
+
+// 5. touchpoints, 24h.
+function drawTouchpoints(el, d){
+  const tp=d.touchpoints_24h||{count:0,items:[]};
+  let h=`<div class=kv><span>count <b>${tp.count}</b></span></div>`;
+  h += (tp.items&&tp.items.length) ? tp.items.map(t=>`<div class=tp-row>${esc(t)}</div>`).join('') : '<div class=empty>none in the last 24h</div>';
+  el.innerHTML=h;
+}
+
+// 6. open experiment.
+function drawExperiment(el, d){
+  const e=d.experiment;
+  if(!e||!e.open){ el.innerHTML='<div class=empty>no experiment open</div>'; return; }
+  const delta=F.pct(e.metric_delta_pct);
+  let h=`<div class=kv>
+    <span>id <b>${esc(e.id)}</b></span>
+    <span>opened <b>${esc(e.opened)}</b></span>
+    <span>knobs <b>${esc((e.knobs||[]).join(', '))}</b></span>
+    <span>gates <b>${F.n(e.gates_counted)}/${F.n(e.gates_target)}</b></span>
+    <span>hours <b>${(e.hours_counted!=null?e.hours_counted.toFixed(1):'—')}/${F.n(e.hours_target)}</b></span>
+  </div>
+  <div style="color:${C.mut};margin-bottom:8px">${esc(e.hypothesis)}</div>
+  <div class=kv><span>${esc(e.metric)} <b>${F.n(e.metric_now)}</b> vs baseline <b>${F.n(e.metric_baseline)}</b> <span style="color:${(e.metric_delta_pct||0)>=0?C.teal:C.coral}">${delta}</span></span></div>`;
+  h += (e.guards||[]).map(g=>{ const cls=g.ok===true?'ok':g.ok===false?'bad':'nodata'; const mark=g.ok===true?'✓':g.ok===false?'✗ BROKEN':'—'; return `<div class="guard ${cls}">${mark} ${esc(g.text)}</div>`; }).join('');
+  h += `<div class=rollback>rollback: ${esc(e.rollback)}</div>`;
+  el.innerHTML=h;
+}
+
+async function load(){
+  try{
+    const d=await (await fetch('/flow.json',{cache:'no-store'})).json();
+    if(d.error){ $('#charts').innerHTML=`<div class=errbox>flow error: ${esc(d.error)}</div>`; $('#sub').textContent='error'; return; }
+    $('#sub').textContent=`as of ${esc(d.at)}`;
+    $('#charts').innerHTML=`
+    <div class=grid>
+      <div class="card wide"><h2><span>Landings/h <em>rolling 6h (teal) / 24h (blue) · flow.jsonl ticks (amber dots)</em></span></h2><div id=cLand class=chart></div></div>
+      <div class="card wide"><h2><span>Per hour, last 24h</span></h2><div id=cHourly class=chart></div></div>
+      <div class="card wide"><h2><span>Per-gate durations by class, last 48h</span></h2><div id=cGates class=chart></div></div>
+      <div class=card><h2>Red rate by cause <em>24h</em></h2><div id=cCauses></div></div>
+      <div class=card><h2>Touchpoints <em>24h</em></h2><div id=cTouch></div></div>
+      <div class="card wide"><h2>Open experiment</h2><div id=cExp></div></div>
+    </div>`;
+    drawLandings($('#cLand'), d);
+    drawHourly($('#cHourly'), d.hourly_24h||[]);
+    drawGates($('#cGates'), d.gates_48h||[], d.baseline_full_gate_p50_min);
+    drawCauses($('#cCauses'), d);
+    drawTouchpoints($('#cTouch'), d);
+    drawExperiment($('#cExp'), d);
+  }catch(e){ $('#charts').innerHTML=`<div class=errbox>fetch error: ${esc(e)}</div>`; $('#sub').textContent='error'; }
+}
+load(); setInterval(load,30000);
+let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
+</script></body></html>"""
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
+        if self.path.startswith("/worklog.json"):
+            try:
+                import sys as _sys
+                if OPSDIR not in _sys.path:
+                    _sys.path.insert(0, OPSDIR)
+                import worklog
+                body = json.dumps(worklog.build()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}", "roles": []}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/worklog"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import worklog
+            body = worklog.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/term.json"):
             try:
                 body = json.dumps({"coord": term_pane(), "now": time.strftime("%H:%M:%S %Z")}).encode(); self.send_response(200)
@@ -2257,8 +2973,9 @@ class H(BaseHTTPRequestHandler):
             keep_review = "review=0" not in self.path
             _oq = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("open", [""])[0]
             open_ms = tuple(m for m in _oq.split(",") if m)
+            collapse_done = "collapse=1" in self.path
             try:
-                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms)).encode(); self.send_response(200)
+                body = json.dumps(task_graph(scope, show_done, show_todo, show_blocked, keep_merging=keep_merging, keep_next=keep_next, keep_failed=keep_failed, keep_queue=keep_queue, keep_review=keep_review, open_ms=open_ms, collapse_done=collapse_done)).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": str(e), "mermaid": "graph RL"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
@@ -2374,9 +3091,20 @@ class H(BaseHTTPRequestHandler):
             body = PERF_PAGE.replace("</body>", TICKET_MODAL + "</body>").encode()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/flow.json"):
+            try:
+                body = json.dumps(flow_panel_cached(SCRATCH)).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": str(e)}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/flow"):
+            body = FLOW_PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/data.json"):
             try:
-                body = json.dumps(gather()).encode()
+                body = json.dumps(gather_cached()).encode()
                 self.send_response(200); self.send_header("Content-Type", "application/json")
             except Exception as e:
                 body = json.dumps({"error": str(e)}).encode(); self.send_response(500); self.send_header("Content-Type", "application/json")
@@ -2398,4 +3126,6 @@ if __name__ == "__main__":
         except Exception:
             pass
     threading.Thread(target=_warm_burndown, daemon=True).start()
-    ThreadingHTTPServer(("127.0.0.1", 8901), H).serve_forever()
+    # MONITOR_PORT was documented (ops/README.md, /dev-env) but never read: a second copy always
+    # died binding 8901. 8901 stays the default.
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("MONITOR_PORT") or 8901)), H).serve_forever()

@@ -541,3 +541,80 @@ fn sample_counter_overflow_is_an_error() {
         Err(SourceError::InvalidRecording(_))
     ));
 }
+
+/// T-463 (AWARE-011): playback starts a recording at a chosen past moment through the device
+/// interface. `seek_to_time` lands on the first sample at or after the time, crosses whole
+/// segments and a recorded gap, flags the skip as a GAP, never moves backwards, and a time past
+/// the data leaves the source at its end.
+#[test]
+fn seek_to_time_starts_at_the_first_sample_at_or_after_it() {
+    let fs = 10_000.0; // 100 µs per sample
+    let build = || {
+        let mut meta = meta(Datatype::Ci8, fs);
+        meta.global.provenance = Some(provenance("synthetic:test", 100e6, fs));
+        meta.captures.push(capture(0, 100e6));
+        meta.captures[0].datetime = Some("2026-09-13T00:00:00Z".into());
+        // Capture 1 starts after 500 missing samples: stream index 1500, time 150 ms.
+        let mut c1 = capture(1000, 100e6);
+        c1.extra
+            .insert("core:global_index".into(), serde_json::json!(1500));
+        meta.captures.push(c1);
+        SigmfReplaySource::from_reader(meta, Cursor::new(ramp_ci8(2000)), opts(256)).unwrap()
+    };
+    let t0 = hk_core::source::sigmf_replay::parse_sigmf_datetime("2026-09-13T00:00:00Z")
+        .unwrap()
+        .as_unix_nanos();
+    let at = |ns: i64| Timestamp::from_unix_nanos(t0 + ns);
+    let mut buf = Vec::new();
+
+    // Mid-sample: 25.05 ms is between samples 250 and 251, so 251.
+    let mut src = build();
+    assert_eq!(src.seek_to_time(at(25_050_000)).unwrap(), 251);
+    let h = src.read_block(&mut buf).unwrap().unwrap();
+    assert_eq!(h.first_sample(), 251);
+    assert!(h.time.host_time >= at(25_050_000));
+    assert!(
+        h.discontinuity.contains(Discontinuity::GAP),
+        "a seek is a gap"
+    );
+    assert_eq!(h.dropped_before, 0, "a deliberate skip is not a loss");
+    let mut expected = Vec::new();
+    format::decode_into(
+        Datatype::Ci8,
+        &ramp_ci8(2000)[2 * 251..2 * 256],
+        &mut expected,
+    )
+    .unwrap();
+    assert_eq!(
+        &buf[..5],
+        &expected[..],
+        "the samples of that time, not others"
+    );
+    let h = src.read_block(&mut buf).unwrap().unwrap();
+    assert!(
+        !h.discontinuity.contains(Discontinuity::GAP),
+        "only the first block after it"
+    );
+
+    // Backwards (and to the current position) skips nothing.
+    assert_eq!(src.seek_to_time(at(0)).unwrap(), 0);
+
+    // Inside the recorded gap: lands on capture 1's first sample (stream index 1500).
+    let mut src = build();
+    assert_eq!(src.seek_to_time(at(120_000_000)).unwrap(), 1000);
+    let h = src.read_block(&mut buf).unwrap().unwrap();
+    assert_eq!(h.first_sample(), 1500);
+    assert_eq!(h.time.host_time, at(150_000_000));
+    assert!(h.discontinuity.contains(Discontinuity::GAP));
+
+    // Exactly on a sample; then past the end of the data.
+    let mut src = build();
+    assert_eq!(src.seek_to_time(at(160_000_000)).unwrap(), 1100);
+    assert_eq!(
+        src.read_block(&mut buf).unwrap().unwrap().first_sample(),
+        1600
+    );
+    let mut src = build();
+    assert_eq!(src.seek_to_time(at(10_000_000_000)).unwrap(), 2000);
+    assert!(src.read_block(&mut buf).unwrap().is_none());
+}

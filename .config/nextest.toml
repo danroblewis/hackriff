@@ -164,6 +164,12 @@
 
 [profile.default]
 test-threads = 8
+# Run every test even after one fails (pipeline manager, 2026-09-23). The merge runner accepts a
+# red test that passes alone twice as a load flake and lets the suite pass (the user's rule) - which
+# is only true if the REST of the suite actually ran. nextest's default fail-fast stopped a red run
+# at its first failure, leaving the tests after it unrun; accepting that would land unrun tests.
+# A real red now also lists every failure at once instead of one per gate.
+fail-fast = false
 # THE `timing` TIER (user, 2026-09-22): throughput tests do not gate merges.
 #
 # Three tests assert HOW FAST the real-time path keeps up - that N stations demodulate
@@ -188,23 +194,17 @@ test-threads = 8
 # docs/10 §3.6). A test whose ASSERTION is a latency or throughput bound belongs in this
 # tier. Readiness waits with a measured bound are neither and stay in the gate.
 #
-# FOR NOW (user, 2026-09-22, "mark all of the timing tests as skipped"): the list also holds
-# the eight kind-1 tests (docs/10 §3.6) that were red in gates since 09-21 - the wall-clock
-# tile/coverage/handshake tests - until their deterministic rewrites land (task-deflake-0922,
-# task-deflake-cov). Each one leaves this list WITH its rewrite, not before, and never
-# silently: `just nextest-config-check` holds the two lists equal.
+# The seven kind-1 (wall-clock) tests that sat here during the 2026-09-22 merge crisis are
+# BACK IN THE GATE (2026-09-23): their deterministic rewrites landed - tile_shadow and
+# tile_route (task-deflake-0922), a_run_that_really_ended and a_finished_run_still_answers_410
+# (task-deflake-cov: read the HTTP body to Content-Length), a_handshake (T-602),
+# unknown_is_only (T-596 follow-up), coverage_answers (T-621 refuses without the IQ ring).
+# Only the three throughput assertions remain, and they are the tier's definition.
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
   or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
   or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
-  or test(tile_shadow_carries_a_departed_band_and_nothing_where_never_observed)
-  or test(tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell)
-  or test(unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so)
-  or test(coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked)
-  or test(a_run_that_really_ended_still_says_so)
-  or test(a_handshake_between_windows_waits_for_the_successor_and_never_says_gone)
-  or test(a_finished_run_still_answers_410)
 )
 '''
 
@@ -467,11 +467,4 @@ default-filter = '''
 test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
 or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
 or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
-or test(tile_shadow_carries_a_departed_band_and_nothing_where_never_observed)
-or test(tile_route_addresses_independent_axis_levels_and_a_budget_never_greys_a_cell)
-or test(unknown_is_only_what_a_server_recorded_and_lost_and_the_plane_says_so)
-or test(coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it_looked)
-or test(a_run_that_really_ended_still_says_so)
-or test(a_handshake_between_windows_waits_for_the_successor_and_never_says_gone)
-or test(a_finished_run_still_answers_410)
 '''

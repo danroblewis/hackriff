@@ -27,7 +27,8 @@ import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import {
-  CANDIDATE_MARK, CONFIRMED_MARK, OPEN_EDGE_MARK, PENDING_MARK, SELECTION_MARK, markAt, markQuads,
+  CANDIDATE_MARK, CONFIRMED_MARK, MEASUREMENT_MARK, OPEN_EDGE_MARK, PENDING_MARK, SELECTION_MARK,
+  markAt, markQuads, measurementMarkBoxes,
   normalizeRegion, pendingMarkBox, pointOn, quadSizePx, selectionMarkBoxes, signalMarkBoxes,
   type MarkBox,
 } from "../src/surface/marks";
@@ -205,6 +206,19 @@ test("selectionMarkBoxes: a frequency-only selection spans the pane's time axis 
   assert.equal(y.t0Ns, PANE.t0Ns);
   assert.equal(y.t1Ns, PANE.t1Ns);
   assert.equal(y.rgba[3], 1, "the focused selection is the opaque one");
+});
+
+test("measurementMarkBoxes (T-822): a saved measurement draws in its own ink, never open, focus opaque", () => {
+  const a = { id: "m1", f_lo_hz: 100e6, f_hi_hz: 100.5e6, t0_s: 10, t1_s: 13 };
+  const b = { id: "m2", f_lo_hz: 433.9e6, f_hi_hz: 434.0e6, t0_s: 20, t1_s: 21 };
+  const out = measurementMarkBoxes([a, b], "m2");
+  assert.deepEqual(out.map((x) => x.id), ["m1", "m2"]);
+  for (const x of out) { assert.equal(x.kind, "measurement-box"); assert.equal(x.open, false); }
+  assert.deepEqual(MEASUREMENT_MARK.slice(0, 3), out[0].rgba.slice(0, 3));
+  assert.equal(out[1].rgba[3], 1, "the focused measurement is the opaque one");
+  assert.notDeepEqual(MEASUREMENT_MARK, SELECTION_MARK, "a measurement is not mistaken for a selection");
+  assert.notDeepEqual(MEASUREMENT_MARK, CONFIRMED_MARK);
+  assert.notDeepEqual(MEASUREMENT_MARK, CANDIDATE_MARK);
 });
 
 // ---------------------------------------------------------------------------

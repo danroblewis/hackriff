@@ -955,10 +955,10 @@ use_cases:
   - spectrum-history
   - event-correlation
   - context-feeds
-  hardware_fit: needs-accessory
-  accessory: induction coil + soundcard/low-frequency ADC
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: null
+  fit_note: 'User decision 2026-09-23 (T-282): out-of-band. 3-50 Hz needs an induction-coil magnetometer and a low-frequency ADC - a separate non-radio instrument beside the HackRF, not an accessory that brings the signal into its 1 MHz-6 GHz range.'
   test_tier: field
 - id: SPACE-043
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -1089,10 +1089,10 @@ use_cases:
   - radiometry
   - spectrum-history
   - event-correlation
-  hardware_fit: needs-accessory
-  accessory: induction coil magnetometer + low-frequency ADC
+  hardware_fit: out-of-band
+  accessory: null
   fit_flags: null
-  fit_note: 0.5-10 Hz is below soundcard response; borderline non-radio instrument.
+  fit_note: 'User decision 2026-09-23 (T-282): out-of-band. 0.5-10 Hz is below soundcard response and needs an induction-coil magnetometer with a low-frequency ADC - a separate non-radio instrument, not an accessory for this device.'
   test_tier: field
 - id: SPACE-049
   theme: Space Weather, the Sun, Radio Astronomy & Natural Radio
@@ -8718,7 +8718,7 @@ use_cases:
   theme: Signals of Infrastructure, Transport, Satellites & Nature (the Long Tail)
   subcategory: Trunked Radio Systems
   name: Automatic control-channel discovery
-  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?".'
+  summary: 'Find a trunk control channel with no prior research: flag continuous 100%-duty 4FSK/C4FM emissions on the LMR raster, confirm by frame sync and valid frames, and propose "this looks like P25 Phase 1, follow it?". The hunt reads no band: it runs on whatever the radio is tuned to, and the built-in registry *spends* it only in the land-mobile allocations — a dwell budget, not a search prior (T-615); a plan widening that budget to 1 MHz–6 GHz finds the same channel anywhere.'
   band: VHF / UHF / 700 / 800 MHz
   tx: none
   receiver_hint: null

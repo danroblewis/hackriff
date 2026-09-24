@@ -221,7 +221,25 @@ pub enum SkipReason {
     NoSymbolView,
 }
 
+/// Reason code for a verifier that ran and kept the tree's top class.
+pub const VERIFIER_CONFIRMED: &str = "verifier_confirmed";
+/// Reason code for a verifier that ran and changed the tree's top class.
+pub const VERIFIER_RERANKED: &str = "verifier_reranked";
+
 impl SkipReason {
+    /// Every skip reason, in declaration order: with [`VERIFIER_CONFIRMED`] and
+    /// [`VERIFIER_RERANKED`] this is the complete set of verifier outcome codes a classification
+    /// can carry (T-597's run-rate report counts against exactly this list).
+    pub const ALL: [SkipReason; 7] = [
+        SkipReason::Abstained,
+        SkipReason::NoClassCall,
+        SkipReason::SingleCandidate,
+        SkipReason::NoClockLock,
+        SkipReason::NoModel,
+        SkipReason::Geometry,
+        SkipReason::NoSymbolView,
+    ];
+
     /// The machine reason code.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -328,9 +346,9 @@ pub fn verify(c: &mut Classification, input: &VerifyInput<'_>) -> VerifyOutcome 
     push_reason(
         &mut c.reasons,
         if from == to {
-            "verifier_confirmed"
+            VERIFIER_CONFIRMED
         } else {
-            "verifier_reranked"
+            VERIFIER_RERANKED
         },
     );
     VerifyOutcome::Ran { scores, from, to }

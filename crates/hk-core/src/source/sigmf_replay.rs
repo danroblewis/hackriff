@@ -27,6 +27,11 @@
 //!   changes as provenance-only changes applied at the next block boundary, so a controller such
 //!   as the scheduler can be exercised offline; the samples are unchanged.
 //!
+//! - **Seek (T-463):** [`SigmfReplaySource::seek_to_time`] skips forward to the first sample at
+//!   or after a sample-clock time, so playback can start a recording at a chosen past moment. It
+//!   only moves forward (a recording is read, not indexed), and the next block carries
+//!   [`Discontinuity::GAP`] so no consumer splices across the skip.
+//!
 //! Not supported (explicit errors): multi-channel files, real (non-complex) datatypes, a first
 //! capture not at sample 0, data ending mid-sample.
 
@@ -199,6 +204,8 @@ pub struct SigmfReplaySource<R = BufReader<File>> {
     overrides: PendingControl,
     virtual_provenance: Option<(usize, ProvenanceHandle)>,
     last_provenance: Option<ProvenanceHandle>,
+    /// Flags a [`SigmfReplaySource::seek_to_time`] leaves for the next block.
+    seek_flags: Discontinuity,
 }
 
 /// Merges a posted change into the accumulated virtual-tuning overrides.
@@ -364,6 +371,7 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             overrides: PendingControl::default(),
             virtual_provenance: None,
             last_provenance: None,
+            seek_flags: Discontinuity::NONE,
         })
     }
 
@@ -443,6 +451,105 @@ impl<R: Read + Send> SigmfReplaySource<R> {
             n -= want as u64;
         }
         Ok(())
+    }
+
+    /// Skips forward to the first sample whose sample-clock time is at or after `t` (T-463):
+    /// playback starting a recording at a chosen past moment. Returns the samples skipped.
+    ///
+    /// Forward only: a position already at or past `t` skips nothing. Whole segments ending
+    /// before `t` are skipped; a `t` beyond the data leaves the source at its end (the next read
+    /// returns `None`). When anything was skipped the next block carries [`Discontinuity::GAP`]
+    /// (the skip is deliberate, so `dropped_before` does not count it as lost). Pacing is
+    /// unaffected: skipped samples were never emitted.
+    pub fn seek_to_time(&mut self, t: Timestamp) -> Result<u64, SourceError> {
+        let target = t.as_unix_nanos();
+        let mut skipped = 0u64;
+        loop {
+            let Some(seg) = self.segments.get(self.segment) else {
+                break;
+            };
+            if !self.header_skipped {
+                let header_bytes = seg.header_bytes;
+                self.skip_bytes(header_bytes)?;
+                self.header_skipped = true;
+                continue;
+            }
+            let (file_start, file_end) = (seg.file_start, seg.file_end);
+            let anchor = SampleTime {
+                sample_index: seg.counter_start,
+                host_time: seg.anchor,
+            };
+            let time_at = |k: u64| {
+                anchor
+                    .time_of(anchor.sample_index.saturating_add(k), self.sample_rate_hz)
+                    .as_unix_nanos()
+            };
+            // The first in-segment offset whose time is >= target.
+            let mut want = if target <= anchor.host_time.as_unix_nanos() {
+                0
+            } else {
+                let dn = (i128::from(target) - i128::from(anchor.host_time.as_unix_nanos())) as f64;
+                (dn * self.sample_rate_hz / 1e9).floor().max(0.0) as u64
+            };
+            while want > 0 && time_at(want - 1) >= target {
+                want -= 1;
+            }
+            while time_at(want) < target {
+                want += 1;
+            }
+            let at = self.file_pos - file_start;
+            if want <= at {
+                break;
+            }
+            let mut n = want - at;
+            if let Some(end) = file_end {
+                n = n.min(end - self.file_pos);
+            }
+            let got = self.discard_samples(n)?;
+            self.file_pos += got;
+            skipped += got;
+            if got < n {
+                if file_end.is_some() {
+                    return Err(SourceError::InvalidRecording(format!(
+                        "sample data ends at sample {} but the captures extend further",
+                        self.file_pos
+                    )));
+                }
+                self.segment = self.segments.len();
+                break;
+            }
+            if file_end == Some(self.file_pos) {
+                self.segment += 1;
+                self.header_skipped = false;
+                continue;
+            }
+            break;
+        }
+        if skipped > 0 {
+            self.seek_flags |= Discontinuity::GAP;
+        }
+        Ok(skipped)
+    }
+
+    /// Reads and discards up to `n` samples; returns how many (short only at end of input).
+    fn discard_samples(&mut self, n: u64) -> Result<u64, SourceError> {
+        let bps = self.datatype.bytes_per_sample() as u64;
+        let per = self.byte_buf.len() as u64 / bps;
+        let mut done = 0u64;
+        while done < n {
+            let want = (n - done).min(per);
+            let got = self.fill_bytes((want * bps) as usize)? as u64;
+            if got % bps != 0 {
+                return Err(SourceError::InvalidRecording(
+                    "sample data ends mid-sample".into(),
+                ));
+            }
+            done += got / bps;
+            if got < want * bps {
+                break;
+            }
+        }
+        Ok(done)
     }
 
     fn pace(&mut self) {
@@ -575,7 +682,8 @@ impl<R: Read + Send> SigmfReplaySource<R> {
                 host_time: seg.anchor,
             };
             let dropped_before = if at_start { seg.dropped_before } else { 0 };
-            let (provenance, discontinuity) = self.block_provenance(at_start);
+            let (provenance, mut discontinuity) = self.block_provenance(at_start);
+            discontinuity |= std::mem::replace(&mut self.seek_flags, Discontinuity::NONE);
             let header = BlockHeader {
                 time: SampleTime {
                     sample_index: counter,
