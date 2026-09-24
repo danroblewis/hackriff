@@ -20,6 +20,7 @@
 //! | S1 | `fsk_demod`, `msk_demod` | `bimodality` (`demod_shape`) | discriminator bimodality coefficient | samples |
 //! | S1 | `psk_demod` | `evm` | RMS EVM ÷ decision radius (small = evidence) | symbols |
 //! | S1 | `subcarrier` | `pilot_lock` (`pilot`) | phase coherence `|Σz^m|/Σ|z|^m` | samples |
+//! | S1 | `stereo_decode` | `pilot_lock` (`pilot`) | pilot phase coherence `|Σb|/Σ|b|` against the NCO, `b` per PLL update block | blocks |
 //! | S2 | `clock_recovery` | `eye_open` (`eye`), `timing_var` (`soft_quality`) | `(E|y|)²/E y²`; `E e²/E y²` (small = evidence) | symbols |
 //! | S3 | `slicer`, `diff_decode`, `nrzi` | `bit_structure` (`bit_shape`) | dependence `1 − H₈/(8·H₁)`, 0 when degenerate | bits |
 //! | S3 | `manchester` | `line_violations`, `bit_structure` (`bit_shape`) | violation rate (small = evidence); as above | pairs; bits |

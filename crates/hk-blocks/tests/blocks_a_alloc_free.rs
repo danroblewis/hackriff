@@ -346,6 +346,8 @@ fn blocks_a_process_allocates_nothing_in_steady_state_and_across_restarts() {
             &mpx,
             iq_fs,
         ),
+        // T-873: the FM stereo decoder (audio group) runs on the same multiplex.
+        ("stereo_decode", json!({}), &mpx, iq_fs),
         ("clock_recovery", clock(json!({})), &real, 9_600.0),
         (
             "clock_recovery",
