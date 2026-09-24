@@ -23732,7 +23732,8 @@ tasks:
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
-    status: todo
+    status: in-progress
+    branch: task-t806
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
