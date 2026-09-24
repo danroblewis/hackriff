@@ -18151,7 +18151,7 @@ tasks:
   - id: T-552
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: measure what one candidate evaluation actually costs on the M1 blocks, before quick/standard/deep are frozen into the /api/analyze contract'
-    status: in-progress
+    status: done
     branch: task-t552
     priority: normal
     parallel_group: MAUTOD
@@ -18224,6 +18224,7 @@ tasks:
           "Jetson figures are out of scope per the ticket (MAUTO M-13); every number here is this Mac workstation's optimistic floor, stated as such in docs/27 section 0."
         ]
       }
+    commit: 261048d9
   - id: T-553
     milestone: MAUTO
     title: 'MAUTO-DESIGN: consolidate the ten open ADR-0015 questions into one decision brief for the user, with a recommendation and a cost per option'
