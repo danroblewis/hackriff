@@ -16029,7 +16029,7 @@ tasks:
   - id: T-512
     milestone: MSDR
     title: hk serve / hk run / hackriffd accept a repeatable --device
-    status: todo
+    status: done
     branch: task-t512
     priority: high
     requested_by: 'user 2026-09-22: multi-SDR runs IN PARALLEL with MMAP (the map work leads); hk-api/hk-core vs ui/ do not collide; T-514 needs the NooElec (serial 7673444264) handed to one agent at a time'
@@ -16054,6 +16054,7 @@ tasks:
       Observed, not chased: docs/api.md untouched (CLI-only change); hk-cli full test binaries only compile-checked, not run
       Use cases: AWARE-011
       Resources: 38 CPU-s, peak 1.3 GB
+    commit: 271bbafc
   - id: T-513
     milestone: MSDR
     title: Two-device mock e2e - both windows, both coverages, shared air merged, device physics kept apart
