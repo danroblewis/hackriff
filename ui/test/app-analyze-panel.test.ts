@@ -65,3 +65,10 @@ test("analyzeTarget hands back the started job's id for the panel to watch", asy
   const r = await analyzeTarget({ post: async () => ({ job: { id: "a3" } }) } as never, { kind: "emitter", id: "e1" });
   assert.deepEqual(r, { ok: true, message: "Analyze: requested", jobId: "a3" });
 });
+
+test("a watched job keeps the focus panel mounted even with nothing focused", async () => {
+  const { analyzeWatched, watchAnalyzeJob } = await import("../src/app/explore/analyze-slice");
+  assert.equal(analyzeWatched(null), false);
+  assert.equal(analyzeWatched("a1"), true);
+  assert.deepEqual(watchAnalyzeJob("a1")(), { analyze: { jobId: "a1" } });
+});

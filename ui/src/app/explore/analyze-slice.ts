@@ -7,3 +7,6 @@ export interface AnalyzeState { analyze: AnalyzeSlice }
 
 export const analyzeInitial = (): AnalyzeState => ({ analyze: { jobId: null } });
 export const watchAnalyzeJob = (jobId: string | null) => (): Partial<AppState> => ({ analyze: { jobId } });
+
+/** Whether a job is being watched — the focus panel must then stay mounted (and shown) so its section renders. */
+export const analyzeWatched = (jobId: string | null): boolean => jobId !== null;
