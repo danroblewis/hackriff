@@ -44,6 +44,7 @@ import type { TracePath } from "./trace";
 import type { ActiveWindow } from "../navigators";
 import { probeAddr, fetchTile, latticeOf, type TileFetch, type TileResponse } from "./tile";
 import { TileCache, type MovingViewport, type Viewport } from "./tilecache";
+import { LiveRowFeeds, type RowOpener } from "./rowfeed";
 import { SURVEY_EVERY_MS, decodeSurvey, surveyUrl, type SurveyResponse } from "./survey";
 import {
   FALLBACK_RANGE, FALLBACK_RANGE_SOURCE,
@@ -569,6 +570,13 @@ export interface PreviewOptions {
   survey?: ((path: string) => Promise<unknown>) | null;
   /** The clock the survey cadence is measured on, ms. Injected by tests; never a capture time. */
   now?: () => number;
+  /**
+   * **The transport for `GET /ws/tiles/rows`** (T-893, `./rowfeed.ts`'s [[wsRowOpener]] in a
+   * browser). Supplied with an `edge`, every column a FOLLOWING pane draws at its live edge holds a
+   * row subscription and rows reach the screen as they are recorded, instead of when the polling
+   * lane next comes round. Omitted, the live edge advances by polling alone (T-460), as before.
+   */
+  rows?: RowOpener | null;
 }
 
 /**
@@ -601,6 +609,8 @@ export class SurfacePreview {
   private surveyFloorNs = Number.POSITIVE_INFINITY;
   /** The survey requests this host has built, in order — the T-367 guard reads them. */
   readonly surveyRequests: string[] = [];
+  /** Pushed rows for the following panes' columns (T-893); null without a transport or an edge. */
+  readonly rowFeeds: LiveRowFeeds | null;
 
   constructor(opts: PreviewOptions) {
     const { probe } = opts;
@@ -611,6 +621,10 @@ export class SurfacePreview {
     this.edgeSeen = probe.origin.edgeNs;
     this.surveyFn = opts.survey ?? null;
     this.nowMs = opts.now ?? (() => Date.now());
+    // A historical surface (no edge) follows nothing, so it never opens a feed.
+    this.rowFeeds = opts.rows && this.edgeFn
+      ? new LiveRowFeeds(opts.rows, (col, block) => this.view.surface.cache.applyRows(col, block), { now: this.nowMs })
+      : null;
     this.view = new SurfaceView({
       canvas: opts.canvas,
       lattice: probe.lattice,
@@ -741,15 +755,23 @@ export class SurfacePreview {
    */
   private refreshLiveEdge(f: SurfaceFrame): void {
     const following: Viewport[] = [];
+    const panes: Viewport[] = [];
     for (const r of f.reports) {
       const v = f.views.find((x) => x.id === r.id);
       if (!v) continue;
-      const live = r.id === this.view.minimap.id
-        ? this.view.minimap.following
-        : this.view.panes.isFollowing(r.id);
-      if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+      const map = r.id === this.view.minimap.id;
+      const live = map ? this.view.minimap.following : this.view.panes.isFollowing(r.id);
+      if (!live) continue;
+      following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
+      if (!map) panes.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
-    if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+    // Called with an EMPTY list too: that is how the cache learns nothing follows any more, and
+    // drops the next-row look-ahead it was holding for a pane that has since frozen (T-890).
+    this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+    // **Rows pushed to the columns a following PANE draws** (T-893). The map is left to the polling
+    // lane: its coarse rows commit every 2^level cells, and the route's feeds are few (16 a server).
+    // A pane that froze drops out of `panes`, which closes its feeds — pausing never follows.
+    this.rowFeeds?.want(this.view.surface.cache.liveColumns(this.view.surface.lat, f.edgeNs, panes));
   }
 
   /**
@@ -856,6 +878,7 @@ export class SurfacePreview {
   dispose(): void {
     this.disposed = true;
     if (this.raf) cancelAnimationFrame(this.raf);
+    this.rowFeeds?.close();
     this.view.dispose();
   }
 

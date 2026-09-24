@@ -57,6 +57,7 @@ import {
 import { rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
+import { wsRowOpener } from "../../surface/rowfeed";
 import {
   acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
@@ -736,6 +737,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
         edge: () => edgeNs() || probe.origin.edgeNs,
+        // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
+        rows: wsRowOpener(ctx.token),
         // T-580: ask the coverage map FIRST, so never-sampled spectrum costs no tile request.
         survey: (path) => client.get(path),
         windows: () => windows,

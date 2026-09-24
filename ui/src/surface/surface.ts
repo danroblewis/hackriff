@@ -319,6 +319,16 @@ export class GlTileTextures implements TileTextures<TilePlanes> {
     return { value, state };
   }
 
+  /** Rewrite rows `[row0, row0 + rows)` of both planes in place: a pushed row's upload (T-893). */
+  patch(t: TilePlanes, data: TileData, row0: number, rows: number): void {
+    const gl = this.gl, nf = data.nf;
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.bindTexture(gl.TEXTURE_2D, t.value);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, nf, rows, gl.RED, gl.FLOAT, data.value.subarray(row0 * nf, (row0 + rows) * nf));
+    gl.bindTexture(gl.TEXTURE_2D, t.state);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, row0, nf, rows, gl.RED, gl.UNSIGNED_BYTE, data.state.subarray(row0 * nf, (row0 + rows) * nf));
+  }
+
   destroy(t: TilePlanes): void {
     this.gl.deleteTexture(t.value);
     this.gl.deleteTexture(t.state);
@@ -632,16 +642,35 @@ export class Surface {
           continue;
         }
         const stand = this.fallbackFor(lat, a);
-        if (stand) {
+        // **Finer tiles already in hand stand in too** (T-893): a time zoom-out on a following pane
+        // asks for a coarser level while the rows it was just drawing are resident one level down,
+        // and searching only upwards left the pane blank until the coarser answer arrived. Drawn
+        // after the ancestor, so where both exist the finer (and newer) rows are the ones seen.
+        const finer = this.finerFor(lat, a);
+        if (stand || finer.length) {
           const region = extentOf(lat, a);
-          const shown = this.drawUpToHorizon(pane, lat, region, stand, "fallback", r);
-          if (shown.behind) behind++;
-          if (shown.drawn) drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); else blank++;
-          // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
-          // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
-          // extent, not the child's. Getting that pair the wrong way round would read a different
-          // corner of the ancestor than the one being displayed.
-          if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
+          let drew = false, late = false;
+          if (stand) {
+            this.cache.standIn(stand);
+            const shown = this.drawUpToHorizon(pane, lat, region, stand, "fallback", r);
+            late ||= shown.behind;
+            if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
+            // A coarse stand-in's cells ARE what is on the screen here, so they count — but the
+            // texture is the ancestor's, so the visible sub-rect is mapped through the ancestor's own
+            // extent, not the child's. Getting that pair the wrong way round would read a different
+            // corner of the ancestor than the one being displayed.
+            if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
+          }
+          for (const c of finer) {
+            this.cache.standIn(c);
+            const own = extentOf(lat, c.addr);
+            const shown = this.drawUpToHorizon(pane, lat, own, c, "fallback", r);
+            late ||= shown.behind;
+            if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
+            if (shown.drawn) measure?.add(c.data, own, shown.drawn, pane.box);
+          }
+          if (late) behind++;
+          if (!drew) blank++;
           fallbacks++;
         }
         // **`pending` and `refused` are drawn apart** (T-499). A place with no usable answer is not
@@ -705,6 +734,29 @@ export class Surface {
       if (e) return e;
     }
     return null;
+  }
+
+  /**
+   * Resident tiles one level FINER than `a` that lie inside it (T-893) — on the time axis first,
+   * then frequency, then both; the first split with anything in hand wins. Peeks only, like
+   * [[fallbackFor]]: a stand-in search must never enqueue a fetch.
+   */
+  private finerFor(lat: Lattice, a: TileAddr): TileEntry<TilePlanes>[] {
+    for (const [df, dt] of [[0, 1], [1, 0], [1, 1]] as const) {
+      if (a.levelF - df < 0 || a.levelT - dt < 0) continue;
+      const out: TileEntry<TilePlanes>[] = [];
+      for (let i = 0; i < 2 ** df; i++) {
+        for (let j = 0; j < 2 ** dt; j++) {
+          const e = this.cache.peek({
+            ...a, levelF: a.levelF - df, levelT: a.levelT - dt,
+            fIndex: a.fIndex * 2 ** df + i, tIndex: a.tIndex * 2 ** dt + j,
+          }, true);
+          if (e) out.push(e);
+        }
+      }
+      if (out.length) return out;
+    }
+    return [];
   }
 
   /**
