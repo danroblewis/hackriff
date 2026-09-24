@@ -25715,6 +25715,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate 09-24 04:49 failed in just test-py, not in T-870 code: py/tests/test_work_accounting.py test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped (line 476) and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed (line 839). ops/work-runner.py release_stale_claims (lines 938/954) checks the REAL {REPO}/.git/MERGE_HEAD, which the tests do not monkeypatch; the merge runner gates inside a staged merge, so both tests fail in EVERY merge gate (task-t873 04:45 too) and pass anywhere else (60/60 in this worktree after merging main). Fix belongs to the pipeline side: monkeypatch REPO, or route the MERGE_HEAD check through a patchable path. T-870 re-queues unchanged once that lands.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 04:44).
