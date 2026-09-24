@@ -13,6 +13,7 @@
 // Loaded lazily (`explore/index.ts` dynamic `import()`, first time a signal is focused): reusing
 // the packet inspector pulls in `decode/inspector.ts` + `frame-inspector.ts`, which must stay out
 // of the initial bundle (ADR-0013 §1 gzip budget) — see T-179's precedent for `decode`/`review`.
+import { mountAnalyzeSection } from "./analyze-panel";
 import type { AppContext, MountFn } from "../context";
 import { h } from "../dom";
 import { getAudioSession } from "../dock/api";
@@ -484,7 +485,9 @@ class OutputPanels {
   constructor(el: HTMLElement, private ctx: AppContext) {
     this.tabsEl = h("div", { class: "out-tabs", role: "tablist" });
     this.bodyEl = h("div", { class: "out-body" });
-    el.replaceChildren(h("div", { class: "out-panels" }, h("div", { class: "section-h" }, "Outputs"), this.tabsEl, this.bodyEl));
+    const analyzeEl = h("div", { class: "out-analyze", hidden: true });
+    el.replaceChildren(h("div", { class: "out-panels" }, analyzeEl, h("div", { class: "section-h" }, "Outputs"), this.tabsEl, this.bodyEl));
+    mountAnalyzeSection(analyzeEl, ctx);
     ctx.store.select((s) => s.outputs, (outputs) => this.recompute(outputs), { immediate: true });
     // A running pipeline's `emitter_id`/`outputs` isn't in any store slice today (only Decode mode
     // polls `/api/pipelines`), so this panel keeps its own light poll rather than pulling in
