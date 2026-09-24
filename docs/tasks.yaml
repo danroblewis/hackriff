@@ -23684,6 +23684,15 @@ tasks:
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): the Selected tab holds the most device actions in the largest surface - invert that: device actions (Listen, Record clip, Stream out, Analyze, Promote/Delete, any retune) are a COMPACT action cluster of small buttons, not a large surface, and no device route is bound to the sheet body. P1: the sheet has a visible dismiss (T-900).
     branch: task-t804
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:23).
+      MAP-04: the focus panel inside the T-803 bottom sheet is now the detail sheet from ui/mockups/map-ui-v1.html. Selecting a signal (clicking its box on the canvas or its inventory row) raises the sheet from peek to half. The sheet shows: the big frequency, the state and liveness in one line (from presence: on air since HH:MM:SS, or ended and marked provisional, reopens if it resumes); a Measured block with centre, bandwidth, and SNR/peak from /api/inventory's `measured` object, followed by a 'measured at HH:MM:SS UTC over N s' line (a level never appears without its time; 'No level measured yet' when there is none); the time extent (an open interval reads 'start -> live'); the ranked explanations, labelled 'ranked suggestions, never truth'; and an action row (Listen, Decode/RDS, Record clip, Stream out, Analyze, Promote, Delete) built from the context menu's own items. The peek strip names the selected frequency. Front end only, existing routes only. The new view-model explore/detail.ts is pure and imports types only. TO SEE IT ON STAGING: open Explore, wait for a signal box or inventory row to appear, then click the box (or the row). The sheet at the bottom right slides up to half height showing that signal's frequency, liveness, Measured-with-time, explanations and actions, while the canvas beside it still pans.
+      Tests: just test-ui -> exit 0 (61/61 test files passed (build + typecheck + unit), incl. new app-detail.test.ts (7 tests, spy-client empty call list on select/build)); cd ui && node e2e/run.mjs app-detail -> exit 0 (1/1 passed: selecting a detected FM-fixture signal raises the sheet to half with its frequency, liveness, measured-at, explanations, actions; no device route); cd ui && node e2e/run.mjs app-sheet -> exit 0 (1/1 files passed (T-803 sheet regression))
+      precheck exit 0
+      Commits: 9a04c5f3
+      Observed, not chased: Clicking the box of the signal that is ALREADY focused, while the sheet is collapsed, does not re-open the sheet. focus-sheet.ts only reveals on a focus CHANGE (T-803 design, asserted in app-sheet.test.ts: 're-asserting the same focus does not reopen it'). The ticket did not ask for this; it would need the surface's onClick to call a reveal directly. | The mockup's 'Seen by' line (device, centre/span, gains) is not shown: /api/inventory rows carry no per-row device/gain provenance. | The canvas has no pins yet, only signal boxes; the pin click path belongs to the ticket that adds pins. The e2e selects through the inventory row, which calls the same focusSignal the canvas box click calls (centre/surface.ts onClick). It does not click a WebGL box, because the spec cannot locate one.
+      Use cases: AWARE-053
+      Resources: 99 CPU-s, peak 2.3 GB
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
@@ -24021,6 +24030,15 @@ tasks:
 
       2026-09-24 coordinator, USER PRINCIPLE P4 (docs/23 §10.6 rule 4, size inversely proportional to influence; T-899): this is a BIG panel (to ~90 vh). A bare click on a drawer row must NOT pan/zoom the map or offer a retune; the jump / retune offer lives on a small explicit per-row button. The drawer's body only adds/removes marks or shifts coordinates slightly. Also P1: it has a visible dismiss (T-900); P3: fixed position, not draggable.
     branch: task-t814
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 13:12).
+      Added the Explore drawer (ui/src/app/chrome/explore-drawer.ts) as a data-slot=drawer inside the T-803 bottom sheet, above the focus panel; collapsed by default (peek), expands to half/full. Groups: unknown & unexplained (/api/events), strongest (/api/analysis/strongest), quiet-but-active (/api/scheduler POI), past surveys (observed runs from /api/coverage). Clicking an item writes requestGoto (and reviewAt for a survey window) to the store: view arithmetic only, GETs only, no device route. Pure model + thin-client source guard tested. To see it on staging: open the app in Explore mode, click the bottom sheet's peek strip/grab handle to expand it, and click any entry to pan the canvas there.
+      Tests: node ui/test/run.mjs app-explore-drawer app-sheet app-shell -> exit 0 (3+11+11 passed)
+      precheck exit 0
+      Commits: d4f5ebfa
+      Observed, not chased: No e2e/spy-client DOM test of clicking a drawer item; covered by source guard only. Drawer polls every 30 s and only once live.edgeTS/view exist.
+      Use cases: AWARE-042
+      Resources: 49 CPU-s, peak 0.6 GB — LEAKED 5 processes (killed at reap)
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
