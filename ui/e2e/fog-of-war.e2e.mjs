@@ -69,7 +69,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { Browser, census, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts");
@@ -854,11 +854,25 @@ function paneRectOf(rect, dpr) {
   const traceH = Math.max(0, Math.min(TRACE_PX, Math.floor(paneH / 3)));
   return { x: rect.x, w: rect.w, y: rect.y + traceH / dpr, h: (paneH - traceH) / dpr };
 }
+/**
+ * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas
+ * is full-bleed and its inventory/focus panels float over it by design, so the pane's whole box is
+ * no longer all surface: measured on the first red run, band C read 55.0 % THE grey across the box
+ * and the missing ~45 % was the two panels' own background. Every claim below — never-swept reads
+ * THE grey, departed reads shadow, re-swept reads live — is about what the SURFACE drew, so it is
+ * measured over the columns the browser's own hit test says the surface is on top at
+ * (`Page.unoccludedColumns`), never over a hard-coded panel width. The pane still maps frequency
+ * across the canvas's full width; only the sampled columns narrow.
+ */
 async function paneGeometry(page) {
   const rect = await page.$rect(".sf-canvas");
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  return { rect, dpr, pane: paneRectOf(rect, dpr) };
+  const whole = paneRectOf(rect, dpr);
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
+  const pane = clipToUnoccluded(whole, rect, unocc);
+  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  return { rect, dpr, pane };
 }
 /** The pane's data rect, inset a few pixels clear of every edge (a boundary pixel is a rounding
  * question, not a colour question — `surface-colour.e2e.mjs`'s `INSET`). */

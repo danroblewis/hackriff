@@ -66,7 +66,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import path from "node:path";
-import { Browser, census, until, waitWhileWorking } from "./harness.mjs";
+import { Browser, census, clipToUnoccluded, until, waitWhileWorking } from "./harness.mjs";
 import { UI_DIR, startBackend } from "./backend.mjs";
 
 /**
@@ -479,11 +479,35 @@ function bodyRect(pane, from = 0.06, to = 1.0) {
     y: Math.round(pane.y + pane.h * from), h: Math.round(pane.h * (to - from)) };
 }
 
+/**
+ * The pane, narrowed to the columns nothing foreign covers (T-801). Since MAP-01 the app's canvas
+ * is full-bleed and the inventory/focus panels float over it by design, so the pane's whole box is
+ * no longer all surface — and the panels sit exactly over the viewport's two ends, which in the
+ * zoomed-out state below are the most-unobserved spectrum on screen. Measured on the first red run:
+ * the whole box read 67.3 % THE grey against a server answer of 88.9 % unobserved for the whole
+ * viewport; the difference was panel background. The pixels are therefore measured only where the
+ * browser's own hit test says the surface is on top (`Page.unoccludedColumns`, never a hard-coded
+ * panel width), and `pane.fracLo/fracHi` say which share of the canvas's width that is, so the
+ * server is asked about exactly the frequency sub-range those pixels draw ([[visibleView]]).
+ */
 async function paneGeometry(page) {
   const rect = await page.$rect(".sf-canvas");
   assert.ok(rect && rect.w > 300 && rect.h > 260, `the canvas has no usable box: ${JSON.stringify(rect)}`);
   const dpr = await page.eval("window.devicePixelRatio || 1");
-  return { rect, dpr, pane: paneRectOf(rect, dpr) };
+  const whole = paneRectOf(rect, dpr);
+  const unocc = await page.unoccludedColumns(".sf-canvas", { y0: whole.y, y1: whole.y + whole.h });
+  const pane = clipToUnoccluded(whole, rect, unocc);
+  assert.ok(pane.w > 200, `less than 200 px of the pane is uncovered by the app's floating chrome: ${JSON.stringify(unocc)}`);
+  return { rect, dpr, pane };
+}
+
+/** The frequency sub-range of `view` that the pane's uncovered columns draw. The pane maps
+ * frequency linearly across the canvas's FULL width (the panels float over the drawing; they do
+ * not reframe it), so this is the same share of the span as `pane.fracLo..fracHi` is of the width. */
+function visibleView(view, pane) {
+  const lo = pane.fracLo ?? 0, hi = pane.fracHi ?? 1;
+  const loHz = view.loHz + lo * view.spanHz, hiHz = view.loHz + hi * view.spanHz;
+  return { ...view, loHz, hiHz, spanHz: hiHz - loHz, centerHz: (loHz + hiHz) / 2, halfHz: (hiHz - loHz) / 2 };
 }
 
 /** Per-pixel classification of a rect: THE grey, magenta, and the plain census beside them. */
@@ -1023,7 +1047,7 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
     // **From the very top of the pane, and eight frames** (T-846) — see the note under [[EDGE_GREY_MAX]].
     const insideEdge = await sampleGrey(page, bodyRect(g.pane, 0, LIVE_EDGE_ZONE), { n: 8, gapMs: 700 });
     const insidePix = insideG.last;
-    const { cov: insideCov, cellHz: insideCellHz, n: insideN } = await atPaneLevel(zi.view);
+    const { cov: insideCov, cellHz: insideCellHz, n: insideN } = await atPaneLevel(visibleView(zi.view, g.pane));
     t.diagnostic(`pane level: ${insideN} cells of ${(insideCellHz / 1e3).toFixed(1)} kHz across the viewport`);
     t.diagnostic(`INSIDE ${spanOf(zi.view)}: pane ${(insideG.mean * 100).toFixed(1)} % THE grey (mean of ` +
       `${insideG.text}); ` +
@@ -1065,8 +1089,11 @@ test("1. an aggressive pan/zoom makes no invalid tile request, and greys only wh
         "the rectangle sampled below is re-read here" : ""));
     const wideG = await sampleGrey(page, bodyRect(g.pane, LIVE_EDGE_ZONE), { n: 3 });
     const widePix = wideG.last;
-    const { cov: wideCov, cellHz: wideCellHz, n: wideN } = await atPaneLevel(wide);
+    const { cov: wideCov, cellHz: wideCellHz, n: wideN } = await atPaneLevel(visibleView(wide, g.pane));
     t.diagnostic(`pane level: ${wideN} cells of ${(wideCellHz / 1e3).toFixed(1)} kHz across the viewport`);
+    t.diagnostic(`OUTSIDE sampled columns ${Math.round(g.pane.x)}..${Math.round(g.pane.x + g.pane.w)} of the canvas ` +
+      `(${(g.pane.fracLo * 100).toFixed(1)}–${(g.pane.fracHi * 100).toFixed(1)} % of its width; ${Math.round(g.pane.clipped)} px under ` +
+      `floating chrome), compared with the server over ${spanOf(visibleView(wide, g.pane))}`);
     t.diagnostic(`OUTSIDE ${spanOf(wide)} (${(wide.spanHz / w0.spanHz).toFixed(1)}x the tuned window): ` +
       `pane ${(wideG.mean * 100).toFixed(1)} % THE grey (mean of ${wideG.text}); server (last ${RECENT_S} s) ` +
       `${(wideCov.unobservedShare * 100).toFixed(1)} % unobserved OF KNOWN ` +
