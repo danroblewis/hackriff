@@ -45,7 +45,7 @@ use hk_store::iqbuffer::{
     Allocation, IqBuffer, IqBufferConfig, IqBufferStatus, IqBufferWriter, OsHooks, SegmentStart,
     is_allocation_refused, is_ring_incompatible, is_ring_locked,
 };
-pub use hk_store::iqbuffer::{ClipError, ClipRange};
+pub use hk_store::iqbuffer::{ClipError, ClipRange, ReadChunk};
 
 /// How long a segment's feeder waits for the ring to open before it reads (and, while the ring
 /// is still allocating, discards) captured blocks.
@@ -548,7 +548,123 @@ impl IqBufferService {
                 return Err(failure(e));
             }
         };
-        let r = self.store(id, label.as_deref(), *band, &clip, &meta_path, &data_path);
+        let r = self.store(
+            id,
+            label.as_deref(),
+            *band,
+            &clip,
+            RecordingTrigger::Manual,
+            (&meta_path, &data_path),
+        );
+        if r.is_err() {
+            cleanup();
+        }
+        r
+    }
+
+    /// **The ring read API** (ADR-0015 §5.3, T-857): the buffered samples of `range` — segments
+    /// whose tuned window overlaps `band` when given — read **into memory** as one [`ReadChunk`]
+    /// per segment piece, each carrying its provenance, stream index and sample-clock times.
+    ///
+    /// Additive beside [`Self::export_clip`] (same plan, same eviction check), but it writes no
+    /// file and stores no `Recording` row: the analysis engine reads windows, and pins the ones it
+    /// searches with [`Self::pin_chunks`]. A chunk never spans a segment boundary, so the reader
+    /// turns each boundary into a `DISCONTINUITY`. At most the configured clip cap
+    /// (`HK_IQ_BUFFER_CLIP_MAX`) is read at once. A run without an open buffer reads
+    /// [`ClipError::Empty`], as does a malformed range.
+    pub fn read(
+        &self,
+        range: ClipRange,
+        band: Option<(f64, f64)>,
+    ) -> Result<Vec<ReadChunk>, ClipError> {
+        let Some(buffer) = self.buffer() else {
+            return Err(ClipError::Empty);
+        };
+        match range {
+            ClipRange::Time { t0_ns, t1_ns } if !(0 <= t0_ns && t0_ns < t1_ns) => {
+                return Err(ClipError::Empty);
+            }
+            ClipRange::Index { start, end } if start >= end => return Err(ClipError::Empty),
+            _ => {}
+        }
+        buffer.read(range, band, self.cfg.max_clip_bytes)
+    }
+
+    /// **Pin on analyze** (ADR-0015 §6, T-857): stores `chunks` — IQ an analysis job already read
+    /// with [`Self::read`] — as one SigMF recording with a `Recording` row (kind `iq-snippet`,
+    /// trigger `analyze`, retention `pinned`), one SigMF capture per chunk.
+    ///
+    /// The file is written **from the chunks in memory**, not re-read from the ring, so the pinned
+    /// clip holds exactly the samples the search reads and ring eviction after the read cannot
+    /// make the two differ. Disjoint windows (a burst set) are one file whose captures carry each
+    /// window's own `core:global_index` and time, so the gaps between bursts stay visible. The
+    /// same guards as a clip export apply: the clip cap, the free-space floor, and one sample rate
+    /// and one run per file.
+    pub fn pin_chunks(
+        &self,
+        chunks: &[ReadChunk],
+        band: Option<(f64, f64)>,
+        label: Option<&str>,
+    ) -> Result<ClipExported, ClipFailure> {
+        let clip = hk_store::iqbuffer::Clip::from_chunks(chunks).map_err(|e| match e {
+            ClipError::Empty => ClipFailure::NotFound("nothing was read to pin".into()),
+            ClipError::MixedRates { .. } | ClipError::MixedRuns { .. } => {
+                ClipFailure::Conflict(e.to_string())
+            }
+            _ => ClipFailure::Invalid(e.to_string()),
+        })?;
+        let bytes = clip.samples * hk_store::iqbuffer::BYTES_PER_SAMPLE;
+        let cap = self.cfg.max_clip_bytes.min(RECORDING_MAX_BYTES);
+        if bytes > cap {
+            return Err(ClipFailure::TooLarge(format!(
+                "the pinned clip would be {bytes} bytes; a clip holds at most {cap} bytes \
+                 (HK_IQ_BUFFER_CLIP_MAX)"
+            )));
+        }
+        let _one = self.exports.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = self.data_dir.join("recordings");
+        std::fs::create_dir_all(&dir).map_err(|e| ClipFailure::Failed(e.to_string()))?;
+        let space = match self.buffer() {
+            Some(b) => b.space_at(&dir),
+            None => hk_store::iqbuffer::fs_space(&dir),
+        };
+        if let Ok(space) = space {
+            let floor = self.cfg.free_floor(space.total);
+            if space.free < bytes.saturating_add(floor) {
+                return Err(ClipFailure::NoSpace(format!(
+                    "not enough free space to pin the analysis clip: it needs {bytes} bytes above \
+                     the {floor}-byte free-space floor and {} bytes are free",
+                    space.free
+                )));
+            }
+        }
+        let id = RecordingId::new();
+        let stem = id.to_string();
+        let data_path = dir.join(format!("{stem}.sigmf-data"));
+        let meta_path = dir.join(format!("{stem}.sigmf-meta"));
+        let cleanup = || {
+            let _ = std::fs::remove_file(&data_path);
+            let _ = std::fs::remove_file(&meta_path);
+        };
+        let written = File::create(&data_path).and_then(|f| {
+            let mut w = BufWriter::new(f);
+            for c in chunks {
+                std::io::Write::write_all(&mut w, &c.data)?;
+            }
+            std::io::Write::flush(&mut w)
+        });
+        if let Err(e) = written {
+            cleanup();
+            return Err(ClipFailure::Failed(format!("writing the pinned clip: {e}")));
+        }
+        let r = self.store(
+            id,
+            label,
+            band,
+            &clip,
+            RecordingTrigger::Analyze,
+            (&meta_path, &data_path),
+        );
         if r.is_err() {
             cleanup();
         }
@@ -598,8 +714,8 @@ impl IqBufferService {
         label: Option<&str>,
         band: Option<(f64, f64)>,
         clip: &hk_store::iqbuffer::Clip,
-        meta_path: &std::path::Path,
-        data_path: &std::path::Path,
+        trigger: RecordingTrigger,
+        (meta_path, data_path): (&std::path::Path, &std::path::Path),
     ) -> Result<ClipExported, ClipFailure> {
         let failed = |e: String| ClipFailure::Failed(e);
         let first = &clip.pieces[0];
@@ -627,7 +743,7 @@ impl IqBufferService {
             time: TimeRange::new(t0, Timestamp::from_unix_nanos(clip.t1_ns)),
             f_center_hz: first.provenance.tune.center_hz,
             sample_rate_hz: clip.sample_rate_hz,
-            trigger: RecordingTrigger::Manual,
+            trigger,
             pre_trigger_s: 0.0,
             post_trigger_s: duration_s,
             size_bytes: 2 * clip.samples,
