@@ -24090,11 +24090,11 @@ tasks:
 
       Review: single limit=1000 page of the oldest-first log dropped newest surveys; now follows next_cursor (max 20 pages), tested.
     result: |
-      DONE (work-runner, from handback.json, 2026-09-24 15:15).
-      Explore drawer 'Past surveys' group now lists observed-then windows built from GET /api/observations (dwell records over the last 7 days, same-band touching dwells merged, newest first), tagged 'survey · observed then', plus the coverage-derived current window and the widest 'survey · never looked' gap (no time window, no review). Per-row small Go button (P4; bare row click only selects) jumps the pane: reviewAt restores the window time extent and requestGoto centres frequency; GET-only, no device route. Frequency span is not restored (nav gotoHz carries centre only). On staging: open the Explore drawer (bottom sheet), scroll to 'Past surveys — jump to a coverage window', press Go on an 'observed then' row.
-      Tests: just test-ui -> exit 0 (68/68 test files passed)
+      DONE (work-runner, from handback.json, 2026-09-24 15:21).
+      Explore drawer 'Past surveys' group now lists observed-then windows built from GET /api/observations (dwell records over the last 7 days, same-band touching dwells merged, newest first), tagged 'survey · observed then', plus the coverage-derived current window and the widest 'survey · never looked' gap (no time window, no review). Per-row small Go button (P4; bare row click only selects) jumps the pane: reviewAt restores the window time extent and requestGoto centres frequency; GET-only, no device route. Frequency span is not restored (nav gotoHz carries centre only). On staging: open the Explore drawer (bottom sheet), scroll to 'Past surveys — jump to a coverage window', press Go on an 'observed then' row. Review fix: observations are now paged via next_cursor (bounded 20 pages) so the newest surveys appear.
+      Tests: just test-ui -> exit 0 (69/69 test files passed)
       precheck exit 0
-      Commits: c06c9982
+      Commits: c06c9982, 8b94b025, 6241e85f
       Observed, not chased: Go restores time extent and centre frequency only; restoring span needs a nav slice extension
       Use cases: AWARE-042
       Resources: 56 CPU-s, peak 0.9 GB
