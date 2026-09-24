@@ -41,6 +41,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import yaml
@@ -1490,6 +1491,39 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+E2E_DATA_IDLE_MIN = 60   # a leaked browser-e2e backend data dir untouched this long is removed
+
+
+def reclaim_e2e_data(dry):
+    """ui/e2e/backend.mjs gives every spec's `hk serve` a mkdtemp data dir ($TMPDIR/hk-e2e-data-*,
+    4-5 GB each: the IQ ring and pyramid) and removes it in stop() - which a spec killed by a gate
+    timeout, an orphan sweep or a signal never runs. 2026-09-24 10:30: 49 such dirs, 89.6 GB, back to
+    09-22, and free disk falling ~10 GB per 20 min; 88 GB came back by hand. A live backend names its
+    dir in argv (--data-dir), so: no process names it and nothing in it written for E2E_DATA_IDLE_MIN."""
+    tmp = tempfile.gettempdir()
+    dirs = [os.path.join(tmp, n) for n in os.listdir(tmp) if n.startswith("hk-e2e-data-")]
+    if not dirs:
+        return
+    cut = time.time() - E2E_DATA_IDLE_MIN * 60
+    procs = sh(["ps", "-axo", "command"])
+    if not procs.strip():
+        return   # no process table: no evidence the dirs are unused
+    for d in dirs:
+        if d in procs or os.path.islink(d) or not os.path.isdir(d):
+            continue
+        try:
+            newest = max([os.path.getmtime(d)] + [e.stat().st_mtime for e in os.scandir(d)])
+        except OSError:
+            continue
+        if newest > cut:
+            continue
+        if dry:
+            log(f"DRY-RUN would remove leaked e2e data dir {d}")
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        log(f"RECLAIM {d} (leaked e2e backend data, idle {(time.time() - newest) / 60:.0f} min, no process names it)")
+
+
 # ---------- deflake dispatch (user, 2026-09-23) ----------
 # "A red test that passes alone twice is accepted as a load flake and the batch lands; the 3rd flake
 # of the same test within 7 days auto-spawns a deflaker, so flakes get fixed, not tolerated."
@@ -1815,6 +1849,10 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
+    try:
+        reclaim_e2e_data(dry)
+    except Exception as e:
+        log(f"reclaim_e2e_data error: {e}")
     try:
         changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
     except Exception as e:

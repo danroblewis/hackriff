@@ -769,6 +769,34 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     assert not any("fatal" in m for m in said)
 
 
+def test_a_leaked_e2e_data_dir_is_removed_and_a_live_one_kept(tmp_path, monkeypatch):
+    """2026-09-24 10:30: 49 hk-e2e-data-* dirs (89.6 GB) left by killed browser specs."""
+    import os
+    for n in ("leaked", "live", "fresh"):
+        (tmp_path / f"hk-e2e-data-{n}").mkdir()
+        (tmp_path / f"hk-e2e-data-{n}" / "ring.bin").write_text("x")
+    (tmp_path / "unrelated").mkdir()
+    old = 1_000_000_000
+    for n in ("leaked", "live"):
+        for p in (tmp_path / f"hk-e2e-data-{n}" / "ring.bin", tmp_path / f"hk-e2e-data-{n}"):
+            os.utime(p, (old, old))
+    os.utime(tmp_path / "unrelated", (old, old))
+    monkeypatch.setattr(R.tempfile, "gettempdir", lambda: str(tmp_path))
+    procs = f"/x/target/debug/hk serve --replay f --data-dir {tmp_path}/hk-e2e-data-live --ui-dist d\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    R.reclaim_e2e_data(dry=True)
+    assert (tmp_path / "hk-e2e-data-leaked").exists() and len(said) == 1
+    R.reclaim_e2e_data(dry=False)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hk-e2e-data-fresh", "hk-e2e-data-live", "unrelated"]
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")          # ps said nothing: delete nothing
+    for p in (tmp_path / "hk-e2e-data-fresh" / "ring.bin", tmp_path / "hk-e2e-data-fresh"):
+        os.utime(p, (old, old))
+    R.reclaim_e2e_data(dry=False)
+    assert (tmp_path / "hk-e2e-data-fresh").exists()
+
+
 def test_only_regenerable_is_strict():
     assert R.only_regenerable([".githooks/", "target/"])
     assert not R.only_regenerable([".githooks/", "src/new.rs"])
