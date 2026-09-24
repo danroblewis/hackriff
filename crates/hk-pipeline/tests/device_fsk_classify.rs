@@ -20,18 +20,21 @@
 //!   wrong family.
 //! - **Above the gate: 0 of 16 rows claimed `fsk` before T-852, 5 of 16 after.** Not yet the
 //!   majority T-852 asks for. The 11 misses split into two causes outside the density refit:
-//!   - *4 rows: C13's burst extent overruns the burst* (24.8–28.8 ms measured against 23.5 ms),
-//!     so the normalised snippet carries noise-only samples and the envelope dimensions read far
-//!     outside any constant-envelope class (`low_fraction` z 9–30, `duty` z −3…−10). The extent is
-//!     `first..last` sample whose moving average clears the threshold anywhere in the snippet
-//!     (`hk_estimate::params`, step 6b).
+//!   - *4 rows: C13's burst extent overran the burst* (25.6–29.6 ms measured against 23.3 ms),
+//!     so the normalised snippet carried noise-only samples and the envelope dimensions read far
+//!     outside any constant-envelope class (`low_fraction` z 9–30, `duty` z −3…−10). The extent
+//!     was `first..last` sample whose moving average cleared the 6 dB edge threshold anywhere in
+//!     the snippet (`hk_estimate::params`, step 6b), and an isolated noise excursion milliseconds
+//!     after the burst cleared it. **T-876** counts only runs that hold a sample significant over
+//!     the whole snippet (`EstimatorConfig::extent_pfa`): every edge now lands within 0.16 ms of
+//!     the truth, and 8 of 16 above-gate rows claim `fsk`.
 //!   - *7 rows: the one-Gaussian `2fsk` density puts h = 4 in its tail* — mean-normalised
 //!     distance m 2.4–3.8 against 1.9–2.1 on the claimed rows, driven by `sigma_aa` (z 2.4–4.3),
 //!     `blind_qpsk` (z 4.0 on every row, claimed ones included), `if_slope_r2` (up to 5.2) and
 //!     `cyclic_db` (≈ −2.3).
 //!
-//! So the floor asserted below is the refit's measured gain (5 of 16, red at 0 before it), and the
-//! majority is the open target those two follow-ups own.
+//! So the floor asserted below is the measured gain (8 of 16: red at 0 before T-852, at 5 before
+//! T-876), and the majority is the open target the density follow-up owns.
 
 mod common;
 
@@ -66,6 +69,8 @@ struct ExtentCheck {
     /// Measured duration, s, and the true one.
     measured_s: f64,
     truth_s: f64,
+    /// The extent's edge-detector window (`2·fs/OBW`), s: twice the duration's stated sigma.
+    window_s: f64,
 }
 
 /// One blind run of `fsk_burst_train`: the C15 rows it persisted, and C13's extent over every
@@ -214,6 +219,11 @@ fn run_scene(seed: u64, snr_db: f64) -> SceneRun {
                 end_err_s: (e.source_end - t1 as f64) / fs,
                 measured_s: (e.source_end - e.source_start) / fs,
                 truth_s: (t1 - t0) as f64 / fs,
+                window_s: 2.0
+                    * params
+                        .duration_s
+                        .sigma()
+                        .expect("a measured extent has a σ"),
             }),
             other => no_extent.push(format!("{request:?}: {other:?}")),
         }
@@ -239,11 +249,12 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
             let run = run_scene(seed, snr_db);
             for x in &run.extents {
                 log.push(format!(
-                    "{snr_db} dB seed {seed}: extent {:.3} ms (truth {:.3}), start {:+.3} ms, end {:+.3} ms",
+                    "{snr_db} dB seed {seed}: extent {:.3} ms (truth {:.3}), start {:+.3} ms, end {:+.3} ms, window {:.3} ms",
                     x.measured_s * 1e3,
                     x.truth_s * 1e3,
                     x.start_err_s * 1e3,
-                    x.end_err_s * 1e3
+                    x.end_err_s * 1e3,
+                    x.window_s * 1e3
                 ));
             }
             extents.extend(run.extents);
@@ -284,10 +295,39 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
         above >= 12,
         "too few above-gate rows to judge ({above}): {log:#?}"
     );
-    // Measured 5 of 16 with the T-852 densities and 0 of 16 with the ones before them; the module
-    // docs name what stands between this and a majority.
+    // T-876: C13's extent ends where the burst ends. Every detected burst gets an untruncated
+    // extent, and each edge sits within three edge-detector windows (`2·fs/OBW`, the slack
+    // `hk-estimate`'s synthetic sweep states) of the hidden truth. Measured: every edge within
+    // 0.16 ms, at most 1.22 windows (a window is 0.06–0.11 ms here), over 240 bursts. Before
+    // T-876 four bursts ran 2.2–6.2 ms past their end (20 dB seed 858, 25 dB seed 853, 30 dB
+    // seeds 853 and 856): the first→last crossing of the 6 dB edge threshold took in an isolated
+    // noise excursion milliseconds after the burst, and the appended noise-only samples pushed
+    // the envelope features out of every FSK class.
     assert!(
-        claimed_above >= 4,
+        no_extent.is_empty(),
+        "detected bursts without an untruncated extent: {no_extent:#?}"
+    );
+    assert!(extents.len() >= 200, "too few extents ({})", extents.len());
+    let bad: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("extent"))
+        .zip(&extents)
+        .filter(|(_, x)| {
+            x.start_err_s.abs() > 3.0 * x.window_s || x.end_err_s.abs() > 3.0 * x.window_s
+        })
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "extent edges more than three windows from the truth: {bad:#?}"
+    );
+    // Measured 5 of 16 with the T-852 densities and 0 of 16 with the ones before them; 8 of 16
+    // once the extent stopped overrunning (T-876: 25 dB seed 853 and 30 dB seed 853, overrun rows,
+    // now claim fsk, and so does 25 dB seed 856; 30 dB seed 856 stays unknown with a clean
+    // extent, in the single-Gaussian density's tail). Red at 5 on the pre-T-876 estimator. The
+    // module docs name what stands between this and a majority.
+    assert!(
+        claimed_above >= 7,
         "fsk claimed on {claimed_above} of {above} above-gate rows: {log:#?}"
     );
 }

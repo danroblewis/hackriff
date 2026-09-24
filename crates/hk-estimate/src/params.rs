@@ -1560,4 +1560,31 @@ mod tests {
         assert!(!multi_signal(&single, 1e-3));
         assert!(cumulative_edges(&single, 0.005).0 < 50);
     }
+
+    /// T-876: an isolated excursion over the edge threshold far from the burst no longer sets
+    /// its end; one within a window of it is the burst's own ragged edge and still does.
+    #[test]
+    fn burst_bounds_ignore_isolated_noise_runs() {
+        let (n, win, thr, seed) = (1000usize, 10usize, 1.0, 3.0);
+        let mut v = vec![0.5; n];
+        v[200..400].iter_mut().for_each(|x| *x = 10.0); // the burst
+        v[405..408].iter_mut().for_each(|x| *x = 1.5); // ragged tail, within a window
+        v[700..703].iter_mut().for_each(|x| *x = 1.5); // noise excursion, 300 samples later
+        v[50..52].iter_mut().for_each(|x| *x = 2.0); // and one well before
+        let ma = |i: usize| v[i];
+        assert_eq!(burst_bounds(n, win, thr, seed, &ma), (Some(200), Some(407)));
+        // The pre-T-876 rule (every run counts) ran from the early excursion to the late one.
+        assert_eq!(burst_bounds(n, win, thr, thr, &ma), (Some(50), Some(702)));
+        // A burst with no significant sample keeps that rule: nothing firmer to measure from.
+        assert_eq!(burst_bounds(n, win, thr, 100.0, &ma), (Some(50), Some(702)));
+        assert_eq!(burst_bounds(n, win, 20.0, 30.0, &ma), (None, None));
+    }
+
+    #[test]
+    fn extent_seed_factor_grows_with_the_snippet_and_the_n0_error() {
+        let f = |n, rel| extent_seed_factor(64, 0.2, n, 1e-3, rel);
+        assert!(f(10_000, 0.0) > 1.0);
+        assert!(f(100_000, 0.0) > f(10_000, 0.0));
+        assert!(f(10_000, 0.05) > f(10_000, 0.0));
+    }
 }
