@@ -89,6 +89,12 @@ _DECLARE = (
     re.compile(r"^TRIAGE: browser specs red: (.*?) - re-running them alone\s*$"),
 )
 _PASSED = re.compile(r"^TRIAGE: they PASS alone")
+#: The browser tier's own summary of each isolated run (`ui/e2e/run.mjs`, no timestamp): which of
+#: the declared specs actually failed ALONE. Without it "a browser spec FAILS alone" was charged to
+#: every spec in the set - 09-22 16:25 app-trace passed its isolated run (`failed: fog-of-war,
+#: surface-address`) and was still counted "failed alone", which made its 09-24 FLAKY verdict
+#: "both ways: real under some condition".
+_E2E_SUMMARY = re.compile(r"^e2e: \d+/\d+ files passed .*; failed: (.*?)\s*$")
 _FAILED = re.compile(r"^TRIAGE: (?:a test|a browser spec) FAILS alone")
 
 #: Explicitly NOT a gate red: the runner also re-runs the same specs on a rewound `main` to ask
@@ -125,6 +131,9 @@ class Incident:
     #: not evidence the SPEC is flaky - on 2026-09-23 23:01 one branch (T-801) breaking three specs
     #: raised three FLAKY alarms. Recorded, never counted toward the FLAKY threshold.
     branch_defect: bool = False
+    #: The specs the last isolated run named as failed (`_E2E_SUMMARY`); empty = not known, and a
+    #: FAILED_ALONE then counts against every test in the set, as before.
+    failed_alone_tests: tuple[str, ...] = ()
 
 
 def _first_load(text: str) -> float | None:
@@ -151,6 +160,9 @@ def parse_runner_log(text: str, year: int) -> list[Incident]:
     for raw in text.splitlines():
         m = _LINE.match(raw.strip())
         if not m:
+            hit = _E2E_SUMMARY.match(raw.strip()) if pending is not None else None
+            if hit:
+                pending.failed_alone_tests = tuple(t for t in hit.group(1).replace(",", " ").split() if t)
             continue
         mon, day, hh, mm, ss, rest = m.groups()
         if not rest.startswith("TRIAGE:") and not (last_failed is not None and _SINGLE_GATE_FAILED.match(rest)):
@@ -366,9 +378,12 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
             e.first_seen = min(e.first_seen, inc.ts)
             e.last_seen = max(e.last_seen, inc.ts)
             e.red_in_gate += 1
-            if inc.outcome == PASSED_ALONE:
+            outcome = inc.outcome
+            if outcome == FAILED_ALONE and inc.failed_alone_tests and test not in inc.failed_alone_tests:
+                outcome = UNRESOLVED        # it passed that isolated run; another spec in the set failed
+            if outcome == PASSED_ALONE:
                 e.passed_alone += 1
-            elif inc.outcome == FAILED_ALONE:
+            elif outcome == FAILED_ALONE:
                 e.failed_alone += 1
             if inc.load is not None:
                 e.loads.append(inc.load)

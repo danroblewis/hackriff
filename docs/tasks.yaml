@@ -23491,7 +23491,7 @@ tasks:
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-800]
     use_cases: []
@@ -23515,13 +23515,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801]
     use_cases: []
@@ -23545,13 +23547,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801]
     use_cases: []
@@ -23575,13 +23579,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-803]
     use_cases: [AWARE-053]
@@ -23605,13 +23611,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
     status: todo
     priority: high
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-801, T-459]
     use_cases: [AWARE-042]
@@ -23634,6 +23642,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -23671,7 +23681,7 @@ tasks:
     status: todo
     priority: normal
     parallel_group: MAP-LAYERS
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-806]
     use_cases: [AWARE-042]
@@ -23694,6 +23704,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
@@ -24248,7 +24260,7 @@ tasks:
     status: todo
     priority: normal
     parallel_group: MAP-CHROME
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-805, T-814, T-821]
     use_cases: []
@@ -24271,13 +24283,15 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
     status: todo
     priority: normal
     parallel_group: MAP-TEST
-    model: sonnet
+    model: opus
     effort: medium
     depends_on: [T-809, T-810, T-812, T-820, T-821, T-822]
     use_cases: []
@@ -24300,6 +24314,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
+
+      2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
@@ -25047,7 +25063,7 @@ tasks:
   - id: T-853
     milestone: MAUTO
     title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
-    status: in-progress
+    status: done
     branch: task-t853
     priority: normal
     deps:
@@ -25072,7 +25088,18 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
 
       2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): M-2's scope must NAME psk_demod - its evidence() metric and calibration table (T-609 landed the block without them).
+
+      2026-09-24 (coordinator): rebuilt on main after a conflict in hk-synth/src/lib.rs with M-3/M-4/M-5 (crate doc header, module table, pub mod library + nullchain) - both sides kept; result re-applied. Old tip old/task-t853.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:20).
+      MAUTO M-2 delivered. hk_blocks::Block gains an optional evidence() (default empty); 19 block kinds emit windowed, allocation-free Evidence: lowpass S0 snr; fm/am/fsk/msk/psk_demod/subcarrier S1 (psk_demod's EVM is the M-14 residue); clock_recovery S2 eye_open+timing_var; slicer/nrzi/diff_decode/manchester S3; sync_search S4 sync_excess; crc/bch/parity/checksum S5 check_distinct_valid (uncorrected, distinct, non-short-period frames only, per T-210/ADR-0022 §4.2); text/fields S6 field_fit. The analytic nulls live in hk_model::synth::null (lower-bound Chernoff tails; hk-synth re-exports them as nulls). hk_blocks::run_window is the batch driver beside the T-088 graph. hk-synth::score scores calibrated metrics against 11 shipped tables in synth/calibration/ (4096 windows per cell, generated by `python -m hkpy.calibrate generate` from Rust null draws through canonical noise chains in hk_synth::nullchain, with T-619's tight fill bounds per ADR-0015 §16.4). The file's groups win over the block's, undeclared is one group, and StageLadder gives Σ min(b_j, cap_j) before the engine's L_j. Supports match strictly because the measured psk EVM null moves with n, so a borrowed support would over-claim. tests/calibration_tables.rs re-samples 1000 fresh null windows per table and asserts the refusal above admissible_bits. Proposal-call budgets (T-552) are M-3/M-4 scope: M-2 makes no proposal calls.
+      Tests: cargo nextest run -p hk-model -p hk-blocks -p hk-synth -> exit 0 (576 passed, 4 skipped (includes hk-synth calibration_tables: 1000 fresh null windows x 11 tables)); cargo nextest run -p hk-pipeline -E 'binary(recipe_alloc_free) | binary(recipe_runtime)' -> exit 0 (10 passed (real-time alloc-free contract intact after the block changes)); cd py && uv run --locked pytest tests/test_calibrate.py -> exit 0 (14 passed); cd py && uv run --locked ruff check . -> exit 0 (clean)
+      precheck exit 0
+      Commits: d737891f
+      Observed, not chased: ADR tension, needs a Fable/user call: ADR-0015 §2.2 says sync_excess = Chernoff tail MINUS the pattern width, and hk_model::synth::null::sync_excess_bits implements that literally. For a searched sync word this double-charges the engine's L_j, and for a template-fixed preamble it removes the bits that ADR-0022 §4.2's single-burst narrative relies on ('a matched 8-pulse preamble carries its own sync_excess bits'). Fails closed, but S4 floors (10 bits) will be hard to clear for 16-bit words. | M-3 constraint: S1 tables are drawn through a 4x-oversampled S0 channel (nullchain.rs). They are conservative for S1 inputs oversampled up to 4x and generous beyond that, so M-3's skeletons must keep S1 input at <= 4x or regenerate. Windows must also be sized to land on a calibrated support ([n, n + n/50 + 16]); any other n scores NoTable (0 bits) by design. | Not generated: the mismatched-parameter nulls (§13.3 mismatch:symbol_rate/centre) need per-block signal corpora. Only the noise null ships, and the §13.1 correlation matrices are measured on that noise null, not on a matched corpus. | subcarrier pilot_lock has no table (needs an FM-composite null corpus), so it scores NoTable (0 bits). fields field_fit is published at 0 bits because a field map states no chance-fit rate. identity_recurrence, plausibility and sync_regularity are not emitted (template/engine side, M-5/M-3). ppm_demod, deframe, assemble, interleave, viterbi and reed_solomon emit no evidence. | §2.1 live mirror (<node>.ev_bits / ev_quality in hk-pipeline status ticks) is not wired. It is a runtime/stream addition and was left for whichever ticket first serves it. | Pre-existing, unrelated: nextest flagged hk-model relate::tests::an_image_is_predicted_from_the_tuning_centre_and_a_real_neighbour_is_not as LEAK (it passed; the leak is in that test's own handles).
+      Resources: 133 CPU-s, peak 1.7 GB
+    commit: "81143197"
   - id: T-854
     milestone: MAUTO
     title: "MAUTO M-3: search engine: beam, memoisation, pruning, budget/profiles, stop rules, power/throttle"
@@ -25113,7 +25140,7 @@ tasks:
   - id: T-855
     milestone: MAUTO
     title: "MAUTO M-4: proposal operators over assist (sync/codes/fields) with budget charging"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25143,11 +25170,11 @@ tasks:
       precheck exit 0
       Commits: 0b4ede6f
       Resources: 42 CPU-s, peak 0.4 GB
+    commit: a29f7496
   - id: T-856
     milestone: MAUTO
     title: "MAUTO M-5: template library: schema validation, loader, built-ins from recipes + generic skeletons, seeding from Classification/SignatureMatch"
-    status: in-progress
-    branch: task-t856
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25171,10 +25198,20 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
 
       2026-09-23 (coordinator, ADR-0015 acceptance / U4 M-14 residue): the template/skeleton library and seeding must include a PSK option at the demodulation stage - section 4.1's built-in skeleton list has none, so PSK cannot reach bits inside a search.
+    branch: task-t856
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 00:38).
+      Added hk-synth::library (ADR-0015 §4.1/§4.2/§15.6 level 1): TemplateLibrary loader (builtin(), load_dir, add_text; duplicate id@version refused, unknown keys refused), consistency validation with machine-coded errors (schema, exactly-one structure, recipe resolves, free-path node exists, ranges/weights, S4 sync_bits vs recipe sync_search, builtin fact_unsourced, skeleton coherence), and inert templates (skeleton naming a block the catalogue lacks is loaded but never seeded, reported via inert()). Built-ins in templates/*.template.json: rds, pocsag, acars, adsb (priors copied from recipe match; standard refs marked UNVERIFIED) plus generic-fsk-framed, -ook-manchester, -ook-pwm (inert: no pwm_decode block), -msk, -ppm and a new generic-psk-framed (psk_demod alternatives bpsk..d8psk) so PSK reaches bits. Seeding: TemplateLibrary::seed(BudgetHint, MeasuredParams) gives prior_bits = log2(P_class x match x band_factor), match demotes by 0.25 per contradicted measured prior (never drops), band_factor 1.5 only for an already-detected centre, full-signature fast path first, deferred (likelihood only) last, open skeletons always listed with share >= 0.2. Not done (need pieces not landed): CRC check-value round trip, field-map width sums, protocol-class free-param check (ParamSchema.class), partial-signature range narrowing, cluster warm-start; skeleton nodes carry no required params yet (M-3 fills when candidates instantiate).
+      Tests: cargo nextest run -p hk-synth -> exit 0 (44 passed)
+      precheck exit 0
+      Commits: c0dcec02
+      Observed, not chased: Skeleton psk_demod node lacks required symbol_rate_bd param; candidates (M-3) must supply it | Built-in standard refs (ITU-R M.584-2, ARINC 618, ICAO Annex 10, IEC 62106) are unverified transcriptions from recipes
+      Resources: 49 CPU-s, peak 0.6 GB
+    commit: 37486d14
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-848
@@ -25196,6 +25233,16 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    branch: task-t857
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 01:05).
+      MAUTO M-6 (ADR-0015 §5.3/§6/§14) delivered. hk-store: IqBuffer::read / ClipPlan::read give buffered IQ in memory as ReadChunk (one per segment piece, with provenance; same plan and eviction check as export_clip), and Clip::from_chunks. hk-pipeline: IqBufferService::read is the §5.3 ring read; pin_chunks stores read chunks as a pinned iq-snippet Recording with the new RecordingTrigger::Analyze, written from memory so the clip is byte-identical to what the search reads. New hk_pipeline::synth::acquire (synth.rs moved to synth/mod.rs): BurstSet::collect (membership emitter > cluster > band, a different identity excludes; guard max(2 ms, duration); overlapping guards split at the gap midpoint so no sample is read twice; cap 64 bursts / 2 s keeping the newest, long single bursts trimmed and flagged; odd bursts are hold-out), acquire (Rule I ReadLedger, DISCONTINUITY on burst gaps and segment boundaries, bursts with no IQ listed as missing and not counted; NoIq/Evicted when nothing is read), acquire_and_pin (pins before any search), and AcquiredWindow (§5.2 window) filled from the ledger. docs/api.md and docs/07 §2.12 list trigger `analyze`. Budgets (T-552 proposal-call counting) are M-3/M-8's and nothing here charges them.
+      Tests: cargo nextest run -p hk-store -E 'test(/iqbuffer/)' -> exit 0 (19 passed (incl. new t857_read_returns_segment_chunks_with_provenance_and_exact_bytes)); cargo nextest run -p hk-model -> exit 0 (362 passed); cargo nextest run -p hk-pipeline -E 'test(/synth::/) or binary(analyze_acquire) or binary(iq_capture_buffer) or binary(iq_capture_ring_restart) or binary(iq_capture_ring_allocation) or test(/playback/)' -> exit 0 (19 passed (7 acquire unit tests + mock-SDR e2e analyze_acquire))
+      precheck exit 0
+      Commits: 4f030620
+      Observed, not chased: The §6 search changes (S0 seed from the burst's short-FFT centre, preamble-driven S2 seeds, ppm_demod-first skeletons) and per-burst evidence n accumulation are the engine's (M-3/M-7), not acquisition; nothing consumes Acquisition yet. | `source: live` acquisition (collect live_s from a ring reader, §5.3) and targeting a pinned clip on re-run are M-8's job routing; AcquiredWindow.source is fixed to `ring` here. | Where to get burst sightings (T-075 burst detections, emitter/cluster links) for a job target is M-8's query; BurstSighting::from_detection is the adapter.
+      Resources: 124 CPU-s, peak 2.4 GB
+    commit: ba88980a
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
@@ -25225,7 +25272,8 @@ tasks:
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
-    status: todo
+    status: in-progress
+    branch: task-t859
     priority: normal
     deps:
     - T-854
@@ -25381,7 +25429,7 @@ tasks:
   - id: T-865
     milestone: MAUTO
     title: "LP-1: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over)"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: LP
@@ -25397,10 +25445,22 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    branch: task-t865
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 01:07).
+      LP-1 / ADR-0015 section 12.9 stage 0: new crates/hk-pipeline/tests/listen_conformance.rs (4 tests) pins today's legacy Listen chain as seen on the wire at /ws/open/listen, driven through MockSdrDriver over a synthetic WFM SigMF recording (100.2 MHz station, 19 kHz pilot; looping, unpaced, lossless, so the assertions are about ordering and counts, not wall-clock time). What it freezes: (1) discovery: /api/streams on_demand[listen] kind/datatype/rate and params exactly emitter,detection,f_lo,f_hi (never mode); (2) the header's key set is exactly today's plus only ADR-0011 section 8.2's additive keys (pipeline_id, recipe, output_id, edit_rev), plus the audio/squelch/agc/refinement key sets, ri16_le / 48000 / 960, mono channels=1 (the mono pin LP-10 needs), WFM auto-chosen with the pilot; (3) records: 1920-byte frames, sample_index on frame boundaries, t advancing at exactly 48 kHz, seq gaps only behind drop markers; (4) status keys with types, and status sample_index == 960*(frames+squelched_frames); (5) squelch: the station fades 44 dB through the device's set_gains, and the next published record's sample_index jump is flagged DISCONTINUITY and equals the squelched frames; (6) refusals 4400 (mode param, span over 1 MHz, malformed id, empty), 4404, 4409, 4422 no-analog-mode, 4403 legal gate before the window check (gating on) versus 4409 (gating off), and 4503 busy at the listener limit, each with the refusal message's key set and no audio; (7) an in-place retune keeps the stream (flagged record), while leaving the channel and a re-plumb both end it (no second header; retune_ends/closed_retune/closed_segment), after which the client reconnects to a new stream; (8) closing the socket stops the chain (closed_client). Checked that the test is not vacuous: removing the squelch gap flag in chains/listen.rs, or adding a header field, turns it red with the matching message (both reverted). No product code changed.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(listen_conformance)' -> exit 0 (4 passed (run 5 times: 4/4 each; ~22-40 s)); cargo test -p hk-pipeline --test listen_conformance -> exit 0 (4 passed in one process (checks that the process-global content-gating toggle is safe under just test-seq))
+      precheck exit 0
+      Commits: b0884793
+      Observed, not chased: When a retune or re-plumb ends a Listen stream, the server resets the WebSocket without sending a close frame (tungstenite: 'Connection reset without closing handshake'). The freeze only requires that the connection ends with no further header, so a later stage may add a close frame (for example 1000 or 4410) without breaking it. Whether to send one is a UI/AudioSession decision. | .config/nextest.toml has a retries=1 override for test(retuning_into_paging_while_listening_stops_the_audio_and_refuses_new_listeners), but no test with that name exists in crates/ or tests/ any more, so the override is stale. | Not frozen here, and still outside Stage 0's list: emitter= targets through a real inventory (tests/e2e acceptance/listen.rs covers them with the recorded FM fixture) and the TCP opener open/listen. Stage 4 should run this file with HK_LISTEN_PIPELINE=1 as well.
+      Use cases: SIGNAL-062
+      Resources: 175 CPU-s, peak 2.9 GB
+    commit: e250c392
   - id: T-866
     milestone: MAUTO
     title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
-    status: todo
+    status: in-progress
+    branch: task-t866
     priority: normal
     deps:
     - T-865
@@ -25583,7 +25643,8 @@ tasks:
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
-    status: todo
+    status: in-progress
+    branch: task-t875
     priority: normal
     deps:
     - T-609
@@ -25601,15 +25662,6 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     tier_reason: "real-time-path DSP: carrier/timing acquisition on short PSK bursts"
-    result: |
-      DONE (work-runner, from handback.json, 2026-09-24 02:08).
-      psk_demod gains a burst mode (`burst: true`, cold, default off, so the streaming contract is unchanged; new crates/hk-blocks/src/blocks/iq/psk_burst.rs). It finds each burst blind by energy, then confirms and measures it feed-forward over the burst's own samples: an M-th-power carrier line, refined at symbol rate over 4 carrier candidates x 8 timing phases after a matched filter; carrier phase; timing; level. It then resets the tracker and feeds it from the burst start through a fractional delay that puts liquid's strobes (pinned by a test: (j-9)k after a reset) on the estimated symbol centres, so every loop starts converged. Only burst symbols are emitted, and each burst's first item starts an output chunk flagged DISCONTINUITY (ADR-0011 s9.2). A chunk holds at most one burst: a second ready in the same call waits for the next call, and at END an open burst is closed and flushed (resampler tail included). What cannot get a chunk is counted in `bursts_dropped`. Shortest burst decoded whole, measured with bits matched by the output's time map (not by searching for a lag), at the streaming test's SNR and a 0.125*Rs offset. BEFORE: none up to 2048 symbols in any mode except DBPSK (64); the first 99-670 symbols of every burst were lost. AFTER: 8 symbols for BPSK, DBPSK, QPSK, DQPSK, pi/4-DQPSK, 8PSK, D8PSK and half-sine OQPSK; 64 for RRC OQPSK. False accepts: none on noise-only streams; noise bursts of 24 symbols or more, 1 in 640. A fix found on the way: OQPSK's phase seed has to be known mod pi for the chosen rail, not mod pi/2, or the timing loop slips half a symbol. ADR-0011 s9 and ADR-0015 s10 (M-14) updated.
-      Tests: just test-crate hk-blocks -> exit 0 (156 passed, 6 skipped (incl. 6 new burst-mode tests and 2 burst-mode alloc-free cases; 2 new #[ignore] measurement reports)); cargo nextest run -p hk-blocks --lib -E 'test(burst_mode_shortest)' --run-ignored only --no-capture (and HK_PSK_REPORT_STREAM=1) -> exit 0 (before/after table recorded in psk_burst.rs module docs)
-      precheck exit 0
-      Commits: 486796a5
-      Observed, not chased: The Rate DDC resampler (filter.rs, shared by resample/fm_demod/subcarrier and psk_demod) emits nothing for its first filter span. Its first output is stamped about 42 source samples (≈4 symbols at 48 kS/s → 14.4 kS/s) into a stream, so a capture cut exactly at a burst's first sample loses those symbols on either psk path. Evidence: burst_mode_decodes_a_capture_that_starts_and_ends_on_the_burst needed a 6-symbol lead; with no lead the first item was stamped at source 43.6. | One-chunk-per-process-call plus chunk-level flags (ADR-0011 s1.1) means a block cannot emit two bursts in one call. If bursts outnumber process calls (a dense ISM burst field fed in big chunks), burst mode overruns and counts bursts_dropped; a single END chunk holding two bursts drops the second. This is a contract question (e.g. multiple output chunks per call) for the ADR owner, not something to fix inside a block. | RRC OQPSK bursts shorter than 64 symbols do not pass the blind PSK test: the raw x^4 line is weak, coherence about 0.3. The symbol-rate y_I^2 - y_Q^2 line was tried and is weaker still (about 0.26 in theory), so it was not kept. A joint carrier-phase x timing search would be the next step. | Burst mode's per-burst estimation cost (up to 32 hypotheses x 256 symbols plus a 1024-point FFT each) has not been measured in a release build. | Streaming-path DBPSK decodes bursts whole from about 64 symbols at a 0.125*Rs offset: differential detection tolerates the unremoved carrier.
-      Use cases: SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081
-      Resources: 161 CPU-s, peak 1.4 GB
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

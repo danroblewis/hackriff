@@ -7,8 +7,11 @@ use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
 use crate::blocks::framing::common::{
     P, RateMeter, Span, combine, extend_bits, frames_io, frames_port, one_input, update_hot,
 };
+use crate::evidence::CheckTally;
 use crate::registry::BuildCtx;
 use crate::status::Status;
+use hk_model::CrcStatus;
+use hk_model::synth::EvidenceSet;
 
 const HOT: &[&str] = &["drop_invalid"];
 
@@ -32,6 +35,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         meter: RateMeter::new(256),
         units_ok: 0,
         units_bad: 0,
+        ev: CheckTally::default(),
         status: Status::default(),
     }))
 }
@@ -50,6 +54,8 @@ pub struct Parity {
     meter: RateMeter,
     units_ok: u64,
     units_bad: u64,
+    /// Evidence (T-853), since `reset()`.
+    ev: CheckTally,
     status: Status,
 }
 
@@ -71,6 +77,7 @@ impl Block for Parity {
             self.out.clear();
             self.out.extend_from_slice(&self.bits[..start]);
             let (mut pos, mut all, mut checked) = (start, true, false);
+            let mut units = 0usize;
             while pos + self.unit <= end {
                 let u = &self.bits[pos..pos + self.unit];
                 let ones = u.iter().filter(|&&b| b == 1).count();
@@ -83,6 +90,7 @@ impl Block for Parity {
                 }
                 all &= ok;
                 checked = true;
+                units += 1;
                 match (self.strip, self.first) {
                     (false, _) => self.out.extend_from_slice(u),
                     (true, true) => self.out.extend_from_slice(&u[1..]),
@@ -91,6 +99,12 @@ impl Block for Parity {
                 pos += self.unit;
             }
             self.out.extend_from_slice(&self.bits[pos..]);
+            if checked {
+                let upstream_clean =
+                    !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
+                self.ev
+                    .record(&self.bits, all && upstream_clean, units as f64);
+            }
             if !all && self.drop_invalid {
                 continue;
             }
@@ -113,7 +127,15 @@ impl Block for Parity {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev.clear();
+    }
+
+    /// S5 `check_distinct_valid` (analytic) per **frame**: a frame of `u` parity units passes
+    /// by chance at `2^−u`; scored at the fewest units any tested frame had.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
+    }
 
     fn update_params(
         &mut self,

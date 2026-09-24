@@ -1616,7 +1616,7 @@ A partially written or missing recording **is listed** — hiding it would be it
 - `f_lo`/`f_hi` are the tuned window as captured, `center_hz ± sample_rate_hz/2` — the same convention the IQ ring's segments and its clip band filter use.
 - `meta_uri`/`data_uri` are **relative to the data directory**, exactly as written, so the pipeline (and a `SigmfReplaySource`) can open them.
 - `size_bytes` is what the row records; `bytes_on_disk` is what the data file holds now (`null` when there is none).
-- `trigger` is `{"kind": "detection" \| "demodulation" \| "scheduler" \| "manual", "id"?}`; `retention_class` is the C25 eviction class (`pinned`/`unknown`/`decoder-confirmed`/`routine`).
+- `trigger` is `{"kind": "detection" \| "demodulation" \| "scheduler" \| "manual" \| "analyze", "id"?}` (`analyze`: the IQ a region analysis acquired, pinned at job start — ADR-0015 §6, T-857); `retention_class` is the C25 eviction class (`pinned`/`unknown`/`decoder-confirmed`/`routine`).
 - `device_id`, `antenna_port`, `bias_tee`, `bandwidth_hz`, `lna_db`, `vga_db`, `amp_on` and `overload` come from the recording's `Provenance` — which front end captured it and under what state. All are `null` when that provenance row cannot be read; none is ever guessed. `bias_tee` follows the same three-valued rule as the ring's segments: `"unknown"` means the source could not report it and is never to be read as `"off"`.
 
 **`iq_available`**: `{horizon: "iq-ring + recordings", ring, spans: [Span]}` — the whole answer to "where is raw IQ still readable", **ring plus these recordings** rather than the ring alone.

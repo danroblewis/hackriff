@@ -7,8 +7,10 @@ use hk_recipe::{Params, PortType};
 use super::common::*;
 use super::filter::Rate;
 use crate::block::{Block, BlockError, Io, ParamUpdate, PortInfo};
+use crate::evidence::{Moments, calibrated};
 use crate::registry::BuildCtx;
 use crate::status::Status;
+use hk_model::synth::{EvidenceSet, GroupId, MetricId, Stage};
 
 /// Time constant of the level/deviation estimators, s.
 const ESTIMATE_TAU_S: f64 = 0.1;
@@ -65,6 +67,8 @@ pub(crate) fn build_fm(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, B
         de: None,
         mean: Ema::default(),
         ms: Ema::default(),
+        ev_abs_dphi: 0.0,
+        ev_n: 0,
         non_finite: 0,
         status: Status::default(),
     }))
@@ -81,6 +85,9 @@ struct Fm {
     de: Option<Deemphasis>,
     mean: Ema,
     ms: Ema,
+    /// Evidence (T-853): Σ|Δφ| per sample, rad, and the samples, since `reset()`.
+    ev_abs_dphi: f64,
+    ev_n: u64,
     non_finite: u64,
     status: Status,
 }
@@ -101,6 +108,10 @@ impl Fm {
     fn step(&mut self, s: num_complex::Complex32) -> f32 {
         let s = finite_iq(s, &mut self.non_finite);
         let f = f64::from(self.disc.push(s));
+        if self.fs > 0.0 {
+            self.ev_abs_dphi += std::f64::consts::TAU * f.abs() / self.fs;
+            self.ev_n += 1;
+        }
         let mean = self.mean.push(f);
         let d = f - mean;
         let ms = self.ms.push(d * d);
@@ -187,6 +198,25 @@ impl Block for Fm {
 
     fn reset(&mut self) {
         self.restart(0);
+        self.ev_abs_dphi = 0.0;
+        self.ev_n = 0;
+    }
+
+    /// S1 `snr`: phase-step coherence `1 − E|Δφ| / (π/2)` — 0 for noise (independent phases
+    /// step uniformly, `E|Δφ| = π/2`), towards 1 for a carrier whose phase moves smoothly.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if self.ev_n > 0 {
+            let mean = self.ev_abs_dphi / self.ev_n as f64;
+            let raw = 1.0 - mean / std::f64::consts::FRAC_PI_2;
+            calibrated(
+                out,
+                Stage::S1,
+                MetricId::Snr,
+                GroupId::Undeclared,
+                raw,
+                self.ev_n,
+            );
+        }
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
@@ -213,6 +243,7 @@ pub(crate) fn build_am(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, B
         fs: 0.0,
         level: Ema::default(),
         depth: Ema::default(),
+        ev: Moments::default(),
         non_finite: 0,
         status: Status::default(),
     };
@@ -228,6 +259,8 @@ struct Am {
     fs: f64,
     level: Ema,
     depth: Ema,
+    /// Evidence (T-853): envelope moments since `reset()`.
+    ev: Moments,
     non_finite: u64,
     status: Status,
 }
@@ -267,6 +300,7 @@ impl Block for Am {
         let y = real_out(out)?;
         for &s in x {
             let a = f64::from(finite_iq(s, &mut self.non_finite).norm());
+            self.ev.push(a);
             let v = if self.normalized {
                 let level = self.level.push(a);
                 if level > 1e-20 { a / level - 1.0 } else { 0.0 }
@@ -292,6 +326,22 @@ impl Block for Am {
     fn reset(&mut self) {
         self.level.clear();
         self.depth.clear();
+        self.ev.clear();
+    }
+
+    /// S1 `bimodality` of the envelope (AM/OOK, ADR-0015 §1.1): Rayleigh noise sits near 0.43,
+    /// on-off keying towards 1.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if let Some(bc) = self.ev.bimodality() {
+            calibrated(
+                out,
+                Stage::S1,
+                MetricId::Bimodality,
+                GroupId::DemodShape,
+                bc,
+                self.ev.count(),
+            );
+        }
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {
@@ -329,11 +379,20 @@ struct Fsk {
     disc: Discriminator,
     track: Ema,
     ms: Ema,
+    /// Evidence (T-853): discriminator moments since `reset()`.
+    ev: Moments,
     non_finite: u64,
     status: Status,
 }
 
 impl Fsk {
+    /// Drops the discriminator history (a `DISCONTINUITY`); the window's evidence is kept.
+    fn restart(&mut self) {
+        self.disc = Discriminator::new(self.fs.max(1.0));
+        self.track.clear();
+        self.ms.clear();
+    }
+
     fn new(p: &Params, msk: bool) -> Self {
         let mut b = Self {
             params: p.clone(),
@@ -345,6 +404,7 @@ impl Fsk {
             disc: Discriminator::new(1.0),
             track: Ema::default(),
             ms: Ema::default(),
+            ev: Moments::default(),
             non_finite: 0,
             status: Status::default(),
         };
@@ -386,7 +446,7 @@ impl Block for Fsk {
         let x = iq_in(&input)?;
         let m = input.meta;
         if restarts(m.flags) {
-            self.reset();
+            self.restart();
         }
         let out = io.output(0)?;
         set_meta(out, &m, m.source_index, m.source_per_item);
@@ -398,6 +458,7 @@ impl Block for Fsk {
             if tracking {
                 f -= self.track.push(f);
             }
+            self.ev.push(f);
             let ms = self.ms.push(f * f);
             let dev = self.deviation.unwrap_or_else(|| ms.sqrt()).max(1e-3);
             y.push((f / dev) as f32);
@@ -415,9 +476,23 @@ impl Block for Fsk {
     }
 
     fn reset(&mut self) {
-        self.disc = Discriminator::new(self.fs.max(1.0));
-        self.track.clear();
-        self.ms.clear();
+        self.restart();
+        self.ev.clear();
+    }
+
+    /// S1 `bimodality` of the discriminator (FSK/MSK, ADR-0015 §1.1): noise's instantaneous
+    /// frequency is heavy-tailed (low), two tones are two levels (towards 1).
+    fn evidence(&self, out: &mut EvidenceSet) {
+        if let Some(bc) = self.ev.bimodality() {
+            calibrated(
+                out,
+                Stage::S1,
+                MetricId::Bimodality,
+                GroupId::DemodShape,
+                bc,
+                self.ev.count(),
+            );
+        }
     }
 
     fn update_params(&mut self, p: &Params, _: &BuildCtx<'_>) -> Result<ParamUpdate, BlockError> {

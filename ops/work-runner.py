@@ -166,7 +166,7 @@ def attention(ticket, branch, kind, detail=""):
              "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
     if level:
         try:
-            subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
+            subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"),
                             level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
                            capture_output=True, timeout=30)
         except Exception:
@@ -678,8 +678,11 @@ def write_result(c, hb):
 
 
 def record_done(claim, outcome, res):
+    # A fix run says WHY it ran (user, 2026-09-24) - the /worklog "Fix runs" table and the digest tally.
+    why = ({"attempt": claim.get("fix_attempts"), "reason_class": claim.get("fix_reason_class") or "OTHER",
+            "reason": claim.get("fix_reason") or ""} if claim.get("kind") == "fix" else {})
     with open(DONE, "a") as f:
-        f.write(json.dumps({"ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
+        f.write(json.dumps({**why, "ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
                             "started": int(claim["started"]), "finished": int(time.time()),
                             "minutes": round((time.time() - claim["started"]) / 60, 1),
                             "cost_usd": res.get("total_cost_usd"), "turns": res.get("num_turns"),
@@ -830,10 +833,29 @@ def reap(claims, dry):
     return changed
 
 
+def fix_reason(fail_line, branch):
+    """(class, reason) for a fix run - hkpy.fixes; a GATE_FAIL names what the merge runner's triage
+    found red. Never fails a launch: an unreadable reason is OTHER with the raw line."""
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import fixes
+        text = ""
+        if fixes.classify(fail_line) == "GATE_FAIL" and os.path.exists(MERGE_LOG):
+            with open(MERGE_LOG, "rb") as f:
+                f.seek(max(0, os.path.getsize(MERGE_LOG) - 4_000_000))
+                text = f.read().decode("utf-8", "replace")
+        return fixes.reason_for(fail_line, text, branch)
+    except Exception:
+        return "OTHER", " ".join(fail_line.split())[:200]
+
+
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
+    cls, why = fix_reason(fail_line, branch)
+    c = dict(c, fix_reason_class=cls, fix_reason=why)
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
@@ -888,7 +910,8 @@ def _run_fix(c, n, prompt):
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
+    log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] {c.get('fix_reason', '')[:120]}: "
+        f"resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 
@@ -1480,6 +1503,42 @@ def read_deflake_requests(path=None):
     return out
 
 
+# A ticket branch still on its way to main - what a deflaker must not race (T-801, 2026-09-23 23:30:
+# the runner dispatched deflakers on app-trace and fog-of-war while T-801's worker was rewriting both
+# specs under the user's authorization; the coordinator had to hold one by hand).
+_INFLIGHT = ("running", "queued", "review-failed", "gate-failed", "fix-held", "conflict")
+_DEFER_SAID = set()
+
+
+def deflake_deferred(slug, req, claims):
+    """Why this deflake request must wait, or "". (a) its own last run left a branch with unmerged
+    commits (held, blocked, review-failed): a second run would start over beside it; (b) an in-flight
+    ticket branch edits the same spec file."""
+    c = claims.get(DEFLAKE_PREFIX + slug)
+    if c and c.get("branch") and commits_ahead(c["branch"], "main") > 0:
+        return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+    test = str(req.get("test", ""))
+    if not test.endswith(".e2e.mjs"):
+        return ""
+    path = f"ui/e2e/{test}"
+    # A `queued` claim counts only while its branch really is queued or gating: 15 claims were
+    # `queued` 25-40 h after landing under another name (T-538 as task-t538-rl) - a forever wait.
+    waiting = set()
+    for f in (MERGE_QUEUE, BULKMARK):
+        try:
+            waiting |= set(open(f).read().replace("branches=", " ").split())
+        except OSError:
+            pass
+    for tid, t in claims.items():
+        if tid.startswith(DEFLAKE_PREFIX) or t.get("state") not in _INFLIGHT or not t.get("branch"):
+            continue
+        if t["state"] == "queued" and t["branch"] not in waiting:
+            continue
+        if sh(["git", "diff", "--name-only", f"main...{t['branch']}", "--", path]).strip():
+            return f"{tid}'s branch {t['branch']} ({t.get('state')}) edits {path}"
+    return ""
+
+
 def pending_deflakes(claims, reqs):
     """([(slug, newest unconsumed request)] that may dispatch now, oldest waiting first; changed).
     A request waits while the slug's previous run is still open or its branch unmerged (claim
@@ -1515,6 +1574,12 @@ def pending_deflakes(claims, reqs):
                 new = [r for r in new if r["ts"] > ended]
                 if not new:
                     continue
+        why = deflake_deferred(slug, latest, claims)
+        if why:
+            if (slug, latest["ts"]) not in _DEFER_SAID:
+                _DEFER_SAID.add((slug, latest["ts"]))
+                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} - {why}")
+            continue
         ready.append((min(r["ts"] for r in new), slug, max(new, key=lambda r: r["ts"])))
     ready.sort(key=lambda x: x[0])
     return [(slug, r) for _, slug, r in ready], changed
@@ -1574,7 +1639,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "precheck": {{"exit": 0}},
    "blocked": {{"needs": "<if blocked: fails alone - the evidence; or what else unblocks it>"}},
    "observed_but_not_chased": ["<anything outside scope, with the exact evidence>", ...]}}
-"done" is refused over a non-zero test exit. Also end your final message with one line
+"done" is refused over a non-zero test exit - except a red-when-the-defect-returns proof, which you record
+with "expect": "red" beside its non-zero "exit". Also end your final message with one line
 HANDBACK: DONE   or   HANDBACK: BLOCKED <why>
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 """
@@ -1661,8 +1727,13 @@ def reap_deflake(claims, key, c):
     if hb is None and hb_err and " names " in hb_err:
         hb, hb_err = load_handback(d, c["deflake"])         # the bare slug is an acceptable name too
     outcome, why = handback_outcome(hb, text)
-    if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
-        bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+    # A deflaker's red-when-the-defect-returns proof exits non-zero by design; it says so with
+    # "expect": "red" (01:33 on 2026-09-24 a DONE deflake read as BLOCKED on exactly those runs).
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)     # a red proof needs a green run beside it
+    fails = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    if hb and outcome == "done" and fails:
+        bad = fails[0]
         outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
     if hb_err:
         log(f"HANDBACK {key}: {hb_err} ({outcome})")
@@ -1779,6 +1850,8 @@ def main():
     os.makedirs(WORKDIR, exist_ok=True)
     for p in (NEEDS, DONE):
         open(p, "a").close()
+    import launchpath
+    launchpath.check(__file__, log)
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
     # What this process is actually running with - `just knobs show` reads it back as "effective".

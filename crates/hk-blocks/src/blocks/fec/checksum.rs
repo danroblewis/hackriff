@@ -8,8 +8,11 @@ use crate::blocks::framing::common::{
     P, RateMeter, Span, combine, extend_bits, frames_io, frames_port, one_input, read_bits,
     update_hot,
 };
+use crate::evidence::CheckTally;
 use crate::registry::BuildCtx;
 use crate::status::Status;
+use hk_model::CrcStatus;
+use hk_model::synth::EvidenceSet;
 
 const HOT: &[&str] = &["drop_invalid"];
 
@@ -55,6 +58,7 @@ pub(crate) fn build(params: &Params, _ctx: &BuildCtx<'_>) -> Result<Box<dyn Bloc
         meter: RateMeter::new(64),
         frames_ok: 0,
         frames_bad: 0,
+        ev: CheckTally::default(),
         status: Status::default(),
     }))
 }
@@ -76,6 +80,8 @@ pub struct Checksum {
     meter: RateMeter,
     frames_ok: u64,
     frames_bad: u64,
+    /// Evidence (T-853), since `reset()`.
+    ev: CheckTally,
     status: Status,
 }
 
@@ -136,6 +142,11 @@ impl Block for Checksum {
             let len = f.info.bit_len as usize;
             let result = self.check(f.bytes, len);
             let ok = result.is_some_and(|r| r.0);
+            self.bits.clear();
+            extend_bits(&mut self.bits, f.bytes, 0, len);
+            let upstream_clean = !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
+            self.ev
+                .record(&self.bits, ok && upstream_clean, self.width as f64);
             self.meter.push(!ok);
             if ok {
                 self.frames_ok += 1;
@@ -145,8 +156,6 @@ impl Block for Checksum {
             if !ok && self.drop_invalid {
                 continue;
             }
-            self.bits.clear();
-            extend_bits(&mut self.bits, f.bytes, 0, len);
             self.out.clear();
             match result {
                 Some((_, cpos)) if self.strip => {
@@ -172,7 +181,15 @@ impl Block for Checksum {
         Ok(())
     }
 
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.ev.clear();
+    }
+
+    /// S5 `check_distinct_valid` (ADR-0015 §2.2, ADR-0022 §4.2, analytic): independent frames
+    /// valid **without FEC correction** (T-210) among those tested — see `CheckTally`.
+    fn evidence(&self, out: &mut EvidenceSet) {
+        self.ev.evidence(out);
+    }
 
     fn update_params(
         &mut self,
