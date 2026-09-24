@@ -18826,6 +18826,8 @@ tasks:
       actually delivers the budget, and A2 is the only part of it with any statistical power.
       Runs after T-568 builds the populations; do not rebuild them.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-23 (coordinator, from the MAUTO manifest refresh): this ticket's acceptance text is word-for-word T-576's (acceptance_mauto::false_confirm_budget) and its notes say 'Runs after T-568 builds the populations' - i.e. the body was copied from its dependant. By its title T-568 is the negative-control guard suite that BUILDS the four populations (N1-N4: ofdm_nonstandard_cp, dsss_m_sequence, qam16_unframed, nbfm_voice/am_voice scenes now exist via T-623/T-624). Rewrite the acceptance from docs/22 before dispatching; the manifest now cites T-568 for the ofdm/dsss/16qam and voice negatives.
   - id: T-577
     milestone: MAUTO
     title: "MAUTO-RESEARCH: measure the two numbers the false-confirm derivation could NOT derive - the check-width floor and the degenerate-framing null"
