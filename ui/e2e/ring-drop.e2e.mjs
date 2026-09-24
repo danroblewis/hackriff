@@ -40,8 +40,22 @@ test("T-845: the drawn IQ horizon is never older than the ring's oldest sample, 
   t.after(() => browser.close());
   const page = await browser.page();
   assert.equal(await page.goto(`${backend.origin}/#token=${backend.token}`), "load");
-  await page.waitFor("the canvas to draw and the ring readout to hold an IQ horizon",
-    `!!document.querySelector('.sf-canvas') && !!document.querySelector('.sf-ring')?.dataset.iqS`, { timeoutMs: 60000 });
+  try {
+    await page.waitFor("the canvas to draw and the ring readout to hold an IQ horizon",
+      `!!document.querySelector('.sf-canvas') && !!document.querySelector('.sf-ring')?.dataset.iqS`,
+      // A fresh backend's first mount waits on its own first ingest: once measured over 60 s
+      // beside another lane's server, so this wait is generous — it is setup, not the claim.
+      { timeoutMs: 120000 });
+  } catch (e) {
+    // Say what the page DID show, and what the server said, rather than only "timed out".
+    const seen = await page.eval(`(() => ({ url: location.href, canvas: !!document.querySelector('.sf-canvas'),
+      ring: document.querySelector('.sf-ring')?.textContent ?? null, note: document.querySelector('.sf-note')?.textContent ?? null,
+      body: document.body?.innerText?.slice(0, 400) }))()`).catch((x) => String(x));
+    t.diagnostic(`page: ${JSON.stringify(seen)}`);
+    t.diagnostic(`server window: ${JSON.stringify(await api("/api/timeline?columns=1&rows=1").catch((x) => String(x)))}`);
+    t.diagnostic(`backend log tail: ${backend.log().slice(-1500)}`);
+    throw e;
+  }
 
   // Age the backend past its retention: the ring has wrapped and dropped whole slots. Bounded by a
   // count of polls, each one a question to the server, not a sleep standing in for a condition.
