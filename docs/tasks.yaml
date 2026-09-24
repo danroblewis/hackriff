@@ -20952,7 +20952,7 @@ tasks:
   - id: T-613
     milestone: MAUTO
     title: 'hk-blocks `bitstuff`: HDLC flag framing and zero-destuffing - the smallest block on the T-554 gap list, and it unlocks AIS, AX.25 and VDL2'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
@@ -20998,6 +20998,7 @@ tasks:
       Observed, not chased: ADR-0011 section 1.5/9 table row for bitstuff not updated to say params pinned
       Use cases: SIGNAL-015, SIGNAL-036, SIGNAL-004, AWARE-007, AWARE-012, PROP-024, PROP-025
       Resources: 58 CPU-s, peak 0.5 GB
+    commit: 42bf4b69
   - id: T-605
     milestone: M2-hardening
     title: A UNIQUE constraint failure on emission_features is logged and swallowed on every acceptance run
