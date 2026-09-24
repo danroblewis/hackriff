@@ -318,8 +318,6 @@ class Entry:
     recent_red: int = 0
     #: Passed-alone incidents inside the window - what the deflake rule reads.
     recent_passed: int = 0
-    #: Failed-alone incidents inside the window - what the one-solo-pass rule reads (it must be 0).
-    recent_failed: int = 0
     #: `recent_passed` when a deflake request was last filed (persisted like `notified_at`).
     deflaked_at: int = 0
     #: This test's incidents, oldest first, for the deflaker's brief.
@@ -338,7 +336,6 @@ class Entry:
             "notified_at": self.notified_at,
             "recent_red": self.recent_red,
             "recent_passed": self.recent_passed,
-            "recent_failed": self.recent_failed,
             "deflaked_at": self.deflaked_at,
         }
 
@@ -394,8 +391,6 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
                 e.recent_red += 1
                 if inc.outcome == PASSED_ALONE:
                     e.recent_passed += 1
-                elif outcome == FAILED_ALONE:
-                    e.recent_failed += 1
             e.incidents.append(inc)
     return ledger
 
@@ -406,15 +401,56 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
 SOLO_MIN_PASSED = 2
 
 
-def solo_ok(entries: dict[str, Entry], tests: list[str], min_passed: int = SOLO_MIN_PASSED) -> tuple[bool, int]:
-    """(every test qualifies, the smallest windowed passed-alone count among them). Unknown test: no."""
-    counts = []
-    for t in tests:
-        e = entries.get(t)
-        if e is None or e.recent_failed or e.recent_passed < min_passed:
-            return False, e.recent_passed if e else 0
-        counts.append(e.recent_passed)
-    return bool(counts), min(counts, default=0)
+def solo_decision(incidents: list[Incident], tests: list[str], since: float,
+                  min_passed: int = SOLO_MIN_PASSED) -> tuple[bool, int]:
+    """(every test has >= min_passed passed-alone and NO failed-alone incident since `since`, the
+    smallest passed-alone count). A fail-alone counts whoever it was pinned on: a branch_defect red is
+    still this test failing alone (review, 2026-09-24: app-trace failed alone at 11:19/11:24/11:30 as
+    branch defects and the per-test counters, which skip those, read it as never failing)."""
+    passes = {t: 0 for t in tests}
+    for inc in incidents:
+        if inc.ts < since:
+            continue
+        for t in tests:
+            if t not in inc.tests:
+                continue
+            if inc.outcome == FAILED_ALONE and (not inc.failed_alone_tests or t in inc.failed_alone_tests):
+                return False, 0
+            if inc.outcome == PASSED_ALONE and not inc.branch_defect:
+                passes[t] += 1
+    n = min(passes.values(), default=0)
+    return bool(tests) and n >= min_passed, n
+
+
+_LOG_TS = re.compile(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\]", re.M)
+
+
+def solo_query(ops: str, tests: list[str], *, now: float | None = None, days: int = WINDOW_DAYS) -> tuple[bool, int]:
+    """solo_decision over what the runner's outputs actually cover: the window starts at the later of
+    `days` ago and the oldest log line read (fail-alones live only in the log, which is read from its
+    last 40 MB - about 3 days on 2026-09-24 - so passes older than that must not count either). An
+    unreadable or empty log is no."""
+    now = time.time() if now is None else now
+    log_path = os.path.join(ops, RUNNER_LOG)
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 40_000_000))
+            text = fh.read().decode("utf-8", "replace")
+        year = datetime.fromtimestamp(os.path.getmtime(log_path)).year
+        first = _LOG_TS.search(text)
+        if not first:
+            return False, 0
+        covered = datetime.strptime(f"{year}-{first.group(1)}", "%Y-%m-%d %H:%M:%S").timestamp()
+        log_incidents = parse_runner_log(text, year)
+    except Exception:
+        return False, 0
+    try:
+        with open(os.path.join(ops, FLAKY_JSONL), encoding="utf-8") as fh:
+            jsonl_incidents = parse_flaky_jsonl(fh.read())
+    except Exception:
+        jsonl_incidents = []
+    return solo_decision(reconcile(log_incidents, jsonl_incidents), tests, max(now - days * 86400, covered))
 
 
 def load_state(path: str) -> dict[str, int]:
@@ -682,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
             print("flakes: nothing new over the threshold")
     entries = ledger(ops, days=args.days)
     if args.solo_ok:
-        ok, n = solo_ok(entries, args.solo_ok)
+        ok, n = solo_query(ops, args.solo_ok, days=args.days)
         print(f"{'solo-ok' if ok else 'solo-no'} {n}")
         return 0 if ok else 1
     if args.json:

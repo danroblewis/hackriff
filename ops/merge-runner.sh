@@ -545,6 +545,10 @@ limited(){ # limited <cmd...>  -> the command's exit code, or 124 on timeout
 # without the second run. Prints `solo-ok N`; exit 1 (twice rule) when off, unknown, or not qualified.
 solo_ok(){
   [ "${FLAKE_SOLO_ONE:-0}" = 1 ] || return 1
+  # Never for a merge that changes the acceptance code itself: it would decide its own flake accept
+  # (review). Compared against the last gated commit - a bulk's base=, else HEAD for a staged merge.
+  local ref=HEAD; [ -f "$BULKMARK" ] && ref=$(sed -n 's/^base=//p' "$BULKMARK" | head -1)
+  git -C "$REPO" diff --quiet "${ref:-HEAD}" -- py/hkpy/flakes.py ops/merge-runner.sh 2>/dev/null || return 1
   ( cd "$REPO" && uv run --locked --project py python -m hkpy.flakes --solo-ok "$@" ) 2>/dev/null
 }
 flake_ledger(){
@@ -674,7 +678,7 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
   saved=$(( old - ${FLAKE_SECOND_S:-0} )); [ "$saved" -lt 0 ] && saved=0
   log "TRIAGE: they PASS alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo once || echo twice) -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
   printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":%s,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s,"solo_saved_s":%s}\n' "${TRIAGE_T0:-$(date '+%Y-%m-%dT%H:%M:%S')}" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "${FLAKE_PASSES:-2}" "$kind" "$failed" "$saved" "${FLAKE_SOLO_S:-0}" >> "$FLAKY"
-  alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone twice; the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
+  alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone $([ "${FLAKE_PASSES:-2}" = 1 ] && echo "once (one-solo-pass rule)" || echo twice); the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
   local resumed; resumed=$(( $(wc -l < "$LOG") + 1 ))
   limited $retry --resume-after "$failed" ${steps:+--resume-steps $steps}; rc=$?
   [ "$rc" -eq 0 ] && log "TRIAGE: resumed gate PASSED" || log "TRIAGE: resumed gate FAILED -> a red in a suite that had not run yet"

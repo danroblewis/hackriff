@@ -233,7 +233,7 @@ def test_a_branch_main_is_red_on_waits_until_main_moves(tmp_path):
     assert "GATED=[task-t802]" in out and queued == []                         # its own tip moved: a fix, it gates
 
 
-def _solo_run(tmp_path, solo_answer, knob="1", alone_rcs=(0, 0)):
+def _solo_run(tmp_path, solo_answer, knob="1", alone_rcs=(0, 0), code_changed=False):
     """A browser red in test-ui-e2e, re-run alone by the real _flake_retry/flake_accept/solo_ok."""
     log = tmp_path / "merge-runner.log"
     log.write_text("[09-24 14:30:00] BULK gate (just gate --base abc ...)\n"
@@ -245,7 +245,8 @@ def _solo_run(tmp_path, solo_answer, knob="1", alone_rcs=(0, 0)):
     rcs = " ".join(str(r) for r in alone_rcs)
     script = f"""
 set -u
-LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}; FLAKE_SOLO_ONE={knob}
+LOG={log}; FLAKY={tmp_path}/flaky.jsonl; REPO={tmp_path}; FLAKE_SOLO_ONE={knob}; BULKMARK={tmp_path}/no-bulk
+git(){{ echo "git $*" >> {calls}; return {1 if code_changed else 0}; }}      # `git diff --quiet` of the acceptance code
 log(){{ echo "[09-24 14:40:00] $*" >> $LOG; echo "LOG $*"; }}
 alert(){{ :; }}
 RCS=({rcs}); N=0
@@ -288,3 +289,11 @@ def test_a_fail_alone_is_a_real_red_whatever_the_ledger_says(tmp_path):
     out, ran, recs = _solo_run(tmp_path, "solo-ok 11", alone_rcs=(1,))
     assert "FAILS alone -> a real defect" in out and "RC 1" in out and recs == []
     assert not any(c.startswith("uv") for c in ran)                                          # asked only after a pass
+
+
+def test_a_merge_that_changes_the_acceptance_code_keeps_the_twice_rule(tmp_path):
+    """Review 2026-09-24: a batch editing hkpy/flakes.py or the runner would decide its own flake accept."""
+    out, ran, recs = _solo_run(tmp_path, "solo-ok 11", code_changed=True)
+    assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- app-trace.e2e.mjs"] * 2
+    assert any("diff --quiet HEAD -- py/hkpy/flakes.py ops/merge-runner.sh" in c for c in ran)
+    assert not any(c.startswith("uv") for c in ran) and recs[-1]["passes_alone"] == 2
