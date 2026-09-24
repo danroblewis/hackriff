@@ -525,7 +525,9 @@ export class Page {
    * `y0` and `y1` (CSS px, page coordinates; default the whole box): a column is **occluded** if
    * any of those points lands on an element outside the element's own mount (`.surface`, or its
    * parent where there is none) — the surface's own overlays (boxes, labels, the capture banner)
-   * are part of what it draws and never count. Nothing about any panel's size is assumed: a panel
+   * are part of what it draws and never count — except screen-space chrome mounted inside it and
+   * marked `data-band="chrome"` (T-802's floating controls), which occludes like any panel.
+   * Nothing about any panel's size is assumed: a panel
    * that moves, collapses (`.focus.is-empty`) or is absent (the harness pages) is simply not hit.
    *
    * Returns the widest contiguous unoccluded run as `{ x, w }` in page CSS px (plus the element's
@@ -542,12 +544,20 @@ export class Page {
       const ys = [];
       for (let i = 0; i < n; i++) ys.push(Math.min(r.bottom - 0.5, Math.max(r.top + 0.5, top + (bot - top) * (i + 0.5) / n)));
       const x0 = Math.ceil(r.left), x1 = Math.floor(r.right);
+      // T-802: the floating controls are small boxes that can sit BETWEEN the sampled rows, so they
+      // are also excluded by their own rectangles: any column under a visible control whose box
+      // meets [top, bot] is occluded, sampled row or not.
+      const chrome = [...document.querySelectorAll('[data-band="chrome"] > *')]
+        .map((c) => c.getBoundingClientRect())
+        .filter((b) => b.width > 0 && b.height > 0 && b.bottom > top && b.top < bot);
       let best = { x: x0, w: 0 }, run = null, occluded = 0;
       for (let x = x0; x < x1; x++) {
-        let clear = true;
-        for (const y of ys) {
+        let clear = !chrome.some((b) => x + 1 > b.left && x < b.right);
+        if (clear) for (const y of ys) {
           const hit = document.elementFromPoint(x + 0.5, y);
-          if (hit && !root.contains(hit)) { clear = false; break; }
+          // T-802: screen-space chrome mounted inside the surface (the floating control cluster,
+          // \`data-band="chrome"\`) is still chrome — its pixels are not the surface's.
+          if (hit && (!root.contains(hit) || hit.closest('[data-band="chrome"]'))) { clear = false; break; }
         }
         if (clear) { run = run ?? { x, w: 0 }; run.w++; if (run.w > best.w) best = { ...run }; }
         else { occluded++; run = null; }
