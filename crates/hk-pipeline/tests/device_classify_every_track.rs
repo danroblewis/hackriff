@@ -95,7 +95,7 @@ fn run(scene: SynthRequest) -> Run {
     }
 }
 
-fn assert_classified(name: &str, scene: SynthRequest) {
+fn assert_classified(name: &str, scene: SynthRequest) -> Run {
     let r = run(scene);
     for (id, family, top) in &r.rows {
         eprintln!("[T-878] {name}: {id} {family} {top}");
@@ -123,6 +123,7 @@ fn assert_classified(name: &str, scene: SynthRequest) {
              (now {family})"
         );
     }
+    r
 }
 
 /// No decode chain matches a POCSAG channel's tracks.
@@ -173,10 +174,17 @@ fn multipath_rows_an_unlocked_chain_label_ties_with_are_recorded() {
     let _probe = synth_or_skip!(SynthRequest::new("multipath_echo").seed(878));
     // Two seconds of the eight-second default: still dozens of bursts per channel, so the fsk
     // chain attaches and labels without a lock, at a quarter of the run time.
-    assert_classified(
+    let r = assert_classified(
         "multipath_echo",
         SynthRequest::new("multipath_echo")
             .seed(878)
             .param("duration_s", 2.0),
+    );
+    // The tie must actually have been exercised, or the family check above passes vacuously.
+    assert!(
+        !r.chain_owned.is_empty(),
+        "[T-878] multipath_echo: no emitter carried an unlocked chain label, so the rank-3 tie was \
+         never tested\n{}",
+        r.summary
     );
 }

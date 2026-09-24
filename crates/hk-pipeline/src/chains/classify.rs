@@ -53,11 +53,13 @@
 //! # Cost
 //!
 //! One chain thread per classified track, at most `max_chains` alive at once (above that the
-//! attach is refused and counted, `classify_admission_refused`), each counted against the run-wide
-//! [`MAX_RUNTIME_CHAINS`](super::MAX_RUNTIME_CHAINS). Memory is the rolling `retain_s` buffer
-//! (capped at the fsk chain's sample ceiling) plus one owned copy of the chosen box, which is at
-//! most `window_s` plus its pads. Once a box spans the whole window nothing later can beat it, so
-//! the chain stops buffering and only reads and releases, which keeps the lossless flow gate moving.
+//! attach is refused and counted, `classify_admission_refused`). They are **not** counted against
+//! the run-wide [`MAX_RUNTIME_CHAINS`](super::MAX_RUNTIME_CHAINS): a track's classifying chain
+//! attaches before its decode chain, and must never take the slot the decode chain needs. Memory
+//! is the rolling `retain_s` buffer (capped at the fsk chain's sample ceiling) plus one owned copy
+//! of the chosen box, which is at most `window_s` plus its pads. Once a box spans the whole window
+//! nothing later can beat it, so the chain stops reading and releases its cursor before it
+//! classifies, which keeps the lossless flow gate moving.
 //! Per classification the cost is [`crate::classify::classify_and_record`]'s documented bound.
 
 use std::sync::Arc;
@@ -180,10 +182,6 @@ pub(crate) fn run(
     let mut prov: Option<ProvenanceHandle> = None;
     let mut groups: Vec<Group> = Vec::new();
     let mut chosen: Option<Chosen> = None;
-    // Classified once the chosen box spans the whole window (a continuous emission), else at the
-    // end; held until the inventory has an entry to write it against.
-    let mut classified: Option<Option<Classification>> = None;
-    let mut last_poll: Option<Instant> = None;
     let (mut detach, mut closed) = (false, false);
     loop {
         let full = chosen.as_ref().is_some_and(|b| b.span >= window);
@@ -306,31 +304,11 @@ pub(crate) fn run(
             }
             groups.drain(..done);
         }
-        if chosen.as_ref().is_some_and(|b| b.span >= window) && !full {
-            // Nothing later can beat it: the buffer and the pending groups are no longer needed.
-            buf = Vec::new();
-            groups.clear();
-        }
-
-        // A continuous emission is classified as soon as it spans the window, and written as soon
-        // as its track has an entry.
-        if classified.is_none() && chosen.as_ref().is_some_and(|b| b.span >= window) {
-            classified = Some(classify(&shared, chosen.as_ref().expect("chosen")));
-        }
-        match &classified {
-            // The cascade abstained on the best box there will be: nothing to write.
-            Some(None) => return,
-            Some(Some(result)) => {
-                let due = last_poll.is_none_or(|t| t.elapsed() >= EMITTER_POLL);
-                if due && !detach {
-                    last_poll = Some(Instant::now());
-                    if let Some(emitter) = emitter_of(&shared, track) {
-                        write(&shared, emitter, result);
-                        return;
-                    }
-                }
-            }
-            None => {}
+        // A continuous emission: nothing later can beat a box that spans the whole window, so
+        // stop reading here — dropping the cursor below releases the lossless flow gate before
+        // the classification and the repository write, never after them.
+        if chosen.as_ref().is_some_and(|b| b.span >= window) {
+            break;
         }
 
         if detach && (groups.is_empty() || full) {
@@ -343,16 +321,32 @@ pub(crate) fn run(
         }
     }
     drop(cr);
+    drop((buf, groups));
+    let continuous = chosen.as_ref().is_some_and(|b| b.span >= window);
 
-    let result = match classified {
-        Some(r) => r,
-        // No box of this track ever reached the chain's buffer: nothing was measured.
-        None => chosen.as_ref().and_then(|b| classify(&shared, b)),
-    };
-    // Abstained upstream (counted in `classify`), or nothing measured: nothing to write.
-    let Some(result) = result else {
+    // Abstained upstream (counted in `classify`), or no box of this track ever reached the
+    // chain's buffer: nothing was measured, nothing to write.
+    let Some(result) = chosen.as_ref().and_then(|b| classify(&shared, b)) else {
         return;
     };
+    drop(chosen);
+    // A continuous emission is written as soon as its track has an entry, not when the track
+    // eventually ends: its decode chain may run for as long as the track does.
+    if continuous && !detach {
+        loop {
+            if let Some(emitter) = emitter_of(&shared, track) {
+                write(&shared, emitter, &result);
+                return;
+            }
+            if shared.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            match rx.recv_timeout(EMITTER_POLL) {
+                Ok(ChainMsg::Member(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Ok(ChainMsg::Detach) | Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
     // The track's decode chain writes its label first, as the fsk chain did when it was also the
     // classifier's caller: an emitter's history is in insertion order, and thread timing must not
     // decide it (see `super::DecodeSlot`).

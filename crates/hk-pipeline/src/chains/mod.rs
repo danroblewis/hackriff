@@ -489,7 +489,21 @@ const BACKLOG_PER_TRACK: usize = 512;
 /// queued: the candidate that could not be decoded now is still in the inventory, and a survey
 /// that keeps moving is worth more than one that stalls holding every region it ever saw. This
 /// counts recorders too, because a recorder is also a thread this run has to carry.
+///
+/// **Classifying chains are not counted** (T-878): they are bounded by their own node spec's
+/// `max_chains` alone. Counted, they held run-wide slots that decode chains needed — a track's
+/// classifying chain attaches before its decode chain, so one taking the last slot refused the
+/// decode chain for good (a refused decode attach is never retried).
 pub(crate) const MAX_RUNTIME_CHAINS: usize = 16;
+
+/// Whether the run-wide cap ([`MAX_RUNTIME_CHAINS`]) admits a chain of kind `new` beside the
+/// `running` chains' kinds. A classifying chain neither counts nor is refused here.
+fn admits(running: impl Iterator<Item = Option<Measure>>, new: Option<Measure>) -> bool {
+    if new == Some(Measure::Classify) {
+        return true;
+    }
+    running.filter(|m| *m != Some(Measure::Classify)).count() < MAX_RUNTIME_CHAINS
+}
 
 impl ChainManager {
     pub fn new(shared: Arc<Shared>) -> Self {
@@ -544,10 +558,6 @@ impl ChainManager {
         // atomic load, so asking is cheap enough to ask on every attach).
         self.reap();
         let c = &self.shared.counters.chains;
-        if self.running.len() >= MAX_RUNTIME_CHAINS {
-            inc(&c.admission_refused);
-            return None;
-        }
         let shape = match spec.shape() {
             Ok(s) => s,
             Err(e) => {
@@ -564,6 +574,10 @@ impl ChainManager {
             (_, Trigger::EveryTrack) => Some(Measure::Sweep),
             _ => None,
         };
+        if !admits(self.running.iter().map(|r| r.measuring), measuring) {
+            inc(&c.admission_refused);
+            return None;
+        }
         if crate::debug_enabled() {
             eprintln!(
                 "hk-pipeline: attach {} for {:.4}..{:.4} MHz (bursty {:?}) from sample {} trigger {}",
@@ -1229,6 +1243,25 @@ mod tests {
         assert!(c.claim(5, station, 100e3, 0.0, 1_500));
         // A worse-ranked late claimant is refused by an uncommitted better claim.
         assert!(!c.claim(6, station, 100e3, 1.0, 1_600));
+    }
+
+    /// T-878 (review blocker): with the run-wide cap full but for one slot, a track's classifying
+    /// chain attaching first must not take the slot its decode chain needs, and a busy band's
+    /// classifying chains never crowd decode chains out.
+    #[test]
+    fn classifying_chains_never_take_a_decode_chains_run_wide_slot() {
+        let mut running: Vec<Option<Measure>> = vec![None; MAX_RUNTIME_CHAINS - 5];
+        running.extend([Some(Measure::Sweep); 4]);
+        // One slot left. The track's classifier attaches first ...
+        assert!(admits(running.iter().copied(), Some(Measure::Classify)));
+        running.push(Some(Measure::Classify));
+        // ... and its decode chain still attaches after it.
+        assert!(admits(running.iter().copied(), None));
+        running.push(None);
+        // The cap still binds decode and sweep chains once it is genuinely full.
+        running.extend([Some(Measure::Classify); 3]);
+        assert!(!admits(running.iter().copied(), None));
+        assert!(!admits(running.iter().copied(), Some(Measure::Sweep)));
     }
 
     #[test]
