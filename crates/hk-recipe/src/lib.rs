@@ -56,22 +56,23 @@ pub use param::{
 pub use port::PortType;
 pub use recipe::{
     AUDIO_OUT_BLOCK, AudioChannels, AudioProfile, ChannelsSpec, DEFAULT_LIVE_EDGE_BACKLOG_S,
-    DecodeMapping, Edge, Endpoint, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec, Liveness,
-    LivenessMode, LivenessSpec, MAX_LIVE_EDGE_BACKLOG_S, MatchHints, MetricObjective, NodeSpec,
-    OutputKind, OutputPolicy, OutputSpec, PortRef, REFINE_BUILTINS, Recipe, RecipeError,
-    RefineGoal, RefineObjective, RefineSpec, Resolved, StageView,
+    DecodeMapping, Edge, Endpoint, EvidenceTarget, FOLLOW_HOPS_BLOCK, IdentityMapping, InputSpec,
+    Liveness, LivenessMode, LivenessSpec, MAX_LIVE_EDGE_BACKLOG_S, MatchHints, NodeSpec,
+    ObjectiveForm, OutputKind, OutputPolicy, OutputSpec, PortRef, REFINE_BUILTINS, Recipe,
+    RecipeError, RefineGoal, RefineObjective, RefineSpec, Resolved, StageView, parse_param_path,
 };
 
 /// `schema` value of every recipe document.
 pub const RECIPE_SCHEMA: &str = "hackriff.recipe";
-/// Recipe format version this crate writes for a new document.
+/// Recipe format version this crate writes for a new document, and the newest it reads.
 ///
 /// - **2** (T-085 review, before any release): variable-length framing params, field-map
 ///   `char_bits: 4`/`pocsag-bcd`/`parity`/`skip_bits`/`scale`/`add`/`value_unit`. Version 1 was
 ///   never released and is not read.
-/// - **3** (ADR-0011 §8.6, T-866): the `audio` output kind and `input.liveness`; T-870 (LP-6)
-///   adds `refine.objective.builtin` (ADR-0011 §8.7). The same bump reserves
-///   `refine.objective.evidence` (ADR-0015 §2.3) for the ticket that serves it. Schema 3 only adds optional keys, so a
+/// - **3** (ADR-0011 §8.6, "one bump, three keys"): the `audio` output kind and `input.liveness`
+///   (T-866); `refine.objective.evidence` (T-858 = MAUTO M-7, ADR-0015 §2.3), with node-parameter
+///   paths in `refine.tune` under it; and `refine.objective.builtin` (T-870 = LP-6,
+///   ADR-0011 §8.7). Schema 3 only adds optional keys, so a
 ///   version-2 document is still read unchanged; a schema-3 key in a version-2 document is an
 ///   error, exactly as an unknown field was.
 pub const RECIPE_SCHEMA_VERSION: u32 = 3;

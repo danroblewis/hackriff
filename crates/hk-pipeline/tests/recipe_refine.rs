@@ -219,12 +219,20 @@ fn open_tcp(addr: SocketAddr, stream_id: &str) -> StreamReader<TcpStream> {
     StreamReader::new(s)
 }
 
-/// Reads until `want` audio data records arrived; returns their samples (as f32, full scale 1)
-/// and every status record.
-fn read_audio(r: &mut StreamReader<TcpStream>, want: usize) -> (Vec<f32>, Vec<Value>) {
+/// Reads until `want` audio data records arrived **and** a status record satisfying `until`
+/// arrived; returns the samples (as f32, full scale 1) and every status record.
+///
+/// Status records come on a wall-clock tick (`STATUS_INTERVAL`) while this replay is unpaced, so
+/// how many audio records separate two of them depends on the machine: the wait is for the
+/// status EVENT, never for a fixed count of audio records to contain one.
+fn read_audio(
+    r: &mut StreamReader<TcpStream>,
+    want: usize,
+    until: impl Fn(&Value) -> bool,
+) -> (Vec<f32>, Vec<Value>) {
     let (mut audio, mut status, mut records) = (Vec::new(), Vec::new(), 0);
     let deadline = Instant::now() + LIMIT;
-    while records < want {
+    while records < want || !status.iter().any(&until) {
         assert!(Instant::now() < deadline, "audio records");
         match r.next_record().unwrap() {
             Some(Record::Binary(b)) => {
@@ -342,7 +350,11 @@ fn a_builtin_wfm_pilot_objective_refines_the_channel_and_applies_it_as_a_hot_edi
 
     // The consumer that attached before the edit keeps receiving the programme on the refined
     // channel, and the status records carry Listen's refinement keys.
-    let (audio, status) = read_audio(&mut r, 150);
+    let refined_status = |s: &Value| s["refine_updates"].as_u64().is_some_and(|n| n >= 1);
+    let (_, status) = read_audio(&mut r, 1, refined_status);
+    // Then a stretch of the programme demodulated after that status record, so the tail is
+    // refined-channel audio.
+    let (audio, _) = read_audio(&mut r, 150, |_| true);
     let tail = &audio[audio.len() - 48_000..];
     let t1k = tone_db(tail, 48_000.0, 1000.0);
     assert!(
@@ -352,7 +364,7 @@ fn a_builtin_wfm_pilot_objective_refines_the_channel_and_applies_it_as_a_hot_edi
     let s = status
         .iter()
         .rev()
-        .find(|s| s["refine_updates"].as_u64().is_some_and(|n| n >= 1))
+        .find(|s| refined_status(s))
         .unwrap_or_else(|| panic!("a status record after the refinement: {status:?}"));
     let rc = s["refined_center_hz"].as_f64().unwrap();
     assert!((rc - truth).abs() <= 2_000.0, "{s}");

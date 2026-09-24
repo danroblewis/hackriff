@@ -340,6 +340,27 @@ mod tests {
         p
     }
 
+    /// T-870: a saved revision reads back **bit-identical** — an applied refinement writes an
+    /// arbitrary f64 (`input.bandwidth_hz`) and the stored revision must carry exactly it. This
+    /// value is one serde_json's default parser reads back one ulp off (125073.8830717856).
+    #[test]
+    fn a_saved_revision_reads_back_every_float_bit_identical() {
+        let root = tmp("floats");
+        let store = RecipeStore::new(None, root.join("user"));
+        let bw = 125_073.883_071_785_59_f64;
+        let mut r = doc("floaty", 1, "Floaty");
+        r.input.bandwidth_hz = Some(bw);
+        let saved = store.save(r).unwrap();
+        let back = store.get("floaty", Some(saved.version)).unwrap();
+        assert_eq!(
+            back.input.bandwidth_hz.map(f64::to_bits),
+            Some(bw.to_bits()),
+            "{:?}",
+            back.input.bandwidth_hz
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn saves_are_immutable_increasing_versions_merged_with_builtins() {
         let root = tmp("versions");
