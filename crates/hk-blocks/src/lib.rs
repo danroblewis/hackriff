@@ -10,6 +10,7 @@
 //!   [`ChunkMeta`] (element index, source time map, channel, flags).
 //! - [`status`]: [`Status`], a `Copy` readout (lock, SNR, error rate, quality, extras).
 //! - [`registry`]: [`BlockFactory`] and the [`Registry`] (an [`hk_recipe::Catalogue`]).
+//! - [`sink`]: what a sink block (`audio_out`) hands the runtime ([`AudioFrames`]).
 //! - [`catalogue`]: the M1 library's pinned descriptors ([`catalogue::planned`]).
 //! - [`blocks`]: implementations, one module per group (ownership in ADR-0011 §7).
 //!
@@ -47,6 +48,7 @@ pub mod buffer;
 pub mod catalogue;
 pub mod registry;
 pub mod schema;
+pub mod sink;
 pub mod status;
 
 pub use block::{Block, BlockError, Io, ParamUpdate, PortInfo, TapMask};
@@ -54,4 +56,5 @@ pub use buffer::{
     ChunkFlags, ChunkMeta, Frame, FrameBuf, FrameInfo, Input, Output, PortSlice, PortVec,
 };
 pub use registry::{BlockFactory, BuildCtx, Registry};
+pub use sink::{AudioFrame, AudioFrames};
 pub use status::{Extras, Lock, MAX_EXTRAS, Status};

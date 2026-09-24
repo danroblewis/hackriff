@@ -44,7 +44,9 @@ use hk_blocks::{ChunkFlags, ChunkMeta, Input, PortInfo, PortSlice, Registry, Tap
 use hk_core::{Discontinuity, ReadChunk};
 use hk_dsp::{Ddc, DdcSpec, InputInfo};
 use hk_model::{ContentClass, EmitterId, SelectionId, Timestamp};
-use hk_recipe::{ChannelsSpec, Endpoint, OutputKind, PortType, RECIPE_SCHEMA, Recipe, RecipeError};
+use hk_recipe::{
+    ChannelsSpec, Endpoint, Liveness, OutputKind, PortType, RECIPE_SCHEMA, Recipe, RecipeError,
+};
 use hk_stream::inspector::InspectorRecordType;
 use hk_stream::{OpenRefusal, PublisherHandle, StreamHeader};
 use serde_json::{Map, Value, json};
@@ -54,6 +56,7 @@ use crate::chains::listen::{ListenConfig, SegmentFn};
 use crate::chains::{ChainReader, Next};
 use crate::class::{classify_emitter, is_restricted, restricted_band};
 use crate::config::ListenSettings;
+use crate::recipes::audio::{self, AudioSink};
 use crate::recipes::graph::{self, Graph, OutputBinding, Shape, Src, StageError, Staged};
 use crate::recipes::hops;
 use crate::recipes::messages::MessagesSink;
@@ -326,6 +329,9 @@ pub struct PipelineStats {
     discontinuity_pair: AtomicU64,
     /// Samples skipped to the live edge.
     pub skipped_samples: AtomicU64,
+    /// Seeks to the live edge a `live-edge` reader made to stay within its backlog bound
+    /// (ADR-0011 §8.5; a `throughput` reader's ring-protection skips are not counted here).
+    pub live_edge_seeks: AtomicU64,
     /// Hot edits applied.
     pub edits: AtomicU64,
     /// Status records published (ticks).
@@ -361,6 +367,7 @@ impl PipelineStats {
             "discontinuities": discontinuities,
             "source_discontinuities": source_discontinuities,
             "skipped_samples": g(&self.skipped_samples),
+            "live_edge_seeks": g(&self.live_edge_seeks),
             "edits": g(&self.edits),
             "status_ticks": g(&self.status_ticks),
             "decodes": g(&self.decodes),
@@ -417,6 +424,8 @@ pub(crate) struct PipelineEdit {
     /// Follow-hops: the upstream sub-recipe staged per channel.
     lanes: Option<hops::LaneEdit>,
     input: PortInfo,
+    /// The draft's reader liveness (ADR-0011 §8.5); an edit of it alone re-plumbs nothing.
+    liveness: Liveness,
     new_rev: u32,
     reply: SyncSender<EditDone>,
 }
@@ -586,6 +595,16 @@ fn pipeline_class(shared: &Shared, recipe: &Recipe, lo: f64, hi: f64) -> Content
     hk_stream::gate::clamp(source, recipe.output_policy.content_class)
 }
 
+/// A pipeline's reader liveness as the API serves it.
+fn liveness_json(l: Liveness) -> Value {
+    match l {
+        Liveness::LiveEdge { max_backlog_s } => {
+            json!({"mode": "live-edge", "max_backlog_s": max_backlog_s})
+        }
+        Liveness::Throughput => json!({"mode": "throughput"}),
+    }
+}
+
 /// Builds the stream of one recipe output. It is not offered in the run's stream registry yet:
 /// [`offer_streams`] does that once the graph it serves is running, so a failed start or edit
 /// never replaces a running output's registry entry.
@@ -595,9 +614,16 @@ fn build_sink(
     ctx: &StreamCtx,
     recipe: &Recipe,
     b: &OutputBinding,
+    edit_rev: u32,
 ) -> Result<(OutputSink, Option<StreamEntry>), RuntimeError> {
     let fail = |_| RuntimeError::new(500, "failed", "creating an output stream");
     let (sink, kind, header, handle) = match b.spec.kind {
+        OutputKind::Audio => {
+            let header = audio::audio_header(ctx, recipe, &b.spec, edit_rev);
+            let s = AudioSink::new(header.clone()).map_err(fail)?;
+            let h = s.handle();
+            (OutputSink::Audio(s), "audio", header, h)
+        }
         OutputKind::Messages => {
             let (s, stream) = MessagesSink::spawn(shared, ctx, recipe, &b.spec, Arc::clone(stats))
                 .map_err(|m| RuntimeError::new(500, "failed", m))?;
@@ -629,7 +655,7 @@ fn build_sink(
             );
             let max = match b.src {
                 Src::Node { .. } => (b.rate_hz.max(1.0) as usize).max(READER_BUF),
-                Src::Input => READER_BUF,
+                Src::Input | Src::Sink { .. } => READER_BUF,
             };
             let p =
                 TapPublisher::new(header.clone(), output_config(), recipe, max).map_err(fail)?;
@@ -893,6 +919,12 @@ impl RecipeRuntime {
             });
         }
         let (lo, hi, emitter) = self.resolve(&shared, &target)?;
+        // Audio is content: Listen's pre-attach gate runs on the target before any channel or
+        // ring reader exists (ADR-0011 §8.3), and again on the planned channel below.
+        let audio_out = recipe.has_audio_output();
+        if audio_out {
+            audio::gate(&shared, lo, hi)?;
+        }
         let center = 0.5 * (lo + hi);
         let tune = planning_tune(&shared, center);
         // Follow-hops (T-093): per-channel lanes run everything upstream of the merge node; the
@@ -929,6 +961,9 @@ impl RecipeRuntime {
                 "outside_window",
                 "the target channel is not inside the tuned window",
             ));
+        }
+        if audio_out {
+            audio::gate(&shared, clo.min(lo), chi.max(hi))?;
         }
         let class = pipeline_class(&shared, &recipe, clo.min(lo), chi.max(hi));
         let cfg = ListenConfig::from_settings(&lock(&self.listen));
@@ -967,7 +1002,7 @@ impl RecipeRuntime {
         let mut sinks = Vec::with_capacity(g.outputs.len());
         let mut streams = Vec::new();
         for b in &g.outputs {
-            let (s, e) = build_sink(&shared, &stats, &streams_ctx, &recipe, b)?;
+            let (s, e) = build_sink(&shared, &stats, &streams_ctx, &recipe, b, 0)?;
             sinks.push(s);
             streams.extend(e);
         }
@@ -1037,6 +1072,9 @@ impl RecipeRuntime {
             disc: true,
             disc_source: false,
             hops: hops_rt,
+            liveness: recipe.liveness(),
+            backlog_s: 0.0,
+            read_at: Instant::now(),
         };
         runner.retap();
         // Held until the streams are offered, so an edit can't offer its streams first.
@@ -1123,6 +1161,7 @@ impl RecipeRuntime {
             "stats": ctl.stats.to_json(),
             "warnings": graph::errors_json(&lock(&ctl.warnings)),
             "follow_hops": ctl.hops.as_ref().map(hops::HopsCtl::json),
+            "liveness": liveness_json(cs.recipe.liveness()),
         })
     }
 
@@ -1177,7 +1216,7 @@ impl RecipeRuntime {
                 "a running pipeline keeps a single iq input",
             ));
         }
-        if follow && draft.input != cs.recipe.input {
+        if follow && !draft.input.same_channel(&cs.recipe.input) {
             return Err(RuntimeError::new(
                 422,
                 "unsupported_input",
@@ -1186,7 +1225,13 @@ impl RecipeRuntime {
         }
         let registry = self.registry();
         let shared = ctl.shared.upgrade().ok_or_else(ended)?;
-        let (channel, input) = if draft.input != cs.recipe.input {
+        if draft.has_audio_output() {
+            // An edit that adds or keeps audio is gated like a start (ADR-0011 §8.3).
+            let c = ctl.streams_ctx.center_hz;
+            let half = 0.5 * ctl.streams_ctx.bandwidth_hz;
+            audio::gate(&shared, c - half, c + half)?;
+        }
+        let (channel, input) = if !draft.input.same_channel(&cs.recipe.input) {
             // An input edit re-plumbs the channel (every node rebuilds); capture continues.
             let tune = shared.counters.tune();
             let c = ctl.streams_ctx.center_hz;
@@ -1217,6 +1262,7 @@ impl RecipeRuntime {
             Some(h) => (Some(h.lanes), Some(h.commit)),
             None => (None, None),
         };
+        let new_rev = ctl.edit_rev.load(Ordering::SeqCst) + 1;
         // Output streams: unchanged outputs keep their publishers (consumers and seq); changed or
         // new ones get new streams; removed ones finish.
         let mut plan = Vec::with_capacity(staged.outputs.len());
@@ -1236,7 +1282,8 @@ impl RecipeRuntime {
                     entries.push(None);
                 }
                 None => {
-                    let (s, e) = build_sink(&shared, &ctl.stats, &ctl.streams_ctx, &recipe, b)?;
+                    let (s, e) =
+                        build_sink(&shared, &ctl.stats, &ctl.streams_ctx, &recipe, b, new_rev)?;
                     plan.push(SinkSlot::New(Some(s)));
                     entries.push(e);
                 }
@@ -1247,7 +1294,6 @@ impl RecipeRuntime {
         let new_outputs = staged.outputs.clone();
         let edit_plan = staged.plan.clone();
         let warnings = staged.warnings.clone();
-        let new_rev = ctl.edit_rev.load(Ordering::SeqCst) + 1;
         let (tx, rx) = mpsc::sync_channel(1);
         *lock(&ctl.pending) = Some(PipelineEdit {
             staged,
@@ -1259,6 +1305,7 @@ impl RecipeRuntime {
             channel,
             lanes,
             input,
+            liveness: recipe.liveness(),
             new_rev,
             reply: tx,
         });
@@ -1454,6 +1501,12 @@ struct Runner {
     disc_source: bool,
     /// Follow-hops: the per-channel lanes feeding `graph` (T-093).
     hops: Option<hops::Hops>,
+    /// Reader liveness (ADR-0011 §8.5).
+    liveness: Liveness,
+    /// How far behind the writer the latest chunk was, s.
+    backlog_s: f64,
+    /// When the latest chunk was read (audio latency origin).
+    read_at: Instant,
 }
 
 impl Runner {
@@ -1467,6 +1520,7 @@ impl Runner {
             self.boundary();
             match self.reader.next() {
                 Next::Data(chunk) => {
+                    self.read_at = Instant::now();
                     if let Err(reason) = self.chunk(&chunk) {
                         break reason;
                     }
@@ -1557,7 +1611,8 @@ impl Runner {
         if let Some(h) = self.hops.as_mut()
             && h.flush(at, &mut self.graph).is_ok()
         {
-            self.publish_outputs();
+            // A follow-hops recipe has no audio output, the only one that can fail.
+            let _ = self.publish_outputs();
         }
     }
 
@@ -1629,6 +1684,7 @@ impl Runner {
                 self.disc = true;
             }
             self.graph.input = e.input;
+            self.liveness = e.liveness;
             self.edit_rev = e.new_rev;
             self.ctl.edit_rev.store(e.new_rev, Ordering::SeqCst);
             inc(&self.ctl.stats.edits);
@@ -1703,7 +1759,17 @@ impl Runner {
         if !self.shared.gate.enabled() {
             let head = self.shared.ring.next_sample().unwrap_or(0);
             let behind = head.saturating_sub(chunk.end_sample());
-            if behind as f64 / self.shared.fs > MAX_BACKLOG_S {
+            self.backlog_s = behind as f64 / self.shared.fs;
+            // `live-edge` (an audio output's default) bounds the backlog tightly: latency is its
+            // contract. `throughput` keeps the ring-protection bound every pipeline has.
+            let bound = match self.liveness {
+                Liveness::LiveEdge { max_backlog_s } => max_backlog_s.min(MAX_BACKLOG_S),
+                Liveness::Throughput => MAX_BACKLOG_S,
+            };
+            if self.backlog_s > bound {
+                if matches!(self.liveness, Liveness::LiveEdge { .. }) {
+                    inc(&st.live_edge_seeks);
+                }
                 add(&st.skipped_samples, behind);
                 add(&self.stat.lost_samples, behind);
                 let cursor = self.shared.gate.register(head);
@@ -1747,8 +1813,7 @@ impl Runner {
             *disc = false;
             h.process(chunk, &reader.buf[..chunk.len], flags, graph)?;
             reader.release_to(chunk.end_sample());
-            self.publish_outputs();
-            return Ok(());
+            return self.publish_outputs();
         }
         let block = ddc
             .process(InputInfo::from(chunk), &reader.buf[..chunk.len])
@@ -1779,11 +1844,12 @@ impl Runner {
             }
         }
         reader.release_to(chunk.end_sample());
-        self.publish_outputs();
-        Ok(())
+        self.publish_outputs()
     }
 
-    fn publish_outputs(&mut self) {
+    /// Publishes every output's current chunk. An error is a gated audio record: the pipeline
+    /// stops (fail closed, as Listen does).
+    fn publish_outputs(&mut self) -> Result<(), String> {
         let version = self.ctl.recipe_version.load(Ordering::Relaxed);
         if version != self.recipe_version {
             self.recipe_version = version;
@@ -1825,6 +1891,27 @@ impl Runner {
             add(&self.ctl.stats.frames, frames);
             add(&self.stat.records, frames);
         }
+        let Runner {
+            graph,
+            sinks,
+            read_at,
+            stat,
+            ..
+        } = self;
+        for (k, b) in graph.outputs.clone().iter().enumerate() {
+            if let (Some(OutputSink::Audio(a)), Some(f)) =
+                (sinks.get_mut(k), graph.audio_frames(b.src))
+            {
+                let n = a
+                    .publish(f, &t_of, *read_at)
+                    .map_err(|_| "error: an audio record was gated (fail closed)".to_owned())?;
+                if n > 0 {
+                    add(&stat.records, n);
+                    stat.latency(read_at.elapsed().as_micros() as u64);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn status_tick(&mut self) {
@@ -1835,9 +1922,14 @@ impl Runner {
         *lock(&self.ctl.status) = Value::Object(m.clone());
         let at = self.next_sample.unwrap_or(self.anchor.0);
         let t = Self::time_of(self.anchor, self.shared.fs, at as f64);
+        let lost = self.stat.lost_samples.load(Ordering::Relaxed);
         for s in &mut self.sinks {
-            if let OutputSink::Frames(f) = s {
-                let _ = f.record(t, InspectorRecordType::Status, m.clone());
+            match s {
+                OutputSink::Frames(f) => {
+                    let _ = f.record(t, InspectorRecordType::Status, m.clone());
+                }
+                OutputSink::Audio(a) => a.status(t, &self.graph, &m, lost, self.backlog_s),
+                _ => {}
             }
         }
         inc(&self.ctl.stats.status_ticks);
