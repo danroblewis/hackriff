@@ -2111,7 +2111,7 @@ pre.pane{margin:0;font:11.5px/1.5 var(--mono);color:var(--mut);white-space:pre-w
   #syscard{order:-1}                /* System stats first on mobile */
 }
 </style></head><body><div class=app>
-<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
+<div class=top><h1>hack<b>riff</b> · agents</h1><span class=pill><span class=dot></span><span id=st>live</span></span><span class=t id=now></span><span class=pill id=load></span><span class=pill id=merge title="Is the coordinator handling the merge queue?"></span><span class=pill id=budget title="Claude token budget. Fed from /usage; update: curl 'http://127.0.0.1:8901/budget?weekly=90&session=3'"></span><a class=maplink href="/worklog" title="What each role session reported at the end of every turn">work log ↗</a><a class=maplink href="/worklog#leverage" title="Open tickets ranked by what landing each releases (just task order)">leverage ↗</a><a class=maplink href="/terminal">terminal ↗</a><a class=maplink href="/graph">task map ↗</a><a class=maplink href="/burndown">burndown ↗</a><a class=maplink href="/perf">perf ↗</a><a class=maplink href="/flow">flow ↗</a><a class=maplink href="/metrics" title="Code metrics over committed main: lines, churn, test cost, outliers, hygiene, trends">metrics ↗</a><span class=t id=err></span><span class=counts id=counts></span></div>
 <div class=cols>
   <div class=col>
     <div class="card fill"><h2>Agents <em id=agn></em></h2><div class=bd id=agents></div></div>
@@ -2981,6 +2981,58 @@ print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}
     return v
 
 
+_METRICS = {"sha": None, "v": None, "err": None}
+METRICS_CACHE = os.path.join(SCRATCH, "metrics-cache.json")
+
+
+def _committed_sha():
+    ref = "main"
+    try:
+        for ln in open(os.path.join(SCRATCH, "bulk-in-progress"), encoding="utf-8"):
+            if ln.startswith("base=") and ln.split("=", 1)[1].strip():
+                ref = ln.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return subprocess.run(["git", "-C", REPO, "rev-parse", ref], capture_output=True, text=True, timeout=20).stdout.strip()
+
+
+def metrics_refresh():
+    """Code metrics (hkpy.codemetrics, user 2026-09-24) over committed main: rebuilt in a child
+    process only when that sha moves - i.e. on each landing - and kept on disk so a restart does not
+    rebuild. The build appends the day's sample to metrics.jsonl."""
+    if _METRICS["v"] is None:
+        try:
+            _METRICS.update(v=json.load(open(METRICS_CACHE)), err=None)
+            _METRICS["sha"] = _METRICS["v"].get("sha")
+        except Exception:
+            pass
+    sha = _committed_sha()
+    if sha and sha != _METRICS["sha"]:
+        try:
+            v = _child_json(f"""
+import json
+from hkpy import codemetrics
+print(json.dumps(codemetrics.build({REPO!r}, {SCRATCH!r})))
+""", timeout=300)
+            _METRICS.update(sha=v.get("sha"), v=v, err=None)
+            tmp = METRICS_CACHE + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(v, fh)
+            os.replace(tmp, METRICS_CACHE)
+        except Exception as e:
+            _METRICS["err"] = f"{type(e).__name__}: {e}"
+    return _METRICS
+
+
+def _metrics_poller():
+    while True:
+        try:
+            metrics_refresh()
+        except Exception:
+            pass
+        time.sleep(300)
+
+
 _FIXES = {"t": 0.0, "v": None}
 
 
@@ -3027,6 +3079,22 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics.json"):
+            m = _METRICS if _METRICS["v"] is not None else metrics_refresh()
+            if m["v"] is not None:
+                body = json.dumps(dict(m["v"], stale_error=m["err"]) if m["err"] else m["v"]).encode(); self.send_response(200)
+            else:
+                body = json.dumps({"error": m["err"] or "not built yet"}).encode(); self.send_response(503)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/metrics"):
+            import sys as _sys
+            if OPSDIR not in _sys.path:
+                _sys.path.insert(0, OPSDIR)
+            import metricspage
+            body = metricspage.PAGE.encode()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store, must-revalidate")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/fixes.json"):
             try:
@@ -3263,6 +3331,7 @@ if __name__ == "__main__":
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()
     threading.Thread(target=_usage_poller, daemon=True).start()
+    threading.Thread(target=_metrics_poller, daemon=True).start()
     def _warm_burndown():
         try:
             import burndown
