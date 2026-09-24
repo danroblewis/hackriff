@@ -2981,6 +2981,23 @@ print(json.dumps({{"line": flow.eta_line({SCRATCH!r}, datetime.now(), {REPO!r})}
     return v
 
 
+_FIXES = {"t": 0.0, "v": None}
+
+
+def fixes_cached(max_age=60.0):
+    """Why tickets were handed back for a fix run (hkpy.fixes.summary; user, 2026-09-24) - the
+    /worklog "Fix runs" card. Built in a child (_child_json), cached 60 s."""
+    if _FIXES["v"] is not None and time.time() - _FIXES["t"] < max_age:
+        return _FIXES["v"]
+    v = _child_json(f"""
+import json
+from hkpy import fixes
+print(json.dumps(fixes.summary({SCRATCH!r})))
+""")
+    _FIXES.update(t=time.time(), v=v)
+    return v
+
+
 def taskorder_cached(max_age=60.0):
     """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
     gates - never the provisional tip), built in a child process (_child_json) and cached 60 s."""
@@ -3007,6 +3024,13 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/eta.json"):
             try:
                 body = json.dumps(eta_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/fixes.json"):
+            try:
+                body = json.dumps(fixes_cached()).encode(); self.send_response(200)
             except Exception as e:
                 body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
             self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
