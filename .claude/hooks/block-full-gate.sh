@@ -22,7 +22,7 @@ deny(){ printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionD
 # note that became a merge commit of task-t899, which LANDED UNGATED. The runner itself is a script,
 # not a session, and is never stopped by this. No override: wait for the runner (`just wait-for-gate`).
 # ---------------------------------------------------------------------------------------------
-if [ -n "$CMD" ] && printf '%s' "$CODE" | grep -Eq '(^|[;&|(]|[[:space:]])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(commit|merge|cherry-pick|revert|am|rebase)([[:space:]]|$)'; then
+if [ -n "$CMD" ] && printf '%s' "$CODE" | grep -Eq '(^|[;&|(]|[[:space:]])git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+(commit|merge|cherry-pick|revert|am|rebase)([[:space:]]|$)'; then
   TGT=$(printf '%s' "$CODE" | sed -nE 's/.*git[[:space:]]+-C[[:space:]]+([^[:space:];&|]+).*/\1/p' | head -1)
   TGT=${TGT:-$CWD}
   TGT=${TGT/#\~/$HOME}

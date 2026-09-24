@@ -316,6 +316,9 @@ def test_no_session_commits_in_main_while_the_runner_has_a_merge_staged(tmp_path
     out = at(repo, 'git add docs/tasks.yaml && git commit -q -m "Board: T-890 note"')
     assert decision(out) == "deny" and "MERGE_HEAD" in reason(out) and "UNGATED" in reason(out)
     assert decision(at(tmp_path, f'git -C {repo} commit -m x')) == "deny"            # -C into main
+    assert decision(at(repo, "git -c user.name=x commit -m x")) == "deny"           # global options first (review)
+    assert decision(at(repo, "git --no-pager commit -m x")) == "deny"
+    assert decision(at(repo, 'echo "git commit -m x"')) is None                      # text, not a command
     assert decision(at(wt, 'git commit -m "T-1: work"')) is None                      # a worktree: never
     assert decision(at(repo, 'git merge-tree --write-tree main task-x')) is None      # read-only git
     assert decision(at(repo, 'git log --oneline -3')) is None
