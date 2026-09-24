@@ -1997,7 +1997,7 @@ def flow_panel_cached(ops, max_age=30.0):
         # built in a child process (_child_json): the log parse's heap goes when the child exits
         data = _child_json(f"""
 import importlib.util, json
-spec = importlib.util.spec_from_file_location("mon", {os.path.join(OPSDIR, "monitor.py")!r})
+spec = importlib.util.spec_from_file_location("mon", {os.path.join(REPO, "ops", "monitor.py")!r})
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps(m.build_flow_panel({ops!r})))
 """)
@@ -3232,6 +3232,9 @@ def _rss_guard(limit_mb=None, every_s=60, rss=_rss_mb, execv=os.execv, sleep=tim
 
 
 if __name__ == "__main__":
+    import sys
+    import launchpath
+    launchpath.check(__file__, lambda m: print(f"monitor: {m}", file=sys.stderr, flush=True))
     threading.Thread(target=_rss_guard, daemon=True).start()
     if psutil is not None:
         threading.Thread(target=_cpu_sampler, daemon=True).start()

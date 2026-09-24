@@ -386,8 +386,13 @@ tail -2 $HACKRIFF_OPS/stage.log                          # "started (live)" — 
 curl -s http://127.0.0.1:8901/burndown.json | head -c 80 # dashboard answers
 python3 -c 'import json;d=json.load(open("'"$HACKRIFF_OPS"'/watchdog.json"));print(d["load"],d["budget"],list(d["owners"])[:5])'
 ```
-If a script's newest version is only on an unmerged branch, start it from that branch's worktree
-(`.claude/worktrees/<name>/ops/<script>`) and restart it from `main` once the branch lands.
+**Never start an ops script from a worktree** - not even to try a change that has not landed.
+The runner removes a worktree when its branch lands, and a script running from one loses its own
+files: on 2026-09-24 the dashboard, started from `pm-dashmem`, answered /flow with
+`FileNotFoundError: .../worktrees/pm-dashmem/ops/monitor.py`. Restart with `/dev-env restart
+<script>`, which runs `REPO/ops/<script>`; a change reaches the running script by landing first.
+Each script logs `PATH: <where it runs from>` at start, and refuses (exit 2, `REFUSED:`) under
+`.claude/worktrees/` (`ops/launchpath.py`, `ops/launch-guard.sh`).
 
 ### 3. The coordinator, last
 ```bash

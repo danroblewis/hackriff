@@ -76,6 +76,8 @@ touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 # bogus names failed the rev-parse check. Same family as the `tr -d` bug that once glued every
 # queued branch into one unmergeable token: a helper's diagnostics leaking into its data.
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$LOG" >&2; }
+# Never from a worktree (ops/launch-guard.sh): logs PATH:, refuses before any side effect.
+. "$(dirname "${BASH_SOURCE[0]}")/launch-guard.sh"; launch_guard "${BASH_SOURCE[0]}"
 # Discord (user, 2026-09-23): every exception the runner hands to a person is also an alert;
 # every landing is a green one-liner. ops/alert.py dedupes by key and never fails the caller.
 alert(){ python3 "$(dirname "${BASH_SOURCE[0]}")/alert.py" "$@" >/dev/null 2>&1 || true; }
