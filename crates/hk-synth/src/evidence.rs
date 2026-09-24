@@ -6,6 +6,7 @@
 //! clipping, the look-elsewhere charge's definition, and the **separation of prior from rank**.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 pub use hk_model::synth::{
     EVIDENCE_SET_CAPACITY, Evidence, EvidenceSet, EvidenceSetFull, GroupId, MetricId,
@@ -36,6 +37,32 @@ pub fn look_elsewhere_bits(hypotheses: u64) -> f32 {
     } else {
         (hypotheses as f64).log2() as f32
     }
+}
+
+/// `b_j` (ADR-0015 §1.3, as amended by §13.1, T-660 (c)): the sum, over declared dependence
+/// groups, of the **maximum** bits within each group. `entries` must all speak for one stage from
+/// one block's `evidence()` call (or calls since the engine's last `reset()`) — that is what makes
+/// [`GroupId::Undeclared`] mean "one group" rather than "one group across every block that ever
+/// touched this stage": the default is **one group per (block, stage)**, and a caller combining
+/// several blocks' entries at the same stage must group by block first.
+///
+/// The sum survives only *between* declared groups; two metrics a block never split stay one
+/// group and score their maximum, never their sum — publishing a second metric without a
+/// declaration is not a way to be paid twice for one statistic. Not capped by `cap_j`: the caller
+/// applies `min(b_j, cap_j)` (ADR-0015 §1.3) after this.
+pub fn combine_stage_bits<'a>(entries: impl IntoIterator<Item = &'a Evidence>) -> f32 {
+    let mut max_by_group: BTreeMap<GroupId, f32> = BTreeMap::new();
+    for e in entries {
+        max_by_group
+            .entry(e.group)
+            .and_modify(|b| {
+                if e.bits > *b {
+                    *b = e.bits;
+                }
+            })
+            .or_insert(e.bits);
+    }
+    max_by_group.values().sum()
 }
 
 /// A beam node's two numbers, kept apart (ADR-0015 §1.3).
@@ -80,6 +107,44 @@ impl NodeScore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stage::Stage;
+
+    fn evidence(metric: MetricId, group: GroupId, bits: f32) -> Evidence {
+        Evidence::new(Stage::S2, metric, group, 0.0, 112, bits)
+    }
+
+    #[test]
+    fn two_metrics_with_no_declared_groups_score_max_not_sum() {
+        // T-660 (c): loading a file (or, here, evidence emitted) with two metrics and no `groups`
+        // key must score the stage's maximum, not the sum. `snr` and `evm` both default to
+        // GroupId::Undeclared (evidence.rs's own parse test shows this is what a bare JSON record
+        // deserialises to), so per ADR-0015 §13.1 they are ONE group.
+        let entries = [
+            evidence(MetricId::Snr, GroupId::Undeclared, 4.0),
+            evidence(MetricId::Evm, GroupId::Undeclared, 5.5),
+        ];
+        // Max, not the 9.5-bit sum a naive combiner would report.
+        assert_eq!(combine_stage_bits(&entries), 5.5);
+    }
+
+    #[test]
+    fn declared_groups_sum_between_groups_and_max_within_one() {
+        let entries = [
+            evidence(MetricId::Snr, GroupId::SoftQuality, 4.0),
+            evidence(MetricId::Evm, GroupId::SoftQuality, 5.5),
+            evidence(MetricId::TimingVar, GroupId::SoftQuality, 3.0),
+            evidence(MetricId::EyeOpen, GroupId::Eye, 3.0),
+        ];
+        // soft_quality maxes to 5.5; eye is its own group and adds in full: 5.5 + 3.0.
+        assert_eq!(combine_stage_bits(&entries), 8.5);
+    }
+
+    #[test]
+    fn a_singleton_group_and_an_empty_set_are_the_identity_cases() {
+        assert_eq!(combine_stage_bits(&[]), 0.0);
+        let one = [evidence(MetricId::Bimodality, GroupId::DemodShape, 2.5)];
+        assert_eq!(combine_stage_bits(&one), 2.5);
+    }
 
     #[test]
     fn prior_bits_clip_to_minus_8_and_0() {
