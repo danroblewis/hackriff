@@ -290,3 +290,36 @@ def test_a_spec_run_on_its_own_ports_may_go_beside_a_gate(tmp_path):
 def test_what_really_runs_is_never_stripped(cmd):
     assert "just gate" in CC.code(cmd)
     assert decision(bash(cmd)) == "deny", CC.code(cmd)
+
+
+# ------------------------------------------------------------------ the main commit guard
+def _main_repo(tmp_path):
+    repo = tmp_path / "main"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+                    "--allow-empty", "-m", "base"], check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "task-x", str(wt)], check=True)
+    ops = tmp_path / "ops"
+    ops.mkdir()
+    return repo, wt, ops
+
+
+def test_no_session_commits_in_main_while_the_runner_has_a_merge_staged(tmp_path):
+    """2026-09-24 15:05:04: a board note committed in main while task-t899's merge was staged became a
+    merge commit of T-899, which landed UNGATED (09-22: ea91c27c, the same failure)."""
+    repo, wt, ops = _main_repo(tmp_path)
+    def at(cwd, cmd):
+        return run(BLOCK, {"tool_input": {"command": cmd}, "cwd": str(cwd)}, ops=ops)
+    assert decision(at(repo, 'git commit -q -m "Board: note"')) is None               # nothing staged: fine
+    (repo / ".git" / "MERGE_HEAD").write_text("abc\n")
+    out = at(repo, 'git add docs/tasks.yaml && git commit -q -m "Board: T-890 note"')
+    assert decision(out) == "deny" and "MERGE_HEAD" in reason(out) and "UNGATED" in reason(out)
+    assert decision(at(tmp_path, f'git -C {repo} commit -m x')) == "deny"            # -C into main
+    assert decision(at(wt, 'git commit -m "T-1: work"')) is None                      # a worktree: never
+    assert decision(at(repo, 'git merge-tree --write-tree main task-x')) is None      # read-only git
+    assert decision(at(repo, 'git log --oneline -3')) is None
+    (repo / ".git" / "MERGE_HEAD").unlink()
+    (ops / "bulk-in-progress").write_text("base=abc\n")
+    out = at(repo, "git commit -m y")
+    assert decision(out) == "deny" and "bulk-in-progress" in reason(out)
