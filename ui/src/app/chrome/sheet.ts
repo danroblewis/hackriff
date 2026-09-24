@@ -172,14 +172,14 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   title.className = "sheet-title";
   const head = document.createElement("div");
   head.className = "sheet-head";
-  // docs/23 §10.6 P1: a visible dismiss that gives the sheet's pixels back to the map. It collapses
-  // to peek (the sheet's floor: the one-line strip still names the selection); fading is not one.
+  // docs/23 §10.6 P1: an overlay exists to be closed — a visible dismiss that collapses the sheet to
+  // its peek strip and hands its pixels back to the map (shown only while the sheet is open).
   const close = document.createElement("button");
   close.type = "button";
   close.className = "sheet-close";
-  close.textContent = "\u2715";
-  close.setAttribute("aria-label", `Close the ${opts.label} sheet`);
-  close.setAttribute("title", "Close (returns the space to the map)");
+  close.textContent = "×";
+  close.setAttribute("aria-label", `Close ${opts.label} sheet`);
+  close.setAttribute("title", "Close (collapse to the strip)");
   head.append(title, close);
   host.prepend(grab, head);
   host.classList.add("sheet");
@@ -200,7 +200,6 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     grab.setAttribute("aria-expanded", String(snap !== "peek"));
     // Collapsed content is not on screen, so it must not be in the tab order either.
     if (body) body.inert = snap === "peek";
-    // Nothing to dismiss while collapsed; out of the tab order with it.
     close.hidden = snap === "peek";
   }
 
@@ -262,8 +261,8 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     ctl.set(next);
   });
   close.addEventListener("click", (ev) => {
-    // The head's own click opens a collapsed sheet; the dismiss must not bubble into it.
-    (ev as Event).stopPropagation?.();
+    // Not the head's click below, which would re-open a collapsed sheet.
+    ev.stopPropagation();
     ctl.set("peek");
   });
   // The title strip is a second, larger target: clicking it while collapsed opens the sheet.

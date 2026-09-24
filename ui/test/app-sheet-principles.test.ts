@@ -210,6 +210,10 @@ test("P1: the sheet has a visible dismiss that collapses it and returns its pixe
     assert.ok(parseFloat(host.style.height) < tall, "the sheet's pixels go back to the map");
     assert.equal(ev.stopped, true, "does not bubble into the head's open-on-click");
     const css = readFileSync("src/app/chrome/sheet.css", "utf8");
-    assert.match(css, /\.sheet \.sheet-close \{[^}]*min-width: 24px;[^}]*min-height: 24px;/, ">= 24 px hit target");
+    const rule = css.match(/^\.sheet \.sheet-close \{([^}]*)\}/m)?.[1] ?? "";
+    for (const k of ["min-width", "min-height"]) {
+      const px = parseFloat(rule.match(new RegExp(`${k}:\\s*([\\d.]+)px`))?.[1] ?? "0");
+      assert.ok(px >= 24, `dismiss ${k} >= 24 px (${px})`);
+    }
   });
 });

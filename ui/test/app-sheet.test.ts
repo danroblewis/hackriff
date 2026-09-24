@@ -97,7 +97,7 @@ test("non-modal by construction: no backdrop, fixed to its own box, content refl
     "width-capped, docked right, clear of the zoom/FAB column (T-802)");
   assert.match(css, /@media \(max-width: 900px\) \{\s*\.sheet \{ left: 8px; width: auto; \}/, "full width on a phone");
   const html = readFileSync("src/app/index.html", "utf8");
-  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<aside class="focus" data-slot="focus"/,
+  assert.match(html, /<section class="sheet" data-slot="sheet"[^>]*>\s*<div class="sheet-body">\s*<div class="drawer" data-slot="drawer"><\/div>\s*<aside class="focus" data-slot="focus"/,
     "the focus panel is the sheet's body");
   assert.doesNotMatch(html, /<dialog|aria-modal/, "no modal anywhere in the shell");
   const src = readFileSync("src/app/chrome/sheet.ts", "utf8");
@@ -210,6 +210,18 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     ctl.set("peek");
     head.fire("click");
     assert.equal(ctl.get(), "half");
+
+    // docs/23 §10.6 P1: a visible, labelled dismiss collapses the open sheet to its strip (its
+    // pixels go back to the map) and is itself hidden once collapsed.
+    const close = head.children[1];
+    assert.equal(close.className, "sheet-close");
+    assert.match(close.getAttribute("aria-label") ?? "", /^Close Selected sheet/);
+    assert.equal((close as unknown as { hidden: boolean }).hidden, false);
+    close.fire("click", { stopPropagation() {} });
+    assert.equal(ctl.get(), "peek");
+    assert.equal(mem.get("s"), "peek");
+    assert.equal((close as unknown as { hidden: boolean }).hidden, true);
+    ctl.set("half");
 
     // reveal() raises but never lowers, and is not the viewer's stored choice.
     ctl.set("peek");
