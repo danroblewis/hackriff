@@ -930,6 +930,22 @@ def release_stale_claims(claims, tasks_by_id):
                     c["state"] = "merged"; c["ended"] = time.time(); changed = True
             except Exception:
                 pass
+    # ...and one whose TICKET is done on the board while its branch is in no queue: it landed as a
+    # rebuilt copy (task-t538 as task-t538-rl), so its own branch is never on main. 12 of 13 `queued`
+    # claims were such on 2026-09-24 02:50, 26-42 h after landing - each one a deflake wait on a spec
+    # its branch touched (deflake_deferred) and a phantom in every "in queue" count.
+    waiting = set()
+    for f in (MERGE_QUEUE, BULKMARK):
+        try:
+            waiting |= set(open(f).read().replace("branches=", " ").split())
+        except OSError:
+            pass
+    for tid, c in list(claims.items()):
+        if (c.get("state") == "queued" and c.get("branch") and c["branch"] not in waiting
+                and tasks_by_id.get(tid, {}).get("status") in ("done", "cancelled")):
+            log(f"CLAIM {tid}: the board says {tasks_by_id[tid]['status']} and {c['branch']} is in no queue "
+                f"(landed as a rebuilt branch) - claim closed")
+            c["state"] = "merged"; c["ended"] = time.time(); changed = True
     for tid, c in list(claims.items()):
         if c.get("state") in ("no-work", "error", "timeout") and time.time() - c.get("started", 0) > RELEASE_AFTER_H * 3600:
             if tasks_by_id.get(tid, {}).get("status") == "todo":
