@@ -26063,6 +26063,8 @@ tasks:
       FOUND BY T-890 worker 2026-09-24.
     effort_reason: "real-time display path: wiring a live row stream into tile residency without regressing T-890's look-ahead or the thin-client rule"
     branch: task-t893
+    result: |
+      Coordinator-run 2026-09-24 on task-t893 ee9e2605 (built on task-t890): following panes subscribe to /ws/tiles/rows (<=12 of 16 feeds, centre-first; frozen panes and the minimap open none), finer tiles stand in on zoom-out and standing-in coarse tiles refresh, the look-ahead extends in-flight/queued columns. Evidence: 3 s simulated route - pane top 2.80 s behind by polling vs 0.020 s with the feed; e2e with every tile read held 2.5 s - median shortfall 1.4 s -> 0-0.2 s. just test-ui 60/60; new unit + e2e cases red on T-890's code. Residue: T-901 (server push stalls), T-902 (pushed-row tiles guess their tier). The T-523 proxy-502 case in live-edge.e2e.mjs was red on T-890's commit too - triaged separately.
   - id: T-894
     milestone: M2-hardening
     title: fog-of-war.e2e.mjs waitForResident still gives up on a 10 s wall-clock stall (T-889 residue)
@@ -26193,6 +26195,44 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
+  - id: T-901
+    milestone: MLIVE
+    title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
+    status: todo
+    priority: high
+    deps:
+    - T-893
+    parallel_group: PIPE-tiles
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-893 worker (task-t893 ee9e2605; handback ~/.hackriff-ops/work/T-893/handback.json), after wiring following panes to /ws/tiles/rows: with the default replay fixture, ONE subscription and no other load, the server's row pushes stall for 0.35-5 s roughly every 64 rows (~2.5 s), and /api/navigation stalls at the same instants. This server-side stall is the residual live-edge lag in T-893's new e2e (the client stays within 0.04 s p90 of the newest pushed row). Suspects (unverified): RowCursor::record_reach or history-lock contention in crates/hk-api/src/rows.rs.
+      This violates "rows append in real time as they are recorded" and T-453's constraint (work on the capture/serving path must be measured, not assumed).
+      DELIVER: root-cause the periodic stall (profile the push path and the lock it shares with /api/navigation), fix it so row pushes are steady at the recording cadence with no multi-second gaps, and a backend test through the mock SDR that measures inter-push gaps over >= 200 rows and goes red on the old code (a latency/throughput bound belongs in the `timing` tier per docs/10 §3.6 - put the bound there and a deterministic structural check, e.g. "no push waits on the history lock", in the gate). Also refresh docs/api.md's /ws/tiles/rows section, which still names the old per-pane client class (with api_contract.rs if the contract changes, T-079).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-893 worker 2026-09-24.
+    effort_reason: "hard debugging of a periodic stall on the live serving path shared with navigation (T-453: measure, do not assume)"
+  - id: T-902
+    milestone: MLIVE
+    title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
+    status: todo
+    priority: normal
+    deps:
+    - T-893
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-893 worker: a tile built client-side from rows pushed over /ws/tiles/rows (before the first real tile answer for that time row) GUESSES its honesty tier - it copies the tier of the tile below in the same column, or claims "spectrum-history" - because pushed rows carry no tier. The pane then states a level it was not actually drawn at until the first real answer replaces it.
+      That breaks the honesty-tier invariant (CLAUDE.md: "each pane states the level it was actually drawn at"; live-IQ detail / spectrum-history / survey overview stay distinct): an inferred tier presented as a statement is the implied-detail defect.
+      DELIVER: pushed rows carry their tier/level from the backend (extend the /ws/tiles/rows row record; docs/api.md + api_contract.rs together, T-079), and the client states exactly that - or, where it genuinely is unknown, states "unknown" rather than a guess (Unknown is not a default). Test: a pushed-row-built tile's stated tier equals the backend's, red on the inference.
+      WHAT THE USER WILL SEE ON STAGING: the level readout on a live pane is always the level the newest rows were actually measured at, never a guess.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-893 worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
