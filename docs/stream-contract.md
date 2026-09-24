@@ -1099,6 +1099,29 @@ T-388's third refusal — *a span starting after the end held is refused, and th
 poll* — is **removed**, replaced by REOPEN (§15.4). The silence is still never claimed; it is now
 drawn as a gap between two boxes rather than hidden behind a box that quietly stopped moving.
 
+## 16. The analyze stream: `hackriff.analyze/1` (T-859, ADR-0015 §5.2, ADR-0021 §4.3)
+
+**On-demand opener `analyze`**, served at `/ws/analyze/{id}` (and `/ws/open/analyze?id=<id>`, TCP
+`open/analyze?id=<id>`): one region-analyze job's progress (docs/api.md "Analyze"). A `messages`
+stream, `message_schema` **`hackriff.analyze/1`**, `content_class` `unrestricted`, published by
+`hk-pipeline` (`crates/hk-pipeline/src/synth/jobs.rs`). It is **additive** — a new opener name, a new
+schema — so it changes nothing an existing reader reads, and the document stays 1.4.
+
+- **Everything is metadata.** Each record's `metadata` is `{type, job_id, …}`; `content` is never set.
+  The one content-bearing field a job has, a result's `frames_preview`, is emptied **before** the job is
+  visible anywhere unless the acquired IQ's class permits content (ADR-0015 §5.3), so the stream cannot
+  carry it and needs no per-record gate.
+- **Records are idempotent snapshots and drop, never block** (ADR-0015 §5.2). Each subscriber has a
+  bounded queue (64 records) in front of the publisher's own §7 queue; a full queue loses the record,
+  never the job's time. `GET /api/analyze/{id}` is always authoritative.
+- **Record types** (`metadata.type`): `progress` (`{job}`; the first record of every stream, then on
+  each state change and at most once a second), `stage` (`{stage, job}` when the deepest stage reached
+  rises), `best` (`{results}`, the top 3), `trace` (`{stage, tried, not_tried, by_outcome, nodes}`, once
+  per stage, ≤ 8 nodes — ADR-0021 §4.3, never per decision), `done` (`{job}`, the final job).
+- **Lifetime.** The stream ends after `done`. Opening it for a finished job yields exactly one `done`.
+  An unknown id is refused `404 not_found`; a forgotten one `410 gone` (ADR-0021 §4.2: *we forgot* is
+  not *it never ran*).
+
 ## Sources
 
 - [ADR-0004](adr/0004-stream-output-contract.md), [ADR-0003](adr/0003-process-plugin-model.md), [ADR-0010](adr/0010-language-and-licence-ledger.md)

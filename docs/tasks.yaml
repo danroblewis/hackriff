@@ -23487,7 +23487,7 @@ tasks:
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: in-progress
+    status: done
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
@@ -23517,10 +23517,67 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
+    result: |
+      Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
+      siblings of `.centre` which is z-index:auto) painted above `.centre`
+      regardless of DOM order, and the surface's own toolbar (`.sf-bar`, mounted
+      inside `.centre`, spanning the full-bleed canvas width) sits in the same
+      top row the panels occupy — so its `.sf-actions` buttons (Live/Trace/
+      Signals/Measure/...) rendered under the panels. Round 2 had only cleared
+      the *outer* `.bar` vertically; this inner toolbar was untouched.
+
+      Fix (ui/src/app/chrome/map-layout.css): inset `.sf-bar` horizontally past
+      both panel columns via shared `--panel-w`/`--panel-gap` custom properties
+      (also used by `.side`/`.focus`'s own width, so the two can't drift apart),
+      scoped to above the 900px breakpoint — below it the panels drop to the
+      bottom of the screen and no longer share a row with the bar. The full-bleed
+      canvas drawing itself is untouched (still edge-to-edge, per MAP-01's
+      intent); only the toolbar's chrome moves. T-528's existing wrap-not-overflow
+      rule for `.sf-bar` handles narrow windows: it grows down instead of hiding
+      a button.
+
+      Also fixed reviewer's minor #3: `.focus:empty` never applied because
+      `render()` in ui/src/app/explore/index.ts always fills the slot with
+      something (real focus / "not found" text / placeholder sentence). Added an
+      `is-empty` class set only in the placeholder-only branch and cleared in the
+      other two; CSS now targets `.focus.is-empty`. No change to what Explore
+      shows.
+
+      Merged main first (git merge main, commit 3efd710e) — clean, no conflicts;
+      the TS2741 the previous round hit on `surface.ts` is fixed on main.
+
+      Tests run, real output:
+      - `just test-ui`: 56/56 test files passed, 0 failures.
+      - `node e2e/run.mjs app-surface` (run 1): 3/3 pass, including the T-528
+        hit-test assertion ("GET / mounts the unified surface in the app, under
+        the product CSP" — 1321ms).
+      - `node e2e/run.mjs app-surface` (run 2): 3/3 pass again (1205ms for the
+        same test).
+      - `node e2e/run.mjs surface-nav`: 5/5 pass (61.4s total).
+      - `just precheck` not run: this diff touches only `ui/src/app/chrome/
+        map-layout.css` and `ui/src/app/explore/index.ts` (no Rust crates),
+        and precheck is Rust-only per the task brief.
+
+      Waited ~50 min for a bulk merge gate (`~/.hackriff-ops/bulk-in-progress`,
+      pid 49109/61866) to clear before running any e2e specs, per the hard rule;
+      confirmed clear (no bulk-in-progress, no MERGE_HEAD, no `just gate`
+      process) immediately before each e2e run.
+
+      Process check after all runs: `ps -axo pid,ppid,pcpu,command | grep -Ei
+      "8791|t801|chrome-mac-arm64"` returned nothing — no Chrome for Testing,
+      node or hk serve instance left running from this session's e2e runs (the
+      two `hk serve` processes found running belong to other unrelated sessions/
+      the shared demo, not this worktree).
+
+      Commit: 7a5d243f "T-801 round 3: inset the surface's own toolbar past the
+      floating panels" on task-t801. Worktree clean.
+    commit: "30401389"
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
-    status: todo
+    status: in-progress
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23549,10 +23606,15 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a floating control cluster over the canvas - Go-to, a layers button, and a live/my-location FAB in the corner - like Google Maps' map controls; the old toolbar row is gone. Say in your handback exactly what to open on staging to see it.
+    branch: task-t802
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-803
     milestone: MMAP
     title: 'Bottom-sheet component: non-modal, draggable peek/half/full snap states'
-    status: todo
+    status: in-progress
+    branch: task-t803
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23581,6 +23643,9 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): panels open as bottom sheets you can drag between peek, half and full height, and the canvas stays usable behind them (non-modal). Say in your handback exactly what to open on staging to see it.
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
@@ -23613,6 +23678,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): clicking a pin or box slides up a detail sheet for that signal (its centre, bandwidth, time extent and explanations) without leaving the canvas. Say in your handback exactly what to open on staging to see it.
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
@@ -23644,6 +23711,8 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): floating frequency ruler along the bottom and time ruler along the left edge, with ticks that track pan and zoom, instead of the old framed axes. Say in your handback exactly what to open on staging to see it.
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -23675,6 +23744,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a layers menu that lists base styles and overlays per pane; toggling one changes that pane only. Say in your handback exactly what to open on staging to see it.
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
@@ -23706,6 +23777,8 @@ tasks:
       lands first, the rest each add one layer module.
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): never-observed spectrum shows as an explicit fog you can switch on and off in the layers menu, distinct from shadow and from unknown. Say in your handback exactly what to open on staging to see it.
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
@@ -23735,6 +23808,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): detections drawn as their own layer: confirmed signals prominent, candidates visibly weaker, and neither ever drawn over the grey fog. Say in your handback exactly what to open on staging to see it.
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
@@ -23765,6 +23840,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): signals and events appear as pins; hovering one shows a tooltip (MapTip), and clicking selects it with a visible selected state. Say in your handback exactly what to open on staging to see it.
   - id: T-810
     milestone: MMAP
     title: 'Pin clustering at coarse zoom from /api/tiles/events, resolving to individuals on zoom-in'
@@ -23794,6 +23871,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
@@ -23823,6 +23902,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
@@ -23856,6 +23937,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a band-plan layer that shades allocations in the viewport as suggestions (labelled as priors, never as detections), from the new /api/priors route. Say in your handback exactly what to open on staging to see it.
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
@@ -23885,6 +23968,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-LAYERS shares ui/src/surface; MAP-06 owns the registry and
       lands first, the rest each add one layer module.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
@@ -23915,6 +24000,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a collapsed Explore drawer at the bottom listing interesting signals and patterns; expanding it and clicking an entry flies the canvas there. Say in your handback exactly what to open on staging to see it.
   - id: T-815
     milestone: MMAP
     title: 'Past-surveys browse + jump-to-a-saved-coverage-window'
@@ -23944,6 +24031,8 @@ tasks:
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a browse list of past surveys; choosing one jumps the canvas to that saved coverage window. Say in your handback exactly what to open on staging to see it.
   - id: T-816
     milestone: MMAP
     title: 'Annotation store + /api/annotations (durable, SigMF-compatible, provenance)'
@@ -24155,6 +24244,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): you can draw a box, marker or label directly on the canvas and it persists as an annotation (visible after reload). Say in your handback exactly what to open on staging to see it.
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
@@ -24183,6 +24274,8 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a Collections panel with a table view; selecting a row highlights its mark on the canvas and vice versa. Say in your handback exactly what to open on staging to see it.
   - id: T-822
     milestone: MMAP
     title: 'On-canvas measurement tool: drag to measure Delta-f/Delta-t/bandwidth/duration, persist it'
@@ -24254,11 +24347,13 @@ tasks:
       MAP-12=T-812, MAP-13=T-813, MAP-14=T-814, MAP-15=T-815, MAP-16=T-816, MAP-17=T-817,
       MAP-18=T-818, MAP-19=T-819, MAP-20=T-820, MAP-21=T-821, MAP-22=T-822, MAP-23=T-823,
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): an Export action that downloads collections, measurements and annotations as a file (or copies a link). Say in your handback exactly what to open on staging to see it.
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
     status: todo
-    priority: normal
+    priority: high
     parallel_group: MAP-CHROME
     model: opus
     effort: medium
@@ -24285,6 +24380,9 @@ tasks:
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): at phone width the floating chrome rearranges to fit, and in immersive mode the controls fade away until you touch or move the pointer. Say in your handback exactly what to open on staging to see it.
+    requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
@@ -24316,6 +24414,8 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Last; extends ui/test + ui/e2e.
 
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
+
+      DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): nothing new to look at: this adds the UI tests and honesty guards; SEE = the staging build still shows every MMAP feature above working. Say in your handback exactly what to open on staging to see it.
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
@@ -24779,9 +24879,11 @@ tasks:
       landing a vacuous half.
     result: |
       I kept the WIP and corrected it. What is built: the durable sink (hk_store::ml::ShadowStore, CRC-line NDJSON with one segment per capture-time hour, 256 MiB / 30 days, per-(model, consumer, family, SNR-bin) agreement aggregates kept per segment, non-shadow records refused); StoreShadowSink as the production ShadowSink; hk_pipeline::ml::MlStage (registry, one ModelHost per provider, modes persisted in <data>/ml/modes.json and restored, active only with section 4.6 evidence plus a conformant provider or an audited force); the producer at the fsk chain's single C15 call site, run after the published row is written and outside the repository lock; the three /api/ml routes (hk-api/src/ml.rs plus an hk-cli adapter), docs/api.md and an api_contract test; the hk-ml dormancy prose rewritten and no_production_caller.rs removed; m3_ml.rs now reads the run's real mode table and counts records from hk-store on disk. WIP fixes: records were keyed on the wall clock and are now keyed on the subject's capture time; served JSON obeys the API time law (t_s/t_ns, verified by the time-law sweep); the racy observe return count is fixed; dead code, clippy and fmt are fixed. The branch is NOT ready to land, and it is blocked by the ticket's own rule against a vacuous producer. hk_ml::gate::admit correctly refuses a subject whose classical family is 'unknown', and every scene I ran through the mock SDR is classified 'unknown' at the call site. That covers fsk_burst_train at 15/20/25/30 dB, 23-430 ms bursts, 2400/4800/9600 Bd, and trunk_control_channel; pocsag, lora, multipath, acars and retune produced no classification rows at all. Open-set is about 1.0 throughout, and at 20 dB the row is flagged BelowGate with spectrum_too_few_segments and low_snr at a measured 18.7 dB. So no real run ever writes a shadow record. The wiring half of the non-vacuity pair, crates/hk-pipeline/tests/ml_shadow.rs, is written and fails on its precondition assertion ('the scene must produce fsk classifications'). The sink half is proven: swapping in MemoryShadowSink turns a_shadow_prediction_is_durable_in_hk_store_and_survives_the_stage red (left 0, right 1). The routes are proven the same way: unrouting /api/ml turns the contract test red (404 vs 200). Everything else passes. Do not queue this branch until ml_shadow.rs passes.
-    depends_on: [T-852]
+    depends_on: [T-852, T-876, T-877]
     notes: |
       2026-09-23 (coordinator): code complete on task-t844 (ad29641b: sink, producer, three /api/ml routes, tests green except ml_shadow) but NOT queued - the ticket forbids landing a producer that never fires, and through the mock SDR the classifier calls every row unknown, so the C38 gate never admits one. Now todo behind T-852; when it lands, re-run crates/hk-pipeline/tests/ml_shadow.rs unchanged and queue.
+
+      2026-09-24 (coordinator): T-852 landed a partial fix (5/16 above-gate device rows now fsk); T-844's ml_shadow scene (seed 844, 20 dB) is still held by the SNR gate and unknown at 25 dB. It now also waits on T-876 (burst-extent overrun) and T-877 (fsk density tail), per the T-852 worker's diagnosis.
   - id: T-845
     milestone: MPLAY
     title: The drawn IQ horizon can claim up to ~7.5 s of IQ the ring has already dropped (5 s poll vs 7.5 s ring chunks)
@@ -25030,7 +25132,7 @@ tasks:
   - id: T-852
     milestone: M3
     title: "Through the mock SDR the M3 classifier names no family: fsk_burst_train and trunk scenes all unknown (open-set ~1.0), pocsag/lora/acars/multipath/retune never classified"
-    status: in-progress
+    status: done
     branch: task-t852
     priority: high
     deps: []
@@ -25060,6 +25162,15 @@ tasks:
     notes: |
       FOUND BY T-844 worker 2026-09-23 (observed through the mock SDR).
     core_interface: true
+    result: |
+      T-852 worker result, 2026-09-24 (commits caceb46d WIP + bea92f02 merge-main + 74b66601). FSK half PARTIALLY fixed; the acceptance majority is NOT met. Branch task-t852 can land as-is: it is a pure improvement with no regressions.
+      1. WIP VERIFIED. wide_deviation_fsk: 43/46 with the refit (green) and 16/46 with the pre-T-852 densities (red). The refit is reproducible: `cargo run --release -p hk-classify --bin fit-densities` rewrites both data/*.json files byte-identically (git diff empty).
+      2. REGRESSION CHECK (old -> new densities). T-199 top-1 at gate+5: 0.901 -> 0.917. By family: fsk 0.92 -> 0.98, analog 0.85 -> 0.87, ook-ask 0.79, psk-qam 0.90, ofdm/css/pulsed 1.00, noise-like 0.92 all unchanged. Wrong 0.000 before and after. Held-out unknown recall 1.00 -> 1.00. T-248 full grid unknown recall 0.9924 -> 0.9924. T-200 2fsk/gfsk class top-1 0.458 -> 0.486. `just test-crate hk-classify` 110/110. No threshold or gate was touched.
+      3. THROUGH THE DEVICE. New test crates/hk-pipeline/tests/device_fsk_classify.rs runs fsk_burst_train (h=4, 23.5 ms bursts) through the mock SDR, blind, over seeds 852-859 at 20/25/30 dB. Above-gate rows claimed fsk: 0/16 before, 5/16 after, and no row names a wrong family. That is not a majority. The 20 dB scene measures 18.3-19.1 dB SNR over OBW99 (scene SNR is per Carson bandwidth), which is below the 20 dB FSK gate, so BelowGate there is correct; the refit does not change it. spectrum_too_few_segments is a separate burst-length effect: 23.5 ms normalises to ~1400 samples, under the 2048 that FEATURE_FFT_LEN 1024 with 3 segments needs. It only drops 4 spectral dimensions and is not what causes the unknowns.
+         The 11 remaining misses have two causes, both outside the refit. (a) 4 rows: C13's extent (hk_estimate::params step 6b, first..last moving-average threshold crossing) overruns the burst, measuring 24.8-28.8 ms against 23.5 ms, so noise-only samples reach the classifier (low_fraction z 9-30, duty z -3..-10). (b) 7 rows: the one-Gaussian 2fsk density puts h=4 in its tail, with m 2.4-3.8 against 1.9-2.1 on the rows it claimed (sigma_aa z 2.4-4.3; blind_qpsk z 4.0 on every row; if_slope_r2 up to 5.2).
+         T-844 ml_shadow.rs will still fail unchanged. Its scene (seed 844, 20 dB) is BelowGate on every row. The same seed through the device gives unknown at 25 dB and fsk at 30 dB, so the test would need a >=25-30 dB scene, or (a) and (b) fixed.
+      4. NO-ROW SCENES (split out, not started). C15's only call site is chains/fsk.rs after a successful framed write. A probe through the mock SDR shows why each scene gets no row. pocsag_pagers: no ConfirmedTrack spec matched (3 unmatched; fsk-bursts needs bursty=true, 2-200 kHz, >=4 detections). acars_message: 0 attached, 1 unmatched. retune_diversity: only wfm-rds chains attached, and they never call C15. lora_ism_burst: fsk-bursts was selected, but classify_box was never reached because fewer than min_bursts=4 bursts demodulated as FSK. multipath_echo: classify_box ran 3 times, but classify::should_record suppressed every row, because the chain's non-CRC 2fsk row sits at rank 3 (Classifier) and wins the T-247 rank-3 tie. The fix is a C15 call site that does not depend on a decode chain succeeding (e.g. per confirmed track, or in the every-track sweep-char chain), plus a look at the rank-3 tie for non-locked chain labels. That is an ADR-0016 section-4 placement change, so it needs its own ticket.
+    commit: d7e8526b
   - id: T-853
     milestone: MAUTO
     title: "MAUTO M-2: Block::evidence and evidence for the S0-S6 blocks, analytic nulls, calibration tables + py generator, run_window"
@@ -25246,7 +25357,8 @@ tasks:
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
-    status: todo
+    status: in-progress
+    branch: task-t858
     priority: normal
     deps:
     - T-853
@@ -25272,8 +25384,7 @@ tasks:
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
-    status: in-progress
-    branch: task-t859
+    status: done
     priority: normal
     deps:
     - T-854
@@ -25297,6 +25408,17 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
     core_interface: true
+    branch: task-t859
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 02:54).
+      MAUTO M-8 (ADR-0015 §5.1-§5.3, ADR-0021 §4/§7A.4/§11.1). New hk-pipeline::synth::jobs job manager: admission via hk_synth::admit (1 running + 4 queued, 503 busy; power policy 422), source resolved at admission (410 evicted / 422 no_iq / 409 outside_window / 503 unavailable; an explicit past window never falls back to live, an emitter's default window does), acquisition through M-6's ring read + bounded-region ledger (60/40 search/hold-out, newest 2 s kept with a warning; live jobs wait on the capture clock, never a wall clock; window filled from the ledger), the search behind a SearchBackend seam over hk_synth::engine::search, immediate-and-final cancel, 50 finished jobs kept (404 unissued vs 410 gone), ADR-0021 trace_summary/resolution and the filtered trace fetch, and the hackriff.analyze/1 on-demand stream (/ws/analyze/{id}; progress/stage/best/trace/done, drop-never-block). hk-api gets a JSON AnalyzeControl trait (wired in hk-cli) plus GET/POST /api/analyze, GET/DELETE /api/analyze/{id}, GET /api/analyze/{id}/trace, a Location header on 202, audit actions analyze_start/analyze_cancel. A bare {emitter_id} keeps T-546's 200 persisted-analysis read, which signal_087/acceptance_mauto depend on. Stage evaluation over IQ (MAUTO M-2) is not built, so a served job acquires for real and then ends failed/no_evaluator with resolution not-searched, never unknown. docs/api.md Analyze and docs/stream-contract.md §16 are updated together with the rewritten api_contract test.
+      Tests: cargo nextest run -p hk-pipeline -E 'binary(analyze_jobs) | binary(analyze_acquire) | (kind(lib) & test(/synth::/))' -> exit 0 (24 passed (8 new analyze_jobs integration + 3 new synth::jobs unit)); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/analyze_jobs_run_over|every_route_in_the_route_table/)' -> exit 0 (2 passed); cargo nextest run -p hk-api -E '(kind(lib) | binary(http_api) | binary(control_api) | binary(ondemand) | binary(tcp_streams) | binary(inventory_api)) & not test(silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay)' -> exit 0 (215 passed. The one excluded test fails on this box without this diff's involvement; see observed_but_not_chased. An earlier full `just test-crate hk-api` run: 285 passed, only that test failed.)
+      precheck exit 0
+      Commits: 4225d74d
+      Observed, not chased: hk-api tests/ondemand.rs:365 silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay fails even when run alone on this box at load avg 16.8-18.2: 'assert!(records > 20)' got '11 records'. It asserts wall-clock throughput from a Ticking opener that sleeps 20 ms per record over 1.5 s, so it is a latency/throughput bound (docs/10 §3.6 timing tier) rather than a defect in this diff. This diff touches that path only with a '/ws/analyze/' prefix check placed before '/ws/open/'. Needs a deflaker: move it to the timing tier or make it count-based. | crates/hk-pipeline/src/region.rs:6 module doc still says 'POST /api/analyze still answers 501'; stale after this ticket (doc comment only). | tests/e2e/tests/acceptance/t255_lora_chirp.rs:35/577 text still says POST /api/analyze answers 501; that is a message string, not an assertion. | ADR-0015 §5.1 has POST {emitter_id} start a job. This keeps a bare {emitter_id} (no job field) as T-546's synchronous 200 read, because signal_087 and acceptance_mauto assert on it, and starts a job only when a job field is present. ADR-0015 §5.1 may want a note recording this. | TCP stream form is 'open/analyze?id=<id>' (the existing on-demand TCP syntax), not ADR-0015 §5.1's 'analyze/<id>'; /ws/analyze/{id} is served as the ADR names it. | Burst-set acquisition from inventory detections (ADR-0015 §6 burst path) is not wired into jobs: every job uses the continuous two-part window. M-6's BurstSet::collect is ready for it once a detection query feeds sightings. | frames_preview content gating in the job snapshot has no dedicated test: the engine never fills frames_preview today, so no test can reach it through the real seam.
+      Use cases: RESEARCH-002
+      Resources: 252 CPU-s, peak 4.1 GB
+    commit: d62a10d0
   - id: T-860
     milestone: MAUTO
     title: "MAUTO M-9: attach (emitter_synthesis), synthesized decode provenance, ConfirmPolicy.synthesized with hold-out"
@@ -25654,7 +25776,7 @@ tasks:
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
-    status: in-progress
+    status: done
     branch: task-t875
     priority: normal
     deps:
@@ -25673,6 +25795,81 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     tier_reason: "real-time-path DSP: carrier/timing acquisition on short PSK bursts"
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 02:40).
+      Re-merged onto main b0347d95. The only conflict was the psk.rs import block: T-853's `crate::evidence::calibrated` against burst mode's `crate::buffer::ChunkFlags`. Both kept. T-853's S1 EVM evidence accumulates in Psk::symbol(), which burst mode calls only for emitted burst symbols, so in burst mode the evidence covers exactly the decoded bursts. Both changes hold. docs/tasks.yaml was taken from main, and the T-875 result was re-applied with `just task result`. Original work: psk_demod gains a burst mode (`burst: true`, cold, default off, so the streaming contract is unchanged; new crates/hk-blocks/src/blocks/iq/psk_burst.rs). It finds each burst blind by energy, then confirms and measures it feed-forward over the burst's own samples: an M-th-power carrier line, refined at symbol rate over 4 carrier candidates x 8 timing phases after a matched filter; carrier phase; timing; level. It then resets the tracker and feeds it from the burst start through a fractional delay that puts liquid's strobes (pinned by a test: (j-9)k after a reset) on the estimated symbol centres, so every loop starts converged. Only burst symbols are emitted, and each burst's first item starts an output chunk flagged DISCONTINUITY (ADR-0011 s9.2). A chunk holds at most one burst: a second ready in the same call waits for the next call, and at END an open burst is closed and flushed (resampler tail included). What cannot get a chunk is counted in `bursts_dropped`. Shortest burst decoded whole, measured with bits matched by the output's time map (not by searching for a lag), at the streaming test's SNR and a 0.125*Rs offset. BEFORE: none up to 2048 symbols in any mode except DBPSK (64); the first 99-670 symbols of every burst were lost. AFTER: 8 symbols for BPSK, DBPSK, QPSK, DQPSK, pi/4-DQPSK, 8PSK, D8PSK and half-sine OQPSK; 64 for RRC OQPSK. False accepts: none on noise-only streams; noise bursts of 24 symbols or more, 1 in 640. A fix found on the way: OQPSK's phase seed has to be known mod pi for the chosen rail, not mod pi/2, or the timing loop slips half a symbol. ADR-0011 s9 and ADR-0015 s10 (M-14) updated.
+      Tests: just test-crate hk-blocks -> exit 0 (167 passed, 6 skipped (after merge with main b0347d95))
+      precheck exit 0
+      Commits: 486796a5, 427d2592, 2ce848c2
+      Observed, not chased: The Rate DDC resampler (filter.rs, shared by resample/fm_demod/subcarrier and psk_demod) emits nothing for its first filter span. Its first output is stamped about 42 source samples (≈4 symbols at 48 kS/s → 14.4 kS/s) into a stream, so a capture cut exactly at a burst's first sample loses those symbols on either psk path. Evidence: burst_mode_decodes_a_capture_that_starts_and_ends_on_the_burst needed a 6-symbol lead; with no lead the first item was stamped at source 43.6. | One-chunk-per-process-call plus chunk-level flags (ADR-0011 s1.1) means a block cannot emit two bursts in one call. If bursts outnumber process calls (a dense ISM burst field fed in big chunks), burst mode overruns and counts bursts_dropped; a single END chunk holding two bursts drops the second. This is a contract question (e.g. multiple output chunks per call) for the ADR owner, not something to fix inside a block. | RRC OQPSK bursts shorter than 64 symbols do not pass the blind PSK test: the raw x^4 line is weak, coherence about 0.3. The symbol-rate y_I^2 - y_Q^2 line was tried and is weaker still (about 0.26 in theory), so it was not kept. A joint carrier-phase x timing search would be the next step. | Burst mode's per-burst estimation cost (up to 32 hypotheses x 256 symbols plus a 1024-point FFT each) has not been measured in a release build. | Streaming-path DBPSK decodes bursts whole from about 64 symbols at a 0.125*Rs offset: differential detection tolerates the unremoved carrier.
+      Use cases: SIGNAL-034, SIGNAL-033, SIGNAL-024, SIGNAL-027, SIGNAL-025, SIGNAL-028, SIGNAL-019, SIGNAL-004, SIGNAL-054, SIGNAL-069, SPACE-081
+      Resources: 161 CPU-s, peak 1.4 GB
+    commit: 33629cd7
+  - id: T-876
+    milestone: M3
+    title: "Burst-extent estimate overruns the burst (hk_estimate::params step 6b): 24.8-28.8 ms for a 23.5 ms burst, so noise-only samples push FSK envelope features out of every class"
+    status: in-progress
+    branch: task-t876
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. 4 of the 11 misses: the extent estimate runs past the burst end, and the appended noise-only samples move the envelope features far outside any FSK class. DELIVER: an extent estimate that ends at the burst's real end (measured, blind), with a test on the device-path scene asserting the estimated extent within a stated tolerance of the truth and the 4 rows no longer unknown for this reason. Never widen a class or lower a threshold to absorb the overrun.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    tier_reason: estimation on the real-time classification path; blind extent recovery
+  - id: T-877
+    milestone: M3
+    title: The fsk class density is one Gaussian over modulation index 0.4-5, so real device FSK at h~4 sits in its tail and reads unknown
+    status: in-progress
+    branch: task-t877
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. 7 of the 11 misses: the fsk model is a single Gaussian spanning h 0.4-5, so this scene (h=4) lands in the tail just past the unknown threshold. DELIVER: a class model that represents narrow and wide FSK honestly (e.g. split by modulation-index regime, or a mixture), refitted by the project's own fit-densities generator, with the open-set/unknown behaviour unchanged for genuinely unknown signals. Guard: hk-classify's accuracy/open-set sweeps before/after (T-852 recorded the baseline). core_interface - the classification contract; reviewed by Opus.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    core_interface: true
+  - id: T-878
+    milestone: M3
+    title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker (task-t852, 74b66601; handback ~/.hackriff-ops/work/T-852/handback.json), through the mock SDR with crates/hk-pipeline/tests/device_fsk_classify.rs (fsk_burst_train, 8 seeds x 20/25/30 dB): after T-852's refit 5 of 16 above-gate rows name fsk (0 before); the 11 misses split into the causes below. Probe through the mock SDR: pocsag and acars - no decode chain matched their tracks, so the fsk chain (the classifier's only call site, chains/fsk.rs, after it wrote demodulated bursts) never ran; retune - only the FM-broadcast chains attached, which never classify; lora - the fsk chain attached but got <4 bursts and stopped before classifying; multipath - classified 3 times but should_record dropped every row (the chain's unconfirmed label ties the classifier's rank and keeps the emitter's family). DELIVER: a classifier call site that does not depend on a decode chain succeeding (ADR-0016 section 4: where classification runs), and resolve the same-rank tie in should_record. Blind; through the mock SDR assert each of those scenes produces classification rows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
+    core_interface: true
+  - id: T-879
+    milestone: M3
+    title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-852 worker: in hk-e2e acceptance_m3, m3_repeated_unknowns_form_one_visible_cluster fails when run alone WITH THE OLD DENSITIES TOO (so not caused by T-852): 1 emitter over 3 appearances and no cluster. It also saw a multipath snippet normalised from 17,920 samples down to 124, which looks wrong. DELIVER: root-cause both (triage-first: it fails alone, so it is a real defect), fix, and prove the test goes red without the fix.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

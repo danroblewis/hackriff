@@ -318,9 +318,37 @@ def ticket_rows(ops: str, since: datetime, until: datetime) -> list[dict]:
     return out
 
 
+#: A merge-runner CONFLICT / GATE_FAIL line is the WORK RUNNER's input, not a person's: it re-queues a
+#: branch that merges cleanly again, or resumes the worker for a fix run. Counted as a touchpoint only
+#: when nothing took it within this long - a conflict run waits for a free worker slot, and T-613's
+#: re-queue came 1 h 40 min after its line. On 2026-09-24 20 of the 29 "touchpoints" in 24 h were
+#: such lines, and T-875's (conflict-fixed and re-queued by the runner in 7 min) fired a false
+#: Discord "trend break: touchpoint".
+HANDLED_WITHIN_S = 6 * 3600
+#: What the work runner hands to a person (work-needs-attention.txt) - its escalations, the
+#: coordinator's notes - which touchpoints() did not read at all before.
+_PERSON_KINDS = re.compile(r"^(BLOCKED|REVIEW_FAIL|ERROR|TIMEOUT|BOARD_UNREADABLE|NOTE|\w+_ESCALATE|\w+_NO_SESSION|"
+                           r"DEFLAKE_(?!REQUESTED)\w+)$")
+_ATT = re.compile(r"^(\d\d-\d\d \d\d:\d\d)\s+(\S+)\s+(\S+)\s+(\S+)")
+
+
+def _handled(wlog: list[tuple[float, str]], ticket: str, branch: str, t: float) -> bool:
+    marks = (f"FIX {ticket} attempt ", f"CONFLICT {ticket}: no fix run", f"QUEUED {branch} for merge")
+    return any(t <= ts <= t + HANDLED_WITHIN_S and any(m in ln for m in marks) for ts, ln in wlog)
+
+
 def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
-    """What a person had to do: attention lines that name a person's action, and holds."""
+    """What a person had to do: attention lines that name a person's action, the work runner's
+    escalations, and holds. A CONFLICT / GATE_FAIL the work runner took over is not one."""
     out = []
+    wlog = []
+    for ln in _read(os.path.join(ops, "work-runner.log")).splitlines():
+        m = re.match(r"^\[(\d\d-\d\d \d\d:\d\d:\d\d)\] ", ln)
+        if m:
+            try:
+                wlog.append((datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M:%S").timestamp(), ln))
+            except ValueError:
+                pass
     for raw in _read(os.path.join(ops, "merge-needs-attention.txt")).splitlines():
         m = re.match(r"^\[?(\d\d-\d\d \d\d:\d\d)", raw)
         if not m:
@@ -329,7 +357,26 @@ def touchpoints(ops: str, since: datetime, until: datetime) -> list[str]:
             t = datetime.strptime(f"{since.year}-{m.group(1)}", "%Y-%m-%d %H:%M")
         except ValueError:
             continue
-        if since <= t <= until and re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+        if not since <= t <= until:
+            continue
+        a = _ATT.match(raw)
+        if a and (a.group(4) == "GATE_FAIL" or a.group(4).startswith("CONFLICT(") or a.group(4) == "CONFLICT"):
+            # younger than the window and not yet taken: pending, not yet a person's (a real
+            # escalation arrives as its own work-needs line, counted below at once)
+            if until.timestamp() - t.timestamp() >= HANDLED_WITHIN_S and not _handled(wlog, a.group(3), a.group(2), t.timestamp()):
+                out.append(raw[:160] + "  (not taken by the work runner)")
+            continue
+        if re.search(r"CONFLICT|GATE_FAIL|SUITE_BR|FIX_HELD|BLOCKED|needs a person|a person must", raw):
+            out.append(raw[:160])
+    for raw in _read(os.path.join(ops, "work-needs-attention.txt")).splitlines():
+        a = _ATT.match(raw)
+        if not a or not _PERSON_KINDS.match(a.group(4)):
+            continue
+        try:
+            t = datetime.strptime(f"{since.year}-{a.group(1)}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+        if since <= t <= until:
             out.append(raw[:160])
     for h in _jsonl(os.path.join(ops, "hold.jsonl")):
         t = datetime.fromtimestamp(float(h.get("ts", 0)))
@@ -439,6 +486,7 @@ def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:
     return (f"flow: {s['landings_per_h_6h']}/h (6h) {s['landings_per_h_24h']}/h (24h) · "
             f"reds {s['reds_24h']}/{s['gates_24h']}{_cause(s)} · touchpoints {s['touchpoints_24h']} · "
             f"{exp} · holding: {_holding(ops, now)}"
+            + (f" · {s['open_graph']['short']}" if (s.get("open_graph") or {}).get("short") else "")
             + (f" · flake-accepts {s['flake_accepts_24h']} (saved {s['flake_saved_min_24h']} min)"
                if s.get("flake_accepts_24h") else ""))
 
@@ -533,6 +581,38 @@ def eta_line(ops: str, now: datetime, repo: str | None = None) -> str:
     return eta.digest_line(now, q_eta, len(queue), ticket, t_eta, why)
 
 
+def open_graph(ops: str, now: datetime, s: dict, record: bool = False, repo: str | None = None) -> dict:
+    """hkpy.graphclear over main's committed board: {line, short, n, at}; with `record`, one ETA-ledger
+    line each for "queue clears" and "open graph clears". Never raises."""
+    from hkpy import eta, graphclear
+    repo = repo or os.environ.get("HACKRIFF_REPO") or "/Users/daniellewis/hackriff"
+    try:
+        r = graphclear.gather(ops, repo, now, float(s.get("landings_per_h_6h") or 0), float(s.get("landings_per_h_24h") or 0))
+    except Exception as e:
+        return {"line": f"open graph: no estimate ({type(e).__name__}: {e})"[:200], "short": ""}
+    at = (r.get("eta", {}).get("p50") or {}).get("at")
+    out = {"line": r["line"], "n": r.get("n"), "at": at, "chain": r.get("chain"), "bound": r.get("bound"),
+           "short": f"graph clears ~{graphclear._when(at, now)} ({r.get('n')})" if at else ""}
+    if record:
+        try:
+            queue = [ln.strip() for ln in _read(os.path.join(ops, "merge-queue.txt")).splitlines() if ln.strip()]
+            gating = os.path.exists(os.path.join(ops, "bulk-in-progress")) or os.path.exists(os.path.join(repo, ".git", "MERGE_HEAD"))
+            full = sorted(g["minutes"] for g in gate_rows(ops, now - timedelta(hours=24), now)
+                          if g["class"] == "full" and g["verdict"] == "green" and g["minutes"])
+            gate_min = float(full[len(full) // 2]) if full else 25.0
+            started = None
+            for ln in _read(os.path.join(ops, "bulk-in-progress")).splitlines():
+                if ln.startswith("started="):
+                    try:
+                        started = datetime.strptime(ln.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+            graphclear.record(ops, now, r, eta.queue_clears(now, len(queue), started, gate_min), len(queue), gating)
+        except Exception:
+            pass
+    return out
+
+
 def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[str]:
     """Post the tick line when due, and each trend break at once. Returns what was posted (keys).
     `send(level, title, body, key)` defaults to ops/alert.py, which dedupes by key for 30 min and
@@ -571,7 +651,11 @@ def digest(ops: str, s: dict, now: datetime | None = None, send=None) -> list[st
             except Exception:
                 body += f"\n\nlanded since last digest: {len(landed)}"
         try:
-            body = body.replace(line, line + "\n" + eta_line(ops, now), 1)
+            extra = eta_line(ops, now)
+            if (s.get("open_graph") or {}).get("line"):
+                from hkpy import graphclear
+                extra += "\n" + s["open_graph"]["line"] + "\n" + graphclear.accuracy_line(ops)
+            body = body.replace(line, line + "\n" + extra, 1)
         except Exception:
             pass
         send("green", "pipeline digest", body, "flow:digest")
@@ -623,6 +707,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.hourly or not views:
         views.insert(0, ("hourly", hourly(a.ops, since, now)))
     s = summary(a.ops, now)
+    if a.record or a.digest:
+        s["open_graph"] = open_graph(a.ops, now, s, record=a.record)
     if a.json:
         print(json.dumps({"summary": s, **{k: v for k, v in views}}, indent=1))
     else:
