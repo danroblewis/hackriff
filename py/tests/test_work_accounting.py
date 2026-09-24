@@ -335,6 +335,30 @@ def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflict
 
 
 
+# --------------------------------------------------------------------- the merge runner lends its safe moment
+def test_sync_board_flag_runs_one_board_sync_and_exits(tmp_path, monkeypatch):
+    (tmp_path / "claims.json").write_text('{"T-801": {"state": "no-work"}}')
+    monkeypatch.setattr(R, "CLAIMS", str(tmp_path / "claims.json"))
+    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
+    seen = []
+    monkeypatch.setattr(R, "sync_board", lambda claims, dry: seen.append((claims, dry)))
+
+    def no_tick(dry):
+        raise AssertionError("no tick, no dispatch")
+    monkeypatch.setattr(R, "tick", no_tick)
+    monkeypatch.setattr(sys, "argv", ["work-runner.py", "--sync-board"])
+    R.main()
+    assert seen == [({"T-801": {"state": "no-work"}}, False)]
+
+
+def test_the_merge_runner_syncs_the_board_only_after_main_is_safe():
+    text = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    bulk = text[text.index('log "BULK MERGED'):]
+    assert bulk.index('rm -f "$BULKMARK"') < bulk.index("board_sync_now")     # marker gone first
+    single = text[text.index('log "MERGED $branch'):]
+    assert single.index("board_sync_now") < single.index("worktree_of")      # after the commit, at landing
+
+
 def test_every_worker_gets_its_own_e2e_port_block_clear_of_the_gate():
     ports = {R.e2e_port_for(f"/x/.claude/worktrees/t{n}") for n in range(400, 900)}
     assert min(ports) >= 9216 and max(ports) + 256 <= 49152          # below the ephemeral range
@@ -659,3 +683,22 @@ def test_a_conflict_on_a_deflake_branch_takes_the_conflict_skip_path(reaped, mon
     R.handle_gate_failures(claims, dry=False)
     assert fixes == [] and [k for _, k, _ in seen] == ["DEFLAKE_CONFLICT"]     # where a ticket gets launch_fix
     assert claims["DEFLAKE:deflake-a"]["state"] == "conflict" and claims["DEFLAKE:deflake-a"]["ended"]
+
+
+
+def test_board_sync_runs_under_one_lock(tmp_path, monkeypatch):
+    """The daemon and the merge runner's --sync-board both see main safe at one instant."""
+    import fcntl
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    held = []
+
+    def inner(claims, dry):
+        with open(tmp_path / "board-sync.lock", "a") as other:
+            try:
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)                       # we could take it: the wrapper did not hold it
+            except OSError:
+                held.append(True)
+        return "synced"
+    monkeypatch.setattr(R, "_sync_board", inner)
+    assert R.sync_board({}, False) == "synced" and held == [True]
