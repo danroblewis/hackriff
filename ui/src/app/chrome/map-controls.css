@@ -14,8 +14,8 @@
   right: 8px;
   font: 12px var(--ui); color: var(--text);
 }
-/* The focus column only covers the right edge when something is focused (`map-layout.css`). */
-#view-explore:has(> .focus:not(.is-empty)) .map-ctl { right: calc(var(--panel-w) + var(--panel-gap) * 2); }
+/* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
+   cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
 .map-ctl > * { pointer-events: auto; position: absolute; }
 .map-ctl > [hidden] { display: none; }
 
@@ -77,5 +77,5 @@
 /* Below the breakpoint the side/focus columns drop to the bottom of the screen (`map-layout.css`),
    so the cluster uses the canvas's whole width. */
 @media (max-width: 900px) {
-  .map-ctl, #view-explore:has(> .focus:not(.is-empty)) .map-ctl { left: 8px; right: 8px; }
+  .map-ctl { left: 8px; right: 8px; }
 }
