@@ -1732,7 +1732,10 @@ mod tests {
         r.validate(&audio_catalogue()).expect("a builtin objective");
         let spec = r.refine.as_ref().unwrap();
         assert_eq!(spec.objective, RefineObjective::builtin("wfm-pilot"));
-        assert_eq!(spec.objective.form(), Some(ObjectiveForm::Builtin("wfm-pilot")));
+        assert_eq!(
+            spec.objective.form(),
+            Some(ObjectiveForm::Builtin("wfm-pilot"))
+        );
         assert_eq!(spec.objective.builtin_name(), Some("wfm-pilot"));
         assert_eq!(spec.objective.node, None);
         assert!(spec.tunes_center() && spec.tunes_bandwidth());
@@ -1770,7 +1773,8 @@ mod tests {
             );
         }
         let mut v = audio_doc();
-        v["refine"] = json!({"objective": {"builtin": "wfm-pilot", "extra": 1}, "tune": ["center_hz"]});
+        v["refine"] =
+            json!({"objective": {"builtin": "wfm-pilot", "extra": 1}, "tune": ["center_hz"]});
         assert!(serde_json::from_value::<Recipe>(v).is_err());
     }
 
