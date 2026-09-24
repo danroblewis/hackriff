@@ -797,7 +797,7 @@ fn analytic_stage_bits(ev: &[NodeEvidence], stage: Stage) -> Option<f32> {
                 .filter(|e| e.stage == stage && e.metric.is_analytic());
             let v: Vec<&Evidence> = it.collect();
             any |= !v.is_empty();
-            combine_stage_bits(v.into_iter())
+            combine_stage_bits(v)
         })
         .sum();
     any.then_some(b)
@@ -2775,7 +2775,8 @@ impl<'a, E: Evaluator> Engine<'a, E> {
         }
         nc.ran = true;
         nc.margin_bits = holdout_bits - nc.best_null_bits;
-        nc.capped = !(nc.margin_bits >= MIN_NULL_MARGIN_BITS);
+        // A NaN margin is not a pass: the control can only cap.
+        nc.capped = nc.margin_bits.is_nan() || nc.margin_bits < MIN_NULL_MARGIN_BITS;
         nc
     }
 

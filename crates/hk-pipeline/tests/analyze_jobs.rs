@@ -964,8 +964,10 @@ mod m9 {
         let dets: Vec<Detection> = (0..detections)
             .map(|i| {
                 let t = T0_NS + 4 * S + i as i64 * (3 * S / detections.max(1) as i64);
-                let mut flags = DetectionFlags::default();
-                flags.spur_candidate = i < suspect;
+                let flags = DetectionFlags {
+                    spur_candidate: i < suspect,
+                    ..DetectionFlags::default()
+                };
                 Detection {
                     id: DetectionId::new(),
                     survey_id: survey.id,
@@ -1077,7 +1079,13 @@ mod m9 {
         assert_eq!(job.job_id, "a1");
         assert_eq!(job.profile, "standard");
         assert!(job.recipe_hash.starts_with("sha256:"));
-        assert_eq!(job.recipe["nodes"].as_array().map(Vec::len).is_some(), true);
+        assert!(
+            job.recipe["nodes"]
+                .as_array()
+                .is_some_and(|n| !n.is_empty()),
+            "the rank-1 recipe is stored inline: {}",
+            job.recipe
+        );
         assert!(job.analytic_holdout_bits.unwrap() >= 24.0);
         assert!(job.trace_summary.is_some());
         assert!(
