@@ -59,7 +59,8 @@ def gate_fail_detail(log_text: str, branch: str) -> str:
                             if _LINE_TS.match(lines[k].strip()) and "FAILS alone" in lines[k]), "")
                 return hit.group(1).strip() + (" (fails alone)" if how else "")
             if rest.startswith("TRIAGE: no FAIL lines found"):
-                return "lint/build/ui-unit (no test line red)"
+                py = re.search(r"\((pytest red: [^)]*)\)", rest)   # the runner names a pytest red
+                return py.group(1) if py else "lint/build/ui-unit (no test line red)"
             if rest.startswith(("MERGE start", "BULK attempt")):
                 break
         return "(no triage line)"

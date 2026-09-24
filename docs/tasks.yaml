@@ -18615,7 +18615,7 @@ tasks:
   - id: T-565
     milestone: MAUTO
     title: "MAUTO: the search trace, produced INSIDE the beam - a bounded TraceNode record of what M-3 tried, pruned, deferred and refused to try"
-    status: todo
+    status: in-progress
     branch: task-t565
     priority: normal
     parallel_group: SYN-E
@@ -19461,7 +19461,8 @@ tasks:
   - id: T-590
     milestone: M3
     title: Re-measure T-422's decline of qam16/qam64 - the smear it was based on is gone
-    status: todo
+    status: in-progress
+    branch: task-t590
     priority: normal
     parallel_group: M3A
     model: opus
@@ -23608,6 +23609,8 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): a floating control cluster over the canvas - Go-to, a layers button, and a live/my-location FAB in the corner - like Google Maps' map controls; the old toolbar row is gone. Say in your handback exactly what to open on staging to see it.
+
+      2026-09-24 coordinator: the relaunched worker (7c2ee1c3) found the dead worker's 6 staged files were a REVERT of the branch's own two commits, and discarded them. DoD line 'the old toolbar row is gone' is NOT met (T-528's hit test + Split/Whole-surface e2e specs drive that row): rehoming it is T-882.
     branch: task-t802
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
   - id: T-803
@@ -25915,6 +25918,82 @@ tasks:
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
     commit: 3421c16d
+  - id: T-882
+    milestone: MMAP
+    title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
+    status: todo
+    priority: high
+    deps:
+    - T-802
+    - T-806
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker (task-t802, handback ~/.hackriff-ops/work/T-802/handback.json): T-802's user DoD line says "the old toolbar row is gone", but the surface toolbar (Live, Trace, Contrast, Signals, Measure, Record, Split, Close, Whole surface) remains - T-802 kept it because T-528's hit test and two e2e specs (Split, Whole surface) drive those buttons.
+      DELIVER: remove the surface toolbar row and rehome every control, per docs/26 + ui/mockups/map-ui-v1.html: Live -> the follow-live FAB (T-802, already there); Trace / Signals / Contrast -> the layers menu (T-806, base style vs overlays); Measure -> the on-canvas measurement tool (T-822); Record -> the detail sheet's "Record clip" action (T-804). Pane management (Split, Close, Whole surface) has NO decided home in docs/26: propose one (e.g. a per-pane corner overflow menu) in the handback with a screenshot, keep it presentation-only, and do not block on it - ship the rest if that one needs the user's call. Retarget T-528's hit test and the Split/Whole-surface e2e specs at the new controls (same assertions, new selectors; never weaken them). Thin client: presentation only; a control that commands the radio still goes through the one gated DeviceAction path.
+      WHAT THE USER WILL SEE ON STAGING: open Explore - no toolbar row above the canvas; the canvas is full-bleed with only the floating controls, the layers menu holds Trace/Signals/Contrast, and pane split/close/whole-surface live where the handback says.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24 (user DoD: the old toolbar row is gone).
+
+      2026-09-24 T-803 worker: at 1000/920 px the toolbar overflows (Split, Close, Whole surface off-screen) and at 420 px Live/Trace/Auto-contrast sit under the top bar with the rest off-screen - the row runs off-screen rather than wrapping, and T-528's hit test runs only at 1440 px. Removing the row fixes this; ALSO extend the rehomed controls' hit test to 1000/920/420 px so an unreachable control goes red. Evidence: diagnostic lines in ui/e2e/app-sheet.e2e.mjs (task-t803).
+  - id: T-883
+    milestone: M2-hardening
+    title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: E2E-HARNESS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker in .claude/worktrees/t802: single-file runs of `node e2e/run.mjs app-surface.e2e.mjs` printed an `app-sheet.e2e.mjs` spec that does not exist in that worktree (it exists only in the concurrently-running T-803 worktree), one run started two lanes for one file with one lane running a copy of app-surface.e2e.mjs WITHOUT the T-802 test, and lanes came up on ports 9431/9591/9471, not the HK_E2E_PORT=9342 it set. Unverified guess: ui/e2e/run.mjs's shared LOCK_DIR / sweepStaleRuns() or lane-port state is machine-global rather than per-worktree, so concurrent runs in different worktrees see (and may sweep/kill) each other's children - a candidate cause of the load-only e2e reds in flaky.jsonl.
+      DELIVER: reproduce with two concurrent run.mjs invocations in two worktrees; if cross-talk is real, make each run's lock/lane/port state and its sweep scoped to its own run (or its own worktree) so one run can never report, reuse or kill another's; a harness test that goes red on the old code. Harness code only (ui/e2e/run.mjs, harness.mjs, backend.mjs) - no product spec assertion changes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24.
+
+      2026-09-24 CORROBORATED by the T-803 worker (separate worktree, same hour): in a parallel run its lane log showed another worktree's specs, including T-802's 'floating controls' test that is not in its tree; one surface-drag test timed out that run and passed on re-run. Two independent worktrees saw each other's runs.
+  - id: T-880
+    milestone: MCANVAS
+    title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the app-trace re-merge worker (task-deflake-app-trace-e2e-mjs, 9c6f32ec; handback ~/.hackriff-ops/work/deflake-app-trace-e2e-mjs/handback-merge-main.json). ui/e2e/app-trace.e2e.mjs's T-475 colour check (the spectrum trace at a scrubbed pane's time position must be the FFT of that pane's top cell) went red 2 of 12 clean runs, both on panes showing ~2 s of history (every pane >= 3.1 s passed): 77.2% (766/992) and 71.7% (665/928) of columns matched against the 80% bar. Offline re-analysis of both saved screenshots: canvas position correct, the 6 rows read are exactly the pane's top cell; the trace matches that cell in only 72-80% of columns but matches max(that cell, the next-older cell) in 88.6-91.8%, with misses spread across all columns (not one tile). So the drawn slice appears to be a max over TWO cells, which sliceWindow's own comment says must never happen; on longer panes cells are ~3 px so 6 rows already span two cells and the defect is masked.
+      UNCONFIRMED HYPOTHESIS: ui/src/surface/trace.ts maxHoldColumns derives the rows to read with floor/ceil on f64 epoch nanoseconds (~1.8e18 > 2^53, ~256 ns precision), so a boundary value just off a cell edge pulls in the neighbouring cell.
+      DELIVER: root-cause (it reproduces on main - the colour check is main's T-475 check), fix so the trace at a pane's time position is exactly one cell's FFT (e.g. integer/BigInt or cell-relative arithmetic, not raw epoch-ns doubles), and a ui/test unit test at a cell boundary with realistic epoch-ns values that goes red on the old code. Presentation-only arithmetic (thin client); no change to the e2e threshold or control.
+      WHAT THE USER WILL SEE ON STAGING: scrubbing a pane into the past, the spectrum trace strip above it matches the top waterfall row of that pane exactly, including on very short (~2 s) pane windows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
+  - id: T-881
+    milestone: MCANVAS
+    title: "Departed band shows never-observed grey at its newest rows (10-60% of a shadow pane) instead of shadow: gap between shadow.edge_s and as_of_s?"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the fog-of-war deflaker (pipeline-manager's manual deflaker; task-deflake-fog-of-war c9018996/ff08e2c5, landed; relayed in merge-needs-attention 00:36). In ui/e2e/fog-of-war.e2e.mjs a DEPARTED band (swept, then the radio left) shows real never-observed grey at its NEWEST rows: the top of the band-A shadow pane was plain grey with 0 pending / 0 coarse stand-ins / 0 behind the live edge, 10.7-25.1% of the pane across the deflaker's runs (rows 181-275 of a 181-548 pane in one snapshot); T-801's gate measured 59.8%. That contradicts the invariant "swept then left = shadow (last-known), not grey" (user: scan + fog-of-war shadow tiles; T-441 distinct marks).
+      UNVERIFIED GUESS: the rows between the server's newest folded frame (shadow.edge_s) and the coverage horizon (as_of_s) are marked unobserved, but no shadow run reaches them.
+      DELIVER: root-cause through the real serving path (coverage/shadow routes + the client's shadow placement), fix so a departed band's rows up to the moment it was left read as shadow (or as observed-not-yet-measured where that is the truth), never as never-observed grey; a backend or ui/test regression test that goes red on the old code. The fog-of-war assertion "departed band A reads mostly THE grey" is currently left unchanged and goes red whenever the gap exceeds half the pane: keep it, do not weaken it.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band you swept; its column on the canvas stays dim "last-known" shadow right up to the moment you left, with no plain-grey strip at the top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate's binary / just test-ui; fog-of-war.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY fog-of-war deflaker 2026-09-24 (relayed by pipeline-manager).
+    effort_reason: "hard cross-layer debugging: root cause spans the backend coverage/shadow serving path and the client's shadow placement, with only an unverified guess (prompts/model-selection.md: hard debugging -> opus high)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
