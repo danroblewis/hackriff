@@ -1079,9 +1079,10 @@ def test_the_merge_runner_says_needs_a_person_only_when_it_gave_up():
     assert '"gate failed - fix run"' in gate_fail and "TRIAGE_SPECS" in gate_fail   # names the failing test/spec
 
 
-def test_the_reserve_cap_holds_while_branches_wait_between_gates(tmp_path, monkeypatch):
-    """2026-09-24 14:30: an isolation's single gates leave 3-8 s gaps with no marker; each gap
-    dispatched up to WORK_CAP and the next gate ran beside 7 workers (load 58 vs plan 32)."""
+def test_the_reserve_cap_holds_through_the_gap_between_two_gates(tmp_path, monkeypatch):
+    """2026-09-24 14:30: an isolation's single gates leave 3-8 s gaps with no marker; each gap a tick
+    landed in dispatched up to WORK_CAP and the next gate ran beside 7 workers (load 58 vs plan 32).
+    Not keyed on the queue (review): held/parked branches sit there with no gate coming."""
     monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
     monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
     monkeypatch.setattr(R, "REPO", str(tmp_path))
@@ -1089,6 +1090,15 @@ def test_the_reserve_cap_holds_while_branches_wait_between_gates(tmp_path, monke
     monkeypatch.setattr(R, "GATE_ALONE", False)
     monkeypatch.setattr(R, "CAP", 6)
     monkeypatch.setattr(R, "RESERVE_CAP", 4)
-    assert R.dispatch_cap() == 6                                          # nothing queued, no gate
-    (tmp_path / "merge-queue.txt").write_text("task-t804\n")
-    assert R.dispatch_cap() == 4                                          # the gap between two gates
+    monkeypatch.setattr(R, "_GATE_SEEN", [0.0])
+    clock = [1_000_000.0]
+    monkeypatch.setattr(R.time, "time", lambda: clock[0])
+    (tmp_path / "merge-queue.txt").write_text("task-parked\n")
+    assert R.dispatch_cap() == 6                                          # queued but no gate: full cap
+    (tmp_path / "bulk-in-progress").write_text("base=abc\n")
+    assert R.dispatch_cap() == 4                                          # a gate runs
+    (tmp_path / "bulk-in-progress").unlink()
+    clock[0] += 20
+    assert R.dispatch_cap() == 4                                          # the gap before the next gate
+    clock[0] += 100
+    assert R.dispatch_cap() == 6                                          # the pipeline went quiet
