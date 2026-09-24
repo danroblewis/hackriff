@@ -25476,6 +25476,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Review fail (3/10 red of recipe_audio hand_started): the tone DFT spanned a flagged loop-splice break (phase jump, non-multiple-of-period sample_index jump); now measured over the longest unflagged run — 10/10 alone. Also removed the per-chunk graph.outputs.clone() in publish_outputs (review finding 2). Merged main b0347d95 (block.rs conflict: kept audio_frames + evidence). Finding 3 (squelch second open stretch in one chunk) left as a follow-up.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 02:57).
