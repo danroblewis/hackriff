@@ -88,9 +88,11 @@ batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse
 # One hold.jsonl line, JSON-encoded by Python so a `\`, a tab or a quote in `why` cannot produce a
 # record `hkpy.flow` would silently drop (review, 2026-09-23). event: expired | ended-by-queue.
 hold_event(){ python3 -c 'import json,sys,time; print(json.dumps({"ts": int(time.time()), "event": sys.argv[1], "why": sys.argv[2]}))' "$1" "$2" >> "$S/hold.jsonl" 2>/dev/null || true; }
+# The coordinator's pane is gone (incident 2026-09-24 04:07: dead 5.5 h, four alarms typed at nothing).
+no_receiver(){ python3 "$REPO/ops/alert.py" --no-receiver dev "MERGE-RUNNER: $1" >/dev/null 2>&1 || true; }
 notify_coordinator(){
   alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
-  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+  tmux has-session -t dev 2>/dev/null || { no_receiver "$1"; return 0; }; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 # Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
 # dependent tickets, but nothing else pings the coordinator for it (task-completions and the
 # failure ping above cover their cases). Without this, the coordinator can sit idle after a
@@ -105,7 +107,7 @@ notify_ok(){ # coordinator_notice [header branch...]
   local notice=$1 header=${2:-$1} body=""; shift; [ "$#" -gt 0 ] && shift
   [ "$#" -gt 0 ] && body=$(cd "$REPO" && uv run --locked --project py python -m hkpy.landnotes --header "$header" "$@" 2>/dev/null)
   alert green "landed" "${body:-$notice}"
-  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+  tmux has-session -t dev 2>/dev/null || { no_receiver "$1"; return 0; }; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
   | awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} /^branch /{if(substr($0,8)==b) print p}'; }

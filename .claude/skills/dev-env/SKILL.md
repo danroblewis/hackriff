@@ -28,6 +28,8 @@ A `watchdog.json` older than two minutes means the watchdog is dead, and nothing
 box: that is how sixteen orphaned busy loops ran through every gate for 2 h 18 m on 2026-09-22.
 
 ### stop
+0. `touch $HACKRIFF_OPS/roles-stopped` — FIRST: `ops/watchdog.py` relaunches a dead `dev`/`flow`
+   session within ~2 min (incident 2026-09-24 04:07) unless this marker (or `dispatch-paused`) exists.
 1. `tmux kill-session -t dev` — the coordinator and every subagent it spawned.
 2. `pkill -f work-runner.py` — dispatch. Its running `claude -p` workers keep going in their
    worktrees and finish on their own; their branches are picked up by the next runner start
@@ -81,6 +83,8 @@ find whose edits those were before touching them.
    `main`; if it starts spawning workers for ordinary `todo` tickets, its role file is stale —
    stop it, check `.claude/roles/coordinator.md` carries the "Dispatch … is the work runner's job"
    paragraph.
+   Then (and the pipeline manager, `ops/launch.sh pipeline-manager`, if it is not running)
+   `rm -f $HACKRIFF_OPS/roles-stopped` — only now may the watchdog relaunch a session that dies.
 5. Tell the user what is running, what is queued, what the first dispatches were, and anything
    in either attention file.
 
