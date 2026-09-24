@@ -2927,9 +2927,40 @@ load(); setInterval(load,30000);
 let rz; window.addEventListener('resize',()=>{ clearTimeout(rz); rz=setTimeout(load,150); });
 </script></body></html>"""
 
+_TASKORDER = {"t": 0.0, "v": None}
+
+
+def taskorder_cached(max_age=60.0):
+    """`hkpy.taskorder.analyse` over main's COMMITTED board (the bulk marker's base while a batch
+    gates - never the provisional tip), cached: the board is 1.9 MB and takes ~0.6 s to parse."""
+    if _TASKORDER["v"] is not None and time.time() - _TASKORDER["t"] < max_age:
+        return _TASKORDER["v"]
+    import sys as _sys
+    if os.path.join(REPO, "py") not in _sys.path:
+        _sys.path.insert(0, os.path.join(REPO, "py"))
+    from hkpy import taskorder
+    tasks, ref = taskorder.committed_tasks(REPO, SCRATCH)
+    a = taskorder.analyse(tasks)
+    keep = ("id", "title", "status", "milestone", "depth", "gate", "unblocks", "value", "downstream_milestones", "blocked")
+    v = {"board": ref, "formula": a["formula"], "open": a["open"],
+         "rows": [{k: r[k] for k in keep} for r in a["rows"]],
+         "groups": a["groups"], "frontier": a["frontier"], "cycle": a["cycle"], "self_deps": a["self_deps"]}
+    _TASKORDER.update(t=time.time(), v=v)
+    return v
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        # Leverage (py/hkpy/taskorder.py, `just task order`): which open tickets release the most
+        # when they land, over main's committed board - the panel on /worklog beside the role logs.
+        if self.path.startswith("/taskorder.json"):
+            try:
+                body = json.dumps(taskorder_cached()).encode(); self.send_response(200)
+            except Exception as e:
+                body = json.dumps({"error": f"{type(e).__name__}: {e}"}).encode(); self.send_response(500)
+            self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         # Role work log (ops/worklog.py): each role session's end-of-turn report, for the user to read.
         if self.path.startswith("/worklog.json"):
             try:
