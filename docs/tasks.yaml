@@ -25189,6 +25189,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 01:05).
+      MAUTO M-6 (ADR-0015 §5.3/§6/§14) delivered. hk-store: IqBuffer::read / ClipPlan::read give buffered IQ in memory as ReadChunk (one per segment piece, with provenance; same plan and eviction check as export_clip), and Clip::from_chunks. hk-pipeline: IqBufferService::read is the §5.3 ring read; pin_chunks stores read chunks as a pinned iq-snippet Recording with the new RecordingTrigger::Analyze, written from memory so the clip is byte-identical to what the search reads. New hk_pipeline::synth::acquire (synth.rs moved to synth/mod.rs): BurstSet::collect (membership emitter > cluster > band, a different identity excludes; guard max(2 ms, duration); overlapping guards split at the gap midpoint so no sample is read twice; cap 64 bursts / 2 s keeping the newest, long single bursts trimmed and flagged; odd bursts are hold-out), acquire (Rule I ReadLedger, DISCONTINUITY on burst gaps and segment boundaries, bursts with no IQ listed as missing and not counted; NoIq/Evicted when nothing is read), acquire_and_pin (pins before any search), and AcquiredWindow (§5.2 window) filled from the ledger. docs/api.md and docs/07 §2.12 list trigger `analyze`. Budgets (T-552 proposal-call counting) are M-3/M-8's and nothing here charges them.
+      Tests: cargo nextest run -p hk-store -E 'test(/iqbuffer/)' -> exit 0 (19 passed (incl. new t857_read_returns_segment_chunks_with_provenance_and_exact_bytes)); cargo nextest run -p hk-model -> exit 0 (362 passed); cargo nextest run -p hk-pipeline -E 'test(/synth::/) or binary(analyze_acquire) or binary(iq_capture_buffer) or binary(iq_capture_ring_restart) or binary(iq_capture_ring_allocation) or test(/playback/)' -> exit 0 (19 passed (7 acquire unit tests + mock-SDR e2e analyze_acquire))
+      precheck exit 0
+      Commits: 4f030620
+      Observed, not chased: The §6 search changes (S0 seed from the burst's short-FFT centre, preamble-driven S2 seeds, ppm_demod-first skeletons) and per-burst evidence n accumulation are the engine's (M-3/M-7), not acquisition; nothing consumes Acquisition yet. | `source: live` acquisition (collect live_s from a ring reader, §5.3) and targeting a pinned clip on re-run are M-8's job routing; AcquiredWindow.source is fixed to `ring` here. | Where to get burst sightings (T-075 burst detections, emitter/cluster links) for a job target is M-8's query; BurstSighting::from_detection is the adapter.
+      Resources: 124 CPU-s, peak 2.4 GB
   - id: T-858
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
