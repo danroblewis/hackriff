@@ -23487,7 +23487,7 @@ tasks:
   - id: T-801
     milestone: MMAP
     title: 'Full-bleed layout: canvas is 100vw x 100vh, the app-shell frame retires'
-    status: in-progress
+    status: done
     branch: task-t801
     priority: high
     parallel_group: MAP-CHROME
@@ -23571,6 +23571,7 @@ tasks:
 
       Commit: 7a5d243f "T-801 round 3: inset the surface's own toolbar past the
       floating panels" on task-t801. Worktree clean.
+    commit: "30401389"
   - id: T-802
     milestone: MMAP
     title: 'Floating control cluster: Go-to, layers button, live/my-location FAB, zoom — semi-transparent, edge-docked, fadeable'
