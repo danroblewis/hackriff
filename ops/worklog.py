@@ -246,9 +246,19 @@ PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 .md th,.md td{border:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top}
 .md th{color:var(--mut)}.md a{color:var(--amber)}.md b,.md strong{color:#fff}
 .empty{color:var(--dim);padding:20px 0}
+.bn{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 12px;margin-bottom:10px;font-size:12.5px}
+.bn h3{margin:0 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);font-weight:600}
+.bn .row{display:flex;gap:10px;align-items:baseline;padding:2px 0}
+.bn .n{font:12px var(--mono);color:var(--amber);min-width:3.5em;text-align:right}
+.bn .id{font:12px var(--mono);min-width:4.5em}
+.bn .ms{font:11px var(--mono);color:var(--dim);min-width:7em}
+.bn .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt)}
+.bn .foot{color:var(--dim);font:11.5px var(--mono);margin-top:4px}
+.bn .warn{color:var(--coral)}
 </style></head><body>
 <div class=top><span class=nm>hack<b>riff</b> · role work log</span><a href="/">← dashboard</a><span class=sub id=sub>loading…</span></div>
 <div class=wrap>
+<div class=bn id=bn></div>
 <div class=tabs id=tabs></div>
 <div class=ctl><label><input type=checkbox id=flowonly> <code>flow:</code> lines only</label><span class=sess id=sess></span></div>
 <div id=list></div>
@@ -284,6 +294,12 @@ document.addEventListener('click',e=>{
 });
 document.getElementById('flowonly').onchange=e=>{ try{localStorage.setItem('wl-flow',e.target.checked?'1':'0');}catch(x){} render(); };
 async function tick(){ try{ D=await (await fetch('/worklog.json',{cache:'no-store'})).json(); document.getElementById('sub').textContent='updated '+(D.generated||''); render(); }catch(e){ document.getElementById('sub').textContent='error: '+e; } }
-tick(); setInterval(tick,30000);
+async function bn(){ try{ const b=await (await fetch('/taskorder.json',{cache:'no-store'})).json(); const el=document.getElementById('bn');
+  if(b.error){ el.innerHTML='<h3>Bottlenecks</h3><div class=foot>'+esc(b.error)+'</div>'; return; }
+  const rows=(b.top||[]).map(r=>`<div class=row><span class=n>${r.unblocks}</span><span class=id>${esc(r.id)}</span><span class=ms>${esc((r.moves||[]).join(','))}</span><span class=t>${esc(r.title)}${r.blocked?' <span class=warn>(blocked)</span>':''}</span></div>`).join('')||'<div class=foot>nothing open holds another open ticket</div>';
+  const warn=(b.self_deps&&b.self_deps.length)?` · <span class=warn>self-dependency: ${esc(b.self_deps.join(' '))}</span>`:((b.cycle&&b.cycle.length)?` · <span class=warn>cycle: ${esc(b.cycle.join(' '))}</span>`:'');
+  el.innerHTML=`<h3>Bottlenecks · open tickets transitively behind each (just task order)</h3>${rows}<div class=foot>${b.open} open · frontier ${b.frontier_n} dispatchable now${b.frontier_n?': '+esc((b.frontier||[]).join(' ')):''}${warn}</div>`;
+}catch(e){} }
+tick(); setInterval(tick,30000); bn(); setInterval(bn,60000);
 </script></body></html>
 """

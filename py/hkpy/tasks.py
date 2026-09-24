@@ -25,6 +25,7 @@ safe leaves the file exactly as it found it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -529,6 +530,21 @@ def cmd_new(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------------------------
 
 
+def cmd_order(args: argparse.Namespace) -> int:
+    """Read-only: which open tickets hold the most work behind them (py/hkpy/taskorder.py)."""
+    from hkpy import taskorder
+    try:
+        doc = load_doc(args.file.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        return die(f"docs/tasks.yaml is not strict YAML:\n{e}")
+    a = taskorder.analyse(doc.get("tasks") or [])
+    if args.json:
+        print(json.dumps(a, indent=1))
+    else:
+        print("\n".join(taskorder.render(a, top=args.top, show_order=args.topo)))
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     text = args.file.read_text(encoding="utf-8")
     try:
@@ -638,6 +654,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--found-by", help="a ticket/agent id, recorded as the notes' provenance line")
     add_file_arg(p)
     p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("order", help="read-only: bottlenecks by 'unblocks N', the frontier, a topological order")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--topo", action="store_true", help="also print the full topological order")
+    p.add_argument("--json", action="store_true")
+    add_file_arg(p)
+    p.set_defaults(func=cmd_order)
 
     p = sub.add_parser("validate", help="strict-parse the board and check its invariants")
     add_file_arg(p)
