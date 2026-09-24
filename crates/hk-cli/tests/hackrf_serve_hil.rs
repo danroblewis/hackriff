@@ -52,6 +52,7 @@ fn live_serve_inventory_shows_real_fm_detections() {
     } = start(&ServeOptions {
         source: ServeSource::HackRf {
             spec: "hackrf".into(),
+            extra: Vec::new(),
             live: LiveArgs {
                 center_hz: 100.8e6,
                 sample_rate_hz: 2.4e6,

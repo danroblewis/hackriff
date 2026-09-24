@@ -420,6 +420,7 @@ fn hil_blind_fm_survey_on_the_hackrf() {
     } = start(&ServeOptions {
         source: ServeSource::HackRf {
             spec: "hackrf".into(),
+            extra: Vec::new(),
             live: live_args(ca, RUN_RATE_HZ),
         },
         data_dir: Some(dir.clone()),
