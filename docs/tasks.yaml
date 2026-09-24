@@ -23860,7 +23860,8 @@ tasks:
   - id: T-809
     milestone: MMAP
     title: 'Pins: signal/event markers with rest/hover(MapTip)/selected states'
-    status: todo
+    status: in-progress
+    branch: task-t809
     priority: high
     parallel_group: MAP-LAYERS
     model: opus
