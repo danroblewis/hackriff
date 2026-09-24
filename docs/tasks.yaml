@@ -23683,7 +23683,7 @@ tasks:
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
-    status: in-progress
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23723,6 +23723,7 @@ tasks:
       Observed, not chased: Nothing sets the chrome idle-fade class yet (no body.chrome-idle in ui/src). The HUD reads that class, so it will fade as soon as MAP-24/T-824 (or MAP-02) adds the idle timer. | #view-explore > .centre still has 56px top / 70px bottom padding (map-layout.css), so the canvas stage is not fully edge-to-edge. The rulers sit on the pane edges inside that stage. | No browser/e2e run was made (targeted protocol). The label CSS offsets (freq 30px above the pane bottom, time 14px right of the left edge) were checked only by unit geometry, not by eye. | The /surface.html preview (preview-main.ts) does not pass a hud element, so it has no rulers. Only the app's Explore surface was wired.
       Use cases: AWARE-042
       Resources: 72 CPU-s, peak 0.4 GB
+    commit: 18586f9b
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -25483,7 +25484,7 @@ tasks:
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-859
@@ -25516,6 +25517,7 @@ tasks:
       Commits: 4f62a242, 520b78b7, 36f21a59
       Observed, not chased: Analyze job poll never stops after the job finishes (reviewer non-blocking) | save-template route (M-10) not yet in docs/api.md | Browser e2e not run
       Resources: 72 CPU-s, peak 0.6 GB
+    commit: ece2fc3d
   - id: T-863
     milestone: MAUTO
     title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
@@ -25758,7 +25760,7 @@ tasks:
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-866
@@ -25785,6 +25787,7 @@ tasks:
       Observed, not chased: Schema 3 refuses a second audio output ('at most one audio output per recipe') and AudioChannels has only Mono. Carrying L/R in one stream is LP-10's wire change, so stereo_recipe.rs sends the right channel out as a stage output for now. | stereo_decode has no calibration table under synth/calibration (same as subcarrier), so hk-synth scores its pilot_lock at NoTable = 0 bits until one is generated. | hk-model change is doc-comment only (Stage::S1 lists stereo_decode); hk-model tests were not run.
       Use cases: SIGNAL-062
       Resources: 43 CPU-s, peak 1.7 GB
+    branch: task-t873
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
