@@ -24664,7 +24664,8 @@ tasks:
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
-    status: todo
+    status: in-progress
+    branch: task-t849
     priority: normal
     deps: []
     parallel_group: M4B
