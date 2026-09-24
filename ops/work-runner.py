@@ -163,15 +163,22 @@ def attention(ticket, branch, kind, detail=""):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
     # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
-    # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
-    # coordinator's routine and stay in the file only.
+    # dedupes per key and never raises; NO_WORK / UNCOMMITTED are the coordinator's routine and
+    # stay in the file only.
     level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
              "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
              "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
+    # "needs a person" only where no automation will pick it up (user, 2026-09-24 11:40): fix runs spent
+    # or impossible, a cancellation to confirm, a review FAIL no fix round will take (REVIEW_FAIL is only
+    # written then), and a BLOCKED hand-back that asks the user to decide.
+    person = kind in ("CONFLICT_ESCALATE", "GATE_FAIL_ESCALATE", "CONFLICT_NO_SESSION", "GATE_FAIL_NO_SESSION",
+                      "CANCEL_PROPOSED", "REVIEW_FAIL") or (kind == "BLOCKED" and re.search(r"\buser\b|decision", detail, re.I))
+    if person:
+        level = level or "amber"
     if level:
         try:
             subprocess.run([sys.executable, os.path.join(REPO, "ops", "alert.py"),
-                            level, f"{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
+                            level, f"{'needs a person - ' if person else ''}{ticket} {kind}", f"{branch}: {detail[:300]}", "--key", f"wr:{ticket}:{kind}"],
                            capture_output=True, timeout=30)
         except Exception:
             pass
