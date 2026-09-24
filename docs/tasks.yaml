@@ -25401,7 +25401,7 @@ tasks:
   - id: T-865
     milestone: MAUTO
     title: "LP-1: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over)"
-    status: in-progress
+    status: done
     priority: normal
     deps: []
     parallel_group: LP
@@ -25427,6 +25427,7 @@ tasks:
       Observed, not chased: When a retune or re-plumb ends a Listen stream, the server resets the WebSocket without sending a close frame (tungstenite: 'Connection reset without closing handshake'). The freeze only requires that the connection ends with no further header, so a later stage may add a close frame (for example 1000 or 4410) without breaking it. Whether to send one is a UI/AudioSession decision. | .config/nextest.toml has a retries=1 override for test(retuning_into_paging_while_listening_stops_the_audio_and_refuses_new_listeners), but no test with that name exists in crates/ or tests/ any more, so the override is stale. | Not frozen here, and still outside Stage 0's list: emitter= targets through a real inventory (tests/e2e acceptance/listen.rs covers them with the recorded FM fixture) and the TCP opener open/listen. Stage 4 should run this file with HK_LISTEN_PIPELINE=1 as well.
       Use cases: SIGNAL-062
       Resources: 175 CPU-s, peak 2.9 GB
+    commit: e250c392
   - id: T-866
     milestone: MAUTO
     title: "LP-2: audio blocks + the `audio` output kind + `input.liveness` + recipe schema 3"
