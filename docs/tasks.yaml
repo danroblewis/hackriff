@@ -6748,7 +6748,7 @@ tasks:
     milestone: M4
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-270
@@ -6776,6 +6776,7 @@ tasks:
       Observed, not chased: Design choice for review: grant Encrypted (service options) + header ALGID 0x80 stays Encrypted (fail closed, reason algid-contradicts-grant) rather than letting the header lower it to Clear; the repo's put_call and schema trigger already refuse encrypted->clear rewrites, so the stronger override would be inconsistent across passes. Not staged in e2e (scene grants state nothing); pinned by CallHeader unit tests. | cc_calls_algid counts per write, so a T-308 continued call decided by ALGID on two passes is counted twice (continuations are rare on the built-in 9.5 s duty cycle). | HDU (which also carries ALGID at call start) is still not decoded (T-849 note); a call whose transmission window holds no LDU2 stays at the grant's state.
       Use cases: AWARE-067
       Resources: 135 CPU-s, peak 2.6 GB
+    commit: 4ff9087b
   - id: T-331
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
