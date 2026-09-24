@@ -90,8 +90,11 @@ batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse
 hold_event(){ python3 -c 'import json,sys,time; print(json.dumps({"ts": int(time.time()), "event": sys.argv[1], "why": sys.argv[2]}))' "$1" "$2" >> "$S/hold.jsonl" 2>/dev/null || true; }
 # The coordinator's pane is gone (incident 2026-09-24 04:07: dead 5.5 h, four alarms typed at nothing).
 no_receiver(){ python3 "$REPO/ops/alert.py" --no-receiver dev "MERGE-RUNNER: $1" >/dev/null 2>&1 || true; }
+# $2 is the Discord title. "needs a person" is reserved for what no automation will pick up (user,
+# 2026-09-24 11:40: six "needs a person" alerts that day were fix-run outcomes, and the user came
+# asking what to decide); a red the work runner resumes a worker for says "fix run".
 notify_coordinator(){
-  alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
+  alert amber "${2:-merge runner: coordinator action}" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
   tmux has-session -t dev 2>/dev/null || { no_receiver "$1"; return 0; }; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 # Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
 # dependent tickets, but nothing else pings the coordinator for it (task-completions and the
@@ -228,13 +231,13 @@ process(){
   if [ -n "$prev" ] && [ "$prev" = "$tip" ]; then
     log "SKIP $branch: UNCHANGED SINCE ITS GATE FAILURE ($tip) - needs a fix, not a re-queue"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  UNCHANGED_SINCE_FAIL ($tip)" >> "$NEEDS"
-    notify_coordinator "$ticket ($branch) was re-queued UNCHANGED since its gate failure - fix the branch first; it was NOT re-gated."
+    notify_coordinator "$ticket ($branch) was re-queued UNCHANGED since its gate failure - fix the branch first; it was NOT re-gated." "re-queued unchanged - not re-gated"
     return 0
   fi
   if [ "${tries:-0}" -ge "$MAX_ATTEMPTS" ]; then
     log "GIVE UP $branch: $tries gate attempts already (cap $MAX_ATTEMPTS) - escalating, no further automatic retries"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GAVE_UP after $tries attempts - NEEDS A PERSON" >> "$NEEDS"
-    notify_coordinator "$ticket ($branch) has now FAILED $tries gate attempts; the runner has GIVEN UP and will not retry it."
+    notify_coordinator "$ticket ($branch) has now FAILED $tries gate attempts; the runner has GIVEN UP and will not retry it." "needs a person - $ticket gate attempts spent"
     return 0
   fi
   if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would merge $branch ($ticket, $ahead ahead)"; return 0; fi
@@ -243,7 +246,7 @@ process(){
   if ! git merge --no-ff --no-commit "$branch" >>"$LOG" 2>&1; then
     git merge --abort 2>/dev/null || true
     log "CONFLICT $branch -> flag for AI"
-    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main."; return 0
+    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main." "merge conflict - fix run"; return 0
   fi
   log "GATE $branch (just gate-merge; may take 15-25 min)…"
   GATE_T0=$SECONDS
@@ -289,7 +292,7 @@ process(){
       log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
       git merge --abort 2>/dev/null || true
       echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"
-      notify_coordinator "$ticket ($branch) gated GREEN but its merge COMMIT was refused (see the log; usually a malformed docs/tasks.yaml). main is untouched."
+      notify_coordinator "$ticket ($branch) gated GREEN but its merge COMMIT was refused (see the log; usually a malformed docs/tasks.yaml). main is untouched." "merge commit refused"
       return 0
     fi
     log "MERGED $branch ✓"
@@ -309,7 +312,7 @@ process(){
       # Not this branch's red: no attempt charged, re-queued by the caller; an isolation stops here.
       log "TRIAGE: MAIN IS RED on: $MAIN_RED_WHAT -> $branch re-queued, no attempt charged; queue the fix"
       echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the branch is re-queued behind the fix" >> "$NEEDS"
-      notify_coordinator "main itself fails $MAIN_RED_WHAT - $ticket ($branch) is re-queued, not blamed; queue a fix for main."
+      notify_coordinator "main itself fails $MAIN_RED_WHAT - $ticket ($branch) is re-queued, not blamed; queue a fix for main." "main is red - fix for main needed"
       MAIN_RED_STOP=1
       # Parked until main moves: re-gating it against the same red main only re-proves the red
       # (review, 2026-09-24: a lone branch re-queued here re-gated every tick until main was fixed).
@@ -318,7 +321,7 @@ process(){
     fi
     record_attempt "$branch" "$tip"
     log "GATE FAILED $branch (attempt $((tries+1))/$MAX_ATTEMPTS, tip $tip) -> abort + flag for AI"
-    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate (tests)."
+    echo "$(date '+%m-%d %H:%M')  $branch  $ticket  GATE_FAIL" >> "$NEEDS"; notify_coordinator "$ticket ($branch) FAILED the merge gate: $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} ${TRIAGE_WHAT:-} | cut -c1-300)" "gate failed - fix run"
   fi
   return 0
 }
@@ -761,7 +764,7 @@ try_bulk(){
       batch_sig "${branches[@]}" > "$S/suite-broken"
       log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
       echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
-      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued."
+      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued." "main+batch broken - fix needed"
       rm -f "$BULKMARK"
       return 0
     fi
@@ -771,7 +774,7 @@ try_bulk(){
       batch_sig "${branches[@]}" > "$S/suite-broken"
       log "TRIAGE: MAIN IS RED on: $MAIN_RED_WHAT -> batch re-queued in order, NOT isolated; queue the fix"
       echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the batch is re-queued behind the fix" >> "$NEEDS"
-      notify_coordinator "main itself fails $MAIN_RED_WHAT - the batch ($tickets) is re-queued and held; queue a fix for main."
+      notify_coordinator "main itself fails $MAIN_RED_WHAT - the batch ($tickets) is re-queued and held; queue a fix for main." "main is red - fix for main needed"
       rm -f "$BULKMARK"
       return 0
     fi
