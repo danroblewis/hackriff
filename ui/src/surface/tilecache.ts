@@ -2006,6 +2006,34 @@ export class TileCache<T> {
     this.limit = Math.min(this.limit, this.ceiling);
   }
 
+  /**
+   * **An answer for a window that had not begun when it was asked for is evidence about none of it**
+   * (T-890 follow-up). Returns `data` with its horizon pinned to the tile's own start in that case.
+   *
+   * The route takes `coverage.horizon.as_of_s` from the tune records that overlap the tile's window,
+   * clipped to it — so a tile asked for before the live edge reaches it (the look-ahead,
+   * [[lookAhead]]) has no overlapping record, answers `as_of_s: null`, and paints every row
+   * `unobserved`. `null` is honestly "no record touches this band" for a window in the past; for one
+   * in the future it is only "nothing has happened yet", and drawn as served it put THE grey over
+   * the newest rows of a following pane — the rows the radio was recording — from the moment the
+   * edge entered the tile until the first revalidation landed (canvas-journey: 6-18 % of the
+   * live-edge zone grey over a band the server reports fully observed).
+   *
+   * The client knows exactly one thing the answer does not: the edge it asked at. When that edge
+   * had not reached the tile's start, the copy reaches forward exactly as far as that start — the
+   * same statement a copy built from pushed rows starts from (T-893's `synthetic`, horizon at its
+   * own start). The renderer then draws nothing past it, the row feed carries the horizon forward
+   * row by row, and the refresh lane replaces it with an answer that has records. A tile asked for
+   * at or after its own start is untouched, as is any answer that states a horizon, and a client
+   * that has never been told an edge (a historical view) has nothing to compare and changes nothing.
+   */
+  private horizonOf(addr: TileAddr, data: TileData, edgeAtFetchNs: number): TileData {
+    const lat = this.lat;
+    if (!lat || addr.scheme !== lat.scheme || Number.isFinite(data.asOfNs as number) || !Number.isFinite(edgeAtFetchNs)) return data;
+    const t0 = extentOf(lat, addr).t0Ns;
+    return edgeAtFetchNs <= t0 ? { ...data, asOfNs: t0 } : data;
+  }
+
   /** Take a fetched tile. **False means "ask again"**: the tuning changed while it was in flight. */
   private insert(addr: TileAddr, data: TileData, edgeAtFetchNs: number): boolean {
     const key = keyOf(addr);
@@ -2015,6 +2043,7 @@ export class TileCache<T> {
     // a resident key is a duplicate, and the same tile is never uploaded twice — except a copy built
     // from pushed rows, which any real answer replaces (T-893).
     if (prev && !this.refreshing.has(key) && !prev.synthetic) return true;
+    data = this.horizonOf(addr, data, edgeAtFetchNs);
     const tex = this.tex.upload(data);
     this.stats.uploads++;
     // The replaced texture is destroyed and its bytes returned: a refresh that leaked one would turn

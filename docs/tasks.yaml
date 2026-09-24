@@ -26333,7 +26333,7 @@ tasks:
   - id: T-896
     milestone: MMAP
     title: "Overlay position is ours: chrome is non-repositionable, users choose visibility only - docs/23 §10.2 + ADR-0023 §1 line and a T-825 guard (user P3)"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: MAP-TEST
@@ -26349,6 +26349,15 @@ tasks:
       FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
 
       WHAT THE USER WILL SEE ON STAGING: every floating control and panel sits in the one place the design gives it; nothing can be dragged somewhere else, and a reload never restores a moved panel - only which panels are shown.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 14:46).
+      docs/23 §10.2 gains the normative line 'No overlay is draggable or repositionable; users choose visibility only' pointing at §10.6 rule 3, and ADR-0023 §1 (still PROVISIONAL) gets the same one-line amendment. New guard ui/test/map-overlay-position.test.ts (named as part of T-825's MAP-25 suite, which is still todo and should fold it in): (1) every storage key the client uses is classified in a table (visibility / snap / display-pref / session-token); any positional key name or positional stored value (left/top/x/y/pos/dock/offset/clientX/getBoundingClientRect...) in any get/set/removeItem, *_KEY constant or storageKey option across ui/src fails, as does an unclassified key; (2) no ui/src/app (band-2/3 chrome) pointermove/mousemove/touchmove/drag handler, inline or named, writes left/top/right/bottom/inset/transform/cssText, and nothing there is made draggable. The sheet's height-only drag (T-803 snap) is asserted allowed. Non-vacuity: injected position writes into the real sheet.ts and shell.ts sources, plus synthetic snippets, each go red.
+      Tests: node test/run.mjs map-overlay-position (in ui/) -> exit 0 (12 passed); just test-ui -> exit 0 (63/63 test files passed); npx tsc --noEmit -p ui -> exit 0 (clean)
+      precheck exit 0
+      Commits: 4642f712
+      Observed, not chased: T-825 (MAP-25) is still todo; when it lands it should list ui/test/map-overlay-position.test.ts as part of its suite rather than re-implement the P3 guard. | The guard is a static source scan scoped to ui/src/app for drag handlers; chrome mounted from ui/src/surface (if the layers panel ever moves there) would need that directory added to chromeSrc.
+      Resources: 55 CPU-s, peak 1.2 GB
+    commit: da858df8
   - id: T-897
     milestone: MMAP
     title: "Path layer: (t, f) polylines on the surface in the tile pass - chirp, hop sequence, sweep path as first producers (user P2)"
