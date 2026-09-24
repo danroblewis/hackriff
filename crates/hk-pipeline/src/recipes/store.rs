@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use hk_recipe::{RECIPE_SCHEMA, RECIPE_SCHEMA_VERSION, Recipe, is_id};
+use hk_recipe::{RECIPE_SCHEMA, Recipe, is_id, is_supported_schema_version};
 use serde_json::{Value, json};
 
 /// Suffix of a built-in recipe file.
@@ -239,7 +239,7 @@ impl RecipeStore {
     /// returns the stored document. The caller validates it against the block catalogue first.
     pub fn save(&self, mut recipe: Recipe) -> Result<Recipe, StoreError> {
         check_id(&recipe.id)?;
-        if recipe.schema != RECIPE_SCHEMA || recipe.schema_version != RECIPE_SCHEMA_VERSION {
+        if recipe.schema != RECIPE_SCHEMA || !is_supported_schema_version(recipe.schema_version) {
             return Err(StoreError::new(
                 400,
                 "invalid",

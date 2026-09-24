@@ -128,6 +128,13 @@ pub struct Evidence { stage: Stage, metric: MetricId, raw: f32, n: u32, bits: f3
 
 Recipe `refine.objective` gains `{"evidence": "deepest"}`. That is a new optional key, so `schema_version` 3 (ADR-0011 §2.4 rule). A running synthesized pipeline then keeps tuning from the same evidence.
 
+**As built (T-858 = M-7, 2026-09-24; `hk_synth::objective`).** Three points differ from the text above, each forced by a measurement:
+- **The channel is flat, fixed and not evidence.** Every calibration null is white noise at the prefix's input rate fed to its own S0 filter, and the tables are tight (`lowpass@1` credits 6 bits at +0.1 dB, n = 16 384). A DDC whose passband rolls off at the band edges made pure noise score 6 bits at S0, and one narrower than the S0 filter's support coloured the noise the S1/S2 blocks saw, so noise locked at S2 **on hold-out**. The objective therefore channelises with a flat passband of 0.9 × the prefix rate (wider than any S0 filter's support), **the bandwidth axis has one value** — the channel filter is the prefix's S0 node, whose cutoff is tuned as a mode axis by path — and **S0 is excluded** from `quality` and the lock (still reported as `b_S0`). A schema-3 recipe with the evidence objective lists `nodes[<id>].params.<name>` paths in `refine.tune` and may not list `bandwidth_hz`.
+- **`EvalDepth` maps onto the split, enforced by the objective.** `Acquire`/`Track` read only samples before the hold-out boundary, `Validate` only samples after it, whatever window lengths the loop is configured with; `RefinementOutcome::locked` means locked on hold-out. "Deepest" is fixed at construction — the candidate's deepest fixed stage, or the result's `stage_reached` for a running pipeline (S6 locks on S5's floor, §16.2 C7) — never read off a measurement.
+- **Supports are aligned per block.** Calibrated metrics score only at enumerated supports and one window cannot land `fsk_demod` (samples) and `clock_recovery` (symbols) on theirs at once, so each measurement re-runs the prefix over a leading sub-slice sized per calibrated block (≤ 1 + 2 × blocks runs).
+
+**Measured limits (not decided here).** Calibrated S1–S3 metrics saturate at 6 bits each, so for a strong unshaped 2-FSK the objective is flat as soon as one tone passes the S0 filter (and at low SNR the true centre scored *lower* than a one-tone tuning); a refinement at S2 finds the emission, not its centre — only analytic S4/S5 evidence ranks finer tunings. §3.1 step 6's "refine at the first S2 lock" should be weighed against that before M-3's engine calls it; the engine-side call (`refined_into`) needs an IQ-backed `Evaluator` and is not wired yet.
+
 ## 3. Search strategy
 
 ### 3.1 Loop
@@ -355,7 +362,7 @@ All thresholds are fixed **before** implementation. The M-12 review may tighten 
 
 **Why the vocabulary is in `hk-model`** (D1, found by T-848): `hk-blocks` must name `Evidence`/`EvidenceSet`/`Stage` for `Block::evidence`, and `hk-synth` depends on `hk-blocks`, so placing them in `hk-synth` as first written was a dependency cycle. Same pattern as ADR-0016's types in `hk_model::classify`.
 
-**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`).
+**Deltas to write when MAUTO is scheduled:** docs/07 §2.11 (`synthesis`), §2.15 (Decode `provenance`) and a new Template object; docs/api.md "Analyze" (replaces the T-190 section); stream-contract `hackriff.analyze/1`; recipe `schema_version` 3 (`refine.objective.evidence`; **done: T-858**, ADR-0011 §2.4).
 
 ## 10. MAUTO task graph (sketch; ids TBD; not in tasks.yaml)
 

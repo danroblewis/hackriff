@@ -210,7 +210,15 @@ pub fn split(recipe: &Recipe, registry: &Registry) -> Result<Split, RuntimeError
         refine: recipe
             .refine
             .clone()
-            .filter(|r| down.contains(r.objective.node.as_str())),
+            // A node-metric objective follows its node into the frames half. The evidence
+            // objective (schema 3) measures the whole IQ-to-tail prefix, which neither half
+            // holds on its own, so it is not carried into either.
+            .filter(|r| {
+                r.objective
+                    .node
+                    .as_deref()
+                    .is_some_and(|n| down.contains(n))
+            }),
         ..recipe.clone()
     };
     Ok(Split {
