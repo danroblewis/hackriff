@@ -119,6 +119,48 @@ export function surveyItems(r: CoverageResp | null, max = 4): DrawerItem[] {
   return out.slice(0, max);
 }
 
+// ---- T-815: past surveys from the observation log (docs/api.md GET /api/observations) ----
+export interface ObservationsResp {
+  records: { record: string; window?: { usable: { lo_hz: number; hi_hz: number } };
+    observed?: { start_ns: number; end_ns: number } }[];
+}
+const fmtAgo = (s: number): string => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 129600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 86400)} d`;
+
+/** Observed-then windows: dwell records of the log, same band merged when their times touch. The
+ * backend's own record extents; this only groups and words them. Newest first. */
+export function pastSurveyItems(r: ObservationsResp | null, edgeS: number, max = 4, joinS = 120): DrawerItem[] {
+  if (!r) return [];
+  const wins: { lo: number; hi: number; t0: number; t1: number }[] = [];
+  for (const rec of r.records) {
+    if (rec.record !== "dwell" || !rec.window || !rec.observed) continue;
+    const t0 = rec.observed.start_ns / 1e9, t1 = rec.observed.end_ns / 1e9;
+    if (!(t1 > t0)) continue;
+    const { lo_hz: lo, hi_hz: hi } = rec.window.usable;
+    const m = wins.find((w) => Math.abs(w.lo - lo) < 1 && Math.abs(w.hi - hi) < 1 && t0 <= w.t1 + joinS && t1 >= w.t0 - joinS);
+    if (m) { m.t0 = Math.min(m.t0, t0); m.t1 = Math.max(m.t1, t1); } else wins.push({ lo, hi, t0, t1 });
+  }
+  return wins.sort((a, b) => b.t1 - a.t1).slice(0, max).map((w) => ({
+    group: "surveys" as const, tag: "survey · observed then", title: `${fmtHz(w.lo)} – ${fmtHz(w.hi)}`,
+    why: `looked at ${fmtAgo(Math.max(0, edgeS - w.t1))} ago for ${fmtAgo(w.t1 - w.t0)}; outside this band and window nothing was looked at`,
+    hz: (w.lo + w.hi) / 2, time: { t0: w.t0, t1: w.t1 },
+  }));
+}
+
+/** The widest never-looked run of the coverage plane — an honest gap, distinct from observed-then. */
+export function neverLookedItems(r: CoverageResp | null): DrawerItem[] {
+  const cells = r?.any?.cells;
+  if (!r || !cells) return [];
+  let best: [number, number] | null = null, start = -1;
+  const flush = (end: number) => { if (start >= 0 && (!best || end - start > best[1] - best[0])) best = [start, end]; start = -1; };
+  cells.forEach((c, i) => { if (c.state === "unobserved") { if (start < 0) start = i; } else flush(i); });
+  flush(cells.length);
+  if (!best) return [];
+  const [a, b] = best as [number, number];
+  const lo = r.grid.f_lo_hz + a * r.grid.f_cell_hz, hi = r.grid.f_lo_hz + b * r.grid.f_cell_hz;
+  return [{ group: "surveys", tag: "survey · never looked", title: `${fmtHz(lo)} – ${fmtHz(hi)}`,
+    why: "no capture covered this in the window: unobserved, not quiet", hz: (lo + hi) / 2 }];
+}
+
 export function groupItems(items: DrawerItem[]): { group: DrawerGroup; items: DrawerItem[] }[] {
   return GROUP_ORDER.map((g) => ({ group: g, items: items.filter((i) => i.group === g) })).filter((g) => g.items.length > 0);
 }
@@ -193,14 +235,15 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
     if (edge === null || !v) return;
     const t0 = edge - 1800;
     const band = `f_lo=${v.loHz}&f_hi=${v.hiHz}`;
-    const [ev, st, sch, cov] = await Promise.all([
+    const [ev, st, sch, cov, obs] = await Promise.all([
       get<EventsResp>(`/api/events?${band}&t0=${t0}&t1=${edge}&limit=200`),
       get<StrongestResp>(`/api/analysis/strongest?${band}&window_s=30`),
       get<SchedulerResponse>(`/api/scheduler${schedulerQuery({ fLoHz: v.loHz, fHiHz: v.hiHz, t0, t1: edge })}`),
       get<CoverageResp>(`/api/coverage?f_lo=1000000&f_hi=6000000000&cells=64&t0=${t0}&t1=${edge}`),
+      get<ObservationsResp>(`/api/observations?f_lo=1000000&f_hi=6000000000&t0=${edge - 7 * 86400}&t1=${edge}&limit=1000`),
     ]);
     if (my !== seq) return;
-    items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...surveyItems(cov)];
+    items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...pastSurveyItems(obs, edge), ...surveyItems(cov, 2), ...neverLookedItems(cov)];
     render();
   };
   render();

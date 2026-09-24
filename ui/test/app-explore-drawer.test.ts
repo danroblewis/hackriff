@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { groupItems, peekLine, quietItems, strongestItem, surveyItems, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, neverLookedItems, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
 import type { AppContext } from "../src/app/context";
@@ -43,6 +43,20 @@ test("strongest, quiet-but-active and survey runs come from the backend's own fi
   assert.deepEqual(s[0].time, { t0: 0, t1: 100 });
   assert.deepEqual(groupItems([...s, ...strongestItem({ found: true, f_center_hz: 1e8 })]).map((g) => g.group), ["strongest", "surveys"]);
   assert.match(peekLine([]), /nothing to suggest/);
+});
+
+test("T-815: past surveys are observed-then windows from the log, merged per band, distinct from never-looked", () => {
+  const rec = (lo: number, hi: number, a: number, b: number) => ({ record: "dwell", window: { usable: { lo_hz: lo, hi_hz: hi } }, observed: { start_ns: a * 1e9, end_ns: b * 1e9 } });
+  const s = pastSurveyItems({ records: [rec(430e6, 440e6, 100, 160), rec(430e6, 440e6, 200, 260), rec(900e6, 910e6, 5000, 5060), { record: "sweep" } as never] }, 6000);
+  assert.equal(s.length, 2);
+  assert.deepEqual(s[0].time, { t0: 5000, t1: 5060 }, "newest first");
+  assert.deepEqual(s[1].time, { t0: 100, t1: 260 }, "touching dwells of one band merge");
+  assert.ok(s.every((i) => i.tag === "survey · observed then" && i.group === "surveys"));
+  const n = neverLookedItems({ window: { t0_s: 0, t1_s: 1 }, grid: { cells: 4, f_lo_hz: 100e6, f_cell_hz: 1e6 },
+    any: { cells: [{ state: "observed" }, { state: "unobserved" }, { state: "unobserved" }, { state: "observed" }] } });
+  assert.equal(n[0].tag, "survey · never looked");
+  assert.equal(n[0].time, undefined, "a gap has no window to review");
+  assert.deepEqual(pastSurveyItems(null, 0), []);
 });
 
 test("thin client: the drawer source reaches no device route and only GETs", () => {
@@ -103,7 +117,7 @@ const viewOf = (s: AppState) => JSON.stringify({ nav: s.nav, time: s.time, view:
 
 test("P4: a bare click on a drawer row selects (focuses the emitter's box) and never moves the view", async () => {
   const { store, rows, gos, el } = await mountedDrawer();
-  assert.equal(rows.length, 2, "one unknown emitter and one survey run");
+  assert.equal(rows.length, 3, "one unknown emitter, one survey run, one never-looked gap");
   assert.equal(gos.length, rows.length, "every row has its own go-to button");
   const before = viewOf(store.get());
   for (const r of rows) r.fire("click");
