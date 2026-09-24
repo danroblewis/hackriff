@@ -123,6 +123,20 @@ export function surveyItems(r: CoverageResp | null, max = 4): DrawerItem[] {
 export interface ObservationsResp {
   records: { record: string; window?: { usable: { lo_hz: number; hi_hz: number } };
     observed?: { start_ns: number; end_ns: number } }[];
+  next_cursor?: number | null;
+}
+/** The log is served oldest-first and pages by `next_cursor`; a single page would miss the newest
+ * surveys, so follow the cursor (bounded) and keep every record. */
+export async function fetchObservations(
+  get: <T>(path: string) => Promise<T | null>, base: string, maxPages = 20,
+): Promise<ObservationsResp | null> {
+  let all: ObservationsResp["records"] = [], cursor: number | null | undefined = 0, got = false;
+  for (let i = 0; i < maxPages && cursor !== null && cursor !== undefined; i++) {
+    const r: ObservationsResp | null = await get<ObservationsResp>(`${base}&limit=1000&cursor=${cursor}`);
+    if (!r) break;
+    got = true; all = all.concat(r.records); cursor = r.next_cursor;
+  }
+  return got ? { records: all } : null;
 }
 const fmtAgo = (s: number): string => s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : s < 129600 ? `${(s / 3600).toFixed(1)} h` : `${Math.round(s / 86400)} d`;
 
@@ -240,7 +254,7 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
       get<StrongestResp>(`/api/analysis/strongest?${band}&window_s=30`),
       get<SchedulerResponse>(`/api/scheduler${schedulerQuery({ fLoHz: v.loHz, fHiHz: v.hiHz, t0, t1: edge })}`),
       get<CoverageResp>(`/api/coverage?f_lo=1000000&f_hi=6000000000&cells=64&t0=${t0}&t1=${edge}`),
-      get<ObservationsResp>(`/api/observations?f_lo=1000000&f_hi=6000000000&t0=${edge - 7 * 86400}&t1=${edge}&limit=1000`),
+      fetchObservations(get, `/api/observations?f_lo=1000000&f_hi=6000000000&t0=${edge - 7 * 86400}&t1=${edge}`),
     ]);
     if (my !== seq) return;
     items = [...unknownItems(ev), ...strongestItem(st), ...quietItems(sch), ...pastSurveyItems(obs, edge), ...surveyItems(cov, 2), ...neverLookedItems(cov)];

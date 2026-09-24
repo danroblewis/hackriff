@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, neverLookedItems, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
+import { groupItems, peekLine, quietItems, strongestItem, surveyItems, pastSurveyItems, neverLookedItems, fetchObservations, unknownItems, type EventsResp } from "../src/app/chrome/explore-drawer";
 import { mountExploreDrawer } from "../src/app/chrome/explore-drawer";
 import type { SchedulerResponse } from "../src/scheduler";
 import type { AppContext } from "../src/app/context";
@@ -57,6 +57,19 @@ test("T-815: past surveys are observed-then windows from the log, merged per ban
   assert.equal(n[0].tag, "survey · never looked");
   assert.equal(n[0].time, undefined, "a gap has no window to review");
   assert.deepEqual(pastSurveyItems(null, 0), []);
+});
+
+test("T-815: observations are paged by next_cursor so the newest surveys are not cut off", async () => {
+  const seen: string[] = [];
+  const get = async <T,>(path: string): Promise<T | null> => {
+    seen.push(path);
+    const c = Number(/cursor=(\d+)/.exec(path)?.[1]);
+    return (c === 0 ? { records: [{ record: "old" }], next_cursor: 1000 } : { records: [{ record: "new" }], next_cursor: null }) as T;
+  };
+  const r = await fetchObservations(get, "/api/observations?f_lo=1&f_hi=2&t0=0&t1=9");
+  assert.deepEqual(r?.records.map((x) => x.record), ["old", "new"]);
+  assert.equal(seen.length, 2);
+  assert.match(seen[1], /cursor=1000/);
 });
 
 test("thin client: the drawer source reaches no device route and only GETs", () => {
