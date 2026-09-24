@@ -22418,6 +22418,82 @@ tasks:
 
       2026-09-23 (coordinator, user request): was blocked on a prerequisite, not a person - now todo depending on T-848 (MAUTO M-1 hk-synth scaffold, filed today) plus T-616..T-618. Branch task-t660 holds only the earlier blocked-report commit.
     branch: task-t660
+    result: |
+      **Landed** (branch `task-t660`, sha `289d9004`): the `hackriff.calibration/1` loader, the
+      generator, and the §13.1 combination.
+
+      (a) `hk_synth::calibration::CalibrationTable` (crates/hk-synth/src/calibration.rs): `load()` parses
+      the schema and refuses anything not carrying `hackriff.calibration/1`; `score()` (raw->bits) and
+      `threshold()` (bits->raw) implement §13.2's refusal exactly, including the ADR's own worked
+      example verbatim as a test: a table whose highest expressible level is 3.0 bits, asked for 6.0,
+      returns `Shortfall { requested_bits: 6.0, admissible_bits: 3.0, reason: Atom { realised_bits: 2.41
+      } }`, never a threshold. A missing cell returns `NoTable` and `Score::credited_bits()` is 0.0. A
+      `floor_j` (6.0, `default_floor_bits(S2)`) above a cell's `admissible_bits` returns `Shortfall`
+      (`floor_unreachable`), never lowered. 8 new tests in `calibration.rs`.
+
+      (b) `py/hkpy/calibrate.py`: `calibrate_cell()` computes a cell's `levels`/`unexpressible`/
+      `admissible_bits` from raw null draws by empirical order statistics, and **refuses** (into
+      `unexpressible`) any asked level whose realised significance misses the claim by more than 0.25
+      bits, is above `log2(windows)`, or is above the 6-bit calibrated claim cap — never rounds.
+      `calibration_document()`/`write_calibration_file()` assemble the full `hackriff.calibration/1`
+      JSON the Rust loader reads, including §13.1's `groups`/`correlation` blocks when supplied. 9 tests
+      in `py/tests/test_calibrate.py`, all passing; ruff clean.
+
+      (c) `hk_synth::evidence::combine_stage_bits()`: `b_j` = sum over declared groups of the max within
+      each group; `GroupId::Undeclared` defaults to one group. Test loads/builds evidence for two
+      metrics with no declared groups and asserts the stage scores max (5.5), not sum (9.5).
+
+      **Red/green proof:** stashed the diff, confirmed the crate's existing 26 tests still pass
+      unmodified (T-848's scaffold), then re-applied. For the Python side, temporarily replaced the
+      expressibility check with `if True` (round everything into `levels`) and reran
+      `test_the_generator_refuses_an_atom_it_cannot_express_rather_than_rounding` — it failed
+      (`assert 4.0 in refused_bits or 6.0 in refused_bits` — got `set()`); restored the real code and it
+      passed again. The Rust refusal test and the max-not-sum test have no code path to exercise before
+      this commit (`CalibrationTable`, `combine_stage_bits` didn't exist), which is the compile-time form
+      of red.
+
+      **T-619 fill-bucket amendment (noted, not applied):** ADR-0015 §16.4 proposes T-660 take the
+      tighter `nominal` bucket (σ >= 1.0 LSB, clip <= 0.10, docs/21 §10.10) before any real table is
+      generated. I did **not** change `hk_synth::calibration::FillBucket`'s constants (still the
+      as-written 0.5/0.30) — that module's own doc comment already records this as deliberately deferred
+      pending the ADR text amendment, and `hk_model::provenance::FillBucket` (T-625, the runtime rule
+      that actually gates windows) uses the same as-written bounds, so changing one without the other
+      would desync two crates over an unaccepted ADR amendment. Instead the **generator** takes the
+      bucket bounds as an explicit parameter (`ADR_NOMINAL_BOUNDS` default, `TIGHT_NOMINAL_BOUNDS`
+      available), so adopting the tightened bucket when the amendment lands is a call-site change, not a
+      rewrite. Flagging this for the coordinator/user: whoever runs M-2's first real calibration
+      generation should pass `TIGHT_NOMINAL_BOUNDS` explicitly, per docs/21 §10.10's recommendation,
+      since the AM/OOK over-claim (5-6 bits at high clip) is a validity defect, not a cosmetic one.
+
+      **§13.5 falsifier 2 — floor_j=6 at S2/S3 under the max rule — measured and reported, not tuned.**
+      docs/22's acceptance corpus and the hk-synth engine (M-2+) don't exist yet (docs/22 §9/§11: several
+      generators are unbuilt and "before the engine exists"), so this can't be a live corpus run. Instead
+      I combined docs/21 §2's **already-published** per-metric realised bits at a 6-bit claim (worst over
+      Null B1/B2 — wrong symbol rate / wrong centre; `realised = 6 - delta`) through §13.1's actual rule,
+      using the M1 FSK ladder's declared groups (ADR-0015 §13.1's own table):
+
+      | Stage | Group(s) | b_j, old sum | b_j, §13.1 max | Clears floor_j=6? |
+      |---|---|---|---|---|
+      | S2 | soft_quality{snr,evm,timing_var} + eye{eye_open} (admissible-capped 3.0) | 17.1 | 8.2 | yes |
+      | S3 | bit_shape{line_violations,bit_structure} — S3's **only** declared group | 8.8 | 4.5 | **no** |
+
+      S2 still clears the floor at these levels. **S3 does not**: it has exactly one declared group, so
+      its `b_j` is capped at whichever single metric realises more, and neither S3 metric clears 6 bits
+      alone at levels consistent with docs/21's own measurements. This matches ADR-0015 §13.1's own
+      prediction in words ("S2/S3 lose roughly 6-12 bits of headroom... some true-but-weak signals will
+      prune where they previously survived") with the arithmetic behind it. Recorded as a doc comment on
+      `hk_synth::stage::default_floor_bits` (not changed — floors stay ADR defaults per this ticket's
+      scope) with the explicit recommendation that a future amendment restate S3's floor to roughly 4-5
+      bits against this measurement, never revert to the sum. §1.3's "pruning is never total" means a
+      node missing the floor still survives as a partial result, so today's cost is search recall, not
+      silent loss.
+
+      Tests: `cargo nextest run -p hk-synth` 36/36 pass (was 26 before this ticket).
+      `cd py && uv run --locked pytest -q tests/test_calibrate.py` 8/8 pass. `just precheck hk-synth`:
+      fmt clean, clippy clean. ruff check + format clean on the two py files.
+
+      Worktree clean after commit; nothing left on disk outside the repo (target/ seeded via `cp -c -R
+      -p`, not touched by this diff).
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
