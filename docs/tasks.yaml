@@ -23293,11 +23293,10 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Group MAP-CHROME shares ui/src/app; tickets in it serialise or split
       file ownership (MAP-01 owns the shell/layout files, later tickets add their own module each).
     result: |
-      DONE (work-runner, from handback.json, 2026-09-23 19:21).
-      Review fix: the <=900px body overflow:hidden is now scoped to body:has(#view-explore:not([hidden])) so Decode/History still scroll on phones. Merged main (docs/tasks.yaml conflict resolved to main's side).
+      DONE (work-runner, from handback.json, 2026-09-23 19:23).
+      Review fix 2: the .centre canvas box is padded 56px top / 70px bottom so .sf-bar and bottom rows clear the floating bar and dock (app-surface hit test); phone override sets a single 1fr row and separates the side/focus sheets with overflow:auto. Caveat: the canvas is inset by the chrome rather than drawn beneath it; ui e2e and just precheck were not run.
       Tests: node test/run.mjs app-map-layout app-shell -> exit 0 (2/2 files passed)
-      precheck exit 0
-      Commits: be92fa85
+      Commits: decf3dad
       Resources: 37 CPU-s, peak 0.3 GB
   - id: T-802
     milestone: MMAP
