@@ -25994,6 +25994,41 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-877 worker 2026-09-24.
+  - id: T-889
+    milestone: M2-hardening
+    title: "fog-of-war.e2e.mjs band-A wait gives up on a 10 s wall-clock stall: make it event-counted (load flake that sank the 10:15 batch)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the coordinator's fog-of-war triage deflaker: the 10:15 bulk gate went red on ui/e2e/fog-of-war.e2e.mjs T-521 "band A at boot is not a real render (only 0 distinct colours)". The spec passed ALONE 8/8 on base 31a36d22, task-t802, task-t803 and a local re-creation of the whole 11-branch batch, so it is a load flake, not a branch defect. Mechanism: draw() gives up once the frame "stopped getting closer for stallMs", and stallMs defaults to a WALL-CLOCK 10000 ms (fog-of-war.e2e.mjs:1064, break :1109, band A call :1234, assertion :1246); under gate load (load 20.7, a tile answer seen at 5062 ms in the same gate) the pane's own tiles take longer than that. Alone on task-t802 run 2 the same wait needed 7847 of 10000 ms. Same assertion red 14x on 09-22/23 (merge-runner.log 417888-465257) before the 09-23 deflake.
+      DELIVER: the band-A wait (and every other draw() call in the spec still on the default stall) gives up on EVENTS, not wall-clock - e.g. after N tile answers for the pane's own addresses have landed since the wait began without the frame being accepted, as phase 5 already does (`giveUp: async () => surveyAnswers() >= 10`, :1383). No assertion or threshold change. Prove it: force the pane's own tiles to be refused (per-address 503, as surface-nav's backpressure test does) and show the band-A assertion still goes red with the counts in its message; and green alone.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
+  - id: T-890
+    milestone: MLIVE
+    title: A pane following live draws NOTHING at its live edge for 8-10+ s when its tile set changes (0 tiles, coarse stand-ins drew nothing) - live gated on tile generation
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 in the 10:15 bulk gate (merge-runner.log ~637569-637601) and reproduced ALONE on task-t802 by the fog-of-war triage deflaker: a pane FOLLOWING LIVE had its tiles resident ("2 tiles ... drawn to 2.3 s short of the top"), then its tile set changed - most likely the live edge crossing into a new time row - and for over 10 s it drew NOTHING at the live edge: "0 tiles · 2 coarse stand-ins · 0 pending · 2 behind the edge · 2 drew nothing", meanLuma 0.0, 0 distinct colours. Alone, the same transition took 7847 ms to produce a usable frame.
+      That violates the live-rendering invariant (CLAUDE.md, user 2026-09-17): "rows append in real time as they are recorded, and live is NEVER gated on batch tile generation"; the live/tuned tier renders at live-IQ FFT resolution (T-484/T-501). Rows that exist must be on screen while the new row's tile is requested.
+      DELIVER: root-cause the empty live edge on a tile-set change (client residency/stand-in selection in ui/src/surface/surface.ts ~590-668 vs the server's live-row serving), fix so a following pane keeps drawing the rows it already has and appends new rows as they arrive with no blank interval, and a regression test (ui/test unit and/or an e2e through the mock SDR with a deliberately slowed tile route) that goes red on the old code. Thin client: presentation/residency only in ui/src; any serving change in the backend.
+      WHAT THE USER WILL SEE ON STAGING: leave a pane following live for a minute; the waterfall never blinks to black/empty at its top edge as time advances, even when the box is busy.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator fog-of-war triage deflaker 2026-09-24.
+    effort_reason: hard debugging across client tile residency/stand-in selection and live-row serving on the real-time display path
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
