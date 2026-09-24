@@ -318,6 +318,8 @@ class Entry:
     recent_red: int = 0
     #: Passed-alone incidents inside the window - what the deflake rule reads.
     recent_passed: int = 0
+    #: Failed-alone incidents inside the window - what the one-solo-pass rule reads (it must be 0).
+    recent_failed: int = 0
     #: `recent_passed` when a deflake request was last filed (persisted like `notified_at`).
     deflaked_at: int = 0
     #: This test's incidents, oldest first, for the deflaker's brief.
@@ -336,6 +338,7 @@ class Entry:
             "notified_at": self.notified_at,
             "recent_red": self.recent_red,
             "recent_passed": self.recent_passed,
+            "recent_failed": self.recent_failed,
             "deflaked_at": self.deflaked_at,
         }
 
@@ -391,8 +394,27 @@ def build(incidents: list[Incident], *, now: float | None = None, days: int = WI
                 e.recent_red += 1
                 if inc.outcome == PASSED_ALONE:
                     e.recent_passed += 1
+                elif outcome == FAILED_ALONE:
+                    e.recent_failed += 1
             e.incidents.append(inc)
     return ledger
+
+
+#: The one-solo-pass rule (user, 2026-09-24 14:20; the merge runner's FLAKE_SOLO_ONE knob): a red test
+#: whose ledger already shows it passing alone this often in the window, and never failing alone, is
+#: accepted after ONE isolated pass instead of two. A first-time flaker still gets the twice rule.
+SOLO_MIN_PASSED = 2
+
+
+def solo_ok(entries: dict[str, Entry], tests: list[str], min_passed: int = SOLO_MIN_PASSED) -> tuple[bool, int]:
+    """(every test qualifies, the smallest windowed passed-alone count among them). Unknown test: no."""
+    counts = []
+    for t in tests:
+        e = entries.get(t)
+        if e is None or e.recent_failed or e.recent_passed < min_passed:
+            return False, e.recent_passed if e else 0
+        counts.append(e.recent_passed)
+    return bool(counts), min(counts, default=0)
 
 
 def load_state(path: str) -> dict[str, int]:
@@ -642,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
         help="recompute, file anything over the threshold, and persist flakes.json "
         "(what ops/merge-runner.sh calls after each triage)",
     )
+    parser.add_argument("--solo-ok", nargs="+", metavar="TEST",
+                        help="exit 0 and print 'solo-ok N' when every TEST qualifies for the one-solo-pass rule "
+                        "(N = its smallest passed-alone count in the window), else exit 1")
     parser.add_argument("--json", action="store_true", help="the ledger as JSON")
     parser.add_argument("--days", type=int, default=WINDOW_DAYS, help=f"window (default {WINDOW_DAYS})")
     parser.add_argument("--ops", default=None, help="the ops directory (default $HACKRIFF_OPS)")
@@ -656,6 +681,10 @@ def main(argv: list[str] | None = None) -> int:
         if not filed:
             print("flakes: nothing new over the threshold")
     entries = ledger(ops, days=args.days)
+    if args.solo_ok:
+        ok, n = solo_ok(entries, args.solo_ok)
+        print(f"{'solo-ok' if ok else 'solo-no'} {n}")
+        return 0 if ok else 1
     if args.json:
         print(json.dumps({k: v.as_dict() for k, v in entries.items()}, indent=1, sort_keys=True))
         return 0

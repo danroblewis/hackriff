@@ -45,6 +45,7 @@ KNOBS: dict[str, tuple[str, str, str]] = {
     "BULK_MAX": ("15", "merge-runner", "most branches in one batch"),
     "GATE_TIMEOUT": ("3600", "merge-runner", "seconds before a gate is killed"),
     "MAX_ATTEMPTS": ("2", "merge-runner", "gate attempts per branch tip"),
+    "FLAKE_SOLO_ONE": ("0", "merge-runner", "1 = a red the flake ledger already shows passing alone (>=2, never failing, 7 d) is accepted after ONE solo pass"),
     "HK_E2E_CONCURRENCY": ("3", "gate (ui/e2e/run.mjs)", "browser-spec lanes"),
     "NEXTEST_TEST_THREADS": ("profile default 8", "gate (nextest)", "test threads for the workspace suite"),
     "CARGO_BUILD_JOBS": ("6 (gate.py sets it)", "gate only", "parallel rustc jobs for the gate; workers keep their own bound (CARGO_ENV in work-runner.py)"),

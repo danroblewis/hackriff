@@ -382,3 +382,31 @@ def test_failed_alone_is_charged_only_to_the_specs_the_isolated_run_named():
     # no summary line (a Rust test set): every test in the set, as before
     led = flakes.build(flakes.parse_runner_log(log(*FAIL_EPISODE), YEAR))
     assert led["the_view_lattices_floor"].failed_alone == 1
+
+
+def test_the_one_solo_pass_rule_reads_the_windowed_ledger():
+    """User decision 2026-09-24 14:20: a test the ledger already shows passing alone (>= 2 in 7 d,
+    never failing alone) is accepted after ONE solo pass; anything else keeps the twice rule."""
+    now = time.time()
+    day = 86400
+    inc = flakes.Incident
+    incs = [inc(ts=now - 1 * day, tests=("app-trace.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 2 * day, tests=("app-trace.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 1 * day, tests=("fog-of-war.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 2 * day, tests=("fog-of-war.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 3 * day, tests=("fog-of-war.e2e.mjs",), outcome=flakes.FAILED_ALONE),
+            inc(ts=now - 1 * day, tests=("once.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 9 * day, tests=("old.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 8 * day, tests=("old.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 20 * day, tests=("aged-fail.e2e.mjs",), outcome=flakes.FAILED_ALONE),
+            inc(ts=now - 1 * day, tests=("aged-fail.e2e.mjs",), outcome=flakes.PASSED_ALONE),
+            inc(ts=now - 2 * day, tests=("aged-fail.e2e.mjs",), outcome=flakes.PASSED_ALONE)]
+    led = flakes.build(incs, now=now)
+    assert flakes.solo_ok(led, ["app-trace.e2e.mjs"]) == (True, 2)
+    assert flakes.solo_ok(led, ["fog-of-war.e2e.mjs"])[0] is False            # failed alone in the window
+    assert flakes.solo_ok(led, ["once.e2e.mjs"])[0] is False                  # a first-time flaker: twice rule
+    assert flakes.solo_ok(led, ["old.e2e.mjs"])[0] is False                   # its passes are outside 7 d
+    assert flakes.solo_ok(led, ["aged-fail.e2e.mjs"]) == (True, 2)            # the fail aged out of the window
+    assert flakes.solo_ok(led, ["app-trace.e2e.mjs", "once.e2e.mjs"])[0] is False   # every test must qualify
+    assert flakes.solo_ok(led, ["never-seen.e2e.mjs"])[0] is False
+    assert led["fog-of-war.e2e.mjs"].as_dict()["recent_failed"] == 1
