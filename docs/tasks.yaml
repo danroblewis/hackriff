@@ -25484,7 +25484,7 @@ tasks:
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-859
@@ -25517,6 +25517,7 @@ tasks:
       Commits: 4f62a242, 520b78b7, 36f21a59
       Observed, not chased: Analyze job poll never stops after the job finishes (reviewer non-blocking) | save-template route (M-10) not yet in docs/api.md | Browser e2e not run
       Resources: 72 CPU-s, peak 0.6 GB
+    commit: ece2fc3d
   - id: T-863
     milestone: MAUTO
     title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
