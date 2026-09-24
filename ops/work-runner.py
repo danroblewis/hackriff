@@ -678,8 +678,11 @@ def write_result(c, hb):
 
 
 def record_done(claim, outcome, res):
+    # A fix run says WHY it ran (user, 2026-09-24) - the /worklog "Fix runs" table and the digest tally.
+    why = ({"attempt": claim.get("fix_attempts"), "reason_class": claim.get("fix_reason_class") or "OTHER",
+            "reason": claim.get("fix_reason") or ""} if claim.get("kind") == "fix" else {})
     with open(DONE, "a") as f:
-        f.write(json.dumps({"ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
+        f.write(json.dumps({**why, "ticket": claim["ticket"], "branch": claim["branch"], "kind": claim.get("kind"),
                             "started": int(claim["started"]), "finished": int(time.time()),
                             "minutes": round((time.time() - claim["started"]) / 60, 1),
                             "cost_usd": res.get("total_cost_usd"), "turns": res.get("num_turns"),
@@ -830,10 +833,29 @@ def reap(claims, dry):
     return changed
 
 
+def fix_reason(fail_line, branch):
+    """(class, reason) for a fix run - hkpy.fixes; a GATE_FAIL names what the merge runner's triage
+    found red. Never fails a launch: an unreadable reason is OTHER with the raw line."""
+    try:
+        if f"{REPO}/py" not in sys.path:
+            sys.path.append(f"{REPO}/py")
+        from hkpy import fixes
+        text = ""
+        if fixes.classify(fail_line) == "GATE_FAIL" and os.path.exists(MERGE_LOG):
+            with open(MERGE_LOG, "rb") as f:
+                f.seek(max(0, os.path.getsize(MERGE_LOG) - 4_000_000))
+                text = f.read().decode("utf-8", "replace")
+        return fixes.reason_for(fail_line, text, branch)
+    except Exception:
+        return "OTHER", " ".join(fail_line.split())[:200]
+
+
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     n = c.get("fix_attempts", 0) + 1
+    cls, why = fix_reason(fail_line, branch)
+    c = dict(c, fix_reason_class=cls, fix_reason=why)
     # A fix run is a dispatch. It used to bypass every hold: at 15:19 on 2026-09-22, with
     # dispatch-paused in force and the box meant to be empty for the gate, a GATE_FAIL on
     # task-t700 resumed a worker to "fix" a defect that was main's, not the branch's.
@@ -888,7 +910,8 @@ def _run_fix(c, n, prompt):
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
-    log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
+    log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] {c.get('fix_reason', '')[:120]}: "
+        f"resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
     return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
 
 
