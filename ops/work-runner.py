@@ -1491,6 +1491,13 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+def _target_written(t):
+    """Newest write under target/. ctime too: `cp -c -R -p` (the worktree clone recipe) keeps main's old
+    mtimes, so a target cloned a minute ago would read as idle; the clone cannot keep the old ctime."""
+    return max(max(st.st_mtime, st.st_ctime) for st in
+               (os.stat(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p)))
+
+
 def reclaim_idle_targets(claims, dry):
     """reap_worktrees keeps a worktree with unmerged commits or edits, and enqueue() frees a target only
     when its branch is queued - so a timed-out, blocked, conflicted or uncommitted worker keeps 4-8 GB
@@ -1503,22 +1510,28 @@ def reclaim_idle_targets(claims, dry):
     idle = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
         wt, t = os.path.join(root, name), os.path.join(root, name, "target")
-        if wt in live or not os.path.isdir(t):
+        if wt in live or os.path.islink(wt) or os.path.islink(t) or not os.path.isdir(t):
             continue
-        written = max(os.path.getmtime(p) for p in (t, f"{t}/debug", f"{t}/debug/deps", f"{t}/debug/.fingerprint") if os.path.exists(p))
+        written = _target_written(t)
         if time.time() - written >= IDLE_TARGET_H * 3600:
             idle.append((wt, time.time() - written))
     if not idle:
         return
     # Coordinator-run work has no claim (09-24: t802/t803 e2e specs, t858); a process is the only sign.
-    seen = sh(["ps", "-axo", "command"]) + "\n" + sh(["lsof", "-d", "cwd", "-Fn"], timeout=60)
+    cwds = sh(["lsof", "-d", "cwd", "-Fn"], timeout=60)
+    if not re.search(r"^p\d+", cwds, re.M):
+        return   # lsof said nothing: no evidence the worktrees are unused, so no delete
+    seen = sh(["ps", "-axo", "command"]) + "\n" + cwds
     for wt, age in idle:
         if re.search(re.escape(wt) + r"(/|\s|$)", seen, re.M):
             continue
         if dry:
             log(f"DRY-RUN would reclaim {wt}/target (idle {age / 3600:.1f} h)")
             continue
-        shutil.rmtree(os.path.join(wt, "target"), ignore_errors=True)
+        # Renamed first: a build that starts during a long delete finds no target, never half of one.
+        gone = os.path.join(wt, f"target.reclaim-{int(time.time())}")
+        os.rename(os.path.join(wt, "target"), gone)
+        shutil.rmtree(gone, ignore_errors=True)
         log(f"RECLAIM {wt}/target (idle {age / 3600:.1f} h, no running claim or process; source kept)")
 
 
