@@ -2935,6 +2935,15 @@ impl RunSummary {
             c("/chains/sweep_uncharacterised")
         ));
         line(format!(
+            "classify:    {} chain(s), {} row(s) written, {} abstained, {} without an entry, {} \
+             refused at the cap",
+            c("/chains/classify_attached"),
+            c("/chains/classifications"),
+            c("/chains/classify_abstained"),
+            c("/chains/classify_no_emitter"),
+            c("/chains/classify_admission_refused")
+        ));
+        line(format!(
             "trunking:    {} CC confirmed, {} TSBK(s) + {} CSBK(s) + {} CAC(s), {} grant(s) \
              mapped / {} unmapped / {} outside window; {} followed ({} refused, {} silent), {} \
              call(s) ({} closed on silence, {} truncated when the window ended, {} continued \

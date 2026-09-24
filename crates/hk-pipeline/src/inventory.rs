@@ -216,6 +216,19 @@ pub trait Inventory: Send {
     fn emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
         None
     }
+
+    /// T-878: the emitter `track`'s observations were **last recorded against**, whether the track
+    /// is still open or has closed — unlike [`Self::emitter_of_track`], which stops answering at
+    /// the close so the live push publishes nothing further.
+    ///
+    /// This is how a measuring chain ([`crate::chains::classify`]) finds the entry for the region
+    /// it measured without looking a frequency up anywhere: the answer is the row this inventory
+    /// itself wrote for that track. `None` when it wrote none (an in-band fragment, a hop-set
+    /// member, a merged-away track) or has forgotten it past its bound; the caller then records
+    /// nothing rather than guessing.
+    fn recorded_emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
+        None
+    }
 }
 
 /// Leaves the inventory to the chains' record writers (no track clustering).
@@ -661,6 +674,12 @@ pub struct TrackInventory {
     /// reach an entry — and removed when the track ends, so a closed track publishes nothing
     /// further. Bounded like [`Self::run`].
     bound: HashMap<TrackId, EmitterId>,
+    /// T-878: which emitter each track's observations were last recorded against, open or closed,
+    /// for [`Inventory::recorded_emitter_of_track`]. Written with [`Self::bound`] and at a track's
+    /// closing sighting; removed only when the track's entry is withdrawn. Bounded like
+    /// [`Self::run`]: past the cap the map is cleared, which costs a measurement its entry (it is
+    /// then counted and dropped), never a wrong one.
+    recorded: HashMap<TrackId, EmitterId>,
     /// T-416: declined chain measurements written for a track that had no entry yet, waiting for
     /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
     /// a refusal its link, never a wrong one.
@@ -737,6 +756,7 @@ impl TrackInventory {
             characterised: HashMap::new(),
             provisional: HashMap::new(),
             bound: HashMap::new(),
+            recorded: HashMap::new(),
             awaiting: HashMap::new(),
             retune_centres: 0,
             retuned: HashSet::new(),
@@ -775,12 +795,22 @@ impl TrackInventory {
             self.bound.clear();
         }
         self.bound.insert(track, emitter);
+        self.remember_track(track, emitter);
         // T-416: this is the moment a track first has somewhere to file things, so any declined
         // measurement that arrived before it is attached here.
         for (demod, at) in self.awaiting.remove(&track).unwrap_or_default() {
             attach_measurement(repo, emitter, demod, at)?;
         }
         Ok(())
+    }
+
+    /// T-878: records `emitter` as `track`'s entry for [`Inventory::recorded_emitter_of_track`],
+    /// bounded like [`Self::bind`].
+    fn remember_track(&mut self, track: TrackId, emitter: EmitterId) {
+        if self.recorded.len() >= RUN_MEMORY && !self.recorded.contains_key(&track) {
+            self.recorded.clear();
+        }
+        self.recorded.insert(track, emitter);
     }
 
     /// Whether `id` may be linked to another entry of its emission: not when it carries a
@@ -1074,12 +1104,14 @@ impl Inventory for TrackInventory {
                     Some(mut s) => {
                         s.classification = track_family(summary).classification(s.seen.end);
                         let (emitter, _) = self.offer(repo, &s, Some(TrackTrust::of(summary)))?;
+                        self.remember_track(track, emitter);
                         for (demod, at) in awaiting {
                             attach_measurement(repo, emitter, demod, at)?;
                         }
                     }
                     // An in-band fragment or hop-set member after all: withdraw its live entry.
                     None => {
+                        self.recorded.remove(&track);
                         if let Some(emitter) = provisional {
                             self.retract(repo, track, emitter, summary.track.time.end)?;
                         }
@@ -1090,6 +1122,7 @@ impl Inventory for TrackInventory {
                 // Channels offered before the set formed now belong to the set's entry.
                 for &m in &h.members {
                     self.bound.remove(&m);
+                    self.recorded.remove(&m);
                     // T-416: the member's entry is being withdrawn in favour of the set's, so
                     // there is nothing left for a waiting refusal to be filed against.
                     self.awaiting.remove(&m);
@@ -1104,6 +1137,7 @@ impl Inventory for TrackInventory {
             }
             TrackEvent::Merged { from, at, .. } => {
                 self.bound.remove(from);
+                self.recorded.remove(from);
                 self.awaiting.remove(from);
                 if let Some(emitter) = self.provisional.remove(from) {
                     self.retract(repo, *from, emitter, *at)?;
@@ -1208,6 +1242,10 @@ impl Inventory for TrackInventory {
 
     fn emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
         self.bound.get(&track).copied()
+    }
+
+    fn recorded_emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
+        self.recorded.get(&track).copied()
     }
 }
 
