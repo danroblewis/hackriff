@@ -37,10 +37,16 @@ mod common;
 
 use common::*;
 use hk_classify::thresholds::thresholds_of;
-use hk_core::Pacing;
+use hk_core::Discontinuity;
+use hk_core::{Pacing, Source};
+use hk_dsp::stft::InputInfo;
 use hk_e2e::{SynthRequest, synth_or_skip};
-use hk_model::InventoryQuery;
+use hk_estimate::SnippetRequest;
 use hk_model::classify::Stage;
+use hk_model::{FreqRange, InventoryQuery, Region, SampleTime, TimeRange, Timestamp};
+use hk_pipeline::classify::measure_box;
+use hk_pipeline::{NodeSpec, builtin_chains, open_replay};
+use num_complex::Complex32;
 use serde_json::json;
 
 /// One feature-tree row as a reader of the inventory sees it.
@@ -51,18 +57,50 @@ struct Row {
     reasons: String,
 }
 
-/// Every C15 (feature-tree) classification row a blind run of `fsk_burst_train` at `snr_db`
-/// persisted.
-fn feature_tree_rows(seed: u64, snr_db: f64) -> Vec<Row> {
+/// C13's burst extent over one stored detection, against the hidden truth burst it overlaps.
+struct ExtentCheck {
+    /// Measured start − true start, s.
+    start_err_s: f64,
+    /// Measured end − true end, s.
+    end_err_s: f64,
+    /// Measured duration, s, and the true one.
+    measured_s: f64,
+    truth_s: f64,
+}
+
+/// One blind run of `fsk_burst_train`: the C15 rows it persisted, and C13's extent over every
+/// burst it detected.
+struct SceneRun {
+    rows: Vec<Row>,
+    extents: Vec<ExtentCheck>,
+    /// Detections C13 measured no untruncated extent for, with why.
+    no_extent: Vec<String>,
+}
+
+/// The fsk chain's own pad around a detection box (the built-in `fsk-bursts` node), so the test
+/// hands C13 the snippet the chain would.
+fn fsk_chain_pad_s() -> f64 {
+    builtin_chains()
+        .iter()
+        .flat_map(|c| c.nodes.iter())
+        .find_map(|n| match n {
+            NodeSpec::FskBursts { pad_s, .. } => Some(*pad_s),
+            _ => None,
+        })
+        .expect("the built-in registry has an fsk-bursts node")
+}
+
+fn run_scene(seed: u64, snr_db: f64) -> SceneRun {
     let out = SynthRequest::new("fsk_burst_train")
         .seed(seed)
         .param("snr_db", snr_db)
         .param("duration_s", 1.2)
         .generate()
         .expect("scene synthesises");
-    let meta = out.fixture(0).unwrap().meta_path;
+    let fixture = out.fixture(0).unwrap();
+    let meta = fixture.meta_path.clone();
     let dir = TempDir::new("t852-device-fsk");
-    let (cfg, replay, _input) = blind_replay_config(&dir.0, &meta, json!({}), Pacing::Unpaced);
+    let (cfg, replay, input) = blind_replay_config(&dir.0, &meta, json!({}), Pacing::Unpaced);
     let s = start(cfg, replay).wait().unwrap();
     assert!(s.errors.is_empty(), "{:?}", s.errors);
     let repo = repo(&dir.0);
@@ -81,7 +119,110 @@ fn feature_tree_rows(seed: u64, snr_db: f64) -> Vec<Row> {
             });
         }
     }
-    rows
+
+    // T-876: C13's extent over every burst the run detected. The samples come back through the
+    // same device interface the run read (a second open of the blinded recording); the boxes are
+    // the run's own stored detections; the truth stays with the test.
+    let mut source = open_replay(&blind_meta(&meta, &input.0), Pacing::Unpaced, false)
+        .unwrap()
+        .source;
+    let mut iq: Vec<Complex32> = Vec::new();
+    let mut block = Vec::new();
+    let mut first = None;
+    while let Some(h) = source.read_block(&mut block).unwrap() {
+        let first = first.get_or_insert_with(|| h.clone());
+        assert_eq!(
+            h.first_sample(),
+            first.first_sample() + iq.len() as u64,
+            "the replay is contiguous"
+        );
+        iq.extend_from_slice(&block);
+    }
+    let head = first.expect("the replay has samples");
+    let tune = head.provenance.tune.clone();
+    let fs = tune.sample_rate_hz;
+    let s0 = head.first_sample();
+    let pad = (fsk_chain_pad_s() * fs) as u64;
+    // The hidden truth: each burst's samples and band.
+    let bursts: Vec<(u64, u64, f64, f64)> = fixture
+        .emissions()
+        .iter()
+        .map(|t| {
+            let a = s0 + t.sample_start;
+            (a, a + t.sample_count, t.f_lo_hz, t.f_hi_hz)
+        })
+        .collect();
+    let all = Region::new(
+        FreqRange::new(0.0, 1e12),
+        TimeRange::new(
+            Timestamp::from_unix_nanos(i64::MIN / 2),
+            Timestamp::from_unix_nanos(i64::MAX / 2),
+        ),
+    );
+    // Each burst's box is the union of the run's detections on it, merged exactly as the fsk
+    // chain merges its member boxes (`chains::fsk::add_member`: overlapping boxes widen one group
+    // in time and frequency). Which detections belong to which burst is decided by overlap with
+    // the truth after the fact — the blind ground-truth match; the run never saw it.
+    let mut groups: Vec<Option<SnippetRequest>> = vec![None; bursts.len()];
+    for det in repo.detections_in_region(&all).unwrap() {
+        let r = SnippetRequest::from_detection(&det, head.time, &tune);
+        let (f_lo, f_hi) = (
+            det.f_center_hz - det.obw_hz / 2.0,
+            det.f_center_hz + det.obw_hz / 2.0,
+        );
+        let Some(k) = bursts.iter().position(|&(a, b, lo, hi)| {
+            r.start_index < b && a < r.end_index && f_lo < hi && lo < f_hi
+        }) else {
+            continue; // not on a burst: nothing to hold an extent against
+        };
+        let g = groups[k].get_or_insert(r);
+        let (lo, hi) = (
+            (tune.center_hz + g.center_offset_hz - g.bandwidth_hz / 2.0).min(f_lo),
+            (tune.center_hz + g.center_offset_hz + g.bandwidth_hz / 2.0).max(f_hi),
+        );
+        *g = SnippetRequest {
+            start_index: g.start_index.min(r.start_index),
+            end_index: g.end_index.max(r.end_index),
+            center_offset_hz: 0.5 * (lo + hi) - tune.center_hz,
+            bandwidth_hz: (hi - lo).max(1.0),
+        };
+    }
+    let (mut extents, mut no_extent) = (Vec::new(), Vec::new());
+    for (&(t0, t1, _, _), request) in bursts.iter().zip(&groups) {
+        let Some(request) = request else {
+            continue; // undetected: a detection-recall question, not an extent one
+        };
+        let a = request.start_index.saturating_sub(pad).max(s0);
+        let b = (request.end_index + pad).min(s0 + iq.len() as u64);
+        let info = InputInfo {
+            time: SampleTime {
+                sample_index: a,
+                host_time: head.time.time_of(a, fs),
+            },
+            discontinuity: Discontinuity::NONE,
+            dropped_before: 0,
+            provenance: &head.provenance,
+        };
+        let slice = &iq[(a - s0) as usize..(b - s0) as usize];
+        let Some((_, params)) = measure_box(info, slice, request) else {
+            no_extent.push(format!("{request:?}: no snippet"));
+            continue;
+        };
+        match params.extent {
+            Some(e) if !e.truncated_start && !e.truncated_end => extents.push(ExtentCheck {
+                start_err_s: (e.source_start - t0 as f64) / fs,
+                end_err_s: (e.source_end - t1 as f64) / fs,
+                measured_s: (e.source_end - e.source_start) / fs,
+                truth_s: (t1 - t0) as f64 / fs,
+            }),
+            other => no_extent.push(format!("{request:?}: {other:?}")),
+        }
+    }
+    SceneRun {
+        rows,
+        extents,
+        no_extent,
+    }
 }
 
 #[test]
@@ -91,9 +232,27 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
     let open_set_max = thresholds_of("fsk").unwrap().open_set_max;
     let (mut above, mut claimed_above) = (0usize, 0usize);
     let mut log = Vec::new();
+    let mut extents = Vec::new();
+    let mut no_extent = Vec::new();
     for snr_db in [20.0, 25.0, 30.0] {
         for seed in 852u64..860 {
-            for r in feature_tree_rows(seed, snr_db) {
+            let run = run_scene(seed, snr_db);
+            for x in &run.extents {
+                log.push(format!(
+                    "{snr_db} dB seed {seed}: extent {:.3} ms (truth {:.3}), start {:+.3} ms, end {:+.3} ms",
+                    x.measured_s * 1e3,
+                    x.truth_s * 1e3,
+                    x.start_err_s * 1e3,
+                    x.end_err_s * 1e3
+                ));
+            }
+            extents.extend(run.extents);
+            no_extent.extend(
+                run.no_extent
+                    .into_iter()
+                    .map(|m| format!("{snr_db} dB seed {seed}: {m}")),
+            );
+            for r in run.rows {
                 // Whatever the gate did, a row may say `fsk` or `unknown` about an FSK emission —
                 // never another family.
                 assert!(
@@ -118,6 +277,9 @@ fn wide_deviation_fsk_through_the_mock_sdr_is_claimed_fsk_and_never_a_wrong_fami
         eprintln!("[T-852] {l}");
     }
     eprintln!("[T-852] above-gate rows claimed fsk: {claimed_above} of {above}");
+    for m in &no_extent {
+        eprintln!("[T-876] no extent: {m}");
+    }
     assert!(
         above >= 12,
         "too few above-gate rows to judge ({above}): {log:#?}"
