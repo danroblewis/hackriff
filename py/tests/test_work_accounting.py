@@ -769,6 +769,33 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     assert not any("fatal" in m for m in said)
 
 
+def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
+    """09-24 09:47: 55 GB of build output sat in twelve worktrees the reaper keeps (timeout, blocked,
+    uncommitted); free disk was 22 GB against a 20 GB dispatch floor."""
+    import os
+    root = tmp_path / ".claude" / "worktrees"
+    old = 1_000_000_000
+    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+        (root / name / "target" / "debug").mkdir(parents=True)
+        (root / name / "src.rs").write_text("kept\n")
+        if name != "fresh":
+            for p in (root / name / "target" / "debug", root / name / "target"):
+                os.utime(p, (old, old))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else f"p1\nn{root}/t870\n")
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    R.reclaim_idle_targets(claims, dry=True)
+    assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
+    R.reclaim_idle_targets(claims, dry=False)
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    assert gone == ["idle", "t87"]
+    assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
+    assert len([m for m in said if m.startswith("RECLAIM")]) == 2
+
+
 def test_only_regenerable_is_strict():
     assert R.only_regenerable([".githooks/", "target/"])
     assert not R.only_regenerable([".githooks/", "src/new.rs"])
