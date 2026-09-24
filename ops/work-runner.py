@@ -931,9 +931,14 @@ def release_stale_claims(claims, tasks_by_id):
     # A `queued` claim whose branch is already on main is finished: the merge runner landed it
     # (or a hand-merge did) and nothing flipped the claim. 24 of 39 "queued" claims were such
     # on 2026-09-23 01:40, inflating the dashboard's IN QUEUE count and every throughput read.
+    # Not while main is provisional: a batch commits each merge before gating (and a single merge is
+    # staged), so every branch in it reads "on main" and was closed - T-866 at 03:33:46 on 2026-09-24,
+    # 16 s before that batch failed, which left its red with no claim to resume. The reaper has the
+    # same guard for the same reason.
+    provisional = os.path.exists(BULKMARK) or os.path.exists(f"{REPO}/.git/MERGE_HEAD")
     for tid, c in list(claims.items()):
         b = c.get("branch")
-        if c.get("state") == "queued" and b:
+        if c.get("state") == "queued" and b and not provisional:
             try:
                 if sh(["git", "rev-parse", "-q", "--verify", b]).strip() and \
                    int(sh(["git", "rev-list", "--count", f"main..{b}"]).strip() or 0) == 0:
