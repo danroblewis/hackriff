@@ -6668,6 +6668,7 @@ tasks:
     blocked_on: "user HIL session: an active GNSS antenna (datasheet 3.0-3.3 V, <50 mA) on the HackRF bias-tee, a DC-safe splitter to a u-blox reference, and the HackRF free of the demo"
     notes: |
       2026-09-22 (coordinator): code on task-t326 (f6f8f7c7: Doppler search covers the receiver clock + a real-capture harness) is held unqueued - T-326 is on the 09-22 defer list; queue it with the capture session.
+    branch: task-t326
   - id: T-327
     milestone: M3
     title: C14 rate-search lower edge and whitening block width scale with the record, so the analysis geometry
@@ -6747,12 +6748,7 @@ tasks:
     milestone: M4
     title: 'ALGID is parsed and unit-tested but unreachable from IQ: it lives in voice frames and nothing
       demodulates those'
-    status: blocked
-    blocked_on: >-
-      a capability that does not exist: ALGID lives in the voice frames on the granted channel
-      and nothing demodulates those yet (T-270 said so at the time). Unblocked by a voice-frame
-      decode existing - not by a slot, and not by anyone deciding anything. Was sitting as todo
-      and making the unblocked-work census lie until 2026-09-16.
+    status: todo
     priority: normal
     deps:
     - T-270
@@ -6768,6 +6764,9 @@ tasks:
       and never lower to Clear. The VoicePermit seam already exists (hk-detect/src/trunk/voice.rs): a future
       vocoder must take one in its signature and the only way to get one is to ask. Keep that property -
       do not add a bypass for the decode path that reads the ALGID'
+    depends_on: [T-849]
+    notes: |
+      2026-09-23 (coordinator, user request): was blocked on a missing capability with no ticket; now todo depending on T-849 (P25 voice-frame LDU1/LDU2 demodulation, filed today).
   - id: T-331
     milestone: M2-hardening
     title: Floor context is not keyed on bias-tee state, so an active antenna and a passive one pool into
@@ -7527,6 +7526,7 @@ tasks:
     blocked_on: "a HIL session with the HackRF free: stop the user demo on :8899 (it holds the radio), run two hk serve --device hackrf processes back to back, then restore the demo. Deferred per the 09-22 directive - schedule after the 09-23 burndown with the user."
     notes: |
       2026-09-22 (coordinator): worker handed back BLOCKED - the test needs the real HackRF, which the :8899 demo holds. Not run: T-356 is on the 09-22 defer list (speculative, no observed failure), and taking the demo down is the user's call. needs: hardware so the runner stops dispatching it.
+    branch: task-t356
   - id: T-357
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
@@ -22260,11 +22260,11 @@ tasks:
   - id: T-660
     milestone: MAUTO
     title: 'hk-synth calibration loader: the conformance test and generator for ADR-0015 section 13 (refusal, groups, fill buckets)'
-    status: blocked
+    status: todo
     priority: medium
     parallel_group: MAUTOD
     model: sonnet
-    depends_on: [T-616, T-617, T-618]
+    depends_on: [T-616, T-617, T-618, T-848]
     use_cases: [RESEARCH-008]
     acceptance: |
       CODE, and it cannot start before `hk-synth` exists (ADR-0015 section 9) - there is no crate to
@@ -22298,7 +22298,9 @@ tasks:
       the contract it implements is ADR-0015 section 13, which is already written.
 
       2026-09-22 (coordinator): worker handed back BLOCKED (branch task-t660, T-660-result.md): crates/ has no hk-synth; T-616/617/618 are measurement-only and scaffold nothing. Do not re-dispatch until M-1 lands.
-    blocked_on: MAUTO M-1 (hk-synth crate scaffold) has not started and ADR-0015 is PROVISIONAL; MAUTO is unscheduled until after M3. No M-1 ticket exists yet.
+
+      2026-09-23 (coordinator, user request): was blocked on a prerequisite, not a person - now todo depending on T-848 (MAUTO M-1 hk-synth scaffold, filed today) plus T-616..T-618. Branch task-t660 holds only the earlier blocked-report commit.
+    branch: task-t660
   - id: T-700
     milestone: MCANVAS
     title: RELAND the tile-body reduction - 16x smaller /api/tiles bodies via an opt-in f16 plane and gzip, stranded on a branch with no ticket
@@ -24607,6 +24609,55 @@ tasks:
 
       2026-09-23 (coordinator): verified and closed as DONE (worker proposed cancel). flaky.jsonl holds exactly 2 app-surface entries, 2026-09-22T21:26:07 and 21:55:54 - both before task-deflake-appsurface (9e08619d) landed at 23:38; none across the ~12 batch merges logged 2026-09-23 00:00-14:33. commit = the fix that ended it.
     commit: 9e08619d
+  - id: T-848
+    milestone: MAUTO
+    title: "MAUTO M-1: hk-synth scaffold (Stage/Evidence/candidate/skeleton/template types, modules and stubs) and the ADR-0015 -> ACCEPTED review"
+    status: todo
+    priority: medium
+    deps:
+    - T-206
+    parallel_group: SYN-0
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      MAUTO M-1 from ADR-0015 section 10's work breakdown, filed 2026-09-23 because T-660 (and every other
+      hk-synth engine ticket) waits on it and no ticket existed.
+      DELIVER: the `hk-synth` crate scaffold - the Stage / Evidence / candidate / skeleton / template types,
+      the pre-added modules and stubs ADR-0015 names, wired into the workspace (no engine behaviour yet), and
+      the ADR-0015 -> ACCEPTED review (with ADR-0016 accepted or its dependency explicitly waived by the user).
+      Accepting an ADR is a user decision: prepare the review (open questions answered or listed with a
+      proposal each) and put it to the user; do not self-accept.
+      DONE WHEN: `cargo build -p hk-synth` and its unit tests pass; the public types match ADR-0015's
+      contracts; M-2..M-14 (T-660 among them) can start against it.
+      core_interface. TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (T-660 blocker review, user request).
+    core_interface: "true"
+  - id: T-849
+    milestone: M4
+    title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: M4B
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      Filed 2026-09-23 so T-330 can depend on a ticket instead of sitting `blocked` on a capability.
+      T-330's ALGID parser is correct and unit-tested but unreachable from IQ: ALGID (and the encryption
+      signalling around it) is carried in the P25 voice frames (LDU1/LDU2) on the GRANTED channel, and nothing
+      demodulates those today - the trunk follower (T-269/T-272/T-308/T-628) follows grants and records calls
+      but stops short of the voice-frame layer.
+      DELIVER: demodulate and deframe P25 Phase 1 LDU1/LDU2 on a followed voice channel far enough to expose
+      their link-control and encryption-sync fields (no vocoder / no audio decode is required), blind from IQ
+      through the mock SDR, so T-330 can assert ALGID from a real or synthetic capture.
+      ASSERT on a synthetic LDU stream with known LC/ES fields (hidden truth) and on the recorded fixture if
+      one carries voice frames. core_interface only if it changes the chain/stream contracts.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator 2026-09-23 (T-330 blocker review, user request).
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
