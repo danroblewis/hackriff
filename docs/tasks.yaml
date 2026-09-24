@@ -23654,7 +23654,8 @@ tasks:
   - id: T-804
     milestone: MMAP
     title: 'Detail sheet on selection: clicking a pin/box opens the focused signal'
-    status: todo
+    status: in-progress
+    branch: task-t804
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23990,7 +23991,8 @@ tasks:
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
-    status: todo
+    status: in-progress
+    branch: task-t814
     priority: normal
     parallel_group: MAP-CHROME
     model: sonnet
