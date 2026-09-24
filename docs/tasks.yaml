@@ -18151,7 +18151,8 @@ tasks:
   - id: T-552
     milestone: MAUTO
     title: 'MAUTO-RESEARCH: measure what one candidate evaluation actually costs on the M1 blocks, before quick/standard/deep are frozen into the /api/analyze contract'
-    status: todo
+    status: in-progress
+    branch: task-t552
     priority: normal
     parallel_group: MAUTOD
     model: sonnet
