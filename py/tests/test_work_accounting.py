@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import pathlib
 import sys
 
@@ -795,6 +796,54 @@ def test_a_leaked_e2e_data_dir_is_removed_and_a_live_one_kept(tmp_path, monkeypa
         os.utime(p, (old, old))
     R.reclaim_e2e_data(dry=False)
     assert (tmp_path / "hk-e2e-data-fresh").exists()
+def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
+    """09-24 09:47: 55 GB of build output sat in twelve worktrees the reaper keeps (timeout, blocked,
+    uncommitted); free disk was 22 GB against a 20 GB dispatch floor."""
+    import os
+    root = tmp_path / ".claude" / "worktrees"
+    old = 1_000_000_000
+    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+        (root / name / "target" / "debug").mkdir(parents=True)
+        (root / name / "src.rs").write_text("kept\n")
+    (root / "linked").mkdir()
+    (root / "linked" / "target").symlink_to(root / "idle" / "target")
+    monkeypatch.setattr(R, "_target_written", lambda t: time.time() if "/fresh/" in t else old)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
+    lsof = f"p1\nn{root}/t870\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    R.reclaim_idle_targets(claims, dry=True)
+    assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
+    R.reclaim_idle_targets(claims, dry=False)
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    assert gone == ["idle", "t87"]
+    assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
+    assert len([m for m in said if m.startswith("RECLAIM")]) == 2
+    assert (root / "linked").is_symlink() is False and os.path.islink(root / "linked" / "target")
+
+
+def test_an_idle_target_is_kept_when_lsof_says_nothing(tmp_path, monkeypatch):
+    root = tmp_path / ".claude" / "worktrees"
+    (root / "idle" / "target" / "debug").mkdir(parents=True)
+    monkeypatch.setattr(R, "_target_written", lambda t: 1_000_000_000)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    monkeypatch.setattr(R, "log", lambda m: None)
+    R.reclaim_idle_targets({}, dry=False)
+    assert (root / "idle" / "target").exists()
+
+
+def test_a_target_cloned_with_old_mtimes_reads_as_just_written(tmp_path):
+    """cp -c -R -p keeps main's mtimes; the clone's ctime is when it happened (review, 09-24)."""
+    import os
+    t = tmp_path / "target"
+    (t / "debug" / "deps").mkdir(parents=True)
+    for p in (t / "debug" / "deps", t / "debug", t):
+        os.utime(p, (1_000_000_000, 1_000_000_000))          # an old mtime, as `cp -p` leaves it
+    assert time.time() - R._target_written(str(t)) < 60
 
 
 def test_only_regenerable_is_strict():
@@ -840,6 +889,23 @@ def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
     R.dispatch_deflakes(claims, dry=False)
     assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
     monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_deflake_waits_while_its_last_branch_gates_in_a_batch(df, monkeypatch):
+    """09-24 09:39:52: main held the batch carrying task-deflake-app-trace-e2e-mjs, so the branch read
+    0 commits ahead of main and a second deflaker was dispatched beside its own gating fix."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())         # module-global: the test above said this WAIT
+    write(_req("deflake-a", 600.0))
+    (tmp / "bulk-in-progress").write_text("base=gatedbase\nbranches=task-deflake-a\n")
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0 if t == "main" else 3)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    (tmp / "bulk-in-progress").unlink()                  # the batch landed: main is gated again
     R.dispatch_deflakes(claims, dry=False)
     assert launched == [("deflake-a", 600.0, 2)]
 
