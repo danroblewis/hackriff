@@ -25618,7 +25618,7 @@ tasks:
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
-    status: todo
+    status: in-progress
     priority: normal
     deps:
     - T-866
@@ -25643,6 +25643,7 @@ tasks:
       Commits: 9de1103a
       Observed, not chased: Recipe not run end-to-end through the pipeline runtime (parity harness is LP-4's scope)
       Resources: 63 CPU-s, peak 0.4 GB
+    branch: task-t867
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
@@ -25685,7 +25686,8 @@ tasks:
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
-    status: todo
+    status: in-progress
+    branch: task-t870
     priority: normal
     deps:
     - T-866
