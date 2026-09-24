@@ -25175,7 +25175,8 @@ tasks:
   - id: T-857
     milestone: MAUTO
     title: "MAUTO M-6: ring read API + burst-set acquisition + pin-on-analyze clip"
-    status: todo
+    status: in-progress
+    branch: task-t857
     priority: normal
     deps:
     - T-848
@@ -25382,7 +25383,8 @@ tasks:
   - id: T-865
     milestone: MAUTO
     title: "LP-1: Listen conformance freeze through the mock SDR (the legacy Listen chain's behaviour pinned as tests before any cut-over)"
-    status: todo
+    status: in-progress
+    branch: task-t865
     priority: normal
     deps: []
     parallel_group: LP
@@ -25584,7 +25586,8 @@ tasks:
   - id: T-875
     milestone: MAUTO
     title: "PSK-BURST: psk_demod burst acquisition: short PSK bursts lose their start because T-609 needs a 512-1024-symbol window"
-    status: todo
+    status: in-progress
+    branch: task-t875
     priority: normal
     deps:
     - T-609
