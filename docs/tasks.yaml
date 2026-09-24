@@ -23683,7 +23683,7 @@ tasks:
   - id: T-805
     milestone: MMAP
     title: 'HUD axes: floating frequency (bottom) and time (left) rulers with ticks+labels, anchored in content space'
-    status: todo
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -23713,6 +23713,17 @@ tasks:
       2026-09-24 (coordinator, user via supervisor): moved to opus/medium - T-801 (the full-bleed layout 19 MMAP tickets hang on) took two sonnet/medium rounds that failed review (toolbar hit test, then three browser specs). Structural chrome/layout work goes to Opus.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): floating frequency ruler along the bottom and time ruler along the left edge, with ticks that track pan and zoom, instead of the old framed axes. Say in your handback exactly what to open on staging to see it.
+    branch: task-t805
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:18).
+      HUD axes (MAP-05, finishes T-459). New ui/src/surface/hud.ts: per-pane rulers (frequency along each pane's bottom edge, time down its left) built every frame in SurfaceView.frame() from the PaneView the data pass drew and the (cellHz, cellS) its PaneStatus reported. Ticks are band 0: hud-tick strokes drawn by the existing overlay program after the data pass, which stays byte-identical with the HUD on/off. Labels are band 2: a pooled DOM layer (.sf-hud inside .sf-stage, pointer-events none) placed in the same frame from the same ruler. Tick values are nice multiples of absolute Hz / capture ns, so pan, zoom and the advancing live edge move them with the rows. The major step and any minor mark are floored at the drawn cell (honesty). Labels state units: '100.5 MHz'; time as age behind the live edge ('−10 s', 'live edge') with the UTC instant beside it. The minimap gets no ruler. Ticks (alpha 0.45) and labels (CSS opacity .45) fade on body.chrome-idle, but nothing sets that class yet: idle detection is MAP-24's (T-824) job. The T-459 chrome readout sentence is kept. TO SEE IT ON STAGING: open the app (/) on the Explore view. The bottom edge of the spectrum canvas, just above the minimap strip, has a floating MHz ruler with major+minor ticks, and the left edge has a time ruler (−N s + HH:MM:SSZ). Drag to pan and wheel to zoom: the ticks and labels move with the waterfall rows, and in a following pane the time ticks scroll down as the live edge advances. Split ⇔ gives each viewport its own pair of rulers.
+      Tests: just test-ui -> exit 0 (build + typecheck + 57/57 node test files passed (new surface-hud.test.ts: 12 tests))
+      precheck exit 0
+      Commits: 5337e78f
+      Observed, not chased: Nothing sets the chrome idle-fade class yet (no body.chrome-idle in ui/src). The HUD reads that class, so it will fade as soon as MAP-24/T-824 (or MAP-02) adds the idle timer. | #view-explore > .centre still has 56px top / 70px bottom padding (map-layout.css), so the canvas stage is not fully edge-to-edge. The rulers sit on the pane edges inside that stage. | No browser/e2e run was made (targeted protocol). The label CSS offsets (freq 30px above the pane bottom, time 14px right of the left edge) were checked only by unit geometry, not by eye. | The /surface.html preview (preview-main.ts) does not pass a hud element, so it has no rulers. Only the app's Explore surface was wired.
+      Use cases: AWARE-042
+      Resources: 72 CPU-s, peak 0.4 GB
+    commit: 18586f9b
   - id: T-806
     milestone: MMAP
     title: 'Per-pane layer registry + layers menu (two axes: base style vs overlays)'
@@ -25473,7 +25484,7 @@ tasks:
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-859
@@ -25495,6 +25506,18 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      Review: Analyze section only mounted on emitter focus; now mounts on selection focus and whenever a job is watched.
+    branch: task-t862
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:16).
+      Review fix: the Analyze section (inside the lazy-loaded output panels) only mounted on emitter focus, but only a selection Analyze starts a job. explore/index.ts now calls ensureOutputPanels in the selection-focus branch and, with nothing focused, whenever an analyze job is watched (keeping the panel un-hidden), and the focus render re-runs when analyze.jobId changes. Added analyzeWatched helper and test. Original feature: Analyze progress, ranked results, evidence ladder, start-as-pipeline, save-template in the output panel.
+      Tests: cd ui && npx tsc --noEmit -> exit 0 (clean); cd ui && node test/run.mjs -> exit 0 (57/57 test files passed)
+      precheck exit 0
+      Commits: 4f62a242, 520b78b7, 36f21a59
+      Observed, not chased: Analyze job poll never stops after the job finishes (reviewer non-blocking) | save-template route (M-10) not yet in docs/api.md | Browser e2e not run
+      Resources: 72 CPU-s, peak 0.6 GB
+    commit: ece2fc3d
   - id: T-863
     milestone: MAUTO
     title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
@@ -25616,7 +25639,8 @@ tasks:
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
-    status: todo
+    status: in-progress
+    branch: task-t867
     priority: normal
     deps:
     - T-866
@@ -25675,7 +25699,8 @@ tasks:
   - id: T-870
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
-    status: todo
+    status: in-progress
+    branch: task-t870
     priority: normal
     deps:
     - T-866
@@ -25735,7 +25760,8 @@ tasks:
   - id: T-873
     milestone: MAUTO
     title: "LP-9: stereo_decode block: 19 kHz pilot PLL, 38 kHz L-R demodulation, L/R matrix, pilot-lock Status and S1 evidence(); honest mono fallback when the pilot is absent or unlocked"
-    status: todo
+    status: in-progress
+    branch: task-t873
     priority: normal
     deps:
     - T-866
@@ -25844,7 +25870,8 @@ tasks:
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
-    status: todo
+    status: in-progress
+    branch: task-t878
     priority: high
     deps: []
     parallel_group: M3A
@@ -25860,7 +25887,7 @@ tasks:
   - id: T-879
     milestone: M3
     title: acceptance_m3 m3_repeated_unknowns_form_one_visible_cluster fails ALONE on main (1 emitter over 3 appearances, no cluster); a multipath snippet is normalised from 17,920 samples to 124
-    status: todo
+    status: in-progress
     priority: high
     deps: []
     parallel_group: M3A
@@ -25884,6 +25911,7 @@ tasks:
       Observed, not chased: acceptance_m3 is not in the merge gate (only `just acceptance-m3` runs it), which is how this test stayed red on main unnoticed; m3_grid tests take 4-15 min each under load. | With the structural-identity fix, the 2nd/3rd unit of one framed device type carry no identity in the inventory (the identity index is unique per (scheme,value)); if the UI should show the framing signature on every unit, that needs a non-unique home for structural signatures (schema change), not done here.
       Use cases: AWARE-011, AWARE-036
       Resources: 1551 CPU-s, peak 2.8 GB
+    branch: task-t879
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
