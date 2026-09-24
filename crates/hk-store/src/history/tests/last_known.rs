@@ -301,6 +301,54 @@ fn the_carry_runs_down_each_column_yield_to_the_grid_and_stop_at_the_data_edge()
     );
 }
 
+/// **T-881: past the data edge, as far as the tune record reaches, over the cells it says the
+/// radio was not looking at.** The data edge is the newest FOLDED frame and the fold trails
+/// capture; a departed band's rows between the two are time the radio spent elsewhere, and with no
+/// run over them they were drawn as THE grey. RED before T-881: every column stopped at row 3.
+#[test]
+fn the_carry_continues_past_the_fold_edge_only_over_unobserved_cells_up_to_the_record_reach() {
+    let before = T0 + 1000 * S;
+    let seed = |db: f32| LastKnownCell {
+        max_db: db,
+        t_ns: before - 5 * S,
+        level: 2,
+    };
+    let k = LastKnown {
+        before_ns: before,
+        f_lo_hz: 0.0,
+        f_cell_hz: 1000.0,
+        nf: 3,
+        cells: vec![seed(-50.0), seed(-60.0), LastKnownCell::NONE],
+        stages: Vec::new(),
+        searched_from_ns: T0,
+        source_cells: 0,
+    };
+    let nt = 8;
+    let (edge, reach) = (before + 3 * S, before + 6 * S);
+    // Column 0: departed, unobserved throughout. Column 1: the radio came back at row 4 (its
+    // frames are not folded yet). Column 2: never observed, no value anywhere.
+    let mask: Vec<bool> = (0..nt * 3).map(|i| !(i % 3 == 1 && i / 3 >= 4)).collect();
+    let runs = k.carry_forward_to(None, S as f64, nt, Some(edge), Some((reach, &mask)));
+    assert_eq!(
+        runs_of(&k, &runs),
+        vec![
+            // Up to the record's reach (row 6), and not into the future past it.
+            (0, 0, 6, -50.0, -5, Some(2), ShadowFill::Forward),
+            // Stops for good at the first cell past the edge the radio DID look at: its newer
+            // measurement is on its way, and an older number must not stand in for it.
+            (1, 0, 4, -60.0, -5, Some(2), ShadowFill::Forward),
+        ]
+    );
+    // Without the record's word, the edge stands exactly as before; a mask that is not this
+    // grid's is no extension at all.
+    let at_edge = k.carry_forward(None, S as f64, nt, Some(edge));
+    assert!(at_edge.iter().all(|r| r.row + r.rows <= 3), "{at_edge:?}");
+    assert_eq!(
+        k.carry_forward_to(None, S as f64, nt, Some(edge), Some((reach, &mask[..5]))),
+        at_edge
+    );
+}
+
 /// **T-527, the fill rule and its one exception.** Every gap in a column that was ever observed is
 /// filled; a column never observed at all carries **no run**, which is what keeps grey meaning
 /// *we never looked*.

@@ -25643,7 +25643,6 @@ tasks:
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
     status: in-progress
-    branch: task-t867
     priority: normal
     deps:
     - T-866
@@ -25660,6 +25659,19 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate failed on test_work_accounting.py (2 tests, release_stale_claims) - unrelated to this recipe-only diff; both pass alone on the merged tree (60 passed). Load/order-sensitive, flag for deflaker. No code change.
+
+      Gate attempt 2 failed again on the same 2 py tests (test_work_accounting: waits_while_last_branch_unmerged, claim_landed_as_rebuilt_branch). They pass alone (60 passed). Cause is on main, not this recipe-only diff: ops/work-runner.py release_stale_claims/branches_waiting read the real REPO/.git/MERGE_HEAD (lines ~954, 1040), which exists during gate-merge, and the tests do not isolate it. Needs a pipeline fix (monkeypatch REPO in those tests); branch is otherwise ready.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:22).
+      Gate failure was 2 py tests in test_work_accounting.py (release_stale_claims), unrelated to this recipe-only diff; both pass alone on the tree merged with 1fef1a41 (60 passed). Load/order-sensitive, flagged for deflaker. No code change; merged main in. Recipe test still passes, precheck clean.
+      Tests: cargo nextest run -p hk-blocks -E 'binary(analog_wfm_recipe)' -> exit 0 (1 passed); pytest py/tests/test_work_accounting.py -> exit 0 (60 passed)
+      precheck exit 0
+      Commits: 9de1103a, 54e9b3de
+      Observed, not chased: test_work_accounting: test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed failed in gate, pass alone
+      Resources: 63 CPU-s, peak 0.4 GB
+    branch: task-t867
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
@@ -25703,7 +25715,6 @@ tasks:
     milestone: MAUTO
     title: "LP-6: refine.objective.builtin + refinement applied as a hot edit"
     status: in-progress
-    branch: task-t870
     priority: normal
     deps:
     - T-866
@@ -25720,6 +25731,16 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:44).
+      ADR-0015 LP-6 (§12.6) / ADR-0011 §8.7 delivered. hk-recipe: refine.objective is either {builtin} (schema 3) or {node, metric, goal}, never a mix; a mixed or partial object is refused at parse with a named rule. builtin must be registered (REFINE_BUILTINS = wfm-pilot) and needs an iq input on one channel. EditPlan::with_channel_moved treats a moved centre as an `input` change, so every node rebuilds. hk-pipeline: new recipes::refine. A per-pipeline hk-refine worker runs T-070's RefinementLoop + WfmObjective with Listen's settings and hysteresis: once from the target, then every 15 s. The pipeline thread only copies a ring window into a buffer made at start and handed back; it never allocates or spawns. Each locked, accepted result is applied as an ordinary hot edit through RecipeRuntime::apply_refinement, the same staged edit PUT /api/pipelines/{id}/recipe makes: the refined centre becomes the channel, the refined bandwidth goes into input.bandwidth_hz, the channel is re-plumbed at a chunk boundary, edit_rev goes up by one, outputs keep their consumers, and a save keeps the refined revision. It is stored as an emitter_refined_tuning row (source "recipe"). Pipeline JSON gains `refinement`, and `channel` now reports the channel in force. Audio status records carry refined_center_hz / refined_bandwidth_hz / refine_updates. The {node, metric} form is still validated but not run. docs/api.md and ADR-0011 §8's status line are updated.
+      Tests: cargo nextest run -p hk-recipe -> exit 0 (52 passed (incl. builtin-objective schema tests and a_moved_channel_rebuilds_every_surviving_node)); cargo nextest run -p hk-pipeline -E 'binary(recipe_refine) or binary(recipe_runtime) or binary(recipe_audio) or binary(follow_hops) or binary(recipe_alloc_free) or binary(decoded_capture) or (kind(lib) and test(/recipes::/))' -> exit 0 (51 passed; recipe_refine: refines a band drawn 25 kHz off the hidden-truth station onto it (within 2 kHz) and applies it as one hot edit per result, the pre-edit audio consumer keeps the 1 kHz programme; an unlocked result never retunes)
+      precheck exit 0
+      Commits: d95e1d2d
+      Observed, not chased: hk-cli api_contract recipe_and_pipeline_routes_match_the_documented_shapes fails on the BASE commit too (checked by restoring HEAD~1's crates/ in this worktree): api_contract.rs:4756 (4761 on this branch) expects POST /api/pipelines on band 90.0-90.1 MHz to be 409 outside_window but gets 201; the started pipeline shows chunks 0. That looks like planning_tune's provisional window (T-175: before the capture publishes a tune, the window is centred on the target), not T-870. It failed 3/3 alone at load ~19. My added assertion (refinement: null) runs before that line and passes. | hk-pipeline runtime_attach chains_attached_and_detached_mid_run_drop_no_always_on_samples fails alone at load 13-20 ('attached 9' / 'attached 8' < 18). It is the known load-flake already recorded in docs/tasks.yaml (~line 21282): fsk-bursts chain, 50 ms wall-clock sleeps, no recipe code involved. | The {node, metric, goal} refine objective (e.g. recipes/rds.recipe.json crc.error_rate -> min) is still parsed and validated but never run by the recipe runtime. T-870 serves only {builtin}; running node-metric objectives through the same apply_refinement path is follow-up work. | A pipeline's content_class (streams_ctx.class) is fixed at start. An applied refinement (or any input edit) re-runs the audio pre-attach gate on the new channel but does not re-derive the class for non-audio outputs. Moves are bounded by the WFM objective's 100 kHz search margin; noted, not changed.
+      Use cases: SIGNAL-062
+      Resources: 180 CPU-s, peak 3.0 GB
+    branch: task-t870
   - id: T-871
     milestone: MAUTO
     title: "LP-7: MUI: one output model across the dock and the per-signal panels"
@@ -25928,6 +25949,51 @@ tasks:
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
     commit: 3421c16d
+  - id: T-880
+    milestone: MCANVAS
+    title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the app-trace re-merge worker (task-deflake-app-trace-e2e-mjs, 9c6f32ec; handback ~/.hackriff-ops/work/deflake-app-trace-e2e-mjs/handback-merge-main.json). ui/e2e/app-trace.e2e.mjs's T-475 colour check (the spectrum trace at a scrubbed pane's time position must be the FFT of that pane's top cell) went red 2 of 12 clean runs, both on panes showing ~2 s of history (every pane >= 3.1 s passed): 77.2% (766/992) and 71.7% (665/928) of columns matched against the 80% bar. Offline re-analysis of both saved screenshots: canvas position correct, the 6 rows read are exactly the pane's top cell; the trace matches that cell in only 72-80% of columns but matches max(that cell, the next-older cell) in 88.6-91.8%, with misses spread across all columns (not one tile). So the drawn slice appears to be a max over TWO cells, which sliceWindow's own comment says must never happen; on longer panes cells are ~3 px so 6 rows already span two cells and the defect is masked.
+      UNCONFIRMED HYPOTHESIS: ui/src/surface/trace.ts maxHoldColumns derives the rows to read with floor/ceil on f64 epoch nanoseconds (~1.8e18 > 2^53, ~256 ns precision), so a boundary value just off a cell edge pulls in the neighbouring cell.
+      DELIVER: root-cause (it reproduces on main - the colour check is main's T-475 check), fix so the trace at a pane's time position is exactly one cell's FFT (e.g. integer/BigInt or cell-relative arithmetic, not raw epoch-ns doubles), and a ui/test unit test at a cell boundary with realistic epoch-ns values that goes red on the old code. Presentation-only arithmetic (thin client); no change to the e2e threshold or control.
+      WHAT THE USER WILL SEE ON STAGING: scrubbing a pane into the past, the spectrum trace strip above it matches the top waterfall row of that pane exactly, including on very short (~2 s) pane windows.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
+  - id: T-881
+    milestone: MCANVAS
+    title: "Departed band shows never-observed grey at its newest rows (10-60% of a shadow pane) instead of shadow: gap between shadow.edge_s and as_of_s?"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the fog-of-war deflaker (pipeline-manager's manual deflaker; task-deflake-fog-of-war c9018996/ff08e2c5, landed; relayed in merge-needs-attention 00:36). In ui/e2e/fog-of-war.e2e.mjs a DEPARTED band (swept, then the radio left) shows real never-observed grey at its NEWEST rows: the top of the band-A shadow pane was plain grey with 0 pending / 0 coarse stand-ins / 0 behind the live edge, 10.7-25.1% of the pane across the deflaker's runs (rows 181-275 of a 181-548 pane in one snapshot); T-801's gate measured 59.8%. That contradicts the invariant "swept then left = shadow (last-known), not grey" (user: scan + fog-of-war shadow tiles; T-441 distinct marks).
+      UNVERIFIED GUESS: the rows between the server's newest folded frame (shadow.edge_s) and the coverage horizon (as_of_s) are marked unobserved, but no shadow run reaches them.
+      DELIVER: root-cause through the real serving path (coverage/shadow routes + the client's shadow placement), fix so a departed band's rows up to the moment it was left read as shadow (or as observed-not-yet-measured where that is the truth), never as never-observed grey; a backend or ui/test regression test that goes red on the old code. The fog-of-war assertion "departed band A reads mostly THE grey" is currently left unchanged and goes red whenever the gap exceeds half the pane: keep it, do not weaken it.
+      WHAT THE USER WILL SEE ON STAGING: tune away from a band you swept; its column on the canvas stays dim "last-known" shadow right up to the moment you left, with no plain-grey strip at the top.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate's binary / just test-ui; fog-of-war.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY fog-of-war deflaker 2026-09-24 (relayed by pipeline-manager).
+    effort_reason: "hard cross-layer debugging: root cause spans the backend coverage/shadow serving path and the client's shadow placement, with only an unverified guess (prompts/model-selection.md: hard debugging -> opus high)"
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 10:26).
+      Root cause, two parts, both server-side on the real serving path. (1) The shadow stopped at the store's newest FOLDED frame (shadow.edge_s), which trails capture; a departed band's rows between it and the tune record's reach carried no run, so coverage 'unobserved' + no shadow = THE grey. New LastKnown::carry_forward_to (hk-store) carries past the edge up to the answer's own coverage.horizon.as_of_s, only over cells the selected coverage plane calls unobserved (a column stops for good at a not-unobserved cell past the edge); wire field shadow.reach_s. (2) coverage.horizon.as_of_s was read over THIS band only: a tile wholly after the departure named no horizon (null) and a held copy was drawn as served, grey over rows recorded since; a tile straddling it named the departure, leaving later rows pending for good. as_of_s is now the tune record's reach over any band (IQ ring segments + dwells in flight from the same snapshot as the band's spans; observation log still per band), the rule /ws/tiles/rows already used. docs/api.md updated (as_of_s row, shadow data-edge rule, reach_s). The fog-of-war 'departed band A reads mostly THE grey' assertion is unchanged; run alone it now measures grey 0.0% (was 10.7-59.8%), the newest strip reading as 'behind the edge' (pending) instead. On staging: a departed band's column stays shadow up to the live edge, with at most a short pending strip at the very top between tile refreshes, never plain grey.
+      Tests: cargo nextest run -p hk-api -E 'test(/shadow|departed|coverage|horizon|as_of|tile/)' -> exit 0 (67 passed (includes new a_departed_band_reads_as_shadow_up_to_the_record_reach_not_grey_past_the_fold_edge, verified RED with the fix disabled: as_of_s null / reach_s null)); cargo nextest run -p hk-store -E 'test(/last_known/)' -> exit 0 (11 passed (includes new the_carry_continues_past_the_fold_edge_only_over_unobserved_cells_up_to_the_record_reach)); cargo nextest run -p hk-cli -E 'binary(api_contract) & test(/coverage_answers_per_cell/)' -> exit 0 (1 passed (updated untouched-band as_of_s assertion)); HK_BIN=target/debug/hk HK_E2E_PORT=9376 HK_E2E_JOURNEY_PORT=9400 HK_E2E_CONCURRENCY=1 node ui/e2e/run.mjs fog-of-war -> exit 0 (1/1 files passed; SHADOW A (departed) grey 0.0%, '3 tiles, 0 pending, 3 behind the edge')
+      precheck exit 0
+      Commits: b8a06b6c
+      Observed, not chased: Full-crate runs: `just test-crate hk-store` exit 100 (211/212) and `just test-crate hk-api` exit 100 (286/287); every test touched by this diff passed. The two failures are unrelated to it and both FAIL ALONE 3/3 at load avg ~15-17: (a) hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at crates/hk-store/src/decoded.rs:1529 `assert!(c.dropped_records > 0)` with dropped_records: 0, frames: 29; (b) hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay panics at crates/hk-api/tests/ondemand.rs:365 `records > 20` with '10 records' in 1.5 s. Both are wall-clock-bound; not re-checked on a quiet box or on main. | as_of_s still reads the observation log for this band only (a whole-band page would compete with the band's records for MAX_RECORD_LIMIT). A server with no IQ ring and no dwell in flight (capture stopped, ring refused) still gets a departed band's horizon at the departure; not observed in practice. | A per-band untouched region (never-swept band C) now carries a non-null as_of_s, so a held copy draws grey only up to it and pending above - more honest, but a visible change to the top strip of never-swept panes between refreshes.
+      Resources: 917 CPU-s, peak 3.5 GB
   - id: T-882
     milestone: MMAP
     title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
@@ -25967,43 +26033,6 @@ tasks:
       FOUND BY T-802 worker 2026-09-24.
 
       2026-09-24 CORROBORATED by the T-803 worker (separate worktree, same hour): in a parallel run its lane log showed another worktree's specs, including T-802's 'floating controls' test that is not in its tree; one surface-drag test timed out that run and passed on re-run. Two independent worktrees saw each other's runs.
-  - id: T-880
-    milestone: MCANVAS
-    title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
-    status: todo
-    priority: high
-    deps: []
-    parallel_group: UI
-    needs: none
-    model: opus
-    effort: medium
-    acceptance: |
-      OBSERVED 2026-09-24 by the app-trace re-merge worker (task-deflake-app-trace-e2e-mjs, 9c6f32ec; handback ~/.hackriff-ops/work/deflake-app-trace-e2e-mjs/handback-merge-main.json). ui/e2e/app-trace.e2e.mjs's T-475 colour check (the spectrum trace at a scrubbed pane's time position must be the FFT of that pane's top cell) went red 2 of 12 clean runs, both on panes showing ~2 s of history (every pane >= 3.1 s passed): 77.2% (766/992) and 71.7% (665/928) of columns matched against the 80% bar. Offline re-analysis of both saved screenshots: canvas position correct, the 6 rows read are exactly the pane's top cell; the trace matches that cell in only 72-80% of columns but matches max(that cell, the next-older cell) in 88.6-91.8%, with misses spread across all columns (not one tile). So the drawn slice appears to be a max over TWO cells, which sliceWindow's own comment says must never happen; on longer panes cells are ~3 px so 6 rows already span two cells and the defect is masked.
-      UNCONFIRMED HYPOTHESIS: ui/src/surface/trace.ts maxHoldColumns derives the rows to read with floor/ceil on f64 epoch nanoseconds (~1.8e18 > 2^53, ~256 ns precision), so a boundary value just off a cell edge pulls in the neighbouring cell.
-      DELIVER: root-cause (it reproduces on main - the colour check is main's T-475 check), fix so the trace at a pane's time position is exactly one cell's FFT (e.g. integer/BigInt or cell-relative arithmetic, not raw epoch-ns doubles), and a ui/test unit test at a cell boundary with realistic epoch-ns values that goes red on the old code. Presentation-only arithmetic (thin client); no change to the e2e threshold or control.
-      WHAT THE USER WILL SEE ON STAGING: scrubbing a pane into the past, the spectrum trace strip above it matches the top waterfall row of that pane exactly, including on very short (~2 s) pane windows.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui or the single ui/test file; app-trace.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
-    notes: |
-      FOUND BY app-trace re-merge worker 2026-09-24 (2/12 reds, offline screenshot analysis).
-  - id: T-881
-    milestone: MCANVAS
-    title: "Departed band shows never-observed grey at its newest rows (10-60% of a shadow pane) instead of shadow: gap between shadow.edge_s and as_of_s?"
-    status: todo
-    priority: high
-    deps: []
-    parallel_group: UI
-    needs: none
-    model: opus
-    effort: high
-    acceptance: |
-      OBSERVED 2026-09-24 by the fog-of-war deflaker (pipeline-manager's manual deflaker; task-deflake-fog-of-war c9018996/ff08e2c5, landed; relayed in merge-needs-attention 00:36). In ui/e2e/fog-of-war.e2e.mjs a DEPARTED band (swept, then the radio left) shows real never-observed grey at its NEWEST rows: the top of the band-A shadow pane was plain grey with 0 pending / 0 coarse stand-ins / 0 behind the live edge, 10.7-25.1% of the pane across the deflaker's runs (rows 181-275 of a 181-548 pane in one snapshot); T-801's gate measured 59.8%. That contradicts the invariant "swept then left = shadow (last-known), not grey" (user: scan + fog-of-war shadow tiles; T-441 distinct marks).
-      UNVERIFIED GUESS: the rows between the server's newest folded frame (shadow.edge_s) and the coverage horizon (as_of_s) are marked unobserved, but no shadow run reaches them.
-      DELIVER: root-cause through the real serving path (coverage/shadow routes + the client's shadow placement), fix so a departed band's rows up to the moment it was left read as shadow (or as observed-not-yet-measured where that is the truth), never as never-observed grey; a backend or ui/test regression test that goes red on the old code. The fog-of-war assertion "departed band A reads mostly THE grey" is currently left unchanged and goes red whenever the gap exceeds half the pane: keep it, do not weaken it.
-      WHAT THE USER WILL SEE ON STAGING: tune away from a band you swept; its column on the canvas stays dim "last-known" shadow right up to the moment you left, with no plain-grey strip at the top.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the crate's binary / just test-ui; fog-of-war.e2e.mjs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
-    notes: |
-      FOUND BY fog-of-war deflaker 2026-09-24 (relayed by pipeline-manager).
-    effort_reason: "hard cross-layer debugging: root cause spans the backend coverage/shadow serving path and the client's shadow placement, with only an unverified guess (prompts/model-selection.md: hard debugging -> opus high)"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

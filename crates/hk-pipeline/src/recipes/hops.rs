@@ -213,7 +213,7 @@ pub fn split(recipe: &Recipe, registry: &Registry) -> Result<Split, RuntimeError
         refine: recipe
             .refine
             .clone()
-            .filter(|r| down.contains(r.objective.node.as_str())),
+            .filter(|r| r.objective.node().is_some_and(|n| down.contains(n))),
         ..recipe.clone()
     };
     Ok(Split {

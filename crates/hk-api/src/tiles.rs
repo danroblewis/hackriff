@@ -1974,7 +1974,9 @@ fn grid_json(o: &Overview, planes: Planes) -> Value {
 /// already holds, newest-first and fine-to-coarse, so nothing is maintained for it and capture pays
 /// nothing (T-453) — and is **replaced by this tile's own value** at every row where the grid holds
 /// one. A row where the grid holds a value gets no run: the shadow never stands in for a
-/// measurement. Rows at or after the store's newest frame get no run either.
+/// measurement. Rows at or after the store's newest frame get no run either — except, since
+/// T-881, where the tune record reaches past it and the coverage plane says the radio was not
+/// looking: the fold trails capture, and those rows are a departed band's newest.
 ///
 /// # Every gap in an observed column, not only the ones after a sample (T-527)
 ///
@@ -2005,6 +2007,9 @@ struct Shadow {
     known: hk_store::LastKnown,
     store: TileStore,
     edge_ns: Option<i64>,
+    /// How far past `edge_ns` runs may reach over cells the coverage plane calls unobserved
+    /// (T-881): the answer's own `as_of_s`, or `None` when it reaches no further than the edge.
+    reach_ns: Option<i64>,
     chunks: usize,
     elapsed_ms: f64,
     /// Source cells this search was allowed (T-523), on the wire as `search.max_source_cells`.
@@ -2030,6 +2035,7 @@ fn shadow(
     tile_store: TileStore,
     key: &TileKey,
     grid: Option<&Overview>,
+    overlay: &crate::coverage::TileOverlay,
 ) -> Result<Shadow, ApiError> {
     let started = std::time::Instant::now();
     let store = shadow_store(state, tile_store);
@@ -2102,12 +2108,22 @@ fn shadow(
         chunks += 1;
     }
     let known = search.finish();
-    let runs = known.carry_forward(grid, key.t_cell_ns as f64, n, edge_ns);
+    // T-881: past the store's newest FOLDED frame, as far as the tune record reaches — the same
+    // `as_of_s` this answer's coverage serves — over the cells that record says the radio was not
+    // looking at. The fold trails capture, so without this a departed band's newest rows carried
+    // no run: coverage `unobserved`, no shadow, drawn as THE grey.
+    let reach_ns = overlay
+        .as_of_ns()
+        .filter(|&r| edge_ns.is_some_and(|e| r > e));
+    let mask = reach_ns.and_then(|_| overlay.unobserved_mask(&key.device));
+    let beyond = reach_ns.zip(mask.as_deref());
+    let runs = known.carry_forward_to(grid, key.t_cell_ns as f64, n, edge_ns, beyond);
     Ok(Shadow {
         runs,
         known,
         store,
         edge_ns,
+        reach_ns: beyond.map(|(r, _)| r),
         chunks,
         elapsed_ms: started.elapsed().as_secs_f64() * 1e3,
         budget,
@@ -2185,6 +2201,9 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             .filter(|r| r.fill == hk_store::ShadowFill::Backward)
             .count(),
         "edge_s": sh.edge_ns.map(s_of),
+        // T-881: how far past `edge_s` a run may reach — this answer's `coverage.horizon.as_of_s`
+        // — or null when runs stop at `edge_s`.
+        "reach_s": sh.reach_ns.map(s_of),
         "search": {
             "store": store_name(sh.store),
             "before_s": s_of(k.before_ns),
@@ -2236,7 +2255,12 @@ fn shadow_json(sh: &Shadow, tile_level: Option<u8>) -> Value {
             forward. Either way last_t_s[i] is the boundary NEAREST the run, so |row time - \
             last_t_s[i]| is the smallest age the evidence supports. A row where `grid` holds a \
             value is never covered: a shadow never replaces a measurement. Rows at or after \
-            `edge_s` (the newest frame) are never covered. A column with NO sample and NO older \
+            `edge_s` (the newest FOLDED frame) are covered only up to `reach_s` (the tune \
+            record's reach, this answer's `coverage.horizon.as_of_s`; null = not at all), and only \
+            where the selected coverage plane says \"unobserved\": the fold trails capture, and a \
+            departed band's rows up to where the record reaches are time the radio spent \
+            elsewhere (T-881). A column meeting a not-unobserved cell past `edge_s` stops there. \
+            A column with NO sample and NO older \
             value carries NO run at all — it was never observed. GREY IS UNCHANGED AND IS STILL \
             DECIDED BY `coverage` ALONE: draw a shadow only where the coverage plane says \
             \"unobserved\", and a cell with no run over it stays grey — no retained measurement \
@@ -2415,7 +2439,7 @@ fn tile_body(
         // T-519: a tile the coverage map greys end to end is exactly where a departed band's
         // shadow lives, so the last-known search runs here too — against no grid, because the
         // coverage map just said no tune touched this tile.
-        let sh = shadow(state, store, &key, None)?;
+        let sh = shadow(state, store, &key, None, &overlay)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
         let mut v = unobserved_tile_json(
             &key,
@@ -2431,7 +2455,7 @@ fn tile_body(
         return Ok(cache_put(state, &cache_key, epoch, v));
     }
     let r = tile_read(state, store, &key)?;
-    let sh = shadow(state, store, &key, Some(&r.grid))?;
+    let sh = shadow(state, store, &key, Some(&r.grid), &overlay)?;
     let levels = with_tile_history(state, store, |p| Ok(p.geometry().n_levels()))?;
     let source = tier(&key, &r, max_live);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -5983,6 +6007,210 @@ mod tests {
             next["shadow"]["search"]["build_ms"],
             next["shadow"]["search"]["source_cells"],
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// T-881's fixture — the fog-of-war scene with the fold **trailing** capture, as it does on a
+    /// live server. Band X (tile `F_INDEX`) is swept for the first `half` rows of tile `T_INDEX`
+    /// (a sealed dwell) and then departed; the radio moves to band Y (tile `F_INDEX + 2`, the dwell
+    /// in flight), whose tune record reaches `record` rows past `t0` — but the spectrum history has
+    /// folded Y's frames only as far as `folded` rows. Tile `F_INDEX + 1` is never observed.
+    fn state_departed_with_fold_lag(
+        dir: &std::path::Path,
+        half: i64,
+        folded: i64,
+        record: i64,
+    ) -> (ApiState, i64, i64) {
+        let mut p = hk_store::Pyramid::open(dir, PyramidConfig::default()).unwrap();
+        let g = p.geometry().clone();
+        let (t_cell, f_cell) = (g.levels[0].t_cell_ns, g.levels[0].f_cell_hz);
+        let band = |b: i64| (F_INDEX + b) as f64 * f_cell * N as f64;
+        let t0 = T_INDEX * t_cell * N as i64;
+        const NB: usize = 128;
+        let bin_hz = f_cell * N as f64 / NB as f64;
+        for k in 0..folded {
+            let mut psd = [1e-12f32; NB];
+            psd[40] = 1e-6;
+            let bands = if k < half {
+                &[0i64, 2][..]
+            } else {
+                &[2i64][..]
+            };
+            for &b in bands {
+                p.ingest(&hk_store::history::FrameInput::new(
+                    Timestamp::from_unix_nanos(t0 + k * t_cell),
+                    t_cell,
+                    band(b),
+                    bin_hz,
+                    hk_model::PowerUnit::Dbfs,
+                    &psd,
+                ))
+                .unwrap();
+            }
+        }
+        let store = hk_store::observation::ObservationStore::open(
+            hk_store::observation::ObservationLogConfig::new(dir.join("observations")),
+        )
+        .unwrap();
+        let width = f_cell * N as f64;
+        store.append(&dwell(band(0), band(0) + width, t0, t0 + half * t_cell));
+        store.flush();
+        let hk_model::attention::observation::ObservationRecord::Dwell(open) = dwell(
+            band(2),
+            band(2) + width,
+            t0 + half * t_cell,
+            t0 + record * t_cell,
+        ) else {
+            unreachable!("dwell builds a dwell")
+        };
+        store.note_open_dwell(open);
+        let state = ApiState {
+            history: Some(Arc::new(std::sync::Mutex::new(p))),
+            observations: Some(store),
+            ..ApiState::default()
+        };
+        (state, t0, t_cell)
+    }
+
+    /// The selected coverage plane of a tile answer, one state name per cell.
+    fn selected_states(v: &Value) -> Vec<String> {
+        let states = v["coverage"]["states"].as_array().unwrap();
+        let sel = v["coverage"]["selected"]["plane"].as_u64().unwrap() as usize;
+        let runs = v["coverage"]["planes"][sel]["runs"].as_array().unwrap();
+        let mut plane = Vec::with_capacity(N * N);
+        for pair in runs.chunks(2) {
+            let s = states[pair[0].as_u64().unwrap() as usize].as_str().unwrap();
+            for _ in 0..pair[1].as_u64().unwrap() {
+                plane.push(s.to_string());
+            }
+        }
+        assert_eq!(plane.len(), N * N, "{}", v["coverage"]);
+        plane
+    }
+
+    /// The cells a client following docs/api.md draws as **THE grey** from this answer: drawn at
+    /// all (the row starts before `coverage.horizon.as_of_s`, or there is no horizon — T-532), the
+    /// selected plane says `unobserved`, and no `shadow` run covers the cell (T-520).
+    fn drawn_grey(v: &Value) -> Vec<(usize, usize)> {
+        let plane = selected_states(v);
+        let shade = shadow_plane(v);
+        let (t0_s, dt) = (
+            v["extent"]["t0_s"].as_f64().unwrap(),
+            v["extent"]["t_cell_s"].as_f64().unwrap(),
+        );
+        let as_of = v["coverage"]["horizon"]["as_of_s"].as_f64();
+        (0..N * N)
+            .map(|i| (i / N, i % N))
+            .filter(|&(r, f)| {
+                as_of.is_none_or(|a| t0_s + r as f64 * dt < a)
+                    && plane[r * N + f] == "unobserved"
+                    && shade[r * N + f].is_none()
+            })
+            .collect()
+    }
+
+    /// **T-881: a departed band's newest rows are its shadow, never THE grey.**
+    ///
+    /// Observed by the fog-of-war guard: the top of a departed band's pane was plain grey — no
+    /// pending, no stand-ins — over 10–60 % of it. Two things made that strip, both here:
+    ///
+    /// 1. **The shadow stopped at the store's newest FOLDED frame** (`shadow.edge_s`), and the fold
+    ///    trails capture. The rows between it and the newest instant the tune record reaches are
+    ///    time the radio spent on another band — the band's last-known value is exactly as true of
+    ///    them — and they carried no run.
+    /// 2. **The horizon was read over this band alone.** A tile wholly after the departure has no
+    ///    record of *this* band in it, so it named no `as_of_s` and was drawn as served — grey — for
+    ///    as long as a client kept it; a tile straddling the departure named the departure itself,
+    ///    so every row after it stayed the pane's pending ground for good, never the shadow.
+    ///
+    /// RED before T-881: tile `T_INDEX + 1` of band X has no horizon and its rows from the fold
+    /// edge up are drawn grey; tile `T_INDEX`'s horizon is the departure.
+    #[test]
+    fn a_departed_band_reads_as_shadow_up_to_the_record_reach_not_grey_past_the_fold_edge() {
+        let dir = temp_dir("t881-fold-lag");
+        let (half, folded, record) = (
+            N as i64 / 2,
+            N as i64 + N as i64 / 4,
+            N as i64 + 3 * N as i64 / 4,
+        );
+        let (state, t0, t_cell) = state_departed_with_fold_lag(&dir, half, folded, record);
+        let s_of = |rows: i64| (t0 + rows * t_cell) as f64 / 1e9;
+        let rows_in_next = |rows: i64| (rows - N as i64) as usize;
+
+        // The tile wholly after the departure: band X's newest rows.
+        let next = tiles_json(&state, &tile_params(F_INDEX, T_INDEX + 1)).unwrap();
+        assert_eq!(
+            next["shadow"]["edge_s"],
+            json!(s_of(folded)),
+            "{}",
+            next["shadow"]
+        );
+        assert_eq!(
+            next["coverage"]["horizon"]["as_of_s"],
+            json!(s_of(record)),
+            "the answer's evidence reaches as far as the radio's record does, over ANY band — the \
+             radio was on band Y, so band X was unobserved up to there: {}",
+            next["coverage"]["horizon"]
+        );
+        assert_eq!(
+            next["shadow"]["reach_s"],
+            json!(s_of(record)),
+            "{}",
+            next["shadow"]
+        );
+        let grey = drawn_grey(&next);
+        assert!(
+            grey.is_empty(),
+            "departed band X draws {} cells as THE grey (rows {:?}..): swept then left is the \
+             last-known shadow, never 'never observed'",
+            grey.len(),
+            grey.first()
+        );
+        let plane = shadow_plane(&next);
+        for f in 0..N {
+            for r in 0..N {
+                assert_eq!(
+                    plane[r * N + f].is_some(),
+                    r < rows_in_next(record),
+                    "band X ({r}, {f}): shadow up to the record's reach (row {}), and none in the \
+                     future past it",
+                    rows_in_next(record)
+                );
+            }
+        }
+
+        // The tile the departure falls in: drawn to its end, the rows after the departure shadow.
+        let here = tiles_json(&state, &tile_params(F_INDEX, T_INDEX)).unwrap();
+        let t1_s = here["extent"]["t1_s"].as_f64().unwrap();
+        assert_eq!(
+            here["coverage"]["horizon"]["as_of_s"],
+            json!(t1_s),
+            "the record reaches past this tile, so nothing in it is left as 'not reached yet' — \
+             before T-881 the horizon was the departure, and the rows after it never drew: {}",
+            here["coverage"]["horizon"]
+        );
+        assert!(drawn_grey(&here).is_empty(), "{:?}", drawn_grey(&here));
+
+        // Band Y past the fold edge: observed, its frames not folded yet — NOT a shadow's to cover.
+        let y = tiles_json(&state, &tile_params(F_INDEX + 2, T_INDEX + 1)).unwrap();
+        let y_states = selected_states(&y);
+        assert!(
+            (0..rows_in_next(record)).all(|r| y_states[r * N] == "observed"),
+            "{:?}",
+            &y_states[..N]
+        );
+        assert_eq!(
+            y["shadow"]["runs"],
+            json!(0),
+            "a band the radio is on carries no shadow, folded or not: {}",
+            y["shadow"]
+        );
+
+        // Never swept: no shadow at all, and grey only as far as the record reaches.
+        let never = tiles_json(&state, &tile_params(F_INDEX + 1, T_INDEX + 1)).unwrap();
+        assert_eq!(never["shadow"]["runs"], json!(0), "{}", never["shadow"]);
+        assert_eq!(never["coverage"]["horizon"]["as_of_s"], json!(s_of(record)));
+        assert_eq!(drawn_grey(&never).len(), rows_in_next(record) * N);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
