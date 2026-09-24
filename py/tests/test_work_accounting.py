@@ -852,3 +852,10 @@ def test_no_rebuilt_branch_close_while_a_single_merge_is_staged(tmp_path, monkey
     claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "queued", "started": 0}}
     R.release_stale_claims(claims, {"T-1": {"status": "done"}})
     assert claims["T-1"]["state"] == "queued"
+def test_the_runner_drops_an_inherited_role_before_it_starts_a_worker():
+    """2026-09-24 03:20: restarted from the pipeline-manager session, the runner passed
+    HACKRIFF_ROLE=pipeline-manager to every worker, and the watchdog charged their 665 % to that role."""
+    src = _WR.read_text()
+    main_body = src[src.index("def main():"):]
+    pop = main_body.index('os.environ.pop("HACKRIFF_ROLE", None)')
+    assert pop < main_body.index("while True") and pop < main_body.index('log(f"VERSION:')

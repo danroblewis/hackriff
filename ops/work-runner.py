@@ -1870,6 +1870,12 @@ def main():
         open(p, "a").close()
     import launchpath
     launchpath.check(__file__, log)
+    # Workers inherit this process's environment. Restarted from a role session, it carried that
+    # session's HACKRIFF_ROLE into every worker, and ops/watchdog.py (which names a role session by
+    # that variable before looking at claims) charged 5 workers' load to role:pipeline-manager -
+    # 665 % and an over-budget alarm on 2026-09-24 03:20. The runner is no role: drop it.
+    if os.environ.pop("HACKRIFF_ROLE", None):
+        log("ENV: dropped an inherited HACKRIFF_ROLE - workers are owned by their claims, not by a role")
     same = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", "ops/work-runner.py"], cwd=REPO).returncode == 0
     log(f"VERSION: {'matches' if same else 'DIFFERS FROM'} HEAD:ops/work-runner.py  ops={S} cap={CAP} dry={a.dry_run}")
     # What this process is actually running with - `just knobs show` reads it back as "effective".
