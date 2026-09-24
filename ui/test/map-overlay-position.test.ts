@@ -67,6 +67,7 @@ function stripComments(src: string): string {
 const STORAGE_KEYS: Record<string, "visibility" | "snap" | "display-pref" | "session-token"> = {
   "hk-mui-show-signals": "visibility", // found-signal overlay shown/hidden (T-522)
   "hk-mui-sheet-selected": "snap", // the Selected sheet's peek/half/full (T-803)
+  "hk-map-layers": "visibility", // per-pane { base style, layer visible } (T-806's layers menu)
   "hk-mui-prefs": "display-pref", // { mode, theme }
   "hk-mui-shadow-gain": "display-pref",
   "hk-surface-range-mode": "display-pref",
