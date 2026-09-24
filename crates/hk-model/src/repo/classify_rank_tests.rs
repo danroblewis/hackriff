@@ -480,8 +480,15 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // creates and so needs its own DROP INDEX. 0015 also
         // rebuilds `emitter_relation`, which 0008 recreates below it, so nothing extra is needed
         // for that half.
+        // T-904: nor the 0019 retention objects — the rollup table, and four indexes on tables
+        // 0001 creates (so DROP INDEX, like 0012's).
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_emitter_observation_time; \
+            "DROP TABLE IF EXISTS detection_rollup; \
+             DROP INDEX IF EXISTS idx_detection_t_end; \
+             DROP INDEX IF EXISTS idx_demodulation_detection; \
+             DROP INDEX IF EXISTS idx_anomaly_subject_detection; \
+             DROP INDEX IF EXISTS idx_emitter_classification_input_detection; \
+             DROP INDEX IF EXISTS idx_emitter_observation_time; \
              DROP INDEX IF EXISTS idx_provenance_tune_center; \
              DROP TABLE IF EXISTS detection_retune; \
              DROP TABLE IF EXISTS harmonic_family_member; \

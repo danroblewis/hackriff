@@ -857,6 +857,65 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     }
     assert_eq!(compute["provider_changes"], json!(0), "{v}");
 
+    // T-904: `storage` — the detection store's size and the retention policy in force, refreshed
+    // by the run's retention thread (its first refresh is at start-up, so wait for it rather than
+    // race it). The composed daemon prunes by default: 1 hour, rolled up, the full 256-row tail.
+    wait_for(
+        "the storage figures in /api/status",
+        Duration::from_secs(30),
+        || get(addr, "/api/status").1["storage"]["measured_s"].is_f64(),
+    );
+    let (_, v) = get(addr, "/api/status");
+    let storage = &v["storage"];
+    for field in [
+        "db_bytes",
+        "free_bytes",
+        "detection_rows",
+        "rollup_rows",
+        "passes",
+    ] {
+        assert!(storage[field].is_u64(), "storage.{field}: {storage}");
+    }
+    assert!(storage["db_bytes"].as_u64().unwrap() > 0, "{storage}");
+    assert!(
+        storage["wal_bytes"].is_u64(),
+        "a file database in WAL mode has a -wal file: {storage}"
+    );
+    for field in ["oldest_detection_s", "newest_detection_s"] {
+        assert!(
+            storage[field].is_null() || storage[field].is_f64(),
+            "storage.{field}: {storage}"
+        );
+    }
+    let measured = storage["measured_s"].as_f64().unwrap();
+    assert!(
+        (before - 60.0..=unix_now() + 1.0).contains(&measured),
+        "{storage}"
+    );
+    // Due at most one interval (the first pass: one minute) after the snapshot.
+    let next = storage["next_prune_s"]
+        .as_f64()
+        .expect("next_prune_s: {storage}");
+    assert!((measured..=measured + 61.0).contains(&next), "{storage}");
+    assert_eq!(
+        storage["retention"],
+        json!({
+            "enabled": true,
+            "max_age_s": 3_600.0,
+            "rollup": true,
+            "keep_per_emitter": 256,
+            "batch": 100,
+            "interval_s": 600.0,
+            "rollup_gap_s": 10.0,
+            "rollup_span_s": 60.0,
+        }),
+        "{storage}"
+    );
+    assert!(
+        storage["last_prune"].is_null(),
+        "no pass in the first minute: {storage}"
+    );
+
     // /api/history over the fixture's band: cell grid.
     let t1 = unix_now() + 5.0;
     let (st, v) = get(
@@ -1781,6 +1840,92 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
 /// here, one row per presence interval, one-offs included. And the answer never lets an empty
 /// catalogue read as a quiet band: `coverage.statement` says which of "unknown", "no data for this
 /// period" and "nothing was on the air" it is.
+/// T-904: a window whose per-frame detection rows have been pruned still answers
+/// `/api/inventory` and `/api/events` (the durable catalogue: presence intervals, `measured`,
+/// relations) **exactly** as before the prune. A finished, unpaced replay makes the store stable,
+/// so the two answers can be compared whole. The prune here is harsher than the product's: every
+/// row older than one second of the recording, keeping only each emitter's newest **one** — the
+/// one `/api/inventory`'s `measured` reads (`Repository::prune_detections` keeps 256 by default,
+/// every per-emitter query's cap; `hk-model`'s retention tests hold that bound).
+#[test]
+fn a_pruned_window_still_answers_inventory_and_events_as_before() {
+    let dir = temp_data_dir();
+    let _guard = TempDataDirGuard::new(dir.clone());
+    let Serving { server, handle, .. } = start(&ServeOptions {
+        source: ServeSource::Replay {
+            path: fixture_path(),
+            loop_replay: false,
+            realtime: false,
+        },
+        data_dir: Some(dir.clone()),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ui_dist: None,
+        fft_len: 1024,
+        rows_per_s: 25.0,
+        calibration: None,
+        token: Some(TOKEN.into()),
+        listen: Default::default(),
+        compute: Default::default(),
+        iq_buffer: Default::default(),
+        iq_buffer_hooks: None,
+    })
+    .unwrap();
+    let addr = server.local_addr();
+    handle.wait().expect("the replay runs to its end");
+
+    let db = dir.join("hackriff.db");
+    let mut repo = hk_model::Repository::open(&db).unwrap();
+    let rows = repo.detection_storage().unwrap();
+    let newest = rows
+        .newest_detection_end
+        .expect("the replay detected something");
+    let t1 = newest.as_unix_nanos() as f64 / 1e9 + 1.0;
+    let t0 = t1 - 3600.0;
+    let (f_lo, f_hi) = (STATION_HZ - 1.2e6, STATION_HZ + 1.2e6);
+    let window = format!("f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}");
+    let read = || {
+        let (st, inv) = get(addr, &format!("/api/inventory?{window}&limit=500"));
+        assert_eq!(st, 200, "{inv}");
+        let (st, ev) = get(addr, &format!("/api/events?{window}"));
+        assert_eq!(st, 200, "{ev}");
+        (inv, ev)
+    };
+    let (inv_before, ev_before) = read();
+    assert!(
+        !inv_before["entries"].as_array().unwrap().is_empty(),
+        "the blind FM station is in the inventory: {inv_before}"
+    );
+    assert!(
+        ev_before["total"].as_u64().is_some_and(|n| n > 0),
+        "{ev_before}"
+    );
+
+    let report = repo
+        .prune_detections(
+            &hk_model::DetectionRetention {
+                max_age_ns: 1_000_000_000,
+                keep_per_emitter: 1,
+                batch: 64,
+                ..hk_model::DetectionRetention::default()
+            },
+            || true,
+        )
+        .unwrap();
+    assert!(
+        report.deleted > rows.detection_rows / 2,
+        "most per-frame rows went: {report:?} of {rows:?}"
+    );
+    let after = repo.detection_storage().unwrap();
+    assert_eq!(after.detection_rows, rows.detection_rows - report.deleted);
+    assert!(after.rollup_rows > 0, "{after:?}");
+
+    let (inv_after, ev_after) = read();
+    assert_eq!(inv_after, inv_before, "the inventory answer did not move");
+    assert_eq!(ev_after, ev_before, "the event catalogue did not move");
+    drop(repo);
+    drop(server);
+}
+
 #[test]
 fn events_and_presence_serve_the_durable_catalogue() {
     let (_guard, serving, addr) = start_server();
