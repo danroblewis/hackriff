@@ -2,8 +2,10 @@
 //!
 //! `fsk_burst_train` is 2-FSK at ±9.6 kHz and 4800 Bd — modulation index h = 4, 23.5 ms bursts —
 //! replayed through the device interface (the mock SDR behind the real source contract, never
-//! files fed to the pipeline). The fsk chain classifies each emission at the pipeline's single C15
-//! call site (`crate::classify::classify_and_record`). Until T-852 every one of those rows came
+//! files fed to the pipeline). Each emission is classified at the pipeline's single C15 call site
+//! (`crate::classify`), from the classifying chain every confirmed track gets since T-878
+//! (`crate::chains::classify`, which chooses the longest burst exactly as the fsk chain did when
+//! the call site lived there — measured unchanged, 5 of 16). Until T-852 every one of those rows came
 //! back `unknown` at open-set 1.000: the classifier's `2fsk` dev grid stopped at h = 1.6, so a
 //! wide-deviation burst sat far outside the fitted envelope (`obw_over_rs` z = 7.7). T-852 widened
 //! the grid to h ≤ 5 and refitted the shipped densities with `bin/fit-densities`.

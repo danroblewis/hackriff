@@ -459,6 +459,22 @@ counter_group!(
         /// Characterisations measured but not written: no inventory emitter covered the region
         /// within the bounded wait, so the measurement had nothing to be evidence about.
         sweep_no_emitter,
+        /// T-878: classifying chains attached ([`crate::chains::classify`]). Counted apart from
+        /// `attached` and from `sweep_attached`, for the reason `sweep_attached` is.
+        classify_attached,
+        /// Classifying chains that finished.
+        classify_detached,
+        /// Classifying chains the concurrency cap refused to attach.
+        classify_admission_refused,
+        /// Member boxes a classifying chain could not use: their samples had left its buffer, or
+        /// arrived after the ring closed.
+        classify_missed,
+        /// Classifications the cascade abstained on upstream (the box could not be extracted or
+        /// normalised), so nothing was written. Not an `unknown`: nothing was measured.
+        classify_abstained,
+        /// Classifications made but not written: the inventory recorded no entry for the track
+        /// within the bounded wait, so the row had nothing to be evidence about.
+        classify_no_emitter,
         /// Chain errors (demod, repository).
         errors,
         /// T-605: chain errors that came back from the **storage engine** — a write the database
