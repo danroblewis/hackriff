@@ -486,3 +486,115 @@ test("a proxy's 502s do not make a place terminal: the live edge recovers with N
     "samples — a proxy's 502 made a place terminal and the live edge stalled until something re-laid it out");
   assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
 });
+
+test("a FOLLOWING pane shorter than a tile keeps its rows across a row boundary, with the cold tile route slowed (T-890)", async (t) => {
+  // **The defect** (T-890, seen in a gate and alone): a following pane had its tiles, then the live
+  // edge crossed into a new time row and for 8-10+ s it drew NOTHING — "0 tiles · 2 coarse stand-ins
+  // · 2 drew nothing", meanLuma 0.0. The pane's span was shorter than a level-0 tile (10.24 s), so
+  // once its old row scrolled out only the NEW row's tile could put rows on it, and that tile was
+  // not asked for until the edge was already inside it — a cold miss on a busy route.
+  //
+  // **The slowed route is the busy box, made deterministic.** Every `GET /api/tiles/batch` (how an
+  // ordinary miss is asked for, T-573) is held for COLD_MS before it goes out; the single-tile
+  // revalidation of the live edge (sent alone, T-573) is left alone. That is the asymmetry a
+  // loaded box has — a batch answers when its slowest member does and queues behind the parent
+  // pins — and it makes the crossing's cold miss outlast the pane's span on any machine, so the
+  // defect is red here without needing load. The assertion is the pane's own report
+  // (`PaneReport`, what the renderer drew the frame with): after it has been resident, the pane
+  // never again has NONE of its own tiles in hand at its own level.
+  const COLD_MS = 2000;
+  const inject = `(() => {
+    const real = window.fetch.bind(window);
+    window.__t890 = { held: 0 };
+    window.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/api/tiles/batch")) {
+        window.__t890.held++;
+        await new Promise((r) => setTimeout(r, ${COLD_MS}));
+      }
+      return real(input, init);
+    };
+  })();`;
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  // A narrow window, so the pane is a couple of tile columns wide as observed ("2 tiles"), not six:
+  // fewer places to fill cold, and the same boundary.
+  const page = await browser.page(undefined, { initScript: inject, width: 800 });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the chrome to report a viewport",
+    `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"]').length > 0`, { timeoutMs: 60000 });
+  assert.equal(
+    await page.$count('.hk-surface-viewport[data-viewport="pane"][data-following="true"]'), 1,
+    "no pane is following the live edge, so there is no live edge to cross");
+
+  const READ = `(() => { const v = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const c = document.querySelector('.sf-canvas').getBoundingClientRect();
+    return JSON.stringify({ level: v.querySelector('.hk-surface-level')?.textContent ?? '',
+      counts: v.querySelector('.hk-surface-counts')?.textContent ?? '',
+      following: v.getAttribute('data-following'),
+      t0: Number(v.getAttribute('data-t0-ns')), t1: Number(v.getAttribute('data-t1-ns')),
+      x: c.x + c.width / 2, y: c.y + c.height / 3 }); })()`;
+  const read = async () => JSON.parse(await page.eval(READ));
+
+  // A pane SHORTER than a tile, as observed (2.8 s against 10.24 s): zoom time alone (alt, T-456)
+  // until it is. A pane taller than a tile always has its previous row in the box, and the defect
+  // could hide behind it.
+  let r = await read();
+  for (let i = 0; i < 30 && r.t1 - r.t0 > 3e9; i++) {
+    await page.wheel({ x: r.x, y: r.y }, -240, { alt: true });
+    await page.frames(3);
+    r = await read();
+  }
+  const cellMs = Number(/× (\d+(?:\.\d+)?) ms cells/.exec(r.level)?.[1] ?? NaN);
+  const tileNs = cellMs * 1e6 * 256;
+  t.diagnostic(`pane span ${((r.t1 - r.t0) / 1e9).toFixed(2)} s at "${r.level}"; a tile is ${(tileNs / 1e9).toFixed(2)} s`);
+  assert.ok(Number.isFinite(tileNs), `the pane's readout states no time cell ("${r.level}"), so no row boundary can be located`);
+  assert.ok(r.t1 - r.t0 < tileNs, `the pane (${((r.t1 - r.t0) / 1e9).toFixed(2)} s) is not shorter than a tile, so this run proves nothing`);
+
+  const res = await waitForResident(page);
+  t.diagnostic(`resident after ${res.ms} ms: ${res.counts}`);
+  assert.ok(res.resident, `the pane never became resident with the cold route slowed (${res.counts})`);
+  const level0 = (await read()).level;
+
+  // Watch across two JUDGED row boundaries, sampling the pane's own report. A boundary is judged
+  // only when the pane had been resident for 3 x COLD_MS before reaching it: the next row can only
+  // be asked for once the current one is in hand, so a boundary a moment after the first fill is
+  // a race about the fill, not about the crossing. Each judged boundary is watched for a span and
+  // two cold fetches past it — the window in which the defect drew nothing.
+  const rowOf = (x) => Math.floor(x.t1 / tileNs);
+  const span = r.t1 - r.t0;
+  const empty = [];
+  let crossings = 0, judged = 0, lastJudgedAt = 0, row = rowOf(await read()), blankSince = null, worstBlank = 0;
+  const started = Date.now();
+  while (judged < 2 || Date.now() - lastJudgedAt < span / 1e6 + 2 * COLD_MS) {
+    if (Date.now() - started > 6 * tileNs / 1e6) break;
+    const s = await read();
+    assert.equal(s.following, "true", "the pane stopped following, so the rest of this run is not about the live edge");
+    assert.equal(s.level, level0, `the pane changed level mid-run ("${level0}" -> "${s.level}") with no gesture`);
+    if (rowOf(s) !== row) {
+      crossings++;
+      row = rowOf(s);
+      const at = Date.now() - started;
+      if (judged > 0 || at >= 3 * COLD_MS) { judged++; lastJudgedAt = Date.now(); }
+      t.diagnostic(`crossed into row ${row} after ${at} ms${judged ? ` (judged boundary ${judged})` : " (too soon after the first fill: not judged)"}`);
+    }
+    const m = /(\d+) tiles · (\d+) coarse stand-in\S* · (\d+) pending/.exec(s.counts);
+    const tiles = Number(m?.[1] ?? NaN), fallbacks = Number(m?.[2] ?? NaN);
+    const nothing = Number(/(\d+) drew nothing/.exec(s.counts)?.[1] ?? 0);
+    if (judged > 0 && tiles === 0 && !/never sampled/.test(s.counts)) empty.push({ at: Date.now() - started, counts: s.counts });
+    if (tiles + fallbacks - nothing <= 0) { blankSince ??= Date.now(); worstBlank = Math.max(worstBlank, Date.now() - blankSince); }
+    else blankSince = null;
+    await new Promise((res2) => setTimeout(res2, 100));
+  }
+  const held = await page.eval("window.__t890.held");
+  t.diagnostic(`${crossings} row boundaries crossed, ${judged} judged; ${held} batch request(s) held ${COLD_MS} ms; ` +
+    `longest stretch with nothing drawn ${worstBlank} ms; ${empty.length} sample(s) with no tile of the pane's own in hand`);
+  for (const e of empty.slice(0, 5)) t.diagnostic(`  +${e.at} ms: ${e.counts}`);
+  assert.ok(held > 0, "no batch request was held, so the cold route was never slowed and this run proves nothing");
+  assert.ok(judged >= 2, `only ${judged} judged row boundar${judged === 1 ? "y" : "ies"} in the watch, so the defect was not exercised`);
+  assert.equal(empty.length, 0,
+    `a following pane had NONE of its own tiles in hand after crossing a row boundary (first at +${empty[0]?.at} ms: ` +
+    `"${empty[0]?.counts}"): its old row scrolled out and the new row was still a cold fetch — the live edge ` +
+    "gated on a tile request (T-890)");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while the live view ran");
+});

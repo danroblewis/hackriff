@@ -749,7 +749,9 @@ export class SurfacePreview {
         : this.view.panes.isFollowing(r.id);
       if (live) following.push({ box: v.box, levelF: r.levelF, levelT: r.levelT });
     }
-    if (following.length) this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
+    // Called with an EMPTY list too: that is how the cache learns nothing follows any more, and
+    // drops the next-row look-ahead it was holding for a pane that has since frozen (T-890).
+    this.view.surface.cache.refreshEdge(this.view.surface.lat, f.edgeNs, following);
   }
 
   /**

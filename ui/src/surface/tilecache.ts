@@ -159,7 +159,7 @@
 // of actual motion, only while otherwise idle**, for the tile the pan is heading into.
 
 import {
-  extentOf, fCellHz, fTileHz, intersects, keyOf, tCellNs, tTileNs, tilesFor,
+  extentOf, fCellHz, fTileHz, inLattice, intersects, keyOf, tCellNs, tTileNs, tilesFor,
   type Box, type Lattice, type TileAddr,
 } from "./lattice";
 import { TileBusyError, TileDecodeError, type TileData } from "./tile";
@@ -328,6 +328,9 @@ export interface TileCacheStats {
    * a tile this lane fetched. `speculativeIssued - speculativeHits` is what it wasted, measured
    * rather than argued. */
   speculativeHits: number;
+  /** Next-row reads issued ahead of a following edge (T-890, [[TileCache.lookAhead]]): at most one
+   * per address. */
+  aheadIssued: number;
 }
 
 const MB = 1024 * 1024;
@@ -412,6 +415,24 @@ const sameSize = (a: number, b: number): boolean =>
 const EDGE_SCAN_MS = 250;
 
 /**
+ * **How far ahead of a following edge the next row is asked for, in measured service times**
+ * (T-890). The lead is `min(one tile, AHEAD_SERVICES x serverMs)`.
+ *
+ * Early costs nothing extra: the address is fetched once whether it is asked for before the edge
+ * reaches it or after, and the copy is revalidated by the ordinary refresh lane once the edge is
+ * inside it. Late costs exactly the defect — a pane whose span is shorter than a tile has nothing
+ * else in hand once its old row scrolls out. So the factor errs long: on a healthy route (a mean of
+ * 100-250 ms) it is one to two seconds of lead; on a busy one (a mean of seconds, which is when the
+ * blank was seen) it reaches the whole tile, i.e. the next row is asked for as soon as the edge
+ * enters the current one. `serverMs` is the mean over every completion, including the waits on the
+ * route's history lock that a cold miss also pays, so it is the right clock for "ask, then have".
+ */
+const AHEAD_SERVICES = 8;
+/** The [[InFlight.owner]] of a look-ahead read: on the global budget like an orphan (-1), but not
+ * sent alone the way a revalidation is. */
+const AHEAD_OWNER = -2;
+
+/**
  * How many speculated addresses [[TileCache.speculated]] remembers (T-538). It only has to be large
  * enough that a long pan cannot walk off the end of its own history and start asking twice; at
  * ~208 tiles for a full screen, 4096 is twenty screens' worth, and the set holds keys, not tiles.
@@ -453,7 +474,7 @@ const OFFLINE_BACKOFF_MS = 500, OFFLINE_MAX_BACKOFF_MS = 30_000;
 interface InFlight {
   readonly ctrl: AbortController | null;
   readonly startedAt: number;
-  /** Index into the viewports of the last [[TileCache.setViewports]], or -1 for none. */
+  /** Index into the viewports of the last [[TileCache.setViewports]], -1 for none, or [[AHEAD_OWNER]]. */
   readonly owner: number;
 }
 
@@ -583,6 +604,15 @@ export class TileCache<T> {
   /** Speculative tiles that arrived and have not yet been drawn — drained by [[acquire]] into
    * `stats.speculativeHits`, so the lane's benefit is counted rather than asserted. */
   private speculativeResident = new Set<string>();
+  /**
+   * **The row each following viewport's edge is about to enter, keyed** (T-890). Recomputed on every
+   * edge scan from the tiles in hand ([[lookAhead]]); [[setViewports]] keeps these queued and in
+   * flight although no viewport box reaches them yet, because reaching them is the whole point.
+   */
+  private ahead = new Set<string>();
+  /** Every look-ahead address ever ISSUED, so the lane asks each ONCE (bounded like [[speculated]]).
+   * A copy evicted before the edge arrives becomes an ordinary miss, never a poll. */
+  private aheadAsked = new Set<string>();
   private nextEdgeScan = 0;
   /**
    * The newest capture instant the surface has been told about, as of the last [[refreshEdge]] —
@@ -624,7 +654,7 @@ export class TileCache<T> {
     uploads: 0, hits: 0, misses: 0, evictions: 0, refetchAfterEvict: 0, requests: 0,
     failures: 0, busyRefusals: 0, cancelled: 0, abandoned: 0, overBudgetFrames: 0, distinctKeys: 0,
     edgeRefreshes: 0, edgeRefreshApplied: 0, terminalFailures: 0, edgeRefreshCompletions: 0,
-    silentFailures: 0, speculativeIssued: 0, speculativeHits: 0,
+    silentFailures: 0, speculativeIssued: 0, speculativeHits: 0, aheadIssued: 0,
   };
 
   constructor(
@@ -800,7 +830,8 @@ export class TileCache<T> {
   setViewports(lat: Lattice, viewports: readonly Viewport[]): void {
     this.lat = lat;
     this.viewports = viewports;
-    const wanted = (a: TileAddr) => viewports.some((v) => this.wants(lat, v, a));
+    // The next row of a following edge is wanted although no box reaches it yet (T-890, [[lookAhead]]).
+    const wanted = (a: TileAddr) => this.ahead.has(keyOf(a)) || viewports.some((v) => this.wants(lat, v, a));
     const keep: TileAddr[] = [];
     for (const a of this.queue) {
       if (wanted(a)) keep.push(a);
@@ -913,10 +944,12 @@ export class TileCache<T> {
     if (!Number.isFinite(edgeNs)) return 0;
     // Stamped even when nothing is following, because it is what the NEXT fetch records about itself.
     if (edgeNs > this.edgeNs) this.edgeNs = edgeNs;
-    if (!following.length) return 0;
+    // Nothing following, nothing ahead: a frozen pane's next row is not coming towards it.
+    if (!following.length) { this.ahead.clear(); return 0; }
     const t = this.now();
     if (t < this.nextEdgeScan) return 0;
     this.nextEdgeScan = t + EDGE_SCAN_MS;
+    const ahead = this.lookAhead(lat, edgeNs, following);
     let n = 0;
     for (const e of this.map.values()) {
       const key = e.key;
@@ -934,8 +967,74 @@ export class TileCache<T> {
       this.refreshQueued.add(key);
       n++;
     }
-    if (n) this.pump();
+    if (n || ahead) this.pump();
     return n;
+  }
+
+  /**
+   * **Ask for the row a following edge is about to enter, before it enters it** (T-890). Returns
+   * how many reads it queued.
+   *
+   * # The defect
+   *
+   * A following pane's tiles are addressed from its box, and its box ends at the edge — so the row
+   * the edge is about to enter is not in any box until the edge is already inside it. It was then
+   * an ordinary cold miss, joining the queue beside the parent pins (which the LIFO order serves
+   * first, by design) and whatever else the view wanted, and on a busy box it was measured taking
+   * **7.8 s alone** and over 10 s in a gate. A pane whose span is shorter than a tile — 2.8 s
+   * against a 10.24 s level-0 tile in the observed run — has nothing else in hand once its old row
+   * scrolls out, so for all of that time it drew *nothing* at its live edge: `0 tiles · 2 coarse
+   * stand-ins · 2 drew nothing`, the stand-ins being parent pins that no lane keeps fresh. The
+   * live edge was gated on a tile fetch — the thing the product forbids.
+   *
+   * # The rule
+   *
+   * For every resident tile a following viewport is DRAWING (its own level, [[drawnBy]]) that
+   * holds the edge now, when the edge is within the lead of that tile's end, the same column's next
+   * row is queued — once per address ([[aheadAsked]]). It then arrives before the edge does, and the
+   * refresh lane revalidates it like any other live tile the moment a box reaches it, so the rows
+   * already in hand stay drawn and the new ones follow at the lane's own cadence, with no cold
+   * fetch in between. Nothing here decides what a cell shows: an answer for rows not yet recorded
+   * reaches its own horizon ([[TileData.asOfNs]]) and the renderer draws nothing past it.
+   *
+   * Only a column already in hand is extended, which is what keeps this from asking for places the
+   * coverage survey answers without a fetch (T-580): the renderer asked for this column's current
+   * row, so it is observed spectrum.
+   */
+  private lookAhead(lat: Lattice, edgeNs: number, following: readonly Viewport[]): number {
+    const next = new Set<string>();
+    const want: TileAddr[] = [];
+    const leadNs = AHEAD_SERVICES * this.serverMs * 1e6;
+    for (const e of this.map.values()) {
+      const a = e.addr;
+      if (a.scheme !== lat.scheme) continue;
+      const ext = extentOf(lat, a);
+      if (!(ext.t0Ns <= edgeNs && edgeNs < ext.t1Ns)) continue;
+      if (ext.t1Ns - edgeNs > Math.min(ext.t1Ns - ext.t0Ns, leadNs)) continue;
+      if (!following.some((v) => this.drawnBy(lat, v, a))) continue;
+      const n: TileAddr = { ...a, tIndex: a.tIndex + 1 };
+      if (!inLattice(lat, n)) continue;
+      const key = keyOf(n);
+      next.add(key);
+      want.push(n);
+    }
+    this.ahead = next;
+    let queued = 0;
+    for (const n of want) {
+      const key = keyOf(n);
+      // Kept fresh in the LRU while it waits for the edge; never re-asked once asked.
+      if (this.map.has(key)) { this.peek(n); continue; }
+      if (this.aheadAsked.has(key) || this.inflight.has(key) || this.queued.has(key) || this.terminal.has(key)) continue;
+      // At the BOTTOM of the LIFO queue: the next row is wanted soon, a visible miss is wanted now,
+      // so this read takes a slot only once nothing on screen is waiting for one. On a busy route the
+      // lead is the whole tile, which is what leaves room for that. A full queue drops it first,
+      // and the ordinary miss path owns the address at the crossing.
+      if (this.queue.length >= this.maxQueue) continue;
+      this.queue.unshift(n);
+      this.queued.add(key);
+      queued++;
+    }
+    return queued;
   }
 
   /**
@@ -1128,6 +1227,8 @@ export class TileCache<T> {
     this.map.delete(key);
     this.refreshedAt.delete(key);
     this.speculativeResident.delete(key);
+    // A retune drops the look-ahead copy too; the next row may be asked for again.
+    this.aheadAsked.delete(key);
     this.bytes -= e.data.bytes;
     return true;
   }
@@ -1157,6 +1258,8 @@ export class TileCache<T> {
     this.speculating.clear();
     this.speculated.clear();
     this.speculativeResident.clear();
+    this.ahead.clear();
+    this.aheadAsked.clear();
   }
 
   /**
@@ -1469,7 +1572,20 @@ export class TileCache<T> {
       }
       // Wanted by no viewport at all: `setViewports` has not seen it yet, so it belongs to no
       // share and is issued on the global budget alone.
-      if (orphan) { this.queue.splice(i, 1); return { addr, owner: -1 }; }
+      // A look-ahead read (T-890) is an orphan by construction; it rides in a batch like any other
+      // ordinary miss rather than alone, which is reserved for the revalidation lane.
+      if (orphan) {
+        this.queue.splice(i, 1);
+        const key = keyOf(addr);
+        if (!this.ahead.has(key)) return { addr, owner: -1 };
+        // Asked means ISSUED: one that waited in the queue and was dropped may be queued again.
+        this.aheadAsked.add(key);
+        this.stats.aheadIssued++;
+        while (this.aheadAsked.size > SPECULATED_MEMORY) {
+          this.aheadAsked.delete(this.aheadAsked.values().next().value as string);
+        }
+        return { addr, owner: AHEAD_OWNER };
+      }
     }
     return null;
   }
