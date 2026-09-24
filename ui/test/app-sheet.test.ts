@@ -8,8 +8,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  cycleSnap, FLICK_PX_PER_MS, keySnap, mountSheet, nearestSnap, PEEK_PX, readSnap, releaseSnap,
-  snapHeights, SNAPS, stepSnap, writeSnap, type SheetSnap,
+  CLEAR_GAP_PX, cycleSnap, FLICK_PX_PER_MS, keySnap, mountSheet, nearestSnap, PEEK_PX, readSnap, releaseSnap,
+  reservedFor, snapHeights, SNAPS, stepSnap, writeSnap, type SheetSnap,
 } from "../src/app/chrome/sheet";
 import { FOCUS_SHEET_KEY, focusSheetTitle, mountFocusSheet } from "../src/app/chrome/focus-sheet";
 import type { AppContext } from "../src/app/context";
@@ -28,6 +28,17 @@ test("three snap states, ordered, from one definition", () => {
     assert.ok(h.peek <= h.half && h.half <= h.full, `vh=${vh}: ${JSON.stringify(h)}`);
     assert.ok(h.peek === PEEK_PX);
   }
+});
+
+test("full clears the chrome above it: the fixed reserve, or the toolbar's real edge if lower", () => {
+  assert.equal(reservedFor(170, null, 70), 170, "no toolbar yet: the fixed reserve");
+  assert.equal(reservedFor(170, 60, 70), 170, "a toolbar above the reserve changes nothing");
+  // A wrapped toolbar on a phone ends at 180 px; the sheet's bottom sits 70 px above the viewport's.
+  assert.equal(reservedFor(170, 180, 70), 180 + CLEAR_GAP_PX + 70);
+  const h = snapHeights(860, reservedFor(170, 180, 70));
+  assert.ok(860 - 70 - h.full >= 180 + CLEAR_GAP_PX, "the full sheet's top is below the toolbar");
+  assert.equal(reservedFor(170, NaN, 70), 170);
+  assert.equal(reservedFor(170, 180, NaN), 170);
 });
 
 test("a released drag snaps to the nearest state; a flick moves one state its way", () => {
@@ -122,7 +133,8 @@ class FakeEl {
   getAttribute(k: string) { return this.attrs[k] ?? null; }
   addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
   querySelector(sel: string) { return sel === ":scope > .sheet-body" ? this.children.find((c) => c.className === "sheet-body") ?? null : null; }
-  getBoundingClientRect() { return { height: parseFloat(this.style.height ?? "56") }; }
+  // The sheet is docked 70 px above the bottom of a 1000 px viewport (`--sheet-bottom`).
+  getBoundingClientRect() { return { height: parseFloat(this.style.height ?? "56"), bottom: 930 }; }
   setPointerCapture() {}
   fire(t: string, ev: Record<string, unknown> = {}) { for (const fn of this.handlers[t] ?? []) fn({ preventDefault() {}, button: 0, pointerId: 1, ...ev }); }
 }
@@ -130,7 +142,7 @@ class FakeEl {
 function withFakeDom<T>(vh: number, fn: () => T): T {
   const g = globalThis as Record<string, unknown>;
   const saved = { document: g.document, window: g.window };
-  g.document = { createElement: (t: string) => new FakeEl(t) };
+  g.document = { createElement: (t: string) => new FakeEl(t), querySelector: () => null };
   g.window = { innerHeight: vh, addEventListener() {} };
   try { return fn(); } finally { g.document = saved.document; g.window = saved.window; }
 }
@@ -214,6 +226,22 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     const c3 = mountSheet(none.host as unknown as HTMLElement, { storageKey: "s", label: "x", storage: null });
     assert.equal(c3.get(), "peek");
     assert.equal(none.host.style.height, `${PEEK_PX}px`);
+  });
+});
+
+test("full is re-bounded by the chrome it clears, as that chrome moves", () => {
+  withFakeDom(1000, () => {
+    let toolbarBottom: number | null = null;
+    const { host } = sheetHost();
+    const ctl = mountSheet(host as unknown as HTMLElement,
+      { storageKey: "s", label: "x", reservedPx: 170, storage: null, clearOf: () => toolbarBottom });
+    ctl.set("full");
+    assert.equal(host.style.height, "830px", "no toolbar yet: the fixed reserve");
+    toolbarBottom = 250; // the toolbar wrapped to more rows
+    ctl.relayout();
+    assert.equal(host.style.height, `${1000 - (250 + CLEAR_GAP_PX + 70)}px`);
+    assert.ok(930 - parseFloat(host.style.height) >= 250 + CLEAR_GAP_PX, "top edge below the toolbar");
+    assert.equal(ctl.get(), "full", "a relayout never changes the state");
   });
 });
 

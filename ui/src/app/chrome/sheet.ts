@@ -124,6 +124,20 @@ export interface SheetOptions {
   reservedPx?: number;
   /** Test/embedding seam; defaults to `localStorage`. */
   storage?: SnapStorage;
+  /** The viewport y of the lowest chrome edge the sheet's top must stay below (e.g. the surface's
+   * toolbar, which wraps to more rows on a narrow window), read at every layout. `null` = none. The
+   * sheet reserves whichever is more: `reservedPx`, or what this edge needs. */
+  clearOf?: () => number | null;
+}
+
+/** Gap kept between the sheet's top at `full` and the chrome it clears (`clearOf`). */
+export const CLEAR_GAP_PX = 8;
+
+/** The reserved height when the sheet's top must clear a chrome edge at viewport y `clearY`, given
+ * the sheet's bottom edge sits `bottomGapPx` above the viewport's bottom. Never less than `minPx`. */
+export function reservedFor(minPx: number, clearY: number | null, bottomGapPx: number): number {
+  if (clearY === null || !Number.isFinite(clearY) || !Number.isFinite(bottomGapPx)) return minPx;
+  return Math.max(minPx, Math.ceil(clearY + CLEAR_GAP_PX + bottomGapPx));
 }
 
 export interface SheetController {
@@ -133,6 +147,8 @@ export interface SheetController {
   /** Raise to at least `s` without persisting — for content that needs room (a new selection).
    * Never lowers a taller state the viewer chose. */
   reveal(s: SheetSnap): void;
+  /** Re-apply the current state's height — when the chrome it clears (`clearOf`) changed size. */
+  relayout(): void;
   /** The element the caller fills with the peek-strip heading. */
   readonly title: HTMLElement;
 }
@@ -162,7 +178,12 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   host.setAttribute("aria-label", opts.label);
 
   let snap = readSnap(storage, opts.storageKey, opts.initial ?? "peek");
-  const heights = () => snapHeights(window.innerHeight, reserved);
+  const heights = () => {
+    const vh = window.innerHeight;
+    // The dock offset is CSS (`--sheet-bottom`); the host's bottom edge does not move with height.
+    const bottomGap = vh - host.getBoundingClientRect().bottom;
+    return snapHeights(vh, reservedFor(reserved, opts.clearOf?.() ?? null, bottomGap));
+  };
 
   function apply() {
     host.dataset.snap = snap;
@@ -173,6 +194,7 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     if (body) body.inert = snap === "peek";
   }
 
+  let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;
   const ctl: SheetController = {
     get: () => snap,
     set(s, persist = true) {
@@ -183,12 +205,12 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     reveal(s) {
       if (SNAPS.indexOf(s) > SNAPS.indexOf(snap)) ctl.set(s, false);
     },
+    relayout: () => { if (!drag) apply(); },
     title,
   };
 
   // Drag. Pointer capture keeps the gesture on the handle, so it never reaches the canvas; a drag
   // that STARTS outside the sheet was never ours to begin with (non-modal).
-  let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;
   let swallowClick = false;
   grab.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;

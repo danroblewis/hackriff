@@ -10,6 +10,15 @@ import { Browser } from "./harness.mjs";
 const ORIGIN = process.env.HK_E2E_ORIGIN, TOKEN = process.env.HK_E2E_TOKEN;
 const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/;
 
+// T-528's hit test, over the sheet: every surface-toolbar button must still be what a click at its
+// centre lands on. `full` is the tallest the sheet gets, so it is checked there.
+const UNCLICKABLE = `JSON.stringify([...document.querySelectorAll('.sf-actions button')].map((el) => {
+  const r = el.getBoundingClientRect();
+  const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+  return { label: (el.textContent ?? '').trim(), covered: top ? (top.className || top.tagName) : 'nothing',
+           bySheet: !!top?.closest('.sheet'), ok: !!top && (top === el || el.contains(top)) };
+}).filter((b) => !b.ok))`;
+
 test("the sheet drags between peek, half and full, and the canvas beside it stays live", async (t) => {
   const browser = await Browser.open();
   t.after(() => browser.close());
@@ -62,6 +71,7 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
   const full = await page.$rect(".sheet");
   const bar = await page.$rect(".app > .bar");
   assert.ok(full.y >= bar.y + bar.h, `full stops below the top bar (${full.y} vs ${bar.y + bar.h})`);
+  assert.deepEqual(JSON.parse(await page.eval(UNCLICKABLE)), [], "the full sheet covers a toolbar button");
 
   // (5) Per-viewer state: a reload comes back at full.
   // (A reload, not a goto: the app strips `#token=` from the address bar, so navigating back to the
@@ -74,5 +84,33 @@ test("the sheet drags between peek, half and full, and the canvas beside it stay
 
   assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), [],
     "a sheet gesture or a pan reached a device route");
+  assert.deepEqual(page.exceptions, [], "uncaught exception");
+});
+
+for (const width of [1000, 920, 800, 420]) test(`at ${width} px wide the full sheet never covers a toolbar button`, async (t) => {
+  // Below 900 px the sheet spans the width and the toolbar wraps to more rows, so `full` must be
+  // bounded by where the toolbar actually ends (`clearOf`), not by the desktop estimate.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page(undefined, { width, height: 860,
+    initScript: "try { localStorage.setItem('hk-mui-sheet-selected', 'full'); } catch {}" });
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the surface's toolbar and a full sheet",
+    `!!document.querySelector('.sf-actions button') && document.querySelector('.sheet')?.dataset.snap === 'full'`,
+    { timeoutMs: 60000 });
+  // Settled: the drawn height is the height the script set (the CSS transition has finished).
+  await page.waitFor("the full sheet to settle",
+    `Math.abs(document.querySelector('.sheet').getBoundingClientRect().height - parseFloat(document.querySelector('.sheet').style.height)) < 1`,
+    { timeoutMs: 15000 });
+  await page.frames(3);
+  const bad = JSON.parse(await page.eval(UNCLICKABLE));
+  t.diagnostic(`at ${width} px: sheet top ${await page.eval("document.querySelector('.sheet').getBoundingClientRect().top")}, `
+    + `toolbar bottom ${await page.eval("document.querySelector('.sf-bar').getBoundingClientRect().bottom")}; `
+    + `unpressable toolbar buttons (not the sheet's doing unless bySheet): ${JSON.stringify(bad)}`);
+  assert.deepEqual(bad.filter((b) => b.bySheet), [], "the full sheet covers a toolbar button");
+  const edges = JSON.parse(await page.eval(`JSON.stringify({ sheet: document.querySelector('.sheet').getBoundingClientRect().top,
+    bar: document.querySelector('.sf-bar').getBoundingClientRect().bottom })`));
+  assert.ok(edges.sheet >= edges.bar, `the full sheet's top (${edges.sheet}) rises over the toolbar (ends ${edges.bar})`);
+  assert.deepEqual(page.requests.filter((r) => CONTROL.test(r.url)).map((r) => r.url), []);
   assert.deepEqual(page.exceptions, [], "uncaught exception");
 });
