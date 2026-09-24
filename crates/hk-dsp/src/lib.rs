@@ -49,6 +49,7 @@ pub mod sk;
 pub mod spectrum;
 pub mod stft;
 pub mod synth;
+pub mod vlf;
 pub mod welch;
 pub mod window;
 
