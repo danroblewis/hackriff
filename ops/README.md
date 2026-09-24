@@ -62,6 +62,16 @@ re-executes the repo's copy of itself at the top of its loop, the only point wit
 no merge staged, and logs `RESTART: requested (<why>)`. Use it after a runner change lands; never
 kill the runner mid-gate for that.
 
+**Red triage (the user's rule, 2026-09-23):** on a red, the failing tests or browser specs are re-run
+ALONE. Pass alone **twice** → a load flake: that suite passes on the evidence, and the gate resumes
+after the suite that stopped it (`just gate … --resume-after <suite>`, a strict suffix of the
+classified suites — nothing that ran is re-run, nothing that did not is skipped; nextest runs with
+`fail-fast = false` so a red suite's other tests all ran, and the workspace-test recipe runs
+`test-rust` last). Fail alone on either run → unchanged: a real red (isolate, MAIN-IS-RED check). Every
+acceptance is a `flaky.jsonl` record (`accepted`, `suite`, `saved_s` against the old retry), an amber
+alert, a line in the 2-hourly digest; the 3rd in 7 days for one test writes
+`deflake-requests.jsonl`, which the work runner dispatches as a `deflaker`.
+
 Owns all merges to `main` deterministically. The coordinator appends a **code-complete** branch
 name (one per line, dependency order) to `$HACKRIFF_OPS/merge-queue.txt`; the runner then does
 `git merge --no-ff --no-commit <branch>` → `just gate-merge` → on green, commit + remove the

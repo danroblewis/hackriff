@@ -223,7 +223,11 @@ build:
 # `cargo test` if nextest isn't installed.
 # See `just test-seq` for a fully sequential run, and `just test-crate`/`just test-one` to run a
 # single crate or test (the T1-T4 subset an agent working on one crate should use, not full `test`).
-test: (_coordinator-only "test") nextest-config-check test-rust test-doc test-py test-ui
+# test-rust runs LAST (pipeline manager, 2026-09-23): the cheap suites go red first, and a Rust
+# red - the only kind the merge runner may accept as a load flake (a test that passes alone twice,
+# the user's rule) - never leaves a sibling step unrun behind it, so the gate can resume after this
+# recipe without skipping anything.
+test: (_coordinator-only "test") nextest-config-check test-doc test-py test-ui test-rust
 
 # HK_E2E_REQUIRE_SYNTH=1 is set here, not by the caller: three workspace tests outside hk-e2e
 # (hk-detect e2e_synth + aware_006_wide_emissions, hk-context aware_006_e2e) skip silently when the
