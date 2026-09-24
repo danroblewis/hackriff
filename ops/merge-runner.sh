@@ -456,32 +456,34 @@ flake_retry(){
   return $rc
 }
 
-_flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the retried gate passed
+_flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the gate may land
+  # THE USER'S RULE (2026-09-23): a red test that passes ALONE TWICE is a load flake and its suite
+  # passes on that evidence - no phase re-run, no full-gate re-run; the gate resumes after the
+  # suite that stopped it, so nothing that never ran is skipped. Failing alone (either isolated
+  # run) is unchanged: a real red - hold/isolate, the MAIN-IS-RED check with the rebuild. Every
+  # acceptance is recorded in flaky.jsonl (py/hkpy/flakes.py counts them; the 3rd in 7 days of one
+  # test files a deflake request the work runner dispatches) and alerted - never a silent pass.
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
-  # single-branch path passes `just gate-merge`, because its merge is still STAGED and a
-  # `--base` gate would diff the wrong thing.
-  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t rc
+  # single-branch path passes `just gate-merge`, because its merge is still STAGED.
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t0
   # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
   tests=$(tail -n +"$from" "$LOG" | grep -E '^\s+(TRY [0-9]+ )?FAIL \[' | awk '{print $NF}' | sort -u)
   TRIAGE_KIND="test"
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
-  # Those are TEST failures too (2026-09-22 14:49 they were read as "suite broken"), and a spec
-  # can be re-run alone with `npm run e2e -- <name>...` from ui/.
   local specs; specs=$(tail -n +"$from" "$LOG" | grep -E '^e2e: [0-9]+/[0-9]+ files passed .*; failed: ' | tail -1 | sed 's/.*failed: //' | tr -d ',')
   if [ -z "$tests" ] && [ -n "$specs" ]; then
     TRIAGE_SPECS="$specs"   # try_bulk re-runs these on main alone if this batch is red
     log "TRIAGE: browser specs red: $specs - re-running them alone"
     if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
-      # The browser tier is the LAST suite; the Rust workspace and acceptance already passed
-      # on this exact tree, so the retry re-runs only the acceptance phase (acceptance-ci +
-      # test-ui-e2e), not the 15-minute workspace suite again.
-      log "TRIAGE: they PASS alone -> load flake; retrying the gate's acceptance phase once"
-      printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$specs" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$S/flaky.jsonl"
-      limited $retry --phase acceptance; rc=$?
-      [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
-      return $rc
+      log "TRIAGE: first isolated run passed - running them alone once more (the rule is twice)"
+      t0=$SECONDS
+      if ( cd "$REPO/ui" && npm run e2e -- $specs ) >>"$LOG" 2>&1; then
+        FLAKE_SECOND_S=$((SECONDS - t0)); flake_accept spec "$specs" "$from" "$tickets" "$retry"; return $?
+      fi
+      log "TRIAGE: a browser spec FAILS alone on the second isolated run -> flaky even alone: a real defect, not a load flake"
+      return 1
     fi
     log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
     return 1
@@ -490,18 +492,50 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
-  # Workers are bounded (ops/work-runner.py: build jobs, test threads, background QoS) and the gate
-  # has its reserved cores, so nothing here asks anyone to step aside: the re-run and the retry get
-  # the reserve the gate always has.
   if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
-    log "TRIAGE: they PASS alone -> load flake; retrying the full gate once"
-    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s"}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$(echo $tests | tr '\n' ' ')" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
-    limited $retry; rc=$?
-    [ "$rc" -eq 0 ] && log "TRIAGE: retry PASSED" || log "TRIAGE: retry FAILED too -> not a flake we can wait out"
-    return $rc
+    log "TRIAGE: first isolated run passed - running them alone once more (the rule is twice)"
+    t0=$SECONDS
+    if ( cd "$REPO" && cargo nextest run --workspace -E "$filter" ) >>"$LOG" 2>&1; then
+      FLAKE_SECOND_S=$((SECONDS - t0)); flake_accept rust "$(echo $tests | tr '\n' ' ')" "$from" "$tickets" "$retry"; return $?
+    fi
+    log "TRIAGE: a test FAILS alone on the second isolated run -> flaky even alone: a real defect, not a load flake"
+    return 1
   fi
   log "TRIAGE: a test FAILS alone -> a real defect in this merge"
   return 1
+}
+
+# The suite that stopped the gate passes on the isolation evidence; run what it never reached.
+flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the resumed remainder
+  local kind=$1 names=$2 from=$3 tickets=$4 retry=$5 failed steps="" old saved rc seg
+  failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just ([a-z0-9-]+) took [0-9]+s \(exit [1-9][0-9]*\)$/\1/p' | tail -1)
+  if [ -z "$failed" ]; then
+    # Cannot tell which suite stopped the gate: do the old, safe thing (a full retry).
+    log "TRIAGE: they PASS alone twice, but the stopped suite is not in the log -> full retry (the old path)"
+    printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":false}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" >> "$FLAKY"
+    limited $retry; return $?
+  fi
+  # acceptance-ci runs two nextest steps (acceptance, then e2e-harness); a red in the first
+  # leaves the second unrun - count the nextest summaries the stopped suite printed.
+  if [ "$failed" = "acceptance-ci" ]; then
+    seg=$(tail -n +"$from" "$LOG" | awk '/^gate: running just acceptance-ci/{buf=""} {buf=buf"\n"$0} END{print buf}')
+    [ "$(printf '%s' "$seg" | grep -cE '^\s+Summary \[')" -lt 2 ] && steps="e2e-harness"
+  fi
+  # What the OLD rule would have re-run: every suite of this attempt for a Rust red (a full gate
+  # retry), the acceptance phase for a browser red. The suites after the stopped one run under
+  # both rules, so the saving is the old re-run minus the second isolated run.
+  if [ "$kind" = spec ]; then
+    old=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just (acceptance-ci|test-ui-e2e) took ([0-9]+)s.*/\2/p' | awk '{s+=$1} END{print s+0}')
+  else
+    old=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just [a-z0-9-]+ took ([0-9]+)s.*/\1/p' | awk '{s+=$1} END{print s+0}')
+  fi
+  saved=$(( old - ${FLAKE_SECOND_S:-0} )); [ "$saved" -lt 0 ] && saved=0
+  log "TRIAGE: they PASS alone twice -> accepted as a load flake (the user's rule): just $failed passes on that evidence; resuming the gate after it${steps:+ (+ $steps, never run)} - saves ~$((saved / 60)) min over the old retry"
+  printf '{"ts":"%s","tests":"%s","batch":"%s","load_before":"%s","passes_alone":2,"accepted":true,"kind":"%s","suite":"%s","saved_s":%s}\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$names" "$tickets" "$(uptime | sed 's/.*load averages*: *//')" "$kind" "$failed" "$saved" >> "$FLAKY"
+  alert amber "flake accepted" "$names went red in \`just $failed\` for ($tickets) and passed alone twice; the batch goes on without a re-run (~$((saved / 60)) min saved). Counted in flaky.jsonl - the 3rd in 7 days spawns a deflaker." --key "flake-accept:$(echo "$names" | cut -c1-60)"
+  limited $retry --resume-after "$failed" ${steps:+--resume-steps $steps}; rc=$?
+  [ "$rc" -eq 0 ] && log "TRIAGE: resumed gate PASSED" || log "TRIAGE: resumed gate FAILED -> a red in a suite that had not run yet"
+  return $rc
 }
 
 try_bulk(){

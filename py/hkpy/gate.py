@@ -326,6 +326,30 @@ class Decision:
         return [list(cmd) for cmd in ordered]
 
 
+#: The sub-steps of a suite that a red in an EARLIER sub-step leaves unrun, and so the only ones
+#: `--resume-steps` may name. The workspace-test recipe runs `test-rust` LAST (a Rust red never
+#: skips a sibling); `acceptance-ci` runs `acceptance` then `e2e-harness`, both nextest.
+RESUMABLE_STEPS: dict[str, tuple[str, ...]] = {
+    "acceptance-ci": ("e2e-harness",),
+}
+
+
+def resume(commands: list[list[str]], after: str, steps: list[str] | tuple[str, ...] = ()) -> list[list[str]]:
+    """The suites to run when a gate resumes after `after` (pure).
+
+    Only a SUFFIX of the classified list, so a resume can never skip a suite that did not run:
+    `after` must be one of `commands`, and each of `steps` must be a known unrun sub-step of it.
+    """
+    names = [c[1] for c in commands if len(c) == 2 and c[0] == "just"]
+    if after not in names:
+        raise ValueError(f"refusing --resume-after {after!r}: not a suite of this gate ({', '.join(names) or 'none'})")
+    bad = [x for x in steps if x not in RESUMABLE_STEPS.get(after, ())]
+    if bad:
+        raise ValueError(f"refusing --resume-steps {' '.join(bad)}: not an unrun sub-step of {after!r}")
+    i = names.index(after)
+    return [["just", x] for x in steps] + [list(c) for c in commands[i + 1:]]
+
+
 def classify(paths) -> Decision:
     """Classify a set of changed paths. Pure: no git, no environment, no side effects."""
     seen: dict[str, tuple[str, str]] = {}
@@ -863,6 +887,24 @@ def main(argv: list[str] | None = None) -> int:
         help="run only half the suites: `check` (lint/test) or `acceptance`",
     )
     parser.add_argument(
+        "--resume-after",
+        metavar="SUITE",
+        help=(
+            "run only the classified suites AFTER this one (a recipe name, e.g. `test`), plus any "
+            "--resume-steps. The merge runner's flake acceptance (user, 2026-09-23): a red test that "
+            "passed alone twice is accepted and the gate goes on from where it stopped - it never "
+            "re-runs what already ran, and it can only drop suites that ran BEFORE the named one. "
+            "A name that is not in this gate's list is refused."
+        ),
+    )
+    parser.add_argument(
+        "--resume-steps",
+        metavar="RECIPE",
+        nargs="*",
+        default=[],
+        help="sub-steps of the resumed suite that never ran; only those in RESUMABLE_STEPS are accepted",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the decision and the suites, run nothing",
@@ -933,6 +975,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     commands = decision.commands(args.phase)
+    if args.resume_after:
+        try:
+            commands = resume(commands, args.resume_after, args.resume_steps)
+        except ValueError as e:
+            print(f"gate: {e}", file=sys.stderr)
+            return 2
+        print(f"gate: resume   = after `just {args.resume_after}`"
+              + (f" + {' '.join(args.resume_steps)}" if args.resume_steps else "")
+              + f" -> {'; '.join(' '.join(c) for c in commands) or 'nothing left to run'}"
+              " (a red test passed alone twice; the suites before it passed in the stopped run)", flush=True)
     if args.dry_run or not commands:
         return 0
 

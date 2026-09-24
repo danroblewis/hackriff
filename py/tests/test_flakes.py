@@ -288,3 +288,41 @@ def test_the_ledger_round_trips(tmp_path, monkeypatch):
     assert rec["red_in_gate"] == 2 and rec["passed_alone"] == 2 and rec["notified_at"] == 2
     assert rec["loads"] == [12.09, 10.57]
     assert flakes.main(["--ops", ops, "--root", ops]) == 0
+
+
+
+# ---------------------------------------------------------------------------
+# Deflake requests (the user's rule, 2026-09-23)
+# ---------------------------------------------------------------------------
+
+
+def _spec_reds(n: int) -> str:
+    eps = []
+    for i in range(n):
+        eps += [f"[09-2{2 if i < 3 else 3} 1{i}:34:33] TRIAGE: browser specs red: fog-of-war.e2e.mjs - re-running them alone",
+                f"[09-2{2 if i < 3 else 3} 1{i}:37:35] TRIAGE: they PASS alone twice -> accepted as a load flake (the user's rule): just test-ui-e2e passes"]
+    return log(*eps)
+
+
+def test_the_third_isolation_pass_in_a_week_files_one_deflake_request(tmp_path, monkeypatch):
+    ops = str(tmp_path)
+    monkeypatch.setattr(flakes, "alert", lambda *a, **k: True)
+    for n, want in ((2, 0), (3, 1), (3, 1), (4, 1), (5, 2)):
+        with open(os.path.join(ops, flakes.RUNNER_LOG), "w") as fh:
+            fh.write(_spec_reds(n))
+        os.utime(os.path.join(ops, flakes.RUNNER_LOG), (NOW, NOW))
+        flakes.update(ops, root=str(tmp_path), now=NOW + 86400)
+        path = os.path.join(ops, flakes.DEFLAKE_REQUESTS)
+        got = open(path).read().splitlines() if os.path.exists(path) else []
+        assert len(got) == want, (n, got)
+    req = json.loads(got[0])
+    assert req["id"] == "deflake-fog-of-war-e2e-mjs" and req["kind"] == "spec" and req["count_7d"] == 3
+    assert "fog-of-war.e2e.mjs: passed alone 3x in 7 days" in req["evidence"]
+    assert all(i["outcome"] == flakes.PASSED_ALONE for i in req["incidents"])
+    assert "DEFLAKE_REQUESTED fog-of-war.e2e.mjs" in open(os.path.join(ops, flakes.NEEDS_FILE)).read()
+
+
+def test_a_failed_alone_red_never_counts_toward_a_deflake():
+    e = flakes.Entry(test="t", first_seen=0, last_seen=0, recent_passed=2, failed_alone=5, recent_red=7)
+    assert flakes.deflake_due({"t": e}) == []
+    assert flakes.deflake_request(flakes.Entry(test="hk-cli::api_contract x", first_seen=0, last_seen=0), 0)["kind"] == "rust"

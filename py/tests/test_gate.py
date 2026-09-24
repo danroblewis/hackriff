@@ -1063,3 +1063,27 @@ def test_the_contended_env_name_is_the_one_the_merge_runner_exports():
     runner = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
     assert CONTENDED_ENV == "HK_GATE_CONTENDED"
     assert f"export {CONTENDED_ENV}" in runner or f"{CONTENDED_ENV}=" in runner
+
+
+
+def test_resume_runs_only_the_suffix_after_the_stopped_suite():
+    """The merge runner's flake acceptance: never re-run what ran, never skip what did not."""
+    from hkpy.gate import resume
+
+    full = [["just", "lint"], ["just", "test"], ["just", "acceptance-ci"], ["just", "test-ui-e2e"]]
+    assert resume(full, "test") == [["just", "acceptance-ci"], ["just", "test-ui-e2e"]]
+    assert resume(full, "test-ui-e2e") == []
+    assert resume(full, "acceptance-ci", ["e2e-harness"]) == [["just", "e2e-harness"], ["just", "test-ui-e2e"]]
+    for bad_after, bad_steps in (("acceptance", []), ("test", ["e2e-harness"]), ("acceptance-ci", ["test-rust"])):
+        try:
+            resume(full, bad_after, bad_steps)
+        except ValueError:
+            continue
+        raise AssertionError(f"resume({bad_after!r}, {bad_steps}) should be refused")
+
+
+def test_resume_after_is_refused_for_a_suite_this_gate_does_not_run(monkeypatch, capsys):
+    from hkpy import gate
+
+    rc = gate.main(["--files", "py/hkpy/flow.py", "--resume-after", "test", "--dry-run"])
+    assert rc == 2 and "refusing --resume-after 'test'" in capsys.readouterr().err
