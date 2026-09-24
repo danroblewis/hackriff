@@ -185,6 +185,7 @@ def conflicts(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "MERGE_QUEUE", str(tmp_path / "merge-queue.txt"))
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    monkeypatch.setattr(R, "REPO", str(tmp_path))                     # never the live .git/MERGE_HEAD
     monkeypatch.setattr(R, "LOG", str(tmp_path / "work-runner.log"))
     monkeypatch.setattr(R, "NEEDS", str(tmp_path / "work-needs-attention.txt"))
     monkeypatch.setattr(R.os.path, "isdir", lambda p: True)
@@ -309,7 +310,6 @@ def test_has_work_fails_safe():
 def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflicts, monkeypatch):
     tmp, launched = conflicts
     (tmp / "bulk-in-progress").write_text("base=abc\nbranches=task-t627 task-x\n")
-    monkeypatch.setattr(R, "REPO", str(tmp))                          # no .git/MERGE_HEAD here
     assert R.merging_branches() == {"task-t627", "task-x"}
     claims = {"T-627": _claim("T-627", "task-t627")}
     R.handle_gate_failures(claims, dry=False)
