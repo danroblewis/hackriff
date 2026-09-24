@@ -728,13 +728,6 @@ impl Recipe {
                 let channel = t == "center_hz" || t == "bandwidth_hz";
                 if !seen.insert(t.as_str()) {
                     e.push(format!("refine.tune[{i}]"), "listed twice");
-                } else if evidence && t == "bandwidth_hz" {
-                    // The evidence objective's channeliser is flat and fixed so the prefix's own
-                    // S0 filter sees its calibration null; that filter is the channel filter.
-                    e.push(
-                        format!("refine.tune[{i}]"),
-                        "the evidence objective tunes its S0 filter by path, not bandwidth_hz",
-                    );
                 } else if channel {
                     // The channel itself: every objective form tunes it.
                 } else if !evidence {
@@ -1284,7 +1277,7 @@ mod tests {
         let r = refine_recipe(
             3,
             json!({"objective": {"evidence": "deepest"},
-                   "tune": ["center_hz", "nodes[clock].params.symbol_rate_bd"]}),
+                   "tune": ["center_hz", "bandwidth_hz", "nodes[clock].params.symbol_rate_bd"]}),
         );
         r.validate(&refine_catalogue())
             .expect("a schema-3 evidence objective validates");
@@ -1406,8 +1399,8 @@ mod tests {
             tune(ev.clone(), &["center_hz", "center_hz"]),
             ["refine.tune[1]"]
         );
-        // The channel width is the S0 filter's parameter under the evidence objective.
-        assert_eq!(tune(ev.clone(), &["bandwidth_hz"]), ["refine.tune[0]"]);
+        // The channel itself is tunable under both forms.
+        assert!(tune(ev.clone(), &["center_hz", "bandwidth_hz"]).is_empty());
         assert_eq!(tune(ev, &[]), ["refine.tune"]);
     }
 

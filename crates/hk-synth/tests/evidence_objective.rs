@@ -200,11 +200,11 @@ fn start() -> RefineStart {
 }
 
 /// How many hidden tones sit inside the prefix's channel filter's support (passband and
-/// transition) at `center_hz`.
-fn tones_held(center_hz: f64) -> usize {
+/// transition) at `center_hz`, for a filter `bandwidth_hz` wide (two-sided).
+fn tones_held(center_hz: f64, bandwidth_hz: f64) -> usize {
     [TRUE_CENTER_HZ - TRUE_DEV_HZ, TRUE_CENTER_HZ + TRUE_DEV_HZ]
         .iter()
-        .filter(|f| (*f - center_hz).abs() < CHAN_CUTOFF_HZ + CHAN_TRANSITION_HZ)
+        .filter(|f| (*f - center_hz).abs() < 0.5 * bandwidth_hz + CHAN_TRANSITION_HZ)
         .count()
 }
 
@@ -214,7 +214,10 @@ fn refine(
     start: &RefineStart,
 ) -> hk_demod::refine::RefinementOutcome {
     let p = provenance();
-    let cfg = obj.loop_config(x.len(), FS, 48);
+    let mut cfg = obj.loop_config(x.len(), FS, 96);
+    // The measurement count is the budget; the wall-clock backstop must not decide a test
+    // outcome on a loaded box (a debug-build refinement runs tens of seconds under load).
+    cfg.termination.time_budget = std::time::Duration::from_secs(24 * 3600);
     RefinementLoop::new(obj, cfg).run(window(&p, x), start)
 }
 
@@ -228,6 +231,15 @@ fn refinement_from_a_coarse_box_locks_on_hold_out_evidence_and_holds_the_emissio
     // Only the bound parameter is an axis; the unbound sync word is not refined.
     let axes: Vec<&str> = obj.axes().iter().map(|a| a.path.as_str()).collect();
     assert_eq!(axes, ["nodes[clock].params.symbol_rate_bd"]);
+    // The bandwidth axis (§2.3) is the S0 channel filter's width, searched around its own
+    // 12 kHz and never so wide that the filter's support leaves the flat channeliser.
+    let space = obj.space(&start(), FS);
+    assert_eq!(space.nominal_bandwidth_hz, 2.0 * CHAN_CUTOFF_HZ);
+    assert!(space.bandwidth_hz.0 < space.bandwidth_hz.1, "{space:?}");
+    assert!(
+        space.bandwidth_hz.1 + 2.0 * CHAN_TRANSITION_HZ <= obj.channel_width(FS) + 1e-6,
+        "{space:?}"
+    );
 
     // At the start box the prefix loses a tone: measured, it does not lock.
     let p = provenance();
@@ -237,13 +249,13 @@ fn refinement_from_a_coarse_box_locks_on_hold_out_evidence_and_holds_the_emissio
             window(&p, &x),
             &Tuning {
                 center_hz: st.center_hz,
-                bandwidth_hz: st.bandwidth_hz,
+                bandwidth_hz: 2.0 * CHAN_CUTOFF_HZ,
                 mode: BTreeMap::new(),
             },
             EvalDepth::Track,
         )
         .unwrap();
-    assert_eq!(tones_held(st.center_hz), 0);
+    assert_eq!(tones_held(st.center_hz, 2.0 * CHAN_CUTOFF_HZ), 0);
     assert!(!at_start.locked, "{at_start:?}");
 
     let o = refine(obj, &x, &st);
@@ -255,7 +267,7 @@ fn refinement_from_a_coarse_box_locks_on_hold_out_evidence_and_holds_the_emissio
     // keeps the first saturating centre nearest the start; ranking centres more finely than
     // that is the analytic stages' job, S4/S5, whose bits grow with the evidence.)
     assert!(
-        tones_held(o.tuning.center_hz) > 0,
+        tones_held(o.tuning.center_hz, o.tuning.bandwidth_hz) > 0,
         "refined centre {} Hz holds neither tone",
         o.tuning.center_hz
     );
@@ -377,14 +389,10 @@ fn a_schema_3_recipe_refines_what_its_tune_list_names() {
     let obj = EvidenceObjective::from_recipe(&r, Stage::S2, ctx(NOMINAL)).unwrap();
     let st = start();
     let space = obj.space(&st, FS);
-    // The channeliser is flat and fixed: one bandwidth candidate, the prefix's own S0 filter
-    // is the channel filter.
-    let w = obj.channel_width(FS);
+    // `bandwidth_hz` is not in `tune`: the bandwidth axis is the prefix's own S0 channel filter
+    // (2 × cutoff), fixed.
+    let w = 2.0 * CHAN_CUTOFF_HZ;
     assert_eq!(space.bandwidth_hz, (w, w));
-    assert!(
-        w >= 2.0 * (CHAN_CUTOFF_HZ + 3_000.0),
-        "covers the S0 filter's support"
-    );
     assert!(space.center_hz.0 < space.center_hz.1);
     // The parameter axis tracks ± 3 % around the running value, current value first.
     assert_eq!(space.mode_axes.len(), 1);
@@ -400,7 +408,11 @@ fn a_schema_3_recipe_refines_what_its_tune_list_names() {
     let x = capture(TOTAL, TOTAL, NOISE, 0x785d);
     let o = refine(obj, &x, &st);
     assert!(o.validated && o.locked, "{o:#?}");
-    assert!(tones_held(o.tuning.center_hz) > 0, "{}", o.tuning.center_hz);
+    assert!(
+        tones_held(o.tuning.center_hz, o.tuning.bandwidth_hz) > 0,
+        "{}",
+        o.tuning.center_hz
+    );
     assert_eq!(o.mode, "synth-candidate");
 }
 

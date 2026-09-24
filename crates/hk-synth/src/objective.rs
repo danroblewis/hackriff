@@ -9,42 +9,39 @@
 //!
 //! # The mapping (ADR-0015 §2.3)
 //!
-//! - **`space()`**: the channel centre becomes the `ParameterSpace` centre axis, a grid over the
-//!   start box; each tuned continuous node parameter (deviation, symbol rate, loop bandwidth, the
-//!   S0 filter's cutoff…) becomes a `Tuning.mode` axis **named by its path**,
+//! - **`space()`**: the channel centre and bandwidth become the `ParameterSpace` centre and
+//!   bandwidth axes. The centre is a grid over the start box; the bandwidth is the width
+//!   (`2 × cutoff_hz`) of the prefix's **S0 channel filter** (its first `lowpass` node), searched
+//!   around the prefix's own width — see "The channel". Each tuned continuous node parameter
+//!   (deviation, symbol rate, loop bandwidth…) becomes a `Tuning.mode` axis **named by its path**,
 //!   `nodes[<id>].params.<name>`, with a grid around its current value
-//!   ([`ParamAxis::from_free`], [`ParamAxis::around`]). The bandwidth axis has one value — see
-//!   "The channel".
+//!   ([`ParamAxis::from_free`], [`ParamAxis::around`]).
 //! - **`evaluate(window, tuning, depth)`**: down-convert the window to the tuning's centre at
-//!   the prefix's own input rate, bind the mode values into the prefix, run it with
+//!   the prefix's own input rate, bind the bandwidth and mode values into the prefix, run it with
 //!   `hk_blocks::run_window`, score it ([`crate::score`]) and return `Measurement { quality:
 //!   evidence_bits, locked: deepest b_k ≥ floor_k }`.
-//! - **`EvalDepth`** maps onto the analysis window's split (§3.1 step 1): `Acquire` and `Track`
-//!   read **only the search part** (samples before [`WindowSplit::holdout_from`]); `Validate`
-//!   reads **only the hold-out part** (samples from it on). The loop's own leading-window
-//!   lengths ([`EvidenceObjective::loop_config`]) choose how much of each part a depth reads; the
-//!   split is enforced here, so no configuration can let a search-window measurement vouch for
-//!   the result. `RefinementOutcome::locked` therefore means "locked on hold-out" — the only
-//!   evidence that solves or confirms (§3.1 step 7).
+//! - **`EvalDepth`** maps onto the short, search and hold-out windows (§3.1 step 1): `Acquire`
+//!   reads the short leading part of the search window and `Track` all of it (both only samples
+//!   before [`WindowSplit::holdout_from`]; [`EvidenceObjective::loop_config`] sets the lengths);
+//!   `Validate` reads **only the hold-out** (samples from it on). The split is enforced here, so
+//!   no configuration can let a search-window measurement vouch for the result.
+//!   `RefinementOutcome::locked` therefore means "locked on hold-out" (§3.1 step 7).
 //!
-//! # The channel: flat, fixed, and not evidence
+//! # The channel (proposed ADR-0015 §2.3 amendment, pending the user)
 //!
 //! Every calibration null (§2.2, `crate::nullchain`) is **white noise at the prefix's input
-//! rate** fed to the prefix's own S0 filter. A channeliser that shapes that input moves every
-//! null under it, and the tables are tight: the `lowpass@1` S0 `snr` table credits 6 bits at
-//! +0.1 dB (n = 16 384), so a DDC whose passband rolls off at the band edges makes pure noise
-//! score 6 bits at S0; and a DDC narrower than the S0 filter's support colours the noise the
-//! S1/S2 blocks see, which let noise lock at S2 on hold-out in the first version of this
-//! objective (measured, T-858). So:
+//! rate** fed to the prefix's own S0 filter, and the tables are tight: the `lowpass@1` S0 `snr`
+//! table credits 6 bits at +0.1 dB (n = 16 384). Measured in T-858: a channeliser whose passband
+//! rolls off at the band edges made pure noise score 6 bits at S0, and one narrower than the S0
+//! filter's support coloured the noise the S1/S2 blocks saw, so noise locked at S2 on hold-out.
+//! So, as a **proposal recorded in ADR-0015 §2.3 for the user to accept or reject**:
 //!
 //! - the channeliser is **flat and fixed**: [`ChannelSearch::occupancy`] of the prefix rate
-//!   (0.9: ±21.6 kHz at 48 kHz), wider than any S0 filter's passband plus transition, so the S0
-//!   filter's output under noise is exactly its null's. The loop's bandwidth phase has one
-//!   candidate; the **channel filter is the prefix's S0 node**, and its cutoff is tuned like any
-//!   other node parameter (a schema-3 recipe lists it by path; `bandwidth_hz` is refused there);
-//! - **S0 is not counted**: its `snr` is a whiteness test of the input the objective itself
-//!   produced, not evidence about the emission. It is still reported (`b_S0`). A prefix that
-//!   reaches only S0 has nothing to refine on ([`ObjectiveError::NothingToMeasure`]).
+//!   (0.9: ±21.6 kHz at 48 kHz); the bandwidth axis moves the S0 filter behind it, kept so its
+//!   support (width plus transitions) stays inside that flat passband;
+//! - **S0 is reported (`b_S0`) but not counted** in `quality` or the lock: its `snr` is a
+//!   whiteness test of the input the objective itself produced. A prefix that reaches only S0
+//!   has nothing to refine on ([`ObjectiveError::NothingToMeasure`]).
 //!
 //! # What a measurement is
 //!
@@ -164,6 +161,15 @@ pub struct ChannelSearch {
     /// prefix's own S0 filter (passband and transition) so that filter sees the white noise its
     /// calibration null was drawn from (module docs, "The channel").
     pub occupancy: f64,
+    /// Narrowest channel-filter width tried, × the prefix's own filter width.
+    pub bandwidth_min: f64,
+    /// Widest channel-filter width tried, × the prefix's own filter width (never so wide that the
+    /// filter's support leaves the flat passband).
+    pub bandwidth_max: f64,
+    /// Channel-filter width step, × the prefix's own filter width.
+    pub bandwidth_step: f64,
+    /// The chosen width is the narrowest within this many bits of the best.
+    pub bandwidth_tolerance_bits: f64,
 }
 
 impl Default for ChannelSearch {
@@ -172,6 +178,10 @@ impl Default for ChannelSearch {
             center_span: 0.5,
             center_step: 0.125,
             occupancy: 0.9,
+            bandwidth_min: 0.5,
+            bandwidth_max: 1.5,
+            bandwidth_step: 0.125,
+            bandwidth_tolerance_bits: 1.0,
         }
     }
 }
@@ -276,6 +286,10 @@ pub struct EvidenceObjective {
     target: Stage,
     axes: Vec<ParamAxis>,
     tune_center: bool,
+    tune_bandwidth: bool,
+    /// The prefix's S0 channel filter (a `lowpass` node): `(node id, cutoff_hz, transition_hz)`.
+    /// The bandwidth axis is its two-sided width, `2 × cutoff_hz`.
+    channel_filter: Option<(String, f64, f64)>,
     channel: ChannelSearch,
 }
 
@@ -307,7 +321,7 @@ impl EvidenceObjective {
             candidate.recipe.clone(),
             target,
             axes,
-            true,
+            (true, true),
             ctx,
         )
     }
@@ -328,7 +342,7 @@ impl EvidenceObjective {
         };
         let mut axes = Vec::new();
         for t in &refine.tune {
-            if t == "center_hz" {
+            if t == "center_hz" || t == "bandwidth_hz" {
                 continue;
             }
             let bad = || ObjectiveError::BadParam(t.clone());
@@ -347,7 +361,10 @@ impl EvidenceObjective {
             recipe.clone(),
             reached,
             axes,
-            refine.tune.iter().any(|t| t == "center_hz"),
+            (
+                refine.tune.iter().any(|t| t == "center_hz"),
+                refine.tune.iter().any(|t| t == "bandwidth_hz"),
+            ),
             ctx,
         )
     }
@@ -357,7 +374,7 @@ impl EvidenceObjective {
         recipe: Recipe,
         target: Stage,
         axes: Vec<ParamAxis>,
-        tune_center: bool,
+        (tune_center, tune_bandwidth): (bool, bool),
         ctx: EvidenceContext,
     ) -> Result<Self, ObjectiveError> {
         if target < Stage::S1 {
@@ -371,6 +388,25 @@ impl EvidenceObjective {
         if recipe.input.port != PortType::Iq {
             return Err(ObjectiveError::NotIq);
         }
+        // The S0 channel filter: the first `lowpass` node with a numeric cutoff. A node-parameter
+        // axis on its cutoff already tunes it; the bandwidth axis then stays fixed.
+        let channel_filter = recipe
+            .nodes
+            .iter()
+            .find(|n| n.block == "lowpass")
+            .and_then(|n| {
+                let cutoff = n.params.get("cutoff_hz")?.as_f64()?;
+                let transition = n
+                    .params
+                    .get("transition_hz")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                (cutoff.is_finite() && cutoff > 0.0).then(|| (n.id.clone(), cutoff, transition))
+            })
+            .filter(|(id, _, _)| {
+                let path = format!("nodes[{id}].params.cutoff_hz");
+                !axes.iter().any(|a| a.path == path)
+            });
         Ok(Self {
             mode,
             recipe,
@@ -379,6 +415,8 @@ impl EvidenceObjective {
             target,
             axes,
             tune_center,
+            tune_bandwidth,
+            channel_filter,
             channel: ChannelSearch::default(),
         })
     }
@@ -438,9 +476,18 @@ impl EvidenceObjective {
         }
     }
 
-    /// The prefix with `tuning`'s mode values bound.
+    /// The prefix with `tuning`'s bandwidth (on the S0 channel filter) and mode values bound.
     fn bound(&self, tuning: &Tuning) -> Recipe {
         let mut r = self.recipe.clone();
+        if self.tune_bandwidth
+            && let Some((id, _, _)) = &self.channel_filter
+            && tuning.bandwidth_hz.is_finite()
+            && tuning.bandwidth_hz > 0.0
+            && let Some(n) = r.nodes.iter_mut().find(|n| &n.id == id)
+            && let Some(v) = serde_json::Number::from_f64(0.5 * tuning.bandwidth_hz)
+        {
+            n.params.insert("cutoff_hz".to_owned(), Value::Number(v));
+        }
         for axis in &self.axes {
             let Some(&v) = tuning.mode.get(&axis.path) else {
                 continue;
@@ -602,16 +649,34 @@ impl Objective for EvidenceObjective {
         } else {
             ((start.center_hz, start.center_hz), bw)
         };
-        // The channeliser's width is fixed (module docs, "The channel"): the bandwidth phase has
-        // one candidate, and the prefix's own S0 filter is the channel filter.
-        let width = self.channel_width(rate_hz);
+        // The bandwidth axis is the S0 channel filter's width (module docs, "The channel"); the
+        // channeliser in front of it is flat and fixed. The filter's support (width plus both
+        // transitions) must stay inside the channeliser's flat passband.
+        let (bandwidth_hz, bandwidth_step_hz, nominal_bandwidth_hz) =
+            match (&self.channel_filter, self.tune_bandwidth) {
+                (Some((_, cutoff, transition)), true) => {
+                    let nominal = 2.0 * cutoff;
+                    let widest = (self.channel_width(rate_hz) - 2.0 * transition).max(nominal);
+                    let hi = (c.bandwidth_max * nominal).min(widest);
+                    let lo = (c.bandwidth_min * nominal).max(1.0).min(hi);
+                    ((lo, hi), (c.bandwidth_step * nominal).max(1.0), nominal)
+                }
+                (Some((_, cutoff, _)), false) => {
+                    let w = 2.0 * cutoff;
+                    ((w, w), w, w)
+                }
+                (None, _) => {
+                    let w = self.channel_width(rate_hz);
+                    ((w, w), w, w)
+                }
+            };
         ParameterSpace {
             center_hz,
             center_step_hz,
-            bandwidth_hz: (width, width),
-            bandwidth_step_hz: width,
-            nominal_bandwidth_hz: width,
-            bandwidth_tolerance: 0.0,
+            bandwidth_hz,
+            bandwidth_step_hz,
+            nominal_bandwidth_hz,
+            bandwidth_tolerance: c.bandwidth_tolerance_bits,
             mode_axes: self
                 .axes
                 .iter()
