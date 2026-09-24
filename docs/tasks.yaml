@@ -5135,6 +5135,15 @@ tasks:
       2026-09-22 (coordinator): a worker proposed CANCEL because SPACE-001/SPACE-041/PROP-019 already carry hardware_fit: needs-accessory - REJECTED. The deliverable is the HF/VLF science front ends themselves (accessory-fed source in hk-core + the three analyses); the needs-accessory tags are a CONSTRAINT on that work, not the work. M5 roadmap - not before the 09-23 burndown.
 
       Review: PROP-019 sign was inverted vs track_carrier e^{-jwt} convention; negated dpath, test now asserts phase advance => lower reflection.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 11:20).
+      Gate flagged only an uncommitted docs/tasks.yaml (the ticket note appended via just task note). Committed it. Code unchanged since review fix: PROP-019 sign corrected; VLF analyses in hk-dsp::vlf, accessory-gated; hk-core accessory source remains a follow-up.
+      Tests: cargo nextest run -p hk-dsp --lib vlf -> exit 0 (4 passed (unchanged code))
+      precheck exit 0
+      Commits: f1785ca1, 2d2d5b08, 78159094
+      Observed, not chased: accessory-fed Source in hk-core not built
+      Use cases: SPACE-001, SPACE-041, PROP-019
+      Resources: 43 CPU-s, peak 1.1 GB
   - id: T-278
     milestone: M5
     title: 'M5 radiometry science (C33) behind a dish, and Ku via LNB'
