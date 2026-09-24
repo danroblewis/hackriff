@@ -25618,7 +25618,8 @@ tasks:
   - id: T-867
     milestone: MAUTO
     title: "LP-3: recipes/analog-wfm.recipe.json with audio + RDS sibling outputs"
-    status: todo
+    status: in-progress
+    branch: task-t867
     priority: normal
     deps:
     - T-866
