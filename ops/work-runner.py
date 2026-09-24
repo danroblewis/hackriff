@@ -57,6 +57,9 @@ WORKDIR = f"{S}/work"
 MERGE_QUEUE = f"{S}/merge-queue.txt"
 BULKMARK = f"{S}/bulk-in-progress"
 LANDED = f"{S}/landed.jsonl"
+# The 3rd isolation-pass of one test within 7 days (user, 2026-09-23) makes py/hkpy/flakes.py append
+# a request here; this runner dispatches a deflaker for it (see dispatch_deflakes).
+DEFLAKE_REQUESTS = f"{S}/deflake-requests.jsonl"
 
 # THE RESOURCE MODEL IS A FIXED BUDGET, NOT A HEURISTIC (user, 2026-09-22). This box has 28 cores
 # (M3 Ultra: 20 performance + 8 efficiency). The merge gate is reserved 14 (its 6 build jobs + 8 test
@@ -158,7 +161,9 @@ def attention(ticket, branch, kind, detail=""):
     # Discord (user, 2026-09-23): the kinds a person must act on are alerts too. ops/alert.py
     # dedupes per key and never raises; NO_WORK / UNCOMMITTED / CANCEL_PROPOSED are the
     # coordinator's routine and stay in the file only.
-    level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info"}.get(kind)
+    level = {"BOARD_UNREADABLE": "red", "ERROR": "amber", "BLOCKED": "amber", "REVIEW_FAIL": "amber", "FIX_HELD": "info",
+             "DEFLAKE_BLOCKED": "amber", "DEFLAKE_ERROR": "amber", "DEFLAKE_REVIEW_FAIL": "amber",
+             "DEFLAKE_GATE_FAIL": "amber", "DEFLAKE_CONFLICT": "amber"}.get(kind)
     if level:
         try:
             subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "alert.py"),
@@ -417,11 +422,16 @@ def launch(t, dry):
 
 def launch_review(claim):
     tid, branch, wt = claim["ticket"], claim["branch"], claim["wt"]
-    d = f"{WORKDIR}/{tid}"
+    d = claim.get("dir") or f"{WORKDIR}/{tid}"
     cancel = c_reason = claim.get("cancel_reason")
     extra = (f"\nTHIS BRANCH CANCELS THE TICKET. The worker's reason: {cancel}\nYour job is to verify that reason against the repo "
              "(is the work really done at the commit named? is the decision real and does it obsolete THIS ticket?). "
              "PASS only if the evidence holds; FAIL names what is missing.\n") if cancel else ""
+    if claim.get("deflake"):
+        extra += (f"\nTHIS BRANCH IS A DEFLAKE RUN for the flaky test {claim.get('test')}, not a ticket (its brief is the "
+                  "'ticket text'). FAIL it if the fix masks rather than removes the nondeterminism: a retry, a skip, an "
+                  "#[ignore], a quarantine entry, a widened or shortened timeout, or a deleted/weakened assertion. PASS needs "
+                  "the cause named, a deterministic fix, and the hand-back's proof that the test goes red when the defect returns.\n")
     prompt = f"""Review branch {branch} for hackriff before it is queued for merge. The diff is `git diff main...{branch}`{extra}
 (run it from {wt}). The ticket text is in {d}/brief.md, the worker's structured hand-back in {d}/handback.json
 (review the diff against what it CLAIMS: tests listed, files listed, summary) and its transcript result in {d}/out.json.
@@ -706,6 +716,7 @@ def reap(claims, dry):
                 except OSError:
                     pass
                 c["state"] = "timeout"
+                c["ended"] = time.time()
                 attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
                 record_done(c, "timeout", {})
                 changed = True
@@ -728,6 +739,9 @@ def reap(claims, dry):
                           + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
         except Exception as e:
             log(f"leak check error for {tid}: {e}")
+        if c.get("deflake"):
+            reap_deflake(claims, tid, c)       # its own outcomes: not a board ticket, no result: block
+            continue
         d = f"{WORKDIR}/{tid}"
         if c["kind"] == "review":
             res = result_of(f"{d}/review.json")
@@ -998,6 +1012,8 @@ def handle_gate_failures(claims, dry):
     """Merge-runner GATE_FAIL and CONFLICT lines for branches this runner queued -> resume the worker to fix.
     Also: claims left in review-failed (from before the review-fix path existed) get the same path."""
     for tid, c in list(claims.items()):
+        if c.get("deflake"):
+            continue                           # a deflake review FAIL is escalated at reap, never resumed
         if c.get("state") == "review-failed" and c.get("session_id") and c.get("fix_attempts", 0) < FIX_ATTEMPTS and os.path.isdir(c.get("wt", "")):
             try:
                 text = str(result_of(f"{WORKDIR}/{tid}/review.json").get("result", ""))
@@ -1022,6 +1038,14 @@ def handle_gate_failures(claims, dry):
         c = claims[tid]
         if line in c.get("gate_fails_seen", []) or c.get("state") != "queued":
             continue
+        if c.get("deflake") and not is_conflict(line):
+            # A deflake branch has no ticket to note and no worker brief a fix run could resume
+            # against; its red goes to a person, and the ledger's next request re-dispatches it.
+            c.setdefault("gate_fails_seen", []).append(line)
+            c["state"], c["ended"] = "gate-failed", time.time()
+            changed = True
+            attention(tid, branch, "DEFLAKE_GATE_FAIL", f"{line[:200]} - not resumed automatically")
+            continue
         if is_conflict(line) and not dry:
             if statuses is None:
                 statuses = board_statuses()
@@ -1035,6 +1059,13 @@ def handle_gate_failures(claims, dry):
                     enqueue(branch, c.get("wt"))
                     why = "merges cleanly now - re-queued"
                 log(f"CONFLICT {tid}: no fix run - {why} ({line[:80]})")
+                continue
+            if c.get("deflake"):
+                # Where a ticket would get a fix run: escalate instead (no ticket brief to resume), no slot spent.
+                c.setdefault("gate_fails_seen", []).append(line)
+                c["state"], c["ended"] = "conflict", time.time()
+                changed = True
+                attention(tid, branch, "DEFLAKE_CONFLICT", f"{line[:200]} - does not merge cleanly; not resumed automatically")
                 continue
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
@@ -1248,8 +1279,8 @@ def dispatch_cap():
 
 
 def busy_workers(claims):
-    """Running work AND fix runs: both are a worker on the box (dispatch counted only `work`)."""
-    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix"))
+    """Running work, fix AND deflake runs: each is a worker on the box (dispatch counted only `work`)."""
+    return sum(1 for c in claims.values() if c.get("state") == "running" and c.get("kind") in ("work", "fix", "deflake"))
 
 
 def dispatch(claims, dry):
@@ -1360,6 +1391,260 @@ def reap_worktrees(claims, dry):
         log(f"REAP {wt} ({branch}: {'merged' if merged else 'no commits'}{', forced' if force else ''}) {'ok' if r.returncode == 0 else r.stderr.strip()[:120]}")
 
 
+# ---------- deflake dispatch (user, 2026-09-23) ----------
+# "A red test that passes alone twice is accepted as a load flake and the batch lands; the 3rd flake
+# of the same test within 7 days auto-spawns a deflaker, so flakes get fixed, not tolerated."
+# py/hkpy/flakes.py keeps the ledger and appends one line per due test to deflake-requests.jsonl;
+# this is the dispatch side. A request is not a board ticket, so its claim is keyed `DEFLAKE:<slug>`
+# (never a T-id: sync_board, candidates and release_stale_claims all look claims up BY board id and
+# so skip it) and carries `deflake: <slug>`, which routes it past every ticket-shaped path: its own
+# reap, no result: block, no fix resume. One claim per slug, reused across runs: it remembers the
+# newest request it consumed (`request_ts`), the run number, and when the last run ended.
+DEFLAKE_PREFIX = "DEFLAKE:"
+
+
+def deflake_slug(rid):
+    """A request id -> the name its branch, worktree and work dir use. Lower-case [a-z0-9-] only, so
+    an id the ledger builds from a test name can never make a bad ref or escape .claude/worktrees."""
+    return re.sub(r"[^a-z0-9]+", "-", str(rid).lower()).strip("-")[:100]
+
+
+def read_deflake_requests(path=None):
+    """Valid requests, file order. Garbage (not JSON, not an object, no id/test, a non-numeric ts,
+    an id with no usable characters) is skipped: the ledger is another process's output and one
+    bad line must not stop every later request."""
+    out = []
+    try:
+        lines = open(path or DEFLAKE_REQUESTS).read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or not isinstance(r.get("id"), str) or not isinstance(r.get("test"), str) \
+                or not r["test"].strip() or isinstance(r.get("ts"), bool) or not isinstance(r.get("ts"), (int, float)):
+            continue
+        slug = deflake_slug(r["id"])
+        if slug:
+            out.append(dict(r, slug=slug))
+    return out
+
+
+def pending_deflakes(claims, reqs):
+    """([(slug, newest unconsumed request)] that may dispatch now, oldest waiting first; changed).
+    A request waits while the slug's previous run is still open or its branch unmerged (claim
+    running - deflaker or review - or queued), logged once per request. Once that run has ended, a
+    request whose ts <= the claim's `ended` is DROPPED: its evidence predates the last fix (a merged
+    claim's `ended` is when release_stale_claims saw it land), and it is logged once and consumed."""
+    by = {}
+    for r in reqs:
+        by.setdefault(r["slug"], []).append(r)
+    ready, changed = [], False
+    for slug, rs in by.items():
+        c = claims.get(DEFLAKE_PREFIX + slug)
+        consumed = c.get("request_ts", float("-inf")) if c else float("-inf")
+        new = [r for r in rs if r["ts"] > consumed]
+        if not new:
+            continue
+        latest = max(new, key=lambda r: r["ts"])
+        if c and c.get("state") in ("running", "queued"):
+            if c.get("wait_logged") != latest["ts"]:
+                what = f"its {c.get('kind')} run is still running" if c["state"] == "running" else f"its branch {c.get('branch')} is not merged yet"
+                log(f"DEFLAKE WAIT {slug}: request for {latest['test']} ({latest.get('count_7d')} in 7 d) - {what}")
+                c["wait_logged"] = latest["ts"]
+                changed = True
+            continue
+        if c:
+            ended = c.get("ended") or c.get("started") or 0
+            stale = [r for r in new if r["ts"] <= ended]
+            if stale:
+                c["request_ts"] = max(r["ts"] for r in stale)
+                changed = True
+                log(f"DEFLAKE DROP {slug}: {len(stale)} request(s) for {latest['test']} predate the last run's end "
+                    f"({c.get('state')} at {time.strftime('%m-%d %H:%M', time.localtime(ended))}) - evidence from before the fix")
+                new = [r for r in new if r["ts"] > ended]
+                if not new:
+                    continue
+        ready.append((min(r["ts"] for r in new), slug, max(new, key=lambda r: r["ts"])))
+    ready.sort(key=lambda x: x[0])
+    return [(slug, r) for _, slug, r in ready], changed
+
+
+def deflake_brief(key, req, wt, branch, d, base):
+    incidents = "\n".join("  - " + json.dumps(i, sort_keys=True) for i in (req.get("incidents") or []) if isinstance(i, dict)) or "  (none listed)"
+    how = ("cargo nextest run -p <crate> -E 'test(/<name>/)' (or -E 'binary(<file>)'), from the name above"
+           if req.get("kind") == "rust" else
+           "the one spec file alone, the way ui/e2e/run.mjs runs a single spec")
+    return f"""You are a DEFLAKER for hackriff, dispatched by ops/work-runner.py because one test has now passed
+alone after failing in a merge gate {req.get('count_7d', 3)} times within 7 days (user, 2026-09-23: the 3rd flake of a
+test in 7 days auto-spawns a deflaker, so flakes get fixed, not tolerated). There is no coordinator in the loop:
+read this fully and finish without asking questions.
+
+TEST:   {req['test']}
+KIND:   {req.get('kind', '?')}
+COUNT:  {req.get('count_7d', '?')} in 7 days
+REQUEST ID: {req['id']}
+INCIDENTS (verbatim from the ledger):
+{incidents}
+EVIDENCE (verbatim from the ledger):
+{req.get('evidence') or '(none given)'}
+
+WHERE: your worktree is {wt} on branch {branch}, cut from {base} (the last gated main). Work ONLY there.
+Never touch /Users/daniellewis/hackriff (the main checkout), never `git stash`, never `git reset --hard`,
+never commit to main, never append to any merge queue - the runner does that after you hand back.
+You do NOT edit docs/tasks.yaml (a hook denies it) and there is no ticket to update.
+
+THE PROCEDURE (the deflake-triage skill, .claude/skills/deflake-triage/SKILL.md - read it; the rules below win
+where they differ):
+1. Run the test ALONE first, several times: {how}.
+   Do NOT use `just test-one` (workspace-wide, 8+ minutes before it reaches a test).
+2. FAILS ALONE = a REAL BUG, not a flake. It is not yours to paper over: hand back BLOCKED with the command, its
+   exit code and the failing output, and what you believe the defect is. Do not change the assertion.
+3. PASSES ALONE but failed in the gates = a load flake. Find the nondeterminism (wall-clock budgets instead of
+   frames/events/sample index, ordering, shared ports/dirs/globals, a cold subprocess timed from the parent) and
+   make the test DETERMINISTIC. NEVER a retry, NEVER a skip or #[ignore], NEVER a quarantine entry, NEVER a
+   widened or shortened timeout, NEVER a deleted or weakened assertion.
+4. PROVE IT: reintroduce the defect (or the timing it was sensitive to) and show the test goes RED; then GREEN with
+   the fix. A green test that asserts nothing is worse than a flaky one. Record what was exercised.
+5. Targeted tests only - the test itself and the crate or spec it lives in. Never the merge gate, the acceptance
+   suite, the whole workspace or every spec (a hook blocks them). Never end a turn waiting on a background
+   command. Run `just precheck <crates you touched>` before handing back if you touched Rust.
+6. COMMIT everything on {branch}. The first line of the message starts "deflake: " and the message ends with
+   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+   An Opus reviewer reads the diff before the branch is queued for merge.
+
+HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no comments):
+  {d}/handback.json
+  {{"ticket": "{key}",
+   "outcome": "done" | "blocked",
+   "summary": "the nondeterminism found, the deterministic fix, the red-when-defect-returns proof, run counts",
+   "commits": ["<short sha>", ...],
+   "files": ["<path>", ...],
+   "tests": [{{"cmd": "<exact command>", "exit": 0, "summary": "passed 20/20 alone; red with the defect back"}}, ...],
+   "precheck": {{"exit": 0}},
+   "blocked": {{"needs": "<if blocked: fails alone - the evidence; or what else unblocks it>"}},
+   "observed_but_not_chased": ["<anything outside scope, with the exact evidence>", ...]}}
+"done" is refused over a non-zero test exit. Also end your final message with one line
+HANDBACK: DONE   or   HANDBACK: BLOCKED <why>
+Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
+"""
+
+
+def launch_deflake(slug, req, prior, dry):
+    """One deflaker run for `slug`: like launch() - worktree + branch, target clone inside the child,
+    the same bound and env - but `--agent deflaker`, opus/high, cut from merge_target() (while a batch
+    gates, main holds it ungated and may be rewound)."""
+    key = DEFLAKE_PREFIX + slug
+    run = (prior or {}).get("run", 0) + 1
+    name = slug if run == 1 else f"{slug}-r{run}"      # a later run never reuses an earlier run's branch
+    branch, wt, d = f"task-{name}", f"{REPO}/.claude/worktrees/{name}", f"{WORKDIR}/{name}"
+    base = merge_target()
+    if dry:
+        log(f"DRY-RUN would dispatch deflaker {key} run {run} for {req['test']} [opus/high] -> {branch} from {base}")
+        return None
+    if sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
+        if not os.path.isdir(wt):
+            sh(["git", "worktree", "add", wt, branch], check=True)
+    else:
+        sh(["git", "worktree", "add", wt, "-b", branch, base], check=True)
+    os.makedirs(d, exist_ok=True)
+    open(f"{d}/brief.md", "w").write(deflake_brief(key, req, wt, branch, d, base))
+    open(f"{d}/request.json", "w").write(json.dumps(req, indent=1))
+    cmd = ["claude", "-p", "--agent", "deflaker", "--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
+           "--output-format", "json", "--max-budget-usd", BUDGET_USD]
+    clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
+    script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
+    env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
+    p = subprocess.Popen(bounded(["bash", "-c", script]), cwd=wt, stdin=subprocess.DEVNULL,
+                         stdout=open(f"{d}/out.json", "w"), stderr=open(f"{d}/run.log", "a"), env=env, start_new_session=True)
+    log(f"DISPATCH {key} deflaker run {run} for {req['test']} ({req.get('count_7d')} in 7 d) [opus/high] pid={p.pid} -> {wt} from {base}")
+    return {"ticket": key, "deflake": slug, "test": req["test"], "test_kind": req.get("kind"), "branch": branch, "wt": wt,
+            "dir": d, "pid": p.pid, "started": time.time(), "model": "opus", "effort": "high", "group": None,
+            "kind": "deflake", "review": True, "run": run, "request_ts": req["ts"], "base": base}
+
+
+def dispatch_deflakes(claims, dry):
+    """At most ONE deflaker per tick, as a worker under the dispatch cap, never through a hold."""
+    reqs = read_deflake_requests()
+    if not reqs:
+        return False
+    ready, changed = pending_deflakes(claims, reqs)
+    if not ready:
+        return changed
+    if os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
+        return changed
+    if busy_workers(claims) >= dispatch_cap() or disk_free_gb() < DISK_MIN_GB:
+        return changed
+    slug, req = ready[0]
+    key = DEFLAKE_PREFIX + slug
+    c = launch_deflake(slug, req, claims.get(key), dry)
+    if c:
+        claims[key] = dict(c, state="running")
+        changed = True
+    return changed
+
+
+def reap_deflake(claims, key, c):
+    """A finished deflaker (or its review). Commits and a clean tree -> the Opus review -> the queue;
+    otherwise one attention line: DEFLAKE_NO_WORK / DEFLAKE_BLOCKED / DEFLAKE_ERROR / DEFLAKE_UNCOMMITTED."""
+    d = c.get("dir") or f"{WORKDIR}/{c['deflake']}"
+    now = time.time()
+    if c["kind"] == "review":
+        res = result_of(f"{d}/review.json")
+        text = str(res.get("result", ""))
+        c["ended"] = now
+        if "VERDICT: PASS" in text:
+            c["state"] = "queued"
+            record_done(c, "review-pass", res)
+            enqueue(c["branch"], c.get("wt"))
+        else:
+            fail = next((l for l in text.splitlines() if l.startswith("VERDICT: FAIL")), "no verdict line")
+            c["state"] = "review-failed"
+            record_done(c, "review-fail", res)
+            attention(key, c["branch"], "DEFLAKE_REVIEW_FAIL", f"{fail[:200]} (full text: {d}/review.json)")
+        return
+    res = result_of(f"{d}/out.json")
+    text = str(res.get("result", ""))
+    if res.get("session_id"):
+        c["session_id"] = res["session_id"]
+    hb, hb_err = load_handback(d, key)
+    if hb is None and hb_err and " names " in hb_err:
+        hb, hb_err = load_handback(d, c["deflake"])         # the bare slug is an acceptable name too
+    outcome, why = handback_outcome(hb, text)
+    if hb and outcome == "done" and any(int(t.get("exit", 0) or 0) != 0 for t in hb.get("tests", []) if isinstance(t, dict)):
+        bad = next(t for t in hb["tests"] if int(t.get("exit", 0) or 0) != 0)
+        outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
+    if hb_err:
+        log(f"HANDBACK {key}: {hb_err} ({outcome})")
+    with open(f"{S}/handbacks.jsonl", "a") as f:
+        f.write(json.dumps({"ts": int(now), "ticket": key, "kind": "deflake", "outcome": outcome, "briefed": True,
+                            "how": "json" if hb else ("line" if "HANDBACK:" in text else "none")}) + "\n")
+    ahead = commits_ahead(c["branch"], "main")
+    dirty = [l for l in sh(["git", "status", "--porcelain"], cwd=c["wt"]).splitlines() if not l.startswith("??")] if os.path.isdir(c["wt"]) else []
+    c["ended"] = now
+    summary = (hb or {}).get("summary", "")
+    if res.get("is_error"):
+        c["state"] = "error"
+        record_done(c, "error", res)
+        attention(key, c["branch"], "DEFLAKE_ERROR", f"claude -p reported an error; see {d}/run.log")
+    elif outcome in ("blocked", "cancel"):
+        c["state"] = "blocked"
+        record_done(c, "blocked", res)
+        attention(key, c["branch"], "DEFLAKE_BLOCKED",
+                  f"{c.get('test')}: {(why or '').strip()[:160]} | {summary.strip()[:300]} (ahead={ahead}; {d}/handback.json)")
+    elif dirty:
+        c["state"] = "uncommitted"
+        record_done(c, "uncommitted", res)
+        attention(key, c["branch"], "DEFLAKE_UNCOMMITTED", f"{len(dirty)} modified files left uncommitted in {c['wt']}; ahead={ahead}")
+    elif ahead <= 0:
+        c["state"] = "no-work"
+        record_done(c, "no-work", res)
+        attention(key, c["branch"], "DEFLAKE_NO_WORK", f"deflaker for {c.get('test')} exited with no commits; see {d}/out.json")
+    else:
+        record_done(c, "done-to-review", res)
+        claims[key] = dict(launch_review(c), state="running")
 
 
 def tick(dry):
@@ -1388,6 +1673,10 @@ def tick(dry):
         reap_worktrees(claims, dry)
     except Exception as e:
         log(f"reap_worktrees error: {e}")
+    try:
+        changed |= dispatch_deflakes(claims, dry)   # first: a flake that keeps costing gates outranks new work
+    except Exception as e:
+        log(f"dispatch_deflakes error: {e}")
     changed |= dispatch(claims, dry)
     if not dry:
         save_claims(claims)

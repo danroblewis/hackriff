@@ -228,6 +228,8 @@ def runtime_states(smap, tl=None, limit=10):
     try:
         _claims = json.load(open(os.path.join(SCRATCH, "work-claims.json")))
         for tid, c in _claims.items():
+            if c.get("deflake"):
+                continue   # a DEFLAKE:<slug> claim (ops/work-runner.py dispatch_deflakes) is not a board ticket
             cs, ck = c.get("state"), c.get("kind")
             if cs == "running" and ck == "review":
                 put(tid, "review", "reviewer stage")
