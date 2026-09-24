@@ -603,6 +603,8 @@ export class TileCache<T> {
   private limit: number;
   /** The most this client may recover to: the server's own number, never raised by anything here. */
   private ceiling: number;
+  /** See [[inFlightShareStatedAt]]. */
+  private shareStatedAt: number | null = null;
   /** Consecutive refusals, for the backoff; and completions since the last one, for the recovery. */
   private refusals = 0;
   private goodRuns = 0;
@@ -650,6 +652,21 @@ export class TileCache<T> {
    * and they are not the same finding.
    */
   get inFlightCeiling(): number { return this.ceiling; }
+  /**
+   * When the route last STATED this client's share (an answer's `cost.in_flight_share`, or a
+   * refusal naming it), on this cache's clock — or null if it never has, in which case
+   * [[inFlightCeiling]] is this client's own starting assumption, not the route's word.
+   *
+   * The share is learned from answers and from nothing else, and the route decides it when it
+   * ADMITS a read. So it is a fact as of the last answer, never a live one: a tab that has stopped
+   * asking keeps the number it was last told while other tabs come and go. A readout that states
+   * the share must say how old it is (T-630's contention finding).
+   */
+  get inFlightShareStatedAt(): number | null { return this.shareStatedAt; }
+  /** How long ago, in ms on this cache's clock, [[inFlightShareStatedAt]] was — or null. */
+  get inFlightShareAgeMs(): number | null {
+    return this.shareStatedAt === null ? null : Math.max(0, this.now() - this.shareStatedAt);
+  }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
   /** Live-edge revalidations queued but not yet issued (T-460). Its own lane, never [[queue]]. */
@@ -1412,7 +1429,10 @@ export class TileCache<T> {
         // requeue has to run in `done`, after the key leaves the in-flight map, or `schedule`
         // would see this very request still outstanding and silently drop the retry.
         let requeue = false;
-        try { requeue = !this.insert(addr, data, edgeAtFetchNs); } catch { this.stats.failures++; }
+        try {
+          this.adoptStatedCaps(data);
+          requeue = !this.insert(addr, data, edgeAtFetchNs);
+        } catch { this.stats.failures++; }
         done(requeue);
       },
       (err) => done(this.failed(addr, err, started, ctrl?.signal.aborted ?? false)),
@@ -1544,7 +1564,10 @@ export class TileCache<T> {
       // the MECHANISM — a refusal must be SEEN — and a refusal is exactly what this is.
       this.stats.busyRefusals++;
       if (err.limit && err.limit > 0) this.ceiling = Math.min(this.ceiling, err.limit);
-      if (err.share && err.share > 0) this.ceiling = Math.max(1, err.share);
+      if (err.share && err.share > 0) {
+        this.ceiling = Math.max(1, err.share);
+        this.shareStatedAt = this.now();
+      }
       this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
@@ -1582,6 +1605,32 @@ export class TileCache<T> {
     return false;
   }
 
+  /**
+   * Adopt the caps an ANSWER states, whatever then happens to its tile.
+   *
+   * `cost.in_flight_limit` is the same server-wide number the refusal names, so it sets the
+   * ceiling — it is not permission to run at it. `cost.in_flight_share` (T-630) is this client's
+   * own allowance of that budget and is authoritative in both directions: it is how a tab that is
+   * already drawn learns, on its very next answer, that another tab has arrived and half the slots
+   * are no longer its to take. The operating cap only ever falls on a seen refusal (T-455); what
+   * moves here is the ceiling it recovers toward.
+   *
+   * **Every answer, not only the ones [[insert]] keeps.** The share is a fact about this client's
+   * admission, not about the tile: an answer for a key already resident, or one a retune overtook,
+   * states it just as truly. Adopting it only on an upload left the stated share stale for as long as
+   * the answers happened to be duplicates — a status line claiming "share 4" with two clients up.
+   */
+  private adoptStatedCaps(data: TileData): void {
+    if (data.serverInFlightLimit && data.serverInFlightLimit > 0) {
+      this.ceiling = Math.min(this.ceiling, data.serverInFlightLimit);
+    }
+    if (data.serverInFlightShare && data.serverInFlightShare > 0) {
+      this.ceiling = Math.max(1, data.serverInFlightShare);
+      this.shareStatedAt = this.now();
+    }
+    this.limit = Math.min(this.limit, this.ceiling);
+  }
+
   /** Take a fetched tile. **False means "ask again"**: the tuning changed while it was in flight. */
   private insert(addr: TileAddr, data: TileData, edgeAtFetchNs: number): boolean {
     const key = keyOf(addr);
@@ -1590,19 +1639,6 @@ export class TileCache<T> {
     // A **live-edge revalidation replaces** the copy in hand (T-460); anything else that arrives for
     // a resident key is a duplicate, and the same tile is never uploaded twice.
     if (prev && !this.refreshing.has(key)) return true;
-    // `cost.in_flight_limit` is the same server-wide number the refusal names, so it sets the
-    // ceiling — it is not permission to run at it. `cost.in_flight_share` (T-630) is this client's
-    // own allowance of that budget and is authoritative in both directions: it is how a tab that is
-    // already drawn learns, on its very next answer, that another tab has arrived and half the
-    // slots are no longer its to take. The operating cap only ever falls on a seen refusal (T-455);
-    // what moves here is the ceiling it recovers toward.
-    if (data.serverInFlightLimit && data.serverInFlightLimit > 0) {
-      this.ceiling = Math.min(this.ceiling, data.serverInFlightLimit);
-    }
-    if (data.serverInFlightShare && data.serverInFlightShare > 0) {
-      this.ceiling = Math.max(1, data.serverInFlightShare);
-    }
-    this.limit = Math.min(this.limit, this.ceiling);
     const tex = this.tex.upload(data);
     this.stats.uploads++;
     // The replaced texture is destroyed and its bytes returned: a refresh that leaked one would turn
@@ -1744,4 +1780,17 @@ export function parseKey(key: string): TileAddr | null {
   const n = p.slice(2).map(Number);
   if (n.some((v) => !Number.isFinite(v))) return null;
   return { device: p[0], scheme: p[1], levelF: n[0], levelT: n[1], fIndex: n[2], tIndex: n[3], cells: n[4] };
+}
+
+/**
+ * The share, as a readout states it: **with its age**, because it is the route's word as of the
+ * last answer and nothing newer (see [[TileCache.inFlightShareStatedAt]]). `ageMs` null means the
+ * route has never stated one, and the number is this client's own starting assumption.
+ *
+ * `share 2, stated 0.4 s ago` · `share 4, stated 38 s ago` · `share 4, assumed (the route has not stated one)`
+ */
+export function shareText(share: number, ageMs: number | null): string {
+  if (ageMs === null) return `share ${share}, assumed (the route has not stated one)`;
+  const s = ageMs / 1000;
+  return `share ${share}, stated ${s < 10 ? s.toFixed(1) : Math.round(s).toFixed(0)} s ago`;
 }

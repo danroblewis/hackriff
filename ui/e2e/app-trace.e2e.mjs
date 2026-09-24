@@ -418,6 +418,13 @@ function topWithin(cols, centrePx, widthPx) {
  */
 const CELL_SLICE_RE = /slice [\d:]+Z \(\d[^)]*(ms|s|min) cell\) · peak/;
 /**
+ * **The page saying the rows before its instant are NOT in hand** (`afterglowAbsence`): the tiles
+ * the afterglow would be read from are pending, drawn by a coarse stand-in, refused, or answered only
+ * up to an earlier instant. A frame in that state says nothing about the afterglow either way — it
+ * is the not-loaded state, not the claim.
+ */
+const AFTERGLOW_NOT_IN_HAND_RE = /afterglow — the rows before this instant are not all in hand/;
+/**
  * **The pane drew this frame with the tiles it is addressing, and nothing standing in for them.**
  *
  * A coarse stand-in is a real measurement — the parent level's, max-held over a cell several times
@@ -437,11 +444,13 @@ const isResident = (counts) => {
   const m = COUNTS_RE.exec(counts ?? "");
   return !!m && Number(m[1]) > 0 && Number(m[2]) === 0 && Number(m[3]) === 0;
 };
-const scrubbedExpr = (lagS, { resident = false } = {}) => `(() => {
+const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) => `(() => {
   const txt = document.querySelector('.sf-trace')?.textContent ?? "";
   const m = /slice (\\d\\d):(\\d\\d):(\\d\\d)Z \\(\\d[^)]*(ms|s|min) cell\\) · peak/.exec(txt);
   const r = window.__hkTap?.recent?.[window.__hkTap.recent.length - 1];
   if (!m || !r) return false;
+  // [[AFTERGLOW_NOT_IN_HAND_RE]], in the page, for the same one-rule-two-places reason as below.
+  if (${afterglowInHand} && /afterglow — the rows before this instant are not all in hand/.test(txt)) return false;
   if (${resident}) {
     // The same condition as isResident(), in the page, so the wait establishes exactly the state
     // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
@@ -1055,13 +1064,27 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   const LAG_S = 2;
   const parked = await scrubOntoCell(page, LAG_S);
+  // **The rows before the slice must be IN HAND before the afterglow is judged** (the deflake,
+  // 2026-09-23). The afterglow is read from what RESIDENT tiles answered, so while the tiles holding
+  // the rows before the pane's instant are still pending or drawn by a coarse stand-in, an empty glow
+  // is a fact about latency, not about the rows. The gate's pooled tier caught it twice with one
+  // signature: the max-hold over the whole 45 s / 2.6 min window peaked at exactly the slice's own dB
+  // (−54.1 / −57.4, against −50.0 on every green run) — the slice's tile freshly started and the rest
+  // of the window not yet in hand at that level — and the readout said "afterglow — no earlier row in
+  // this window". That was the PRODUCT claiming a fact it could not know, and it now says "not all in
+  // hand yet" there (`afterglowAbsence`), so a frame in that state is the not-loaded state and not
+  // the claim. What varies between runs is the backend's age: alone, a fresh backend's pane spans
+  // ~18 s and its afterglow rows share the slice's tile; in the gate the lane's backend had served
+  // other files first, the pane spanned minutes, and a freeze near a tile boundary put the rows
+  // before the slice in a tile the pane did not yet hold.
   const obs = await heldObservation(page, path.join(ART, "app-trace-afterglow.png"), {
-    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge`,
-    expr: scrubbedExpr(LAG_S),
-    accept: (snap) => CELL_SLICE_RE.test(snap.trace),
+    what: `the viewport to be tracing a pyramid cell at least ${LAG_S} s behind the live edge, with the ` +
+      "rows before it in hand",
+    expr: scrubbedExpr(LAG_S, { afterglowInHand: true }),
+    accept: (snap) => CELL_SLICE_RE.test(snap.trace) && !AFTERGLOW_NOT_IN_HAND_RE.test(snap.trace),
     timeoutMs: 20000,
   });
-  t.diagnostic(`parked on an observed cell on attempt ${parked}`);
+  t.diagnostic(`parked on an observed cell on attempt ${parked}; the pane drew it with ${obs.snap.counts}`);
   const snap = obs.snap;
   const m = /slice ([\d:]+)Z \(([^)]+)\)/.exec(snap.trace);
   assert.ok(m, `the trace stated no slice: ${JSON.stringify(snap.trace)}`);
@@ -1074,7 +1097,24 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
 
   // ---- what the readout claims ----
   const glow = /afterglow (\d+) × ([\d.]+ (?:ms|s|min)) back to ([\d:]+)Z/.exec(snap.trace);
-  assert.ok(glow, `no afterglow is stated on a scrubbed viewport: ${JSON.stringify(snap.trace)}`);
+  // What the SOCKET delivered in the second before the slice's: independent of the pyramid and of
+  // the page, so a red below says which of "no rows existed" and "rows existed and the pane said
+  // there were none" it was.
+  const [hh, mm, ss] = m[1].split(":").map(Number);
+  const sliceS = hh * 3600 + mm * 60 + ss;
+  const tapS = snap.tap.recent.map((r) => {
+    const d = new Date(r.tS * 1000);
+    return d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds() + (r.tS % 1);
+  });
+  const rowsBefore = tapS.filter((at) => at >= sliceS - 1 && at < sliceS).length;
+  // The tap is a bounded ring that also restarts on a stream header, so "0 rows" is only evidence
+  // when its oldest row is older than the second in question — stated rather than assumed.
+  const socketSays = tapS.length && tapS[0] <= sliceS - 1
+    ? `the socket delivered ${rowsBefore} row(s) in the second before ${m[1]}Z`
+    : `the tap holds no rows from before ${m[1]}Z (its oldest is ${tapS.length ? (tapS[0] - sliceS).toFixed(2) : "—"} s from it), so the socket cannot say`;
+  t.diagnostic(socketSays);
+  assert.ok(glow, `no afterglow is stated on a scrubbed viewport whose earlier rows the page says it holds ` +
+    `(${snap.counts}); ${socketSays}: ${JSON.stringify(snap.trace)}`);
   t.diagnostic(`afterglow: ${glow[1]} rows of ${glow[2]}, back to ${glow[3]}Z`);
   assert.ok(Number(glow[1]) >= 1, "the readout claims no glowing rows");
   assert.equal(glow[2], m[2].replace(" cell", ""),

@@ -209,14 +209,18 @@ test("a second tab can open /surface while the first is saturating the tile rout
   // until the readout agrees, with `timeoutMs` as a failure bound rather than the wait (a run where
   // it is already right returns on the first sample), and decide fail-vs-inconclusive below from
   // the wire rather than from the clock.
+  // T-630 deflake (2026-09-23, kept with main's harness/spec): the status line now states the
+  // share's AGE too — "share 2, stated 0.4 s ago" or "share 4, assumed (the route has not stated
+  // one)" — so the regex reads up to the share digits and stops there, rather than requiring the
+  // closing paren to follow them immediately.
   const readShare = (s) => {
-    const mm = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)\)/.exec(s ?? "");
+    const mm = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/.exec(s ?? "");
     return mm ? Number(mm[4]) : null;
   };
   const settled = await first.waitForValue("the first tab's status line to state the share the route gave it",
     STATUS, (s) => readShare(s) !== null && readShare(s) <= share, { timeoutMs: 30000 });
   const statusLine = String(settled.value ?? "");
-  const m = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)\)/.exec(statusLine);
+  const m = /(\d+)\+(\d+)\/(\d+) in flight \(share (\d+)/.exec(statusLine);
   // **The wire fact that decides whether the readout CAN be asserted on.** The route fixes a
   // client's share when it admits the request, so a read the first tab started only after the route
   // had already answered the second tab's first one is certain to have been decided with two
