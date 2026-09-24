@@ -247,6 +247,69 @@ test("T-802: the floating controls are pressable, move only the view, and offer 
   assert.deepEqual(page.exceptions, [], "uncaught exception while using the floating controls");
 });
 
+test("T-806: the layers menu has two axes, and a toggle changes only the active pane", async (t) => {
+  // MAP-06 in a real browser: the menu lists base styles (radios, exactly one) and overlays
+  // (checkboxes) for the ACTIVE pane. Split, then change the new pane's base style and hide its
+  // detections and capture rules: the new pane's readouts say so, and closing it returns to pane 1,
+  // whose registry is untouched. Nothing reaches a device route.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the surface to draw and the floating controls to mount",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
+     !!document.querySelector('.map-layers-btn') && /^IQ ring/.test(document.querySelector('.sf-ring')?.textContent ?? '')`,
+    { timeoutMs: 60000 });
+  const menu = `JSON.stringify({
+    head: [...document.querySelectorAll('#map-layers h4')].map((e) => e.textContent),
+    bases: [...document.querySelectorAll('#map-layers input[type=radio]')].map((i) => [i.value, i.checked]),
+    overlays: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
+    signals: document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed'),
+  })`;
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
+  const one = JSON.parse(await page.eval(menu));
+  assert.deepEqual(one.bases, [["ramp", true], ["phosphor", false]], "base style: exactly one, ramp by default");
+  assert.deepEqual(one.overlays, [["rules", true], ["detections", true]], "overlays in paint order, defaults on");
+  assert.match(one.head[0], /Base style · this pane/);
+  assert.match(one.head[1], /Overlays · this pane/);
+  assert.equal(one.signals, "true");
+
+  // Split: the new pane is active, inherits pane 1's registry, and the menu says which pane it is.
+  await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent.startsWith('Split')).click()`);
+  await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
+  assert.deepEqual(JSON.parse(await page.eval(menu)).overlays, [["rules", true], ["detections", true]], "a split must inherit the registry");
+  await page.click(`document.querySelector('#map-layers input[data-base="phosphor"]')`);
+  await page.click(`document.querySelector('#map-layers input[data-layer="detections"]')`);
+  await page.click(`document.querySelector('#map-layers input[data-layer="rules"]')`);
+  await page.waitFor("pane 2's readouts to state its layers",
+    `/hidden on this pane/.test(document.querySelector('.sf-ring').textContent) &&
+     /phosphor style/.test(document.querySelector('.sf-trace').textContent) &&
+     document.querySelector('.sf-signalsbtn').getAttribute('aria-pressed') === 'false'`, { timeoutMs: 10000 });
+  const two = JSON.parse(await page.eval(menu));
+  assert.deepEqual(two.bases, [["ramp", false], ["phosphor", true]]);
+  assert.deepEqual(two.overlays, [["rules", false], ["detections", false]]);
+
+  // Close pane 2: pane 1 is active again, and none of pane 2's toggles reached it.
+  await page.eval(`[...document.querySelectorAll('.sf-actions button')].find((b) => b.textContent === 'Close').click()`);
+  const said = `JSON.stringify({ head: document.querySelector('#map-layers h4')?.textContent,
+    ring: document.querySelector('.sf-ring').textContent, trace: document.querySelector('.sf-trace').textContent })`;
+  try {
+    await page.waitFor("pane 1's own layers back in the menu and the readouts",
+      `/this pane/.test(document.querySelector('#map-layers h4')?.textContent ?? '') &&
+       /^IQ ring/.test(document.querySelector('.sf-ring').textContent) &&
+       !/phosphor style/.test(document.querySelector('.sf-trace').textContent)`, { timeoutMs: 20000 });
+  } catch (e) { t.diagnostic(`page said: ${await page.eval(said)}`); throw e; }
+  const back = JSON.parse(await page.eval(menu));
+  assert.deepEqual(back.bases, one.bases, "pane 2's base style leaked into pane 1");
+  assert.deepEqual(back.overlays, one.overlays, "pane 2's overlay toggles leaked into pane 1");
+  assert.equal(back.signals, "true");
+
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "a layer toggle reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while toggling layers");
+});
+
 test("T-506: the canvas draws the IQ horizon and the retention bound where the ring window says", async (t) => {
   // The retired Capture panel was the only place either boundary was drawn. This measures them on
   // the canvas in a real browser: the ink is found in the screenshot, row by row, and its position

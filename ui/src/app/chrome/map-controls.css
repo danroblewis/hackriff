@@ -57,6 +57,10 @@
 .map-layers h4 { margin: 0 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .map-row { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; }
 .map-row input { margin: 0; accent-color: var(--amber); }
+.map-row small { margin-left: auto; color: var(--muted); font-size: 10.5px; text-align: right; }
+.map-layers-axis { padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--muted) 25%, transparent); }
+.map-layers-axis:last-of-type { border-bottom: 0; }
+.map-layers-note { color: var(--muted); font-size: 11px; line-height: 1.35; }
 .map-note { color: var(--muted); font-size: 11px; margin-top: 6px; }
 
 /* Zoom: right edge, vertically centred. */
