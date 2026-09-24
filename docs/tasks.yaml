@@ -24649,7 +24649,7 @@ tasks:
   - id: T-848
     milestone: MAUTO
     title: "MAUTO M-1: hk-synth scaffold (Stage/Evidence/candidate/skeleton/template types, modules and stubs) and the ADR-0015 -> ACCEPTED review"
-    status: todo
+    status: done
     priority: medium
     deps:
     - T-206
@@ -24681,6 +24681,7 @@ tasks:
       Commits: a3ece799
       Observed, not chased: ADR-0015 §4.2 says a family with posterior < 0.02 is deferred; ADR-0016 §8/T-215 says only the likelihood prunes. hk-synth follows ADR-0016 (correction C2 in §16.2); the ADR-0015 text needs the fold-in on acceptance. | ADR-0015 §11.7 proposes a 'new docs/07 §2.28 CandidatePipeline', but docs/07 §2.28 is TrunkSystem (T-266). CP-1 should take §2.33. | T-206 records M3 NOT closing (unknown recall 0.778 vs 0.80; no end-to-end classification row) while its status is done. Relevant to the ADR-0016-accepted dependency; §16.5 proposes waiving it for ADR-0015. | T-552 (the quick/standard/deep budget measurement) is still todo; hk-synth carries §3.3's unverified numbers in Profile::budget().
       Resources: 101 CPU-s, peak 1.0 GB
+    commit: 6d25fa00
   - id: T-849
     milestone: M4
     title: P25 Phase 1 voice-frame (LDU1/LDU2) demodulation on the followed channel, so link-control and ALGID are reachable from IQ
