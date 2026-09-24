@@ -112,8 +112,10 @@
 .focus .detail .kv dd { text-align: left; }
 .focus .detail .at { color: var(--dim); font-size: 11px; margin-top: 6px; }
 .focus .detail .expl li.flagged .rank { color: var(--coral); }
-.focus .detail .actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.focus .detail .actions button { border: 1px solid var(--line); background: var(--panel-2); color: inherit; border-radius: 6px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+/* docs/23 §10.6 P4: a compact cluster of small buttons, never a large surface — >= 24 px hit
+   targets, sized to their labels, never stretched to the sheet's width. */
+.focus .detail .actions { display: flex; flex-wrap: wrap; gap: 4px; align-self: flex-start; max-width: 100%; }
+.focus .detail .actions button { flex: none; min-width: 24px; min-height: 24px; box-sizing: border-box; border: 1px solid var(--line); background: var(--panel-2); color: inherit; border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 11.5px; line-height: 1.2; cursor: pointer; }
 .focus .detail .actions button.primary { border-color: var(--teal); color: var(--teal); background: var(--teal-soft); }
 .focus .detail .actions button.danger { color: var(--coral); }
 .focus .detail .actions button:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }

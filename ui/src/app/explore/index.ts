@@ -229,7 +229,7 @@ const mountSelections: MountFn = (el, ctx) => {
 
 function stateBadge(state: string): HTMLElement { return h("span", { class: `state ${state}` }, state); }
 
-function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
+export function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch | null>, cluster: Loaded<Cluster | null>): HTMLElement {
   // T-587: same artefact chip and visible reason as the sidebar row — the focus panel is the same
   // row, so it must say the same thing.
   const artifact = explanationChip(r);
@@ -308,15 +308,20 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
         h("dl", { class: "kv" }, h("dt", {}, r.identity_scheme), h("dd", {}, r.identity_value ?? (r.withheld ? "withheld" : "—"))))
     : null;
 
-  // T-804: the sheet carries the action row again (the mockup's Listen … Delete), built from the
-  // context menu's own items so a button calls exactly what the menu item calls; the menu stays for
-  // the rest (Adjust band, Reset band) and for right-click on the surface.
-  const actions = h("div", { class: "actions" }, ...detailActions(signalMenuItems(ctx, r)).map((a) => h("button", {
-    type: "button", "data-action": a.id, title: a.hint,
-    class: [a.primary ? "primary" : "", a.danger ? "danger" : ""].filter(Boolean).join(" ") || undefined,
-    disabled: a.disabled ? "" : undefined,
-    onclick: () => a.onSelect(),
-  }, a.label)));
+  // T-804: the sheet's device actions (the mockup's Listen … Delete), built from the context
+  // menu's own items so a button calls exactly what the menu item calls; the menu stays for the rest
+  // (Adjust band, Reset band) and for right-click on the surface.
+  // docs/23 §10.6 P4: size inversely proportional to influence. The sheet is the largest surface,
+  // so it only shows; every action that reaches the device or moves the map is one SMALL labelled
+  // button in this compact, keyboard-reachable cluster, and nothing else in the body carries a
+  // handler (ui/test/app-sheet-principles.test.ts goes red otherwise).
+  const actions = h("div", { class: "actions", role: "toolbar", "aria-label": "Signal actions" },
+    ...detailActions(signalMenuItems(ctx, r)).map((a) => h("button", {
+      type: "button", "data-action": a.id, title: a.hint ? `${a.label} — ${a.hint}` : a.label, "aria-label": a.label,
+      class: [a.primary ? "primary" : "", a.danger ? "danger" : ""].filter(Boolean).join(" ") || undefined,
+      disabled: a.disabled ? "" : undefined,
+      onclick: () => a.onSelect(),
+    }, a.label)));
 
   return h("div", { class: "detail" },
     h("div", { class: "head" },
@@ -340,7 +345,7 @@ function renderSignalFocus(ctx: AppContext, r: Row, match: Loaded<SignatureMatch
   );
 }
 
-function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
+export function renderSelectionFocus(ctx: AppContext, s: Selection): HTMLElement {
   const rows = foundInside(s, Object.values(ctx.store.get().inventory.rows));
   const inside = h("div", { class: "list", style: "padding:0" }, ...(rows.length ? rows.map((r) => h("div", {
     class: "row", tabindex: "0", "data-id": r.id, role: "button",

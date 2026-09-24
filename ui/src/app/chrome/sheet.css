@@ -15,6 +15,10 @@
 .sheet .sheet-grab:focus-visible { outline: 2px solid var(--amber); outline-offset: -2px; }
 .sheet .sheet-head { flex: none; height: 34px; display: flex; align-items: center; padding: 0 16px 4px;
   border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+.sheet .sheet-close { margin-left: auto; flex: none; min-width: 24px; min-height: 24px; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.sheet .sheet-close[hidden] { display: none; }
+.sheet .sheet-close:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 .sheet .sheet-title { font-size: 12px; letter-spacing: .04em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Content reflows per state: the body takes whatever height the snap leaves and scrolls inside it. */
 .sheet .sheet-body { flex: 1; min-height: 0; overflow: auto; }
