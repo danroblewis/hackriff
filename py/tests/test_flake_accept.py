@@ -139,3 +139,12 @@ echo "RC $? FILTER=[$TRIAGE_FILTER] SPECS=[$TRIAGE_SPECS]"
     assert [c for c in ran if c.startswith("npm")] == ["npm run e2e -- fog-of-war.e2e.mjs"] * 2   # re-run alone, twice
     assert ran[-1] == "limited just gate --base abc --resume-after test-ui-e2e"
     assert "RC 0 FILTER=[] SPECS=[fog-of-war.e2e.mjs]" in out.stdout
+
+
+def test_the_main_is_red_rerun_treats_a_test_main_lacks_as_green():
+    """09-24 10:15: T-870's own new test was re-run on the rewound main, where it does not exist;
+    nextest's "no tests to run" exit (4) read as red -> MAIN IS RED, and T-870 was never isolated."""
+    text = RUNNER.read_text()
+    i = text.index("TRIAGE: is main itself red? re-running the failing tests alone on the rewound main")
+    rerun = next(ln for ln in text[i:].splitlines() if "cargo nextest run" in ln)
+    assert "--no-tests=pass" in rerun

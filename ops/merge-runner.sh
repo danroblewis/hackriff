@@ -716,7 +716,9 @@ try_bulk(){
     # scoped nextest run on the clean main; saves a full gate per branch.
     if [ "${TRIAGE_KIND:-test}" = "test" ] && [ -n "${TRIAGE_FILTER:-}" ]; then
       log "TRIAGE: is main itself red? re-running the failing tests alone on the rewound main"
-      if ! ( cd "$REPO" && cargo nextest run --workspace -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
+      # --no-tests=pass: a test the batch ADDED does not exist on main, and nextest's "no tests to run"
+      # exit read as red - 09-24 10:15, T-870's own new test declared MAIN IS RED and never isolated.
+      if ! ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1; then
         for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
         batch_sig "${branches[@]}" > "$S/suite-broken"
         log "TRIAGE: MAIN IS RED on: $(echo $TRIAGE_FILTER) -> batch re-queued in order, NOT isolated; queue the fix"
