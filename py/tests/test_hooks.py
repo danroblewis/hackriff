@@ -263,13 +263,30 @@ def test_shell_payloads_are_still_commands(cmd, tmp_path):
 
 
 def test_a_spec_run_on_its_own_ports_may_go_beside_a_gate(tmp_path):
-    """The 2026-09-22 reds were port sharing; ports are per-run now. A base >= 9100 clears the
-    gate's lanes (8791/8951/8983 + a 24-port sweep)."""
+    """The 2026-09-22 reds were port sharing; ports are per-run now. Every port named must be >= 9216
+    (the gate's lanes + sweeps end below it), and canvas-journey's own port counts too."""
     (tmp_path / "bulk-in-progress").write_text("base=abc\n")
-    assert bash("cd ui && HK_E2E_PORT=9356 npm run e2e -- a.e2e.mjs", ops=tmp_path) is None
-    assert bash("cd ui && npm run e2e -- a.e2e.mjs", ops=tmp_path, env={"HK_E2E_PORT": "9612"}) is None
+    own = {"HK_E2E_PORT": "9472", "HK_E2E_JOURNEY_PORT": "9696"}
+    assert bash("cd ui && HK_E2E_PORT=9472 HK_E2E_JOURNEY_PORT=9696 npm run e2e -- a.e2e.mjs", ops=tmp_path) is None
+    assert bash("cd ui && npm run e2e -- a.e2e.mjs", ops=tmp_path, env=own) is None
     assert bash("./target/debug/hk serve --bind 127.0.0.1:9400 --data /tmp/d", ops=tmp_path) is None
-    for cmd, env in (("HK_E2E_PORT=8791 npm run e2e", {}), ("npm run e2e", {"HK_E2E_PORT": "8951"}),
-                     ("./target/debug/hk serve --bind 127.0.0.1:8770", {})):
+    for cmd, env in (("HK_E2E_PORT=8791 npm run e2e", own),
+                     ("npm run e2e", {"HK_E2E_PORT": "9472"}),                        # journey defaults to 8801
+                     ("HK_E2E_PORT=8791 npm run e2e; HK_E2E_PORT=9400 npm run e2e", own),   # every value, not the last
+                     ("HK_E2E_PORT=9400 npm run e2e; ./target/debug/hk serve --bind 127.0.0.1:8795", own),
+                     ("env -u HK_E2E_PORT npm run e2e", own),
+                     ("HK_E2E_PORT= npm run e2e", own),
+                     ("./target/debug/hk serve --data /tmp/d", own)):                  # default ports, not ours
         out = bash(cmd, ops=tmp_path, env=env)
-        assert decision(out) == "deny" and "HK_E2E_PORT=<9100 or above>" in reason(out), cmd
+        assert decision(out) == "deny" and "HK_E2E_PORT=<9216 or above>" in reason(out), cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    'echo "$(just gate --base x)"',
+    "printf 'just gate --base x' | bash",
+    "cat <<'EOF' | bash\njust gate\nEOF",
+    "grep '<<EOF' x.sh\njust gate",
+])
+def test_what_really_runs_is_never_stripped(cmd):
+    assert "just gate" in CC.code(cmd)
+    assert decision(bash(cmd)) == "deny", CC.code(cmd)

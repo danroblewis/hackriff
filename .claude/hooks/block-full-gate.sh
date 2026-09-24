@@ -58,17 +58,13 @@ if [ -n "$CMD" ] && [ "${HK_ALLOW_LOAD:-0}" != "1" ]; then
     # A run on its OWN ports may go beside the gate (user lead, 2026-09-23): the 2026-09-22 reds
     # were PORT sharing, and ports are per-run now (HK_E2E_PORT lanes; every spec derives its port
     # since task-e2e-lane-ports). The gate's lanes sit at 8791 / 8951 / 8983 with a 24-port sweep
-    # each, so a base >= 9100 cannot reach them; CPU is already bounded (the worker's cpulimit, the
+    # each (9 lanes still end below 9216), so a base >= 9216 cannot reach them - cmd_code.py --ports
+    # decides, over EVERY port the command names; CPU is already bounded (the worker's cpulimit, the
     # gate's reserve). The work runner gives each worker such a base (ops/work-runner.py
     # e2e_port_for). Measured cost of the old rule: 46 wait-for-gate calls, 250 worker-minutes on
     # 2026-09-23, one worker (T-845) parked 2 h+ because back-to-back gates never left a gap.
-    if [ -n "$WHY" ]; then
-      PORT=$(printf '%s' "$CODE" | sed -n -E 's/.*HK_E2E_PORT=([0-9]+).*/\1/p' | head -1)
-      [ -z "$PORT" ] && PORT=$(printf '%s' "$CODE" | sed -n -E 's/.*hk serve[^|;&]*--bind[= ][^ ]*:([0-9]+).*/\1/p' | head -1)
-      [ -z "$PORT" ] && PORT="${HK_E2E_PORT:-}"
-      if [ -n "$PORT" ] && [ "$PORT" -ge 9100 ] 2>/dev/null; then WHY=""; fi
-    fi
-    [ -n "$WHY" ] && deny "Not while $WHY. A spec run or an \`hk serve\` on the gate's ports (8788-9099) shares its browser tier's ports and turns green specs red - three of them in two gates on 2026-09-22. Run on your own ports instead: HK_E2E_PORT=<9100 or above> npm run e2e ... (a work-runner worker already has one in its environment), or \`hk serve --bind 127.0.0.1:<9100+>\`. Or wait with \`just wait-for-gate\`, or HK_ALLOW_LOAD=1 if you accept both results being untrustworthy."
+    if [ -n "$WHY" ] && printf '%s' "$CMD" | python3 "$(dirname "$0")/cmd_code.py" --ports 2>/dev/null; then WHY=""; fi
+    [ -n "$WHY" ] && deny "Not while $WHY. A spec run or an \`hk serve\` on the gate's ports (below 9216) shares its browser tier's ports and turns green specs red - three of them in two gates on 2026-09-22. Run on your own ports instead: HK_E2E_PORT=<9216 or above> HK_E2E_JOURNEY_PORT=<9216 or above> npm run e2e ... (a work-runner worker already has both in its environment), or \`hk serve --bind 127.0.0.1:<9216+>\`. Or wait with \`just wait-for-gate\`, or HK_ALLOW_LOAD=1 if you accept both results being untrustworthy."
   fi
 fi
 

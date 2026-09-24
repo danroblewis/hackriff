@@ -124,12 +124,19 @@ CARGO_ENV = {"CARGO_BUILD_JOBS": WORKER_JOBS, "NEXTEST_TEST_THREADS": WORKER_TES
 
 
 def e2e_port_for(wt):
-    """This worker's own HK_E2E_PORT base: 9100 + 256 * (crc32(worktree name) % 200). A 3-lane run
-    uses base .. base+216, so a 256 block holds it; >= 9100 clears the gate's lanes (8791/8951/8983
-    + a 24-port sweep) and backend.mjs's reserved 8788/8789/8899/8900, and the hook lets a spec run
-    on such a base go beside a gate. Two workers hashing to one block share it the way two runs did
-    before (backend.mjs's freePort steps past a taken port) - 1 in 200 per pair."""
-    return 9100 + 256 * (zlib.crc32(os.path.basename(str(wt).rstrip("/")).encode()) % 200)
+    """This worker's own HK_E2E_PORT base: 9216 + 256 * (crc32(worktree name) % 146). A run at
+    HK_E2E_CONCURRENCY=3 uses base .. base+216 (lanes base, +160, +192, each + a 24-port sweep) and
+    canvas-journey its HK_E2E_JOURNEY_PORT = base+224 .. +252, so the 256 block holds both; >= 9216
+    clears the gate's lanes even at 9 of them, and every block stays below macOS's ephemeral range
+    (49152). Two of six workers share a block ~7 % of the time; backend.mjs's freePort steps past a
+    taken port, as it did for any two runs before."""
+    return 9216 + 256 * (zlib.crc32(os.path.basename(str(wt).rstrip("/")).encode()) % 146)
+
+
+def e2e_env(wt):
+    """The per-worker e2e environment: its own port block, and 3 lanes so the block holds the run."""
+    base = e2e_port_for(wt)
+    return {"HK_E2E_PORT": str(base), "HK_E2E_JOURNEY_PORT": str(base + 224), "HK_E2E_CONCURRENCY": "3"}
 
 
 def log(msg):
@@ -390,7 +397,7 @@ def launch(t, dry):
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
     clone = f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
-    env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, HK_E2E_PORT=str(e2e_port_for(wt)))
+    env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
     out = open(f"{d}/out.json", "w")
     err = open(f"{d}/run.log", "a")
     # The bound, inherited by the whole tree, three layers: (1) CPULIMIT - the HiGarfield fork of
@@ -859,7 +866,7 @@ def _run_fix(c, n, prompt):
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
-                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, HK_E2E_PORT=str(e2e_port_for(wt))), start_new_session=True, text=True)
+                         env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)
     p.stdin.close()
     log(f"FIX {tid} attempt {n}: resumed session {c['session_id'][:8]} pid={p.pid} (bounded)")
