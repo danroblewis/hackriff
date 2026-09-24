@@ -25776,6 +25776,15 @@ tasks:
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 04:41).
+      Added the `stereo_decode` block (audio group, crates/hk-blocks/src/blocks/audio/stereo.rs), ADR-0015 §12.13 LP-9. It takes the real FM multiplex from fm_demod without de-emphasis (at least 110 kS/s) and outputs `left` and `right` at 48 kS/s. A PilotPll locks to the 19 kHz pilot using phase coherence, so it works whatever scale the input is in. While the pilot is locked, the 38 kHz L−R carrier (−sin 2θ, BS.450 phase) is demodulated. M and S go through one shared DDC as a complex stream, so both channels get the same delay, and the matrix is L = M+S, R = M−S. Honest mono fallback: while the pilot is absent or the PLL is unlocked, L−R is not decoded at all and L = R = M exactly, even if an L−R subcarrier is present. Status: lock, pilot_locked, stereo (1 only while L−R is being decoded), lock_losses (counts every locked→unlocked transition, including a DISCONTINUITY, so a loss between two polls is still reported), pilot_hz and pilot_amplitude. quality = pilot coherence. Evidence: S1 pilot_lock, group pilot, raw = |Σb|/Σ|b| over PLL update blocks, calibrated (no table yet, so bits = 0). Tests: separation above 35 dB at the correct level, labelled stereo; a mono station and a pilotless subcarrier both give identical L/R labelled mono; the pilot dropping mid-stream is reported (lock_losses=1) and output falls back to identical L/R; a DISCONTINUITY gives mono until relock; noise never locks and has low coherence; param/rate refusal; chunk invariance; allocation-free and restart-equals-fresh. Two deliberate breaks (swapped L−R sign; decoding L−R while unlocked) each turned the tests red. A recipe with st.left/st.right wiring validates against the catalogue.
+      Tests: just test-crate hk-blocks -> exit 0 (181 passed, 6 skipped); cargo nextest run -p hk-blocks -E 'test(/stereo/) | binary(stereo_recipe)' -> exit 0 (7 passed (re-run after cargo fmt))
+      precheck exit 0
+      Commits: fa7da3f8
+      Observed, not chased: Schema 3 refuses a second audio output ('at most one audio output per recipe') and AudioChannels has only Mono. Carrying L/R in one stream is LP-10's wire change, so stereo_recipe.rs sends the right channel out as a stage output for now. | stereo_decode has no calibration table under synth/calibration (same as subcarrier), so hk-synth scores its pilot_lock at NoTable = 0 bits until one is generated. | hk-model change is doc-comment only (Stage::S1 lists stereo_decode); hk-model tests were not run.
+      Use cases: SIGNAL-062
+      Resources: 43 CPU-s, peak 1.7 GB
   - id: T-874
     milestone: MAUTO
     title: "LP-10: audio stream `channels` (1|2) with interleaved ri16_le frames, stream-contract version bump, every client updated in the same change; mono byte-identical"
