@@ -298,6 +298,8 @@ const SPEC_SECONDS = {
   "app-trace.e2e.mjs": 33, "surface-contention.e2e.mjs": 24, "surface-retune.e2e.mjs": 23,
   "surface-load.e2e.mjs": 13, "surface-address.e2e.mjs": 10, "app-surface.e2e.mjs": 9,
   "surface-region.e2e.mjs": 7,
+  // T-845, measured alone 2026-09-23 (its own 20 s-retention backend, aged past a wrap).
+  "ring-drop.e2e.mjs": 85,
 };
 const SPEC_SECONDS_DEFAULT = 20;
 const queue = [...files].sort(

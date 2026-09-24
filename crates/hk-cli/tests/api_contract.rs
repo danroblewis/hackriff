@@ -6081,6 +6081,19 @@ fn the_timeline_spans_the_capture_window_and_draws_it() {
             b["t1_s"].as_f64().expect("buffered.t1_s"),
         );
         assert!(b0 >= t0 && b1 <= t1 && b1 - b0 < retention_s, "{w}");
+        // T-845: the ring's next whole-slot evictions, so a client polling this can move the IQ
+        // horizon past a drop it has not re-polled. Each lies ahead of the write head and moves
+        // the oldest sample forward to data already held.
+        let drops = b["drops"].as_array().expect("buffered.drops");
+        let mut prev = (b1, b0);
+        for d in drops {
+            let (at, d0) = (
+                d["at_s"].as_f64().expect("at_s"),
+                d["t0_s"].as_f64().expect("t0_s"),
+            );
+            assert!(at >= prev.0 && d0 > prev.1 && d0 <= b1, "{w}");
+            prev = (at, d0);
+        }
 
         // ---- never an empty box: the band is a compressed overview waterfall ----
         let g = &v["grid"];

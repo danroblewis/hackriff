@@ -33,9 +33,17 @@ import type { PaneRect } from "../../surface/surface";
 export interface CaptureWindow {
   /** Window start / end / span, Unix s, on the capture clock. `t0S = t1S − spanS`. */
   t0S: number; t1S: number; spanS: number;
-  /** What the ring currently holds, inside the window; `null` when it holds nothing. */
-  buffered: { t0S: number; t1S: number } | null;
+  /** What the ring currently holds, inside the window; `null` when it holds nothing. `drops`: the
+   * ring's next whole-slot evictions (T-845), oldest first, when the server states them. */
+  buffered: { t0S: number; t1S: number; drops?: readonly RingDrop[] } | null;
 }
+
+/**
+ * One scheduled whole-slot eviction of the ring (T-845, `buffered.drops` on `GET /api/timeline`):
+ * when capture reaches `atS`, the ring's oldest sample jumps to `t0S`. `t0S` is exact (the start of
+ * IQ already written); `atS` is the server's prediction at the current rate.
+ */
+export interface RingDrop { atS: number; t0S: number }
 
 /** The `GET /api/timeline` response fields read here: the window, and nothing about a band. */
 export interface TimelineResponse {
@@ -43,7 +51,7 @@ export interface TimelineResponse {
     enabled?: boolean;
     retention_s?: number | null;
     t0_s?: number | null; t1_s?: number | null; span_s?: number | null;
-    buffered?: { t0_s: number; t1_s: number } | null;
+    buffered?: { t0_s: number; t1_s: number; drops?: readonly { at_s: number; t0_s: number }[] } | null;
   } | null;
 }
 
@@ -59,10 +67,15 @@ export function captureWindow(r: TimelineResponse | null): CaptureWindow | null 
   if (typeof t0_s !== "number" || typeof t1_s !== "number" || typeof span_s !== "number") return null;
   if (!(span_s > 0) || !(t1_s > t0_s)) return null;
   const b = w.buffered;
-  return {
-    t0S: t0_s, t1S: t1_s, spanS: span_s,
-    buffered: b && typeof b.t0_s === "number" && typeof b.t1_s === "number" ? { t0S: b.t0_s, t1S: b.t1_s } : null,
-  };
+  if (!(b && typeof b.t0_s === "number" && typeof b.t1_s === "number")) return { t0S: t0_s, t1S: t1_s, spanS: span_s, buffered: null };
+  const buffered: NonNullable<CaptureWindow["buffered"]> = { t0S: b.t0_s, t1S: b.t1_s };
+  if (Array.isArray(b.drops)) {
+    // Kept only while well-formed and in order: a drop list the rule cannot trust is no list.
+    const drops = b.drops.filter((d) => typeof d?.at_s === "number" && typeof d?.t0_s === "number")
+      .map((d) => ({ atS: d.at_s, t0S: d.t0_s }));
+    buffered.drops = drops.every((d, i) => i === 0 || (d.atS >= drops[i - 1].atS && d.t0S >= drops[i - 1].t0S)) ? drops : [];
+  }
+  return { t0S: t0_s, t1S: t1_s, spanS: span_s, buffered };
 }
 
 /** A capture window's length in words. Keeps seconds, because a retention is commonly seconds
@@ -104,17 +117,43 @@ export function currentSpan(input: {
  *   ever moves the line *newer*: it can under-promise IQ, never promise IQ that is not there.
  *   `null` when the ring holds nothing: **unknown**, not "the ring is empty".
  *
+ *   **Whole-slot drops (T-845).** A byte-full ring evicts a whole slot at a time (7.5 s of a
+ *   120 s ring), which can put its oldest sample *ahead* of the retention bound, and the window is
+ *   only re-polled every `CAPTURE_CLOCK_MS`. So `buffered.t0S` alone, drawn per frame, would claim
+ *   up to a slot of IQ the ring dropped since the poll — and a clip or demod asked for there
+ *   fails. The server schedules its next drops (`buffered.drops`), and the horizon is also held at
+ *   or after the oldest sample every drop scheduled up to [[DROP_LEAD_S]] past the edge leaves —
+ *   applied *ahead* of its time, because the ring's writer runs ahead of the edge the panes are
+ *   drawn to and the drop's time is a prediction. A filling ring whose first drop is far off shows
+ *   exactly what it holds. The rule under-promises by one slot for at most the lead before each
+ *   drop; it never promises IQ the ring has dropped (unless the writer leads the drawn edge by
+ *   more than the lead).
+ *
  * `null` overall when no window has been answered.
  */
-export interface RingRules { retentionS: number; iqS: number | null; spanS: number }
+export interface RingRules {
+  retentionS: number; iqS: number | null; spanS: number;
+  /** The oldest sample the scheduled drops applied this frame leave (T-845); `null` when none is. */
+  dropT0S?: number | null;
+}
+
+/**
+ * How far ahead of the edge the panes are drawn to a scheduled ring drop is already honoured, s
+ * (T-845). It covers what the drop's `at_s` cannot know: the ring's writer running ahead of the
+ * drawn edge (stream and frame latency), and a rate raised since the prediction. It is not the
+ * poll cadence and does not need to be — `at_s` is absolute, so an old poll's schedule stays right.
+ */
+export const DROP_LEAD_S = 2;
 
 export function ringRules(w: CaptureWindow | null, edgeS: number | null): RingRules | null {
   if (!w) return null;
   const edge = edgeS !== null && Number.isFinite(edgeS) && edgeS > 0 ? Math.max(edgeS, w.t1S) : w.t1S;
   const retentionS = edge - w.spanS;
   const b = w.buffered;
-  const iqS = b && b.t1S > b.t0S ? Math.max(b.t0S, retentionS) : null;
-  return { retentionS, iqS, spanS: w.spanS };
+  let dropT0S: number | null = null;
+  for (const d of b?.drops ?? []) if (d.atS <= edge + DROP_LEAD_S) dropT0S = Math.max(dropT0S ?? d.t0S, d.t0S);
+  const iqS = b && b.t1S > b.t0S ? Math.max(b.t0S, retentionS, Math.min(dropT0S ?? -Infinity, b.t1S)) : null;
+  return { retentionS, iqS, spanS: w.spanS, dropT0S };
 }
 
 /** Whether an instant still has IQ behind it: `"live"` at the live edge, `"ring"` inside what the

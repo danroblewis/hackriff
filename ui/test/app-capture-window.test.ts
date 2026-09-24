@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqAvailability,
+  DROP_LEAD_S, IQ_RULE_INK, RETENTION_RULE_INK, captureWindow, currentSpan, durationText, iqAvailability,
   iqBackingAt, iqNote, ringRuleQuads, ringRules, type CaptureWindow,
 } from "../src/app/centre/capture-window";
 import { CAPTURE_CLOCK_MS, CAPTURE_CLOCK_REQUEST, IQ_AVAILABILITY_REQUEST } from "../src/app/centre/capture-clock";
@@ -76,6 +76,86 @@ test("ringRules: both rules advance with the edge the panes are drawn to, not on
   assert.equal(ringRules(w, null)!.retentionS, 900, "no edge yet: the window's own t1");
   // A filling ring's horizon is a fixed instant; the edge moving does not move it.
   assert.equal(ringRules(winOf(1000, 100, { t0S: 950, t1S: 1000 }), 1010)!.iqS, 950);
+});
+
+/**
+ * A byte-full ring as `hk_store::iqbuffer` runs one (T-845): 16 slots of `slotS` each, a whole slot
+ * evicted the moment the writer crosses into a new one, so the oldest sample jumps a slot at a time
+ * and holds between 15 and 16 slots — AHEAD of the retention bound for most of each slot. `drops` is
+ * the schedule the server states at writer time `wS` (`buffered.drops`, lookahead 60 s).
+ */
+function fullRing(slotS: number, slots = 16) {
+  const t0At = (wS: number) => (Math.floor(wS / slotS) - (slots - 1)) * slotS;
+  return {
+    t0At,
+    window: (wS: number, withDrops: boolean): CaptureWindow => {
+      const drops = [];
+      for (let k = Math.floor(wS / slotS) + 1; k * slotS <= wS + 60 + slotS; k++) drops.push({ atS: k * slotS, t0S: t0At(k * slotS) });
+      const retention = slots * slotS;
+      return { t0S: wS - retention, t1S: wS, spanS: retention, buffered: { t0S: t0At(wS), t1S: wS, ...(withDrops ? { drops } : {}) } };
+    },
+  };
+}
+
+test("T-845: the drawn IQ horizon is never older than what the ring holds, across whole-slot drops", () => {
+  // The observed defect: the page re-polls the ring window every CAPTURE_CLOCK_MS (5 s) and the ring
+  // drops 7.5 s slots, so for up to one poll after a drop the horizon drawn per frame claimed up to
+  // 7.5 s of IQ already gone. Frame by frame (count-based: every 16 ms of capture over 120 s), with
+  // the edge the panes are drawn to lagging the ring's writer by up to 400 ms, the horizon from the
+  // LAST poll must never be older than the ring's true oldest sample at that frame.
+  const pollS = CAPTURE_CLOCK_MS / 1000;
+  const slot = 7.5, start = 10_000;
+  const ring = fullRing(slot);
+  let checked = 0, drops = 0, worstOld = -Infinity, slack = 0, exact = 0;
+  for (const lagS of [0, 0.05, 0.4]) {
+    let polled = ring.window(start, true), stale = ring.window(start, false), lastPoll = start;
+    let prevT0 = ring.t0At(start);
+    for (let i = 0; i * 0.016 < 120; i++) {
+      const wS = start + i * 0.016;
+      if (wS - lastPoll >= pollS) { polled = ring.window(wS, true); stale = ring.window(wS, false); lastPoll = wS; }
+      const truth = ring.t0At(wS);
+      if (truth > prevT0) { drops++; prevT0 = truth; }
+      const edge = wS - lagS;
+      const iq = ringRules(polled, edge)!.iqS!;
+      assert.ok(iq >= truth - 1e-9, `frame ${i} (lag ${lagS} s): horizon ${iq} claims IQ older than the ring's oldest ${truth}`);
+      assert.ok(iq <= truth + slot + 1e-9, `the horizon under-promises by more than one slot: ${iq} vs ${truth}`);
+      slack = Math.max(slack, iq - truth);
+      if (Math.abs(iq - truth) < 1e-9) exact++;
+      worstOld = Math.max(worstOld, truth - ringRules(stale, edge)!.iqS!);
+      checked++;
+    }
+  }
+  assert.ok(checked > 20_000 && drops >= 45, `must span many drops: ${checked} frames, ${drops} drops`);
+  // …and it under-promises by at most one slot, only within DROP_LEAD_S of a drop: for most of
+  // each slot it is exactly the ring's oldest sample.
+  assert.ok(slack <= slot + 1e-9, `under-promised by ${slack} s`);
+  assert.ok(exact / checked > 1 - (DROP_LEAD_S + 0.5) / slot, `exactly right on only ${exact} of ${checked} frames`);
+  // The control: the same polls without the schedule draw the pre-T-845 horizon, which DOES claim
+  // dropped IQ — by up to a whole poll's worth of slot.
+  assert.ok(worstOld > 1, `without drops the horizon should have claimed dropped IQ; worst ${worstOld} s`);
+});
+
+test("T-845: captureWindow parses buffered.drops, and a malformed or disordered list is no list", () => {
+  const w = captureWindow({ window: { t0_s: 880, t1_s: 1000, span_s: 120, buffered: { t0_s: 885, t1_s: 1000,
+    drops: [{ at_s: 1001.5, t0_s: 887.5 }, { at_s: 1010, t0_s: 895 }] } } })!;
+  assert.deepEqual(w.buffered, { t0S: 885, t1S: 1000, drops: [{ atS: 1001.5, t0S: 887.5 }, { atS: 1010, t0S: 895 }] });
+  const bad = captureWindow({ window: { t0_s: 880, t1_s: 1000, span_s: 120, buffered: { t0_s: 885, t1_s: 1000,
+    drops: [{ at_s: 1010, t0_s: 895 }, { at_s: 1002.5, t0_s: 887.5 }] } } })!;
+  assert.deepEqual(bad.buffered!.drops, [], "a disordered schedule is not trusted");
+  // The rule: the next pending drop is applied ahead of its time; past the schedule, its last.
+  assert.equal(ringRules(w, 1000)!.iqS, 887.5, "a drop within the lead is honoured ahead of its time");
+  assert.equal(ringRules(w, 1000)!.dropT0S, 887.5);
+  assert.equal(ringRules(w, 1005)!.iqS, 887.5, "a drop beyond the lead is not");
+  assert.equal(ringRules(w, 1008)!.iqS, 895);
+  assert.equal(ringRules(w, 1020)!.iqS, 900, "past every drop: the last, or the retention bound if newer");
+  // A FILLING ring whose first drop is far off draws exactly what it holds, never a slot less.
+  const filling = captureWindow({ window: { t0_s: 880, t1_s: 1000, span_s: 120, buffered: { t0_s: 950, t1_s: 1000,
+    drops: [{ at_s: 1070, t0_s: 957.5 }] } } });
+  assert.equal(ringRules(filling, 1000)!.iqS, 950);
+  assert.equal(ringRules(filling, 1000)!.dropT0S, null);
+  assert.equal(ringRules(filling, 1068.5)!.iqS, 957.5, "…until the drop comes within the lead");
+  // A ring whose retention trims to the sample schedules nothing: the retention rule alone, as before.
+  assert.equal(ringRules(captureWindow({ window: { t0_s: 880, t1_s: 1000, span_s: 120, buffered: { t0_s: 885, t1_s: 1000, drops: [] } } }), 1000)!.iqS, 885);
 });
 
 test("iqBackingAt: live, in the ring, past the ring, and unknown are four different answers", () => {
