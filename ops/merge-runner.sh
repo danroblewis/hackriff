@@ -311,6 +311,9 @@ process(){
       echo "$(date '+%m-%d %H:%M')  $branch  $ticket  MAIN_RED - $MAIN_RED_WHAT fail(s) on main itself; fix main, the branch is re-queued behind the fix" >> "$NEEDS"
       notify_coordinator "main itself fails $MAIN_RED_WHAT - $ticket ($branch) is re-queued, not blamed; queue a fix for main."
       MAIN_RED_STOP=1
+      # Parked until main moves: re-gating it against the same red main only re-proves the red
+      # (review, 2026-09-24: a lone branch re-queued here re-gated every tick until main was fixed).
+      echo "$branch $(git -C "$REPO" rev-parse HEAD)" >> "$S/main-red-parked"
       return 1
     fi
     record_attempt "$branch" "$tip"
@@ -929,6 +932,22 @@ while true; do
     grep -E '^\s*#' "$QUEUE" > "$QUEUE.tmp" 2>/dev/null || true; mv "$QUEUE.tmp" "$QUEUE" 2>/dev/null || true
     # A task-pm-* branch the scope check held stays queued (it merges by itself once released).
     [ -s "$S/pm-held" ] && cat "$S/pm-held" >> "$QUEUE"
+    # A branch whose red main shares (main_is_red in process) waits for main to change - any landing
+    # releases it for one more gate. Before the CHEAP FIRST split, so a fix for main still gates.
+    if [ -s "$S/main-red-parked" ]; then
+      parked=$(awk -v h="$(git -C "$REPO" rev-parse HEAD)" '$2 == h {print $1}' "$S/main-red-parked")
+      if [ -z "$parked" ]; then
+        rm -f "$S/main-red-parked"; PARK_SAID=""; log "PARK: main moved - parked branches gate again"
+      else
+        keep=""
+        for b in $ready; do
+          if printf '%s\n' $parked | grep -qx "$b"; then echo "$b" >> "$QUEUE"; else keep="$keep $b"; fi
+        done
+        ready="${keep# }"
+        [ -z "${PARK_SAID:-}" ] && { log "PARK: $(echo $parked) wait for main to move (main is red on their red)"; PARK_SAID=1; }
+        [ -z "$ready" ] && { sleep 8; continue; }
+      fi
+    fi
     # CHEAP FIRST (user, 2026-09-24: a py+ops or ui-only branch queued behind a batch "should be the
     # very next attempt, alone, so it lands in ~2 min after the batch rather than joining the next
     # full one"). hkpy.gatepri classifies each branch with the gate's own rule; the cheap ones go now,

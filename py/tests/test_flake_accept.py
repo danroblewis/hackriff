@@ -186,5 +186,46 @@ def test_a_single_branch_red_that_main_shares_is_not_charged_and_stops_an_isolat
     single = text[text.index("    git merge --abort 2>/dev/null || true\n    if main_is_red; then"):]
     single = single[:single.index("record_attempt")]
     assert "return 1" in single and "MAIN_RED_STOP=1" in single           # re-queued by the caller, no attempt
+    assert '>> "$S/main-red-parked"' in single                               # ... and parked until main moves
     loop = text[text.index('        MAIN_RED_STOP=""'):]
     assert 'if [ -n "$MAIN_RED_STOP" ]; then echo "$b" >> "$QUEUE"; continue; fi' in loop[:600]
+
+
+def _park_block() -> str:
+    text = RUNNER.read_text()
+    i = text.index("    # A branch whose red main shares")
+    j = text.index("\n    fi\n", text.index('log "PARK: $(echo $parked)', i)) + len("\n    fi\n")
+    return text[i:j]
+
+
+def _park(tmp_path, parked_lines, head, ready):
+    (tmp_path / "main-red-parked").write_text(parked_lines)
+    q = tmp_path / "queue"
+    q.write_text("")
+    script = f"""
+set -u
+S={tmp_path}; QUEUE={q}; REPO={tmp_path}
+log(){{ echo "LOG $*"; }}
+sleep(){{ :; }}
+git(){{ echo {head}; }}
+ready="{ready}"; GATED=none
+for _ in 1; do
+{_park_block()}
+GATED="$ready"
+done
+echo "GATED=[$GATED]"
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return out.stdout, q.read_text().split(), (tmp_path / "main-red-parked").exists()
+
+
+def test_a_branch_main_is_red_on_waits_until_main_moves(tmp_path):
+    """Review 2026-09-24: re-queued on MAIN IS RED, a lone branch re-gated every tick until main was
+    fixed. Parked, it waits; the rest of the queue (a fix for main among it) still gates."""
+    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "aaa", "task-t802 task-fix")
+    assert "GATED=[task-fix]" in out and queued == ["task-t802"] and still
+    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "aaa", "task-t802")
+    assert "GATED=[none]" in out and queued == ["task-t802"]                 # nothing else: no gate at all
+    out, queued, still = _park(tmp_path, "task-t802 aaa\n", "bbb", "task-t802")
+    assert "GATED=[task-t802]" in out and queued == [] and not still          # main moved: it gates again
