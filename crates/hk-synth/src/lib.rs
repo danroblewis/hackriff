@@ -13,7 +13,8 @@
 //! | [`calibration`] | `hackriff.calibration/1` answers: `Score`, `Threshold`, fill buckets (§13.2–§13.3) | T-660 (loader + generator) |
 //! | [`candidate`] | a candidate = recipe prefix + typed free parameters (§1.2) | M-3 |
 //! | [`skeleton`] | structure alternatives per stage slot (§1.2) | M-5 (built-in skeletons) |
-//! | [`template`] | `hackriff.template/1` (§4.1, §15) | M-5 (loader, validation, built-ins) |
+//! | [`template`] | `hackriff.template/1` (§4.1, §15) | M-5 (schema) |
+//! | [`library`] | template loader, consistency validation, built-ins, seeding (§4.1, §4.2, §15.6) | M-5 (T-856) |
 //! | [`seed`] | the adapter over ADR-0016's `SearchSeed` (§4.2) | M-5 (match and band terms) |
 //! | [`proposal`] | proposal operators over `hk_estimate::assist` (§3.2) | M-4 |
 //! | [`search`] | profiles, budgets, stop reasons, job states, the ML slot (§3.3, §5.2) | M-3 |
@@ -40,6 +41,7 @@
 pub mod calibration;
 pub mod candidate;
 pub mod evidence;
+pub mod library;
 pub mod objective;
 pub mod proposal;
 pub mod result;

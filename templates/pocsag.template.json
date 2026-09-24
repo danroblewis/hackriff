@@ -1,0 +1,126 @@
+{
+  "schema": "hackriff.template",
+  "schema_version": 1,
+  "id": "pocsag",
+  "version": 1,
+  "name": "POCSAG: pager messages",
+  "description": "Built-in template for the shipped pocsag recipe; priors copied from its match block. Orders the search, never ranks or confirms.",
+  "provenance": {
+    "kind": "builtin",
+    "facts": [
+      {
+        "fields": [
+          "priors.families",
+          "priors.symbol_rate_bd",
+          "priors.bandwidth_hz",
+          "priors.bursty",
+          "free[clock].domain",
+          "evidence_targets.S4",
+          "evidence_targets.S5",
+          "plausibility"
+        ],
+        "basis": "spec",
+        "source": {
+          "kind": "standard",
+          "ref": "ITU-R M.584-2",
+          "locator": "as transcribed in recipes/pocsag.recipe.json match (UNVERIFIED against the standard)"
+        }
+      }
+    ]
+  },
+  "recipe": {
+    "id": "pocsag",
+    "version": 1
+  },
+  "free": [
+    {
+      "path": "nodes[clock].params.symbol_rate_bd",
+      "domain": {
+        "enum": {
+          "values": [
+            512,
+            1200,
+            2400
+          ]
+        }
+      }
+    }
+  ],
+  "priors": {
+    "families": {
+      "fsk": 1.0
+    },
+    "symbol_rate_bd": [
+      [
+        500,
+        2500
+      ]
+    ],
+    "bandwidth_hz": [
+      6000,
+      25000
+    ],
+    "bursty": true
+  },
+  "output_policy": {
+    "content_class": "restricted-paging",
+    "metadata_keys": {
+      "capcode": {
+        "type": "digits",
+        "max_len": 8
+      },
+      "function": {
+        "type": "enum",
+        "values": [
+          "0",
+          "1",
+          "2",
+          "3"
+        ]
+      },
+      "baud": {
+        "type": "enum",
+        "values": [
+          "512",
+          "1200",
+          "2400"
+        ]
+      },
+      "encoding": {
+        "type": "enum",
+        "values": [
+          "numeric",
+          "alpha",
+          "tone"
+        ]
+      }
+    },
+    "frame_models": [
+      "pocsag-page"
+    ]
+  },
+  "validation": [
+    {
+      "level": "consistency"
+    }
+  ],
+  "evidence_targets": {
+    "S4": {
+      "sync_bits": 32
+    },
+    "S5": {
+      "kind": "bch",
+      "width": 10
+    }
+  },
+  "plausibility": [
+    {
+      "field": "ric",
+      "range": [
+        0,
+        2097151
+      ]
+    }
+  ],
+  "timing": "crystal"
+}
