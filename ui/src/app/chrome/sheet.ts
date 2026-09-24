@@ -172,7 +172,15 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   title.className = "sheet-title";
   const head = document.createElement("div");
   head.className = "sheet-head";
-  head.append(title);
+  // docs/23 §10.6 P1: an overlay exists to be closed — a visible dismiss that collapses the sheet to
+  // its peek strip and hands its pixels back to the map (shown only while the sheet is open).
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "sheet-close";
+  close.textContent = "×";
+  close.setAttribute("aria-label", `Close ${opts.label} sheet`);
+  close.setAttribute("title", "Close (collapse to the strip)");
+  head.append(title, close);
   host.prepend(grab, head);
   host.classList.add("sheet");
   host.setAttribute("aria-label", opts.label);
@@ -192,6 +200,7 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     grab.setAttribute("aria-expanded", String(snap !== "peek"));
     // Collapsed content is not on screen, so it must not be in the tab order either.
     if (body) body.inert = snap === "peek";
+    close.hidden = snap === "peek";
   }
 
   let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;
@@ -250,6 +259,11 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     if (next === null) return;
     ev.preventDefault();
     ctl.set(next);
+  });
+  close.addEventListener("click", (ev) => {
+    // Not the head's click below, which would re-open a collapsed sheet.
+    ev.stopPropagation();
+    ctl.set("peek");
   });
   // The title strip is a second, larger target: clicking it while collapsed opens the sheet.
   head.addEventListener("click", () => { if (snap === "peek") ctl.set("half"); });

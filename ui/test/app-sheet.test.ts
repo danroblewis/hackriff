@@ -211,6 +211,18 @@ test("the mount wraps, never replaces, the hosted slot; drag/click/keys snap and
     head.fire("click");
     assert.equal(ctl.get(), "half");
 
+    // docs/23 §10.6 P1: a visible, labelled dismiss collapses the open sheet to its strip (its
+    // pixels go back to the map) and is itself hidden once collapsed.
+    const close = head.children[1];
+    assert.equal(close.className, "sheet-close");
+    assert.match(close.getAttribute("aria-label") ?? "", /^Close Selected sheet/);
+    assert.equal((close as unknown as { hidden: boolean }).hidden, false);
+    close.fire("click", { stopPropagation() {} });
+    assert.equal(ctl.get(), "peek");
+    assert.equal(mem.get("s"), "peek");
+    assert.equal((close as unknown as { hidden: boolean }).hidden, true);
+    ctl.set("half");
+
     // reveal() raises but never lowers, and is not the viewer's stored choice.
     ctl.set("peek");
     ctl.reveal("half");

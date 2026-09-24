@@ -3,21 +3,43 @@
 // strongest right now, quiet-but-active bands, and past-survey windows.
 //
 // THIN CLIENT: every figure is the backend's own (GET /api/events, /api/analysis/strongest,
-// /api/scheduler POI, /api/coverage); this file only orders, formats and turns a click into a view
-// request (`requestGoto` / `reviewAt` — store writes). It issues GETs only and never a device route,
-// so opening, scrolling or clicking the drawer cannot move the radio; a frequency outside the tuned
-// window is reached by the surface's own retune *offer*, not from here.
+// /api/scheduler POI, /api/coverage); this file only orders, formats and turns clicks into store
+// writes. It issues GETs only and never a device route, so opening, scrolling or clicking the drawer
+// cannot move the radio; a frequency outside the tuned window is reached by the surface's own retune
+// *offer*, not from here.
+//
+// docs/23 §10.6 P4 (size inversely proportional to influence): the drawer is a big panel, so a bare
+// click / Enter on a row only SELECTS it — highlights the row and, for an emitter, focuses its box on
+// the map (`focusSignal`, view state). It never pans, zooms or jumps the view. Jumping is the small,
+// explicit per-row "go to" button, which writes `requestGoto` (and `reviewAt` for a past window).
 import type { MountFn } from "../context";
 import { requestGoto } from "../shell-slice";
 import { reviewAt } from "../centre/capture-slice";
+import { focusSignal } from "../explore/slice";
+import type { AppState } from "../state";
 import { schedulerQuery, type SchedulerResponse } from "../../scheduler";
 
 export type DrawerGroup = "unknown" | "strongest" | "quiet" | "surveys";
 export interface DrawerItem {
   group: DrawerGroup; tag: string; title: string; why: string;
-  /** Where a click goes: a frequency and, for a past window, the time range to review. */
+  /** Where the row's "go to" button goes: a frequency and, for a past window, the time range. */
   hz: number; time?: { t0: number; t1: number };
+  /** The emitter this row is, if any: a row-body click focuses (highlights) its box on the map. */
+  emitterId?: string;
 }
+
+/** A row's stable identity across refreshes, so a selection survives the 30 s re-list. */
+export const itemKey = (it: DrawerItem): string => it.emitterId ?? `${it.group}:${it.hz}:${it.time?.t0 ?? ""}`;
+
+/** What a bare row click / Enter writes: selection only (view state), never a view move (P4). */
+export const selectItem = (it: DrawerItem) => (s: AppState): Partial<AppState> =>
+  it.emitterId !== undefined ? focusSignal(it.emitterId)(s) : {};
+
+/** What the small per-row "go to" button writes: view arithmetic only, never a device route. */
+export const gotoItem = (it: DrawerItem) => (s: AppState): Partial<AppState> => ({
+  ...(it.time ? reviewAt(it.time.t1, it.time.t1 - it.time.t0)() : {}),
+  ...requestGoto(it.hz)(s),
+});
 export const GROUP_TITLE: Record<DrawerGroup, string> = {
   unknown: "Unknown & unexplained — the priority", strongest: "Strongest right now",
   quiet: "Quiet but active", surveys: "Past surveys — jump to a coverage window",
@@ -53,7 +75,7 @@ export function unknownItems(r: EventsResp | null, max = 4): DrawerItem[] {
       group: "unknown", tag: ev.open ? "unknown · on air" : ev.count > 1 ? `unknown · burst ×${ev.count}` : "unknown · ended",
       title: `${fmtHz(e.f_center_hz)} · ${fmtHz(e.bandwidth_hz)}`,
       why: hint ? `nothing matched; nearest suggestion: ${hint}` : "no explanation matched — measured, not looked up",
-      hz: e.f_center_hz,
+      hz: e.f_center_hz, emitterId: e.id,
     });
     if (out.length >= max) break;
   }
@@ -117,6 +139,7 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
   peek.className = "drawer-peek";
   el.append(peek, listEl);
   let items: DrawerItem[] = [];
+  let selected: string | null = null;
   let seq = 0;
 
   const render = () => {
@@ -125,18 +148,34 @@ export const mountExploreDrawer: MountFn = (el, ctx) => {
       const h = document.createElement("h4"); h.textContent = GROUP_TITLE[g.group];
       const ul = document.createElement("ul");
       for (const it of g.items) {
+        const key = itemKey(it);
         const li = document.createElement("li"), b = document.createElement("button");
         b.type = "button";
+        b.className = "row";
+        b.setAttribute("aria-pressed", String(key === selected));
+        if (key === selected) li.classList.add("selected");
         for (const [cls, text] of [["tag", it.tag], ["f", it.title], ["why", it.why]] as const) {
           const s = document.createElement("span"); s.className = cls; s.textContent = text; b.append(s);
         }
+        // P4: the big row only selects (view state); it never moves the map.
         b.addEventListener("click", () => {
-          // View arithmetic only: a frequency request the surface pans to (or offers a retune for),
-          // and for a past window the review time. Never a device route.
-          if (it.time) ctx.store.set(reviewAt(it.time.t1, it.time.t1 - it.time.t0));
-          ctx.store.set(requestGoto(it.hz));
+          selected = key;
+          ctx.store.set(selectItem(it));
+          render();
         });
-        li.append(b); ul.append(li);
+        // The small explicit control is the one that jumps the view.
+        const go = document.createElement("button");
+        go.type = "button";
+        go.className = "go";
+        go.textContent = "Go";
+        go.setAttribute("aria-label", `Go to ${it.title}`);
+        go.setAttribute("title", it.time ? "Pan the map here and review this window" : "Pan the map here");
+        go.addEventListener("click", () => {
+          selected = key;
+          ctx.store.set(gotoItem(it));
+          render();
+        });
+        li.append(b, go); ul.append(li);
       }
       listEl.append(h, ul);
     }
