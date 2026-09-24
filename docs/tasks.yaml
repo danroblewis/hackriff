@@ -26398,7 +26398,7 @@ tasks:
   - id: T-899
     milestone: MMAP
     title: "Size inversely proportional to influence: big panels never jump the map or offer a retune on a bare row click - re-spec T-814/T-815/T-821/T-804 + T-825 guard (user P4)"
-    status: todo
+    status: done
     priority: normal
     deps: []
     parallel_group: MAP-DESIGN
@@ -26414,6 +26414,8 @@ tasks:
       FOUND BY user 2026-09-24 ~12:30 map-UI principles (handoff ~/.hackriff-ops/handoffs/map-ui-principles-2026-09-24.md; docs/23 §10.6).
 
       WHAT THE USER WILL SEE ON STAGING: clicking a row in a big panel (sheet, Explore drawer, Research) highlights its mark but never moves or retunes the map; moving the map from a row is a small explicit button on that row.
+
+      2026-09-24 coordinator - LANDED UNGATED at 15:05 via 292de09b: the coordinator made a board commit in the main checkout (a cd into a removed worktree failed) while the merge runner had task-t899 STAGED (MERGE_HEAD present, its gate running); git recorded it as a merge with T-899's tip 3c00903c as second parent - an invariant breach of the same class as ea91c27c (09-22). T-899's own gate (run 8ad41df20aa8, 14:56-15:03, class ui+docs+py) passed lint-py / test-ui / test-py and was red only in test-ui-e2e on canvas-journey + fog-of-war, which the runner then confirmed red on main itself (MAIN_RED 15:10, no attempt charged) - main-side, not this branch. COVERED AFTER THE FACT by the 15:10-15:19 bulk gate (run db008bf29f8b, base fbf77e7d which contains 292de09b, class ui+docs+py, T-896 + task-t890-cj): lint-py 0, test-ui 0, test-py 0, test-ui-e2e red only on fog-of-war which passed alone twice (load-flake rule) and the resumed gate PASSED 15:19:05, canvas-journey green. The coordinator did not run git push at any point.
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 14:45).
       (a) DOC: docs/23 §10.6 rule 4 now has a normative re-spec table for T-814 (Explore drawer), T-815 (past surveys), T-821 (Research slide-in) and T-804 (Selected tab). In a big panel, a bare row or body click only selects and highlights the mark. A view jump, or raising the gated retune offer, goes on a small per-row Go/Jump/Restore button. T-804's device actions become a compact cluster of small buttons, and the sheet body has no device route. §11's Selected row and rule 1 were amended to match. The table replaces the matching acceptance words, and the tickets' existing 2026-09-24 notes point there. (b) GUARD: ui/test/app-panel-influence.test.ts (T-825's P4 guard) scans every module under ui/src/app except a short named list of non-panels (map-controls, canvas surface, nudge cluster, decode workbench, each with its reason), so it fails closed and covers new panel files automatically. A press handler (click/dblclick/key/pointer/mouse/touch/contextmenu) bound to anything other than a button/input/select/textarea — a row, a panel body, an unresolved mount host — must not name a device route (/api/control, /ws/open, DeviceAction, retune…) or a view jump (jump/fly/panTo/centreOn/zoom/followLive/setView/restore…View/viewChanged…). Same-file helpers are followed two deep, and focus subscribers are checked too. The guard is shown to fire on injected violations, including a jump swapped into each real Explore row and the sheet's title strip. It passes when the same call is on a per-row button. Staging: nothing visible changes; current rows already only select.
@@ -26422,6 +26424,7 @@ tasks:
       Commits: 6dfaa125
       Observed, not chased: The acceptance: text of T-814/T-815/T-821/T-804 was not edited: workers may not edit docs/tasks.yaml, and T-814/T-804 are in progress on their own branches. The coordinator should replace 'selecting an item pans/zooms (or offers a retune)' (T-814), 'jump the pane to one' (T-815), and 'actions (Listen, …)' (T-804) with a pointer to the docs/23 §10.6 rule-4 re-spec table, and add that pointer to T-821. | When T-814/T-821 land, the new guard will fail any row that jumps or retunes on a bare click. That is intended; their workers should put Go/Jump on a per-row <button>. | T-825 can now mark its P4 part done: the guard exists in ui/test/app-panel-influence.test.ts.
       Resources: 60 CPU-s, peak 1.7 GB
+    commit: 292de09b
   - id: T-900
     milestone: MMAP
     title: "Overlays are closeable, not just fadeable: a visible dismiss (and Esc) on the sheet, Research slide-in and left column (user P1)"
@@ -26526,6 +26529,22 @@ tasks:
     notes: |
       FOUND BY supervisor, staging DB measurement 2026-09-24 (user asked 13:55).
     core_interface: true
+  - id: T-905
+    milestone: MCANVAS
+    title: "fog-of-war: the pane sometimes requests a tile over never-swept band C - T-580's coverage short-circuit races the coverage survey (fails alone 1 in 9)"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: UI
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the fog-of-war shadow-race deflaker (task-deflake-fog-shadow-race), and in the 09-23 23:30 gate (before T-890/T-893): ui/e2e/fog-of-war.e2e.mjs's check "the pane REQUESTED a tile over band C ... T-580's short-circuit did not fire" failed ALONE once in a 4-run batch (the next 5 passed). Band C was never swept, so T-580's rule is that a viewport tile with no data is answered from the coverage map and never requested/generated. A test that fails alone is a real defect (deflake-triage): likely a race between the coverage survey and the pane's tile requests - a request issued before the client knows band C is unobserved. The spec now names the offending request URL, the tile's extent and its coverage states in the failure message (eac4845e).
+      DELIVER: root-cause through the real client path (ui/src/surface: when tile requests are issued vs when coverage is known) and fix so an unobserved region is never requested, with a regression test (ui/test with a delayed coverage answer) that goes red on the old code. No assertion or threshold change.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; fog-of-war.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY fog-of-war shadow-race deflaker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
