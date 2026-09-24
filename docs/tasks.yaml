@@ -7521,7 +7521,7 @@ tasks:
     milestone: M2-hardening
     title: 'Cross-process device exclusion is unverified: two hk serve runs against one HackRF have never
       been tried'
-    status: todo
+    status: done
     priority: normal
     deps:
     - T-343
@@ -7542,6 +7542,11 @@ tasks:
 
       2026-09-24 11:55 USER (via supervisor): approves taking the HackRF anytime. Status todo; stays needs: hardware so the work runner does not dispatch it - the coordinator runs it as a capture-agent HIL slot: stop the :8899 demo (exact pid, never a broad pkill), start two hk serve --device hackrf back to back, assert the second gets a clean device-in-use (not a libusb error or a half-open stream), then release the radio; the supervisor restores the demo.
     branch: task-t356
+    result: |
+      DONE 2026-09-24 by HIL (capture-agent; full record ~/.hackriff-ops/work/T-356/hil-result.md). HackRF One serial 0000000000000000d2b861dc263bc293, fw 2026.01.3, libhackrf 0.9.2; binary hk 0.1.0 built 06:25 from main 31a36d22. Receive only.
+      The first process (the :8899 demo, restarted live by ops/stage.sh - same binary, --hackrf, 100.8 MHz / 2.4 Msps / LNA 32 / VGA 30 / amp on) streamed throughout; a second `hk serve --hackrf` was started twice while it streamed.
+      RESULT: exclusion HOLDS. Both attempts: the second process exits 1 after ~0.5 s, before binding its port, never half-opens the device, emits no frames; the first process kept streaming (20.7 M / 20.8 M samples in ~9 s, read errors / drops / capture failures all 0). The T-302..T-305/T-325 assumption (a device is opened once or not at all) is verified.
+      DEFECT (filed separately): the second process's error is a raw libusb error, class (b): "hackrf-one: hackrf_open_by_serial failed: Access denied (insufficient permissions) (-1000)" - it blames permissions when the device is simply in use.
   - id: T-357
     milestone: M2-hardening
     title: CI acceptance job runs the whole hk-e2e crate, not just acceptance - drift by accretion, and
@@ -26001,6 +26006,23 @@ tasks:
     notes: |
       FOUND BY fog-of-war deflaker 2026-09-24 (relayed by pipeline-manager).
     effort_reason: "hard cross-layer debugging: root cause spans the backend coverage/shadow serving path and the client's shadow placement, with only an unverified guess (prompts/model-selection.md: hard debugging -> opus high)"
+  - id: T-892
+    milestone: M2-hardening
+    title: A second process opening a held HackRF reports 'Access denied (insufficient permissions)' - make device-in-use a distinct, honest error (from T-356's HIL)
+    status: todo
+    priority: normal
+    deps:
+    - T-356
+    parallel_group: SDR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-356's HIL (~/.hackriff-ops/work/T-356/hil-result.md): when another process holds the HackRF, a second `hk serve --hackrf` fails with "Error: opening the hackrf source / Caused by: hackrf-one: hackrf_open_by_serial failed: Access denied (insufficient permissions) (-1000)". Exclusion itself is correct (no half-open, first stream undisturbed) but the message sends the user to fix permissions when the device is in use. crates/hk-core/src/source/hackrf/ffi.rs LibHackRf::open and check() pass libhackrf's -1000 (LIBUSB_ERROR_ACCESS) through verbatim.
+      DELIVER: a distinct, typed device-in-use error from the source layer (generic across devices, not HackRF-specific in the core), naming the device serial and saying another process holds it, surfaced the same way through `hk serve` startup and the gated DeviceAction path (its API error shape documented in docs/api.md + api_contract.rs if it reaches the API, T-079). Distinguish in-use from a genuine permissions failure honestly: if libhackrf cannot tell them apart, say "in use by another process, or not permitted" rather than guessing - Unknown is not Off. Test through the mock SDR (the mock can simulate an open that fails with the access code) that goes red on the verbatim message.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-356 HIL capture-agent 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
