@@ -7,10 +7,32 @@
 #view-explore > .centre > .surface { min-height: 0; height: 100%; }
 .app:has(#view-explore:not([hidden])) > .bar { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 5; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px); min-height: 40px; }
 .app:has(#view-explore:not([hidden])) > .dock { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 5; height: 54px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 88%, transparent); }
-#view-explore > .side, #view-explore > .focus { position: absolute; z-index: 4; top: 64px; bottom: 74px; width: min(300px, calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
+/* T-801 round 3: `--panel-w`/`--panel-gap` are the one definition of the floating side/focus
+   columns' footprint, shared with the `.sf-bar` inset below so the two can never drift apart. */
+#view-explore { --panel-w: 300px; --panel-gap: 8px; }
+#view-explore > .side, #view-explore > .focus { position: absolute; z-index: 4; top: 64px; bottom: 74px; width: min(var(--panel-w), calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
 #view-explore > .side { left: 8px; }
 #view-explore > .focus { right: 8px; }
-#view-explore > .focus:empty { display: none; }
+/* Nothing focused renders only the placeholder sentence (`explore/index.ts`'s `render()`, which
+   sets this class in that one case and clears it whenever there is a real focus or an explanatory
+   "not here" state) — collapse the panel then rather than covering the canvas's right edge with an
+   empty box. `:empty` never fired here: the slot is always filled with *something*. */
+#view-explore > .focus.is-empty { display: none; }
+/* T-801 round 2 cleared the panels vertically (`top: 64px`, above) so they no longer sit under the
+   top `.bar`, but round 3's review caught what that left: the surface's OWN toolbar (`.sf-bar`,
+   T-528's wrapping button row, mounted inside `.centre`) still spans the full-bleed canvas's whole
+   width, so it paints its buttons (`.sf-actions`: Live/Trace/Signals/Measure/…) directly behind
+   these panels — the panels are two `z-index: 4` siblings of `.centre` (`z-index: auto`, so it
+   paints at the stacking level below any explicit z-index, whatever the DOM order), so
+   `elementFromPoint` at a button's centre lands on the panel and T-528's own hit test failed on the
+   very buttons that ticket had already fixed once, this time hidden by a sibling rather than a
+   neighbour in the same row.
+   The full-bleed CANVAS drawing stays edge-to-edge on purpose (that is the point of this ticket) —
+   only the toolbar's own chrome insets past the two columns it would otherwise render under. T-528's
+   own rule already covers the rest: the bar wraps rather than overflows when its row does not fit,
+   so narrowing it between the panels grows it down instead of hiding a button under a neighbour,
+   exactly as it already does on an ordinary narrow window. */
+#view-explore > .centre .sf-bar { padding-left: calc(var(--panel-w) + var(--panel-gap) * 2); padding-right: calc(var(--panel-w) + var(--panel-gap) * 2); box-sizing: border-box; }
 @media (max-width: 900px) {
   body:has(#view-explore:not([hidden])) { overflow: hidden; }
   .app:has(#view-explore:not([hidden])) { height: 100dvh; }
@@ -20,4 +42,8 @@
   #view-explore > .side { bottom: calc(70px + 28dvh + 8px); }
   #view-explore > .focus { bottom: 70px; }
   .app:has(#view-explore:not([hidden])) > .dock { flex-wrap: nowrap; }
+  /* Below the breakpoint the panels drop to the bottom of the screen (above) and no longer share a
+     row with the surface's toolbar, so the desktop inset is not needed — and at phone widths it
+     would leave the bar with negative usable space (2 × ~316px against a ~375px viewport). */
+  #view-explore > .centre .sf-bar { padding-left: 12px; padding-right: 12px; }
 }
