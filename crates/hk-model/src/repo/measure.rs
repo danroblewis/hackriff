@@ -494,6 +494,7 @@ impl Repository {
             RecordingTrigger::Demodulation(m) => ("demodulation", None, Some(blob(m))),
             RecordingTrigger::Scheduler => ("scheduler", None, None),
             RecordingTrigger::Manual => ("manual", None, None),
+            RecordingTrigger::Analyze => ("analyze", None, None),
         };
         self.conn.execute(
             "INSERT INTO recording (recording_id, kind, t_start, t_end, f_center, trigger_kind, \
