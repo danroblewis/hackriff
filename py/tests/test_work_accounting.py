@@ -334,6 +334,19 @@ def test_a_branch_the_merge_runner_holds_is_being_merged_not_conflicted(conflict
     assert not (tmp / "merge-queue.txt").exists()
 
 
+
+def test_every_worker_gets_its_own_e2e_port_block_clear_of_the_gate():
+    ports = {R.e2e_port_for(f"/x/.claude/worktrees/t{n}") for n in range(400, 900)}
+    assert min(ports) >= 9216 and max(ports) + 256 <= 49152          # below the ephemeral range
+    assert all((p - 9216) % 256 == 0 for p in ports)
+    assert R.e2e_port_for("/x/.claude/worktrees/t845/") == R.e2e_port_for("/x/.claude/worktrees/t845")
+    assert len(ports) > 120                                         # spread, not one block
+    env = R.e2e_env("/x/.claude/worktrees/t845")
+    base = int(env["HK_E2E_PORT"])
+    assert int(env["HK_E2E_JOURNEY_PORT"]) == base + 224 and env["HK_E2E_CONCURRENCY"] == "3"
+    assert base + 192 + 24 < base + 224 and base + 224 + 4 + 24 <= base + 256   # lanes and journey fit
+
+
 # --------------------------------------------------------------------- deflake dispatch (2026-09-23)
 # The user's decision: the 3rd isolation-pass of one test within 7 days auto-spawns a deflaker.
 # py/hkpy/flakes.py appends the request; the work runner dispatches it as a worker whose claim is
