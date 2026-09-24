@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import pathlib
 import sys
 
@@ -769,6 +770,153 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     assert not any("fatal" in m for m in said)
 
 
+@pytest.fixture
+def killed_run(df, monkeypatch, tmp_path):
+    """A ticket worker whose process is gone and left no out.json result and no handback.json."""
+    monkeypatch.setenv("HK_ALERT_OFF", "1")
+    wt = tmp_path / "wt-t802"
+    wt.mkdir()
+    (tmp_path / "work" / "T-802").mkdir(parents=True)
+    (tmp_path / "work" / "T-802" / "out.json").write_text("")            # killed: claude never wrote its result
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False:
+                        "2\n" if args[:3] == ["git", "rev-list", "--count"] else (" M ui/src/a.ts\n" if args[:2] == ["git", "status"] else ""))
+    fixes, alerts = [], []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line: fixes.append(line) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "alert", lambda *a: alerts.append(a))
+
+    def claim(**kw):
+        return {"T-802": dict({"ticket": "T-802", "branch": "task-t802", "wt": str(wt), "pid": 1, "started": 0,
+                               "kind": "work", "state": "running", "model": "opus"}, **kw)}
+    return claim, fixes, alerts, df[3]
+
+
+def test_a_killed_worker_is_resumed_in_its_worktree(killed_run):
+    """04:07 on 2026-09-24: a pkill took five workers; each was logged "NO_HANDBACK ... (done)", parked
+    as uncommitted/no-work, and never ran again."""
+    claim, fixes, alerts, seen = killed_run
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("KILLED") and "1 modified files and 2 commits" in fixes[0]
+    assert claims["T-802"]["state"] == "running" and seen == []
+    assert alerts[0][0] == "amber" and "T-802 (resumed)" in alerts[0][2]
+
+
+def test_a_killed_worker_with_no_session_is_named_for_a_redispatch(killed_run):
+    claim, fixes, alerts, seen = killed_run
+    claims = claim()                                                       # launched before --session-id
+    R.reap(claims, dry=False)
+    assert fixes == [] and claims["T-802"]["state"] == "killed"
+    assert [k for _, k, _ in seen] == ["KILLED"] and "T-802 (needs a redispatch)" in alerts[0][2]
+
+
+def test_a_killed_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch, tmp_path):
+    """Review 2026-09-24: through the gate-failure prompt a killed worker would chase a gate that never
+    ran, and a later real gate failure would get one fix attempt instead of two."""
+    monkeypatch.setattr(R, "merge_target", lambda: "main")
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
+    c = {"ticket": "T-802", "branch": "task-t802", "wt": str(tmp_path), "session_id": "abc", "fix_attempts": 1, "kind": "work"}
+    r = R.launch_fix(c, "KILLED your run ended after 40 min with no result")
+    (n, prompt, out_name), = runs
+    assert n == 1 and r["fix_attempts"] == 1 and r["kill_resumes"] == 1 and out_name == "resume1.json"
+    assert "KILLED from outside" in prompt and "merge gate" not in prompt and "merge-runner.log" not in prompt
+
+
+def test_a_killed_claim_with_no_commits_is_released_like_no_work(df, monkeypatch):
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    claims = {"T-802": {"ticket": "T-802", "state": "killed", "started": 0, "branch": "task-t802"}}
+    R.release_stale_claims(claims, {"T-802": {"id": "T-802", "status": "todo"}})
+    assert "T-802" not in claims
+
+
+def test_a_worker_that_wrote_its_result_is_not_killed(killed_run, tmp_path):
+    claim, fixes, alerts, seen = killed_run
+    (tmp_path / "work" / "T-802" / "out.json").write_text(json.dumps({"result": "done", "session_id": "abc"}))
+    claims = claim(session_id="abc")
+    R.reap(claims, dry=False)
+    assert alerts == [] and not any("KILLED" in f for f in fixes)
+
+
+def test_a_leaked_e2e_data_dir_is_removed_and_a_live_one_kept(tmp_path, monkeypatch):
+    """2026-09-24 10:30: 49 hk-e2e-data-* dirs (89.6 GB) left by killed browser specs."""
+    import os
+    for n in ("leaked", "live", "fresh"):
+        (tmp_path / f"hk-e2e-data-{n}").mkdir()
+        (tmp_path / f"hk-e2e-data-{n}" / "ring.bin").write_text("x")
+    (tmp_path / "unrelated").mkdir()
+    old = 1_000_000_000
+    for n in ("leaked", "live"):
+        for p in (tmp_path / f"hk-e2e-data-{n}" / "ring.bin", tmp_path / f"hk-e2e-data-{n}"):
+            os.utime(p, (old, old))
+    os.utime(tmp_path / "unrelated", (old, old))
+    monkeypatch.setattr(R.tempfile, "gettempdir", lambda: str(tmp_path))
+    procs = f"/x/target/debug/hk serve --replay f --data-dir {tmp_path}/hk-e2e-data-live --ui-dist d\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    R.reclaim_e2e_data(dry=True)
+    assert (tmp_path / "hk-e2e-data-leaked").exists() and len(said) == 1
+    R.reclaim_e2e_data(dry=False)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hk-e2e-data-fresh", "hk-e2e-data-live", "unrelated"]
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")          # ps said nothing: delete nothing
+    for p in (tmp_path / "hk-e2e-data-fresh" / "ring.bin", tmp_path / "hk-e2e-data-fresh"):
+        os.utime(p, (old, old))
+    R.reclaim_e2e_data(dry=False)
+    assert (tmp_path / "hk-e2e-data-fresh").exists()
+
+
+def test_an_idle_target_of_a_kept_worktree_is_reclaimed(tmp_path, monkeypatch):
+    """09-24 09:47: 55 GB of build output sat in twelve worktrees the reaper keeps (timeout, blocked,
+    uncommitted); free disk was 22 GB against a 20 GB dispatch floor."""
+    import os
+    root = tmp_path / ".claude" / "worktrees"
+    old = 1_000_000_000
+    for name in ("idle", "fresh", "inuse", "claimed", "t87"):
+        (root / name / "target" / "debug").mkdir(parents=True)
+        (root / name / "src.rs").write_text("kept\n")
+    (root / "linked").mkdir()
+    (root / "linked" / "target").symlink_to(root / "idle" / "target")
+    monkeypatch.setattr(R, "_target_written", lambda t: time.time() if "/fresh/" in t else old)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    procs = f"node {root}/inuse/ui/e2e/run.mjs\n"                 # a process in inuse; none in t87 (t870 is a prefix trap)
+    lsof = f"p1\nn{root}/t870\n"
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: procs if args[0] == "ps" else lsof)
+    said = []
+    monkeypatch.setattr(R, "log", said.append)
+    claims = {"T-1": {"state": "running", "wt": str(root / "claimed")}}
+    R.reclaim_idle_targets(claims, dry=True)
+    assert all((root / n / "target").exists() for n in ("idle", "fresh", "inuse", "claimed", "t87"))
+    R.reclaim_idle_targets(claims, dry=False)
+    gone = sorted(n for n in ("idle", "fresh", "inuse", "claimed", "t87") if not (root / n / "target").exists())
+    assert gone == ["idle", "t87"]
+    assert all((root / n / "src.rs").exists() for n in ("idle", "t87"))   # the source is never touched
+    assert len([m for m in said if m.startswith("RECLAIM")]) == 2
+    assert (root / "linked").is_symlink() is False and os.path.islink(root / "linked" / "target")
+
+
+def test_an_idle_target_is_kept_when_lsof_says_nothing(tmp_path, monkeypatch):
+    root = tmp_path / ".claude" / "worktrees"
+    (root / "idle" / "target" / "debug").mkdir(parents=True)
+    monkeypatch.setattr(R, "_target_written", lambda t: 1_000_000_000)
+    monkeypatch.setattr(R, "REPO", str(tmp_path))
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "")
+    monkeypatch.setattr(R, "log", lambda m: None)
+    R.reclaim_idle_targets({}, dry=False)
+    assert (root / "idle" / "target").exists()
+
+
+def test_a_target_cloned_with_old_mtimes_reads_as_just_written(tmp_path):
+    """cp -c -R -p keeps main's mtimes; the clone's ctime is when it happened (review, 09-24)."""
+    import os
+    t = tmp_path / "target"
+    (t / "debug" / "deps").mkdir(parents=True)
+    for p in (t / "debug" / "deps", t / "debug", t):
+        os.utime(p, (1_000_000_000, 1_000_000_000))          # an old mtime, as `cp -p` leaves it
+    assert time.time() - R._target_written(str(t)) < 60
+
+
 def test_only_regenerable_is_strict():
     assert R.only_regenerable([".githooks/", "target/"])
     assert not R.only_regenerable([".githooks/", "src/new.rs"])
@@ -812,6 +960,23 @@ def test_a_deflake_waits_while_its_own_last_branch_is_unmerged(df, monkeypatch):
     R.dispatch_deflakes(claims, dry=False)
     assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
     monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]
+
+
+def test_a_deflake_waits_while_its_last_branch_gates_in_a_batch(df, monkeypatch):
+    """09-24 09:39:52: main held the batch carrying task-deflake-app-trace-e2e-mjs, so the branch read
+    0 commits ahead of main and a second deflaker was dispatched beside its own gating fix."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())         # module-global: the test above said this WAIT
+    write(_req("deflake-a", 600.0))
+    (tmp / "bulk-in-progress").write_text("base=gatedbase\nbranches=task-deflake-a\n")
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 0 if t == "main" else 3)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake", "state": "blocked",
+                                    "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [] and "has unmerged commits" in (tmp / "work-runner.log").read_text()
+    (tmp / "bulk-in-progress").unlink()                  # the batch landed: main is gated again
     R.dispatch_deflakes(claims, dry=False)
     assert launched == [("deflake-a", 600.0, 2)]
 

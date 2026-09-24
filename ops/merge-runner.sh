@@ -88,9 +88,11 @@ batch_sig(){ for b in "$@"; do printf '%s@%s\n' "$b" "$(git -C "$REPO" rev-parse
 # One hold.jsonl line, JSON-encoded by Python so a `\`, a tab or a quote in `why` cannot produce a
 # record `hkpy.flow` would silently drop (review, 2026-09-23). event: expired | ended-by-queue.
 hold_event(){ python3 -c 'import json,sys,time; print(json.dumps({"ts": int(time.time()), "event": sys.argv[1], "why": sys.argv[2]}))' "$1" "$2" >> "$S/hold.jsonl" 2>/dev/null || true; }
+# The coordinator's pane is gone (incident 2026-09-24 04:07: dead 5.5 h, four alarms typed at nothing).
+no_receiver(){ python3 "$REPO/ops/alert.py" --no-receiver dev "MERGE-RUNNER: $1" >/dev/null 2>&1 || true; }
 notify_coordinator(){
   alert amber "merge runner needs a person" "$1" --key "mr:$(echo "$1" | cut -c1-48)"
-  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+  tmux has-session -t dev 2>/dev/null || { no_receiver "$1"; return 0; }; tmux send-keys -t dev -l "MERGE-RUNNER: $1 See $NEEDS; fix it, then re-queue the branch." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 # Edge-triggered wake on a SUCCESSFUL merge: a clean merge drains the queue and may unblock
 # dependent tickets, but nothing else pings the coordinator for it (task-completions and the
 # failure ping above cover their cases). Without this, the coordinator can sit idle after a
@@ -105,7 +107,7 @@ notify_ok(){ # coordinator_notice [header branch...]
   local notice=$1 header=${2:-$1} body=""; shift; [ "$#" -gt 0 ] && shift
   [ "$#" -gt 0 ] && body=$(cd "$REPO" && uv run --locked --project py python -m hkpy.landnotes --header "$header" "$@" 2>/dev/null)
   alert green "landed" "${body:-$notice}"
-  tmux has-session -t dev 2>/dev/null || return 0; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
+  tmux has-session -t dev 2>/dev/null || { no_receiver "$1"; return 0; }; tmux send-keys -t dev -l "MERGE-RUNNER: $1 Reconcile, then fill the builder cap from startable work." 2>/dev/null; sleep 1; tmux send-keys -t dev Enter 2>/dev/null; }
 ticket_of(){ echo "$1" | sed -E 's/^task-t0*([0-9]+)$/T-\1/I'; }
 worktree_of(){ git -C "$REPO" worktree list --porcelain \
   | awk -v b="refs/heads/$1" '/^worktree /{p=substr($0,10)} /^branch /{if(substr($0,8)==b) print p}'; }
@@ -533,7 +535,12 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
     log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
     return 1
   fi
-  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
+  # pytest (the `py` suites inside `just test`) prints `FAILED tests/x.py::name` - not a nextest line,
+  # so it takes the suite path (hold for a fix), but the alarm names it: at 09:42 and 09:44 on
+  # 2026-09-24 a board-check red was announced as "lint/build/ui-unit", the wrong place to look.
+  local py; py=$(tail -n +"$from" "$LOG" | sed -n -E 's/^(FAILED|ERROR) (tests\/[^ ]+).*/\2/p' | sort -u | tr '\n' ' ')
+  TRIAGE_WHAT=${py:+"pytest red: ${py% }"}
+  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (${TRIAGE_WHAT:-lint/build/ui-unit failure}) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
@@ -665,7 +672,7 @@ try_bulk(){
   if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
     # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
     # re-queue the batch once, hold until the queue changes - and say so where a person looks.
-    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT="gate timed out"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
   elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
@@ -693,9 +700,9 @@ try_bulk(){
     if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
       batch_sig "${branches[@]}" > "$S/suite-broken"
-      log "BULK gate FAILED without a test FAIL (lint/build/ui-unit) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
-      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; lint/build/ui-unit red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
-      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
+      log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
+      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued."
       rm -f "$BULKMARK"
       return 0
     fi

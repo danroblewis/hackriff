@@ -30,7 +30,8 @@ pub mod null;
 pub enum Stage {
     /// Channel: runtime DDC, `mix`, `lowpass`, `resample`.
     S0,
-    /// Demodulation: `fm_demod`, `am_demod`, `fsk_demod`, `msk_demod`, `psk_demod`, `subcarrier`.
+    /// Demodulation: `fm_demod`, `am_demod`, `fsk_demod`, `msk_demod`, `psk_demod`, `subcarrier`,
+    /// `stereo_decode`.
     S1,
     /// Clock recovery: `clock_recovery`.
     S2,

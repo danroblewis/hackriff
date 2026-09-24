@@ -57,7 +57,14 @@
     <section class="centre" aria-label="Spectrum surface">
       <div class="surface" data-slot="surface"></div>
     </section>
-    <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
+    <!-- T-803 (MAP-03): the focus panel lives in a non-modal bottom sheet (peek / half / full) that
+         floats over the still-live canvas; `chrome/sheet.ts` adds its grab handle and title strip
+         around `.sheet-body` without touching the focus slot inside it. -->
+    <section class="sheet" data-slot="sheet" aria-label="Selected">
+      <div class="sheet-body">
+        <aside class="focus" data-slot="focus" aria-live="polite" aria-label="Focused signal"></aside>
+      </div>
+    </section>
   </div>
 
   <!-- DECODE -->
