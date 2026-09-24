@@ -535,7 +535,12 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
     log "TRIAGE: a browser spec FAILS alone -> a real defect in this merge"
     return 1
   fi
-  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (lint/build/ui-unit failure) - not a flake candidate"; return 1; }
+  # pytest (the `py` suites inside `just test`) prints `FAILED tests/x.py::name` - not a nextest line,
+  # so it takes the suite path (hold for a fix), but the alarm names it: at 09:42 and 09:44 on
+  # 2026-09-24 a board-check red was announced as "lint/build/ui-unit", the wrong place to look.
+  local py; py=$(tail -n +"$from" "$LOG" | sed -n -E 's/^(FAILED|ERROR) (tests\/[^ ]+).*/\2/p' | sort -u | tr '\n' ' ')
+  TRIAGE_WHAT=${py:+"pytest red: ${py% }"}
+  [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (${TRIAGE_WHAT:-lint/build/ui-unit failure}) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
   log "TRIAGE: re-running the failing tests alone: $(echo $tests | tr '\n' ' ')"
@@ -667,7 +672,7 @@ try_bulk(){
   if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
     # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
     # re-queue the batch once, hold until the queue changes - and say so where a person looks.
-    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT="gate timed out"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
   elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
@@ -695,9 +700,9 @@ try_bulk(){
     if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
       batch_sig "${branches[@]}" > "$S/suite-broken"
-      log "BULK gate FAILED without a test FAIL (lint/build/ui-unit) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
-      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; lint/build/ui-unit red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
-      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - lint/build/ui-unit is red on main+batch; fix that first, the batch is re-queued."
+      log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
+      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued."
       rm -f "$BULKMARK"
       return 0
     fi
