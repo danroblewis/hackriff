@@ -430,7 +430,7 @@ Everything else sits in exactly one band:
 | Band | z | Space | Members | Laid out |
 |---|---|---|---|---|
 | **0** | `0` | **content** | the one `<canvas>`: tiles, traces, coverage plane, every overlay stroke, HUD ticks | **every render frame** |
-| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz) | **every render frame, in the same pass as band 0** |
+| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7), placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
 | **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, follow-live FAB, pane-status readout, HUD axis *labels* | on interaction |
 | **3** | `30` | screen | the bottom sheet; the Research slide-in | on interaction |
 | **4** | `40` | screen | transients: MapTip, retune offer, mode banner, error toasts | on interaction |
@@ -646,6 +646,53 @@ partly planned; the tickets that close the gaps are named per principle.*
    - **Density, not clustering, at coarse zoom.** Where many features would generalize, a
      density layer (features per cell, from `/api/tiles/events`) replaces numbered cluster bubbles;
      drilling in resolves to boxes.
+
+### 10.7 The active pane, and which chrome is global (normative, T-1000, 2026-09-25)
+
+*From the user's split-view review (2026-09-25): "a common use would be to look at one signal from
+the past and the current waterfall". With two panes, most of the chrome acts on ONE of them, and
+before this section nothing on screen said which.*
+
+**Principle: chrome that acts on one pane must show which.** A split surface has exactly one
+**active pane** — the one last pressed, right-clicked, wheeled or pinched, the one a split just made,
+or the one chosen by key — and it is **visible**:
+
+- **An outline on the canvas** around the active pane's rectangle (`.sf-active-pane`), placed every
+  render frame from the rectangles the frame was drawn with, and at once — in the same event
+  dispatch — when the active pane changes. A neutral light line with a dark halo, so it is never read
+  as a signal box's class symbology (§10.6 rule 6). Drawn only while there are **two or more** panes:
+  with one there is nothing to disambiguate, and an outline would be overlay with no information in
+  it (§10.6 rule 1). Never faded (it says where the chrome's presses land) and never takes the pointer.
+- **Every per-pane control names it**, by layout position ("pane 2 of 3", left-to-right then
+  top-to-bottom — never an internal id), with the same words the outline carries.
+
+| Chrome | Acts on | Says so how |
+|---|---|---|
+| **Go-to** (and its retune offer) | the active pane | a "pane N" tag in the box; the input's accessible name |
+| **Zoom** +/- | the active pane | a number badge on the stack; the buttons' titles |
+| **Layers** (base style, coverage, overlays) | the active pane | a number badge on the button; the menu head and every section heading |
+| **Follow-live FAB** (until each pane has its own Live, T-c) | the active pane | a number badge; its title and accessible name |
+| **Viewport menu**: Close, Whole surface | the active pane | the menu head, "Viewport · pane N of M" |
+| **Tools** (Measure, Annotate, Pin) | the pane the stroke is made on — which the press makes active | the outline moves to it at the press |
+| **Colour scale** | **every pane** (docs/16 §8.5a: one scale, stated) | the layers menu's "every pane" section |
+| **Spectrum-trace strip** toggle | every pane | the layers menu's "Every pane" section |
+| **Outputs**: Listen, Decode, Record IQ, Stream out | **global** — the selected signal or region, not a pane | no pane name, by design |
+
+**Setting the active pane.** A primary press, a **right-click** (and the context-menu request
+itself), a wheel and a pinch on a pane each make it active — a right-click that opens a pane's menu
+while the chrome goes on acting on another pane is the defect this section closes. Keys, bare only
+(never while typing into a field, never with Ctrl/Cmd/Alt, never on auto-repeat):
+
+| Key | Does |
+|---|---|
+| `]` / `[` | the next / previous pane becomes active (layout order, wrapping) |
+| `1`-`9` | pane N becomes active |
+| `L` | toggles Live on the **active** pane — the FAB's own press: freeze a following pane, re-pin a frozen one |
+
+**Nothing here reaches a device route** (§10.4): which pane is active is view state, and `L` is a
+coordinate change on one pane. Guarded by `ui/test/app-active-pane.test.ts` (naming, the notifying
+accessor, right-click, the keys, the wiring) and `ui/e2e/app-active-pane.e2e.mjs` (click, right-click
+and keys each move the outline and the named chrome in the same event, at 1280 and 400 px).
 
 ---
 

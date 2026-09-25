@@ -34,6 +34,23 @@ export const unclickable = (sel) => `JSON.stringify([...document.querySelectorAl
            ok: !!top && (top === el || el.contains(top)) && r.width >= 16 && r.height >= 16 && r.right <= innerWidth && r.bottom <= innerHeight };
 }).filter((b) => !b.ok))`;
 
+/** T-1022: each closed-cluster control's accessible name, so a spec asserts WHICH controls are there
+ * (a bare count let T-993's two added controls read as "two too many"). Review's name carries its
+ * open-anomaly count (`Review (3)`, `shell.ts`); the count is stripped so the name is the control's. */
+export const closedNames = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) =>
+  String(el.getAttribute('aria-label') ?? el.textContent ?? el.tagName).replace(/ \\(\\d+\\+?\\)$/, '')))`;
+
+/** T-1022: every pair of matched controls whose boxes intersect (by more than a hairline), as
+ * `"a × b"` — two controls drawn over each other is a layout defect even when each centre is clear. */
+export const overlapping = (sel) => `JSON.stringify((() => {
+  const els = [...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => [el.getAttribute('aria-label') ?? el.className, el.getBoundingClientRect()]);
+  const out = [];
+  for (let i = 0; i < els.length; i++) for (let j = i + 1; j < els.length; j++) {
+    const [a, r] = els[i], [b, q] = els[j];
+    if (Math.min(r.right, q.right) - Math.max(r.left, q.left) > 0.5 && Math.min(r.bottom, q.bottom) - Math.max(r.top, q.top) > 0.5) out.push(a + ' × ' + b);
+  }
+  return out; })())`;
+
 /** Hit-test every rehomed control: the closed cluster, then each menu opened in turn (and closed
  * again). Returns `{ closed, pane, layers, counts }` — the unpressable ones per group, and how many
  * were tested, so an empty result cannot come from matching nothing. */
@@ -41,6 +58,8 @@ export async function rehomedHitTest(page) {
   const count = (sel) => page.eval(`document.querySelectorAll(${JSON.stringify(sel)}).length`);
   const closed = JSON.parse(await page.eval(unclickable(CLOSED)));
   const counts = { closed: await count(CLOSED) };
+  const names = JSON.parse(await page.eval(closedNames(CLOSED)));
+  const overlaps = JSON.parse(await page.eval(overlapping(CLOSED)));
   await page.click("document.querySelector('.map-pane-btn')");
   await page.waitFor("the viewport menu to open", "!document.querySelector('#map-pane-menu').hidden", { timeoutMs: 5000 });
   const pane = JSON.parse(await page.eval(unclickable(PANE_ITEMS)));
@@ -53,7 +72,7 @@ export async function rehomedHitTest(page) {
   await page.click("document.querySelector('.map-layers-btn')");
   await page.waitFor("both menus to close",
     "document.querySelector('#map-layers').hidden && document.querySelector('#map-pane-menu').hidden", { timeoutMs: 5000 });
-  return { closed, pane, layers, counts };
+  return { closed, pane, layers, counts, names, overlaps };
 }
 
 /**

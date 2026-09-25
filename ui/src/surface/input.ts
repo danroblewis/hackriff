@@ -140,6 +140,12 @@ export function attachSurfaceInput(
     };
   };
   const moved = () => opts.onView?.();
+  /** Make the pane under `p` active (the map strip is not a pane and changes nothing). */
+  const activate = (p: GlPoint) => {
+    if (preview.onMap(p)) return;
+    const pane = preview.paneAt(p);
+    if (pane) preview.activePane = pane;
+  };
 
   let dragging:
     | {
@@ -187,7 +193,14 @@ export function attachSurfaceInput(
   // Nothing here moves a viewport, so a region stroke is not a pan: T-444's offer is neither
   // invalidated nor created by one, which is correct — the viewport did not move.
   const onDown = (e: PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0) {
+      // T-1000: a right (or middle) press on a pane still says which pane the user is pointing at,
+      // so it sets the active pane exactly as a primary press does — before this, a right-click
+      // opened a pane's context menu while the chrome went on acting on whichever pane was pressed
+      // last. It starts no stroke: nothing pans, marks or measures, and nothing reaches a device.
+      if (!isTouch(e)) activate(point(e));
+      return;
+    }
     if (isTouch(e)) {
       if (fingers.size >= 2) return; // a third finger means nothing
       fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -428,6 +441,9 @@ export function attachSurfaceInput(
   };
 
   const onMenu = (e: MouseEvent) => {
+    // T-1000: the menu request itself names the pane too — a keyboard's context-menu key, or a
+    // platform whose secondary click arrives with no non-primary `pointerdown` before it.
+    if (fingers.size === 0) activate(point(e));
     if (!opts.onContext) return;
     e.preventDefault();
     // A finger is still down (T-824): the browser's long-press menu, fired mid-hold. The stroke

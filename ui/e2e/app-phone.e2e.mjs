@@ -104,7 +104,16 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
   for (const k of ["status", "nudge", "dock", "zoom", "fab", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
   for (const k of ["sheet", "chrome", "note"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
-  await touch("touchStart", [[200, 110]]);
+  // T-1025: the wake-up touch lands on the DEVICE chip, found by its own box, not on a fixed
+  // (200, 110) that happened to be over the Explore button while the status pill was one wide box.
+  // The chips made that point "Decode" — the touch switched view, and everything after it was
+  // asserted against the framed shell. A touch meant to say "a finger on the chrome" must not be a
+  // press on whatever control the layout has moved under the coordinate.
+  const wake = JSON.parse(await page.eval(`JSON.stringify((() => {
+    const r = document.querySelector('.map-status #device').getBoundingClientRect();
+    return [Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)]; })())`));
+  t.diagnostic(`wake touch at ${JSON.stringify(wake)}`);
+  await touch("touchStart", [wake]);
   await touch("touchEnd", []);
   await page.waitFor("a touch to bring the chrome back", "!document.body.classList.contains('chrome-idle')", { timeoutMs: 5000 });
 
