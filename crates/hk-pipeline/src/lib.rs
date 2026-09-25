@@ -44,6 +44,7 @@ pub mod classify; // T-199
 pub mod compute;
 pub mod config;
 pub mod control;
+pub mod dmr; // T-989: conventional DMR (Tier II) identification on any 4FSK 4800 Bd region
 pub mod events;
 pub mod family;
 pub mod gate;

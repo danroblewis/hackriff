@@ -75,6 +75,7 @@ pub mod comb;
 pub mod components;
 pub mod config;
 pub mod detector;
+pub mod dmr_tier2;
 pub mod integrated;
 pub mod record;
 pub mod rules;

@@ -31,6 +31,17 @@
 //!   as soon as that much of it has arrived, not when its track eventually idles out, and the row is
 //!   written the moment the inventory has an entry for the track.
 //!
+//! # And whether it is DMR (T-989)
+//!
+//! Over the same box, the chain also asks [`crate::dmr`] whether the region is **conventional DMR
+//! (Tier II)** — a question the trunking hunt cannot reach, because a conventional repeater has no
+//! control channel. It is deliberately **not** gated on the classification: the emissions it
+//! exists for are the ones the classifier abstained on (an explorer window's DMR repeater arrived
+//! with `classification: null`), so a region with no classification is still asked, and a region
+//! with one gets both rows. What gates it is the region's own measured bandwidth, because a DMR
+//! channel is 12.5 kHz wide; everything past that gate has to produce DMR sync words at a ~1e-11
+//! false-alarm rate per position before anything is written.
+//!
 //! # Which emitter the row is written against
 //!
 //! The one the inventory recorded **for this track**
@@ -436,11 +447,25 @@ pub(crate) fn run(
     let continuous = chosen.as_ref().is_some_and(|b| b.span >= window);
 
     // Abstained upstream (counted in `classify`), or no box of this track ever reached the
-    // chain's buffer: nothing was measured, nothing to write.
-    let Some(result) = chosen.as_ref().and_then(|b| classify(&shared, b)) else {
-        return;
+    // chain's buffer: nothing was measured.
+    let classification = chosen.as_ref().and_then(|b| classify(&shared, b));
+    // T-989: and, on the same box, whether this is conventional DMR. Deliberately **not** gated
+    // on the classification: the emissions this exists for are the ones the classifier abstained
+    // on (an explorer window's DMR repeater arrived with `classification: null`), so a region
+    // that could not be classified is still asked.
+    let result = Measured {
+        dmr: chosen.as_ref().and_then(|b| dmr_scan(&shared, b)),
+        region: chosen.as_ref().map(|b| Region {
+            center_hz: b.prov.tune.center_hz + b.request.center_offset_hz,
+            bandwidth_hz: b.request.bandwidth_hz,
+            t: b.time.host_time,
+        }),
+        classification,
     };
     drop(chosen);
+    if result.is_empty() {
+        return;
+    }
     // A continuous emission is written as soon as its track has an entry, not when the track
     // eventually ends: its decode chain may run for as long as the track does.
     if continuous && !detach {
@@ -541,17 +566,95 @@ fn emitter_of(shared: &Shared, track: TrackId) -> Option<EmitterId> {
         .recorded_emitter_of_track(track)
 }
 
-/// Appends the classification to `emitter` ([`crate::classify::record`], which always writes).
-fn write(shared: &Shared, emitter: EmitterId, classification: &Classification) {
+/// What the chain measured about one region: the C15 classification, and whether the region is
+/// conventional DMR (T-989). Either may be absent, and a region with neither is never written.
+struct Measured {
+    classification: Option<Classification>,
+    dmr: Option<hk_detect::dmr_tier2::Tier2Scan>,
+    region: Option<Region>,
+}
+
+/// Where the measured box sat, for the DMR row and its message stream.
+#[derive(Clone, Copy)]
+struct Region {
+    center_hz: f64,
+    bandwidth_hz: f64,
+    t: hk_model::Timestamp,
+}
+
+impl Measured {
+    /// Nothing was measured, so there is nothing to wait for an emitter for.
+    fn is_empty(&self) -> bool {
+        self.classification.is_none() && self.dmr.is_none()
+    }
+}
+
+/// Asks [`crate::dmr`] whether the chosen box is conventional DMR, counting what it spent.
+///
+/// The bandwidth gate is checked here rather than inside so that `dmr_scanned` counts the regions
+/// a demodulation was actually spent on, not every region the chain saw.
+fn dmr_scan(shared: &Shared, b: &Chosen) -> Option<hk_detect::dmr_tier2::Tier2Scan> {
     let c = &shared.counters.chains;
-    let mut repo = shared.repo();
-    match crate::classify::record(&mut repo, emitter, classification) {
-        Ok(_) => inc(&c.classifications),
-        Err(e) => {
-            inc(&c.errors);
-            eprintln!("hk-pipeline: classify write: {e}");
+    if !crate::dmr::bandwidth_admits(b.request.bandwidth_hz) {
+        return None;
+    }
+    inc(&c.dmr_scanned);
+    let info = InputInfo {
+        time: b.time,
+        discontinuity: Discontinuity::NONE,
+        dropped_before: 0,
+        provenance: &b.prov,
+    };
+    let scan = crate::dmr::identify(info, &b.iq, &b.request)?;
+    inc(&c.dmr_identified);
+    add(
+        &c.dmr_headers_refused,
+        (scan.bptc_failed + scan.check_failed) as u64,
+    );
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: dmr-tier2 {:.4} MHz: {}",
+            (b.prov.tune.center_hz + b.request.center_offset_hz) / 1e6,
+            scan.verdict().unwrap_or_default()
+        );
+    }
+    Some(scan)
+}
+
+/// Appends what was measured to `emitter`: the classification ([`crate::classify::record`], which
+/// always writes) and, where the region was identified as DMR, its verdict row and its headers.
+fn write(shared: &Shared, emitter: EmitterId, measured: &Measured) {
+    let c = &shared.counters.chains;
+    if let Some(classification) = &measured.classification {
+        let mut repo = shared.repo();
+        match crate::classify::record(&mut repo, emitter, classification) {
+            Ok(_) => inc(&c.classifications),
+            Err(e) => {
+                inc(&c.errors);
+                eprintln!("hk-pipeline: classify write: {e}");
+            }
         }
     }
+    let (Some(scan), Some(region)) = (&measured.dmr, measured.region) else {
+        return;
+    };
+    {
+        let mut repo = shared.repo();
+        if let Err(e) = crate::dmr::record(&mut repo, emitter, scan, region.t) {
+            inc(&c.errors);
+            eprintln!("hk-pipeline: dmr-tier2 write: {e}");
+        }
+    }
+    // Outside the repository borrow: publishing takes its own time and no other writer should
+    // queue behind it.
+    crate::dmr::publish_headers(
+        shared,
+        emitter,
+        scan,
+        region.center_hz,
+        region.bandwidth_hz,
+        region.t,
+    );
 }
 
 #[cfg(test)]
