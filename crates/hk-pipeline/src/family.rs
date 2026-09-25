@@ -91,24 +91,33 @@
 //!    230 kHz of occupied bandwidth is not a 25 kHz aviation voice channel. Services with no
 //!    bandwidth signature (amateur; Part 15, which spans a 20 kHz remote and a 20 MHz WLAN
 //!    channel) state none, and read `not-discriminating` rather than pretending to a test.
-//! 3. **A receiver artefact is explained as one — but never over a measurement.**
+//! 3. **A receiver artefact is explained as one — but only where the mechanism was measured.**
 //!    [`artefact_verdict`] reads the repository for a standing `artifact-of` relation (T-219,
-//!    with its arithmetic), for a **measured** receiver mechanism, or for a frequency
-//!    **coincidence the LO moved under** ([`Repository::emitter_receiver_artefact_share`]). Such
-//!    a row gets exactly one explanation, [`RECEIVER_ARTEFACT`], and **no** service candidate:
-//!    nothing was on the air, so no allocation applies to it. T-948 stops the DC point being
-//!    admitted at all; this is what the ones already in the inventory say.
+//!    with its arithmetic) or for an **established** mechanism on a majority of the row's newest
+//!    detections ([`Repository::emitter_receiver_artefact_share`]): an IQ image, an
+//!    intermodulation product, a hit in a *measured* spur mask, or a retune-settled LO-relative
+//!    verdict. Such a row gets exactly one explanation, [`RECEIVER_ARTEFACT`], and **no** service
+//!    candidate: nothing was on the air, so no allocation applies to it.
 //!
-//!    Four limits, from the T-990 review and the AWARE-042 red it uncovered, each load-bearing
-//!    rather than a softening: a coincidence with one of the receiver's own numbers (DC, a
-//!    reference or clock harmonic, a comb tooth) is not a verdict until the mark is shown
-//!    following the LO, because a dwell centres the radio on what it is listening to; `clipped`
-//!    and `compressed` never count (a real station strong enough to clip the ADC on one
-//!    high-gain tune is still a real station, and an artefact label would override what was
-//!    measured); a row carrying demodulator, decoder or classifier evidence keeps it at rank 1
-//!    and shows the artefact only as an alternative at [`ARTEFACT_ALTERNATIVE_SCORE`], so the
-//!    status that evidence earned stands; and the verdict is derived on every call and never
-//!    written down, so it is revocable in both directions with nothing to un-tag.
+//!    A bare **coincidence** between the emission's frequency and one of the receiver's own
+//!    numbers — DC at the tuned centre, `n × 10 MHz`, `n × fs`, a comb tooth — is *not* a verdict
+//!    and never has been able to be one here. 120.000 MHz is a 10 MHz multiple and a valid 25 kHz
+//!    airband channel; a dwell centres the radio on what it is listening to, so a real emission
+//!    being demodulated is at the tuned centre too (AWARE-042's real 12.5 kHz channels are `dc`
+//!    on 100 % of their detections); and the retune test that would settle DC is unreachable per
+//!    emitter, because a DC line under a wide retune lands at a different frequency and becomes a
+//!    different emitter. So a coincidence is **said and not claimed**: [`coincidence_note`] puts
+//!    the mechanism and its count on the rank-1 row, in words, with the allocations still ranked
+//!    below. Deciding it belongs where the detection is admitted (T-948's per-device, per-rate DC
+//!    + spur mask) — and a row that mask lists carries `spur-map`, which *is* established here.
+//!
+//!    Two further limits, from the first T-990 review: `clipped` and `compressed` never count (a
+//!    real station strong enough to clip the ADC on one high-gain tune is still a real station,
+//!    and an artefact label would override what was measured); and a row carrying demodulator,
+//!    decoder or classifier evidence keeps it at rank 1 and shows the artefact only as an
+//!    alternative at [`ARTEFACT_ALTERNATIVE_SCORE`], so the status that evidence earned stands.
+//!    The verdict is derived on every call and never written down, so it is revocable in both
+//!    directions with nothing to un-tag.
 //! 4. **The `unidentified` row carries the raster verdict it displaced.** The client reads
 //!    `explanations[0]` for the off-raster chip and the channel-raster readout, so rank 1 copies
 //!    the `off-raster` flag and the [`ExplanationEvidence::Raster`] entry of the best candidate
@@ -170,6 +179,7 @@ use hk_context::{BandTable, Region, match_known_status};
 // T-218: a user reclassification is written at the user arbitration rank (ADR-0016 §2).
 use hk_detect::TrackSummary;
 use hk_detect::track::inventory::SUSPECT_FRACTION;
+use hk_model::ReceiverArtefactShare;
 use hk_model::classify::{ArbRank, Stage};
 use hk_model::relate::{ArtifactKind, RelationKind};
 use hk_model::{
@@ -956,7 +966,7 @@ pub fn rank_explanations(
     f_center_hz: f64,
     bandwidth_hz: f64,
 ) -> Vec<Explanation> {
-    let mut out = rank_all(table, evidence, f_center_hz, bandwidth_hz, None, None);
+    let mut out = rank_all(table, evidence, f_center_hz, bandwidth_hz, None, None, None);
     out.truncate(TOP_K);
     out
 }
@@ -989,6 +999,7 @@ fn rank_all(
     bandwidth_hz: f64,
     duty_cycle: Option<f64>,
     artefact: Option<&ArtefactVerdict>,
+    coincidence: Option<&ExplanationEvidence>,
 ) -> Vec<Explanation> {
     // T-990 review: the short-circuit is only for a row nothing measured has named. A
     // demodulator lock, a decode or a classifier row is proof the signal was on the air, and the
@@ -1150,7 +1161,10 @@ fn rank_all(
         });
     }
     if !out.iter().any(|x| x.evidence_confidence > 0.0) {
-        out.insert(0, unidentified_explanation(&occupancy, &out, no_rows));
+        out.insert(
+            0,
+            unidentified_explanation(&occupancy, &out, no_rows, coincidence),
+        );
     }
     for (i, e) in out.iter_mut().enumerate() {
         e.rank = i as u32 + 1;
@@ -1199,6 +1213,7 @@ fn unidentified_explanation(
     occupancy: &Occupancy,
     below: &[Explanation],
     no_allocation_rows: bool,
+    coincidence: Option<&ExplanationEvidence>,
 ) -> Explanation {
     let considered: Vec<&str> = below.iter().map(|x| x.service.as_str()).collect();
     let reason = if no_allocation_rows {
@@ -1238,6 +1253,15 @@ fn unidentified_explanation(
             flags.push("off-raster".to_owned());
         }
         evidence.push(raster);
+    }
+    // T-990: a frequency coincidence with one of the receiver's own numbers, said out loud on the
+    // row a person actually reads, without being claimed as a verdict (see `artefact_verdict`).
+    if let Some(ExplanationEvidence::Artefact { source, reason }) = coincidence {
+        flags.push(source.clone());
+        evidence.push(ExplanationEvidence::Artefact {
+            source: source.clone(),
+            reason: reason.clone(),
+        });
     }
     Explanation {
         rank: 0,
@@ -1285,42 +1309,43 @@ pub struct ArtefactVerdict {
 
 /// Share of an emitter's newest linked detections a receiver mechanism must explain before the
 /// row is called the receiver's own. A majority: "mostly the receiver", the same reading of
-/// "mostly" as [`hk_detect::track::inventory::SUSPECT_FRACTION`], applied to strictly narrower
-/// sets of flags.
+/// "mostly" as [`hk_detect::track::inventory::SUSPECT_FRACTION`], applied to a strictly narrower
+/// set of flags.
 pub const RECEIVER_ARTEFACT_FRACTION: f64 = 0.5;
 
-/// How far apart two tuning centres must be before "it was at the centre of both" is proof the
-/// mark followed the LO rather than proof of one fixed emission, Hz.
-///
-/// Comfortably wider than the DC rule's own window ([`hk_detect::DcRule`]: within 15 kHz of the
-/// centre, at most 40 kHz wide) and wider than AWARE-042's whole 100 kHz scene, so a dwell
-/// wandering across one channel plan can never satisfy it while a scanner stepping bands always
-/// does.
-pub const ARTEFACT_LO_SPAN_HZ: f64 = 100e3;
-
-/// `emitter`'s receiver-artefact verdict, recomputed from what the repository holds. Three ways
-/// in, and the third is the one the T-990 review forced:
+/// `emitter`'s receiver-artefact verdict, recomputed from what the repository holds. Two ways in,
+/// and both require the mechanism to have been **measured against something**:
 ///
 /// 1. A standing `artifact-of` relation (T-219's overlap resolver, with the arithmetic in its
 ///    reason) — the mechanism was resolved against a named source.
-/// 2. A majority of the newest linked detections explained by a mechanism that was **measured
-///    against something**: an IQ image, an intermodulation product, a measured spur-mask entry, or
-///    a retune-settled LO-relative verdict ([`Repository::emitter_receiver_artefact_share`]).
-/// 3. A majority explained by a frequency **coincidence** with one of the receiver's own numbers
-///    (DC / LO leakage, a reference or clock harmonic, a comb tooth) — but **only where the LO
-///    moved and the mark followed it**: the row must have been flagged at every tuning centre it
-///    was measured under, across a span of at least [`ARTEFACT_LO_SPAN_HZ`]. A real emission
-///    keeps its absolute frequency (T-586); the receiver's own line does not.
+/// 2. A majority of the newest linked detections explained by an **established** mechanism
+///    ([`Repository::emitter_receiver_artefact_share`]): an IQ image, an intermodulation product,
+///    a hit in a **measured** spur mask, or a retune-settled LO-relative verdict.
 ///
-/// **What clause 3 is guarding against, measured rather than argued.** A coincidence on its own
-/// is not a verdict, because a dwell *centres the radio on what it is listening to*: every real
-/// signal being demodulated is "at the tuned centre", and a land-mobile channel plan is a comb.
-/// Before this clause existed, AWARE-042's synthetic 12.5 kHz raster at 446 MHz — real emissions,
-/// blind truth — had its channels explained "Receiver artefact" with `dc` on 100 % of their
-/// detections, because the renderer tunes to each channel in turn. That is the same defect as the
-/// one this ticket was filed for, pointing the other way.
+/// **What is deliberately not a verdict, and why (the T-990 reviews).** A bare *coincidence*
+/// between the emission's frequency and one of the receiver's own numbers proves nothing, in two
+/// different ways, and neither can be repaired at this layer:
 ///
-/// **Two further things this deliberately is not** (T-990 review):
+/// - A reference harmonic (`n × 10 MHz`), a clock harmonic (`n × fs`) and a comb tooth sit at a
+///   **fixed absolute frequency**. 120.000 MHz is a 10 MHz multiple *and* a valid 25 kHz airband
+///   channel. Nothing distinguishes the two by position, and no retune can: neither the mark nor
+///   a real emission there moves.
+/// - DC sits at the **tuned centre**, which does move — but a dwell centres the radio on what it
+///   is listening to, so a real emission being demodulated is at the tuned centre too. Measured,
+///   not argued: AWARE-042's synthetic 12.5 kHz raster at 446 MHz has every one of its real
+///   channels flagged `dc` on 100 % of its detections, because the renderer tunes to each channel
+///   in turn. And "the mark followed the LO" cannot be tested per emitter, because the DC rule
+///   only marks a detection within 15 kHz of the centre ([`hk_detect::DcRule`]) — a DC line under
+///   a larger retune lands at a different frequency and becomes a *different* emitter, so one
+///   row's DC detections can never span a retune wide enough to prove anything.
+///
+/// So a coincidence is **disclosed and never asserted**: [`coincidence_note`] puts it on the
+/// rank-1 explanation in words, with the mechanism named and counted, and the band-plan
+/// allocations stay ranked below it. Deciding it needs the check made where the detection is
+/// admitted — T-948's per-device, per-rate DC + spur mask — and once a row *is* mask-listed its
+/// detections carry `spur-map`, which is established evidence and does reach a verdict here.
+///
+/// **Two further things this is not** (first T-990 review):
 ///
 /// - **It is not "the measurement was untrustworthy".** `clipped` and `compressed` are excluded
 ///   entirely, so a real station strong enough to drive the ADC into clipping on one high-gain
@@ -1332,60 +1357,89 @@ pub fn artefact_verdict(
     repo: &Repository,
     emitter: EmitterId,
 ) -> Result<Option<ArtefactVerdict>, RepoError> {
+    Ok(artefact_and_coincidence(repo, emitter)?.0)
+}
+
+/// [`artefact_verdict`] and, when there is no verdict, the coincidence worth *saying*
+/// ([`coincidence_note`]) — from **one** pass over the row's detections.
+///
+/// One call, because this runs on the control thread for every explained emitter: the relation
+/// lookup is an indexed read of a table that is empty for almost every row, and the census is one
+/// index-only query capped at [`hk_model::MAX_EVIDENCE_DETECTIONS`] rows with no join and no JSON
+/// extract (the tuning centre it used to fetch is not needed — see [`artefact_verdict`]).
+pub fn artefact_and_coincidence(
+    repo: &Repository,
+    emitter: EmitterId,
+) -> Result<(Option<ArtefactVerdict>, Option<ExplanationEvidence>), RepoError> {
     let id = repo.live_emitter_id(emitter)?;
     if let Some(r) = repo
         .emitter_relations(id)?
         .into_iter()
         .find(|r| r.active && r.kind == RelationKind::ArtifactOf)
     {
-        return Ok(Some(ArtefactVerdict {
-            source: format!(
-                "artifact-of:{}",
-                r.artifact.map_or("unspecified", ArtifactKind::as_str)
-            ),
-            reason: r.reason,
-        }));
+        return Ok((
+            Some(ArtefactVerdict {
+                source: format!(
+                    "artifact-of:{}",
+                    r.artifact.map_or("unspecified", ArtifactKind::as_str)
+                ),
+                reason: r.reason,
+            }),
+            None,
+        ));
     }
     let share = repo.emitter_receiver_artefact_share(id)?;
-    if share.detections == 0 {
-        return Ok(None);
+    Ok(match artefact_from_share(&share) {
+        Some(v) => (Some(v), None),
+        None => (None, coincidence_note(&share)),
+    })
+}
+
+/// The verdict a detection-flag census supports, if any. Split out so it can be read (and tested)
+/// without a repository.
+pub fn artefact_from_share(share: &ReceiverArtefactShare) -> Option<ArtefactVerdict> {
+    if share.detections == 0 || share.established_fraction() <= RECEIVER_ARTEFACT_FRACTION {
+        return None;
     }
-    let mechanism = share.reason.clone().unwrap_or_else(|| "spur".to_owned());
-    let span = share.coincidence_lo_span_hz();
-    let (count, why) = if share.measured_fraction() > RECEIVER_ARTEFACT_FRACTION {
-        (
-            share.measured_mechanism,
-            format!(
-                "the mechanism ({mechanism}) was measured against something — a mirror, a strong \
-                 carrier, a spur mask or a retune — not inferred from the frequency alone"
-            ),
-        )
-    } else if share.coincidence_fraction() > RECEIVER_ARTEFACT_FRACTION
-        && share.coincidence_at_every_tuning()
-        && span >= ARTEFACT_LO_SPAN_HZ
-    {
-        (
-            share.coincidence,
-            format!(
-                "the {mechanism} coincidence held at every one of the {} tuning centres this row \
-                 was measured under, spanning {:.3} MHz: the mark followed the LO, which a real \
-                 emission at a fixed frequency cannot do",
-                share.coincidence_centres_hz.len(),
-                span / 1e6,
-            ),
-        )
-    } else {
-        return Ok(None);
-    };
-    Ok(Some(ArtefactVerdict {
+    let mechanism = share
+        .established_reason
+        .clone()
+        .unwrap_or_else(|| "spur".to_owned());
+    Some(ArtefactVerdict {
         source: format!("receiver-mechanism:{mechanism}"),
         reason: format!(
-            "{count} of this row's {} newest detections are the receiver's own: {why}. Clipping \
-             and compression are not counted, so this is not merely a measurement it could not be \
-             trusted on",
-            share.detections,
+            "{} of this row's {} newest detections are the receiver's own: the mechanism \
+             ({mechanism}) was measured against something — a mirror, a strong carrier, a \
+             measured spur mask or a retune — not inferred from the frequency alone. Clipping \
+             and compression are not counted, so this is not merely a measurement it could not \
+             be trusted on",
+            share.established, share.detections,
         ),
-    }))
+    })
+}
+
+/// A frequency coincidence with one of the receiver's own numbers, to be **said** on the rank-1
+/// explanation without being claimed as a verdict (see [`artefact_verdict`] for why it cannot be
+/// one). `None` unless a majority of the row's detections carry it.
+pub fn coincidence_note(share: &ReceiverArtefactShare) -> Option<ExplanationEvidence> {
+    if share.detections == 0 || share.coincidence_fraction() <= RECEIVER_ARTEFACT_FRACTION {
+        return None;
+    }
+    let mechanism = share
+        .coincidence_reason
+        .clone()
+        .unwrap_or_else(|| "unspecified spur".to_owned());
+    Some(ExplanationEvidence::Artefact {
+        source: format!("receiver-coincidence:{mechanism}"),
+        reason: format!(
+            "{} of this row's {} newest detections coincide with one of the receiver's own \
+             numbers ({mechanism}). That is a suspicion, not a verdict: a real emission sits on a \
+             10 MHz multiple or at the tuned centre of the dwell listening to it just as readily, \
+             and no retune separates the two. Deciding it needs the receiver's own measured DC / \
+             spur mask (T-948); until then this row is unidentified, not explained away",
+            share.coincidence, share.detections,
+        ),
+    })
 }
 
 /// The status, `prior_ref` and reason `ranked` (best first, untruncated) supports: the verdict of
@@ -1605,7 +1659,7 @@ pub fn explain_emitter(
         .get("duty_cycle")
         .and_then(serde_json::Value::as_f64)
         .filter(|d| d.is_finite() && (0.0..=1.0).contains(d));
-    let artefact = artefact_verdict(repo, id)?;
+    let (artefact, coincidence) = artefact_and_coincidence(repo, id)?;
     let mut all = rank_all(
         table,
         &evidence,
@@ -1613,6 +1667,7 @@ pub fn explain_emitter(
         bandwidth,
         duty,
         artefact.as_ref(),
+        coincidence.as_ref(),
     );
     if refined.is_some() {
         for ev in all.iter_mut().flat_map(|x| x.evidence.iter_mut()) {
@@ -1701,8 +1756,8 @@ mod tests {
     use hk_model::detection::SpurReason;
     use hk_model::{
         Detection, DetectionFlags, DetectionId, Fingerprint, FreqRange, LinkTarget, PlanRegion,
-        ScanPlan, ScanPlanId, ScanPolicy, Schedule, Sighting, Survey, SurveyId, SurveyState,
-        TimeRange, TimingFeatures, Track, TrackId, TrackState,
+        ScanPlan, ScanPlanId, ScanPolicy, Schedule, Sighting, SpurMask, SpurMaskId, Survey,
+        SurveyId, SurveyState, TimeRange, TimingFeatures, Track, TrackId, TrackState,
     };
 
     const FM_ROW: &str = "us-47cfr2106-compact:fm-broadcast";
@@ -2131,6 +2186,7 @@ mod tests {
             230e3,
             None,
             None,
+            None,
         );
         assert_eq!(r[0].service, "aviation-voice");
         assert_eq!(r[0].status, KnownStatus::Known);
@@ -2146,6 +2202,7 @@ mod tests {
             &[ev("aviation-voice", 0.45, "clf@1")],
             120.5e6,
             230e3,
+            None,
             None,
             None,
         );
@@ -2451,60 +2508,140 @@ mod tests {
         );
     }
 
-    /// T-990 / T-948: the DC point in the airband. A row the receiver's DC / LO leakage explains
-    /// — at the tuned centre of **every** tuning it was measured under, across a span no fixed
-    /// emission could sit in the middle of — is the receiver's own. It is explained as a receiver
-    /// artefact, and no service is offered, because nothing was on the air to allocate.
+    /// T-990 / T-948: the DC point in the airband, built from detections **the DC rule could
+    /// actually produce** — a 2 kHz mark within `DcRule`'s 15 kHz window of the one tuned centre
+    /// (a wider retune moves the DC line to a different frequency, where it is a different
+    /// emitter, so a DC row measured under two far-apart tunings is a fixture the pipeline can
+    /// never record).
+    ///
+    /// The ticket's requirement is "**not 'Aviation voice'**", and that is met unconditionally:
+    /// the band-plan allocation is never the explanation of a row nothing measured has named. The
+    /// DC coincidence itself is **said out loud** — mechanism and count, on the rank-1 row — but
+    /// not claimed as a verdict, because at this layer it cannot be told from a real emission the
+    /// radio is dwelled on (see [`artefact_verdict`]).
     #[test]
-    fn t990_a_receiver_artefact_row_is_explained_as_one_not_as_aviation_voice() {
+    fn t990_a_dc_spike_in_the_airband_is_never_explained_as_aviation_voice() {
         let mut repo = Repository::open_in_memory().unwrap();
-        let clean = emitter_with_detections(
-            &mut repo,
-            120.5e6,
-            8e3,
-            "unknown",
-            &[DetectionFlags::default(); 4],
-        );
-        let before = explain_emitter(&mut repo, &table(), clean).unwrap();
-        assert!(
-            before
-                .explanations
-                .iter()
-                .any(|e| e.service == "aviation-voice"),
-            "{before:?}"
-        );
-
-        // The DC point: still at the centre after the radio moved 4.8 MHz across the airband.
         let dc = emitter_measured_at(
             &mut repo,
-            120.5001e6,
+            120.5e6,
             2e3,
             "unknown",
-            &[118.5e6, 123.3e6],
-            &[dc_flag(), dc_flag(), dc_flag(), dc_flag()],
+            &[120.5e6],
+            &[dc_flag(); 6],
         );
-        let after = explain_emitter(&mut repo, &table(), dc).unwrap();
-        assert_eq!(after.explanations.len(), 1, "{:?}", after.explanations);
-        let top = &after.explanations[0];
-        assert_eq!(top.service, RECEIVER_ARTEFACT);
-        assert_eq!(top.label, "Receiver artefact");
+        let x = explain_emitter(&mut repo, &table(), dc).unwrap();
+        let top = &x.explanations[0];
+        assert_eq!(top.service, UNIDENTIFIED, "{:?}", x.explanations);
+        assert_ne!(top.service, "aviation-voice");
         assert!(
-            matches!(top.evidence.first(), Some(ExplanationEvidence::Artefact { source, .. }) if source == "receiver-mechanism:dc"),
+            top.has_flag("receiver-coincidence:dc"),
+            "the DC mechanism was not named on the row a person reads: {top:?}"
+        );
+        assert!(
+            matches!(
+                top.evidence.iter().find(|e| matches!(e, ExplanationEvidence::Artefact { .. })),
+                Some(ExplanationEvidence::Artefact { reason, .. }) if reason.contains("6 of this row's 6")
+            ),
             "{top:?}"
         );
-        assert_eq!(after.status_appended, None);
+        // The allocation is still offered, ranked below, and still sets no status.
+        assert!(
+            x.explanations
+                .iter()
+                .any(|e| e.service == "aviation-voice" && e.rank > 1),
+            "{:?}",
+            x.explanations
+        );
+        assert_eq!(x.status_appended, None);
     }
 
-    /// T-990, from the AWARE-042 red the review's finding 4 uncovered. A **coincidence** with one
-    /// of the receiver's own numbers is not a verdict on its own, because a dwell centres the
-    /// radio on what it is listening to: in AWARE-042's synthetic 12.5 kHz raster at 446 MHz
-    /// every real channel is `dc`-flagged on 100 % of its detections, and every one of them was
-    /// being explained "Receiver artefact". The mark has to be shown following the LO.
+    /// T-990 / T-948: the same DC point once the receiver's **measured** spur mask lists it. The
+    /// ticket's clause is "DC/spur-**masked** rows get the artefact explanation instead (T-948)":
+    /// a mask entry is a measurement of the receiver (a terminated-input capture), not a
+    /// coincidence, so it does reach a verdict — one explanation, and no service offered.
     #[test]
-    fn t990_a_dc_coincidence_under_one_tuning_is_not_a_receiver_artefact() {
+    fn t990_a_spur_masked_row_is_explained_as_a_receiver_artefact() {
         let mut repo = Repository::open_in_memory().unwrap();
-        // A real 12.5 kHz land-mobile channel, dwelled on: at the tuned centre every time,
-        // because that is what a dwell is.
+        // The mask is a measurement of the receiver: a terminated-input capture, stored.
+        let mask = SpurMask {
+            id: SpurMaskId::new(),
+            supersedes: None,
+            device_id: "mock:t990".into(),
+            measured_at: t(0),
+            rules: Vec::new(),
+        };
+        repo.insert_spur_mask(&mask).unwrap();
+        let masked = DetectionFlags {
+            spur_candidate: true,
+            spur_reason: Some(SpurReason::SpurMap { mask: mask.id }),
+            ..DetectionFlags::default()
+        };
+        let id = emitter_measured_at(&mut repo, 120.5e6, 2e3, "unknown", &[120.5e6], &[masked; 4]);
+        let x = explain_emitter(&mut repo, &table(), id).unwrap();
+        assert_eq!(x.explanations.len(), 1, "{:?}", x.explanations);
+        assert_eq!(x.explanations[0].service, RECEIVER_ARTEFACT);
+        assert_eq!(x.explanations[0].label, "Receiver artefact");
+        assert!(
+            !x.explanations.iter().any(|e| e.service == "aviation-voice"),
+            "{:?}",
+            x.explanations
+        );
+        assert_eq!(x.status_appended, None);
+    }
+
+    /// T-990 second review, finding 2. A **fixed absolute frequency** that happens to be one of
+    /// the receiver's own numbers proves nothing: 120.000 MHz is a 10 MHz multiple *and* a valid
+    /// 25 kHz airband channel, and no retune separates the two because neither moves. A real
+    /// narrowband emission there, flagged `ref-harmonic` on every detection under two dwells
+    /// 400 kHz apart, must keep its allocation — the previous rule made it "Receiver artefact"
+    /// and dropped the aviation suggestion entirely.
+    #[test]
+    fn t990_a_real_emission_on_a_10_mhz_multiple_is_not_the_receivers_own() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let refh = DetectionFlags {
+            spur_candidate: true,
+            spur_reason: Some(SpurReason::RefHarmonic),
+            ..DetectionFlags::default()
+        };
+        let id = emitter_measured_at(
+            &mut repo,
+            120.0e6,
+            8e3,
+            "unknown",
+            &[119.8e6, 120.2e6],
+            &[refh; 8],
+        );
+        assert_eq!(artefact_verdict(&repo, id).unwrap(), None);
+        let x = explain_emitter(&mut repo, &table(), id).unwrap();
+        assert!(
+            !x.explanations
+                .iter()
+                .any(|e| e.service == RECEIVER_ARTEFACT),
+            "a real 25 kHz airband channel on a 10 MHz multiple was called the receiver's own: \
+             {:?}",
+            x.explanations
+        );
+        assert!(
+            x.explanations.iter().any(|e| e.service == "aviation-voice"),
+            "the aviation allocation was dropped: {:?}",
+            x.explanations
+        );
+        // The suspicion is still disclosed, by name, on the row a person reads.
+        assert!(
+            x.explanations[0].has_flag("receiver-coincidence:ref-harmonic"),
+            "{:?}",
+            x.explanations[0]
+        );
+    }
+
+    /// T-990, from the AWARE-042 red the first review's finding 4 uncovered. A dwell centres the
+    /// radio on what it is listening to, so a real channel being demodulated is flagged `dc` on
+    /// every detection. In AWARE-042's synthetic 12.5 kHz raster at 446 MHz every real channel
+    /// was being explained "Receiver artefact"; the allocation must survive.
+    #[test]
+    fn t990_a_dwelled_on_real_channel_is_not_a_receiver_artefact() {
+        let mut repo = Repository::open_in_memory().unwrap();
         let real = emitter_measured_at(
             &mut repo,
             446.06875e6,
@@ -2519,33 +2656,21 @@ mod tests {
             !x.explanations
                 .iter()
                 .any(|e| e.service == RECEIVER_ARTEFACT),
-            "a dwelled-on real channel was called the receiver's own: {:?}",
+            "{:?}",
             x.explanations
         );
         assert!(
             x.explanations.iter().any(|e| e.service == "amateur"),
-            "the 70 cm allocation is still offered as an alternative: {:?}",
+            "the 70 cm allocation is still offered: {:?}",
             x.explanations
         );
-
-        // Two tunings 60 kHz apart is a dwell wandering inside one channel plan, not the LO
-        // moving: still under ARTEFACT_LO_SPAN_HZ, so still not a verdict.
-        let near = emitter_measured_at(
-            &mut repo,
-            446.03e6,
-            8e3,
-            "unknown",
-            &[446.0e6, 446.06e6],
-            &[dc_flag(); 8],
-        );
-        assert_eq!(artefact_verdict(&repo, near).unwrap(), None);
     }
 
     /// A mechanism that was **measured against something** — here an IQ image, a mirror measured
-    /// stronger with a correlated shape — needs no LO corroboration: it is already a measurement
-    /// about the receive chain and not a coincidence of numbers.
+    /// stronger with a correlated shape — is a verdict: it is a measurement about the receive
+    /// chain, not a coincidence of numbers.
     #[test]
-    fn t990_a_measured_mechanism_is_a_verdict_without_the_lo_moving() {
+    fn t990_a_measured_mechanism_is_a_verdict() {
         let mut repo = Repository::open_in_memory().unwrap();
         let image = DetectionFlags {
             image_candidate: true,
@@ -2593,13 +2718,17 @@ mod tests {
         let mut repo = Repository::open_in_memory().unwrap();
         // A real broadcast station that also clipped, and that a spur rule flagged on most of its
         // detections: the worst case the review names.
+        let image = DetectionFlags {
+            image_candidate: true,
+            ..DetectionFlags::default()
+        };
         let id = emitter_measured_at(
             &mut repo,
             98.5e6,
             180e3,
             "wfm",
-            &[96.0e6, 101.0e6],
-            &[dc_flag(), dc_flag(), dc_flag(), dc_flag()],
+            &[101.0e6],
+            &[image, image, image, DetectionFlags::default()],
         );
         assert!(artefact_verdict(&repo, id).unwrap().is_some());
         let x = explain_emitter(&mut repo, &table(), id).unwrap();
@@ -2625,14 +2754,11 @@ mod tests {
     #[test]
     fn t990_the_artefact_verdict_is_revocable() {
         let mut repo = Repository::open_in_memory().unwrap();
-        let id = emitter_measured_at(
-            &mut repo,
-            120.5e6,
-            8e3,
-            "unknown",
-            &[118.5e6, 123.3e6],
-            &[dc_flag(); 4],
-        );
+        let image = DetectionFlags {
+            image_candidate: true,
+            ..DetectionFlags::default()
+        };
+        let id = emitter_measured_at(&mut repo, 120.5e6, 8e3, "unknown", &[120.9e6], &[image; 4]);
         assert_eq!(
             explain_emitter(&mut repo, &table(), id)
                 .unwrap()

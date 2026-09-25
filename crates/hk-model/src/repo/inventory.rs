@@ -88,29 +88,6 @@ pub(super) const EMITTER_REGION_SQL: &str = concat!(
 /// `track_detection`/`detection` primary keys, so this is index-only, no table scan. `t_start` was
 /// already read to order the rows; T-350 only stops it (and `t_end`) being thrown away at the
 /// `SELECT`. Parameter `?1` is the emitter id, given twice (once per source path).
-/// T-990: the emitter's newest linked detections' flags and the tuning centre each was measured
-/// under, for the receiver-artefact verdict. Same "linked" reach as
-/// [`EMITTER_LATEST_DETECTION_SQL`], newest first, capped at `?2`. The LO comes through the
-/// provenance join because half the verdict is "did this follow the LO"; the caller decides which
-/// bits mean what, so the rule lives in one place and not in SQL.
-const EMITTER_DETECTION_FLAGS_SQL: &str = "\
-     SELECT flags, spur_reason, lo, t_start FROM ( \
-       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
-       FROM emitter_link el \
-       JOIN track_detection td ON td.track_id = el.target_id \
-       JOIN detection d ON d.detection_id = td.detection_id \
-       JOIN provenance p ON p.provenance_id = d.provenance_id \
-       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
-       UNION ALL \
-       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start, \
-              json_extract(p.canonical, '$.tune.center_hz') AS lo \
-       FROM emitter_link el \
-       JOIN detection d ON d.detection_id = el.target_id \
-       JOIN provenance p ON p.provenance_id = d.provenance_id \
-       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
-     ) ORDER BY t_start DESC LIMIT ?2";
-
 const EMITTER_LATEST_DETECTION_SQL: &str = "\
      SELECT snr_peak, peak_dbfs, t_start, t_end FROM ( \
        SELECT d.snr_peak AS snr_peak, d.peak_dbfs AS peak_dbfs, \
@@ -126,6 +103,51 @@ const EMITTER_LATEST_DETECTION_SQL: &str = "\
        JOIN detection d ON d.detection_id = el.target_id \
        WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
      ) ORDER BY t_start DESC LIMIT 1";
+
+/// T-990: newest linked detections read for the receiver-artefact verdict
+/// ([`Repository::emitter_receiver_artefact_share`]).
+///
+/// Its own cap, well under [`super::MAX_EVIDENCE_DETECTIONS`] (256), because the question is
+/// "what is this row *mostly made of, lately*" and a majority over the newest 32 answers it —
+/// while a smaller window also makes the verdict track the latest measurements more closely,
+/// which is the revocability the whole design rests on.
+///
+/// **Measured** (T-990, the second review asked for it), on the explain path, in-memory
+/// repository, dev profile:
+///
+/// | row | census | whole `explain_emitter` |
+/// |---|---|---|
+/// | 4 linked detections (the common case) | 136 us | 460 us |
+/// | 400 linked detections, cap 256 | 793 us | 1256 us |
+/// | 400 linked detections, cap 32 | 536 us | 860 us |
+///
+/// So the cap pays on a long-lived row and nothing on a short one: the fixed part is the two
+/// prepared statements and the live-id lookup, and what the cap cannot remove is SQLite sorting
+/// the row's linked detections newest-first before the `LIMIT`. This runs on the **control
+/// thread**, once per explained emitter, beside `characterise`, the confirmation review and three
+/// overlap resolvers in the same `TrackInventory::touch`; it is not on the sample path.
+pub const MAX_ARTEFACT_DETECTIONS: usize = 32;
+
+/// T-990: the flags of an emitter's newest linked detections, for the receiver-artefact verdict.
+/// Same "linked" reach as [`EMITTER_LATEST_DETECTION_SQL`], newest first, capped at `?2`.
+///
+/// Flags and the stored spur reason only: no provenance join and no JSON extract, because the
+/// verdict asks *which mechanism* explained the detection and never *where the radio was tuned*
+/// (see [`Repository::emitter_receiver_artefact_share`] for why the tuning cannot settle it).
+/// The caller decides which bits mean what, so the rule lives in one place and not in SQL.
+const EMITTER_DETECTION_FLAGS_SQL: &str = "\
+     SELECT flags, spur_reason, t_start FROM ( \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN track_detection td ON td.track_id = el.target_id \
+       JOIN detection d ON d.detection_id = td.detection_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'track' AND el.superseded_by IS NULL \
+       UNION ALL \
+       SELECT d.flags AS flags, d.spur_reason AS spur_reason, d.t_start AS t_start \
+       FROM emitter_link el \
+       JOIN detection d ON d.detection_id = el.target_id \
+       WHERE el.emitter_id = ?1 AND el.target_kind = 'detection' AND el.superseded_by IS NULL \
+     ) ORDER BY t_start DESC LIMIT ?2";
 
 /// [`EMITTER_REGION_SQL`] with a row limit (`?6`).
 const EMITTER_REGION_LIMIT_SQL: &str = concat!(
@@ -1026,29 +1048,40 @@ impl Repository {
     }
 
     /// T-990: the ingredients of the **receiver-artefact** verdict for an emitter — read from its
-    /// newest linked detections (at most [`super::MAX_EVIDENCE_DETECTIONS`], newest first), with
-    /// the tuning centre each was measured under. The verdict itself is
-    /// `hk_pipeline::family::artefact_verdict`; this method only counts, so the rule has one home.
+    /// newest linked detections (at most [`MAX_ARTEFACT_DETECTIONS`], newest first). The
+    /// verdict itself is `hk_pipeline::family::artefact_verdict`; this method only counts, so the
+    /// rule has one home.
     ///
-    /// The counting splits the suspect flags three ways, and the split is the whole point:
+    /// The counting splits the suspect flags three ways, and the split is the whole point.
     ///
-    /// - **Measured mechanisms** ([`ReceiverArtefactShare::measured_mechanism`]): an IQ image (a
-    ///   mirror measured ≥ 20 dB stronger with a correlated shape), an intermodulation product (a
-    ///   measured relationship to strong carriers, or the gain-step test), a
-    ///   [`crate::detection::SpurReason::SpurMap`] hit (listed in a measured mask) or a
-    ///   [`crate::detection::SpurReason::LoRelative`] verdict (T-598, settled by retuning). Each
-    ///   of these was measured against *something*, so each can stand on its own.
-    /// - **Coincidences** ([`ReceiverArtefactShare::coincidence`]): DC / LO leakage, a reference
-    ///   or clock harmonic, a comb tooth. These say only that the emission's frequency coincides
-    ///   with one of the receiver's own numbers, and **a real emission coincides all the time** —
-    ///   a dwell centres the radio on the channel it is listening to, so every real signal being
-    ///   demodulated is "at the tuned centre", and a land-mobile channel plan is a comb. Measured,
-    ///   not assumed: AWARE-042's synthetic 12.5 kHz raster at 446 MHz has every one of its real
-    ///   channels flagged `dc` on 100 % of its detections, because the renderer tunes to each
-    ///   channel in turn. The caller therefore needs these corroborated by the LO having moved,
-    ///   which is what [`Self::coincidence_centres_hz`] is for.
-    /// - **Neither**: `clipped` and `compressed`. They say the measurement could not be trusted,
-    ///   never that the receiver invented the signal, and they are counted nowhere here.
+    /// **Established** ([`ReceiverArtefactShare::established`]) — the mechanism was measured
+    /// against something, so it stands on its own: an IQ image (a mirror measured ≥ 20 dB
+    /// stronger with a correlated shape), an intermodulation product (a measured relationship to
+    /// strong carriers, or the gain-step test), a [`crate::detection::SpurReason::SpurMap`] hit
+    /// (the frequency is listed in a **measured** spur mask, e.g. a terminated-input capture) or
+    /// a [`crate::detection::SpurReason::LoRelative`] verdict (T-598, settled by retuning).
+    ///
+    /// **Coincidence** ([`ReceiverArtefactShare::coincidence`]) — the emission's frequency
+    /// coincides with one of the receiver's own numbers, and **nothing more**. DC / LO leakage, a
+    /// reference harmonic (`n × 10 MHz`), a clock harmonic (`n × fs`), a comb tooth. None of these
+    /// can decide on its own, and the two reasons are different:
+    ///
+    /// - A reference or clock harmonic and a comb tooth sit at a **fixed absolute frequency**.
+    ///   120.000 MHz is a 10 MHz multiple *and* a valid 25 kHz airband channel; 460.000 MHz is
+    ///   both too. No retune separates the hypotheses, because neither the mark nor a real
+    ///   emission there moves.
+    /// - DC sits at the **tuned centre**, which moves — but a dwell *centres the radio on what it
+    ///   is listening to*, so every real signal being demodulated is "at the tuned centre" (this
+    ///   is measured, not argued: AWARE-042's synthetic 12.5 kHz raster at 446 MHz has every one
+    ///   of its real channels flagged `dc` on 100 % of its detections). And the corroboration
+    ///   that would settle it — the mark following the LO — is unreachable from one emitter,
+    ///   because the DC rule only marks a detection within 15 kHz of the centre
+    ///   (`hk_detect::DcRule`), so a DC line under a larger retune lands at a different frequency
+    ///   and becomes a **different** emitter. The check belongs where the detection is admitted
+    ///   (T-948's per-device, per-rate DC + spur mask), not here.
+    ///
+    /// **Neither**: `clipped` and `compressed`. They say the measurement could not be trusted,
+    /// never that the receiver invented the signal, and they are counted nowhere.
     ///
     /// Recomputed on every call and never stored, so the verdict follows the latest measurements.
     pub fn emitter_receiver_artefact_share(
@@ -1057,50 +1090,32 @@ impl Repository {
     ) -> Result<ReceiverArtefactShare, RepoError> {
         let mut stmt = self.conn.prepare_cached(EMITTER_DETECTION_FLAGS_SQL)?;
         let rows = stmt.query_map(
-            params![blob(emitter_id), super::MAX_EVIDENCE_DETECTIONS as i64],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<f64>>(2)?,
-                ))
-            },
+            params![blob(emitter_id), MAX_ARTEFACT_DETECTIONS as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
         )?;
         let mut out = ReceiverArtefactShare::default();
-        let push = |v: &mut Vec<f64>, lo: Option<f64>| {
-            if let Some(lo) = lo.filter(|x| x.is_finite())
-                && !v.iter().any(|x| (x - lo).abs() < 1.0)
-            {
-                v.push(lo);
-            }
-        };
         for row in rows {
-            let (bits, reason, lo) = row?;
+            let (bits, reason) = row?;
             out.detections += 1;
-            push(&mut out.tuning_centres_hz, lo);
             let f = DetectionFlags::from_bits(u32::try_from(bits).unwrap_or(0));
-            let measured = f.image_candidate
+            if f.image_candidate
                 || f.suspect_imd
-                || matches!(reason.as_deref(), Some("spur-map" | "lo-relative"));
-            let coincidence = !measured
-                && f.spur_candidate
-                && matches!(
-                    reason.as_deref(),
-                    Some("dc" | "ref-harmonic" | "clock-harmonic" | "comb") | None
-                );
-            if measured {
-                out.measured_mechanism += 1;
-            } else if coincidence {
+                || matches!(reason.as_deref(), Some("spur-map" | "lo-relative"))
+            {
+                out.established += 1;
+                if out.established_reason.is_none() {
+                    out.established_reason = Some(match reason.as_deref() {
+                        Some(kind) => kind.to_owned(),
+                        None if f.image_candidate => "image".to_owned(),
+                        None => "intermod".to_owned(),
+                    });
+                }
+            } else if f.spur_candidate {
                 out.coincidence += 1;
-                push(&mut out.coincidence_centres_hz, lo);
-            }
-            if (measured || coincidence) && out.reason.is_none() {
-                out.reason = Some(match reason.as_deref() {
-                    Some(kind) => kind.to_owned(),
-                    None if f.image_candidate => "image".to_owned(),
-                    None if f.suspect_imd => "intermod".to_owned(),
-                    None => "spur".to_owned(),
-                });
+                if out.coincidence_reason.is_none() {
+                    out.coincidence_reason =
+                        Some(reason.unwrap_or_else(|| "unspecified spur".to_owned()));
+                }
             }
         }
         Ok(out)
@@ -1109,29 +1124,28 @@ impl Repository {
 
 /// T-990: [`Repository::emitter_receiver_artefact_share`]'s answer. See that method for what each
 /// count means and why the split exists.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReceiverArtefactShare {
-    /// Detections read (at most [`super::MAX_EVIDENCE_DETECTIONS`]).
+    /// Detections read (at most [`MAX_ARTEFACT_DETECTIONS`]).
     pub detections: u64,
     /// Of those, the ones a mechanism *measured against something* explains.
-    pub measured_mechanism: u64,
-    /// Of those, the ones explained only by a frequency coincidence with the receiver's own
-    /// numbers, which a real emission produces too.
+    pub established: u64,
+    /// The mechanism the newest established one named (`image`, `intermod`, `spur-map`,
+    /// `lo-relative`), for saying *why* rather than only *that*.
+    pub established_reason: Option<String>,
+    /// Of those, the ones explained only by a frequency coincidence with one of the receiver's
+    /// own numbers — which a real emission produces too, so this decides nothing and is reported
+    /// only so the explanation can say it out loud.
     pub coincidence: u64,
-    /// The mechanism the newest flagged one named (the stored `spur_reason`, else `image`,
-    /// `intermod` or `spur`), for saying *why* rather than only *that*.
-    pub reason: Option<String>,
-    /// Distinct tuning centres the read detections were measured under, Hz.
-    pub tuning_centres_hz: Vec<f64>,
-    /// Distinct tuning centres at which a coincidence flag fired, Hz. Equal to
-    /// [`Self::tuning_centres_hz`] exactly when the coincidence followed the LO everywhere.
-    pub coincidence_centres_hz: Vec<f64>,
+    /// The coincidence the newest such one named (`dc`, `ref-harmonic`, `clock-harmonic`,
+    /// `comb`, …).
+    pub coincidence_reason: Option<String>,
 }
 
 impl ReceiverArtefactShare {
-    /// Share of the read detections a **measured** mechanism explains, 0 with none read.
-    pub fn measured_fraction(&self) -> f64 {
-        self.share(self.measured_mechanism)
+    /// Share of the read detections an **established** mechanism explains, 0 with none read.
+    pub fn established_fraction(&self) -> f64 {
+        self.share(self.established)
     }
 
     /// Share of the read detections a frequency **coincidence** explains, 0 with none read.
@@ -1146,32 +1160,9 @@ impl ReceiverArtefactShare {
             n as f64 / self.detections as f64
         }
     }
-
-    /// The span of the distinct tuning centres the coincidence was seen at, Hz; 0 with fewer than
-    /// two. A fixed real emission can sit at the centre of only one of two tunings this far
-    /// apart, so a wide span is the LO having moved and the mark having followed it.
-    pub fn coincidence_lo_span_hz(&self) -> f64 {
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for c in &self.coincidence_centres_hz {
-            lo = lo.min(*c);
-            hi = hi.max(*c);
-        }
-        if self.coincidence_centres_hz.len() < 2 {
-            0.0
-        } else {
-            hi - lo
-        }
-    }
-
-    /// Every tuning centre the row was measured under also produced the coincidence: it was never
-    /// seen away from the receiver's own number.
-    pub fn coincidence_at_every_tuning(&self) -> bool {
-        !self.coincidence_centres_hz.is_empty()
-            && self.coincidence_centres_hz.len() == self.tuning_centres_hz.len()
-    }
 }
 
-/// T-350: an emitter's latest linked-[`crate::Detection`] measurement **with the detection's own/// T-350: an emitter's latest linked-[`crate::Detection`] measurement **with the detection's own
+/// T-350: an emitter's latest linked-[`crate::Detection`] measurement **with the detection's own
 /// time extent**, from [`Repository::emitter_latest_measurement`].
 ///
 /// The two levels used to be returned as a bare `(f64, f64)`, so every consumer — `/api/inventory`
