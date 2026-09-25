@@ -29597,6 +29597,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-api tiles binaries you touch, api_contract with docs/api.md together per T-079, just test-ui if the client changes, just precheck), then HAND BACK with before/after numbers measured the same way as the review. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile latency review): Coarse /api/tiles reads fold from the FINEST affordable level and never read their own pre-built T-585 node: read the exact node first, else the cheapest candidate ((3,1) 150 ms -> ~25 ms)
+
+      Review fix 1: live coarse nodes lag level 0 by seal_lag (held-back closed rows are not in live_preview). Added hk_store::Pyramid::coarse_lag_start; read_order_until keeps finest-first for any read whose end passes it; /ws/tiles/rows decides the order per block. Guard test now reads the live edge mid-run (radio held) and is red with the check disabled.
     core_interface: true
     high_effort_reason: the tile read path is the live/history canvas hot path and an honesty-tier contract (answered level must state what was drawn); choosing the source level changes what every coarse tile serves
     result: |
