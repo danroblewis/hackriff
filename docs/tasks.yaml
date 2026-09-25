@@ -25444,7 +25444,6 @@ tasks:
     milestone: MAUTO
     title: "MAUTO M-7: EvidenceObjective over RefinementLoop; recipe schema v3 refine.objective.evidence"
     status: in-progress
-    branch: task-t858
     priority: normal
     deps:
     - T-853
@@ -25466,7 +25465,21 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+
+      Review fix (attempt 1): the review failed the branch for changing ACCEPTED ADR-0015 §2.3 without the user. Changed: bandwidth axis restored (it is the S0 channel filter's width behind a flat channeliser), schema v3 no longer refuses bandwidth_hz, and the ADR block is reworded as a PROPOSED AMENDMENT PENDING THE USER (S0 not counted in quality or the lock; bandwidth read as the S0 filter width; measured S1-S3 saturation). The coordinator should raise the amendment with the user. No gate failure: this was a review finding. Tests: hk-recipe + hk-synth 142/142, precheck clean.
+
+      Review fix 2: the review failed the branch because the code still left S0 out of quality and refused S0-only prefixes while ADR-0015 called that amendment pending. Now the code implements §2.3 exactly as accepted (S0 counted; any prefix accepted). The S0 exception exists only as ADR text marked 'not accepted, not implemented', for the user to decide. Tests: hk-synth 93/93; hk-recipe 49 of its 50 pass in the combined run. The 50th, field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant, failed at load average ~40 and passes alone in 0.9 s: a pre-existing wall-clock-bound test outside this diff, for the deflaker.
     core_interface: true
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 03:42).
+      Review fix 2. The review failed the branch because the code still left S0 out of quality and refused S0-only prefixes while ADR-0015 (ACCEPTED) called that amendment pending. main is merged in. The code now implements §2.3 exactly as accepted: quality = capped evidence bits over S0 … the deepest stage (§1.3); any prefix is accepted (ObjectiveError::NothingToMeasure removed); an S0-only prefix locks on S0's floor. The ADR-0015 §2.3 block now says 'PENDING THE USER; not accepted, not implemented'. The S0 exception exists only as a proposal, and the block states the consequence of the accepted text: S0's ~6 noise bits are added to every tuning, roughly constant; an S0-only prefix can lock on pure noise; deeper prefixes lock on their deepest stage and are unaffected. The bandwidth axis stays as last round, which the reviewer did not object to: it is the S0 channel filter's width behind a flat channeliser. New tests pin the accepted contract: quality == b_S0+b_S1+b_S2, and an S0-only prefix builds and locks on S0. The rest stands: EvidenceObjective over RefinementLoop, hold-out-enforced validation, per-block support alignment, recipe schema v3 refine.objective.evidence.
+      Tests: cargo nextest run -p hk-synth -E 'binary(evidence_objective)' --no-fail-fast -> exit 0 (9 passed); cargo nextest run -p hk-synth --no-fail-fast -> exit 0 (92 passed, before adding the S0-only test (evidence_objective now 9/9)); cargo nextest run -p hk-recipe -E 'test(/reparsing_a_recorded_stream/)' -> exit 0 (1 passed alone (0.9 s). In the combined hk-recipe+hk-synth run at load average ~40 it failed its wall-clock bound: 142/143 passed)
+      precheck exit 0
+      Commits: c5e2b468, 62125374, 8fef1e7f, 093608d2
+      Observed, not chased: USER DECISION (coordinator to raise): ADR-0015 §2.3 proposed amendment, not implemented. Should S0 be left out of evidence-objective quality and lock, and S0-only prefixes refused? Evidence: noise scores 6 bits at S0 through a channeliser whose band edges roll off (lowpass@1 credits 6 bits at +0.1 dB, n=16384). | Load-flake for the deflaker: hk-recipe::field_eval reparsing_a_recorded_stream_of_10k_frames_is_instant failed in a combined run at load average ~40 and passes alone in 0.9 s. It asserts on elapsed wall time, so it belongs in the timing tier (docs/10 §3.6). The test is pre-existing and not in this diff. | Engine wiring not done: hk_synth::engine never emits refined_into. It needs a refine call on the Evaluator seam, which needs an IQ-backed Evaluator (M-6/M-8). | Calibrated S1–S3 evidence saturates at 6 bits per metric, so a refinement at S2 is flat for a strong unshaped 2-FSK. This weighs on §3.1 step 6. | The calibration tables were drawn at a 6 kHz cutoff and 4800 Bd, so tuning the S0 cutoff or the symbol rate scores against a mismatched null. The effect was not measured.
+      Use cases: RESEARCH-002, SIGNAL-062
+      Resources: 192 CPU-s, peak 3.2 GB
+    branch: task-t858
   - id: T-859
     milestone: MAUTO
     title: "MAUTO M-8: /api/analyze jobs, stream, cancel, audit; docs/api.md + api_contract tests (replaces the T-190 501)"
@@ -25802,6 +25815,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
+
+      Gate 09-24 04:49 failed in just test-py, not in T-870 code: py/tests/test_work_accounting.py test_a_request_waits_while_the_last_branch_is_unmerged_then_older_evidence_is_dropped (line 476) and test_a_claim_whose_ticket_landed_as_a_rebuilt_branch_is_closed (line 839). ops/work-runner.py release_stale_claims (lines 938/954) checks the REAL {REPO}/.git/MERGE_HEAD, which the tests do not monkeypatch; the merge runner gates inside a staged merge, so both tests fail in EVERY merge gate (task-t873 04:45 too) and pass anywhere else (60/60 in this worktree after merging main). Fix belongs to the pipeline side: monkeypatch REPO, or route the MERGE_HEAD check through a patchable path. T-870 re-queues unchanged once that lands.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-24 04:44).
