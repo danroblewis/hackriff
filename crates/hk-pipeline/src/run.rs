@@ -644,7 +644,9 @@ pub(crate) struct Shared {
     pub fs: f64,
     pub fft_len: usize,
     pub averages: usize,
-    pub inventory: Mutex<Box<dyn Inventory>>,
+    /// **The run's inventory, not the segment's** (T-941): every segment holds a clone of the one
+    /// `Arc` [`Common::inventory`] owns. See there for why it is the run's.
+    pub inventory: Arc<Mutex<Box<dyn Inventory>>>,
     pub specs: Vec<ChainSpec>,
     /// Display settings (shared by every segment of the run).
     pub display: Arc<DisplayControl>,
@@ -726,6 +728,15 @@ pub struct ControlStats {
     pub replumb_failures: AtomicU64,
     /// Segments restarted after a capture or re-plumb failure (T-508).
     pub capture_recoveries: AtomicU64,
+    /// T-941: threads of an earlier segment **left behind** because they had not stopped within
+    /// [`REPLUMB_JOIN_BOUND`] of their segment ending (`join_workers`).
+    ///
+    /// Served rather than kept internal, for the reason `window_settle_timeouts` is: a thread that
+    /// does not observe its segment's stop is a defect, and it is one the user could otherwise
+    /// only learn about from a line on stderr. Non-zero means the re-plumb went on without one —
+    /// **not** that anything was detached: since T-941 the run's inventory is the run's, so an
+    /// abandoned straggler can delay the next segment's inventory writes and never silence them.
+    pub workers_abandoned: AtomicU64,
     /// Segments whose state was **salvaged** because a thread of the old segment still held it
     /// past [`unwrap_shared`]'s bound (T-508): a fresh database connection, and the inventory taken
     /// from under the straggler. It used to end the run.
@@ -879,6 +890,25 @@ struct Common {
     /// rather than through `Shared.inventory` keeps an API read off a mutex a capture worker may
     /// hold. A re-plumb carries the inventory across unchanged, so the value stays true.
     synthesized_confirm: crate::inventory::SynthesizedConfirm,
+    /// **The run's inventory** (T-941). One inventory for the whole run: every segment's
+    /// [`Shared`] holds a clone of this `Arc`, so a re-plumb hands it to the next segment *by
+    /// construction* — there is nothing to move, and so nothing that can fail to be moved.
+    ///
+    /// It used to be a segment's own ([`Parts`]), moved out of the old [`Shared`] at every
+    /// re-plumb. That move needed the old state to be unwrappable and the inventory mutex to be
+    /// free, and when a straggler held either, [`take_parts`] **took the inventory from under it
+    /// and left the run a [`crate::inventory::NullInventory`]** — permanently. T-941's live
+    /// report is what that costs: after one class-boundary retune whose `hk-detect` and
+    /// `hk-control` had not stopped within [`REPLUMB_JOIN_BOUND`], detection went on writing rows
+    /// (`detections_written` 12 487 → 15 619 in 20 s) while `tracks_opened` never moved again and
+    /// `/api/inventory` answered `total 0` — "Nothing on the air" everywhere, until a restart.
+    ///
+    /// A straggler still inside an `Inventory` call can now only **delay** the next segment's
+    /// first inventory write, by the length of that one call, and the run recovers by itself when
+    /// it returns. The inventory is also where it belongs: its track→emitter bindings and
+    /// re-measurement keys are memory of the *run*, which is why they were carried across a
+    /// re-plumb in the first place.
+    inventory: Arc<Mutex<Box<dyn Inventory>>>,
     data_dir: PathBuf,
     db_path: PathBuf,
     survey_id: SurveyId,
@@ -1331,6 +1361,7 @@ impl Pipeline {
         });
         let common = Common {
             synthesized_confirm: inventory.synthesized_confirm(),
+            inventory: Arc::new(Mutex::new(inventory)),
             view,
             iq_buffer,
             receiver: Arc::default(),
@@ -1396,11 +1427,7 @@ impl Pipeline {
         let window = (info.center_hz, info.sample_rate_hz);
         // T-510: every further front end is built from the run's configuration as it stands here.
         let template = (!extra.is_empty()).then(|| cfg.clone());
-        let parts = Parts {
-            cfg,
-            repo,
-            inventory,
-        };
+        let parts = Parts { cfg, repo };
         let Started {
             shared,
             tx,
@@ -1516,10 +1543,15 @@ impl Pipeline {
 /// The parts of a segment that outlive it: handed from each segment to the next at a re-plumb,
 /// and — since T-508 — **never lost on a failure**, so a failed re-plumb can start another
 /// segment instead of ending the run.
+///
+/// T-941: the **inventory is not here any more**. It is the run's ([`Common::inventory`]), so
+/// there is nothing for a re-plumb to hand over and nothing a straggler can hold it away from.
+/// What is left is the configuration and the segment's repository *connection* — a connection is
+/// the one thing that is genuinely better per segment: a straggler that never lets go of one
+/// blocks only its own segment, and [`take_parts`] opens a fresh one for the next.
 struct Parts {
     cfg: PipelineConfig,
     repo: Repository,
-    inventory: Box<dyn Inventory>,
 }
 
 /// A segment that did not start, with its parts when they could be kept (T-508).
@@ -1538,11 +1570,7 @@ fn start_segment(
     source: Box<dyn Source>,
     expect: Option<(f64, f64)>,
 ) -> Result<Started, SegmentFailure> {
-    let Parts {
-        cfg,
-        repo,
-        inventory,
-    } = parts;
+    let Parts { cfg, repo } = parts;
     let mut source = Lent::wrap(source, &common.slot);
     if cfg.live_window_class {
         source = WindowGuard::wrap(
@@ -1610,11 +1638,7 @@ fn start_segment(
             Err(error) => {
                 return Err(SegmentFailure {
                     error,
-                    parts: Some(Box::new(Parts {
-                        cfg,
-                        repo,
-                        inventory,
-                    })),
+                    parts: Some(Box::new(Parts { cfg, repo })),
                 });
             }
         }
@@ -1665,7 +1689,7 @@ fn start_segment(
         fs,
         fft_len,
         averages,
-        inventory: Mutex::new(inventory),
+        inventory: Arc::clone(&common.inventory),
         specs,
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
@@ -1926,6 +1950,9 @@ fn join_workers(
             errors.push(format!(
                 "{name}: still running {REPLUMB_JOIN_BOUND:?} after its segment ended; left behind"
             ));
+            // T-941: counted, not only printed and pushed into `errors` — `errors` reaches the
+            // user when the run *ends*, and this is a fact about a run that is still going.
+            inc(&sup.common.stats.workers_abandoned);
             continue;
         }
         let failed = match join.join() {
@@ -2355,59 +2382,46 @@ fn unwrap_shared(mut arc: Arc<Shared>) -> Result<Shared, Arc<Shared>> {
 /// The [`Parts`] of a segment that has ended: unwrapped when nothing else holds its state, else
 /// **salvaged** (T-508). A straggler still holding the old `Shared` — a chain or tap thread that
 /// did not end with its segment — used to end the run ("a thread of the previous segment still
-/// holds its state"). Now the next segment gets its own database connection and the inventory is
-/// taken from under the straggler (which is left a [`crate::inventory::NullInventory`]), counted
-/// as `segments_salvaged`. `Err` only when the database cannot be opened again.
+/// holds its state"). Now the next segment gets its own database connection, counted as
+/// `segments_salvaged`. `Err` only when the database cannot be opened again.
+///
+/// # T-941: what a straggler can no longer take with it
+///
+/// This used to salvage the **inventory** too, by taking it out from under the straggler with a
+/// one-second `try_lock` and leaving a [`crate::inventory::NullInventory`] behind. When that lock
+/// was busy — which is exactly what a straggler *inside* an inventory call is — it printed "the
+/// old segment's inventory is locked by its straggler; continuing without inventory" and the run
+/// went on with a null inventory **for the rest of its life**: rows kept being written and no
+/// track, candidate or emitter ever reached the user again (the report at
+/// [`Common::inventory`]).
+///
+/// The inventory is the run's now, so this function never touches it: the next segment already
+/// has it. A straggler holding the inventory lock delays that segment's first inventory write by
+/// the length of its own call and nothing else — and the whole "continue without X" shape is
+/// gone, because there is no X to continue without.
 fn take_parts(c: &Common, old: Arc<Shared>) -> Result<Parts, String> {
     let arc = match unwrap_shared(old) {
         Ok(s) => {
             return Ok(Parts {
                 cfg: s.cfg,
                 repo: s.repo.into_inner().unwrap_or_else(PoisonError::into_inner),
-                inventory: s
-                    .inventory
-                    .into_inner()
-                    .unwrap_or_else(PoisonError::into_inner),
             });
         }
         Err(arc) => arc,
     };
     inc(&c.stats.segments_salvaged);
     eprintln!(
-        "segment state still held {} s after its threads ended ({} holders); salvaging it",
+        "segment state still held {} s after its threads ended ({} holders); salvaging it (the \
+         run's inventory is not the segment's and is unaffected)",
         UNWRAP_BOUND.as_secs(),
         Arc::strong_count(&arc) - 1
     );
     let repo = Repository::open(&c.db_path).map_err(|e| {
         format!("a thread of the previous segment still holds its state, and reopening the database failed: {e}")
     })?;
-    let deadline = Instant::now() + Duration::from_secs(1);
-    let inventory: Box<dyn Inventory> = loop {
-        match arc.inventory.try_lock() {
-            Ok(mut g) => {
-                break std::mem::replace(&mut *g, Box::new(crate::inventory::NullInventory));
-            }
-            Err(std::sync::TryLockError::Poisoned(p)) => {
-                break std::mem::replace(
-                    &mut *p.into_inner(),
-                    Box::new(crate::inventory::NullInventory),
-                );
-            }
-            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                eprintln!(
-                    "the old segment's inventory is locked by its straggler; continuing without inventory"
-                );
-                break Box::new(crate::inventory::NullInventory);
-            }
-        }
-    };
     Ok(Parts {
         cfg: arc.cfg.clone(),
         repo,
-        inventory,
     })
 }
 
@@ -2626,6 +2640,10 @@ impl PipelineController {
                 "replumb_failures": get(&stats.replumb_failures),
                 "capture_recoveries": get(&stats.capture_recoveries),
                 "segments_salvaged": get(&stats.segments_salvaged),
+                // T-941: threads of an earlier segment left behind past `REPLUMB_JOIN_BOUND`. A
+                // straggler no longer costs the run its inventory, but it is still a thread that
+                // did not stop, and this is where a client can see that it happened.
+                "workers_abandoned": get(&stats.workers_abandoned),
                 // T-541: pipeline threads that ended by panicking. Always a defect, and served
                 // rather than kept internal for the same reason as `window_settle_timeouts`:
                 // a fault the system handled is still a fault the operator should be able to see.
@@ -2815,6 +2833,24 @@ impl PipelineController {
 /// A segment's state held from outside, as a straggling thread would ([`PipelineHandle::hold_segment`]).
 #[doc(hidden)]
 pub struct SegmentHold(#[allow(dead_code)] Arc<Shared>);
+
+/// **Test seam (T-941).** The run's inventory held *locked*, from a thread that also holds the
+/// running segment's state — a straggler caught inside an `Inventory` call, which is the state the
+/// live report was taken in ([`Common::inventory`]). Dropping it releases both.
+#[doc(hidden)]
+pub struct InventoryHold {
+    release: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for InventoryHold {
+    fn drop(&mut self) {
+        self.release.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
 
 /// A running pipeline.
 pub struct PipelineHandle {
@@ -3323,6 +3359,48 @@ impl PipelineHandle {
     #[doc(hidden)]
     pub fn hold_segment(&self) -> Option<SegmentHold> {
         self.sup.lock().shared.clone().map(SegmentHold)
+    }
+
+    /// **Test seam (T-941).** Holds the **run's inventory locked**, from a thread that also holds
+    /// the running segment's state — a straggler caught inside an `Inventory` call, the state
+    /// T-941's live report was taken in. Drop the hold to release both.
+    ///
+    /// Deterministic on purpose: it returns only once the lock is really held, so a test never
+    /// depends on winning a race with a writer, and `None` if it could not be taken within
+    /// [`UNWRAP_BOUND`] (which would make the test vacuous rather than red).
+    #[doc(hidden)]
+    pub fn hold_inventory(&self) -> Option<InventoryHold> {
+        let shared = self.sup.lock().shared.clone()?;
+        let release = Arc::new(AtomicBool::new(false));
+        let held = Arc::new(AtomicBool::new(false));
+        let (r, h) = (Arc::clone(&release), Arc::clone(&held));
+        let thread = thread::Builder::new()
+            .name("test-inventory-hold".into())
+            .spawn(move || {
+                // Holds the segment's `Arc` *and* its inventory lock, as a straggler does.
+                let _guard = shared
+                    .inventory
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                h.store(true, Ordering::SeqCst);
+                while !r.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            })
+            .ok()?;
+        let deadline = Instant::now() + UNWRAP_BOUND;
+        while !held.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                release.store(true, Ordering::SeqCst);
+                let _ = thread.join();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Some(InventoryHold {
+            release,
+            thread: Some(thread),
+        })
     }
 
     /// **Test seam (T-508).** The next `n` segment starts fail at their last step (every reader

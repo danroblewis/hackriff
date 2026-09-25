@@ -277,7 +277,11 @@ pub(super) fn start(
         fs,
         fft_len,
         averages,
-        inventory: Mutex::new(Box::new(crate::inventory::TrackInventory::default())),
+        // T-510: a further front end keeps its own track inventory (module docs). Held in an
+        // `Arc` like the primary's since T-941, because that is what `Shared` holds now.
+        inventory: Arc::new(Mutex::new(Box::new(
+            crate::inventory::TrackInventory::default(),
+        ))),
         specs: Vec::new(),
         display: Arc::clone(&common.display),
         continues: AtomicBool::new(false),
