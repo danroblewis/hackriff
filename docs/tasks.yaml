@@ -26647,7 +26647,6 @@ tasks:
     milestone: MMAP
     title: "Past-surveys drawer follow-ups: Go restores the frequency SPAN too; honest 'nothing looked at' text; sweep records (T-815 review)"
     status: in-progress
-    branch: task-t906
     priority: normal
     deps:
     - T-815
@@ -26667,6 +26666,16 @@ tasks:
       FOUND BY T-815 Opus review 2026-09-24.
 
       2026-09-24 coordinator: item 2 (honest drawer text) is DONE in T-815's fix fa8ba25a ('the log records this band looked at X ago for Y'). Remaining: item 1 (restore the frequency span) and item 3 (sweep records - the route has no filter that excludes them without dropping dwells). ADDED item 4 (T-815 fix worker): if an older day's slice fails on first load (network), the 'not fully loaded' row sticks until that day ages out of the 7-day window - retry failed older slices on refresh.
+    branch: task-t906
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 20:25).
+      Item 1: the past-surveys drawer's Go now restores the frequency SPAN as well as the centre and time window. requestGoto takes an optional span (nav.gotoSpanHz); a new pure gotoWindow(nav, currentSpan) gives the pane window, which PaneModel.setFreq's normalisation snaps to a realizable view (zoom floor .. device range). This is view arithmetic only and never reaches a device route. surface.ts now selects on the whole nav request, so a second Go to the same centre with a different span still moves the pane. Region rows (past surveys, coverage runs, never-looked gaps) carry spanHz. Item 2 was already fixed by T-815 (fa8ba25a); a source guard now asserts the drawer never says 'nothing was looked at'. Item 3 decision: survey sweeps ARE listed as past surveys. There is one row per pass (survey_id), spanning only the hops the record says were actually visited (observed_ms > 0) and the pass's time span. It is tagged 'survey · swept then' and says 'each step was heard only during its own dwell'. A sweep whose geometry the page lacks is skipped, not guessed. Item 4: SurveyLog now tracks retryBefore for older slices that FAILED to fetch (not budget truncation) and re-reads [floor, retryBefore] on the next refresh, so 'not fully loaded' no longer sticks until the day ages out. Each item has a ui/test that fails on the old behaviour.
+      Tests: just test-ui -> exit 0 (build + typecheck + 69/69 test files passed)
+      precheck exit 0
+      Commits: 3e36f1fa
+      Observed, not chased: just precheck was not run with a crate list because no crate was touched; ran cargo fmt --all --check (exit 0), and just test-ui covers typecheck for the ui/ diff
+      Use cases: AWARE-042
+      Resources: 53 CPU-s, peak 0.7 GB
   - id: T-907
     milestone: M2-hardening
     title: e2e harness waitForSurfaceMounted returns immediately on the APP page (waits on [data-slot=note], only on /surface) - app specs can race an unmounted surface; app-surface boot flake
