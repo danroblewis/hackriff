@@ -26533,7 +26533,8 @@ tasks:
   - id: T-902
     milestone: MLIVE
     title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
-    status: todo
+    status: in-progress
+    branch: task-t902
     priority: normal
     deps:
     - T-893
