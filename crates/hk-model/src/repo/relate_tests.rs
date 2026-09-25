@@ -260,7 +260,12 @@ fn t262_a_station_seen_in_two_disjoint_windows_is_one_row_from_the_start() {
 
     // Two presence intervals on that one emitter: the 72 s silence closed the first.
     let iv = r
-        .presence_intervals(first, crate::presence::IdleGap::conservative(), t(530))
+        .presence_intervals(
+            first,
+            crate::presence::IdleGap::conservative(),
+            t(530),
+            &crate::presence::Watched::unrecorded(),
+        )
         .unwrap();
     assert_eq!(iv.len(), 2, "{iv:?}");
     assert_eq!(iv[0].time, tr(94, 399));

@@ -171,6 +171,9 @@ counter_group!(
         presence_extensions,
         /// Presence extensions a tick left out at its cap; those boxes grow on the poll instead.
         presence_extensions_truncated,
+        /// T-940: open-track reports filed on the observation ledger (measured end + observed
+        /// silence), which keep an on-air emitter `live` on the inventory poll between sightings.
+        tracks_followed,
     }
 );
 

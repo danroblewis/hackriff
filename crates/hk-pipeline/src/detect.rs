@@ -59,7 +59,7 @@ use hk_detect::{
 use hk_dsp::floor::{FloorConfig, FloorEvent, NoiseFloorTracker};
 use hk_dsp::window::WindowKind;
 use hk_dsp::{InputInfo, SpectrumFrame, StftConfig, WelchConfig};
-use hk_model::{DetectionId, FreqRange, Timestamp, TrackId, TrustVerdict};
+use hk_model::{DetectionId, FreqRange, TimeRange, Timestamp, TrackId, TrustVerdict};
 use num_complex::Complex;
 
 use crate::dc_twin::{LiveDcTwins, Observed};
@@ -876,6 +876,10 @@ struct Writer {
     live_reviews: Vec<TrackSummary>,
     /// The latest observed extents (T-388), replaced by each batch and published by [`Writer::write`].
     live_extents: Vec<LiveExtent>,
+    /// T-940: [`Self::live_extents`] arrived since the last write pass and has not yet been
+    /// reported to the observation ledger. A kept list is never re-reported: a report after the
+    /// track's close would mark its final row followed again.
+    extents_unreported: bool,
     /// The `presence` stream: track→emitter bindings the offers teach it, and the tick gate.
     presence: PresenceStream,
     floor: Vec<FloorEvent>,
@@ -917,6 +921,7 @@ impl Writer {
             live: Vec::new(),
             live_reviews: Vec::new(),
             live_extents: Vec::new(),
+            extents_unreported: false,
             presence,
             floor: Vec::new(),
             anomalies,
@@ -956,6 +961,7 @@ impl Writer {
         }
         if !live_extents.is_empty() {
             self.live_extents = live_extents;
+            self.extents_unreported = true;
         }
         self.floor.extend(floor);
         self.now_ns = self.now_ns.max(now_ns);
@@ -968,6 +974,7 @@ impl Writer {
             || !self.closed.is_empty()
             || !self.live.is_empty()
             || !self.floor.is_empty()
+            || self.extents_unreported
     }
 
     /// T-410 (ADR-0019): one presence tick — publish the **endpoints** of each open track's
@@ -1058,7 +1065,10 @@ impl Writer {
                     }
                 };
             if tracks_stored
-                && !(self.closed.is_empty() && self.live.is_empty() && self.live_reviews.is_empty())
+                && !(self.closed.is_empty()
+                    && self.live.is_empty()
+                    && self.live_reviews.is_empty()
+                    && !self.extents_unreported)
             {
                 let mut inv = shared
                     .inventory
@@ -1086,8 +1096,47 @@ impl Writer {
                         inc(&dc.db_errors);
                     }
                 }
+                // T-940: then report every open track the inventory has given a row, so an
+                // emission still on the air reads **live** on the poll between sightings. The live
+                // offer refreshes a row every `LIVE_OFFER_NS` (5 s), and a track bound through a
+                // chain — a WFM station — had no track row at all, while `/api/inventory` closes
+                // an interval after 1 s under a live dwell: every on-air FM station read `ended`
+                // (staging, 2026-09-25). The report carries the measured end and the silence the
+                // tracker *observed* since it, never a clock read, so it can only say how far the
+                // emission was measured and whether the tracker has seen it stop.
+                //
+                // After the offers (an offer may bind the track this pass) and before the closes
+                // (a close must be the last word on its row). Creates no entry: a track with no
+                // binding is not reported, which is T-388's gate.
+                if std::mem::take(&mut self.extents_unreported) {
+                    for e in &self.live_extents {
+                        let Some(emitter) = inv.emitter_of_track(e.track) else {
+                            continue;
+                        };
+                        let seen = TimeRange::new(
+                            Timestamp::from_unix_nanos(e.t_start_ns),
+                            Timestamp::from_unix_nanos(e.t_end_ns.max(e.t_start_ns)),
+                        );
+                        match repo.follow_track(emitter, e.track, seen, e.observed_silence_ns) {
+                            Ok(()) => inc(&dc.tracks_followed),
+                            Err(_) => inc(&dc.db_errors),
+                        }
+                    }
+                }
                 for e in self.closed.drain(..) {
                     if inv.track_event(&mut repo, &e).is_err() {
+                        inc(&dc.db_errors);
+                    }
+                    // T-940: a track that closed or merged is no longer followed; its row's end is
+                    // final. Keyed by the track, not by its binding, which the event just removed.
+                    let ended = match &e {
+                        TrackEvent::Closed(s) => Some(s.track.id),
+                        TrackEvent::Merged { from, .. } => Some(*from),
+                        _ => None,
+                    };
+                    if let Some(track) = ended
+                        && repo.stop_following_track(track).is_err()
+                    {
                         inc(&dc.db_errors);
                     }
                 }

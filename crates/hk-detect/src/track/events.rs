@@ -106,7 +106,9 @@ pub struct LiveExtent {
     /// has gone quiet keeps the end it went quiet at.
     pub t_end_ns: i64,
     /// Silence since [`Self::t_end_ns`] that the receiver **actually observed**, stream ns
-    /// (T-410, ADR-0019 §3). 0 while the track is still bursting.
+    /// (T-410, ADR-0019 §3). 0 while the track is still bursting — including between the split
+    /// records of one continuous burst — and counted only while the tuned window contained the
+    /// track's centre (T-940).
     ///
     /// This is wall silence passed through the tracker's coverage, so it counts only time the
     /// front end was looking at this region — the tracker's own idle test (`maintain`) is the same
@@ -115,7 +117,8 @@ pub struct LiveExtent {
     /// nowhere else: a consumer comparing `now − t_end_ns` would call a sweep's absence between
     /// visits "silence" and close an interval nobody heard stop.
     pub observed_silence_ns: i64,
-    /// Wall-clock silence since [`Self::t_end_ns`], stream ns.
+    /// Wall-clock silence since [`Self::t_end_ns`], stream ns. 0 while a burst is in flight, like
+    /// the observed figure.
     ///
     /// Carried beside the observed figure because the *pair* is what says whether the receiver
     /// looked away at all: equal (within the coverage's own slack) means it never did, and only

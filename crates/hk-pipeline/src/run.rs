@@ -1201,6 +1201,15 @@ impl Pipeline {
                 eprintln!("hk-pipeline: cannot abort surveys left open by an earlier run: {e}")
             }
         }
+        // T-940: for the same reason, no track of an earlier process is being followed any more.
+        // A run that was killed never stopped following its open tracks, and a row still marked
+        // followed reads as ongoing on the report it last got — so each is released to the closed
+        // reading, where the silence after it is whatever the receiver has watched since.
+        match repo.stop_following_all() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("hk-pipeline: released {n} track report(s) left by an earlier run"),
+            Err(e) => eprintln!("hk-pipeline: cannot release earlier track reports: {e}"),
+        }
         repo.insert_survey(&survey)?;
         store_calibrations(&mut repo, &cfg.calibrations)?;
         let product = FloorProduct::open(
