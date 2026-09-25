@@ -27939,12 +27939,12 @@ tasks:
 
       Review: refresh queried the frozen first-paint box; now re-asks /api/navigation and extends t1 to latest_s. Test asserts coverage query t1 >= newest capture (red with the fix reverted).
     result: |
-      DONE (work-runner, from handback.json, 2026-09-25 06:42).
-      (a) shadow scanlines now ink 1 row in 5 (was 2 in 5) so stations stay legible; ceiling/ink honesty tests unchanged. (b) orientation note re-derived from GET /api/coverage every 10 s (refreshOrientationNote). (d) Real cause found: DeviceTab's rate onchange read select.value AFTER deviceCall's render() reset an unfocused select to the old tuning, so the OLD rate was posted; now value is captured in the handler, and the select re-syncs to served rate after the call even while focused. (c) black rectangle not reproduced/fixed - needs a live repro. Red proof for (d) not automated: DeviceTab has no DOM harness under node:test.
-      Tests: node test/run.mjs surface-range surface-honesty app-review -> exit 0 (3/3 files passed)
+      DONE (work-runner, from handback.json, 2026-09-25 06:47).
+      Review fix: refreshOrientationNote now re-asks /api/navigation and extends the coverage box top to the newest latest_s (never shrinks), so coverage swept after first paint is counted. Test asserts the coverage request's t1 >= newest capture; verified red with the fix reverted. Other items as before: (a) lighter shadow scanlines, (d) rate select reads value before re-render; (c) black rectangle not reproduced. Gate finding was only the uncommitted board note (just task note); committed.
+      Tests: node test/run.mjs surface-range surface-honesty app-review -> exit 0 (3/3 files passed); node test/run.mjs surface-range (fix reverted) -> exit 1 (T-946(b) fails)
       precheck exit 0
-      Commits: d7de029a
-      Observed, not chased: (c) black live-pane rectangle at first paint not investigated | no DOM e2e for the span select; (d) fix is unit-untested
+      Commits: d7de029a, cdc127d9, 70fecce0
+      Observed, not chased: (c) black live-pane rectangle not investigated | no DOM harness for DeviceTab select
       Resources: 27 CPU-s, peak 0.6 GB
   - id: T-947
     milestone: MMAP
