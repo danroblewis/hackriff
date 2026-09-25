@@ -19004,7 +19004,8 @@ tasks:
   - id: T-569
     milestone: MAUTO
     title: "MAUTO: a database suggestion explains a result and never becomes one - explanations[] beside a sealed Resolution, enforced by the crate graph"
-    status: todo
+    status: in-progress
+    branch: task-t569
     priority: normal
     parallel_group: W
     model: opus
@@ -26147,7 +26148,8 @@ tasks:
   - id: T-872
     milestone: MAUTO
     title: "LP-8: retire ChainKind::Listen for cut-over modes; listener-budget mapping"
-    status: todo
+    status: in-progress
+    branch: task-t872
     priority: normal
     deps:
     - T-869
@@ -28832,7 +28834,8 @@ tasks:
   - id: T-977
     milestone: M3
     title: "Control-channel chain's verdict never reaches the row: P25 C4FM reads unknown/2fsk/not-searched after 10 cc demods; no route lists cc candidates"
-    status: todo
+    status: in-progress
+    branch: task-t977
     priority: P2
     deps: []
     parallel_group: TRUNK-CC-VERDICT
@@ -29441,7 +29444,8 @@ tasks:
   - id: T-1004
     milestone: MMAP
     title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
-    status: todo
+    status: in-progress
+    branch: task-t1004
     priority: medium
     deps:
     - T-1000
@@ -29718,7 +29722,8 @@ tasks:
   - id: T-1020
     milestone: MLIVE
     title: "Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache"
-    status: todo
+    status: in-progress
+    branch: task-t1020
     priority: medium
     deps:
     - T-1019
@@ -29966,7 +29971,8 @@ tasks:
   - id: T-1030
     milestone: MMAP
     title: "Selected-region drawer asks /api/coverage for a stale scope (0-9.8 GHz instead of the selected region) when the selection lands mid-flight: send the current scope, drop superseded responses"
-    status: todo
+    status: in-progress
+    branch: task-t1030
     priority: medium
     deps: []
     parallel_group: UI-DRAWER-SCOPE
