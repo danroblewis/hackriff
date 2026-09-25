@@ -27957,7 +27957,7 @@ tasks:
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: STORE-HISTORY
@@ -27984,6 +27984,7 @@ tasks:
       Commits: ef60f883
       Observed, not chased: A store dropped without close() (a crash) leaves a stale or absent `edge` file. That is self-correcting - tiles sealed past the stale watermark are reopened (level 0, content preserved) or re-folded from their children (coarser) - but a coarse tile whose children were evicted by the BYTE BUDGET in that window would be rebuilt from fewer children than it was first folded from. Not reproduced; the window is a block that has not ended, whose children are the most recent tiles on disk. | save_edge() adds one 8->16-byte fsync per seal and per checkpoint on the capture thread (~2/min at scheme 1's 60 s checkpoint interval). Visible in a unit test that checkpointed every frame: 45 checkpoints cost 37 s of wall clock on this loaded box, i.e. ~0.8 s per small-file fsync here. At the shipped cadence it is negligible, but it is real per-seal work on the thread that gates the ring (T-453's constraint).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 34e58c3e
   - id: T-943
     milestone: MMAP
     title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
