@@ -89,6 +89,7 @@ import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -201,6 +202,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // pans and zooms — one gesture everywhere (docs/23 §3). The MapTip is placed in the same pass.
   const pinsEl = h("div", { class: "sf-pins", role: "group", "aria-label": "Signal markers: Tab to a marker for its summary, Enter to select it, arrow keys for its neighbours" });
   const tipEl = h("div", { class: "sf-maptip", role: "tooltip", id: "sf-maptip", hidden: true });
+  // T-1000 (docs/23 §10.7): the ACTIVE pane's outline — the pane Go-to, zoom, the layers menu, the
+  // follow-live FAB and the viewport menu act on. Placed every render frame from the pane rectangles
+  // the frame was drawn with (and at once when the active pane changes), shown only while there are
+  // two or more panes. Never takes the pointer: a press goes through it to the pane underneath.
+  const activeEl = h("div", { class: "sf-active-pane", "aria-hidden": "true", hidden: true });
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -221,7 +227,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -632,6 +638,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
       .map((v) => layoutPanePins(all, v.id, v.box, v.rect, hPx, dpr, edge));
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();
+  };
+  /** T-1000: outline the active pane, from pane rectangles in drawing-buffer px. Set-if-changed, like
+   * every other per-frame placement here. The outline's own `data-*` state which pane it is on, so a
+   * test compares it with the chrome's words and the pane's rectangle rather than parsing pixels. */
+  let outlined = "";
+  const placeActive = (panes: readonly PaneView[], hPx: number, dpr: number) => {
+    const p = preview;
+    const active = p ? p.activePane : null;
+    const name = activePaneName(panes.map((v) => v.id), active);
+    const v = name ? panes.find((x) => x.id === active) ?? null : null;
+    const box = v ? outlineBox(v.rect, hPx, dpr) : null;
+    const key = box && name ? `${v!.id}|${name.label}|${box.left}|${box.top}|${box.width}|${box.height}` : "";
+    if (key === outlined) return;
+    outlined = key;
+    activeEl.hidden = !box;
+    stage.dataset.activePane = name ? String(name.n) : "";
+    if (!box || !name) { delete activeEl.dataset.pane; return; }
+    activeEl.dataset.pane = String(name.n);
+    activeEl.dataset.paneId = v!.id;
+    activeEl.dataset.label = name.label;
+    Object.assign(activeEl.style, {
+      left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px`,
+    });
   };
   /** CSS px from the canvas's top-left — the coordinate the pins are laid out in. */
   const cssPoint = (e: MouseEvent) => {
@@ -1202,7 +1231,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
-        dom: pinsFrame,
+        dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
       });
     } catch (e) {
       const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
@@ -1440,6 +1469,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         isOpen: () => store.get().research.open,
         toggle: () => store.set(setResearchOpen(!store.get().research.open)),
       },
+      // T-1000: the per-pane chrome's name for the pane it acts on — the outline's own words.
+      activeName: () => activePaneName(pv.view.panes.list().map((x) => x.id), pv.activePane),
     };
     const setMode = (mode: RangeMode) => {
       preview?.setRangeMode(mode);
@@ -1455,6 +1486,39 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+
+    // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
+    // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
+    // outline and every piece of chrome that names it move in the SAME call, not on the next frame
+    // or poll. A Go-to offer on screen described the previous pane's window, so it is withdrawn.
+    // Presentation only: changing the active pane moves no view and reaches no route.
+    const activeChanged = () => {
+      const f = pv.lastFrame;
+      const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
+      // The last frame's PANE rectangles (its `views` also carry the map strip's, which is not a
+      // pane), when that frame drew the panes there are now; after a split or a close it did not, and
+      // the very next frame (the `dom` hook) places the outline instead.
+      const ids = new Set(pv.view.panes.list().map((x) => x.id));
+      const drawn = f ? f.views.filter((v) => ids.has(v.id)) : [];
+      if (drawn.length === ids.size && ids.has(pv.activePane)) placeActive(drawn, canvas.height, dpr);
+      controls.syncActive();
+      syncLayerControls();
+      renderFollow();
+      viewMoved();
+    };
+    pv.onActiveChange(activeChanged);
+    // The pane keys: `[` / `]` step through the panes, `1`-`9` pick one, `L` toggles Live on the
+    // active pane through the FAB's own press. `paneKeyIntent` refuses typing, modifiers and repeats.
+    document.addEventListener("keydown", (e) => {
+      const k = paneKeyIntent(e);
+      if (!k) return;
+      if (k.kind === "live") { e.preventDefault(); controls.toggleFollow(); return; }
+      const ids = pv.view.panes.list().map((x) => x.id);
+      const next = k.kind === "step" ? stepPane(ids, pv.activePane, k.step) : ids[k.n - 1] ?? null;
+      if (!next) return;
+      e.preventDefault();
+      pv.activePane = next;
+    });
 
     const topBar = document.querySelector<HTMLElement>(".app > .bar");
     const fit = () => {
