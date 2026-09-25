@@ -1730,7 +1730,7 @@ A job that finished **`done`** with results, asked to `attach`, attaches on the 
 
 ### The trace (`GET /api/analyze/{id}/trace`)
 
-`{job_id, state, engine, final, replay_key, bounds: {max_nodes, max_bytes, truncated}, nodes: [TraceNode], elided: [{stage, family?, outcome, count, bits_max, bits_min, evaluations}]}`. Filters: `stage` (`S0`…`S6`), `outcome` (an outcome name, e.g. `pruned_floor`), `family`, `tried` (`true`/`false`), `limit` (1..=512, default 512); an unknown filter value is `400 invalid`. `final` is false while the job runs — the engine hands its trace over when it stops. The trace lives for the job's lifetime only; `trace_summary` is what persists.
+`{job_id, state, engine, final, replay_key, bounds: {max_nodes, max_bytes, truncated}, nodes: [TraceNode], elided: [{stage, family?, outcome, count, bits_max, bits_min, evaluations}]}`. Filters: `stage` (`S0`…`S6`), `outcome` (an outcome name, e.g. `pruned_floor`), `family`, `tried` (`true`/`false`), `limit` (1..=512, default 512); an unknown filter value is `400 invalid`. `final` is false only while the job can still produce a trace — the engine hands its trace over when it stops. A job that **ended without one** (a failure, or a cancel of a job that was still queued) serves `final: true` with empty `nodes`, so a watching client stops polling; a cancelled job whose worker is still handing back stays `false` until it does, because its partial trace may yet arrive. The trace lives for the job's lifetime only; `trace_summary` is what persists.
 
 ### The stream (`hackriff.analyze/1`)
 
