@@ -754,7 +754,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     g("init", "-q", "-b", "main")
     g("commit", "-q", "--allow-empty", "-m", "base")
     wts = repo / ".claude" / "worktrees"
-    for name in ("t356", "t900", "tgone", "t844", "t845"):
+    for name in ("t356", "t900", "tgone", "t844", "t845", "t961", "t962", "t974"):
         g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
     (wts / "t356" / ".githooks").mkdir()
     (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
@@ -762,7 +762,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
     shutil.rmtree(wts / "tgone")                                   # registered, directory gone
     old = 1_000_000_000
-    for name in ("t356", "t900", "t844", "t845"):
+    for name in ("t356", "t900", "t844", "t845", "t961", "t962", "t974"):
         os.utime(wts / name, (old, old))
 
     real_sh = R.sh
@@ -775,12 +775,18 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     monkeypatch.setattr(R, "log", said.append)
     claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")},
               "T-844": {"state": "fix-held", "wt": str(wts / "t844")},   # review 07:30: a held fix resumes there
-              "T-845": {"state": "sync-error", "wt": str(wts / "t845")}}  # invariant 29: judged there once the refs agree
+              "T-845": {"state": "sync-error", "wt": str(wts / "t845")},  # invariant 29: judged there once the refs agree
+              # 2026-09-25: limit-killed 'error' claims lost their worktrees within the hour and could not resume
+              "T-961": {"state": "error", "wt": str(wts / "t961"), "started": time.time() - 3600},
+              "T-962": {"state": "error", "wt": str(wts / "t962"), "started": time.time() - (R.RELEASE_AFTER_H + 1) * 3600},
+              "T-974": {"state": "limited", "wt": str(wts / "t974")}}
 
     R.reap_worktrees(claims, dry=False)
     assert not (wts / "t356").exists()                             # only build output: reaped
     assert (wts / "t844").exists()                                 # clean and old, but a held fix's: kept
     assert (wts / "t845").exists()                                 # ...and a sync-error claim's
+    assert (wts / "t961").exists() and (wts / "t974").exists()     # an unreleased error claim's, a limited one's: kept
+    assert not (wts / "t962").exists()                             # an error claim past its release: reaped
     assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
     assert "tgone" not in g("worktree", "list").stdout             # pruned
     kept = [m for m in said if "kept - untracked" in m]
@@ -1943,3 +1949,144 @@ def test_ahead_branches_go_in_one_push(git_node2, monkeypatch):
     R.sync_repos(dry=False)
     assert len(pushes) == 1 and {e["state"] for e in R._REPOSYNC["node2"]["branches"].values()} == {"pushed"}
     assert all(git(mirror, "rev-parse", b) == git(local_repo, "rev-parse", b) for b in ("task-t9", "task-t10"))
+
+
+LIMIT_TEXT = ("You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message · "
+              "your session limit resets 9:20am (America/Los_Angeles)")
+
+
+def test_the_reset_a_usage_limit_message_names_is_the_next_one_after_it_was_written():
+    at = time.mktime((2026, 9, 25, 8, 11, 0, 0, 0, -1))
+    assert time.localtime(R.usage_limit_until(LIMIT_TEXT, at))[3:5] == (9, 20)
+    assert R.usage_limit_until(LIMIT_TEXT, at) - at == 69 * 60
+    copied_back = time.mktime((2026, 9, 25, 9, 20, 15, 0, 0, -1))                   # review: a node2 result read late
+    assert R.usage_limit_until(LIMIT_TEXT, copied_back) < copied_back                  # already reset - never tomorrow
+    evening = time.mktime((2026, 9, 25, 21, 30, 0, 0, 0, -1))
+    assert R.usage_limit_until(LIMIT_TEXT, evening) - evening == (11 * 60 + 50) * 60  # > 12 h behind: tomorrow's 9:20
+    assert R.usage_limit_until("You've hit your limit", at) == at + 1800             # unparseable: half an hour
+
+
+def test_only_the_accounts_limit_messages_count_as_a_usage_limit():
+    assert R._USAGE_LIMIT.search(LIMIT_TEXT)
+    assert not R._USAGE_LIMIT.search("Context limit reached · /compact or /clear to continue")   # one session's
+    assert not R._USAGE_LIMIT.search("Error: Exceeded USD budget (5)")                           # --max-budget-usd
+
+
+def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launches_until_the_reset(killed_run, monkeypatch, tmp_path):
+    """2026-09-25 08:11-08:57: every run died in 1-3 min on the account usage limit; each was scored 'error' (released
+    after 4 h), dispatch launched 15 tickets into the wall in 7 min, and node2 then sat at 0/6 with nothing dispatchable."""
+    import os
+    claim, fixes, alerts, seen = killed_run
+    d = tmp_path / "work" / "T-802"
+    text = "You've hit your monthly spend limit · raise it at claude.ai/settings/usage"   # no reset named: +30 min,
+    (d / "out.json").write_text(json.dumps({"is_error": True, "result": text, "session_id": "s1"}))  # clock-independent
+    (d / "handback.json").write_text(json.dumps({"outcome": "done", "summary": "a stale one from the earlier run"}))
+    at = int(time.time()) - 60                                  # the marker file keeps whole seconds
+    os.utime(d / "out.json", (at, at))
+    wrote = []
+    monkeypatch.setattr(R, "write_result", lambda c, hb: wrote.append(c["ticket"]))
+    claims = claim(session_id="s0")
+    R.reap(claims, dry=False)
+    c = claims["T-802"]
+    assert c["state"] == "limited" and c["session_id"] == "s1" and fixes == [] and wrote == []   # never the stale handback
+    assert [k for _, k, _ in seen] == ["USAGE_LIMIT"]
+    until = R.usage_limited()
+    assert until == c["limited_until"] and until == R.usage_limit_until(text, at) == at + 1800 and until > time.time()
+    # while it holds: no dispatch (remote or here), no deflaker, no fix run, and the limited run stays put
+    monkeypatch.setattr(R, "hosts", lambda: {"node2": {"cap": 6}})
+    monkeypatch.setattr(R, "board", lambda: [{"id": "T-900"}])
+    monkeypatch.setattr(R, "candidates", lambda tasks, claims: tasks)
+    monkeypatch.setattr(R, "host_for", lambda t, claims: "node2")
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append(t["id"]) or {"ticket": t["id"]})
+    monkeypatch.setattr(R, "dispatch_cap", lambda: 4)
+    monkeypatch.setattr(R, "disk_free_gb", lambda: launched.append("mac-dispatch-went-on") or 0.0)
+    assert R.dispatch(claims, dry=False) is False and launched == []
+    assert R.dispatch_deflakes(claims, dry=False) is False
+    assert R.relaunch_held_fixes(claims) is False and claims["T-802"]["state"] == "limited"
+    # the reset passes: the held-fix pass resumes the session with the limit's own KILLED line, through the cap
+    (tmp_path / "usage-limited").write_text(f"{time.time() - 1:.0f}\n")
+    assert R.dispatch_remote(claims, dry=False) is True and launched == ["T-900"]   # the stubs above do dispatch
+    del claims["T-900"]
+    relaunched = []
+    monkeypatch.setattr(R, "launch_fix", lambda c, line, claims=None: relaunched.append((c["ticket"], line)) or dict(c, state="running", kind="fix"))
+    monkeypatch.setattr(R, "host_room", lambda claims, h, exclude=None: None)
+    assert R.relaunch_held_fixes(claims) is True
+    assert relaunched[0][0] == "T-802" and relaunched[0][1].startswith("KILLED") and "USAGE LIMIT" in relaunched[0][1]
+    assert claims["T-802"]["state"] == "running"
+
+
+def test_a_named_reset_already_past_still_holds_for_the_floor(killed_run, monkeypatch, tmp_path):
+    """Review 2026-09-25: the runs said 'resets 9:20am' under a monthly spend limit; read after 9:20 the hold was in the
+    past, so every limited run would resume, die and resume again each tick."""
+    claim, fixes, alerts, seen = killed_run
+    d = tmp_path / "work" / "T-802"
+    (d / "out.json").write_text(json.dumps({"is_error": True, "result": LIMIT_TEXT, "session_id": "s1"}))
+    monkeypatch.setattr(R, "usage_limit_until", lambda text, at: time.time() - 3600)
+    claims = claim(session_id="s0")
+    R.reap(claims, dry=False)
+    assert claims["T-802"]["state"] == "limited" and R.usage_limited() >= time.time() + R.USAGE_LIMIT_FLOOR_S - 5
+
+
+def test_a_fix_run_asked_for_while_the_limit_holds_waits_quietly(monkeypatch, tmp_path):
+    (tmp_path / "usage-limited").write_text(f"{time.time() + 600:.0f}\n")
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    notes = []
+    monkeypatch.setattr(R, "attention", lambda *a: notes.append(a))
+    monkeypatch.setattr(R, "fix_reason", lambda line, b: ("GATE_FAIL", "x"))
+    c = {"ticket": "T-9", "branch": "task-t9", "wt": str(tmp_path), "session_id": "s", "state": "queued", "kind": "work"}
+    held = R.launch_fix(c, "GATE_FAIL x", claims={"T-9": c})
+    assert held["state"] == "fix-held" and notes == []
+
+def test_an_abandoned_deflake_branch_no_longer_blocks_a_fresh_run(df, monkeypatch):
+    """2026-09-24: fog-of-war's 00:35 WIP branch, retired at 03:55 but kept, deferred every new
+    fog-of-war deflake for 17 h while the spec went red in 8 gates."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())
+    write(_req("deflake-a", 600.0))
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 2)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake",
+                                    "state": "uncommitted", "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    now = R.time.time()
+    monkeypatch.setattr(R, "branch_tip_ts", lambda b: now - 3600)       # touched an hour ago: still waits
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    (tmp / "merge-queue.txt").write_text("task-deflake-a\n")
+    monkeypatch.setattr(R, "branch_tip_ts", lambda b: now - 17 * 3600)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []                                                 # old but QUEUED: still waits
+    (tmp / "merge-queue.txt").write_text("")
+    for marker in ("merging-now", "isolate-remaining"):                  # review: gating alone / isolated
+        (tmp / marker).write_text("task-deflake-a\n")
+        R.dispatch_deflakes(claims, dry=False)
+        assert launched == []
+        (tmp / marker).unlink()
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]                          # abandoned: a fresh run
+    assert "is abandoned" in (tmp / "work-runner.log").read_text()
+
+
+def test_a_fresh_deflake_never_checks_out_an_earlier_runs_commits(tmp_path, monkeypatch):
+    """Review 2026-09-25: the fog-of-war claim had lost its `run` (claims rebuilt), so run 1's name was the abandoned
+    WIP branch itself - the fresh deflaker would have been handed 5c98fb3d and told it was cut from the base."""
+    g = lambda *a: subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                  check=True, capture_output=True, text=True).stdout.strip()
+    g("init", "-q", "-b", "main")
+    g("commit", "-q", "--allow-empty", "-m", "base")
+    g("branch", "task-deflake-a")
+    g("checkout", "-q", "task-deflake-a")
+    g("commit", "-q", "--allow-empty", "-m", "abandoned WIP")
+    g("checkout", "-q", "main")
+    for name, val in [("REPO", str(tmp_path)), ("WORKDIR", str(tmp_path / "work")), ("LOG", str(tmp_path / "log")),
+                      ("BULKMARK", str(tmp_path / "no-bulk"))]:
+        monkeypatch.setattr(R, name, val)
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: real_sh(args, cwd=cwd or str(tmp_path), **k))
+    monkeypatch.setattr(R, "clone_cmd", lambda wt: "")
+    monkeypatch.setattr(R, "e2e_env", lambda wt: {})
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(R.subprocess, "Popen", lambda *a, **k: type("P", (), {"pid": 1})() if k.get("start_new_session")
+                        else real_popen(*a, **k))                           # the deflaker itself is never spawned
+    c = R.launch_deflake("deflake-a", _req("deflake-a", 600.0), {"branch": "task-deflake-a"}, dry=False)
+    assert c["branch"] == "task-deflake-a-r2" and c["run"] == 2
+    assert g("rev-parse", "task-deflake-a-r2") == g("rev-parse", "main")    # cut from the base, not from the WIP

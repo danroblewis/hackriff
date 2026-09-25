@@ -12,6 +12,13 @@ Environment-specific constants at the top of each file (edit for a different mac
 `REPO` (the repo path, `/Users/daniellewis/hackriff`); in `monitor.py` also `PROJ` (the Claude
 projects dir), `COORD` (the coordinator's conversation id), and `SUPER`.
 
+**Role sessions (2026-09-25).** `ops/launch.sh <role>` starts claude with `--session-id <uuid>` (a
+`--resume <id>` keeps that id) and writes it to `$HACKRIFF_OPS/role-session/<role>` (the coordinator
+also to `coordinator-session`). The dashboard's agents panel names roles only from those files and
+shows a session as live only while a claude process carries its id (`ps`, or Claude Code's
+`~/.claude/sessions/<pid>.json`); otherwise `ended hh:mm`, hidden 5 min later. `COORD` is only the
+fallback until `role-session/coordinator` exists.
+
 ## The five scripts
 
 ### `stage.sh` — staging demo watcher (port 8899)
@@ -319,9 +326,10 @@ ancestors are all gone can be unowned. Five rules:
 | d | `ops/monitor.py` >200 % CPU or >1.5 GB for >120 s | amber |
 | e | load1 over the plan (owners' budgets, capped at the core count, +4) for >5 min | amber + top 5 |
 | g | `$HACKRIFF_OPS/radio-lock` past its `until` (T-922) | **release the lock** + red |
+| h | an UNOWNED build/test process (cargo, nextest, non-sccache rustc, `hk serve`, ui/e2e node, a worktree `target/` binary, or a shell wrapping one) in this repo's `.claude/worktrees/<name>` (command line or one `lsof` cwd; either one protected is enough) with no running/fix-held/limited claim on any host, no owned process there and no git activity there (mtime of its admin dir's `index`/`HEAD`/`logs/HEAD`, found from the worktree's `.git` file) within the hold, >1800 s — the 2026-09-25 t901 15-h cargo wrapper and the 09:34 killed sessions' nextest runs | **SIGTERM, then SIGKILL** + red |
 
-**Rule (b) is the only thing it kills** (rule g removes a file, never a process: an owner that overran
-its window or died holding the radio would otherwise keep staging on replay indefinitely), and only on that signature, only when unowned, only
+**Rules (b) and (h) are the only things it kills** ((h) re-reads ps and the claims before each signal) (rule g removes a file, never a process: an owner that overran
+its window or died holding the radio would otherwise keep staging on replay indefinitely), and only on those shapes, only when unowned, only
 sustained: a live agent's shell has a live parent, so it is *owned* and can never match. Every
 kill is logged to `watchdog.log` with its full command line. Everything else is an alert through
 `ops/alert.py` (deduped 30 min per key). The last tick is `$HACKRIFF_OPS/watchdog.json`, which

@@ -342,6 +342,14 @@ impl Radio {
             control,
         )
     }
+
+    /// T-942: the same radio, its first sample stamped `t_ns` — a **restart** resumes later in
+    /// capture time than the run before it, which is the whole shape of the defect.
+    #[must_use]
+    pub fn starting_at(mut self, t_ns: i64) -> Self {
+        self.t_ns = t_ns;
+        self
+    }
 }
 
 impl Source for Radio {

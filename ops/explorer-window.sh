@@ -3,7 +3,7 @@
 # in the foreground, and release the lock at window end, on exit and on crash. `ops/launch.sh explorer`
 # runs this as its tmux pane process; run it directly only with --dry-run.
 #
-#   ops/explorer-window.sh --window 3h [--dry-run]
+#   ops/explorer-window.sh --window 3h [--session-id <uuid>] [--dry-run]
 #
 # Guarantees:
 #   * ONE instance: a live pid in $HACKRIFF_OPS/explorer/window.pid refuses a second (exit 3).
@@ -38,13 +38,15 @@ POLL="${EXPLORER_POLL:-5}"
 PORT="${EXPLORER_PORT:-8897}"
 MAX_S=$((8 * 3600))
 
-WINDOW=3h; DRY=0
+WINDOW=3h; DRY=0; SID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --window) [ $# -ge 2 ] || { echo "explorer: --window needs a value (e.g. 3h, 90m)" >&2; exit 2; }; WINDOW="$2"; shift 2 ;;
     --window=*) WINDOW="${1#--window=}"; shift ;;
     --dry-run) DRY=1; shift ;;
-    *) echo "explorer: unknown argument '$1' (usage: ops/explorer-window.sh --window 3h [--dry-run])" >&2; exit 2 ;;
+    # ops/launch.sh picks the session id and records it in role-session/explorer (the dashboard's role map)
+    --session-id) [ $# -ge 2 ] || { echo "explorer: --session-id needs a value" >&2; exit 2; }; SID="$2"; shift 2 ;;
+    *) echo "explorer: unknown argument '$1' (usage: ops/explorer-window.sh --window 3h [--session-id <uuid>] [--dry-run])" >&2; exit 2 ;;
   esac
 done
 
@@ -72,7 +74,9 @@ WHY="explorer window $WINDOW until $DEADLINE_HUMAN (T-923)"
 PIDF="$D/window.pid"
 
 PROMPT="Start your explorer window now. Deadline: $DEADLINE_HUMAN (EXPLORER_DEADLINE=$DEADLINE). The launcher has taken the radio lock as owner 'explorer' and staging is already on replay; confirm with 'just radio status' (do NOT take it again - a re-take is refused). Serve on 127.0.0.1:$PORT. Journal: $JOURNAL. Work the first-window targets in order, and release the radio before you exit."
-CMD=("$CLAUDE" --agent explorer --model opus --effort high --dangerously-skip-permissions "$PROMPT")
+CMD=("$CLAUDE" --agent explorer --model opus --effort high --dangerously-skip-permissions)
+[ -n "$SID" ] && CMD+=(--session-id "$SID")
+CMD+=("$PROMPT")
 
 mkdir -p "$D"
 log(){ echo "[$(date '+%m-%d %H:%M:%S')] $*" | tee -a "$D/window.log"; }

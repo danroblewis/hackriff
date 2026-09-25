@@ -1741,29 +1741,88 @@ def _tid_of_cwd(path):
     return None
 
 
+def _role_sessions():
+    """{session id: role} from $HACKRIFF_OPS/role-session/<role>, each written by ops/launch.sh."""
+    out = {}
+    for f in glob.glob(os.path.join(SCRATCH, "role-session", "*")):
+        try:
+            sid = open(f).read().strip()
+        except OSError:
+            continue
+        if sid:
+            out[sid] = os.path.basename(f)
+    return out
+
+
+CLAUDE_SESSIONS = os.path.expanduser("~/.claude/sessions")
+
+
+def _ps():
+    return sh(["ps", "-axo", "pid=,args="])
+
+
+def _live_session_ids():
+    """Session ids a live claude process belongs to, from ONE `ps` per refresh: an id on a claude
+    command line (`--session-id`, `--resume`: how ops/launch.sh starts a role), or Claude Code's own
+    registry ~/.claude/sessions/<pid>.json naming a pid that ps still shows running claude (a
+    session started without its id on the command line)."""
+    procs = {}
+    for line in (_ps() or "").splitlines():
+        pid, _, args = line.strip().partition(" ")
+        if "claude" in args and pid.isdigit():
+            procs[int(pid)] = args
+    live = set(re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", " ".join(procs.values())))
+    for f in glob.glob(os.path.join(CLAUDE_SESSIONS, "*.json")):
+        try:
+            d = json.load(open(f))
+            if int(d["pid"]) in procs:
+                live.add(d["sessionId"])
+        except Exception:
+            continue
+    return live
+
+
 def agents(status_map):
     out = []
     titles = {t.get("id"): t.get("title", "") for t in load_tasks_yaml()}
     mstone = {t.get("id"): t.get("milestone", "") for t in load_tasks_yaml()}
     # EVERY live session and its subagents, not only the coordinator's (user, 2026-09-22: the
     # supervisor's triage/fix/merge/SDET agents were invisible here). A session is a top-level
-    # transcript under PROJ; its subagents live in <session>/subagents/. The coordinator is the
-    # id in $HACKRIFF_OPS/coordinator-session when that file exists (the COORD constant went
-    # stale the first time the coordinator was relaunched), else the COORD constant; the
-    # session whose subagent dir this monitor's own launcher used is the supervisor.
-    coord_id = COORD
-    try:
-        coord_id = open(os.path.join(SCRATCH, "coordinator-session")).read().strip() or COORD
-    except Exception:
-        pass
-    sessions = [p for p in glob.glob(f"{PROJ}/*.jsonl") if os.path.getmtime(p) > time.time() - 1800]
+    # transcript under PROJ; its subagents live in <session>/subagents/.
+    # A role is named ONLY by $HACKRIFF_OPS/role-session/<role>, which ops/launch.sh writes with the
+    # id it launched (user ask 2026-09-25 09:45: six sessions showed as 'supervisor' because any
+    # session with a subagents/ dir was one). Every other session is 'session'. Until
+    # role-session/coordinator exists the older coordinator-session pointer (else COORD) stands in.
+    roles = _role_sessions()
+    if "coordinator" not in roles.values():
+        coord_id = COORD
+        try:
+            coord_id = open(os.path.join(SCRATCH, "coordinator-session")).read().strip() or COORD
+        except Exception:
+            pass
+        roles.setdefault(coord_id, "coordinator")
+    live = _live_session_ids()
+    now = time.time()
+    recent = {os.path.basename(p)[:-6]: p for p in glob.glob(f"{PROJ}/*.jsonl") if os.path.getmtime(p) > now - 1800}
+    for sid in roles:          # a live role session is listed however long it has been quiet
+        p = f"{PROJ}/{sid}.jsonl"
+        if sid not in recent and sid in live and os.path.exists(p):
+            recent[sid] = p
     role_of = {}
-    for p in sorted(sessions, key=os.path.getmtime, reverse=True):
-        sid = os.path.basename(p)[:-6]
-        role = "coordinator" if sid == coord_id else ("supervisor" if os.path.isdir(f"{PROJ}/{sid}/subagents") else "session")
+    for sid, p in sorted(recent.items(), key=lambda kv: os.path.getmtime(kv[1]), reverse=True):
+        role = roles.get(sid, "session")
         role_of[sid] = role
         s = session_summary(p, role)
-        if s: s["status"] = None; s["running"] = s["age_s"] < 180; s["session"] = sid[:8]; out.append(s)
+        if not s: continue
+        # Live = a claude process for this id. A role session without one has ended, whatever its
+        # transcript's age (the sessions killed at 09:34 showed as running); any other session
+        # without one falls back to transcript age. An ended session reads 'ended hh:mm' (its last
+        # transcript write) and is dropped 5 min after it.
+        running = sid in live or (sid not in roles and s["age_s"] < 180)
+        if not running:
+            if s["age_s"] > 300: continue
+            s["ended"] = time.strftime("%H:%M", time.localtime(os.path.getmtime(p)))
+        s["status"] = None; s["running"] = running; s["session"] = sid[:8]; out.append(s)
     subs = [p for sid in role_of for p in glob.glob(f"{PROJ}/{sid}/subagents/*.jsonl") + glob.glob(f"{PROJ}/{sid}/**/*.jsonl", recursive=True)]
     subs = sorted({p for p in subs if os.path.getmtime(p) > time.time() - 1800}, key=os.path.getmtime, reverse=True)
     # A subagent quiet longer than this is treated as no longer running. 900 s, not 210: a
@@ -2373,7 +2432,7 @@ async function tick(){
   const idleWhy = mg.state==='merging' ? 'no builder agents — coordinator merging ('+esc(mg.msg||'')+')'
     : mg.state==='gating' ? 'no builder agents — coordinator gating ('+esc(mg.gate)+' '+dur(mg.elapsed_s)+')'
     : 'no agents running — coordinator idle';
-  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.milestone?` <span class="chip ms">${esc(a.milestone)}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
+  $('#agents').innerHTML=A.map(a=>`<div class=ag><div class=r1><span class="nm ${a.name==='coordinator'?'coordinator':''}"><span class="rdot ${a.running?'on':'off'}"></span>${/^T-\d/.test(a.name)?`<span class=tlink data-tid="${esc(a.name)}">${esc(a.name)}</span>`:esc(a.name)}${a.ended?` <span class=chip>ended ${esc(a.ended)}</span>`:''}${a.status?` <span class="chip ${a.status}">${a.status}</span>`:''}${a.milestone?` <span class="chip ms">${esc(a.milestone)}</span>`:''}${a.title?` <span class=agtitle>${esc(a.title)}</span>`:''}</span><span class=meta>${a.name==='coordinator'?'':dur(a.dur_s)+' · '}last ${dur(a.age_s)} ago</span></div>${a.label?`<div class=lbl>${esc(a.label)}</div>`:''}<div class=last>${esc(a.last)}</div></div>`).join('')||`<div class=lbl>${idleWhy}</div>`;
   const W=d.worktrees||[]; $('#wtn').textContent=W.length+' trees';
   $('#wts').innerHTML=W.map(w=>{
     const badge = w.is_main ? (w.uncommitted?`<span class="badge chg">${w.uncommitted} uncommitted</span>`:`<span class="badge clean">clean</span>`)

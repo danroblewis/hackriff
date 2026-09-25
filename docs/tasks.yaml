@@ -23618,6 +23618,8 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): the canvas fills the whole window edge to edge (no app-shell frame or margins); the inventory and focus panels float over it; every toolbar button is clickable. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator: after staging review the user stated principle P1 (docs/23 §10.6): the left column kept its pre-redesign height, which is not minimal. The collapse-to-chip + dismiss is T-895 (high).
+
+      2026-09-25 coordinator (user via supervisor, 10:02): the 'app-shell frame retires' claim was PARTIAL. The side column went via T-882 and the chip tickets, but T-150's top bar (Explore/Decode/History, Review, Theme, tuning nudges) and the Outputs bottom dock were still on staging. They are retired by T-993 (top bar -> floating chrome) and T-994 (outputs on the map: active box state + badge, context menu with Listen, dock retires). MMAP's definition of done includes both.
     result: |
       Round 3 fix for the T-528 hit-test regression: `.side`/`.focus` (z-index 4,
       siblings of `.centre` which is z-index:auto) painted above `.centre`
@@ -27737,7 +27739,7 @@ tasks:
   - id: T-932
     milestone: MLIVE
     title: "RC red: surface-nav - the tile route refuses a request while nothing moves the view and the client cap never adapts, at main 92d0f6f1"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI
@@ -27754,6 +27756,7 @@ tasks:
     branch: task-rcfix-surface-nav
     result: |
       DONE 2026-09-25 on task-rcfix-surface-nav (9aab332e, queued): a LOAD FLAKE, not a product defect - surface-nav passed alone 3/3 at 92d0f6f1 (load 25-32). The steady window opened when the gestures' requests were answered on the wire, but an aborted read is 'answered' (canceled) while /api/tiles still builds it and holds the slot; the refusal ~4 s in was over the page's own leftover reads (cap at AIMD floor 1, not a cap that failed to react). Fix (spec only, no assertion loosened): after the wire drain, poll a serial probe until the route reports it holds no slot but the probe's (cost.in_flight - cost.in_flight_held == 0); a slot held > 31.2 s while the page is idle fails as the T-454 leak with the server's numbers. Red proof with a fault-injected hk: the RC case red 3/3 on the old spec, green 3/3 on the new; a never-released slot green on the old, red on the new. Spec 4/4 alone, just test-ui 81/81, tsc clean. Product follow-up: T-959 (client uses in_flight_held, not an average charge).
+    commit: 9a4de46c
   - id: T-935
     milestone: MAUTO
     title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
@@ -27908,7 +27911,7 @@ tasks:
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: STORE-HISTORY
@@ -27927,6 +27930,15 @@ tasks:
 
       2026-09-25 coordinator, from explorer window 2 (journal-20260925.md, 05:52-06:23): another future time: /api/timeline window.buffered.drops[0].at_s = 1790341844.69 while the wall clock was 1790340962 - a ring DROP timestamp ~880 s in the future, on a FRESH data dir (w2/data-aprs), so not only the reused-dir case - check the ring's drop-time arithmetic too.
     branch: task-t942
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 07:27).
+      Root cause of the restart-kills-history defect: the run-end seal was seal_through(last_frame + 1 h), which sealed tiles of time blocks that had not happened yet. Scheme 1's level 2 is a ONE-HOUR tile, so the tile of the hour the run died in landed on disk with its block end (the next hour boundary) as the newest sealed time; Pyramid::recover resumed the watermark from the newest sealed block end of EVERY level, and ingest answers Late for every frame whose level-0 block ends at or before the watermark - so the whole of the next run's history was refused, silently, until wall clock passed the hour. latest_ns is resumed from the same value, which is the explorer's second finding (time.latest_s an exact hour boundary 34 min ahead, /api/analysis/strongest found:false, the pane drawn short of the top): one cause, both surfaces. Fix: (1) new Pyramid::seal_all separates the forcing from the clock - it seals every open tile whatever its block and leaves the watermark at the last frame; hk-pipeline's two end-of-run seals use it, so a finished run's history is still complete on disk at every level. (2) The watermark is a decision, not a property of the tiles, so it is persisted with the data's own edge (new 16-byte `edge` file beside `recording_began`) and read back exactly; a store written before T-942 falls back to level 0's newest sealed block end - the tightest tile bound and the only level ingest tests - instead of a coarse level's hour. (3) reopen_sealed_ahead undoes the forced seal at open: a level-0 tile sealed past the watermark is read back and reopened so the restart keeps filling the minute it was in the middle of, while a coarser one is dropped and re-folded from its children by the rebuild that already runs there (reopening both would double-count). A total loss is also no longer silent: a run that has folded nothing and refused 100 frames says so once on stderr.
+      Tests: just test-crate hk-store -> exit 0 (231 passed, 0 failed (includes the two new history::tests::restart tests)); just test-crate hk-pipeline -> exit 0 (446 passed, 6 skipped - includes the new history_survives_restart and the five tests an earlier draft of this fix broke); just test-crate hk-api -> exit 0 (307 passed - hk-api reads the pyramid watermark in tiles.rs, so it is in scope); cargo nextest run -p hk-pipeline -E 'binary(history_survives_restart) or binary(history_survives_retune) or binary(aware_042_pipeline) or binary(iterative_scan_device) or binary(space_050_pipeline) or binary(signal_062_pipeline) or binary(replumb_spectrum_handshake)' -> exit 0 (8 passed - final confirmation after the last edit); cargo nextest run -p hk-pipeline -E 'binary(history_survives_restart)'  [with the +1h seal and the all-levels watermark recovery re-injected] -> exit 100 (RED PROOF on the old code, reproducing the staging reading exactly: 'no spectrum history for the run AFTER a restart over its own 4 s of capture (ingested 0, LATE 33251)'. Both hk-store restart tests also go red with the old recover() re-injected (watermark 1789300860000000000 vs 1789300830000000000).)
+      precheck exit 0
+      Commits: ef60f883
+      Observed, not chased: A store dropped without close() (a crash) leaves a stale or absent `edge` file. That is self-correcting - tiles sealed past the stale watermark are reopened (level 0, content preserved) or re-folded from their children (coarser) - but a coarse tile whose children were evicted by the BYTE BUDGET in that window would be rebuilt from fewer children than it was first folded from. Not reproduced; the window is a block that has not ended, whose children are the most recent tiles on disk. | save_edge() adds one 8->16-byte fsync per seal and per checkpoint on the capture thread (~2/min at scheme 1's 60 s checkpoint interval). Visible in a unit test that checkpointed every frame: 45 checkpoints cost 37 s of wall clock on this loaded box, i.e. ~0.8 s per small-file fsync here. At the shipped cadence it is negligible, but it is real per-seal work on the thread that gates the ring (T-453's constraint).
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: 34e58c3e
   - id: T-943
     milestone: MMAP
     title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
@@ -28103,6 +28115,8 @@ tasks:
       2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
 
       2026-09-25 coordinator, user: this is THE FLEX decoder recipe ticket, and the flex-pagers-930p8 fixture (T-949, external; fetch it in your worktree) is its BLIND TEST: write the FLEX member of the 'all captured signals decode' set FIRST, T-545 pattern (mock SDR replaying the capture, blind - no frequency/protocol passed; per truth channel 929.608/929.933/931.733: one burst region, FSK params estimated, the FLEX chain auto-selected, frames sync + BCH(31,21)-valid, a paging-allocation explanation in the top-k), confirm it is red on main for the right reason, then build the recipe until it is green. Use case SIGNAL-088.
+
+      2026-09-25 coordinator: finished by a relaunched Opus worker (686160b9, queued): SIGNAL-088 blind member 5/5 through the mock SDR, hk-demod flex 17, hk-pipeline 73, hk-context 267; precheck clean. FSK level-count verdict: all 6 frames on all 3 channels (929.6084, 929.9331, 931.1580) are 4-level in the data (the explorer called 931.158 2FSK; the oracle read the always-2-level/1600 Bd header) - README table, truth values left as T-949 wrote them. Noted: the ticket names 931.733 as a truth channel but the fixture's third channel is 931.158 (931.733 idle in this clip); `just fixtures-fetch --from ...` exits 1 on unrelated 2026-09-13 manifest entries even when the wanted capture is present.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
     dispatch: manual
     branch: task-t950
@@ -28177,10 +28191,12 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the 1006 close is on EVERY WebSocket opener session, /ws/open/listen too (every listen and bits tap ended 1006 when closed) - fix at the shared opener close path.
+
+      2026-09-25 09:45 coordinator: review attempt 3 (after 2 fix rounds, runner review-failed) FAILED on a real correctness bug - a vanished peer is reaped after ~40 s not ~20 s: serve() blocks on conn.lock() behind a writer stuck in sink.write (ConnSink::write holds conn for the whole write, peer timeout 20 s), and PeerGone/Detached still take the lock before shutdown (attempt 2 fixed only SlowConsumer/DrainTimeout). Fix: serve() uses try_lock and skips the close frame when busy, going straight to handle.close + shutdown; on_close for PeerGone/Detached shuts down before (or instead of) the close write, with the short close-write timeout; add a test whose records fill the send buffer so the writer holds conn mid-write (the silent_peers test's tiny Ticking records never do). Review text: ~/.hackriff-ops/work/T-954/review.json. Coordinator runs this fix round as a manual Opus worker.
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-BOOT
@@ -28195,6 +28211,17 @@ tasks:
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): also: the page opened on 100-1100 MHz x 1.6 h with the tuned 101.7 MHz window drawn as a sliver - it does not open on the tuned window even without a stale offer.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): repeat: the page opens on a 0-520 MHz overview with the tuned window a sliver. Also (possibly a harness artefact): the first /#token= load after a refused navigation stayed on 'token needed' - reproduce with a real browser before fixing.
+
+      Review attempt(s) on cdf2aa1f ended REVIEW_FAIL with no verdict line. Checked ops/work/T-955/{fix1,review}.json directly: both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one reviewer attempt made zero turns, the other got a Bash call denied (running the new e2e/app-reload-retune.e2e.mjs against a built hk binary) and then hit the spend limit after ~23 min. No actual defect was named. Triage: merged in fcb0dd43 (already an ancestor, no-op), re-ran just test-ui: 88/88 files pass, tsc --noEmit clean, same as before the review. No code change made; treating this as an infra/cost failure of the review step, not a finding against the diff.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 09:28).
+      Fixed the root cause behind both reported symptoms: the surface's opening window (surface/bootstrap.ts + preview.ts) was computed as the bounding box over EVERY cell ever observed, so a session holding two different tunings inside one record horizon (162.2 MHz then 144.6 MHz) got a box spanning the gap between them - a reload opened on the stale band with a stale retune offer, and one live run opened on '100-1100 MHz x 1.6 h' with the actually-tuned band drawn as a sliver. Added recentObservedExtent, which boxes only the most recently active rows of the coverage grid, and used it (falling back to the whole-history census only when the recent rows are empty) at both the coarse and fine stages of probeSurface's refinement pass, so the opening tracks the currently-tuned band and the per-pane retune offer naturally stops naming the departed one. Separately, followLive (app/chrome/map-controls.ts) now also resets the pane's frequency window to the front end's own current tuning (frequency.current) when pressed, not only its time. Both changes are view arithmetic only; no device route. RE-TRIAGE (this pass): the branch failed review twice with 'no verdict line'. Read both raw review artifacts directly (ops/work/T-955/fix1.json and review.json): both terminated with terminal_reason=api_error / api_error_status=429 ('hit your monthly spend limit') before producing any finding - one attempt made zero turns, the other had one Bash call denied (running the new e2e file against a built hk binary) and then hit the spend limit ~23 minutes in. No actual defect was ever named against this diff. Triaged per the brief: merged in fcb0dd43 (already an ancestor of this branch - no-op), re-ran the full targeted UI suite: unchanged, 88/88 files pass, tsc --noEmit clean. No code change was made this pass, since nothing in the diff was found broken; this is recorded as an infra/cost failure of the review step, not a finding, via `just task note T-955`.
+      Tests: cd ui && node test/run.mjs surface-preview -> exit 0 (35 passed, including the T-955 recentObservedExtent/probeSurface regression tests reproducing the two-disjoint-tunings shape); cd ui && node test/run.mjs app-map-controls -> exit 0 (12 passed, including the T-955 follow-live frequency-reset tests); just test-ui -> exit 0 (88/88 UI test files passed (build + tsc --noEmit + full node:test suite) - re-run after merging fcb0dd43 (already an ancestor; no-op) during this re-triage pass, unchanged from the first pass); cd ui && npm run typecheck -> exit 0 (tsc --noEmit clean)
+      precheck exit 0
+      Commits: cdf2aa1f, dfb16473
+      Observed, not chased: The review process failed twice with terminal_reason=api_error / api_error_status=429 (account monthly spend limit), never producing a verdict against this diff - not something this branch can fix. Recorded on the ticket via `just task note T-955` with the exact evidence (the two raw review JSON artifacts' terminal_reason/api_error_status/result fields) for whoever re-runs the review once the limit resets. | The new ui/e2e/app-reload-retune.e2e.mjs (retune via POST /api/control/window, reload, assert the drawn pane + its retune offer) was authored per the ticket's ask for an app e2e, but has still not been RUN in any session: no `hk` binary exists in this worktree or its target dir, and building the whole workspace for one e2e run is outside a targeted-tests pass. It appears to be exactly what one of the failed review attempts got stuck trying to do (a Bash call to build+run it was denied, then that session ran out of budget) - flagging this explicitly in case a future review pass hits the same wall: the unit-level tests are the primary, run evidence for this fix, and the e2e file is additional coverage for whoever next builds hk. | docs/tasks.yaml's root CLAUDE.md states the T-376 rule as 'never derived from frequency.current or a band plan' for the opening window; this fix does not read frequency.current for the OPENING (it derives recency purely from the coverage map's own row timestamps), but followLive's frequency reset does read frequency.current directly - deliberately, since that is on an explicit user press rather than at open. Worth a second look if a future ADR pass tightens that wording.
+      Resources: 689 CPU-s, peak 2.0 GB
+    commit: a5575655
   - id: T-956
     milestone: MAUTO
     title: Production Evaluator over acquired IQ for /api/analyze (every job ends no_evaluator) - next MAUTO tranche
@@ -28214,7 +28241,7 @@ tasks:
   - id: T-957
     milestone: MMAP
     title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
-    status: todo
+    status: done
     priority: P1
     deps: []
     parallel_group: UI-SURFACE-RC
@@ -28228,10 +28255,11 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: the T-820 conflict-fix worker saw app-surface fail on the bulk base d4c82050 WITHOUT its merge on: 'pane 2's priors toggle never flips' (T-806's assertion) and 'the fog key list has an extra none' (T-807's) - same two as the T-933 worker's (layers-menu toggle + fog key). Same defect set; bisect covers both.
+    commit: daf76a79
   - id: T-958
     milestone: MMAP
     title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-SHEET-FLAKE
@@ -28242,6 +28270,7 @@ tasks:
       FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
       DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
+    commit: 5c0891d1
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
@@ -28280,7 +28309,8 @@ tasks:
   - id: T-961
     milestone: MAUTO
     title: "RDS identity lands on a separate overlapping row (106.1: rds-pi:1323 beside an unknown-0.999 detection); a CRC-valid decode never confirms the emitter"
-    status: todo
+    status: in-progress
+    branch: task-t961
     priority: P1
     deps: []
     parallel_group: INV-DECODE-ATTACH
@@ -28297,7 +28327,8 @@ tasks:
   - id: T-962
     milestone: MAUTO
     title: RDS PI committed and Confirmed from ~3 CRC-valid groups (98.085 PI 1704; oracle saw no RDS) - identity needs vote counts and a provisional state
-    status: todo
+    status: in-progress
+    branch: task-t962
     priority: P1
     deps: []
     parallel_group: RDS-EVIDENCE
@@ -28314,7 +28345,7 @@ tasks:
   - id: T-963
     milestone: MAUTO
     title: AIS recipe (GMSK 9600, NRZI, HDLC, CRC-16/X.25) + a validated AIS reference oracle
-    status: todo
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: RECIPE-AIS
@@ -28327,7 +28358,10 @@ tasks:
       FOUND 2026-09-25 by the explorer (AIS 161.975/162.025, SIGNAL-015): there is no AIS (GMSK 9600 Bd, NRZI, HDLC, CRC-16/X.25) recipe or decoder in the app; with AIS on the air the only path would be blind synthesis (no evaluator yet, T-956). No AIS reached this antenna tonight (two oracles; the explorer's numpy AIS oracle is unvalidated), so there is no capture. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, 03:43-05:16, live HackRF in SF) - sections named below; fm-gap.json, shots/, hk-serve-run*.log beside it. (section 'AIS').
       DELIVER: an AIS recipe (two-channel, GMSK 9600 demod, NRZI, HDLC bitstuff (T-613's block), CRC-16/X.25, NMEA/AIVDM payload as a stream output) with rate/deviation verified from the signal; a synthetic AIS scene (hidden truth: MMSI, message types) through the mock SDR, blind; add a small independent AIS reference decoder under py/fixtures (like rds_ref.py) validated on the synthetic scene, so the next explorer window has a validated oracle.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: the node2 run's handback (a007f7de) was reaped as a false NO_WORK (sync-back bug), so the runner's Opus review of this sonnet output never ran; the coordinator ran it: FAIL - (1) octets sent/read MSB-first where AIS/HDLC is LSB-first (a spec-order frame fails check_crc; HDLC residue 0x5B67 vs 0xF0B8), shared by synth, oracle, recipe and Rust test so all tests passed; (2) destuff before the 0x7E flag search truncates ~40% of real frames (the test hid it with has_false_flag); (3) oracle raim/comm_state sliced one bit early. One Opus fix round running (coordinator-manual), validated against an external AIS vector; re-review follows.
     model_reason: "sonnet/high: a well-specified recipe over existing blocks, plus a new validated oracle"
+    branch: task-t963
   - id: T-964
     milestone: MSCAN
     title: "Scan everything (fast) does not light the coverage map: 4.3 % sampled after a full 1 MHz-6 GHz pass; /api/coverage observed only for the current step"
@@ -28378,7 +28412,8 @@ tasks:
   - id: T-967
     milestone: MMAP
     title: Decoded identity (PI/PS etc.) is not shown in the inventory list rows
-    status: todo
+    status: in-progress
+    branch: task-t967
     priority: P2
     deps: []
     parallel_group: UI-LIST-IDENT
@@ -28539,7 +28574,8 @@ tasks:
   - id: T-974
     milestone: M2-hardening
     title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
-    status: todo
+    status: in-progress
+    branch: task-t974
     priority: P1
     deps: []
     parallel_group: DEFLAKE-API-CONTRACT
@@ -28626,6 +28662,8 @@ tasks:
       core_interface (detection/inventory). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): more overlap cases left standing: overlapping Confirmed boxes at 462.0076 / 462.0099 MHz (~100 kHz each), a stationary 12.5 kHz comb at 445.3-445.6 MHz Confirmed as ONE 105 kHz emitter with overlapping candidates, and triplicate candidates - none re-analysed.
+
+      2026-09-25 coordinator, evidence from T-974's triage (mock SDR, deterministic enough to reproduce): hk-cli api_contract inventory_and_analysis_strongest_find_the_blind_fm_station fails ALONE on main's code 3 of 6 runs - api_contract.rs:1719 'two boxes served stacked in time and frequency': two Candidates for one station, 99.8309-99.8517 MHz over 1790360024.517-027.598 s (count 7) and 99.8363-99.9161 MHz over 1790360024.389-026.650 s (count 4), both closed, both served by /api/inventory; the T-369 overlap re-analysis did not resolve the pair. Use it as this ticket's CI-visible failing-first test (it already exists and is red intermittently); when fixed it must pass alone 20/20.
     core_interface: true
   - id: T-979
     milestone: M3
@@ -28662,7 +28700,8 @@ tasks:
   - id: T-981
     milestone: M2-hardening
     title: Full-span overload stripes drawn as signal with no overload flag; /api/status reports no front-end overload
-    status: todo
+    status: in-progress
+    branch: task-t981
     priority: P1
     deps: []
     parallel_group: FRONTEND-OVERLOAD
@@ -28812,7 +28851,8 @@ tasks:
   - id: T-990
     milestone: M2-hardening
     title: Noise-only band yields ~6 candidates/min, each given a band-plan explanation with no measured support (airband, spurs as AIS)
-    status: todo
+    status: in-progress
+    branch: task-t990
     priority: P1
     deps: []
     parallel_group: DETECT-FALSEALARM
@@ -28827,7 +28867,8 @@ tasks:
   - id: T-991
     milestone: M2-hardening
     title: Content class computed for the whole window from one sub-band (152-162 MHz reads restricted-paging)
-    status: todo
+    status: in-progress
+    branch: task-t991
     priority: P2
     deps: []
     parallel_group: CONTENT-CLASS
@@ -28859,6 +28900,444 @@ tasks:
       DELIVER: the ratio table per station (app vs oracle), PI and PS unprompted counts, written to T-926's result; if < 90 %, name the remaining cause per station and file it through the coordinator.
       TESTING PROTOCOL: live measurement only; no code changes expected. HAND BACK with the table.
     blocked_on: "a radio window: ~15 min of the HackRF under the radio lock in a scheduled explorer/nightly window (staging stays live in the daytime); T-926 + T-941 landed"
+  - id: T-993
+    milestone: MMAP
+    title: "Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map"
+    status: done
+    priority: high
+    deps: []
+    parallel_group: MAP-TOPBAR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:02, via supervisor): "The top bar ... Explore/Decode/History tab buttons, the Review button, the Theme button, and the nudge buttons" are still there. T-801 ('the app-shell frame retires') did not retire T-150's top bar.
+      WHAT THE USER WILL SEE ON STAGING: no fixed-height bar above the map; the canvas's top row is the first pixel row of the page; the former bar's controls are small floating chrome that fades with the rest.
+      DELIVER (map principles docs/23 §10, P1 closeable / P4 small controls for big view changes):
+      - Explore / Decode / History mode -> a compact segmented control (three small buttons) docked top-centre, or folded into the Go-to cluster.
+      - Review -> a small icon button in the top-right cluster (beside layers/tools/Research).
+      - Theme -> inside a small settings/overflow menu (⋯) in that same cluster, not a bar button.
+      - Tuning nudge buttons (T-409; they command the radio through the one gated DeviceAction path) -> small buttons beside Go-to, the one place device commands live; fadeable with the rest. A pan/wheel still never commands the radio.
+      ACCEPTANCE: at 1280x800 and at 400 px width the canvas's top row is visible with no fixed-height bar above it (assert the canvas's bounding rect top == 0 and no element with the old bar's role spans the width); every former top-bar action reachable in <= 2 clicks (e2e clicks each); e2e specs that asserted the old bar are rewritten or retired per the rcfix rule (never loosened to pass); just test-ui green; screenshots at both widths in the handback.
+      OWNED FILES (so this runs beside the Outputs-on-the-map ticket): ui/src/app/index.html's HEADER/top-bar element only, ui/src/app/centre/nudge.ts, the mode/review/theme wiring, the top-right chrome cluster and base.css/phone.css rules for the bar. Do not touch ui/src/app/dock/*.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 10:02 via supervisor (staging): Retire the app-shell top bar: Explore/Decode/History, Review, Theme and the tuning nudges become small floating chrome; the bar's pixels return to the map
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 11:55).
+      Retired the app-shell top bar over the map. In Explore, <header class="bar"> is display:none, so the canvas's top row is the page's first pixel row (measured: .sf-canvas top == 0 and the bar box is 0x0 at 1280x800 and at 400x820). Its controls are MOVED, not copied (ids and listeners unchanged), into the map's floating cluster by the new ui/src/app/chrome/top-chrome.ts, and put back into the framed bar in their original order for Decode/History. Explore/Decode/History, device state, readouts, rec and stream status go into a compact .map-status pill: top-centre on wide screens, under the top-right cluster when the top row is too narrow. The T-409 nudges go into .map-nudge under Go-to, and the retune offer moves down one row. Review becomes an icon button with a count badge in the top-right cluster. Theme goes into a new ⋯ settings menu there, with a visible close and Esc handled by the overlay stack. All of it fades with the cluster, and the pill stays solid while it says the stream is not live. At <=600 px the cluster buttons are 32 px wide so Go-to keeps some width beside 8 buttons. New e2e app-top-chrome clicks every former bar action at both widths, each in at most 2 clicks: modes take 1, Review 1, Theme 2 (⋯ then Theme), and a nudge press reaches /api/control/* against the mock SDR. It is red with the old floating bar rule put back. The e2e specs and unit tests that asserted the old bar are rewritten to assert there is no bar. Screenshots: /Users/daniellewis/.hackriff-ops/work/T-993/shots/top-chrome-1280.png, top-chrome-400.png, top-chrome-{1280,400}-more.png.
+      Tests: just test-ui -> exit 0 (91/91 test files passed (build + typecheck + node suites)); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-top-chrome -> exit 0 (2/2: 1280x800 and 400x820, no bar, every former bar action clicked); cd ui && node e2e/run.mjs app-top-chrome  (old floating .bar rule re-injected into map-layout.css) -> exit 1 (both widths fail: 'the old top bar still takes a box over the map'); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-phone app-sheet app-side-chip app-dismiss app-status scan-everything app-detail -> exit 1 (6/7 passed. app-phone failed under 3-lane load: every idle opacity read 1, including dock/zoom/FAB, which this change does not touch. It passed alone (next entry).); cd ui && HK_BIN=../target/debug/hk node e2e/run.mjs app-phone -> exit 0 (passes alone: bar 0 px, canvasTop 0, status/nudge/dock/zoom/fab/chip all fade to 0.35)
+      precheck exit 0
+      Commits: c1b05d55
+      Observed, not chased: app-phone.e2e.mjs's idle-fade step read opacity 1 for every element (dock, zoom and FAB too) when run in a 3-lane e2e batch, and passed alone. Under load it looks like the 800 ms transition wait or the idle timer gets starved. Deflaker candidate. | At 400 px the floating Go-to input is ~100 px wide beside the 8-button cluster, so its placeholder is cut off ('Go to f…'). Folding Annotate/Pin into a menu at phone width would win the space back. | Decode and History still use the framed shell's bar (as the ticket scoped it to the map). Retiring it there too would be a follow-up.
+      Resources: 753 CPU-s, peak 6.8 GB
+    commit: a7f58d37
+  - id: T-994
+    milestone: MMAP
+    title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
+    status: in-progress
+    branch: task-t994
+    priority: high
+    deps: []
+    parallel_group: MAP-OUTPUTS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:02 + AMENDMENT 10:06, via supervisor): the OUTPUTS bottom dock (T-150) is still a fixed bar. The user: "the outputs could be a tab, but it might make more sense to enhance what's rendered on the waterfall map. We already have Detections drawn as boxes; if a box is actively being demodulated / listened / decoded, the box could show that it's active somehow, and there could be a right-click menu for it."
+      WHAT THE USER WILL SEE ON STAGING: no bottom bar; a box that is playing/decoding/recording says so on the map; right-click (long-press on touch) any box or pin gives its actions, Listen included.
+      DELIVER (docs/23 §10 P2: anything with coordinates is drawn on the map; GIS symbology by attribute - boxes, not pins):
+      - ACTIVE STATE ON THE BOX: a detection/emitter box with an active output - Listen (audio), demod stream, decode pipeline, recording - draws an 'active' outline state distinct from 'selected', plus a small corner badge naming the output kind(s) (audio / stream / decode / rec glyphs) and, for audio, a subtle level pulse driven by the server-reported level. The state comes from the backend's open-output records (listen/stream/decode/record sessions), never inferred client-side; laid out through the pane's capture-time mapping on every frame like every other overlay.
+      - CONTEXT MENU on any box/feature (right-click; long-press on touch), and the same menu on a pin (generalized box): Listen / Stop listening, Decode... (recipe picker), Record clip, Stream out, Analyze, Promote / Delete, Go to. This is where Listen lives from now on (the explorer found Listen unreachable from Candidate rows). Reuse T-192's context-menu component and T-943's action wiring rather than a second implementation; the Selected tab keeps the detail view.
+      - The Outputs dock RETIRES (its pixels return to the map). Optional, secondary: a small closeable 'Active outputs' chips strip in the bottom sheet's peek (T-803), each chip with a working stop.
+      ACCEPTANCE: e2e through the mock SDR: start Listen on a station from the context menu -> its box shows active + the audio badge within a frame; stop from the same menu -> both drop; a decoding box shows the decode badge while its pipeline runs and drops it when done; long-press opens the same menu at 400 px; no fixed-height bar at the bottom at 1280x800 or 400 px; every former dock action reachable; specs that asserted the dock rewritten/retired per the rcfix rule (never loosened); just test-ui green; screenshots in the handback. If a needed output-state field is missing from the API, add it to docs/api.md + api_contract.rs together (T-079). Interplay: T-987 (Listen opens squelched on a bursty channel) changes what Listen does, not where it is invoked.
+      OWNED FILES: ui/src/app/dock/*, the box/pin overlay symbology in ui/src/surface/, the context-menu component, index.html's DOCK element only. Do not touch the top bar (sibling ticket).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone; a targeted nextest binary if the API changes), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 10:02 + amendment 10:06 via supervisor (staging): Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires
+    high_effort_reason: "cross-cutting: new server output-state records (listen/stream/decode/record) reach the map as per-frame box symbology + a context menu that replaces the dock and becomes the only Listen entry point - UI + API contract together"
+  - id: T-995
+    milestone: MMAP
+    title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
+    status: in-progress
+    branch: task-t995
+    priority: high
+    deps: []
+    parallel_group: MAP-MINIMAP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User: "I don't want that [full-spectrum minimap bar] there at all. If I want to see the whole width of the waterfall map, I would zoom or scale to see it, which is how Google Maps works - there is never a 'whole world' minimap. The minimap was an idea for the previous UI."
+      DELIVER: remove the minimap pane and its bar; the whole-spectrum view is reached by zooming out (the canvas already spans 1 MHz-6 GHz). What only the minimap showed - active capture windows per SDR, survey/sweep coverage segments - moves to the coverage-fog layer and the scale bar's tier text (sibling scale-bar ticket), never lost. Update docs/16 §8, docs/23 and the root CLAUDE.md sentences that say 'with a minimap' / 'the minimap lights every active capture window' to say the minimap is retired by the user's decision 2026-09-25 and where its information now lives. The follow-live FAB's minimap toggle (surface.ts:1340) goes with it.
+      ACCEPTANCE: no minimap element at 1280x800 or 400 px; zooming out reaches the full device range; multi-SDR/survey coverage still visible on the map; docs updated.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired
+  - id: T-996
+    milestone: MMAP
+    title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-SCALE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User: the Retune/stats bar's "more" expansion (slice, peak dB, a signal selection stuck at 101.3, phosphor style "totally unnecessary", capture rules "also unnecessary", "0.4 % of this surface was ever sampled (18 of 4096 coverage cells)..." "can probably go") and the white panel block "100.980 MHz ± 937 kHz LIVE" "can definitely be replaced with something on the waterfall map. Google Maps has a very small short section bottom-right that shows the distance measure ... A sense of scale is what the current centre freq and width is."
+      DELIVER: a Google-Maps-style SCALE BAR bottom-right of EACH pane (built per pane from the start - the split-view per-pane status ticket depends on it): a short bar labelled with the frequency it spans at the current zoom ("200 kHz") and a second short bar for time ("10 s"), recomputed every render frame from that pane's own Hz/px and capture-time mappings; the pane's honesty tier/level in tiny text beside it (the existing three-tier rule). REMOVE: phosphor style, capture rules, the coverage-percentage statement, the white centre/span panel block, the stale signal-selection line, the "more" expansion. KEEP as a one-line readout in the pane's bottom-left status: centre / span / LIVE-or-time-position, and peak dB only while hovering. The Retune button stays where Go-to lives (small; it commands the radio through the gated DeviceAction path).
+      ACCEPTANCE: no white panel block and no "more" expansion with those items; e2e measures the bar's px against the pane's Hz/px and s/px at three zooms; 400 px width fits.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
+  - id: T-997
+    milestone: MMAP
+    title: "Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: MAP-CHIP
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User, of the floating hamburger + "1 cand, 1 conf" chip at left vertical centre: "I don't like where this is placed, in the vertical center, it overlaps the timeline markers and isn't very useful. We need a redesign of that component."
+      DELIVER: dock it top-left under Go-to (the chrome cluster), never mid-height; two small pills "1 cand · 1 conf" that open the Explore drawer (bottom sheet, T-803) filtered to that list; no hamburger glyph; never overlaps the time ruler; fades with the rest. First look, then state in the handback whether it should exist at all once the counts are visible on the map as boxes, and implement the recommendation (removing it is allowed if every path it offered stays reachable in <= 2 clicks).
+      ACCEPTANCE: at 1280x800 and 400 px the chip does not intersect the time ruler or any other chrome (bounding-rect e2e); each pill opens the sheet on its list.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler
+  - id: T-998
+    milestone: MMAP
+    title: Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
+    status: todo
+    priority: medium
+    deps:
+    - T-993
+    parallel_group: MAP-RULER
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User: "The timeline tick markers on the left are too wide, and I'm not sure if I like them at all. At the very least, there should be a choice between 'seconds ago' and timestamp."
+      DELIVER: narrow the HUD time ruler to <= 40 px (labels drawn just inside the canvas edge, subtle, short ticks); a mode toggle in the ⋯ settings menu (T-993 creates it): relative ("12 s ago", "3 min ago") vs absolute (HH:MM:SS local), persisted per viewer (localStorage in try/catch; default relative); the frequency ruler gets the same narrow treatment. Labels come from absolute capture time through the pane's mapping, never a browser clock.
+      ACCEPTANCE: ruler width <= 40 px; never overlaps floating chrome (bounding-rect e2e); both modes read correctly on a frozen (scrubbed) pane and a following pane (label text asserted against the server's capture time).
+      Opus reviews this (cheaper model on the live-rendering path).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
+  - id: T-999
+    milestone: MMAP
+    title: "Past-survey Go-to loses its time jump: the drawer writes reviewAt but no pane moves to it and mirror() overwrites it - move the pane's time + the missing test"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-GOTO
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET (standalone bug, single pane too): the drawer's "go to a past survey" writes reviewAt (ui/src/app/chrome/explore-drawer.ts:49) but nothing in app/ moves a pane's time from the store (no panes.goTo caller) and mirror() at ui/src/app/centre/surface.ts:1567 overwrites it - the time jump is lost. No test covers it.
+      DELIVER: the past-survey Go-to moves the target pane's time window to the survey's time (and frequency), freezing it there; the mirror no longer overwrites it. Add the missing tests (unit over the store + e2e: choose a past survey -> the pane's time position equals the survey's capture time, read from the server's record). Opus reviews.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Past-survey Go-to loses its time jump: the drawer writes reviewAt but no pane moves to it and mirror() overwrites it - move the pane's time + the missing test
+  - id: T-1000
+    milestone: MMAP
+    title: "Split view: make the active pane visible (outline; Go-to/zoom/layers name the pane; click and right-click set it; keys switch panes and toggle Live) + the global-vs-active chrome rule in docs/23 §10"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: MAP-PANES
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: make the ACTIVE PANE VISIBLE. An outline on the canvas around the active pane; the chrome that acts on it names it ("Go to · pane 2", "Layers · pane 1 of 2", zoom); click AND right-click set the active pane (right-click does not today, input.ts:430-437); keys to switch panes and to toggle Live on the active pane. Write the rule in docs/23 §10: Go-to, zoom, layers and tools act on the ACTIVE pane and say so; colour scale and outputs (Listen/decode/record) are global. Principle: chrome that acts on one pane must show which.
+      ACCEPTANCE: with two panes, pressing/right-clicking either moves the outline in the same frame and the named chrome updates; e2e covers click, right-click and the keys.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: make the active pane visible (outline; Go-to/zoom/layers name the pane; click and right-click set it; keys switch panes and toggle Live) + the global-vs-active chrome rule in docs/23 §10
+    high_effort_reason: replaces a hidden global (preview.activePane) that nearly every chrome control binds to; the input model and the global-vs-active chrome rule in docs/23 are designed here and every later split-view ticket builds on it
+  - id: T-1001
+    milestone: MMAP
+    title: "Split view: a Live/Freeze button inside each pane's rectangle; the single follow-live FAB retires"
+    status: todo
+    priority: medium
+    deps:
+    - T-1000
+    parallel_group: MAP-PANES
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: a per-pane Live/Freeze button INSIDE each pane's rectangle; the single follow-live FAB (ui/src/app/chrome/map-controls.ts:519-523, which freezes/resumes whichever pane was last wheeled) retires. A pane's pause IS its time window (no separate flag, T-347); pausing never reaches a device route.
+      ACCEPTANCE: freezing pane 1 leaves pane 2 following live; each button's state is correct in the same frame; a spy client asserts no device call.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: a Live/Freeze button inside each pane's rectangle; the single follow-live FAB retires
+  - id: T-1002
+    milestone: MMAP
+    title: "Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it"
+    status: todo
+    priority: medium
+    deps:
+    - T-1000
+    parallel_group: MAP-PANE-INV
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: detections queried PER PANE. Today touching pane 1 re-scopes the Candidate/Confirmed lists and pane 2's boxes to pane 1's past window (ui/src/app/centre/surface.ts:854-866 -> explore/inventory.ts:260-270) and every pane draws the same inventory.rows (surface.ts:473-476, 627). Each pane draws the rows for its own (t, f) window (the inventory is time-scoped to the view - CLAUDE.md signal model); the lists follow the active pane and name it ("Candidates · pane 1"). Assert the requests the client builds per pane (ui/test), not only the responses.
+      ACCEPTANCE: pane 2's live boxes do not change when pane 1 is touched or scrubbed; the lists name the pane they show.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it
+    high_effort_reason: per-pane inventory queries change how the time-scoped inventory invariant is served (one query per pane window, lists bound to the active pane) - backend query shape + client data flow
+  - id: T-1003
+    milestone: MMAP
+    title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
+    status: todo
+    priority: medium
+    deps:
+    - T-1001
+    - T-996
+    parallel_group: MAP-PANES
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: status, scale bar and IQ words PER PANE, inside each rectangle - tier/level, Retune, IQ backing (retention bound / IQ horizon words), trace readout. Today pane 2's status row + Retune can be clipped (pane status collapsed at 46 px, centre.css:72), rows are labelled pane1/pane2 not by screen position, and the trace readout and IQ-ring words describe the active pane only (surface.ts:410, 776); the trace strip toggle is all-or-nothing (surface.ts:1411). Reuse the per-pane scale bar from the scale-bar ticket (dependency).
+      ACCEPTANCE: at two panes (1280x800 and 400 px) nothing is dropped and nothing clipped (bounding-rect e2e); each pane's IQ words describe its own time position.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes
+  - id: T-1004
+    milestone: MMAP
+    title: "Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost"
+    status: todo
+    priority: medium
+    deps:
+    - T-1000
+    - T-994
+    parallel_group: MAP-PANE-OUT
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: Go-to and outputs aware of frozen panes. Go-to on a frozen pane today lands it in the past (surface.ts:1566) and the retune offer shows disabled as "past" (surface/retune.ts:219) - offer "go live at this frequency" instead. Record IQ records the band NOW even when the active pane is frozen (app/centre/capture-clock.ts:90) - refuse or re-label it for a frozen pane (say what will be recorded). Output badges from T-994 (outputs on the map) are drawn per pane. A selection highlighted in both panes (global focus, surface.ts:453): draw it in the OTHER pane as a linked ghost, not as the selection.
+      ACCEPTANCE: each of the four behaviours covered by an e2e with pane 1 frozen and pane 2 live.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: Go-to on a frozen pane offers 'go live at this frequency'; Record IQ refuses or re-labels for a frozen pane; output badges per pane; the other pane shows a selection as a linked ghost
+  - id: T-1005
+    milestone: MMAP
+    title: "Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close"
+    status: todo
+    priority: medium
+    deps:
+    - T-1000
+    parallel_group: MAP-PANES
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:30, split-view refinement via supervisor; audit with file:line evidence in ~/.hackriff-ops/handoffs/coordinator-1030-split-view.md). User: "A common use would be to look at one signal from the past and the current waterfall, and each split needs its own 'Live' button." Root cause: panes are independent in surface/panes.ts but nearly every outside control goes through one HIDDEN preview.activePane (the pane last pressed/wheeled, surface/input.ts:213,421) that nothing on screen shows. SET ACCEPTANCE (all split-view tickets): pane 1 frozen on a past signal, pane 2 live - each pane has its own Live button and status, boxes correct in both, Go-to and the lists name the pane they act on, nothing in pane 2 changes when pane 1 is touched.
+      THIS TICKET: split layout controls. A draggable divider (wire setSplitFraction, which has no caller), a close button per pane, columns OR rows (only column splits exist in the app today; rows only on the preview page), and the rule for which pane becomes active after a close: the one under the pointer, else the live one (today closing silently makes pane 1 active, surface/preview.ts:1131).
+      ACCEPTANCE: e2e drags the divider (fraction changes, both panes re-lay-out in the same frame), closes each pane, switches rows/columns.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view layout controls: draggable divider (wire setSplitFraction), a close button per pane, rows or columns, and which pane is active after a close
+  - id: T-1006
+    milestone: MMAP
+    title: "Pane device selector in the UI: a device pill in each pane's status, a picker in the pane menu, 'one pane per device' when two SDRs are attached; Go-to/retune command that pane's device"
+    status: todo
+    priority: normal
+    deps:
+    - T-1000
+    parallel_group: MAP-DEVICE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:40, multi-SDR + scan overlay via supervisor; ~/.hackriff-ops/handoffs/coordinator-1040-multisdr-scan.md). MULTI-SDR IS DONE IN THE BACKEND (MSDR): T-510 N source/ring/capture sets in one Pipeline, T-511 N live controls + device selector on control routes, T-512 repeatable --device, T-513 two-device mock e2e, T-514 RTL-SDR driver (the user's NooElec Nano 3), coverage by device (hk-api coverage.rs by_device_over), device_id in provenance, /api/devices in docs/api.md. What is missing is the UI - build on those routes, do not re-implement them.
+      THIS TICKET: a pane's `device` (docs/16 §8: it chooses whose coverage decides the pane's grey) becomes visible: a small device pill in each pane's status ("HackRF · 2.4 Msps" / "RTL-SDR"), a picker in the pane's context/⋯ menu, and - when two devices are attached (/api/devices) - the split-view offer "one pane per device". Go-to/retune in a pane commands THAT pane's device through T-511's device selector on the control routes (one gated DeviceAction path, device_id recorded).
+      ACCEPTANCE: the two-device mock e2e (T-513's setup) shows two panes on two devices, each with its own coverage grey, own Live button and own retune; a spy asserts each retune names its pane's device.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Pane device selector in the UI: a device pill in each pane's status, a picker in the pane menu, 'one pane per device' when two SDRs are attached; Go-to/retune command that pane's device
+  - id: T-1007
+    milestone: MMAP
+    title: "Settings menu replaces most of Review: theme, contrast, ruler mode, devices and which pane uses which, retention/capture window, colour scale; Review keeps only anomalies/alarms"
+    status: todo
+    priority: normal
+    deps:
+    - T-993
+    parallel_group: MAP-TOPBAR
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:40, multi-SDR + scan overlay via supervisor; ~/.hackriff-ops/handoffs/coordinator-1040-multisdr-scan.md). MULTI-SDR IS DONE IN THE BACKEND (MSDR): T-510 N source/ring/capture sets in one Pipeline, T-511 N live controls + device selector on control routes, T-512 repeatable --device, T-513 two-device mock e2e, T-514 RTL-SDR driver (the user's NooElec Nano 3), coverage by device (hk-api coverage.rs by_device_over), device_id in provenance, /api/devices in docs/api.md. What is missing is the UI - build on those routes, do not re-implement them.
+      User: "instead of the Review section a lot of those things could be considered settings." THIS TICKET: the ⋯/gear settings menu T-993 creates (top-right cluster, tiny per docs/23 P4) holds: theme, contrast/auto-contrast, ruler mode (seconds-ago vs timestamp), device list + which pane uses which, retention/capture window (the backend's configured retention - reconfiguring it is a server call), colour scale, phosphor (only if it survives the scale-bar ticket). Review keeps only what is review: anomalies/alarms/what needs a person, and its badge.
+      ACCEPTANCE: nothing configurable is left in Review; the settings menu is one small button; every moved setting still works (e2e toggles each).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Settings menu replaces most of Review: theme, contrast, ruler mode, devices and which pane uses which, retention/capture window, colour scale; Review keeps only anomalies/alarms
+  - id: T-1008
+    milestone: MMAP
+    title: "Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: MAP-SCAN
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:40, multi-SDR + scan overlay via supervisor; ~/.hackriff-ops/handoffs/coordinator-1040-multisdr-scan.md). MULTI-SDR IS DONE IN THE BACKEND (MSDR): T-510 N source/ring/capture sets in one Pipeline, T-511 N live controls + device selector on control routes, T-512 repeatable --device, T-513 two-device mock e2e, T-514 RTL-SDR driver (the user's NooElec Nano 3), coverage by device (hk-api coverage.rs by_device_over), device_id in provenance, /api/devices in docs/api.md. What is missing is the UI - build on those routes, do not re-implement them.
+      User: "The scan should be a buttoned overlay feature; it would be really cool if it drew an overlay on top of the waterfall (including grey regions) so the user can visually see what they would be scanning." THIS TICKET: a small Scan button (it commands the radio -> small, in the Go-to cluster) opens a scan plan drawn AS AN OVERLAY LAYER on the canvas: the frequency regions and dwell steps it will sweep, hatched over grey/unobserved cells too, with the device that will do it and its step/dwell; the user adjusts the plan on the map (drag the region edges) and presses Start; while scanning the overlay shows progress (the step being dwelt highlighted, covered steps fading) and coverage fills in beneath it; Stop from the same button. The plan comes from the backend's iterative-scan engine (T-452) - the client draws what the server says it will execute, never its own step arithmetic; use the layer registry (T-806).
+      ACCEPTANCE: on the mock device the drawn plan matches the steps the engine executes (e2e compares the overlay's regions to the scheduler's log); grey regions inside the plan are visibly part of it before the scan starts; Stop halts the scan.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop
+    high_effort_reason: the scan plan must be the server engine own step schedule rendered and edited on the map (no client step arithmetic), incl. progress over grey cells - new API surface over T-452 plus an editable overlay
+  - id: T-1009
+    milestone: MMAP
+    title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
+    status: todo
+    priority: normal
+    deps:
+    - T-1008
+    - T-994
+    parallel_group: MAP-SCAN
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (user 2026-09-25 10:40, multi-SDR + scan overlay via supervisor; ~/.hackriff-ops/handoffs/coordinator-1040-multisdr-scan.md). MULTI-SDR IS DONE IN THE BACKEND (MSDR): T-510 N source/ring/capture sets in one Pipeline, T-511 N live controls + device selector on control routes, T-512 repeatable --device, T-513 two-device mock e2e, T-514 RTL-SDR driver (the user's NooElec Nano 3), coverage by device (hk-api coverage.rs by_device_over), device_id in provenance, /api/devices in docs/api.md. What is missing is the UI - build on those routes, do not re-implement them.
+      User: "We can draw arbitrary boxes with the Measure tool; it would be great if those could choose one of the SDRs to start a scan." THIS TICKET: the measurement box (T-822) gets the same context menu as a detection box (T-994), plus: "Scan this region with <device>" (a scan plan bounded by the box's frequency extent - time extent ignored for a live scan, or used as 'repeat for this long'), "Record IQ of this region with <device>", "Save as marker".
+      ACCEPTANCE: draw a box over a grey region, choose the RTL-SDR (two-device mock), Start -> the scan overlay appears bounded by the box and coverage fills in there.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (staging map UI): Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu
+  - id: T-1010
+    milestone: M2-hardening
+    title: "On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame"
+    status: todo
+    priority: normal
+    deps:
+    - T-954
+    parallel_group: HKAPI-WS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-954's fix round (2026-09-25, PASS; follow-ups, none blocking). Evidence:
+      1. docs/api.md:2034 says a slow consumer gets `1008 (too slow to keep up)` and an undrained one `1008 (did not drain in time)`, 'sent from both places'. The code sends neither: on_close sends no frame for SlowConsumer/DrainTimeout (crates/hk-api/src/ondemand.rs:283-284), so close_frame_for_reason's Policy arms (:232-233) never run; after the closer's shutdown, serve's `1000 closed` write fails. A slow consumer IS reading (e.g. over the tunnel) and sees 1006. Fix one way: a non-blocking attempt (try the lock once, non-blocking close write, skip on WouldBlock) so the promised code reaches a live peer, or correct the doc to 'bare hang-up' with the reason (the closer runs on the producer's real-time thread / drain watchdog and must not block). Prefer delivering the code.
+      2. watch() sends its ping while holding conn's lock with the full peer timeout (ondemand.rs:450-462): a vanished peer whose buffer fills during a ping delays the reap by one timeout again (pre-existing since T-066). Non-blocking ping send, skipped when the buffer is full.
+      3. api_contract.rs has no close-code tests (T-079): add them for every documented code.
+      4. bridge.rs watch_peer (/ws/{id}) hangs up without a close frame.
+      5. The T-954 regression test a_vanished_peer_is_released_promptly_even_while_a_write_to_it_is_stuck goes red only because watch reaps at ~2.0 s while the stuck write began at ~1.5 s; assert the writer was actually blocked (published-vs-written counter) so a reap-timing change cannot make it pass silently on the defect. Its bound is a latency assertion: decide timing tier vs structural (docs/10 §3.6) and say which. Also MAX_CLOSE_REASON is defined twice (bridge.rs, ondemand.rs:70).
+      6. Minor: under sustained backpressure a live peer that closed first can miss the echo of its close frame (lock_within polls try_lock every 1 ms and can miss the writer's micro-gaps for 200 ms).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p <crate> -E 'binary(<name>)'; just precheck <crates>), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-954 2026-09-25: On-demand WS close codes: docs/api.md promises 1008 for slow/undrained consumers that are sent a bare hang-up; watch()'s ping writes under conn's lock with the full peer timeout; no close-code contract tests; bridge watch_peer hangs up with no frame
+  - id: T-1011
+    milestone: M3
+    title: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
+    status: todo
+    priority: normal
+    deps:
+    - T-953
+    parallel_group: CLASSIFY-FU
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-953 (2026-09-25, PASS; follow-ups, none blocking). Evidence:
+      1. crates/hk-demod/src/fsk/consensus.rs consensus_of splits clusters by comparing each rate with the previous sorted rate, not the cluster median, so rates with <2% gaps chain: [4700, 4780, 4860, 4940, 5020, 5100] forms one 6-burst cluster with ~4% spread, stored as a measured rate; with enough bursts a chain could bridge the 15.2% gap between standard rates. Fix: refuse when the cluster's spread > CONSENSUS_TOLERANCE; a test with that example goes red first.
+      2. Sub-harmonic locks (a trial at 1/k of the true rate, e.g. 9600 Bd data locked at 4800) are untested: the new single-symbol-run guard catches k x only. Add a blind test; Gardner lock (<0.15 UI RMS) may already reject it - prove it.
+      3. FLEX 1600/3200/6400 Bd are not in the standard-rate table, so a FLEX population below the trust floor stores no rate (honest, not a measurement) - decide with T-950 whether they join the table.
+      4. UI: at open-set saturation top(5) returns unknown 90% plus four families tied at 0.1/K sorted alphabetically, and ui/src/app/explore/format.ts:91 renders 'analog 1% · css 1% ...' as if ranked; docs/api.md says not to read an order into it. Collapse or mark ties (presentation only; the server can flag ties if the client cannot know).
+      5. docs/adr/0016-classification-contracts.md:136 still says 'No C17 data: prior None, posterior = likelihood', false above the new 0.9 unknown cap (the amendment at :130 qualifies only the :135 invariant). Fix the text.
+      6. Explorer window 3: NBFM voice and DMR 4FSK bursts get classification: null, not even unknown - every emission gets a classification row. Check against T-989/T-986 first and fold there if they already own it.
+      7. T-953's tests drive FskReceiver -> infer_framing -> write_framed_bursts directly, not through the mock SDR the ticket asked for; add one mock-SDR e2e over the FLEX fixture (T-949/T-950) asserting the population's parameters or an honest abstention.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p <crate> -E 'binary(<name>)'; just precheck <crates>), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-953 2026-09-25: Burst-rate consensus chains past its 2% tolerance; sub-harmonic locks untested; the UI renders tied posterior residue as a ranking; stale ADR-0016 line; NBFM/DMR classification null
+  - id: T-1012
+    milestone: M2-hardening
+    title: "Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-REPLUMB
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner, 2026-09-25 09:57-10:28: the 14-branch bulk (base 72f9d76c) went red on hk-pipeline::loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (90.5 s, FAILED alone in the runner's triage; main green on it alone). Bisect: base + t942 t952 t844 t948 t928 t960 green; base + t567 t934 t938 RED; each of t567 / t934 / t938 alone GREEN - no single culprit, so the runner fell back to isolating every branch (hours of gates). Flake history (ops flakes registry): red 2x in 7 days, passed alone 1, failed alone 1 - 'both ways'. Also red in that gate: hk-api analyze::tests::t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity (T-844's handback already recorded it as a load flake that passes alone, 'got resolution not-searched').
+      DELIVER (deflake-triage rules): on base 72f9d76c + task-t567 + task-t934 + task-t938 merged, run the test ALONE N>=5 times and on base alone N>=5 times. Fails alone on the merge but never on base => a real interaction defect: name the pair (t938 refines WFM/RDS centres; t934 changed three wall-clock waits to counted events; t567 the sealed Resolution) and fix the root cause (on the owning branch, or here). Intermittent on both => a real nondeterminism in the test or the replay/recovery path (a wall-clock choice of what to assert, a race with fail_reads_for) - make it deterministic, prove it goes red when the defect returns. Never retry/quarantine/loosen. Do the same triage for t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity (alone x5 on the same merge).
+      TESTING PROTOCOL: targeted only (cargo nextest run -p hk-pipeline -E 'binary(loop_survives_replumb)'; -p hk-api -E 'test(t884_the_analyze_read_withholds_the_analysis_of_a_withheld_identity)'), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
+    dispatch: manual
+    high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
+  - id: T-1016
+    milestone: M2-hardening
+    title: "sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-SWEEP-RESIDENCY
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FOUND BY the merge runner / supervisor (2026-09-25 11:34): hk-pipeline::sweep_residency::a_sustained_survey_holds_a_bounded_number_of_chain_threads has reddened THREE bulk gates (2026-09-24 16:21, overnight, 2026-09-25 11:26 - base 6b521960, 12 branches; today 29 branches waited on it). Each red costs a solo re-run or a bisect. Messages (ops merge-runner.log):
+        crates/hk-pipeline/tests/sweep_residency.rs:188 '400 attaches left 17 chains running, above the 16 cap' (report: 'attaches 25: threads 60 running 16 ... + 0 classifying; attaches 400: threads 62 running 17 ... + 1 classifying')
+        crates/hk-pipeline/tests/sweep_residency.rs:229 '400 attaches left 17 chains (classifying chains excluded) running, above the 16 cap'
+      The test (T-558) asserts the run-wide chain cap (16) holds under a sustained survey. Flakes registry: branch_defects 2, never triaged alone.
+      DELIVER (deflake-triage rules): run it ALONE >= 10x on main (nextest -p hk-pipeline -E 'binary(sweep_residency)') and under load; then decide:
+      - red alone => a REAL cap defect (an admission race letting a 17th chain start, or a finishing chain counted before it releases its slot): fix the product (the admission/release ordering), prove red on regression. The cap is a CPU-budget invariant - do not raise it or loosen the bound.
+      - passes alone, red only under load => the COUNT is racy, not the cap: count at a deterministic point (join/quiesce the chains that have ended, or read the scheduler's own admitted-count under its lock) instead of sampling live threads at an instant; never a sleep or retry. If the assertion is inherently a load-dependent bound it moves to the `timing` tier (docs/10 §3.6) with evidence - but prefer the deterministic count.
+      Do not #[ignore], quarantine or loosen. Red-on-regression proof required (re-inject an off-by-one admission and show the test catches it).
+      TESTING PROTOCOL (CLAUDE.md): targeted only (cargo nextest run -p hk-pipeline -E 'binary(sweep_residency)'; just precheck hk-pipeline), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY supervisor 2026-09-25 11:34 (merge gate reds x3): sweep_residency a_sustained_survey_holds_a_bounded_number_of_chain_threads reddened three bulk gates ('400 attaches left 17 chains running, above the 16 cap'): triage alone, fix the admission race or count at a deterministic point
+    high_effort_reason: "three bulk reds on a CPU-budget invariant (the run-wide chain cap): real admission race vs racy count must be told apart and fixed deterministically on the real-time scheduling path"
+    dispatch: manual
+  - id: T-1017
+    milestone: MAUTO
+    title: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+    status: todo
+    priority: medium
+    deps:
+    - T-967
+    parallel_group: IDENTITY-LABEL
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus review of T-967 (2026-09-25). T-967 serves identity_label / identity_confidence on /api/inventory rows. Its first implementation guessed the label from field NAMES (IDENTITY_LABEL_KEYS ["ps","callsign","flight","station"], IDENTITY_CONFIDENCE_KEYS ["pi_share","share"] in crates/hk-model/src/decode.rs:243,248), which silently made any plugin's `station`/`share` field an identity label/confidence - an implicit plugin-output contract. The T-967 fix round narrows it to decoders with a known summary (RDS) and serves null otherwise. THIS TICKET designs the real contract:
+      1. A DECLARED label + confidence per decoder: the decoder/recipe manifest (and the built-in chains) state which output field is the human-readable identity label (e.g. RDS PS voted most-frequent, ADS-B callsign, AIS vessel name, FLEX/POCSAG capcode alias) and which is its confidence, with the confidence's meaning (vote share, CRC-valid rate). Plugin/stream contract (ADR-0010/0011, docs/stream-contract.md) + docs/api.md + api_contract.rs together (T-079). Pluggable decoders are consumers (CLAUDE.md), so a plugin opts in by declaring, never by naming a field a certain way.
+      2. Show the label on the other surfaces that carry identity: /api/events rows and the Selected/focus panel's identity box (T-967 worker's GAP 3).
+      3. Window scoping: today the label (like identity_value) is the all-time latest committed one; when a pane is scrubbed into the past the row can show a label decoded after the window. Either scope the label to the viewed window (the inventory is time-scoped to the view - CLAUDE.md signal model) or state the rule in docs/api.md; prefer scoping.
+      ACCEPTANCE: a plugin that declares no label shows none; RDS, AIS (T-963) and FLEX (T-950) show their declared labels via the manifest path; a scrubbed pane shows the label known within its window; contract tests for each.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the hk-model/hk-api/hk-plugins binaries you touch, api_contract, just test-ui, just precheck), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-967 2026-09-25: Declared identity label/confidence per decoder (manifest + built-in chains) instead of field-name guessing; label on /api/events and the focus panel; label scoped to the viewed window
+
+      2026-09-25 coordinator, from T-967's re-review (PASS): add the missing guard test while here - a restricted/metadata-only decode naming the same PI alongside an hk-rds summary row must make latest_decode_identity_summary return None (withheld row serves identity_label and identity_label_share null); correct by inspection today (crates/hk-model/src/repo/gating.rs, IdentityAccess::Standard.reveals), untested. T-967 landed the RDS-only summary; this ticket generalises it by declaration.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
