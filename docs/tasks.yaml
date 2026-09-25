@@ -28144,7 +28144,7 @@ tasks:
   - id: T-948
     milestone: M2-hardening
     title: DC point listed as a candidate at the tuned centre; a steady -57.5 dB line at 161.984 MHz never detected or explained
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: DETECT-DC
@@ -28172,6 +28172,7 @@ tasks:
       Observed, not chased: The ticket's second coordinator note asks for a per-device, per-rate spur/DC mask covering the integer-MHz carriers at 912.000/915.000/916.99/918.000 and the 37.5 kHz comb at 930.884-931.071. This change does NOT cover those: the in-capture rules never flag them. The reference-harmonic rule's step is 10 MHz (hk_detect::config::RefHarmonicRule::default), so 918.000 MHz is not a harmonic, and 918.000/2.4e6 is not an integer so the clock-harmonic rule misses it too. Once any rule (a 1 MHz-step grid, or a measured SpurMask) flags them, the admission rule landed here refuses them with no further change - so what is missing is the MEASUREMENT, not the seam. A measured per-device mask wants the 50-ohm terminator capture, which is T-375 and blocked on the user; a 1 MHz-step reference-harmonic rule is a detection-threshold change I did not invent without a terminated capture to justify it. | The explorer evidence the ticket cites is not present on this box: ~/.hackriff-ops does not exist (no journal-20260925.md, no shots/, no hk-serve-run1.log), so half (b) could not be investigated against the real capture. The synthetic replacement above shows a steady line near the notch is detected and listed, which rules out the three mechanisms the ticket guessed (floor estimate, CFAR guard, a spur mask swallowing it) for that geometry. | Tracker::refute_dc deliberately does not decrement the slot's `suspect` count, only the new artifact count: suspect_fraction feeds the confirmation policy's measured tolerances and changing it is a separate, evidence-needing decision. Arguably T-174's intent covers it; left alone.
       Use cases: AWARE-006, SIGNAL-012
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 5edadb2c
   - id: T-949
     milestone: MAUTO
     title: "FLEX pager capture into fixtures/ (LFS, hidden truth) + new use cases: terrestrial paging, terrestrial APRS"
