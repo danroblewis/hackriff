@@ -826,7 +826,7 @@ def test_h_stops_an_orphan_nextest_after_ten_minutes_not_before(monkeypatch, tmp
     assert "KILL-ORPHAN SIGTERM pid=35689" in log and NEXTEST in log
 
 
-@pytest.mark.parametrize("state", ["running", "fix-held"])
+@pytest.mark.parametrize("state", ["running", "fix-held", "limited"])
 @pytest.mark.parametrize("host", [None, "node2"])
 def test_h_never_with_a_live_claim_on_that_worktree_on_any_host(monkeypatch, tmp_path, state, host):
     claims = {"T-926": {"state": state, "ticket": "T-926", "wt": WT, "pid": 4242, "host": host}}

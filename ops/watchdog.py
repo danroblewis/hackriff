@@ -679,7 +679,7 @@ def kill_now(rows: list[dict]) -> list[int]:
 ORPHAN_FOR = 600
 #: The work runner's live claim states (ops/work-runner.py): a review runs as "running" too, and a
 #: "fix-held" claim resumes in its worktree. Host does not matter: a node2 claim's `wt` is the Mac path.
-ORPHAN_STATES = ("running", "fix-held")
+ORPHAN_STATES = ("running", "fix-held", "limited")   # limited: task-pm-usage-limit, a run waiting out the account limit
 #: Fallback labels, not owners: an orphan cargo's sccache rustc must not protect its own worktree.
 NOT_AN_OWNER = ("sccache", "system", "apps", "tunnel", "limiter")
 WT_RE = re.compile(r"/[^\s'\";&|()]*?/\.claude/worktrees/[^/\s'\";&|()]+")
