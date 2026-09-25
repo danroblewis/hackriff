@@ -1171,6 +1171,40 @@ The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), ans
 
 `counts` is row-major on **exactly** the tile's axes (`nt` time rows × `nf` frequency cells, earliest row and lowest frequency first), so a client indexes it with the tile's own index.
 
+### `GET /api/paths` — traced (t, f) paths over a viewport (T-897, [docs/23](23-map-ui-philosophy.md) §10.6 rule 2)
+
+The backend half of the map's `paths` layer ([ADR-0023](adr/0023-map-ui-and-research-state.md) §2): every **chirp**, **sweep** and **frequency-hop sequence** whose route crosses a (time × frequency) window, as an ordered list of `(t, f)` vertices at **absolute capture time**. Code: `hk_model::path` (the derivation, unit-tested on its own), `crates/hk-api/src/paths.rs` (the route).
+
+| Query | |
+|---|---|
+| `f_lo`, `f_hi` | Hz, `0 <= f_lo < f_hi` — **required** (a viewport route answers about a viewport) |
+| `t0`, `t1` | Unix s, `t0 < t1` — **required** |
+| `kind` | optional: `chirp`, `sweep` or `hop` |
+| `limit` | optional, 1..=1000, default 200 |
+
+```jsonc
+{ "window":  { "f_lo_hz": 1.0e8, "f_hi_hz": 1.004e8, "t0_s": 1790000000.0, "t1_s": 1790000010.0 },
+  "context": { "f_lo_hz": 0.996e8, "f_hi_hz": 1.008e8, "t0_s": 1789999940.0, "t1_s": 1790000070.0 },
+  "paths": [
+    { "id": "chirp:0192…", "kind": "chirp",          // chirp | sweep | hop — a morphology, never an identity
+      "t0_s": 1790000000.31, "t1_s": 1790000003.30, "f_lo_hz": 99800000.0, "f_hi_hz": 99890000.0,
+      "rate_hz_per_s": 30010.0,                      // chirp: fitted slope; sweep: median ramp's; hop: null
+      "ramps": 1, "hops": 0, "channels_hz": [],      // sweep: ramps >= 2; hop: dwells and the channels visited
+      "vertices": [ { "t_s": 1790000000.31, "f_hz": 99800400.0, "detection": "0192…", "at": "start" },
+                    { "t_s": 1790000000.81, "f_hz": 99815300.0, "detection": "0192…", "at": "centre" }, "…" ],
+      "provenance": { "method": "hk-model/path@1", "detections": ["0192…", "…"],
+                      "provenance_refs": ["…"], "detector_versions": ["…"], "surveys": ["…"] } } ],
+  "total": 1, "limit": 200, "truncated": false,
+  "detections_read": 72, "detections_truncated": false, "method": "hk-model/path@1" }
+```
+
+- **Derived on read, from measurement only.** A path is `hk_model::derive_paths` over the stored detections — immutable rows — recomputed per request, the way presence intervals are recomputed from the observation ledger. No band plan, catalogue or known hop set is read and nothing is snapped to a raster. A **chirp** is a ladder of detections abutting in time and frequency, each centre stepping the same way (≥ 3, each step ≥ ½ width); a **sweep** is two or more such ramps joined by a flyback (sawtooth) or a reversal (triangle); a **hop** sequence is ≥ 5 contiguous dwells, alike in width and length, over ≥ 3 channels. A steady carrier cut into segments and an isolated burst draw **no** path. Spur-, image-, impulse- and IMD-flagged detections are never traced.
+- **Every vertex is a measurement, and says which.** `at: "centre"` is a detection's measured centre at its time midpoint; `"start"`/`"end"` is a hop dwell's measured centre at its start/end, or a ramp's end carried along the neighbouring measured slope to the detection's start/end time — **clamped inside that detection's measured frequency extent**. `detection` names the row it came from.
+- **Stable across pans.** Paths are traced through `context` — the window widened by its own span on each side in both axes, the time margin clamped to 60–600 s (a path's kind depends on its neighbours: one ramp of a sawtooth alone is a chirp, so a deep zoom must read the neighbours a wide one does) — so a route crossing the window's edge is the same route (same vertices, same `id`) whichever part of it is on screen. A path is served when its extent overlaps `window`. `id` is `kind:first-detection`, stable across polls.
+- **Bounded, and says so.** At most 20 000 detections are traced (the newest; `detections_truncated`) and at most `limit` paths served (earliest first; `truncated`).
+- **Honest limit.** A sweep that completes inside one analysis frame has no ladder (ADR-0017 §1.3(b)) and draws no path; its measured sweep *rate* is the `sweep_rate_hz_per_s` feature field, not a route.
+- `400 invalid` for a missing or malformed window, `kind` or `limit`; `503 unavailable` with no inventory. Read-only: it reaches no device and is not audited.
+
 ### `GET /ws/tiles/rows` — rows pushed to a subscription over an **address range** (T-468)
 
 WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.

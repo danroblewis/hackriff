@@ -2136,6 +2136,84 @@ fn events_and_presence_serve_the_durable_catalogue() {
     stop_server(serving);
 }
 
+/// T-897 (docs/23 §10.6 rule 2): `GET /api/paths` answers as `docs/api.md` documents it, on a live
+/// `hk serve` over the mock device's FM window. By value, not only shape: the fixture's one
+/// emitter is a **steady** broadcast station, so once the run has stored detections of it the
+/// route must have read them (`detections_read > 0`) and traced **no** path through them — a
+/// carrier cut into segments is not a chirp. The chirp/sweep/hop producers are asserted blind, with
+/// hidden truth, through the mock device in `hk-pipeline/tests/paths_blind.rs`.
+#[test]
+fn paths_route_answers_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    let (f_lo, f_hi) = (STATION_HZ - 400e3, STATION_HZ + 400e3);
+    let url = |t0: f64, t1: f64, extra: &str| {
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}&t1={t1}{extra}")
+    };
+    wait_for(
+        "the station's detections to reach the paths route",
+        Duration::from_secs(90),
+        || {
+            let t1 = unix_now();
+            get(addr, &url(t1 - 3600.0, t1, "")).1["detections_read"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let t1 = unix_now();
+    let t0 = t1 - 3600.0;
+    let (st, v) = get(addr, &url(t0, t1, ""));
+    assert_eq!(st, 200, "{v}");
+    for field in [
+        "window",
+        "context",
+        "paths",
+        "total",
+        "limit",
+        "truncated",
+        "detections_read",
+        "detections_truncated",
+        "method",
+    ] {
+        assert!(v.get(field).is_some(), "paths answer missing {field}: {v}");
+    }
+    assert_eq!(v["method"], json!("hk-model/path@1"), "{v}");
+    assert_eq!(v["limit"], json!(200), "{v}");
+    assert_eq!(v["window"]["f_lo_hz"].as_f64(), Some(f_lo), "{v}");
+    assert_eq!(v["window"]["f_hi_hz"].as_f64(), Some(f_hi), "{v}");
+    // The context is the window widened by its own span, the time margin capped at 600 s.
+    assert_eq!(v["context"]["f_lo_hz"].as_f64(), Some(f_lo - 800e3), "{v}");
+    assert_eq!(v["context"]["f_hi_hz"].as_f64(), Some(f_hi + 800e3), "{v}");
+    let ct0 = v["context"]["t0_s"].as_f64().unwrap();
+    assert!((ct0 - (t0 - 600.0)).abs() < 1e-3, "{v}");
+    assert_eq!(v["paths"], json!([]), "a steady station draws no path: {v}");
+    assert_eq!(v["total"], json!(0), "{v}");
+    assert_eq!(v["truncated"], json!(false), "{v}");
+    // `kind` and `limit` narrow; malformed ones refuse.
+    let (st, k) = get(addr, &url(t0, t1, "&kind=hop&limit=5"));
+    assert_eq!(st, 200, "{k}");
+    assert_eq!(k["limit"], json!(5), "{k}");
+    for bad in ["&kind=radar", "&limit=0", "&limit=5000"] {
+        let (st, e) = get(addr, &url(t0, t1, bad));
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    // A viewport route needs the whole viewport.
+    for q in [
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t0}"),
+        format!("/api/paths?f_lo={f_hi}&f_hi={f_lo}&t0={t0}&t1={t1}"),
+        format!("/api/paths?f_lo={f_lo}&f_hi={f_hi}&t0={t1}&t1={t0}"),
+        "/api/paths".to_owned(),
+    ] {
+        let (st, e) = get(addr, &q);
+        assert_eq!(st, 400, "{q}: {e}");
+    }
+    let (st, e) = post(addr, "/api/paths", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(t0, t1, ""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();

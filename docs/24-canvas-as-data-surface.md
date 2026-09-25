@@ -635,14 +635,14 @@ defect these guards exist to catch.
 
 ### 13.4 Paint order and defaults
 
-Within `overlay`, ascending `z`: `rules` (10) → `detections` (20) → `research` (30) →
+Within `overlay`, ascending `z`: `rules` (10) → `detections` (20) → `paths` (25, T-897) → `research` (30) →
 `collection:*` (40) → `artifacts` (50) → `priors` (60). Suggestions sit on top so they never obscure a
 measurement; rules sit at the bottom so a box that crosses one is drawn over it (the existing
 `ringQuads`-before-`markQuads` order, preserved).
 
 | Layer | Default |
 |---|---|
-| `base`, `coverage`, `detections`, `rules`, `pins` | **visible** |
+| `base`, `coverage`, `detections`, `paths`, `rules`, `pins` | **visible** |
 | `collection:*` | the collection's own stored `visible` |
 | `tier`, `artifacts`, `priors`, `research` | hidden until asked |
 

@@ -58,6 +58,7 @@ mod harmonic_tests;
 pub mod hash;
 pub mod ids;
 pub mod multipath; // T-222 (C40): content-correlated multipath
+pub mod path; // T-897 (docs/23 §10.6 rule 2): traced (t, f) paths derived from detections
 pub mod plan;
 pub mod presence; // T-262 (ADR-0017 TM-5): presence intervals, close and revive
 pub mod provenance;
@@ -118,6 +119,10 @@ pub use ids::{
 pub use multipath::{
     ContentCorrelation, ContentKind, IdentityAgreement, MultipathFinding, MultipathRow,
     MultipathVerdict, content_multipath,
+};
+pub use path::{
+    PATH_METHOD, PathConfig, PathKind, PathProvenance, PathVertex, TracedPath, VertexAt,
+    derive_paths,
 };
 pub use plan::{
     GainTableEntry, PlanRegion, ScanPlan, ScanPolicy, Schedule, Survey, SurveyState, SurveySummary,
