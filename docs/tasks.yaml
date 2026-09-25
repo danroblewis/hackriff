@@ -27193,6 +27193,27 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched app-*.e2e.mjs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-918 worker 2026-09-25.
+  - id: T-920
+    milestone: M2-hardening
+    title: "IQ ring unavailable / lossless-gate test red on Linux (node2) but green on the Mac: view_pause_keeps_capture + api_contract coverage iq-ring available:false - Jetson portability"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: SDR
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-25 by the T-567 worker running on the REMOTE host node2 (Linux; T-567 handback ~/.hackriff-ops/work/T-567/handback.json): two tests fail DETERMINISTICALLY in isolation there (4/4 runs, gate_waits: 0), while BOTH PASS alone on the Mac on current main (coordinator check 2026-09-25 ~01:40, Darwin arm64: holding_the_view_... 3.1 s PASS; coverage_greys_... 0.65 s PASS):
+      1. hk-pipeline view_pause_keeps_capture::holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection - asserts the lossless gate / that holding the view cannot stop rows, the ring or detection.
+      2. hk-cli api_contract coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked (~line 7328) - the iq-ring source row reports available:false.
+      Both point at the IQ RING behaving differently on Linux. The product's compute target (the Jetson) is Linux, so an IQ ring that is unavailable or lossy on Linux is a PRODUCT portability defect (the ring gates capture, demod/decode of recent history and the IQ-horizon rule), not only a remote-worker nuisance.
+      DELIVER: on node2 (Linux) - it does not reproduce on the Mac - root-cause both (ring allocation/mmap/mlock limits, page size, clock source, a platform cfg, an env var the Mac sets, a missing capability/ulimit on the box?) and fix the product so the ring is available and lossless on Linux, OR if it is purely the host's configuration (e.g. a ulimit), make the product STATE the reason (never silently available:false) and document the host requirement for the Jetson; each with a regression test that runs on Linux. Report which.
+      DISPATCH NOTE: must run on node2 / a Linux host; a Mac run proves nothing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the two binaries + the ring crate), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-567 worker on node2 + coordinator Mac check 2026-09-25.
+    effort_reason: platform root cause on the capture/ring path (the Jetson target is Linux); needs a Linux host
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
