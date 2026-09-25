@@ -31,9 +31,22 @@
 //! and untouched: they are the history catalogue (workflow #3), and a one-off burst stays a track
 //! with its rollup whatever happens to its per-frame rows.
 //!
-//! **Time basis.** The age is measured from the newest stored `t_end` (the store's own capture
+//! **Time basis.** The age is measured from a **per-survey** watermark (the store's own capture
 //! clock, like the history pyramid's watermark), never the wall clock: a replayed recording from
-//! last year is not "a year old", and a prune is deterministic under test.
+//! last year is not "a year old", and a prune is deterministic under test. An **open** survey
+//! ages from its own newest `t_end`, so a replay into a data directory holding newer rows, a host
+//! clock behind the store (a Jetson with no RTC) or another survey's future-stamped row can never
+//! age out rows its running tracker still holds tentative links to; a closed survey ages from the
+//! store's newest row. The composed daemons also floor the age well above the tracker's hold
+//! windows (`hk-pipeline` `retention::MIN_RETENTION_S`), and a link whose detection is gone is
+//! skipped rather than failing its batch (`link_detections_on`), so no clock anomaly can wedge
+//! track persistence.
+//!
+//! **Rollup grouping.** A tracked row rolls up with its track's contiguous run. A row no track
+//! links rolls up only with rows of the same survey and provenance that **overlap it in
+//! frequency** (envelope ≤ 2× the widest member) within the gap and span — so an isolated
+//! one-off burst keeps its own time–frequency box as its own rollup, and bursts at different
+//! frequencies are never merged into one box spanning the window.
 //!
 //! **Cost (T-453).** A pass never holds the write lock for more than one batch
 //! ([`DetectionRetention::batch`] rows): candidates, their tracks and the per-emitter tail cut are
@@ -74,7 +87,8 @@ const NS_PER_S: i64 = 1_000_000_000;
 /// The retention policy for per-frame detection rows (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectionRetention {
-    /// A row is eligible once its `t_end` is older than the newest stored `t_end` minus this, ns.
+    /// A row is eligible once its `t_end` is older than its survey's watermark minus this, ns
+    /// ([`Repository::prune_detections`]).
     pub max_age_ns: i64,
     /// Fold each pruned row into a [`DetectionRollup`] first. Off = plain age-out (the region
     /// reads then see nothing past the age).
@@ -119,9 +133,10 @@ impl Default for DetectionRetention {
 /// What one [`Repository::prune_detections`] pass did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PruneReport {
-    /// The newest stored `t_end` the age was measured from (`None`: no detections).
+    /// The newest survey watermark of the pass (`None`: no detections). Each survey ages from its
+    /// own ([`Repository::prune_detections`]).
     pub watermark: Option<Timestamp>,
-    /// Rows ending before this were eligible.
+    /// [`Self::watermark`] minus the age: that survey's rows ending before this were eligible.
     pub cutoff: Option<Timestamp>,
     /// Eligible rows looked at.
     pub examined: u64,
@@ -269,7 +284,7 @@ const CANDIDATES_SQL: &str = "\
      SELECT detection_id, survey_id, provenance_id, t_start, t_end, f_center, obw, f_lo, f_hi, \
             snr_peak, snr_mean, flags, peak_dbfs, clip_count \
      FROM detection \
-     WHERE t_end < ?1 AND t_end >= ?2 AND (t_end, detection_id) > (?2, ?3) \
+     WHERE survey_id = ?5 AND t_end < ?1 AND t_end >= ?2 AND (t_end, detection_id) > (?2, ?3) \
      ORDER BY t_end, detection_id LIMIT ?4";
 
 const TRACKS_OF_SQL: &str =
@@ -313,6 +328,103 @@ const LAST_ROLLUP_SQL: &str = "\
             f_lo, f_hi, f_center_mean, obw_mean, obw_max, snr_peak_max, snr_mean_mean, \
             peak_dbfs_max, detections, flags_any, flags_all, clip_count \
      FROM detection_rollup WHERE track_id IS ?1 ORDER BY t_start DESC, rollup_id DESC LIMIT 1";
+
+/// The untracked rollup an untracked pruned row may extend (`?1` survey, `?2` provenance, `?3`
+/// earliest `t_start` that can still be within the gap and span, `?4`/`?5` the row's `f_hi`/`f_lo`):
+/// the newest that overlaps it in frequency. [`Acc::same_emission`] decides the rest.
+const UNTRACKED_ROLLUP_SQL: &str = "\
+     SELECT rollup_id, track_id, survey_id, provenance_id, t_start, t_end, on_air_ns, \
+            f_lo, f_hi, f_center_mean, obw_mean, obw_max, snr_peak_max, snr_mean_mean, \
+            peak_dbfs_max, detections, flags_any, flags_all, clip_count \
+     FROM detection_rollup \
+     WHERE track_id IS NULL AND t_start >= ?3 AND survey_id = ?1 AND provenance_id = ?2 \
+       AND f_lo <= ?4 AND f_hi >= ?5 \
+     ORDER BY t_start DESC, rollup_id DESC LIMIT 1";
+
+/// The rollups one batch builds or extends: per track, and — for rows no track links (T-075
+/// short bursts stored untracked, members of tentative tracks that never confirmed) — per
+/// emission, by frequency ([`Acc::same_emission`]), never one bucket for the whole window.
+#[derive(Default)]
+struct Rollups {
+    tracked: HashMap<[u8; 16], Acc>,
+    untracked: Vec<Acc>,
+}
+
+impl Rollups {
+    fn add(
+        &mut self,
+        conn: &Connection,
+        c: &Candidate,
+        p: &DetectionRetention,
+        report: &mut PruneReport,
+    ) -> Result<(), RepoError> {
+        let Some(&track) = c.tracks.first() else {
+            return self.add_untracked(conn, c, p);
+        };
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.tracked.entry(track) {
+            let stored = conn
+                .prepare_cached(LAST_ROLLUP_SQL)?
+                .query_row([track], Acc::stored)
+                .optional()?;
+            if let Some(s) = stored {
+                slot.insert(s);
+            }
+        }
+        match self.tracked.get_mut(&track) {
+            Some(acc) if acc.continues(c, p) => acc.add(c),
+            Some(acc) => {
+                acc.flush_counted(conn, report)?;
+                *acc = Acc::of(Some(track), c);
+            }
+            None => {
+                self.tracked.insert(track, Acc::of(Some(track), c));
+            }
+        }
+        Ok(())
+    }
+
+    fn add_untracked(
+        &mut self,
+        conn: &Connection,
+        c: &Candidate,
+        p: &DetectionRetention,
+    ) -> Result<(), RepoError> {
+        let fits = |a: &Acc| a.continues(c, p) && a.same_emission(c);
+        if let Some(acc) = self.untracked.iter_mut().rev().find(|a| fits(a)) {
+            acc.add(c);
+            return Ok(());
+        }
+        let earliest = c
+            .t_start
+            .saturating_sub(p.rollup_span_ns)
+            .saturating_sub(p.rollup_gap_ns);
+        let stored = conn
+            .prepare_cached(UNTRACKED_ROLLUP_SQL)?
+            .query_row(
+                params![c.survey, c.provenance, earliest, c.f_hi, c.f_lo],
+                Acc::stored,
+            )
+            .optional()?
+            .filter(|s| fits(s) && !self.untracked.iter().any(|a| a.id == s.id));
+        let mut acc = match stored {
+            Some(mut s) => {
+                s.add(c);
+                s
+            }
+            None => Acc::of(None, c),
+        };
+        acc.dirty = true;
+        self.untracked.push(acc);
+        Ok(())
+    }
+
+    fn flush(&mut self, conn: &Connection, report: &mut PruneReport) -> Result<(), RepoError> {
+        for acc in self.tracked.values_mut().chain(self.untracked.iter_mut()) {
+            acc.flush_counted(conn, report)?;
+        }
+        Ok(())
+    }
+}
 
 /// A rollup being built or extended inside one batch.
 #[derive(Clone, Debug)]
@@ -397,6 +509,19 @@ impl Acc {
             && c.t_start <= self.t_end.saturating_add(p.rollup_gap_ns)
             && c.t_end >= self.t_start.saturating_sub(p.rollup_gap_ns)
             && self.t_end.max(c.t_end) - self.t_start.min(c.t_start) <= p.rollup_span_ns
+    }
+
+    /// For an untracked run, whether `c` is the same emission: it overlaps the run's frequency
+    /// envelope, and joining it leaves the envelope no wider than twice the widest member. Rows no
+    /// track links carry no tracker verdict that they are one signal, so frequency is the only
+    /// evidence; without it two bursts at opposite edges of the window within the gap would read
+    /// as one rollup spanning the window (and occupancy would learn a phantom channel at its
+    /// middle).
+    fn same_emission(&self, c: &Candidate) -> bool {
+        let widest = self.obw_max.max(c.obw).max(c.f_hi - c.f_lo);
+        c.f_lo <= self.f_hi
+            && c.f_hi >= self.f_lo
+            && self.f_hi.max(c.f_hi) - self.f_lo.min(c.f_lo) <= 2.0 * widest
     }
 
     fn add(&mut self, c: &Candidate) {
@@ -602,6 +727,7 @@ fn tracks_of(conn: &Connection, id: [u8; 16]) -> Result<Vec<[u8; 16]>, RepoError
 
 fn read_candidates(
     conn: &Connection,
+    survey: [u8; 16],
     cutoff: i64,
     cursor: (i64, [u8; 16]),
     batch: usize,
@@ -609,7 +735,7 @@ fn read_candidates(
     let mut rows: Vec<Candidate> = conn
         .prepare_cached(CANDIDATES_SQL)?
         .query_map(
-            params![cutoff, cursor.0, cursor.1, batch.max(1) as i64],
+            params![cutoff, cursor.0, cursor.1, batch.max(1) as i64, survey],
             |r| {
                 Ok(Candidate {
                     id: r.get(0)?,
@@ -638,6 +764,35 @@ fn read_candidates(
 }
 
 impl Repository {
+    /// Each survey's watermark: the newest `t_end` the age is measured from for its rows. An
+    /// **open** survey uses its own newest row, so a tracker still running on it only ever loses
+    /// rows older than its own newest by the age — a replay stamped last year into a database
+    /// holding today's rows, or a host clock behind the store, cannot age out rows the tracker
+    /// has yet to link. A closed or aborted survey has no tracker, so it ages from the store's
+    /// newest row.
+    fn survey_watermarks(&self) -> Result<Vec<([u8; 16], i64)>, RepoError> {
+        let surveys: Vec<([u8; 16], bool)> = self
+            .conn
+            .prepare_cached("SELECT survey_id, state = 'open' FROM survey")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut own: Vec<([u8; 16], bool, i64)> = Vec::with_capacity(surveys.len());
+        for (id, open) in surveys {
+            let newest: Option<i64> = self
+                .conn
+                .prepare_cached("SELECT max(t_end) FROM detection WHERE survey_id = ?1")?
+                .query_row([id], |r| r.get(0))?;
+            if let Some(n) = newest {
+                own.push((id, open, n));
+            }
+        }
+        let store = own.iter().map(|w| w.2).max().unwrap_or(i64::MIN);
+        Ok(own
+            .into_iter()
+            .map(|(id, open, n)| (id, if open { n } else { store }))
+            .collect())
+    }
+
     /// One retention pass over per-frame detection rows (see the module docs for what is kept and
     /// why). Batched: each batch is one short write transaction, and `between` runs before every
     /// batch after the first — return `false` from it to stop the pass early (the report then
@@ -648,108 +803,88 @@ impl Repository {
         mut between: impl FnMut() -> bool,
     ) -> Result<PruneReport, RepoError> {
         let mut report = PruneReport::default();
-        let watermark: Option<i64> =
-            self.conn
-                .query_row("SELECT max(t_end) FROM detection", [], |r| r.get(0))?;
-        let Some(watermark) = watermark else {
-            report.complete = true;
-            return Ok(report);
-        };
-        let cutoff = watermark.saturating_sub(policy.max_age_ns.max(0));
-        report.watermark = Some(Timestamp::from_unix_nanos(watermark));
-        report.cutoff = Some(Timestamp::from_unix_nanos(cutoff));
-        let mut cursor = (i64::MIN, [0u8; 16]);
+        let age = policy.max_age_ns.max(0);
+        let watermarks = self.survey_watermarks()?;
+        if let Some(newest) = watermarks.iter().map(|w| w.1).max() {
+            report.watermark = Some(Timestamp::from_unix_nanos(newest));
+            report.cutoff = Some(Timestamp::from_unix_nanos(newest.saturating_sub(age)));
+        }
         let mut cuts = TailCuts::default();
         let mut first = true;
-        loop {
-            if !first && !between() {
-                return Ok(report);
-            }
-            first = false;
-            // Everything expensive happens here, before the write lock.
-            let batch = read_candidates(&self.conn, cutoff, cursor, policy.batch)?;
-            let Some(last) = batch.last() else {
-                report.complete = true;
-                return Ok(report);
-            };
-            let next_cursor = (last.t_end, last.id);
-            let mut tail = Vec::with_capacity(batch.len());
-            for c in &batch {
-                tail.push(cuts.protects(&self.conn, c, policy.keep_per_emitter)?);
-            }
-            let asked = Instant::now();
-            let tx = self.write_tx()?;
-            let started = Instant::now();
-            report.wait_ns_max = report
-                .wait_ns_max
-                .max(started.duration_since(asked).as_nanos() as u64);
-            report.examined += batch.len() as u64;
-            let mut open: HashMap<Option<[u8; 16]>, Acc> = HashMap::new();
-            for (c, protected) in batch.iter().zip(tail) {
-                if protected {
-                    report.kept_tail += 1;
-                    continue;
+        for (survey, watermark) in watermarks {
+            let cutoff = watermark.saturating_sub(age);
+            let mut cursor = (i64::MIN, [0u8; 16]);
+            loop {
+                if !first && !between() {
+                    return Ok(report);
                 }
-                if tracks_of(&tx, c.id)? != c.tracks {
-                    report.kept_moved += 1;
-                    continue;
+                first = false;
+                // Everything expensive happens here, before the write lock.
+                let batch = read_candidates(&self.conn, survey, cutoff, cursor, policy.batch)?;
+                let Some(last) = batch.last() else {
+                    break;
+                };
+                let next_cursor = (last.t_end, last.id);
+                let mut tail = Vec::with_capacity(batch.len());
+                for c in &batch {
+                    tail.push(cuts.protects(&self.conn, c, policy.keep_per_emitter)?);
                 }
-                let tracked = cuts.track.len();
-                if !cuts.still_current(&tx, c)? {
-                    report.relinks += (tracked - cuts.track.len()) as u64;
-                    report.kept_moved += 1;
-                    continue;
-                }
-                let pinned: bool = tx
-                    .prepare_cached(PINNED_SQL)?
-                    .query_row([c.id], |r| r.get(0))?;
-                if pinned {
-                    report.kept_pinned += 1;
-                    continue;
-                }
-                if policy.rollup {
-                    let key = c.tracks.first().copied();
-                    if let std::collections::hash_map::Entry::Vacant(slot) = open.entry(key) {
-                        let stored = tx
-                            .prepare_cached(LAST_ROLLUP_SQL)?
-                            .query_row([key], Acc::stored)
-                            .optional()?;
-                        if let Some(s) = stored {
-                            slot.insert(s);
-                        }
+                let asked = Instant::now();
+                let tx = self.write_tx()?;
+                let started = Instant::now();
+                report.wait_ns_max = report
+                    .wait_ns_max
+                    .max(started.duration_since(asked).as_nanos() as u64);
+                report.examined += batch.len() as u64;
+                let mut rollups = Rollups::default();
+                for (c, protected) in batch.iter().zip(tail) {
+                    if protected {
+                        report.kept_tail += 1;
+                        continue;
                     }
-                    match open.get_mut(&key) {
-                        Some(acc) if acc.continues(c, policy) => acc.add(c),
-                        Some(acc) => {
-                            acc.flush_counted(&tx, &mut report)?;
-                            *acc = Acc::of(key, c);
-                        }
-                        None => {
-                            open.insert(key, Acc::of(key, c));
-                        }
+                    if tracks_of(&tx, c.id)? != c.tracks {
+                        report.kept_moved += 1;
+                        continue;
                     }
+                    let tracked = cuts.track.len();
+                    if !cuts.still_current(&tx, c)? {
+                        report.relinks += (tracked - cuts.track.len()) as u64;
+                        report.kept_moved += 1;
+                        continue;
+                    }
+                    let pinned: bool = tx
+                        .prepare_cached(PINNED_SQL)?
+                        .query_row([c.id], |r| r.get(0))?;
+                    if pinned {
+                        report.kept_pinned += 1;
+                        continue;
+                    }
+                    if policy.rollup {
+                        rollups.add(&tx, c, policy, &mut report)?;
+                    }
+                    tx.prepare_cached("DELETE FROM track_detection WHERE detection_id = ?1")?
+                        .execute([c.id])?;
+                    tx.prepare_cached("DELETE FROM detection WHERE detection_id = ?1")?
+                        .execute([c.id])?;
+                    report.deleted += 1;
                 }
-                tx.prepare_cached("DELETE FROM track_detection WHERE detection_id = ?1")?
-                    .execute([c.id])?;
-                tx.prepare_cached("DELETE FROM detection WHERE detection_id = ?1")?
-                    .execute([c.id])?;
-                report.deleted += 1;
+                rollups.flush(&tx, &mut report)?;
+                tx.commit()?;
+                let held = started.elapsed().as_nanos() as u64;
+                report.lock_ns_max = report.lock_ns_max.max(held);
+                report.lock_ns_total += held;
+                report.batches += 1;
+                // A pass deletes in bulk, and every deleted row touches pages of the table and
+                // each of its indexes, so the WAL grows fast. Checkpoint after each batch, with
+                // the lock released (PASSIVE: never waits on a reader or the detector's writer),
+                // so the WAL is backfilled while the pass runs instead of ballooning to the
+                // pass's whole volume.
+                self.wal_checkpoint_passive()?;
+                cursor = next_cursor;
             }
-            for acc in open.values_mut() {
-                acc.flush_counted(&tx, &mut report)?;
-            }
-            tx.commit()?;
-            let held = started.elapsed().as_nanos() as u64;
-            report.lock_ns_max = report.lock_ns_max.max(held);
-            report.lock_ns_total += held;
-            report.batches += 1;
-            // A pass deletes in bulk, and every deleted row touches pages of the table and each
-            // of its indexes, so the WAL grows fast. Checkpoint after each batch, with the lock
-            // released (PASSIVE: never waits on a reader or the detector's writer), so the WAL is
-            // backfilled while the pass runs instead of ballooning to the pass's whole volume.
-            self.wal_checkpoint_passive()?;
-            cursor = next_cursor;
         }
+        report.complete = true;
+        Ok(report)
     }
 
     /// `PRAGMA wal_checkpoint(PASSIVE)`: backfills what it can without waiting on anyone. A

@@ -4,9 +4,14 @@
 -- one is first folded into a `detection_rollup` row of its track. `repo/retention.rs` holds the
 -- policy and says which rows are never pruned and why.
 
--- The age scan and the watermark (`max(t_end)`) read this; without it a prune pass is a full
--- table scan. `(t_end, detection_id)` is also the pass's resumable cursor.
+-- The storage figures (oldest detection, the store's newest `t_end`) read this; without it each is a
+-- full table scan.
 CREATE INDEX idx_detection_t_end ON detection (t_end);
+-- Each survey's watermark and its candidates (retention ages per survey; `(t_end, detection_id)`
+-- within a survey is the pass's resumable cursor). Subsumes the survey-only
+-- index, so the row carries no more index bytes than before.
+DROP INDEX IF EXISTS idx_detection_survey;
+CREATE INDEX idx_detection_survey_t_end ON detection (survey_id, t_end);
 
 -- Pin lookups. `demodulation.detection_id` is a foreign key into `detection`, so every detection
 -- DELETE checks it — without an index that is a scan of `demodulation` per deleted row. The two

@@ -23,6 +23,13 @@ use serde_json::{Value, json};
 
 use crate::stats::Counters;
 
+/// The shortest retention age the run applies, s: ten minutes, ten times the tracker's 60 s idle
+/// timeout (the longest it holds a tentative link to a stored detection in memory before writing
+/// it). A shorter setting is clamped up to it, and `/api/status` `storage.retention` says so
+/// (`clamped_from_s`). Library callers of [`hk_model::Repository::prune_detections`] may pass any
+/// age (tests do); the daemon never ages rows its tracker may still link.
+pub const MIN_RETENTION_S: f64 = 600.0;
+
 /// How the run applies [`DetectionRetention`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RetentionSettings {
@@ -39,6 +46,8 @@ pub struct RetentionSettings {
     pub pause: Duration,
     /// Time between two refreshes of the storage figures.
     pub refresh: Duration,
+    /// The age asked for, ns, when it was below [`MIN_RETENTION_S`] and was clamped up to it.
+    pub clamped_from_ns: Option<i64>,
 }
 
 impl Default for RetentionSettings {
@@ -52,6 +61,7 @@ impl Default for RetentionSettings {
             first_after: Duration::from_secs(60),
             pause: Duration::from_millis(20),
             refresh: Duration::from_secs(60),
+            clamped_from_ns: None,
         }
     }
 }
@@ -95,6 +105,7 @@ impl RetentionSettings {
                 s.enabled = false;
             }
         }
+        s = s.floored();
         if let Some(i) = duration(ENV_INTERVAL).filter(|&i| i > 0.0) {
             s.interval = Duration::from_secs_f64(i);
         }
@@ -108,11 +119,24 @@ impl RetentionSettings {
         s
     }
 
+    /// The settings with the age clamped up to [`MIN_RETENTION_S`] (recording what was asked).
+    /// [`RetentionService::start`] applies it too, so no path runs a shorter age.
+    pub fn floored(mut self) -> Self {
+        let min_ns = (MIN_RETENTION_S * 1e9) as i64;
+        if self.policy.max_age_ns < min_ns {
+            self.clamped_from_ns = Some(self.policy.max_age_ns);
+            self.policy.max_age_ns = min_ns;
+        }
+        self
+    }
+
     fn to_json(self) -> Value {
         let s = |ns: i64| ns as f64 / 1e9;
         json!({
             "enabled": self.enabled,
             "max_age_s": self.enabled.then(|| s(self.policy.max_age_ns)),
+            "min_age_s": MIN_RETENTION_S,
+            "clamped_from_s": self.clamped_from_ns.map(s),
             "rollup": self.policy.rollup,
             "keep_per_emitter": self.policy.keep_per_emitter,
             "batch": self.policy.batch,
@@ -207,7 +231,7 @@ impl RetentionService {
         counters: Arc<Counters>,
     ) -> Arc<Self> {
         let me = Arc::new(Self {
-            settings,
+            settings: settings.floored(),
             db_path,
             counters,
             state: Mutex::new(State {
@@ -381,6 +405,18 @@ mod tests {
         assert_eq!(set.interval, Duration::from_secs(300));
         let off = RetentionSettings::from_lookup(|k| (k == ENV_RETENTION).then(|| "off".into()));
         assert!(!off.enabled);
+        // T-904 review: an age under the tracker's hold windows is clamped up, and says so.
+        let short = RetentionSettings::from_lookup(|k| (k == ENV_RETENTION).then(|| "30s".into()));
+        assert!(short.enabled);
+        assert_eq!(short.policy.max_age_ns, 600_000_000_000);
+        assert_eq!(short.clamped_from_ns, Some(30_000_000_000));
+        let v = short.to_json();
+        assert_eq!(
+            (&v["max_age_s"], &v["min_age_s"], &v["clamped_from_s"]),
+            (&json!(600.0), &json!(600.0), &json!(30.0))
+        );
+        assert_eq!(set.clamped_from_ns, None);
+        assert!(set.to_json()["clamped_from_s"].is_null());
         let junk = RetentionSettings::from_lookup(|_| Some("soon".into()));
         assert_eq!(
             (junk.enabled, junk.policy.max_age_ns, junk.policy.rollup),

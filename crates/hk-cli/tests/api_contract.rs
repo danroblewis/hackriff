@@ -892,16 +892,20 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         (before - 60.0..=unix_now() + 1.0).contains(&measured),
         "{storage}"
     );
-    // Due at most one interval (the first pass: one minute) after the snapshot.
+    // Pruning is on, so a next pass is always scheduled, never in the past of the snapshot.
+    // How far ahead depends on whether the first pass (one minute in) has run yet, which is the
+    // wall clock's business, not this test's: the server's own `last_prune` says which.
     let next = storage["next_prune_s"]
         .as_f64()
         .expect("next_prune_s: {storage}");
-    assert!((measured..=measured + 61.0).contains(&next), "{storage}");
+    assert!(next >= measured - 1.0, "{storage}");
     assert_eq!(
         storage["retention"],
         json!({
             "enabled": true,
             "max_age_s": 3_600.0,
+            "min_age_s": 600.0,
+            "clamped_from_s": null,
             "rollup": true,
             "keep_per_emitter": 256,
             "batch": 100,
@@ -911,10 +915,28 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
         }),
         "{storage}"
     );
-    assert!(
-        storage["last_prune"].is_null(),
-        "no pass in the first minute: {storage}"
-    );
+    // Either no pass has run yet (`null`, and the first is due within its one-minute delay of
+    // the snapshot), or one has and reports itself whole; which, is read off the server's report.
+    let last = &storage["last_prune"];
+    if last.is_null() {
+        assert_eq!(storage["passes"], json!(0), "{storage}");
+        assert!(next <= measured + 61.0, "the first pass is due: {storage}");
+    } else {
+        assert!(
+            storage["passes"].as_u64().is_some_and(|n| n >= 1),
+            "{storage}"
+        );
+        assert!(last["error"].is_null(), "{storage}");
+        for field in ["t_s", "duration_s", "lock_ms_max", "wait_ms_max"] {
+            assert!(last[field].is_f64(), "last_prune.{field}: {storage}");
+        }
+        for field in ["examined", "deleted", "batches"] {
+            assert!(last[field].is_u64(), "last_prune.{field}: {storage}");
+        }
+        assert!(last["complete"].is_boolean(), "{storage}");
+        // The next pass is one interval (600 s) after the last.
+        assert!(next <= measured + 601.0, "{storage}");
+    }
 
     // /api/history over the fixture's band: cell grid.
     let t1 = unix_now() + 5.0;

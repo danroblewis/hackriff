@@ -651,3 +651,124 @@ fn a_prune_batch_holds_the_write_lock_briefly() {
     drop(w);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+impl World {
+    /// Another survey on the same plan, open (`SurveyState::Open`).
+    fn another_survey(&mut self) -> SurveyId {
+        let first = self.repo.survey(self.survey).unwrap();
+        let s = Survey {
+            id: SurveyId::new(),
+            state: SurveyState::Open,
+            t_start: t(0),
+            t_end: None,
+            ..first
+        };
+        self.repo.insert_survey(&s).unwrap();
+        s.id
+    }
+
+    /// `n` back-to-back 100 ms untracked rows at `f_hz` in `survey` from `start_ms`.
+    fn untracked(&mut self, survey: SurveyId, f_hz: f64, start_ms: i64, n: i64) -> Vec<Detection> {
+        let dets: Vec<Detection> = (0..n)
+            .map(|i| {
+                let a = start_ms + i * 100;
+                Detection {
+                    survey_id: survey,
+                    ..self.det(f_hz, tr(a, a + 100), 12.0)
+                }
+            })
+            .collect();
+        self.repo.insert_detections(&dets).unwrap();
+        dets
+    }
+}
+
+/// T-904 review, blocker 1: a replay (or a run on a host whose clock is behind) writes into a
+/// store that already holds newer rows. Its survey is open and its tracker holds tentative links
+/// to its unlinked rows; ageing them from the store's newest row would delete them under the
+/// tracker (and, before links tolerated a missing row, wedge track persistence for good). An
+/// open survey ages from its own newest row; a closed one still ages from the store's.
+#[test]
+fn an_open_survey_ages_from_its_own_newest_row_not_the_stores() {
+    let mut w = world();
+    // Yesterday's live run, two hours "ahead" of the replay: closed, and with an old row.
+    let live = w.survey;
+    let old_live = w.untracked(live, 434.0e6, 0, 5);
+    let _newest = w.untracked(live, 434.0e6, 7_200 * S, 5);
+    w.repo
+        .finish_survey(
+            live,
+            SurveyState::Closed,
+            t(7_201 * S),
+            &SurveySummary::default(),
+        )
+        .unwrap();
+    // The replay: an open survey stamped with the recording's own (older) time, unlinked rows
+    // the tracker has not confirmed yet, a minute of them.
+    let replay = w.another_survey();
+    let held = w.untracked(replay, 433.92e6, 1_000 * S, 600);
+    let report = w
+        .repo
+        .prune_detections(&DetectionRetention::default(), || true)
+        .unwrap();
+    assert_eq!(
+        w.remaining(&held).len(),
+        600,
+        "no row of the open replay survey is an hour older than its own newest: {report:?}"
+    );
+    assert!(
+        w.remaining(&old_live).is_empty(),
+        "the closed survey still ages from the store's newest row: {report:?}"
+    );
+    assert_eq!(report.deleted, 5);
+    // A link the tracker writes afterwards lands: the row is still there.
+    let (track, _) = w.track(433.92e6, 1_000 * S, 1);
+    w.repo
+        .link_detections_to_track(track, &[held[0].id], t(1_100 * S))
+        .unwrap();
+}
+
+/// T-904 review, blocker 1 (c): a link to a detection that is no longer stored — aged out while
+/// the tracker held it tentatively — is skipped; it never fails the write it is part of.
+#[test]
+fn a_link_to_a_pruned_detection_is_skipped_not_an_error() {
+    let mut w = world();
+    let (track, dets) = w.track(433.92e6, 0, 3);
+    let gone = w.det(433.92e6, tr(300, 400), 10.0);
+    w.repo
+        .link_detections_to_track(track, &[gone.id, dets[0].id], t(500))
+        .expect("a missing detection does not fail the link write");
+    assert_eq!(w.repo.track_detections(track).unwrap().len(), 3);
+}
+
+/// T-904 review, blocker 2: rows no track links carry no verdict that they are one signal, so
+/// they roll up by frequency. Two short bursts at opposite edges of a 20 MHz window, 2 s apart,
+/// are two rollups, each its own time–frequency box — not one box spanning the window. Bursts at
+/// one frequency inside the gap still share one.
+#[test]
+fn untracked_bursts_at_different_frequencies_roll_up_separately() {
+    let mut w = world();
+    let survey = w.survey;
+    let lo = w.untracked(survey, 424.0e6, 0, 3);
+    let hi = w.untracked(survey, 443.9e6, 2 * S, 3);
+    let lo_again = w.untracked(survey, 424.0e6, 4 * S, 3);
+    let _young = w.untracked(survey, 434.0e6, 7_200 * S, 1);
+    let report = w.repo.prune_detections(&policy(60, 0, 4), || true).unwrap();
+    assert_eq!(report.deleted, 9);
+    let region = Region::new(FreqRange::new(400e6, 460e6), tr(0, 10 * S));
+    let mut rollups = w.repo.detection_rollups_in_region(&region).unwrap();
+    rollups.sort_by(|a, b| a.freq.lo_hz.total_cmp(&b.freq.lo_hz));
+    assert_eq!(rollups.len(), 2, "{rollups:#?}");
+    let (a, b) = (&rollups[0], &rollups[1]);
+    assert!(a.freq.hi_hz < 425e6 && b.freq.lo_hz > 443e6, "{rollups:#?}");
+    assert_eq!((a.detections, b.detections), (6, 3));
+    assert_eq!(
+        (a.time.start, a.time.end),
+        (lo[0].time.start, lo_again[2].time.end)
+    );
+    assert_eq!(
+        (b.time.start, b.time.end),
+        (hi[0].time.start, hi[2].time.end)
+    );
+    assert!(a.track_id.is_none() && b.track_id.is_none());
+}
