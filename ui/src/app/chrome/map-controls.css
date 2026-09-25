@@ -133,7 +133,7 @@
 .bar #review-btn .rv-ico { display: none; }
 .bar #review-btn .rv-n { margin-left: 4px; color: var(--coral); }
 .bar #review-btn .rv-n::before { content: "("; } .bar #review-btn .rv-n::after { content: ")"; }
-.map-more-menu { width: min(220px, 100%); }
+/* T-1007 widened this below, where the settings groups are styled. */
 .map-more-body #theme-btn { min-height: 30px; text-align: left; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-more-body #theme-btn:hover { background: var(--raise); }
 .map-more-body { display: flex; flex-direction: column; gap: 4px; }
@@ -174,3 +174,18 @@
   .map-offer { top: 132px; }
   .map-mode { top: 176px; }
 }
+
+/* ---- T-1007: the ⋯ menu is the settings menu ------------------------------------------------------
+   Theme plus every preference that used to be in Review: colour scale (auto-contrast), the time
+   ruler's labels, the front ends and which viewport's grey reads which, and the capture window the
+   backend reports. Groups reuse the layers menu's row/axis rules; only the extra shapes are here. */
+.map-more-menu { width: min(300px, 100%); }
+.map-settings-rows { margin-top: 6px; }
+.map-settings-rows .map-layers-axis h4 { margin: 0 0 6px; font: 600 10.5px/1.3 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.map-row-sel, .map-row-read { justify-content: space-between; gap: 8px; cursor: default; }
+.map-row-sel select { max-width: 55%; background: none; border: 1px solid var(--line); border-radius: 6px; color: var(--text); font: 12px var(--ui); padding: 2px 4px; min-height: 26px; }
+.map-row-read strong { font: 12px var(--mono); color: var(--text); }
+.map-device { padding: 2px 0 4px; }
+.map-device-name { font: 12px var(--ui); color: var(--text); }
+.map-device small { margin-left: 6px; color: var(--muted); font-size: 10.5px; }
+.map-device .mono { font-family: var(--mono); font-size: 10px; word-break: break-all; }

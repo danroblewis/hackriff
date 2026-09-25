@@ -43,6 +43,17 @@ export function deviceFrom(cs: ControlState): AppState["device"] {
     fftBounds: cs.display_limits
       ? { fft_size_min: cs.display_limits.fft_size_min, fft_size_max: cs.display_limits.fft_size_max }
       : null,
+    // T-1007 (over T-511): the front ends themselves, in composition order, for the ⋯ settings
+    // menu's list and the per-pane choice of whose coverage decides its grey. An absent list is `[]`
+    // — never one entry synthesised from the singular `device`, which is null precisely when the run
+    // holds more than one radio, and that is the case the list exists for.
+    devices: (cs.devices ?? []).map((d) => ({
+      deviceId: d.device_id ?? d.device?.device_id ?? null,
+      driver: d.device?.driver ?? "unknown front end",
+      kind: d.device?.kind ?? "hardware",
+      centerHz: d.tuning?.center_hz ?? null,
+      sampleRateHz: d.tuning?.sample_rate_hz ?? null,
+    })),
   };
 }
 

@@ -25,11 +25,14 @@ const ART = process.env.HK_E2E_ARTIFACTS ?? path.join(UI_DIR, "e2e", "artifacts"
 
 /** The controls T-882's hit test must find, so an empty result cannot come from matching nothing.
  * The fixed ones are literal: closed = Go-to input, Layers, Research (T-821), Measure, Annotate and
- * Pin (T-820), Viewport, zoom in/out, FAB (10); the viewport menu = its × (T-900), Split, Close, Whole surface, Record IQ
+ * Pin (T-820), Viewport, Review and the ⋯ settings menu (T-993 moved those two off the retired top
+ * bar into this cluster, and this count was not moved with them — it read 10 against a page with 12
+ * since that landed), zoom in/out, FAB (12); the viewport menu = its × (T-900), Split, Close, Whole surface, Record IQ
  * (5). The layers menu's rows are the overlay registry the page states (`.sf-stage
  * [data-overlay-layers]`, the same statement T-806's check derives from — T-914) plus the fixed
- * rows outside it: the coverage-fog row (T-807), the trace strip and the three colour-scale rows
- * (T-882). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
+ * rows outside it: the coverage-fog row (T-807) and the trace strip. The three colour-scale rows are
+ * not among them since T-1007 moved them to the ⋯ settings menu (`app-settings.e2e.mjs` presses
+ * those). A literal layer count broke on every renderer that landed (T-807, T-809, T-897). The
  * registry is read after the server's reserved Bookmarks collection is stated, so a collection row
  * cannot arrive between this read and the hit test. */
 async function rehomedCounts(page) {
@@ -38,7 +41,7 @@ async function rehomedCounts(page) {
     { timeoutMs: 30000 });
   const registry = JSON.parse(await page.eval("document.querySelector('.sf-stage').dataset.overlayLayers"));
   assert.ok(registry.length >= 2, `a gutted overlay registry: ${JSON.stringify(registry)}`);
-  return { closed: 10, pane: 5, layers: registry.length + 1 + 1 + 3 };
+  return { closed: 12, pane: 5, layers: registry.length + 1 + 1 };
 }
 
 test("GET / mounts the unified surface in the app, under the product CSP", async (t) => {

@@ -77,6 +77,15 @@ export function fmtRulerHz(hz: number, stepHz: number): string {
   return `${(hz / 1e6).toFixed(mhzDecimals(stepHz))} MHz`;
 }
 
+/**
+ * Which form the TIME ruler's primary label takes (T-1007, the ⋯ settings menu's "Time ruler").
+ *
+ * `age` is T-805's own: how far behind the live edge the mark is, with the UTC instant beside it.
+ * `clock` swaps the two, for reading a recording against an external log. Labelling only — the marks
+ * are at the identical capture instants either way, and the frequency ruler is unaffected.
+ */
+export type RulerMode = "age" | "clock";
+
 /** A time ruler label: how far behind the live edge `tNs` is, or `live edge` for the mark on it. */
 export function fmtRulerAge(tNs: number, edgeNs: number, stepNs: number): string {
   const d = edgeNs - tNs;
@@ -112,6 +121,7 @@ function multiples(lo: number, hi: number, step: number): number[] {
  */
 export function paneRuler(
   id: string, box: Box, rect: PaneRect, cellHz: number, cellS: number, edgeNs: number, dpr = 1,
+  rulerMode: RulerMode = "age",
 ): PaneRuler {
   const spanHz = box.f1Hz - box.f0Hz, spanNs = box.t1Ns - box.t0Ns;
   const cellNs = cellS * 1e9;
@@ -138,10 +148,14 @@ export function paneRuler(
     const steps = minor >= cellNs ? multiples(box.t0Ns, box.t1Ns, minor) : multiples(box.t0Ns, box.t1Ns, timeStepNs);
     for (const v of steps) {
       const major = isMajor(v);
+      // T-1007: `clock` swaps the primary and the secondary — the same two strings, read the other
+      // way round, so a mark can never carry a time the other mode would not have put there.
+      const age = major ? fmtRulerAge(v, edgeNs, timeStepNs) : null;
+      const clock = major ? fmtRulerClock(v, timeStepNs) : null;
       time.push({
         value: v, pos: px(v), major,
-        label: major ? fmtRulerAge(v, edgeNs, timeStepNs) : null,
-        sub: major ? fmtRulerClock(v, timeStepNs) : null,
+        label: rulerMode === "clock" ? clock : age,
+        sub: rulerMode === "clock" ? age : clock,
       });
     }
   }

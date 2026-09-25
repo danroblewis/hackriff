@@ -110,10 +110,20 @@ export interface ScanState {
   yielded: ScanYielded | null;
 }
 
+/**
+ * One live front end of `GET /api/control/state`'s `devices` (T-511), in composition order: `[]` on a
+ * replay, one entry on a single-SDR run (the same radio the singular `device`/`tuning` describe), N
+ * when N are composed. The list a client picks a `device_id` selector from — and the list the ⋯
+ * settings menu names the radios from (T-1007).
+ */
+export interface ControlDevice { device_id: string | null; device: DeviceCaps | null; tuning: Tuning | null }
+
 export interface ControlState {
   live: boolean;
   device: DeviceCaps | null;
   tuning: Tuning | null;
+  /** T-511: every live front end. Absent on a server older than T-511; never assume one from `device`. */
+  devices?: ControlDevice[];
   run: Run | null;
   /** T-452: the survey sweep, beside the tuning it moves. `null` when nothing can sweep this
    * source (a replay), so the panel disables the control with a reason rather than hiding it. */

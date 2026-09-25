@@ -212,7 +212,12 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   assert.match(ts, /class: "map-ibtn map-measure-btn"/);
   assert.match(ts, /class: "map-ibtn map-pane-btn"/);
   for (const act of ["split", "close", "whole"]) assert.match(ts, new RegExp(`paneItem\\("${act}"`));
-  assert.match(ts, /"data-axis": "scale", role: "radiogroup"/);
+  // T-1007 moved the colour scale one menu across — out of Layers (a per-pane picture) and into the
+  // ⋯ settings menu, which is where the view-wide preferences now live. Still in the cluster, still
+  // one radio group over the one range mode: the assertion follows the control, it is not dropped.
+  const settings = readFileSync("src/app/chrome/settings.ts", "utf8");
+  assert.match(settings, /group\("scale", "Colour scale[^"]*", "Colour scale, every pane", "radiogroup"/);
+  assert.doesNotMatch(ts, /"data-axis": "scale"/, "the colour scale is still offered by the layers menu too");
   assert.match(ts, /fade\.hold\("pane-menu", open\)/, "an open viewport menu must not fade");
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.doesNotMatch(host, /sf-bar|sf-actions|sf-live|sf-tracebtn|sf-contrast|sf-vscale|sf-signalsbtn|sf-measurebtn/,

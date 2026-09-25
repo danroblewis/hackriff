@@ -43,6 +43,22 @@ export interface DeviceSlice {
    * reject on a device it has not been told about.
    */
   fftBounds: FftBounds | null;
+  /**
+   * T-1007 (over T-511's `devices`): every live front end, for the ⋯ settings menu's list and for
+   * the per-pane choice of whose coverage decides a pane's grey. `[]` on a replay, on a server that
+   * does not send the list, or before the state loads — never a list invented from the singular
+   * `device`, which is null exactly when the run holds more than one.
+   */
+  devices: readonly DeviceEntry[];
+}
+
+/** One front end as the shell reduces it: its identity, what it is, and what it is tuned to now. */
+export interface DeviceEntry {
+  deviceId: string | null;
+  driver: string;
+  kind: "hardware" | "replay";
+  centerHz: number | null;
+  sampleRateHz: number | null;
 }
 
 /** One-shot navigation requests from the top bar (Go to), consumed by T-151/T-152. `gotoSpanHz`
@@ -80,7 +96,7 @@ export function parsePrefs(raw: string | null): Prefs {
 export const shellInitial = (prefs: Prefs): ShellState => ({
   mode: prefs.mode, theme: prefs.theme,
   conn: { api: "connecting", spectrum: "idle", message: "" },
-  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null },
+  device: { loaded: false, live: false, finished: false, capture: null, captureNote: null, contentClass: null, centerHz: null, sampleRateHz: null, rowsPerS: null, recording: false, deviceId: null, centerGrid: null, fftBounds: null, devices: [] },
   nav: { gotoHz: null, gotoSpanHz: null, seq: 0 },
   toast: { text: "", seq: 0 },
   openAlarms: 0,

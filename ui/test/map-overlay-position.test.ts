@@ -71,6 +71,7 @@ const STORAGE_KEYS: Record<string, "visibility" | "snap" | "display-pref" | "ses
   "hk-mui-prefs": "display-pref", // { mode, theme }
   "hk-mui-shadow-gain": "display-pref",
   "hk-surface-range-mode": "display-pref",
+  "hk-ruler-mode": "display-pref", // T-1007: the time ruler's labels — seconds-ago or timestamp
   "hk-token": "session-token",
 };
 
