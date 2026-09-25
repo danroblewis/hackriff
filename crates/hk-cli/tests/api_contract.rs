@@ -1831,18 +1831,9 @@ fn inventory_and_analysis_strongest_find_the_blind_fm_station() {
     stop_server(serving);
 }
 
-/// T-264 (ADR-0017 stage TM-8): the History surface's two routes — the durable catalogue of
-/// events in a region over a time range, and one emitter's presence track.
-///
-/// The invariant under test is the one that makes the whole time model safe to live with:
-/// **nothing is deleted to make the live list correct**. Explore is window-scoped (T-260), so a
-/// signal that stopped hours ago is not listed there; every one of its events is still catalogued
-/// here, one row per presence interval, one-offs included. And the answer never lets an empty
-/// catalogue read as a quiet band: `coverage.statement` says which of "unknown", "no data for this
-/// period" and "nothing was on the air" it is.
 /// T-904: a window whose per-frame detection rows have been pruned still answers
-/// `/api/inventory` and `/api/events` (the durable catalogue: presence intervals, `measured`,
-/// relations) **exactly** as before the prune. A finished, unpaced replay makes the store stable,
+/// `/api/inventory`, `/api/events` and each listed emitter's `/api/inventory/{id}/presence` (the
+/// durable catalogue: presence intervals, `measured`, relations) **exactly** as before the prune. A finished, unpaced replay makes the store stable,
 /// so the two answers can be compared whole. The prune here is harsher than the product's: every
 /// row older than one second of the recording, keeping only each emitter's newest **one** — the
 /// one `/api/inventory`'s `measured` reads (`Repository::prune_detections` keeps 256 by default,
@@ -1888,9 +1879,31 @@ fn a_pruned_window_still_answers_inventory_and_events_as_before() {
         assert_eq!(st, 200, "{inv}");
         let (st, ev) = get(addr, &format!("/api/events?{window}"));
         assert_eq!(st, 200, "{ev}");
-        (inv, ev)
+        // Each listed emitter's own presence track (`/api/inventory/{id}/presence`).
+        let presence: Vec<Value> = inv["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let id = e["id"].as_str().expect("an inventory entry has an id");
+                // Windowed, so liveness derives against `t1` rather than the wall clock.
+                let (st, track) = get(
+                    addr,
+                    &format!("/api/inventory/{id}/presence?t0={t0}&t1={t1}"),
+                );
+                assert_eq!(st, 200, "{track}");
+                track
+            })
+            .collect();
+        (inv, ev, presence)
     };
-    let (inv_before, ev_before) = read();
+    let (inv_before, ev_before, presence_before) = read();
+    assert!(
+        presence_before
+            .iter()
+            .any(|p| p["intervals"].as_array().is_some_and(|i| !i.is_empty())),
+        "some listed emitter has a presence track: {presence_before:?}"
+    );
     assert!(
         !inv_before["entries"].as_array().unwrap().is_empty(),
         "the blind FM station is in the inventory: {inv_before}"
@@ -1919,13 +1932,26 @@ fn a_pruned_window_still_answers_inventory_and_events_as_before() {
     assert_eq!(after.detection_rows, rows.detection_rows - report.deleted);
     assert!(after.rollup_rows > 0, "{after:?}");
 
-    let (inv_after, ev_after) = read();
+    let (inv_after, ev_after, presence_after) = read();
     assert_eq!(inv_after, inv_before, "the inventory answer did not move");
     assert_eq!(ev_after, ev_before, "the event catalogue did not move");
+    assert_eq!(
+        presence_after, presence_before,
+        "every listed emitter's presence track did not move"
+    );
     drop(repo);
     drop(server);
 }
 
+/// T-264 (ADR-0017 stage TM-8): the History surface's two routes — the durable catalogue of
+/// events in a region over a time range, and one emitter's presence track.
+///
+/// The invariant under test is the one that makes the whole time model safe to live with:
+/// **nothing is deleted to make the live list correct**. Explore is window-scoped (T-260), so a
+/// signal that stopped hours ago is not listed there; every one of its events is still catalogued
+/// here, one row per presence interval, one-offs included. And the answer never lets an empty
+/// catalogue read as a quiet band: `coverage.statement` says which of "unknown", "no data for this
+/// period" and "nothing was on the air" it is.
 #[test]
 fn events_and_presence_serve_the_durable_catalogue() {
     let (_guard, serving, addr) = start_server();

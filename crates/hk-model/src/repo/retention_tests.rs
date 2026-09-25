@@ -560,3 +560,94 @@ fn rows_sharing_an_end_time_across_a_batch_boundary_are_all_pruned() {
     assert_eq!(report.deleted, 21);
     assert!(w.remaining(&all).is_empty());
 }
+
+/// Simulated steady ingest at the measured 2.4 Msps mock-replay rate (~20 rows/s: twelve 10 s
+/// tracks of 100 back-to-back 100 ms detections per simulated minute), with `prune` applied every
+/// second simulated minute. Returns the database bytes (`page_count × page_size`) after each
+/// simulated minute.
+fn steady_ingest(minutes: i64, prune: Option<&DetectionRetention>) -> (World, Vec<u64>) {
+    let mut w = world();
+    let mut sizes = Vec::new();
+    for m in 0..minutes {
+        for k in 0..12 {
+            let start = m * 60 * S + (k % 6) * 10 * S;
+            w.track(433.1e6 + k as f64 * 100e3, start, 100);
+        }
+        if let Some(p) = prune.filter(|_| m % 2 == 1) {
+            w.repo.prune_detections(p, || true).unwrap();
+        }
+        sizes.push(w.repo.detection_storage().unwrap().db_bytes);
+    }
+    (w, sizes)
+}
+
+/// T-904 regression bound on growth, deterministic (simulated capture time, no wall clock): with
+/// retention on the database stops growing once the age is reached — SQLite reuses the freed pages —
+/// while the same ingest without it grows linearly. Tracks stay durable either way. The bytes/h
+/// measured through the mock SDR replay are in the ticket's result; this pins the shape.
+#[test]
+fn a_steady_ingest_plateaus_under_retention_and_grows_without_it() {
+    let policy = policy(300, 0, 100);
+    let (kept_all, grow) = steady_ingest(30, None);
+    let (pruned, flat) = steady_ingest(30, Some(&policy));
+    // Without retention: minutes 10 → 30 at least doubles the file.
+    assert!(grow[29] > 2 * grow[9], "unpruned growth {grow:?}");
+    // With retention: after the age plus a couple of passes, the file grows < 15 % over 20 min.
+    assert!(
+        flat[29] * 100 < flat[9] * 115,
+        "pruned store should plateau: {flat:?}"
+    );
+    assert!(flat[29] * 2 < grow[29], "{flat:?} vs {grow:?}");
+    let s = pruned.repo.detection_storage().unwrap();
+    // At most the age (5 min) plus one pass interval (2 min) of rows at 20 rows/s.
+    assert!(s.detection_rows <= 7 * 60 * 20, "{s:?}");
+    assert!(s.rollup_rows > 0);
+    // Every track is still there.
+    let tracks = |w: &World| -> i64 {
+        w.repo
+            .conn
+            .query_row("SELECT count(*) FROM track", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(tracks(&pruned), 30 * 12);
+    assert_eq!(tracks(&kept_all), 30 * 12);
+}
+
+/// T-904 / T-453, **timing tier** (`.config/nextest.toml`, `just timing`): one batch of a prune
+/// pass holds SQLite's write lock briefly, so the detector's writer is never stalled behind it.
+/// The assertion is a latency bound — a property of the machine's headroom as much as of the code
+/// — so it runs on a quiet box, never in the gate (docs/10 §3.6). Measured through the mock SDR
+/// replay under load ~44 on the dev Mac (2026-09-24): worst batch 26.6 ms, typical 4–12 ms.
+#[test]
+fn a_prune_batch_holds_the_write_lock_briefly() {
+    let dir = std::env::temp_dir().join(format!("hk-t904-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hackriff.db");
+    let mut w = world_in(Repository::open(&path).unwrap());
+    // An hour of the 2.4 Msps replay's rate (~20 rows/s) on a file database, 40 min past the age.
+    for m in 0..60 {
+        for k in 0..12 {
+            let start = m * 60 * S + (k % 6) * 10 * S;
+            w.track(433.1e6 + k as f64 * 100e3, start, 100);
+        }
+    }
+    let report = w
+        .repo
+        .prune_detections(&policy(20 * 60, 256, 100), || true)
+        .unwrap();
+    assert!(report.deleted > 40 * 60 * 15, "{report:?}");
+    assert!(report.batches > 100, "{report:?}");
+    let max_ms = report.lock_ns_max as f64 / 1e6;
+    eprintln!(
+        "prune: {} rows in {} batches, worst lock hold {max_ms:.2} ms, total {:.1} ms",
+        report.deleted,
+        report.batches,
+        report.lock_ns_total as f64 / 1e6
+    );
+    assert!(
+        max_ms < 50.0,
+        "worst batch held the write lock {max_ms:.1} ms: {report:?}"
+    );
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}

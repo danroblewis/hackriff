@@ -163,6 +163,7 @@ fn report_json(r: &PruneReport, at: Timestamp, took: Duration, error: Option<&st
         "rollups_extended": r.rollups_extended,
         "batches": r.batches,
         "lock_ms_max": r.lock_ns_max as f64 / 1e6,
+        "wait_ms_max": r.wait_ns_max as f64 / 1e6,
         "lock_ms_total": r.lock_ns_total as f64 / 1e6,
         "complete": r.complete,
         "error": error,
@@ -281,7 +282,10 @@ impl RetentionService {
                 return;
             }
             if repo.is_none() {
+                // This connection checkpoints after each batch with the lock released
+                // (`prune_detections`), so its commits do not checkpoint too.
                 repo = Repository::open(&self.db_path)
+                    .and_then(|r| r.disable_wal_autocheckpoint().map(|()| r))
                     .map_err(|e| {
                         self.lock().errors += 1;
                         eprintln!("hk-pipeline: retention cannot open the database: {e}");

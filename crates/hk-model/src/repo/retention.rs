@@ -140,8 +140,13 @@ pub struct PruneReport {
     pub rollups_extended: u64,
     /// Write transactions taken.
     pub batches: u64,
-    /// Longest write-lock hold of one batch, ns (measured, T-453).
+    /// Longest write-lock hold of one batch, ns (measured, T-453): from the lock being granted
+    /// to the commit, excluding the wait for it ([`Self::wait_ns_max`]) and the WAL checkpoint
+    /// that follows the commit (run after the lock is released).
     pub lock_ns_max: u64,
+    /// Longest wait for the write lock before one batch, ns: time spent behind the detector's
+    /// own writes, which the pass pays and ingest does not.
+    pub wait_ns_max: u64,
     /// Total write-lock hold, ns.
     pub lock_ns_total: u64,
     /// Tracks whose cached tail cut was dropped because an emitter link onto them appeared.
@@ -672,8 +677,12 @@ impl Repository {
             for c in &batch {
                 tail.push(cuts.protects(&self.conn, c, policy.keep_per_emitter)?);
             }
-            let started = Instant::now();
+            let asked = Instant::now();
             let tx = self.write_tx()?;
+            let started = Instant::now();
+            report.wait_ns_max = report
+                .wait_ns_max
+                .max(started.duration_since(asked).as_nanos() as u64);
             report.examined += batch.len() as u64;
             let mut open: HashMap<Option<[u8; 16]>, Acc> = HashMap::new();
             for (c, protected) in batch.iter().zip(tail) {
@@ -734,8 +743,31 @@ impl Repository {
             report.lock_ns_max = report.lock_ns_max.max(held);
             report.lock_ns_total += held;
             report.batches += 1;
+            // A pass deletes in bulk, and every deleted row touches pages of the table and each
+            // of its indexes, so the WAL grows fast. Checkpoint after each batch, with the lock
+            // released (PASSIVE: never waits on a reader or the detector's writer), so the WAL is
+            // backfilled while the pass runs instead of ballooning to the pass's whole volume.
+            self.wal_checkpoint_passive()?;
             cursor = next_cursor;
         }
+    }
+
+    /// `PRAGMA wal_checkpoint(PASSIVE)`: backfills what it can without waiting on anyone. A
+    /// no-op on an in-memory database.
+    pub fn wal_checkpoint_passive(&self) -> Result<(), RepoError> {
+        if self.conn.path().is_some_and(|p| !p.is_empty()) {
+            self.conn
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))?;
+        }
+        Ok(())
+    }
+
+    /// Turns off this connection's automatic checkpoint on commit (`wal_autocheckpoint = 0`), for
+    /// a connection that checkpoints itself outside its write locks — the retention pass does,
+    /// so the checkpoint's I/O is never counted in, or added to, its lock hold.
+    pub fn disable_wal_autocheckpoint(&self) -> Result<(), RepoError> {
+        self.conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+        Ok(())
     }
 
     /// Sizes and extents of the detection store (`/api/status` `storage`).

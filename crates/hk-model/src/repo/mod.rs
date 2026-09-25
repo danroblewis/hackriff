@@ -294,6 +294,10 @@ pub struct ProvenanceChain {
     pub spur_mask: Option<SpurMask>,
 }
 
+/// `PRAGMA journal_size_limit` for file databases (T-904): the WAL file is truncated back to
+/// this after each reset.
+const WAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// The relational store.
 pub struct Repository {
     conn: Connection,
@@ -311,6 +315,10 @@ impl Repository {
                 "could not enable WAL journal (got {mode})"
             )));
         }
+        // T-904: SQLite never shrinks the WAL file on its own, so a burst of writes (a retention
+        // pass's deletes) would leave its high-water mark on disk for good. With a limit, the
+        // file is truncated back to it whenever the WAL is reset.
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
         Self::init(conn)
     }
 
