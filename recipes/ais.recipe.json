@@ -1,0 +1,143 @@
+{
+  "schema": "hackriff.recipe",
+  "schema_version": 2,
+  "id": "ais",
+  "version": 1,
+  "name": "AIS: vessel positions",
+  "description": "SIGNAL-015 (baseline): ITU-R M.1371 AIS Class A position reports on the two fixed international marine VHF channels, AIS1/Ch87B 161.975 MHz and AIS2/Ch88B 162.025 MHz (followed together, not discovered by hopping — the channel plan is fixed by treaty, unlike a pager net's unknown channel count). GMSK at 9600 Bd, h = 0.5 (deviation = rate/4, BT = 0.4 on air but the receive-side discriminator is the same non-coherent MSK chain as `msk_demod` uses elsewhere), NRZI line coding (0 = transition, ISO/IEC 13239 §4.4.1, the `nrzi` default), then standard HDLC framing: 0x7E flags, zero-bit destuffing after five consecutive ones (T-613's `bitstuff`) run before the flag search (the flag's own 6-one run is never stuffed, so it passes through unaffected), variable-length frame ended by (and, per `sync_search`'s terminator convention, including) the next 0x7E; the `crc` node's `end_trim_bits: 8` excludes that trailing flag octet from the FCS = CRC-16/X-25 a.k.a. CRC-16/IBM-SDLC (poly 0x1021, init 0xFFFF, refin/refout, xorout 0xFFFF) computation and check-field lookup, and its stripped output leaves the flag bits as harmless trailing padding past the fields the field map defines. The frame's payload is decoded for the common navigation block shared by message types 1/2/3 (Class A position report): MMSI, navigational status, speed/course/heading over ground, longitude/latitude (1/600000 minute resolution) and timestamp. Other message types (5 static/voyage data, 18/19 Class B, 24 static data report, …) are carried as raw frames only — their own field maps are a follow-up. Oracle: py/fixtures/ais_ref.py (T-963), validated against the `ais_vessels` synthetic scene.",
+  "match": {
+    "families": ["fsk"],
+    "freq_hz": [[161950000, 162050000]],
+    "bandwidth_hz": [12000, 20000],
+    "symbol_rate_bd": [9600, 9600],
+    "bursty": true
+  },
+  "input": {
+    "port": "iq",
+    "sample_rate_hz": 192000,
+    "bandwidth_hz": 100000,
+    "channels": {
+      "mode": "follow-hops",
+      "channel_bandwidth_hz": 38400,
+      "max_channels": 2,
+      "list_hz": [161975000, 162025000]
+    }
+  },
+  "nodes": [
+    { "id": "msk", "block": "msk_demod", "label": "GMSK discriminator (h = 0.5, deviation = rate/4)", "params": { "symbol_rate_bd": 9600 } },
+    {
+      "id": "clock",
+      "block": "clock_recovery",
+      "label": "9600 Bd timing",
+      "params": { "symbol_rate_bd": 9600, "pulse": "nrz", "algorithm": "gardner" }
+    },
+    { "id": "slice", "block": "slicer" },
+    {
+      "id": "line",
+      "block": "nrzi",
+      "label": "NRZI → HDLC line bits",
+      "params": { "mode": "transition-is-0", "direction": "decode" }
+    },
+    {
+      "id": "destuff",
+      "block": "bitstuff",
+      "label": "Remove zero-stuffing (0x7E flags pass through unchanged)",
+      "params": { "direction": "destuff", "stuff_after": 5, "abort_ones": 7 }
+    },
+    {
+      "id": "sync",
+      "block": "sync_search",
+      "label": "0x7E … 0x7E (bit-oriented, flags shared between frames)",
+      "params": {
+        "mode": "sync-word",
+        "sync_word": "0x7E",
+        "sync_bits": 8,
+        "max_errors": 0,
+        "frame_bits": 1050,
+        "include_sync": false,
+        "terminator": { "words": ["0x7E"], "bits": 8, "step_bits": 1, "trailer_bits": 0 }
+      }
+    },
+    {
+      "id": "crc",
+      "block": "crc",
+      "label": "FCS: CRC-16/X-25 (the terminator flag is part of the frame; end_trim_bits skips it)",
+      "params": {
+        "width": 16,
+        "poly": "0x1021",
+        "init": "0xFFFF",
+        "refin": true,
+        "refout": true,
+        "xorout": "0xFFFF",
+        "span": { "start_bit": 0, "end_trim_bits": 8 },
+        "strip": true
+      }
+    },
+    { "id": "hops", "block": "follow_hops", "label": "Merge AIS1/AIS2", "params": { "dedupe_s": 0.2 } },
+    { "id": "msg", "block": "fields", "label": "AIS common navigation block", "params": { "map": "ais_position_report" } }
+  ],
+  "field_maps": {
+    "ais_position_report": {
+      "description": "One HDLC frame's data (FCS already stripped), MSB first. `message_type` and `mmsi` are common to every AIS message; the rest of the common navigation block (ITU-R M.1371 §3.3.1) is decoded for types 1/2/3 (Class A position report) only.",
+      "unit": "bits",
+      "fields": [
+        { "name": "message_type", "type": "uint", "offset": 0, "length": 6, "label": "Message type" },
+        { "name": "repeat_indicator", "type": "uint", "offset": 6, "length": 2, "label": "Repeat indicator" },
+        { "name": "mmsi", "type": "uint", "offset": 8, "length": 30, "label": "Maritime Mobile Service Identity" },
+        {
+          "name": "position_report",
+          "type": "layer",
+          "offset": 38,
+          "length": 130,
+          "condition": { "field": "message_type", "in": [1, 2, 3] },
+          "label": "Class A position report",
+          "fields": [
+            { "name": "nav_status", "type": "uint", "offset": 0, "length": 4, "label": "Navigational status" },
+            { "name": "rot", "type": "int", "offset": 4, "length": 8, "label": "Rate of turn (raw ROT_AIS units)" },
+            { "name": "sog", "type": "uint", "offset": 12, "length": 10, "scale": 0.1, "value_unit": "kt", "label": "Speed over ground" },
+            { "name": "position_accuracy", "type": "uint", "offset": 22, "length": 1, "display": "bool", "label": "Position accuracy" },
+            { "name": "longitude", "type": "int", "offset": 23, "length": 28, "scale": 0.0000016666666666666667, "value_unit": "deg", "label": "Longitude" },
+            { "name": "latitude", "type": "int", "offset": 51, "length": 27, "scale": 0.0000016666666666666667, "value_unit": "deg", "label": "Latitude" },
+            { "name": "cog", "type": "uint", "offset": 78, "length": 12, "scale": 0.1, "value_unit": "deg", "label": "Course over ground" },
+            { "name": "true_heading", "type": "uint", "offset": 90, "length": 9, "value_unit": "deg", "label": "True heading" },
+            { "name": "timestamp", "type": "uint", "offset": 99, "length": 6, "label": "UTC second (or special value ≥ 60)" },
+            { "name": "maneuver", "type": "uint", "offset": 105, "length": 2, "label": "Manoeuvre indicator" },
+            { "name": "raim", "type": "uint", "offset": 110, "length": 1, "display": "bool", "label": "RAIM in use" },
+            { "name": "comm_state", "type": "uint", "offset": 111, "length": 19, "display": "hex", "label": "Communication state" }
+          ]
+        }
+      ]
+    }
+  },
+  "outputs": [
+    { "id": "frames", "kind": "inspector", "from": "msg" },
+    {
+      "id": "vessels",
+      "kind": "messages",
+      "from": "msg",
+      "decode": {
+        "frame_model": "ais-position-report",
+        "identity": { "scheme": "ais-mmsi", "field": "mmsi", "format": "dec" },
+        "metadata": [
+          "message_type",
+          "repeat_indicator",
+          "position_report.nav_status",
+          "position_report.sog",
+          "position_report.cog",
+          "position_report.true_heading",
+          "position_report.longitude",
+          "position_report.latitude",
+          "position_report.timestamp"
+        ],
+        "require": ["mmsi"],
+        "service": "ais"
+      }
+    },
+    { "id": "symbols", "kind": "stage", "from": "clock.out" }
+  ],
+  "output_policy": { "content_class": "unrestricted" },
+  "refine": {
+    "objective": { "node": "crc", "metric": "error_rate", "goal": "min" },
+    "tune": ["center_hz"]
+  }
+}

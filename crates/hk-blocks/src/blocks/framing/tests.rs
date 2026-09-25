@@ -10,10 +10,49 @@ use hk_recipe::{Params, PortType};
 use serde_json::{Value, json};
 
 use super::common::testutil::{Owned, bits_of, build, bytes_bits, noise, run_bits, run_frames};
-use crate::block::ParamUpdate;
+use crate::block::{Block, Io, ParamUpdate, PortInfo};
 use crate::blocks::fec::tests::pocsag_word;
+use crate::buffer::{ChunkFlags, ChunkMeta, Input, Output, PortSlice, PortVec};
 use crate::registry::BuildCtx;
 use crate::status::Lock;
+
+/// Runs `bits` through a bits-in/bits-out block (`bitstuff` in `bits` mode) in `chunk`-sized
+/// pieces and returns the concatenated output bits — [`run_bits`]/[`run_frames`] both collect a
+/// `Frames` output, which `bitstuff` here does not produce.
+fn run_bits_to_bits(block: &mut dyn Block, bits: &[u8], chunk: usize) -> Vec<u8> {
+    let info = block
+        .init(&[PortInfo {
+            ty: PortType::Bits,
+            rate_hz: 9600.0,
+            max_items: chunk,
+            hold_items: 0,
+        }])
+        .unwrap();
+    let mut outputs = vec![Output::for_port(&info[0])];
+    let mut all = Vec::new();
+    for (k, c) in bits.chunks(chunk.max(1)).enumerate() {
+        outputs[0].begin_chunk();
+        let meta = ChunkMeta {
+            index: (k * chunk) as u64,
+            flags: if k == 0 {
+                ChunkFlags::DISCONTINUITY
+            } else {
+                ChunkFlags::NONE
+            },
+            ..ChunkMeta::start(9600.0)
+        };
+        let inputs = [Input {
+            meta,
+            data: PortSlice::Bits(c),
+        }];
+        block.process(&mut Io::new(&inputs, &mut outputs)).unwrap();
+        let PortVec::Bits(v) = &outputs[0].data else {
+            panic!("bits output expected")
+        };
+        all.extend_from_slice(v);
+    }
+    all
+}
 
 fn recipe_node(recipe: &str, id: &str) -> Value {
     let path = format!(
@@ -425,6 +464,132 @@ fn acars_terminator_lsb_characters_and_crc16_kermit() {
         let got = run_bits(s.as_mut(), &chips, 13, false);
         assert_eq!(got.len(), 1, "start level {start}");
         assert_eq!(got[0].bits, frames[0].bits, "start level {start}");
+    }
+}
+
+// ---- AIS (T-963, SIGNAL-015): 0x7E flags, zero-bit destuffing, CRC-16/X-25 ----
+
+/// Bit-by-bit HDLC zero-insertion (ISO/IEC 13239 §4.4.2): a 0 stuffed after every 5 consecutive
+/// 1s, mirroring the `bitstuff` block's own rule so the test's synthetic "on air" stream is
+/// exactly what a real AIS transmitter would send.
+fn hdlc_stuff(bits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bits.len() + bits.len() / 5 + 1);
+    let mut ones = 0u32;
+    for &b in bits {
+        out.push(b);
+        if b == 1 {
+            ones += 1;
+            if ones == 5 {
+                out.push(0);
+                ones = 0;
+            }
+        } else {
+            ones = 0;
+        }
+    }
+    out
+}
+
+/// Whether `bits` contains the literal flag pattern `01111110` anywhere: destuffing runs before
+/// framing (the `bitstuff` module doc), so — unlike real HDLC, where the flag search runs on the
+/// still-stuffed line and stuffing guarantees the flag is unique — a coincidental 6-one run
+/// flanked by zeros in the *destuffed* data would frame early. Real frame payloads essentially
+/// never contain one by chance; this test's synthetic data is picked (never hand-tuned per
+/// assertion) to have none, so it stands in for a real, flag-free payload.
+fn has_false_flag(bits: &[u8]) -> bool {
+    bits.windows(8).any(|w| w == [0, 1, 1, 1, 1, 1, 1, 0])
+}
+
+#[test]
+fn ais_hdlc_destuff_sync_and_crc16_x25() {
+    let x25 = CATALOGUE
+        .iter()
+        .find(|e| e.name == "CRC-16/IBM-SDLC")
+        .unwrap()
+        .params;
+
+    // Two AIS-shaped 168-bit (21-byte) frames, each with a forced run of 8 ones (over
+    // `stuff_after`, so real stuffing happens; 8 long can never itself read as the 6-one flag,
+    // whatever its neighbours are). `has_false_flag` rejects any seed whose random remainder
+    // happens to contain the flag pattern elsewhere.
+    let frame_data = |seed: u64| -> Vec<u8> {
+        let mut bits = noise(168, seed);
+        bits[20..28].fill(1);
+        bits.chunks(8)
+            .map(|c| c.iter().fold(0u8, |a, &b| (a << 1) | b))
+            .collect::<Vec<u8>>()
+    };
+    let on_frame_bits = |data_bytes: &[u8]| -> Vec<u8> {
+        let fcs = x25.compute(data_bytes) as u16;
+        let mut on_frame = data_bytes.to_vec();
+        on_frame.extend(fcs.to_le_bytes());
+        bytes_bits(&on_frame)
+    };
+    let pick = |mut seed: u64| -> (Vec<u8>, Vec<u8>) {
+        loop {
+            let d = frame_data(seed);
+            let on = on_frame_bits(&d);
+            if !has_false_flag(&on) {
+                return (d, on);
+            }
+            seed += 1;
+        }
+    };
+    let (d0, on0) = pick(96_301);
+    let (_d1, on1) = pick(96_302);
+
+    // On air: idle ones, then two independent AIS bursts (own flag pair each, idle between —
+    // each transmission slot ramps up and down on its own, per ITU-R M.1371).
+    let flag = bits_of(0x7E, 8);
+    let mut stream = vec![1u8; 40];
+    stream.extend(&flag);
+    stream.extend(hdlc_stuff(&on0));
+    stream.extend(&flag);
+    stream.extend(vec![1u8; 40]);
+    stream.extend(&flag);
+    stream.extend(hdlc_stuff(&on1));
+    stream.extend(&flag);
+    stream.extend(vec![1u8; 40]);
+
+    let sync_params = recipe_node("ais", "sync");
+    let destuff_params = recipe_node("ais", "destuff");
+    let crc_params = recipe_node("ais", "crc");
+    assert_eq!(
+        crc_params["span"]["end_trim_bits"].as_u64(),
+        Some(8),
+        "the terminator match (the closing flag) is part of the frame `sync_search` emits"
+    );
+
+    // `sync_search`'s terminator match is part of the frame it emits (the ACARS convention: the
+    // matched word plus `trailer_bits` more), so each frame here is data + FCS + the closing flag.
+    let mut expect0 = on0.clone();
+    expect0.extend(&flag);
+    let mut expect1 = on1.clone();
+    expect1.extend(&flag);
+
+    for chunk in [1, 7, 1000] {
+        let mut destuff = build("bitstuff", destuff_params.clone(), PortType::Bits);
+        let raw = run_bits_to_bits(destuff.as_mut(), &stream, chunk);
+        let mut sync = build("sync_search", sync_params.clone(), PortType::Bits);
+        let frames = run_bits(sync.as_mut(), &raw, chunk, false);
+        assert_eq!(frames.len(), 2, "two independent bursts, chunk {chunk}");
+        assert_eq!(frames[0].bits, expect0, "frame 0, chunk {chunk}");
+        assert_eq!(frames[1].bits, expect1, "frame 1, chunk {chunk}");
+
+        let mut bad = frames[1].clone();
+        bad.bits[100] ^= 1;
+        let mut crc = build("crc", crc_params.clone(), PortType::Frames);
+        let out = run_frames(crc.as_mut(), &[frames[0].clone(), bad], 2, false);
+        assert_eq!(out[0].info.check, CrcStatus::Valid, "chunk {chunk}");
+        // Stripped: data, then the trimmed trailing flag (harmless padding past the field map).
+        let mut expect_stripped = bytes_bits(&d0);
+        expect_stripped.extend(&flag);
+        assert_eq!(out[0].bits, expect_stripped, "FCS stripped, chunk {chunk}");
+        assert_eq!(
+            out[1].info.check,
+            CrcStatus::Invalid,
+            "corrupted frame 1, chunk {chunk}"
+        );
     }
 }
 

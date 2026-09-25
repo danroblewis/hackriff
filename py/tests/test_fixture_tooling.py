@@ -14,6 +14,7 @@ import pytest
 FIXTURE_TOOLS = Path(__file__).resolve().parents[1] / "fixtures"
 sys.path.insert(0, str(FIXTURE_TOOLS))
 
+import ais_ref  # noqa: E402
 import annotate  # noqa: E402
 import fetch  # noqa: E402
 import flex_ref  # noqa: E402
@@ -216,6 +217,54 @@ def test_rds_reference_decoder_recovers_synthetic_pi_ps_and_stats(tmp_path):
     assert got["block_error_rate"] == 0.0
     assert abs(got["pilot_hz"] - 19000.0) < 0.5
     assert math.isclose(got["bitrate_bd_in_sample_clock"], got["pilot_hz"] / 16)
+
+
+def test_ais_reference_decoder_recovers_synthetic_vessels_blind(tmp_path):
+    """T-963 (SIGNAL-015): the ``ais_vessels`` scene's three Class A position reports, on the
+    two fixed marine channels, are recovered by the independent oracle from the raw IQ alone —
+    blind: `ais_ref` is never told the MMSI, message type or channel a burst is on, only the two
+    channels' offsets (a receiver would tune to, same as the fixed frequencies any AIS receiver
+    already knows) and the recording itself."""
+    from scipy import signal
+
+    from hkpy.synth import generate
+    from hkpy.synth.ais_scene import CHANNEL_HZ
+
+    out = tmp_path / "ais"
+    generate("ais_vessels", 963, out, {}, "ci8")
+    manifest = json.loads((out / "manifest.json").read_text())
+    meta_path = out / manifest["recordings"][0]
+    meta = sigmf.read_meta(meta_path)
+    fs = meta["global"]["core:sample_rate"]
+    center_hz = meta["captures"][0]["core:frequency"]
+    raw = np.fromfile(sigmf.data_path(meta_path), dtype=np.int8).astype(np.float32).reshape(-1, 2)
+    x = (raw[:, 0] + 1j * raw[:, 1]).astype(np.complex128)
+
+    truth = [a["hackriff:truth"] for a in meta["annotations"] if a["hackriff:truth"].get("role") == "emission"]
+    assert len(truth) == 3, f"3 vessels in the hidden truth, got {len(truth)}"
+
+    got = []
+    for ch_hz in CHANNEL_HZ:
+        off = ch_hz - center_hz
+        tt = np.arange(len(x)) / fs
+        base = x * np.exp(-2j * math.pi * off * tt)
+        bw = 40e3
+        base = np.convolve(base, signal.firwin(129, bw / 2, fs=fs), mode="same")
+        got += ais_ref.decode_channel(base, fs)
+
+    got_by_mmsi = {m["mmsi"]: m for m in got}
+    assert {t["mmsi"] for t in truth} == set(got_by_mmsi), (
+        f"blind decode found {sorted(got_by_mmsi)}, truth has {sorted(t['mmsi'] for t in truth)}"
+    )
+    for t in truth:
+        m = got_by_mmsi[t["mmsi"]]
+        assert m["message_type"] == t["msg_type"]
+        assert m["nav_status"] == t["nav_status"]
+        assert math.isclose(m["sog_kt"], t["sog_kt"], abs_tol=0.05)
+        assert math.isclose(m["longitude_deg"], t["longitude_deg"], abs_tol=1e-4)
+        assert math.isclose(m["latitude_deg"], t["latitude_deg"], abs_tol=1e-4)
+        assert math.isclose(m["cog_deg"], t["cog_deg"], abs_tol=0.05)
+        assert m["heading_deg"] == t["heading_deg"]
 
 
 def test_flex_reference_oracle_finds_synthetic_sync_and_levels():
