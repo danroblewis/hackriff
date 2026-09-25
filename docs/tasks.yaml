@@ -27212,7 +27212,6 @@ tasks:
     milestone: MLIVE
     title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
     status: in-progress
-    branch: task-t916
     priority: normal
     deps:
     - T-911
@@ -27229,6 +27228,15 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-911 worker 2026-09-24.
+    branch: task-t916
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 02:31).
+      T-911's three residues, each delivered with a test or a measurement. (1) A departure older than the own-level search's pinned reach still falls back to the spectrum-history ladder and reads hotter; the client now decodes the shadow block's `sources` table (TileData.shadowSource), Surface.render counts ladder/unstated-sourced tiles a pane actually drew, and the pane readout carries one clause naming the ladder, its cell and the direction of the difference (an own-level run gets none - it IS the stated level; an unlabelled run is counted as coarse, never as own-level). Keeping fine levels longer for departed bands is refused in docs/api.md with T-453's reason (residency would grow with every band ever left). (2) Contrast decision: a shadow sets the range in NO mode (viewport excludes by construction; auto reads grid.range_db, which a fully-departed tile does not carry) and is deliberately NOT pinned - within one frame a shadow and the live row it copied share one ramp - with the tracking modes' own text saying so. (3) Cost re-measured per search: the zoom burst now prints the own-level/ladder split (level_f 0-4 own-level 9216/131072 x4, ladder 0; level_f 5-9 ladder alone 53248/106496/24576/49152/98304) - totals identical to T-523's, so the own-level search REPLACED the ladder's reads rather than adding to them; the only both-run shape, a new stale-departure fixture, reads 5024 of 131072 allowed with own-level 0, because a pinned search that cannot reach crosses the gap by a bounded index scan and reads no cell. Numbers recorded in docs/api.md.
+      Tests: cargo nextest run -p hk-api -E 'binary(tile_cost)' -> exit 0 (4 tests run, 4 passed (incl. the new a_departure_older_than_the_own_level_reach_is_labelled_ladder_and_costs_one_budget)); cd ui && npm test -> exit 0 (80/80 test files passed, incl. the new surface-shadow-source.test.ts (7 tests)); cd ui && npm run typecheck -> exit 0 (tsc --noEmit clean); cargo nextest run -p hk-api -E 'binary(tile_cost)' with every run labelled "own-level" in shadow_json (defect re-injected) -> exit 1 (red proof: the new ladder-label guard failed; source restored and the same test is green above); cd ui && npm test -- surface-shadow-source with shadowStatement forced to null (defect re-injected) -> exit 1 (red proof: the pane-readout test failed 1/7; source restored and the same file is green above)
+      precheck exit 0
+      Commits: e95c730d
+      Observed, not chased: Measurement, not a failure: in the T-523 zoom-burst fixture the own-level search and the ladder never both spend cells - at level_f 0-4 the own level answers everything, at level_f 5-9 no own level divides the tile's row so only the ladder runs. The shared-budget path where both spend is only exercised by the new stale-departure fixture, and there the own-level search spends 0. | crates/hk-api/tests/tile_cost.rs level_f 9 of the T-527 backward-fill burst took 1723 ms of route time on this (loaded, debug-profile) box, against ~25 ms for the same address in the T-523 burst. Not thresholded by the test and not investigated here; it is the arrived-band fixture's full-path read, not the shadow search (its shadow leg was 23 ms).
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-917
     milestone: M2-hardening
     title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"

@@ -158,6 +158,23 @@ export interface PaneReport {
    * Counted apart from `pending` because nothing is coming: that is the point.
    */
   readonly surveyed: number;
+  /**
+   * **Tiles drawn in this pane whose last-known (shadow) cells came from a COARSER source than the
+   * tile's own level** (T-916) — the spectrum-history ladder's fallback, or a source the answer did
+   * not label.
+   *
+   * It is a resolution statement, not an error count. Since T-911 a recently-departed band's shadow
+   * is read at the tile's own level and so is the very cell the band's last live row was drawn
+   * with; a band that left longer ago than that search's reach is answered by the ladder, whose
+   * max-hold over a ~260× larger box measured 10–15 dB hotter. Both are honest last-known values
+   * and neither is grey — but they are not the same resolution, and this surface's rule is that a
+   * pane states the level it was actually drawn at.
+   */
+  readonly shadowLadder: number;
+  /** The coarsest such source cell now on screen, `(Hz, s)`; `0` on an axis nothing stated, and
+   * both `0` when `shadowLadder` is `0`. */
+  readonly shadowCellHz: number;
+  readonly shadowCellS: number;
 }
 
 const KIND_TILE = 0, KIND_FLAT = 1, KIND_REFUSED = 2;
@@ -627,6 +644,19 @@ export class Surface {
       this.lastTier.set(pane.id, tier);
       viewports.push({ box: pane.box, levelF, levelT, lat });
       let tiles = 0, fallbacks = 0, pending = 0, refused = 0, behind = 0, blank = 0, surveyed = 0;
+      // T-916: the shadow's provenance, counted over the tiles this pane actually DREW (stand-ins
+      // included — their cells are what is on the screen here), so the readout names a coarser
+      // last-known source only when one is visible.
+      let shadowLadder = 0, shadowCellHz = 0, shadowCellS = 0;
+      const shadowOf = (d: TileData): void => {
+        const src = d.shadowSource;
+        if (!src || src.ladder + src.unstated === 0) return;
+        shadowLadder++;
+        if (src.coarsest) {
+          shadowCellHz = Math.max(shadowCellHz, src.coarsest.fHz);
+          shadowCellS = Math.max(shadowCellS, src.coarsest.tS);
+        }
+      };
       let drawnToNs = -Infinity;
       const awaiting = this.survey === "awaiting";
       for (const a of addrs) {
@@ -659,6 +689,7 @@ export class Surface {
           // short, so the scale is measured over what was DRAWN and never over rows this copy does
           // not reach.
           if (shown.drawn) measure?.add(res.entry.data, region, shown.drawn, pane.box);
+          if (shown.drawn) shadowOf(res.entry.data);
           // **The one read of a tile's own range, and it is inside the opt-in branch** (T-470). What
           // is on screen decides the scale only when the user has asked for that; otherwise the
           // scale is anchored and this loop cannot touch it. `ui/test/surface-range.test.ts` asserts
@@ -689,6 +720,7 @@ export class Surface {
             // extent, not the child's. Getting that pair the wrong way round would read a different
             // corner of the ancestor than the one being displayed.
             if (shown.drawn) measure?.add(stand.data, extentOf(lat, stand.addr), shown.drawn, pane.box);
+            if (shown.drawn) shadowOf(stand.data);
           }
           for (const c of finer) {
             this.cache.standIn(c);
@@ -697,6 +729,7 @@ export class Surface {
             late ||= shown.behind;
             if (shown.drawn) { drew = true; drawnToNs = Math.max(drawnToNs, shown.drawn.t1Ns); }
             if (shown.drawn) measure?.add(c.data, own, shown.drawn, pane.box);
+            if (shown.drawn) shadowOf(c.data);
           }
           if (late) behind++;
           if (!drew) blank++;
@@ -723,7 +756,7 @@ export class Surface {
         }
       }
       const shortNs = Number.isFinite(drawnToNs) ? Math.max(0, pane.box.t1Ns - drawnToNs) : 0;
-      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed });
+      reports.push({ id: pane.id, tier, lat, clamped, levelF, levelT, tiles, fallbacks, pending, refused, behind, blank, shortNs, surveyed, shadowLadder, shadowCellHz, shadowCellS });
     }
     gl.disable(gl.SCISSOR_TEST);
     if (this.autoScale && lo < hi) {
