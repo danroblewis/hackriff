@@ -26910,6 +26910,8 @@ tasks:
       FOUND BY T-887 worker 2026-09-24.
 
       2026-09-24 coordinator, from T-877's re-measure on main 2a3f4a85: 2fsk is the weakest fsk class on main - 7 right / 5 wrong at or above the class gate (none confidently wrong); the verifier rescues gfsk snippets the tree calls 2fsk at p~0.6. T-877 (line/continuous mixture) was cancelled - it lowered device claims 16->15 - so any 2fsk density change belongs here, measured against those numbers.
+
+      Review attempt 1 returned no verdict: the reviewer session ended while it was still compiling ('Still compiling. I'll wait…'), so it made no finding. Merged main (6260a6ec); precheck hk-classify hk-pipeline clean; t908 regression test and verifier_gain 2fsk/gfsk pass. No code change.
     core_interface: true
     result: |
       DONE (work-runner, from handback.json, 2026-09-25 01:08).
