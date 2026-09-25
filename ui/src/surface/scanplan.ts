@@ -85,7 +85,7 @@ const MIN_DWELL_PX = 4;
 /** Hatch per status: [periodPx, onPx, alpha]. Covered steps fade (sparser, fainter) so the coverage
  * filling in beneath them is what reads; the dwelling one is the densest and brightest. */
 const HATCH: Record<StepStatus, readonly [number, number, number]> = {
-  pending: [9, 2, 0.7],
+  pending: [9, 2, 0.55],
   covered: [16, 1, 0.3],
   dwelling: [5, 2, 0.95],
 };

@@ -195,7 +195,11 @@
   .map-topright { gap: 2px; }
   .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }
   .map-hint { display: none; }
-  .map-scan-btn { padding: 2px 6px; }
+  /* Icon-only on a phone (its hatch; a filled square while a sweep runs), so Go-to keeps a usable
+     input beside it; the name is its aria-label and title. */
+  .map-scan-btn { padding: 2px 5px; min-width: 22px; justify-content: center; }
+  .map-scan-btn .map-scan-label { display: none; }
+  .map-scan-ico { width: 10px; height: 10px; }
   .map-scan { width: calc(100% - 60px); }
   .map-nudge { padding: 3px 4px; }
   .map-nudge .nudge-label { display: none; }

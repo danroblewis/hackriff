@@ -49,6 +49,10 @@ export interface ScanHost {
  * changes it; the server prices whatever it says, and says when it is outside the 10–30 s the
  * survey is sized for. */
 export const MAP_SCAN_DWELL_S = 1;
+/** A new plan opens over the middle of the view, this fraction in from each side, so both of its
+ * edges are on screen as handles — not on the pane's own borders, where the zoom stack and the
+ * pane edge would hide them. View arithmetic on the pane's window; the server prices the result. */
+export const PLAN_INSET = 0.1;
 /** The narrowest a drag may make the region, Hz (a region needs width; the server prices it). */
 export const MIN_REGION_HZ = 10e3;
 /** Re-price this long after the last change (typing in the dwell box). */
@@ -264,7 +268,8 @@ export class ScanController {
     const w = this.host.paneWindow();
     if (!w || !(w.f1Hz > w.f0Hz)) { this.host.toast("There is no viewport to plan a scan over."); return; }
     this.open = true;
-    this.draft = { loHz: w.f0Hz, hiHz: w.f1Hz };
+    const inset = (w.f1Hz - w.f0Hz) * PLAN_INSET;
+    this.draft = { loHz: w.f0Hz + inset, hiHz: w.f1Hz - inset };
     this.priced = null;
     this.priceError = null;
     this.showPanel(true);
@@ -382,6 +387,9 @@ export class ScanController {
     const setHidden = (e: HTMLElement, hide: boolean) => { if (e.hidden !== hide) e.hidden = hide; };
 
     setText(this.label, active ? "Stop" : "Scan");
+    // The name, for when the label is not shown (a phone shows the icon alone).
+    const name = active ? "Stop scan" : "Scan";
+    if (this.button.getAttribute("aria-label") !== name) this.button.setAttribute("aria-label", name);
     this.button.classList.toggle("is-active", active);
     this.button.setAttribute("aria-pressed", String(active || this.open));
     this.button.disabled = !active && gate !== null;

@@ -589,7 +589,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     toast: (text) => store.set(toast(text)),
   });
   store.select((s) => s.device, (d) => scanCtl.update(d.scan, d.loaded), { immediate: true });
-  const scanQuadsFn: OverlayLayerFn = (pane) => scanPlanQuads(scanCtl.model(), pane.box, pane.rect);
+  const scanQuadsFn: OverlayLayerFn = (pane) => {
+    // Where the active pane is, stated beside the plan it draws (CSS px from the canvas's top-left,
+    // and its frequency window), so a check can find a plan edge on screen without re-deriving the
+    // pane layout. Set-if-changed; presentation only.
+    if (preview && pane.id === preview.activePane && scanCtl.model()) {
+      const k = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+      const d = scanCtl.panel.dataset;
+      const put = (key: string, v: number) => { const t = String(v); if (d[key] !== t) d[key] = t; };
+      put("paneF0Hz", pane.box.f0Hz); put("paneF1Hz", pane.box.f1Hz);
+      put("paneLeftPx", pane.rect.x * k); put("paneWPx", pane.rect.w * k);
+      put("paneTopPx", (canvas.height - pane.rect.y - pane.rect.h) * k); put("paneHPx", pane.rect.h * k);
+    }
+    return scanPlanQuads(scanCtl.model(), pane.box, pane.rect);
+  };
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
     rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads,
     paths: pathQuadsFn, tune: tuneQuadsFn, scan: scanQuadsFn, priors: priorsQuads,

@@ -207,11 +207,13 @@ test("CONTROLLER: opening a plan is a READ over the pane's window, and the overl
     btn.fire("click");
     await settle();
     assert.deepEqual(calls.map((c) => c.m), ["GET"], "opening and pricing reach no device route");
-    assert.equal(calls[0].path, mod.scanPriceRequest({ loHz: 94e6, hiHz: 106e6 }, mod.MAP_SCAN_DWELL_S, "fine"));
+    // The plan opens inset from the view's edges (so both handles are on screen), 94-106 -> 95.2-104.8.
+    const [lo, hi] = [94e6 + 12e6 * mod.PLAN_INSET, 106e6 - 12e6 * mod.PLAN_INSET];
+    assert.equal(calls[0].path, mod.scanPriceRequest({ loHz: lo, hiHz: hi }, mod.MAP_SCAN_DWELL_S, "fine"));
     const m = ctl.model()!;
     assert.equal(m.state, "plan");
     assert.equal(m.editable, true);
-    assert.deepEqual(m.windows, windows(94e6, 106e6, 3), "the drawn steps are the answer's windows, verbatim");
+    assert.deepEqual(m.windows, windows(lo, hi, 3), "the drawn steps are the answer's windows, verbatim");
     assert.equal((ctl.panel as unknown as FakeEl).hidden, false, "the plan panel is shown");
     const pub = JSON.parse((ctl.panel as unknown as FakeEl).dataset.plan);
     assert.equal(pub.windows.length, 3);
@@ -224,13 +226,14 @@ test("CONTROLLER: dragging an edge draws no steps until the server re-prices the
     ctl.update(idle);
     (ctl.button as unknown as FakeEl).fire("click");
     await settle();
+    const lo = ctl.model()!.loHz;
     ctl.dragTo("hi", 100e6);
     assert.equal(ctl.model()!.windows, null, "mid-drag, the old steps are not stretched over the new region");
     assert.equal(ctl.model()!.hiHz, 100e6);
     ctl.endDrag();
     await settle();
-    assert.equal(calls.at(-1)!.path, mod.scanPriceRequest({ loHz: 94e6, hiHz: 100e6 }, mod.MAP_SCAN_DWELL_S, "fine"));
-    assert.deepEqual(ctl.model()!.windows, windows(94e6, 100e6, 3));
+    assert.equal(calls.at(-1)!.path, mod.scanPriceRequest({ loHz: lo, hiHz: 100e6 }, mod.MAP_SCAN_DWELL_S, "fine"));
+    assert.deepEqual(ctl.model()!.windows, windows(lo, 100e6, 3));
     assert.ok(calls.every((c) => c.m === "GET"), "no device route while planning");
   });
 });
@@ -246,7 +249,9 @@ test("CONTROLLER: Start posts exactly the priced plan; progress and Stop come th
     await settle();
     const post = calls.find((c) => c.m === "POST")!;
     assert.equal(post.path, mod.SCAN_START_PATH);
-    assert.deepEqual(post.body, mod.scanStartBody({ loHz: 94e6, hiHz: 106e6 }, mod.MAP_SCAN_DWELL_S, "fine"));
+    const m0 = ctl.model();
+    assert.equal(m0?.state, "running");
+    assert.deepEqual(post.body, mod.scanStartBody({ loHz: 94e6 + 12e6 * mod.PLAN_INSET, hiHz: 106e6 - 12e6 * mod.PLAN_INSET }, mod.MAP_SCAN_DWELL_S, "fine"));
     assert.match(toasts.at(-1)!, /Scanning 6 steps on mock:1/);
     // The running plan's steps are the start answer's — and a poll with the same plan re-reads none.
     ctl.update(running(2, 3));
