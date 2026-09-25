@@ -28704,7 +28704,7 @@ tasks:
   - id: T-972
     milestone: M2-hardening
     title: "api_contract inventory_entry_promote_and_delete: by-id fetch returns a different id than the listed row under load"
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: DEFLAKE-API-INV
@@ -28715,6 +28715,7 @@ tasks:
       Seen 2026-09-25 by the T-567 conflict-fix worker: hk-cli tests/api_contract.rs inventory_entry_promote_and_delete_answer_as_documented failed once at api_contract.rs:2826 under load ~23 - fetching the entry BY ID returned a different id than the list row it was taken from; passed alone 3/3 and the whole binary then 71/71. The diff (T-567) does not touch it. Shape: a live inventory under the mock SDR can merge/re-key an emitter between the list call and the by-id call (the self-cleaning, near-duplicate merge the invariants require), so the test picks a row that is renamed under it - a race in the TEST's choice, not necessarily a product bug; but if by-id for a merged-away id should redirect (docs/api.md), it may be a product gap.
       DELIVER (deflake-triage): reproduce under load; decide from docs/api.md whether a merged-away id must answer (redirect / 410 with the survivor's id) - if the contract says so and it does not, that is the fix (api.md + api_contract.rs together, T-079); otherwise make the test choose a row that cannot be merged during the call (a settled Confirmed row, or read the id the server reports for the promote) - never a retry or a loosened assertion. Red-on-regression proof.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-cli -E 'binary(api_contract)'), then HAND BACK. Never `just gate`.
+    commit: "41628689"
   - id: T-973
     milestone: M2-hardening
     title: "replumb_never_pays_for_the_ring fails alone on main: a re-plumb stalls the always-on readers 1.8 s (bound 1 s)"
