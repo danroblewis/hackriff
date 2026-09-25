@@ -40,11 +40,14 @@ export interface PaneControl {
   zoomBoth(id: string, factor: number, anchorF?: number, anchorT?: number): void;
   isFollowing(id: string): boolean;
   setFollowing(id: string, on: boolean): void;
-  /** Move the pane's frequency window (view arithmetic; never a device route). Used by
-   * `followLive` (T-955) to bring a pane's FREQUENCY back to the tuned window too, not only its
-   * time, when the caller supplies one. */
-  setFreq(id: string, centerHz: number, spanHz: number): void;
+  /** T-955: following in time AND showing the tuned window (`PaneModel.atTunedLiveEdge`). */
+  atTunedLiveEdge(id: string, tuned: TunedWindow | null): boolean;
+  /** T-955: follow, and move onto the tuned window only if not overlapping it (`PaneModel.followTuned`). */
+  followTuned(id: string, tuned: TunedWindow | null): void;
 }
+
+/** The front end's own current centre/span (`frequency.current`), or null when none is reported. */
+export interface TunedWindow { centerHz: number; spanHz: number }
 
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
 export interface GotoOffer { why: string; enabled: boolean; press(): void }
@@ -105,6 +108,9 @@ export interface PaneMenuHost {
 export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   zoom(factor: number): void;
   followLive(): void;
+  /** T-955: is the active pane at the live edge of the TUNED window (time and frequency)? The FAB
+   * freezes only then; anywhere else its press is `followLive`. Optional: absent = `isFollowing`. */
+  atLiveEdge?(): boolean;
   /** Freeze the active pane on the window it shows — the FAB's other half (the retired `Live`
    * button's pause). A coordinate change on the pane; capture, the ring and detection never stop. */
   pauseLive(): void;
@@ -153,19 +159,27 @@ const MODE_TEXT = {
  * (so zooming never walks a live pane off the growing edge) and at the middle when it is frozen.
  *
  * `tunedWindow` (T-955) is the front end's OWN current centre/span (`frequency.current`, off the
- * navigation poll the host already runs), asked only here and only on an explicit follow-live press — never at open
- * (see `surface/bootstrap.ts`'s recency-narrowed opening) and never as a background correction. A
- * pane can drift to spectrum the radio is no longer tuned to (a stale reload, a pan, a retune
- * elsewhere) while still reading as "following" in TIME; pressing follow-live is the explicit ask to
- * return to what the front end is doing now, in both axes, so it also resets the pane's frequency
- * window when the caller has one to give. View arithmetic only — `setFreq` reaches no route.
+ * navigation poll the host already runs), read only on an explicit follow-live press and for the
+ * FAB's state — never at open (see `surface/bootstrap.ts`'s recency-narrowed opening) and never as a
+ * background correction. The control's states are `PaneModel`'s: **at the tuned live edge**
+ * (following in time and overlapping the tuned window) a press freezes; **anywhere else** — frozen,
+ * or following the live edge of spectrum the radio has left — a press brings the pane to the tuned
+ * window's live edge (`followTuned`), so it can never freeze a pane that was not at the edge (the
+ * explorer's 0430 shot: "LIVE" at 162.2 MHz after a retune to 144.6, pressed, frozen at -14 s).
+ * View arithmetic only — nothing here reaches a route. T-1001 moves this control into each pane and
+ * reuses the same two `PaneModel` methods.
  */
 export function paneActions(
   panes: PaneControl,
   activePane: () => string | null,
   onFollow?: (on: boolean) => void,
-  tunedWindow?: () => { centerHz: number; spanHz: number } | null,
+  tunedWindow?: () => TunedWindow | null,
 ) {
+  const tuned = (): TunedWindow | null => tunedWindow?.() ?? null;
+  const atLiveEdge = (): boolean => {
+    const id = activePane();
+    return !!id && panes.atTunedLiveEdge(id, tuned());
+  };
   return {
     zoom(factor: number): void {
       const id = activePane();
@@ -177,11 +191,8 @@ export function paneActions(
       if (!id) return;
       // T-442: following is a coordinate change on the pane, nothing more — the SDR, the ring and
       // detection never paused, so there is nothing to resume anywhere but the screen.
-      panes.setFollowing(id, true);
-      const w = tunedWindow?.();
-      if (w && Number.isFinite(w.centerHz) && Number.isFinite(w.spanHz) && w.spanHz > 0) {
-        panes.setFreq(id, w.centerHz, w.spanHz);
-      }
+      // T-955: and to the TUNED window's live edge — frequency too, when the pane has drifted off it.
+      panes.followTuned(id, tuned());
       onFollow?.(true);
     },
     pauseLive(): void {
@@ -196,14 +207,31 @@ export function paneActions(
       const id = activePane();
       return !!id && panes.isFollowing(id);
     },
+    atLiveEdge,
   };
 }
 
+/**
+ * **The FAB's press** (T-955): freeze only a pane AT the tuned live edge; a frozen pane, or one
+ * following the live edge of spectrum the radio has left, is brought to the tuned window's live
+ * edge instead. The explorer's 0430 shot is what the old `isFollowing ? pause : follow` did to a
+ * pane reading "LIVE" at 162.2 MHz after a retune to 144.6: it froze it at -14 s.
+ */
+export function fabPress(host: Pick<MapControlHost, "atLiveEdge" | "isFollowing" | "pauseLive" | "followLive">): void {
+  const atEdge = host.atLiveEdge ? host.atLiveEdge() : host.isFollowing();
+  if (atEdge) host.pauseLive(); else host.followLive();
+}
+
 /** The FAB's words for the active pane's state — what the VIEW is doing, never the radio. */
-export function fabState(following: boolean): { cls: "following" | "frozen"; title: string } {
+export function fabState(following: boolean, atTuned = following): { cls: "following" | "frozen"; offTuned: boolean; title: string } {
+  if (following && !atTuned) {
+    // T-955: following in time over spectrum the radio has left — the press brings it to the tuned
+    // window, it does not freeze, and the button must say so rather than read as plain "following".
+    return { cls: "following", offTuned: true, title: "Following live time, but this viewport is off the tuned window — press to bring it to the tuned window's live edge." };
+  }
   return following
-    ? { cls: "following", title: "Following the live edge — press to freeze this viewport on what it shows. Capture never stops, paused or not." }
-    : { cls: "frozen", title: "This viewport is frozen on a past window (capture continues) — press to follow the live edge again." };
+    ? { cls: "following", offTuned: false, title: "Following the live edge — press to freeze this viewport on what it shows. Capture never stops, paused or not." }
+    : { cls: "frozen", offTuned: false, title: "This viewport is frozen on a past window (capture continues) — press to follow the tuned window's live edge again." };
 }
 
 /** Parse a Go-to entry: a frequency (`433.92M`, `101.3`, `+200k` relative to the tuned centre). */
@@ -300,6 +328,7 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  */
 export function mountMapControls(host: MapControlHost): {
   el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
+  tuningChanged(): void;
   /** T-1000: re-state which pane the per-pane chrome acts on (after an active-pane change, split or close). */
   syncActive(): void;
   /** T-1000: the FAB's press, for the `L` key — freeze a following active pane, re-pin a frozen one. */
@@ -452,10 +481,12 @@ export function mountMapControls(host: MapControlHost): {
   });
 
   const syncFollow = () => {
-    const st = fabState(host.isFollowing());
+    const following = host.isFollowing();
+    const st = fabState(following, host.atLiveEdge ? host.atLiveEdge() : following);
     fab.classList.toggle("following", st.cls === "following");
     fab.classList.toggle("frozen", st.cls === "frozen");
-    fab.setAttribute("aria-pressed", String(st.cls === "following"));
+    fab.classList.toggle("off-tuned", st.offTuned);
+    fab.setAttribute("aria-pressed", String(st.cls === "following" && !st.offTuned));
     const name = host.activeName?.() ?? null;
     fab.title = name ? `${st.title} (Acts on ${name.label}; L toggles it.)` : st.title;
   };
@@ -630,8 +661,12 @@ export function mountMapControls(host: MapControlHost): {
   // The FAB is the retired `Live` button too (T-882): following → press freezes the view on what it
   // shows; frozen → press re-pins it to the growing edge. Either way only the screen changes.
   // The one toggle, shared by the FAB's press and the `L` key (T-1000), so the two cannot differ.
+  // (T-955: "following" here means at the TUNED live edge - see `paneActions`/`fabPress`.)
   const toggleFollow = () => {
-    if (host.isFollowing()) host.pauseLive(); else host.followLive();
+    fabPress(host);
+    // T-955: follow-live can move the pane's frequency too, so a painted Go-to offer now describes
+    // a window the pane has left - withdrawn, exactly as a zoom withdraws it.
+    hideOffer();
     host.viewChanged();
     syncFollow();
   };
@@ -648,5 +683,24 @@ export function mountMapControls(host: MapControlHost): {
   registerMapInvHome(invHome);
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch, syncActive, toggleFollow };
+  /**
+   * T-955: **the front end's tuned window changed** (a retune by this page, another client or the
+   * API). A painted Go-to offer was computed against the OLD tuning — "Retune to 162.2 MHz" still on
+   * screen after the radio went to 162.2 and then 144.6 (explorer 0428) — so it is re-derived against
+   * the new one: withdrawn if a tuned window now covers the pane, re-worded if not. Never pressed
+   * here; the press still re-derives at commit and refuses if the view moved. The FAB's state
+   * depends on the tuned window too, so it is re-stated.
+   */
+  const tuningChanged = () => {
+    if (shown) {
+      shown = host.gotoOffer();
+      if (!shown) hideOffer();
+      else { offerWhy.textContent = shown.why; offerGo.disabled = !shown.enabled; }
+    }
+    syncFollow();
+  };
+  // A gesture moved the view: the Go-to offer describes a window the pane has left, and whether
+  // the pane still shows the tuned window (the FAB's state, T-955) may have changed with it.
+  const viewMoved = () => { hideOffer(); syncFollow(); };
+  return { el, viewMoved, syncFollow, syncLayers, syncMeasure, syncResearch, syncActive, toggleFollow, tuningChanged };
 }

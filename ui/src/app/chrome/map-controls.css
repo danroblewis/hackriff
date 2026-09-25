@@ -105,6 +105,8 @@
 .map-fab svg { width: 22px; height: 22px; }
 .map-fab.following { color: var(--teal); border-color: var(--teal); box-shadow: 0 0 0 4px var(--teal-soft), 0 4px 18px var(--shadow); }
 .map-fab.frozen { color: var(--amber); border-color: var(--amber); }
+/* T-955: following live TIME over spectrum the radio has left — the press brings it to the tuned window. */
+.map-fab.following.off-tuned { color: var(--amber); border-color: var(--teal); border-style: dashed; box-shadow: 0 4px 18px var(--shadow); }
 
 /* T-1000 (docs/23 §10.7): the number of the pane a per-pane control acts on, shown only while there
    are two or more — the same number the outline on the canvas carries (`.sf-active-pane[data-pane]`). */

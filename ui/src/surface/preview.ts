@@ -249,40 +249,40 @@ export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureO
   }
 
   const census = observedExtent(cov);
-  // T-955: the box the refinement pass narrows is the RECENTLY active one, not the lifetime union.
-  // A session that tuned to one band for an hour and retuned five minutes ago has both bands inside
-  // one record horizon, and `observedExtent`'s box is a bounding rectangle over every observed cell
-  // ever — measured live as a reload opening on a box still centred near the band the radio had just
-  // left, and a separate session opening on "100–1100 MHz × 1.6 h" with the actually-tuned band drawn
-  // as a sliver inside it. `recent` falls back to the whole-history box only when the recent rows
-  // hold nothing at all, so a server with no live front end still opens on whatever it has.
+  // T-955: **frequency from what is observed NOW, time from everything observed.** A session that
+  // tuned to one band for an hour and retuned since holds both bands in one record horizon, and
+  // `census.box` — a bounding rectangle over every observed cell ever — spans the gap between them
+  // (measured live: a page opening on "100–1100 MHz × 1.6 h" with the tuned band a sliver). So the
+  // FREQUENCY the view opens on is the band observed in the newest observed rows
+  // (`recentObservedExtent`, anchored at the newest OBSERVED row, never the grid's end: a server's
+  // `latest_s` was seen 34 min in the future). The TIME it opens on stays the whole census's — the
+  // recent box is a few rows by construction, and opening on its time would cut an hour of history to
+  // two minutes (the regression the first T-955 pass shipped).
   const recent = recentObservedExtent(cov);
-  const coarse = recent.box ? recent : census;
   // **One refinement pass, measured rather than assumed.** A 128-cell map of a 6.5 GHz surface has
   // 51.2 MHz cells, so the coarse box around a 2.4 MHz capture is ~20x too wide — measured on a
   // replay: 0.78 % observed, and the observed box came back as 51.2–102.4 MHz for a recording that
   // spans 99.6–102 MHz. Opening there would put the capture in a twentieth of the pane's width and
-  // read as "still nothing here". Asking the *same route* again over the box it just returned costs
-  // one request and is the same question at the resolution the answer made available — over a MUCH
-  // smaller extent, so this second pass is also what resolves a retune boundary the coarse recency
-  // narrowing above was still too coarse to see.
-  let refined = coarse;
-  if (coarse.box) {
+  // read as "still nothing here". Asking the *same route* again over the recent box costs one
+  // request and is the same question at the resolution the answer made available — in time too, so
+  // its newest observed row (an eighth of a coarse row) separates a retune seconds old from the band
+  // the radio just left, which a coarse row of a long history straddles.
+  let freqBox: Box | null = recent.box;
+  if (recent.box) {
     try {
-      fine = (await ask(coverageUrl(coarse.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
-      const fineRecent = recentObservedExtent(fine);
-      refined = fineRecent.box ? fineRecent : observedExtent(fine);
+      fine = (await ask(coverageUrl(recent.box, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+      // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
+      // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
+      freqBox = recentObservedExtent(fine, 1).box ?? recent.box;
     } catch (e) {
       degraded.push(`the coverage refinement pass failed (${describe(e)}): the view opens on the coarse observed box, which may be much wider than what was actually sampled.`);
-      refined = coarse;
     }
-    // A refinement that found nothing is not evidence against the coarse answer — the coarse cell
-    // was observed, so something is in there. Keep the wider box rather than opening on nowhere.
-    if (refined.observed === 0) refined = coarse;
   }
   // The note's share is the SURFACE-wide census: it is a statement about the whole surface, and
   // quoting the refined pass's share (measured inside coverage, so near 100 %) would invert it.
-  const opening = openingWindow(origin.bounds, refined.box);
+  const opening = openingWindow(origin.bounds, freqBox && census.box
+    ? { f0Hz: freqBox.f0Hz, f1Hz: freqBox.f1Hz, t0Ns: census.box.t0Ns, t1Ns: census.box.t1Ns }
+    : null);
   // **The colour scale, decided here and only here** (T-470). Preferred from the refinement pass,
   // because that answer was measured over the observed region rather than over 6.5 GHz of mostly
   // grey; the coarse pass stands in when there was no refinement to make. Both are already in hand,

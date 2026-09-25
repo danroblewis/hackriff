@@ -60,7 +60,7 @@ import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrien
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -1447,9 +1447,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
-      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
-      // too, when one is known — the same `frequency.current` the retune-offer span already reads
-      // (`goToSpanHz`), never a device call.
+      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
+      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
+      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
+      // pane's own device's window.
       () => {
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
@@ -1490,7 +1492,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        // T-955: a Go-to names a CENTRE (T-947), so "covered" is whether the tuned window holds the
+        // pane's centre — not whether it holds the whole viewport, which a pane zoomed out past the
+        // capture never is. Checked against `frequency.current` as well as the active windows, so a
+        // retune by anyone withdraws the offer the moment the navigation poll reports it (the
+        // explorer's 0428: "Retune to 162.2000 MHz" still painted with the radio at 162.2, then 144.6).
+        const pane = pv.view.panes.get(pv.activePane);
+        const cur = store.get().navGrid.grid?.frequency?.current ?? null;
+        const c = pane?.freq.centerHz ?? NaN;
+        const heldNow = !!pane && (coveringWindow(windows, c, c, pane.device) !== null
+          || (!!cur && Math.abs(c - cur.center_hz) <= cur.span_hz / 2));
+        if (!o || heldNow) { lastPaintedGoto = null; return null; }
         const wo = widthOfferNow(pv.activePane, gotoSpanHz());
         if (!wo) { lastPaintedGoto = null; return null; }
         lastPaintedGoto = wo;
@@ -1566,6 +1578,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
+    // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
+    store.select((s) => {
+      const c = s.navGrid.grid?.frequency?.current;
+      return c ? `${c.center_hz}/${c.span_hz}` : "";
+    }, () => controls.tuningChanged());
 
     // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
     // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
