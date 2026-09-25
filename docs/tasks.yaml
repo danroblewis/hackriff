@@ -24676,7 +24676,7 @@ tasks:
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-TEST
     model: opus
@@ -24716,6 +24716,7 @@ tasks:
       Commits: 32a8b47e
       Observed, not chased: ui/e2e was NOT extended: every guard this ticket names is a request-shape or geometry property that ui/test asserts more strongly than a browser can (the built request, the submitted GL ops, the composed layer registry), and the e2e tier needs a full cargo backend build per run. The browser tier already covers these surfaces (app-pins/app-sheet/app-surface/fog-of-war). Flagging it because MAP-25's acceptance says 'extend ui/test + e2e'. | Four docs/23 §11 routes have no client at all and are pinned in map-request-shape.test.ts with reasons: /api/views and /api/views/{id} (T-819 serves the store; the Research slide-in still has no Views tab — MAP-19 FE is unbuilt), /api/measurements/{id} (no edit/delete UI), /api/collections/{id}/markers (the client reads the all-collections /api/markers instead), /api/inventory/{id}/classification (served inside the /api/inventory row). Each reds the day a client starts building it. | docs/23 §11 listed /api/history as an Explore-tab read, but no ui/src module has read it since T-445 retired the spectrum-grid pane; the past-surveys pages actually read /api/observations. Recorded in the table rather than silently dropped.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: c1349932
   - id: T-761
     milestone: M2-hardening
     title: T-650's staged-bulk marker was invisible to the coordinator, because HACKRIFF_OPS is per-process and nothing said where the ops state lives
