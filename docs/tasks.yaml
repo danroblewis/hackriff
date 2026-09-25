@@ -27400,6 +27400,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): docs only; HAND BACK.
     notes: |
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+
+      Review FAIL: NOAA SAME tones wrong (said 1050 Hz mark/2083 Hz space; correct is mark 2083.3 Hz / space 1562.5 Hz per 47 CFR §11.31, 1050 Hz is the separate Warning Alarm Tone). Fixed the table cell + added §11.31 citation; also fixed a malformed AIS table separator row (4 cols vs 5-col header) and loosened 'CQPSK (P25 Phase 2)' to H-DQPSK/CQPSK-is-Phase-1 per the reviewer's nits. Commit 85389315.
   - id: T-925
     milestone: M2-hardening
     title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
