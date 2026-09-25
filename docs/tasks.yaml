@@ -27614,6 +27614,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): add T-960's two captures (88.5 PI 3AAB, 106.1 PI 1323) to the set as T-960 lands (T-936 does not wait for them); the 106.1 member also asserts ONE row (T-961).
+
+      2026-09-25 coordinator, user: all 4 FM/RDS captures (88.5/98.9/101.3/106.1) belong to this set - 101.3 and 98.9 here (T-935), 88.5 and 106.1 added by T-969 when T-960's fixtures land; FLEX joins via T-950. Keep the set's shape easy to extend by one member per capture.
   - id: T-937
     milestone: MAUTO
     title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
@@ -27850,6 +27852,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator: the FLEX capture is an EXTERNAL fixture (57.6 MB > the 25 MB LFS cap; T-949 indexed it in fixtures/manifest.json as status: external, store path store/explorer-2026-09-25/). The original stays in ~/.hackriff-ops/explorer/captures/20260925/ on the Mac: in your worktree run `just fixtures-fetch --from ~/.hackriff-ops/explorer/captures/20260925` (never copy into the main checkout). Oracle: py/fixtures/flex_ref.py (T-949) agrees on sync counts 3/1/2; it DISAGREES with the explorer's truth on the FSK level count at 2 of 3 channels (recorded in the fixture README) - settle it from your decoder's evidence. Use case SIGNAL-088 (paging); T-952 APRS uses SIGNAL-089. Mac-only while the fixture is external.
+
+      2026-09-25 coordinator, user: this is THE FLEX decoder recipe ticket, and the flex-pagers-930p8 fixture (T-949, external; fetch it in your worktree) is its BLIND TEST: write the FLEX member of the 'all captured signals decode' set FIRST, T-545 pattern (mock SDR replaying the capture, blind - no frequency/protocol passed; per truth channel 929.608/929.933/931.733: one burst region, FSK params estimated, the FLEX chain auto-selected, frames sync + BCH(31,21)-valid, a paging-allocation explanation in the top-k), confirm it is red on main for the right reason, then build the recipe until it is green. Use case SIGNAL-088.
     model_reason: novel DSP decoder (FLEX 2/4-FSK sync, BCH(31,21), interleave) plus a GPL plugin-boundary decision (ADR-0010)
     dispatch: manual
   - id: T-951
@@ -28132,6 +28136,25 @@ tasks:
       Seen by at least 4 workers as 'observed, not chased' (latest T-844 on 2026-09-25: fails ALONE 3/3 with hk-store byte-identical to main; earlier load ~10-17): hk-store src/decoded.rs tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at decoded.rs:1529 `assert c.dropped_records > 0` with CaptureInfo{frames: 29, dropped_records: 0}. The test runs a 600 ms wall-clock loop (Instant::now() + 600 ms, sleep 5 ms) against disconnect_after 100 ms and assumes a stall long enough to force drops happened inside it - the wall-clock-chooses-the-assertion shape (docs/10 §3.6). Same class as T-934 (its three tests); a separate ticket so the two run in parallel.
       DELIVER per deflake-triage: drive the stall deterministically (a stall injected until the policy's disconnect has been observed - wait on the writer's reported state/counter, a generous deadline only bounding a hang), assert drops are counted; no #[ignore], no retry, no threshold change. Red-on-regression proof: a policy that never counts drops goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-store -E 'test(/a_disk_stall/)' alone + just test-crate hk-store), then HAND BACK. Never `just gate`.
+  - id: T-969
+    milestone: MAUTO
+    title: "All captured signals decode: add the 88.5 (PI 3AAB) and 106.1 (PI 1323) FM members to T-936's set"
+    status: todo
+    priority: P1
+    deps:
+    - T-936
+    - T-960
+    parallel_group: FIXTURE-EXPLORER-TESTS
+    use_cases:
+    - SIGNAL-062
+    needs: none
+    model: opus
+    effort: high
+    notes: |
+      User 2026-09-25: all 4 explorer FM/RDS fixtures (88.5 / 98.9 / 101.3 / 106.1) go into the 'all captured signals decode' set. T-936 (running) builds the set on T-935's two captures (101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot-only); this ticket adds the other two members from T-960's fixtures, same shape, same file: 88.5 MHz PI 3AAB (the app confirmed it fm-broadcast when prompted) and 106.1 MHz PI 1323 (the app decoded it only on a SPLIT overlapping row - the member also asserts ONE row per station, red until T-961).
+      DELIVER: two members, T-545 pattern exactly as T-936 set it up: through the MOCK SDR replaying the fixture, BLIND (no frequency/modulation/protocol passed), per truth emission: one (t,f) region, WFM with pilot, RDS auto-attached unprompted, PI decoded and checked against the HIDDEN truth, 'FM broadcast' in the top explanations; red for the right reason, each red naming the ticket that turns it green (T-926 auto-attach/PS, T-937 fragmentation, T-961 one row, T-962 provisional identity); registered in the same milestone target (never the per-merge gate).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the set's binary alone), then HAND BACK. Never `just gate`.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
