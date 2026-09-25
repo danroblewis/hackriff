@@ -27277,6 +27277,98 @@ tasks:
     notes: |
       FOUND BY T-575 fix round 2026-09-25.
     core_interface: true
+  - id: T-922
+    milestone: M2-hardening
+    title: "Radio lock: $HACKRIFF_OPS/radio-lock (owner/since/until/why), stage.sh goes replay while held and live when released, capture-agent takes it, watchdog releases stale; fix stage.sh's hackrf_info busy check"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: OPS-RADIO
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      User directive 2026-09-25 02:25 (handoff ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md): an AI 'simulated user' explores the live radio, decodes with our UI, and captures fixtures. Mac Studio only (it holds the HackRF). FIRST 3-hour window TONIGHT, released by 07:00 so staging is live when the user wakes.
+      RADIO LOCK (design item 1): a `$HACKRIFF_OPS/radio-lock` (owner, since, until, why) - ONE owner of the HackRF at a time. `ops/stage.sh` RESPECTS it: while held, staging switches to its looping SigMF replay (it already falls back when the radio is busy - make it lock-driven and stated), and back to LIVE when released. The capture-agent (.claude/agents/capture-agent.md + skill capture-sigmf) takes the same lock. A lock past its `until` is STALE: the watchdog releases it with an alert. A `just radio take|release|status` CLI. Fix stage.sh's busy check at the same time (hackrf_info exits 0 even when the open fails - from T-356's HIL: judge by the open, not by hackrf_info's exit). Tests: py/ops tests for take/release/stale-release and stage.sh's mode switch.
+      WHAT THE USER WILL SEE: the dashboard/stage says who holds the radio and until when; staging is replay while the explorer runs, live again by 07:00.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+    branch: task-t922
+  - id: T-923
+    milestone: M2-hardening
+    title: "Explorer agent: .claude/agents/explorer.md (bounded window, takes the radio lock, drives the real app, journals per target, captures small SigMF fixtures with hidden truth) + ops/launch.sh explorer --window 3h"
+    status: in-progress
+    priority: high
+    deps:
+    - T-922
+    parallel_group: OPS-EXPLORE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      User directive 2026-09-25 02:25 (handoff ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md): an AI 'simulated user' explores the live radio, decodes with our UI, and captures fixtures. Mac Studio only (it holds the HackRF). FIRST 3-hour window TONIGHT, released by 07:00 so staging is live when the user wakes.
+      EXPLORER AGENT + LAUNCHER (design items 2 and 4): `.claude/agents/explorer.md` (opus, Mac only) - a bounded WINDOW (default 3 h) that TAKES the radio lock, drives the REAL app through the ui/e2e browser harness and the authenticated API (never the pipeline directly - CLAUDE.md test rule): peruse, scan (sweep), select candidates, listen, decode. It keeps a JOURNAL per target (`$HACKRIFF_OPS/explorer/journal-YYYYMMDD.md`): what it looked for and why (external source cited), what the app showed, whether decode succeeded (CRC-valid / RDS lock / audio quality), and for failures WHICH feature is missing (prose with evidence, for the coordinator to ticket - it never allocates ids). On success: a SMALL SigMF capture (seconds; per-station 2.4 MHz x 3-5 s for FM, ~24 MB) + HIDDEN ground truth + a use-case id, via the capture-sigmf skill (LFS). Receive only. Blind rule: external knowledge may choose WHERE to look; fixtures carry hidden truth and are tested blind (detection + top-k explanation), never lookup-and-tune. `ops/launch.sh explorer --window 3h` (tmux `explore`), ONE instance, releases the lock at window end (and on exit/crash). First-window targets: FM/RDS (full 88-108 MHz, per the RDS P1 ticket), NOAA WX 162.400/162.475, APRS 144.390, POCSAG 929-932, ISM 433/915 bursts, AIS 161.975.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (launcher/lock py tests; a dry-run window against the mock SDR), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+    branch: task-t923
+  - id: T-924
+    milestone: M2-hardening
+    title: "docs/reference/sf-targets.md: cited San Francisco target list with expected modulation and what 'decoded' means, for the explorer"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: DOCS-REF
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      User directive 2026-09-25 02:25 (handoff ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md): an AI 'simulated user' explores the live radio, decodes with our UI, and captures fixtures. Mac Studio only (it holds the HackRF). FIRST 3-hour window TONIGHT, released by 07:00 so staging is live when the user wakes.
+      SF TARGET LIST (design item 3): `docs/reference/sf-targets.md` - a curated, CITED, cached reference from public sources (RadioReference, sigidwiki, FCC/band plans) for San Francisco: NOAA WX 162.x, ADS-B 1090 (antenna pending), APRS 144.39, marine AIS 161.975/162.025, FM/RDS broadcast, pagers/POCSAG 929-932, ISM 433/915, DMR/P25 public safety, BART 851 (not receivable here, docs/19), utility/SCADA, LoRa, TPMS, wireless mics ... - each with expected modulation/protocol and what "decoded" means (RDS PI/PS, CRC-valid frame, audio), marked unverified where so. The explorer picks from it and appends what it finds. Docs convention: inline source links + a Sources section; index it in docs/README.md.
+      TESTING PROTOCOL (CLAUDE.md): docs only; HAND BACK.
+    notes: |
+      FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+  - id: T-925
+    milestone: M2-hardening
+    title: "Dashboard: explorer row (target, phase, journal tail) + radio-owner tile (holder, until, staging live/replay)"
+    status: todo
+    priority: normal
+    deps:
+    - T-922
+    parallel_group: OPS-DASH
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      User directive 2026-09-25 02:25 (handoff ~/.hackriff-ops/handoffs/explorer-agent-2026-09-25.md): an AI 'simulated user' explores the live radio, decodes with our UI, and captures fixtures. Mac Studio only (it holds the HackRF). FIRST 3-hour window TONIGHT, released by 07:00 so staging is live when the user wakes.
+      DASHBOARD (design item 5): an EXPLORER row (current target, phase, journal tail) and a RADIO-OWNER tile (who holds the HackRF, until when; staging mode live/replay) on the ops dashboard, read from `$HACKRIFF_OPS/radio-lock` and the explorer journal. Pipeline-manager territory (dashboard code).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+  - id: T-926
+    milestone: MAUTO
+    title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
+    status: todo
+    priority: high
+    deps:
+    - T-922
+    parallel_group: PIPE-RDS
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER P1 2026-09-25 (relayed; message partly truncated) + supervisor refinement 02:44. The user sees a WHOLE FM band undecoded: RDS must decode WITHOUT the user selecting a station. CI is green only because the existing fixture (fixtures/hackrf/capture-2026-09-15-fm-band) is a 2.4 MHz slice with TWO stations and ONE RDS truth.
+      FIRST MEASURE, then fix:
+      (1) MEASURE on LIVE AIR the full 88-108 MHz band as the app actually explores it (20 MHz dwell at 20 Msps, or the scheduler's sweep + dwell): count stations PRESENT; stations with a 19 kHz pilot + RDS; stations with PI/PS DECODED within T s, unprompted. Post the numbers (the user-facing ratio = decoded / RDS-present). Live-air runs need the radio lock (use it, or run inside the explorer's window); receive only.
+      (2) FIX the pipeline so detection -> WFM auto-demod -> RDS decode runs across ALL detections in the window, not only the selected one (blind: from the signal, never a frequency lookup; bounded compute - measure per-station cost, T-453), until the live ratio is >= 90 %.
+      (3) REGRESSION GUARD: NOT one 20 MHz blob (400 MB/10 s). A SERIES of narrow per-station captures (2.4 MHz, 3-5 s, ~24 MB each, one per RDS station confirmed by ear/PI) with HIDDEN truth (PI; PS if stable), recorded by the explorer - a station set that grows every window; an acceptance test runs 'every captured station decodes PI (and PS where stable)' over the whole set through the MOCK SDR, blind.
+      The explorer's FM journal feeds (1) and (3).
+      WHAT THE USER WILL SEE ON STAGING: tune to the FM band and, without clicking anything, most stations show their RDS name within seconds.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 P1 + supervisor 02:44.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
