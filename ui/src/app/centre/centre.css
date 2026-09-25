@@ -212,6 +212,16 @@
    Confirmed filled square, Candidate open diamond, unexplained open circle with `?`, my marker a
    filled pennant. Selected adds a ring and hover/focus a scale — never hue alone. */
 .sf-pins { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
+/* T-1000 (docs/23 §10.7): the ACTIVE pane's outline — the pane Go-to, zoom, the layers menu, the FAB
+   and the viewport menu act on. A neutral double stroke (light line, dark halo either side) so it
+   reads on any ramp colour and is never mistaken for a signal box's class symbology; placed per frame
+   from the pane rectangles (`centre/surface.ts`'s `placeActive`), only while two or more panes exist.
+   Not faded with the chrome: it says where the chrome's presses land. Never takes the pointer. */
+.sf-active-pane {
+  position: absolute; pointer-events: none; z-index: 1; box-sizing: border-box;
+  border: 2px solid var(--text); border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(0, 0, 0, .55);
+}
 .sf-pin {
   position: absolute; left: 0; top: 0; width: 24px; height: 24px; margin: -12px 0 0 -12px; padding: 0;
   border: 0; background: none; pointer-events: none; display: grid; place-items: center;
