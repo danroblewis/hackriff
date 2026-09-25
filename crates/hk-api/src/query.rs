@@ -1638,10 +1638,13 @@ pub fn inventory_entry_json_at(
             })).collect::<Vec<_>>(),
         });
         let current = repo.current_classification(e.id)?;
-        let latest_classification = match (&current, repo.latest_classification(e.id)?) {
-            (Some(c), Some(l)) if *c != l => Some(classification_json(&l)),
-            _ => None,
-        };
+        // T-886: the latest row **unlike** the current one, not simply the latest. On a rank-3
+        // tie the newest row is a restatement of the chain's own label (the T-878 write order), so
+        // reading the newest alone served `null` and hid the classifier's posterior from every
+        // client of this route.
+        let latest_classification = repo
+            .latest_classification_beside(e.id, current.as_ref())?
+            .map(|l| classification_json(&l));
         // T-163 (ADR-0013 gap 7a): the emitter's latest blind-estimated parameters (C13/C14), for
         // the Decode workbench's "Use" suggestions. `null` with no demodulation session recorded
         // yet. On a withheld-identity row this reads `null` too, whatever storage holds: these

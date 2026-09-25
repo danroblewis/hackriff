@@ -113,6 +113,11 @@ pub const SAME_EMISSION_REASON: &str =
 /// Entries of the current run remembered for same-emission linking.
 const RUN_MEMORY: usize = 8192;
 
+/// T-886: most merges [`Inventory::recorded_emitter_of_track`] follows from an absorbed track to
+/// the surviving entry. Merges chain only when a survivor is itself later absorbed, so this is
+/// deep enough for any real sequence and turns an impossible cycle into `None`.
+const MERGE_CHAIN_MAX: usize = 16;
+
 /// T-416: declined measurements held per track while it waits for an entry.
 const MAX_AWAITING_PER_TRACK: usize = 8;
 
@@ -227,9 +232,14 @@ pub trait Inventory: Send {
     ///
     /// This is how a measuring chain ([`crate::chains::classify`]) finds the entry for the region
     /// it measured without looking a frequency up anywhere: the answer is the row this inventory
-    /// itself wrote for that track. `None` when it wrote none (an in-band fragment, a hop-set
-    /// member, a merged-away track) or has forgotten it past its bound; the caller then records
-    /// nothing rather than guessing.
+    /// itself wrote for that track. `None` when it wrote none (an in-band fragment) or has
+    /// forgotten it past its bound; the caller then records nothing rather than guessing.
+    ///
+    /// T-886: a track **absorbed by a merge** or folded into a **hop set** keeps an answer — the
+    /// surviving track's entry, or the set's — because its observations continue there. Its own
+    /// provisional row is withdrawn, so without this its classifying chain would wait out
+    /// [`crate::chains::classify`]'s emitter timeout and drop a measurement of an emission that
+    /// does have a row.
     fn recorded_emitter_of_track(&self, _track: TrackId) -> Option<EmitterId> {
         None
     }
@@ -949,6 +959,13 @@ pub struct TrackInventory {
     /// [`Self::run`]: past the cap the map is cleared, which costs a measurement its entry (it is
     /// then counted and dropped), never a wrong one.
     recorded: HashMap<TrackId, EmitterId>,
+    /// T-886: where a track's observations **went** when its own row was withdrawn — absorbed by
+    /// a merge into the surviving track, or folded into a hop set's entry. The absorbed track's
+    /// chains are still measuring the emission the survivor now owns, so
+    /// [`Inventory::recorded_emitter_of_track`] follows this to the survivor's entry instead of
+    /// answering `None` and costing the measurement its row. Bounded like [`Self::recorded`]: past
+    /// the cap the map is cleared, which costs a measurement its entry, never a wrong one.
+    merged_into: HashMap<TrackId, TrackId>,
     /// T-416: declined chain measurements written for a track that had no entry yet, waiting for
     /// [`Self::bind`]. Bounded like [`Self::bound`]: past the cap the map is cleared, which costs
     /// a refusal its link, never a wrong one.
@@ -1026,6 +1043,7 @@ impl TrackInventory {
             provisional: HashMap::new(),
             bound: HashMap::new(),
             recorded: HashMap::new(),
+            merged_into: HashMap::new(),
             awaiting: HashMap::new(),
             retune_centres: 0,
             retuned: HashSet::new(),
@@ -1075,6 +1093,15 @@ impl TrackInventory {
 
     /// T-878: records `emitter` as `track`'s entry for [`Inventory::recorded_emitter_of_track`],
     /// bounded like [`Self::bind`].
+    /// T-886: records that `from`'s observations continue as `into`'s, for
+    /// [`Inventory::recorded_emitter_of_track`]. Bounded like [`Self::remember_track`].
+    fn redirect_track(&mut self, from: TrackId, into: TrackId) {
+        if self.merged_into.len() >= RUN_MEMORY && !self.merged_into.contains_key(&from) {
+            self.merged_into.clear();
+        }
+        self.merged_into.insert(from, into);
+    }
+
     fn remember_track(&mut self, track: TrackId, emitter: EmitterId) {
         if self.recorded.len() >= RUN_MEMORY && !self.recorded.contains_key(&track) {
             self.recorded.clear();
@@ -1399,15 +1426,26 @@ impl Inventory for TrackInventory {
                         self.retract(repo, m, emitter, h.time.end)?;
                     }
                 }
-                self.offer(repo, &hop_set_sighting(h), None)?;
+                let (emitter, _) = self.offer(repo, &hop_set_sighting(h), None)?;
+                // T-886: a member's observations did not vanish, they became the set's. A chain
+                // measuring one of those channels writes its row against the set's entry rather
+                // than dropping the measurement for want of one.
+                for &m in &h.members {
+                    self.remember_track(m, emitter);
+                }
             }
             TrackEvent::HopSetClosed(h) => {
                 self.offer(repo, &hop_set_sighting(h), None)?;
             }
-            TrackEvent::Merged { from, at, .. } => {
+            TrackEvent::Merged { from, into, at } => {
                 self.bound.remove(from);
                 self.recorded.remove(from);
                 self.awaiting.remove(from);
+                // T-886: the absorbed track's observations continue as the survivor's, so its
+                // recorded entry follows the merge instead of disappearing. `into` may not have a
+                // row yet (a merge can precede either track's first sighting), which is why this
+                // is a redirect resolved at read time and not a copied emitter id.
+                self.redirect_track(*from, *into);
                 if let Some(emitter) = self.provisional.remove(from) {
                     self.retract(repo, *from, emitter, *at)?;
                 }
@@ -1514,7 +1552,20 @@ impl Inventory for TrackInventory {
     }
 
     fn recorded_emitter_of_track(&self, track: TrackId) -> Option<EmitterId> {
-        self.recorded.get(&track).copied()
+        let mut t = track;
+        // T-886: follow at most `MERGE_CHAIN_MAX` merges to the surviving track's entry. A chain
+        // of merges is short by construction (each one closes a track), and the bound makes a
+        // cycle — which the tracker does not produce — a `None` rather than a hang.
+        for _ in 0..MERGE_CHAIN_MAX {
+            if let Some(e) = self.recorded.get(&t) {
+                return Some(*e);
+            }
+            match self.merged_into.get(&t) {
+                Some(&next) if next != t => t = next,
+                _ => return None,
+            }
+        }
+        None
     }
 }
 
@@ -2538,5 +2589,101 @@ mod tests {
 
     fn t(sec: f64) -> Timestamp {
         Timestamp::from_unix_nanos(1_000_000_000 + (sec * 1e9) as i64)
+    }
+
+    /// **T-886: a track absorbed by a merge, or folded into a hop set, still resolves to the
+    /// entry its observations went to.**
+    ///
+    /// A classifying chain ([`crate::chains::classify`]) writes its posterior against
+    /// `recorded_emitter_of_track`. Before T-886 both paths simply forgot the track, so the
+    /// chain — which is still measuring the emission the survivor now owns — waited out its
+    /// two-second emitter timeout and dropped the measurement (`classify_no_emitter`), although
+    /// the emission it measured has a row.
+    #[test]
+    fn t886_a_merged_away_track_resolves_to_the_surviving_entry() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let t = Timestamp::from_unix_nanos(9_000_000_000);
+        let (a, b) = (TrackId::new(), TrackId::new());
+        inv.live_track(&mut repo, &channel_at(152.30e6, a, 6, 5, None))
+            .unwrap();
+        inv.live_track(&mut repo, &channel_at(152.60e6, b, 6, 5, None))
+            .unwrap();
+        let absorbed = inv.recorded_emitter_of_track(a).expect("a has a row");
+        let survivor = inv.recorded_emitter_of_track(b).expect("b has a row");
+        assert_ne!(absorbed, survivor, "two tracks, two entries");
+
+        inv.track_event(
+            &mut repo,
+            &TrackEvent::Merged {
+                from: a,
+                into: b,
+                at: t,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inv.recorded_emitter_of_track(a),
+            Some(survivor),
+            "the absorbed track's measurement belongs to the surviving entry"
+        );
+
+        // A merge can precede the survivor's own first sighting: the redirect is resolved when
+        // the row exists, not copied at the merge.
+        let (c, d) = (TrackId::new(), TrackId::new());
+        inv.live_track(&mut repo, &channel_at(152.90e6, c, 6, 5, None))
+            .unwrap();
+        inv.track_event(
+            &mut repo,
+            &TrackEvent::Merged {
+                from: c,
+                into: d,
+                at: t,
+            },
+        )
+        .unwrap();
+        assert_eq!(inv.recorded_emitter_of_track(c), None, "d has no row yet");
+        inv.live_track(&mut repo, &channel_at(153.20e6, d, 6, 5, None))
+            .unwrap();
+        let late = inv.recorded_emitter_of_track(d).expect("d has a row now");
+        assert_eq!(inv.recorded_emitter_of_track(c), Some(late));
+    }
+
+    /// T-886, the other half: a hop-set member's entry is withdrawn in favour of the set's, and a
+    /// chain measuring that channel writes against the set.
+    #[test]
+    fn t886_a_hop_set_member_resolves_to_the_sets_entry() {
+        let mut repo = Repository::open_in_memory().unwrap();
+        let mut inv = TrackInventory::default();
+        let chans = [433.10e6, 433.20e6, 433.30e6];
+        let ids: Vec<TrackId> = chans.iter().map(|_| TrackId::new()).collect();
+        for (&f, &id) in chans.iter().zip(&ids) {
+            inv.live_track(&mut repo, &channel_at(f, id, 6, 5, None))
+                .unwrap();
+        }
+        let h = hk_detect::track::HopSetSummary {
+            id: TrackId::new(),
+            channels_hz: chans.to_vec(),
+            members: ids.clone(),
+            raster_hz: Some(100e3),
+            hop_rate_hz: Some(2.0),
+            dwell_s: Some(0.4),
+            hops: 12,
+            time: TimeRange::new(
+                Timestamp::from_unix_nanos(1_000_000_000),
+                Timestamp::from_unix_nanos(7_000_000_000),
+            ),
+        };
+        inv.track_event(&mut repo, &TrackEvent::HopSetFormed(h))
+            .unwrap();
+        let rows = listed(&repo);
+        assert_eq!(rows.len(), 1, "only the hop set's entry: {rows:?}");
+        for &id in &ids {
+            assert_eq!(
+                inv.recorded_emitter_of_track(id),
+                Some(rows[0]),
+                "a member's measurement is filed against the set"
+            );
+        }
     }
 }
