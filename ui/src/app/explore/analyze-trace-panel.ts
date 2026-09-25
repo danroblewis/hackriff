@@ -142,25 +142,13 @@ function resolutionBlock(r: Resolution): HTMLElement {
   );
 }
 
-export function renderTracePanel(
-  el: HTMLElement, ctx: AppContext, job: AnalyzeJob | null, trace: TraceFetch | null,
-  filter: TraceFilter, onFilter: (f: TraceFilter) => void,
-): void {
-  if (!job) { el.hidden = true; el.replaceChildren(); return; }
-  el.hidden = false;
-  const familyInput = h("input", { type: "text", class: "mono", placeholder: "family (e.g. psk)", value: filter.family ?? "", "aria-label": "Why not this family?" }) as HTMLInputElement;
-  const ask = () => onFilter({ ...filter, family: familyInput.value.trim() || undefined });
-  familyInput.onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); ask(); } };
-  const goBtn = h("button", { class: "mini", type: "button", onclick: ask }, "Why not?");
-  const clearBtn = filter.family
-    ? h("button", { class: "mini", type: "button", onclick: () => onFilter({ ...filter, family: undefined }) }, "Clear")
-    : undefined;
-
-  const kids: Array<Node | undefined> = [
-    h("div", { class: "section-h" }, "Search trace"),
-    h("div", { class: "tr-filter" }, familyInput, goBtn, clearBtn),
-  ];
-
+/** The results body only (headline/resolution, stage groups, elided tail, truncation note) — never
+ * the filter row. Split out so a redraw (every trace fetch, and only a trace fetch — see
+ * `mountTracePanel` below) cannot touch the family `<input>` a user may be mid-keystroke in
+ * (found in review: rebuilding the whole panel on every ~1 s job poll wiped focus and typed text,
+ * so "Why not PSK?" could not be used at all). */
+function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, trace: TraceFetch | null): void {
+  const kids: Array<Node | undefined> = [];
   if (!trace) {
     kids.push(h("div", { class: "empty" }, "loading trace…"));
   } else {
@@ -183,23 +171,43 @@ export function renderTracePanel(
 
 /** Mounts the trace panel into `el`. The caller (`mountAnalyzeSection`, via its own `AnalyzeJob`
  * poll) drives `setJob`; this module makes no `GET /api/analyze/{id}` call of its own, only the
- * trace fetch, at 2 s while a job is watched. */
+ * trace fetch, at 2 s while a job is watched (stopped once the trace reports `final`, restarted on
+ * the next job).
+ *
+ * The filter row (the family `<input>` and its buttons) is built exactly once per watched job and
+ * never rebuilt by a results redraw — the fix for the review finding above. Only `renderTraceResults`
+ * runs on every trace fetch; `setJob` being called again for the *same* job id (the 1 s `AnalyzeJob`
+ * poll) touches nothing here at all, so nothing about the filter row or the results list is on that
+ * cadence. A monotonic request sequence discards a stale trace response that resolves after a newer
+ * one (e.g. the unfiltered fetch still in flight when "why not psk" is asked) rather than letting it
+ * overwrite the answer to a later question. */
 export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: AnalyzeJob | null): void } {
   let job: AnalyzeJob | null = null;
   let filter: TraceFilter = {};
-  let trace: TraceFetch | null = null;
   let stopPoll: (() => void) | null = null;
+  let seq = 0;
 
-  const draw = () => renderTracePanel(el, ctx, job, trace, filter, (f) => { filter = f; void fetchTrace(); });
+  const familyInput = h("input", { type: "text", class: "mono", placeholder: "family (e.g. psk)", "aria-label": "Why not this family?" }) as HTMLInputElement;
+  const ask = () => { filter = { ...filter, family: familyInput.value.trim() || undefined }; void fetchTrace(); };
+  familyInput.onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); ask(); } };
+  const goBtn = h("button", { class: "mini", type: "button", onclick: ask }, "Why not?");
+  const clearBtn = h("button", { class: "mini", type: "button", onclick: () => { familyInput.value = ""; filter = { ...filter, family: undefined }; void fetchTrace(); } }, "Clear");
+  const resultsEl = h("div", { class: "tr-results" });
+  el.replaceChildren(h("div", { class: "section-h" }, "Search trace"), h("div", { class: "tr-filter" }, familyInput, goBtn, clearBtn), resultsEl);
 
   const fetchTrace = async () => {
     if (!job) return;
+    const mySeq = ++seq;
+    const j = job;
+    let trace: TraceFetch | null;
     try {
-      trace = await ctx.client.get<TraceFetch>(tracePath(job.id, filter));
+      trace = await ctx.client.get<TraceFetch>(tracePath(j.id, filter));
     } catch {
       trace = null;
     }
-    draw();
+    if (seq !== mySeq || job?.id !== j.id) return; // superseded by a later filter, or the job changed
+    renderTraceResults(resultsEl, ctx, j, trace);
+    if (trace?.final && stopPoll) { stopPoll(); stopPoll = null; }
   };
 
   return {
@@ -208,17 +216,15 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
       job = j;
       if (!j) {
         if (stopPoll) { stopPoll(); stopPoll = null; }
-        trace = null; filter = {};
-        draw();
+        el.hidden = true;
         return;
       }
-      if (changed) {
-        filter = {}; trace = null;
-        if (stopPoll) stopPoll();
-        stopPoll = startPoll(fetchTrace, 2000);
-      } else {
-        draw();
-      }
+      el.hidden = false;
+      if (!changed) return; // the 1 s AnalyzeJob poll for the SAME job touches nothing below
+      filter = {}; familyInput.value = "";
+      resultsEl.replaceChildren(h("div", { class: "empty" }, "loading trace…"));
+      if (stopPoll) stopPoll();
+      stopPoll = startPoll(fetchTrace, 2000);
     },
   };
 }
