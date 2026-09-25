@@ -608,3 +608,83 @@ probe
     t1, t2 = run("rev-parse", "task-t1"), run("rev-parse", "task-t2~1")
     assert f"GATED=task-t1={t1} task-t2={t2}" in out.stdout     # bisect and the pytest probe get the merged tips
     assert run("log", "-1", "--format=%s", "HEAD") == "Merge task-t2 (task-t2): batch, gated together (automated, no AI)"
+
+
+def _no_culprit(tmp_path, branches, culprits, recorded_sig=None, sig="SIG-A"):
+    """bisect_culprit then try_bulk's NO CULPRIT block, over the stubs `_bisect` uses. culprits break it only together."""
+    state, queue = tmp_path / "merged", tmp_path / "queue"
+    state.write_text("")
+    queue.write_text("task-later\n")
+    if recorded_sig is not None:
+        (tmp_path / "bisect-no-culprit").write_text(recorded_sig)
+    (tmp_path / "bulk").write_text("base=base\n")
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    block = text[text.index("      # NO CULPRIT", i):text.index("isolate by merging each individually\"\n", i)]
+    block += 'isolate by merging each individually"\n'
+    culprit_re = "|".join(culprits)
+    script = f"""
+set -uo pipefail
+LOG={tmp_path}/log; REPO={tmp_path}; S={tmp_path}; QUEUE={queue}; BULKMARK={tmp_path}/bulk
+log(){{ echo "LOG $*" >&2; }}
+ticket_of(){{ echo "$1"; }}
+git(){{ shift 2
+  case "$1" in
+    rev-parse) [ -s {state} ] && echo moved || echo base ;;
+    reset) : > {state} ;;
+    merge) b="${{@: -1}}"; echo "${{b#sha-}}" >> {state} ;;
+  esac; return 0; }}
+cargo(){{ [ "$(grep -cxE '{culprit_re}' {state})" -ge {len(culprits)} ] && return 1; return 0; }}
+TRIAGE_FILTER=t; TRIAGE_SPECS=""
+{_function("bisect_red")}
+{_function("bisect_fact")}
+{_function("bisect_culprit")}
+nocul(){{
+local branches=({' '.join(branches)}) gated_sig={sig!r} b
+{block}
+echo ISOLATE
+}}
+echo "CULPRIT=[$(bisect_culprit base {' '.join(f"{b}=sha-{b}" for b in branches)})]"
+nocul
+"""
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    rec = tmp_path / "bisect-no-culprit"
+    return (out.stdout + out.stderr, queue.read_text().split(), rec.read_text() if rec.exists() else None,
+            (tmp_path / "bulk").exists())
+
+
+#: The 2026-09-25 09:25 shape: 12 branches, first half green, base + b6 b7 b8 red, each of them green alone.
+INCIDENT = [f"b{i}" for i in range(12)]
+
+
+def test_a_first_no_culprit_bisect_re_queues_the_batch_first_proven_green_then_unprobed_then_the_red_subset(tmp_path):
+    """Supervisor, 2026-09-25 10:44: a no-culprit bisect isolated 12 branches (6 proven green) - 0 landings for an hour."""
+    out, queue, rec, bulk = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"])
+    assert "CULPRIT=[]" in out and "ISOLATE" not in out
+    assert queue == [f"b{i}" for i in range(6)] + ["b9", "b10", "b11"] + ["b6", "b7", "b8"] + ["task-later"]
+    assert rec == "SIG-A"                      # the batch signature, for the second-time check
+    assert not bulk                            # main is back on base: the provisional window is closed
+    line = next(ln for ln in out.splitlines() if "re-queued first as one batch" in ln)
+    assert "proven green: b0 b1 b2 b3 b4 b5," in line and "unprobed: b9 b10 b11," in line
+    assert "red subset each green alone: b6 b7 b8)" in line and "a second no-culprit red on this batch isolates" in line
+
+
+def test_the_same_batch_reaching_a_no_culprit_bisect_twice_isolates(tmp_path):
+    out, queue, rec, bulk = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"], recorded_sig="SIG-A")
+    assert "ISOLATE" in out and "isolate by merging each individually" in out
+    assert queue == ["task-later"]             # nothing re-queued: the caller isolates what merged
+    assert rec is None                         # the record is spent
+
+
+def test_a_changed_batch_signature_gets_the_first_time_re_queue_again(tmp_path):
+    """A branch dropped/added or a tip moved is a different batch: re-queue it once more, never isolate it on sight."""
+    out, queue, rec, _ = _no_culprit(tmp_path, INCIDENT, ["b7", "b8"], recorded_sig="SIG-OLD", sig="SIG-A")
+    assert "ISOLATE" not in out and queue[:3] == ["b0", "b1", "b2"] and rec == "SIG-A"
+
+
+def test_the_no_culprit_record_is_cleared_when_the_batch_lands():
+    text = RUNNER.read_text()
+    i = text.index("\ntry_bulk(){")
+    merged = text[text.index('log "BULK MERGED', i):text.index("board_sync_now", i)]
+    assert '"$S/bisect-no-culprit"' in merged and "rm -f" in merged

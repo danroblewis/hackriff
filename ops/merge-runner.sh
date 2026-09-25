@@ -241,7 +241,8 @@ main_is_red(){
 # branch that breaks it with THAT TEST ALONE over halves of the batch (log2(n) targeted runs), confirm the
 # last candidate is red ALONE, and only then blame it. Everything else goes back as one batch and still
 # lands only through a full gate - nothing is excused. The candidates are persisted in isolate-remaining,
-# so a restart mid-bisect re-queues them (startup).
+# so a restart mid-bisect re-queues them (startup). A bisect that names NO culprit re-queues the batch first as
+# one batch (proven green, unprobed, then the red subset) and isolates only when the same batch does it again.
 bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
   # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
   # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
@@ -264,19 +265,27 @@ bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + th
   log "BISECT: base + $(printf '%s ' "${@%%=*}")-> $([ "$rc" = 0 ] && echo RED || echo green)"
   return $rc
 }
-bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (twice), or nothing
+# The probe verdicts, for the no-culprit re-queue: `green <names>` per green probe, `red <names>` per red one (the
+# last red line is the smallest red subset). A file, because bisect_culprit runs in a $( ) subshell.
+bisect_fact(){ # rc branch=sha...
+  local r=$1; shift
+  case "$r" in 0) echo "red ${*%%=*}" ;; 1) echo "green ${*%%=*}" ;; *) return 0 ;; esac >> "$S/bisect-facts"
+}
+bisect_culprit(){ # base branch=sha... -> echoes the one branch=sha red ALONE (twice), or nothing; leaves $S/bisect-facts
   local base=$1; shift; local cand=("$@") n r
   printf '%s ' "${@%%=*}" > "$S/isolate-remaining"
+  echo "red ${*%%=*}" > "$S/bisect-facts"   # the batch gate itself
   while [ "${#cand[@]}" -gt 1 ]; do
     n=$(( ${#cand[@]} / 2 ))
     bisect_red "$base" "${cand[@]:0:$n}"; r=$?
     [ "$r" = 2 ] && return 0
+    bisect_fact "$r" "${cand[@]:0:$n}"
     if [ "$r" = 0 ]; then cand=("${cand[@]:0:$n}"); else cand=("${cand[@]:$n}"); fi
   done
   # Blame needs the red on base + it ALONE twice: a halving that ended on the green side rests on
   # nothing else, and one red run cannot tell a defect from a test that is flaky even alone.
-  bisect_red "$base" "${cand[0]}" || return 0
-  bisect_red "$base" "${cand[0]}" && echo "${cand[0]}"
+  bisect_red "$base" "${cand[0]}"; r=$?; bisect_fact "$r" "${cand[0]}"; [ "$r" = 0 ] || return 0
+  bisect_red "$base" "${cand[0]}"; r=$?; bisect_fact "$r" "${cand[0]}"; [ "$r" = 0 ] && echo "${cand[0]}"
   return 0
 }
 
@@ -976,7 +985,7 @@ try_bulk(){
       wt=$(worktree_of "$b")
       [ -n "$wt" ] && [ "$wt" != "$REPO" ] && git -C "$REPO" worktree remove "$wt" --force 2>>"$LOG" && log "worktree removed: $wt"
     done
-    rm -f "$BULKMARK"
+    rm -f "$BULKMARK" "$S/bisect-no-culprit"
     board_sync_now
     # Only now: while the bulk marker stood, a killed runner's startup still rewinds this batch (review, 2026-09-25).
     push_mirrors
@@ -1057,6 +1066,25 @@ try_bulk(){
         return 0
       fi
       rm -f "$S/isolate-remaining"
+      # NO CULPRIT (supervisor, 2026-09-25 10:44: a both-ways flake sent 12 branches, six of them proven green, through
+      # serial gates - 0 landings for an hour). The first time, the batch goes back FIRST as one batch and gates in full
+      # again: proven green, then unprobed, then the red subset (each green alone). The same batch (gated_sig) doing it
+      # a second time isolates, as before. No attempt is charged: nothing was blamed.
+      if [ "$(cat "$S/bisect-no-culprit" 2>/dev/null)" != "$gated_sig" ]; then
+        local reds greens pg="" up="" rs=""
+        reds=$(sed -n 's/^red //p' "$S/bisect-facts" 2>/dev/null | tail -1); greens=$(sed -n 's/^green //p' "$S/bisect-facts" 2>/dev/null)
+        for b in "${branches[@]}"; do
+          if printf '%s\n' $reds | grep -qx "$b"; then rs="$rs $b"
+          elif printf '%s\n' $greens | grep -qx "$b"; then pg="$pg $b"
+          else up="$up $b"; fi
+        done
+        { printf '%s\n' $pg $up $rs; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+        printf '%s' "$gated_sig" > "$S/bisect-no-culprit"
+        log "BISECT: no culprit (no single branch confirmed red alone) -> re-queued first as one batch (proven green:${pg:- none}, unprobed:${up:- none}, red subset each green alone:${rs:- none}); a second no-culprit red on this batch isolates"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      rm -f "$S/bisect-no-culprit"
       log "BISECT: no single branch confirmed red alone -> isolate by merging each individually"
     else
       log "BULK gate FAILED -> rewound to $base; isolate by merging each individually"
