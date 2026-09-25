@@ -26664,7 +26664,7 @@ tasks:
   - id: T-901
     milestone: MLIVE
     title: Server row pushes on /ws/tiles/rows stall 0.35-5 s every ~64 rows (and /api/navigation with them) - live rows are not steady (T-893 finding)
-    status: in-progress
+    status: done
     branch: task-t901
     priority: high
     deps:
@@ -26691,6 +26691,7 @@ tasks:
       Commits: 64dd2ab7, 5cf9df6d
       Observed, not chased: PRE-EXISTING, fails alone 3/3, not touched by this diff (decoded.rs has no history-store reference): hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at decoded.rs:1529 with dropped_records: 0. | PRE-EXISTING, fails alone and ALSO fails with the base's (4432fcc7) hk-store+hk-pipeline checked out: hk-pipeline runtime_attach::chains_attached_and_detached_mid_run_drop_no_always_on_samples panics at runtime_attach.rs:69 with 'attached 11'. | Load flakes in `just test-crate hk-pipeline` at load ~25-45 (all pass alone): listen_conformance listen_freeze_discovery_header..., listen_lifecycle fifty_sessions..., listen_lifecycle requests_during_a_replumb.... receiver_survey_cadence t399_... failed at 253 s in the loaded run and was not re-run alone. | Residual sub-second push cadence is the tune-record horizon: rows.rs record_reach holds a row until the record reaches it, and the open dwell trails the spectrum by up to a control tick (measured p50 0.16 s, max 0.50 s). This is by design (T-468 review, T-596); a finer open-dwell publish would smooth it further. | The T-893 browser e2e live-edge shortfall bound is still diagnostic-only: there is no browser timing-tier runner (pipeline manager's gap). The Rust-side bound now lives in the timing tier. | Dev builds compile zstd-sys C at -O0 (no profile.dev.package override), so tile encodes cost 100-370 ms each in dev. With the writes off the lock this is no longer on the push path, but `[profile.dev.package.zstd-sys] opt-level = 3` would cut dev/test seal cost a lot. | The control run of main's 18:33 hk binary never answered the second /ws/tiles/rows handshake within 150 s on port 9940. Not chased; the old-code numbers above are from this worktree's own pre-fix builds.
       Resources: 266 CPU-s, peak 3.5 GB — LEAKED 1 processes (killed at reap)
+    commit: e66b215b
   - id: T-902
     milestone: MLIVE
     title: Tiles built from pushed rows guess their honesty tier - carry the tier on the row record, never infer it (T-893 finding)
