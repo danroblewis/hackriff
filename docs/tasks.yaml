@@ -27988,7 +27988,8 @@ tasks:
   - id: T-950
     milestone: MAUTO
     title: FLEX pager decode (2/4-FSK 1600-6400 bps, BCH(31,21)) - the dominant 929-932 MHz protocol; app has only POCSAG
-    status: todo
+    status: in-progress
+    branch: task-t950
     priority: P2
     deps:
     - T-949
@@ -28147,7 +28148,8 @@ tasks:
   - id: T-960
     milestone: MAUTO
     title: "Two more explorer FM captures into fixtures/ with hidden truth: 88.5 PI 3AAB, 106.1 PI 1323 (oracle-confirmed)"
-    status: todo
+    status: in-progress
+    branch: task-t960
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
