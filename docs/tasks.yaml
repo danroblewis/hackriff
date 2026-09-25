@@ -23979,7 +23979,7 @@ tasks:
   - id: T-810
     milestone: MMAP
     title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
-    status: in-progress
+    status: done
     branch: task-t810
     priority: normal
     parallel_group: MAP-LAYERS
@@ -24020,6 +24020,7 @@ tasks:
       Use cases: AWARE-042
       Resources: 4 CPU-s, peak 0.3 GB
     effort_reason: two sonnet rounds failed review on a live-edge refresh policy (supervisor 2026-09-25 02:18)
+    commit: 5fc927d8
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
