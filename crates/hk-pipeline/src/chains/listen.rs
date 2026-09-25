@@ -301,6 +301,32 @@ pub fn listen_class(
 /// The running segment's state (`None` while re-plumbing or after the run).
 pub(crate) type SegmentFn = Arc<dyn Fn() -> Option<Arc<Shared>> + Send + Sync>;
 
+/// The run's recipe runtime, built on first use (the opener holds no runtime until the switch
+/// below actually sends a request down the recipe path).
+pub type RecipesFn = Arc<dyn Fn() -> Arc<crate::recipes::runtime::RecipeRuntime> + Send + Sync>;
+
+/// Environment switch of ADR-0015 §12.9 stage 4: `HK_LISTEN_PIPELINE=1` lets the chooser answer
+/// **`recipe`**, so `/ws/open/listen` serves an ephemeral audio pipeline instead of this chain.
+/// Default **off**, and off means no pipeline is ever started: this chain serves every request,
+/// as it does today.
+///
+/// **What the flag does not gate.** The chooser itself
+/// ([`crate::audio::choose`]) runs on every request whatever the flag says, because it is *the*
+/// place a mode is decided and there must not be two of those. Off, it answers only `legacy` or
+/// `refuse` — with one deliberate difference from before this stage, which is a **product
+/// decision, not a side effect of the flag**: the weak-carrier rule (T-869, §12.2's note) means
+/// a narrow selection with measured energy whose mode was not recognised is demodulated as NBFM
+/// with the squelch armed, where it used to be refused `422 no-analog-mode`. A refusal that
+/// nothing measured is still a refusal, in both modes.
+pub const PIPELINE_SWITCH_ENV: &str = "HK_LISTEN_PIPELINE";
+
+/// Whether [`PIPELINE_SWITCH_ENV`] is set to something truthy.
+fn pipeline_switch_default() -> bool {
+    std::env::var(PIPELINE_SWITCH_ENV)
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Opens listen streams on a running pipeline (`PipelineHandle::listen_service`).
 pub struct ListenManager {
     counters: Arc<Counters>,
@@ -309,6 +335,11 @@ pub struct ListenManager {
     settings: Arc<std::sync::Mutex<ListenSettings>>,
     /// Pinned by [`Self::with_config`] instead of following `settings`.
     config: Option<ListenConfig>,
+    /// The recipe runtime, for the chooser's recipe path (T-869). `None` wires the opener to
+    /// this chain only, whatever the switch says.
+    recipes: Option<RecipesFn>,
+    /// The stage-4 switch in force for this opener ([`PIPELINE_SWITCH_ENV`]).
+    pipeline_audio: AtomicBool,
 }
 
 static STREAM_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -354,6 +385,26 @@ enum End {
 }
 
 impl End {
+    /// The end of a session whose guard was dropped, by the same rule [`Session::session_end`]
+    /// uses: a **source** reason outranks the session, whichever thread got there first.
+    fn of_session(shared: Option<&Shared>, end: SessionEnd) -> Self {
+        if let Some(shared) = shared
+            && (shared.ring.is_closed() || shared.stop.load(Ordering::SeqCst))
+        {
+            return if shared.continues.load(Ordering::SeqCst) {
+                End::Segment
+            } else {
+                End::Source
+            };
+        }
+        match end {
+            SessionEnd::Client => End::Client,
+            SessionEnd::Unresponsive => End::Unresponsive,
+            SessionEnd::Transport => End::Transport,
+            SessionEnd::Unattributed => End::Unattributed,
+        }
+    }
+
     fn count(self, lc: &ListenCounters) {
         inc(match self {
             End::Client => &lc.closed_client,
@@ -368,6 +419,39 @@ impl End {
             End::Error => &lc.closed_error,
         });
     }
+}
+
+/// Counts how one listening session ended (T-633), for a session served by an **audio pipeline**
+/// rather than by this chain (ADR-0015 §12.3): the pipeline's own thread has no session guard, so
+/// the attachment counts the end here under exactly the legacy chain's rule.
+///
+/// `pipeline_end` is the pipeline's own end reason once it has one. It is what decides a
+/// **source** end, because the segment's state is already gone by then: a re-plumb drops the old
+/// `Shared`, so a chain that ended with it would otherwise be counted as "the client went away"
+/// — the very mis-attribution T-633 fixed on the legacy path.
+pub(crate) fn count_session_end(
+    counters: &Counters,
+    shared: Option<&Shared>,
+    pipeline_end: Option<&str>,
+    end: SessionEnd,
+) {
+    let lc = &counters.listen;
+    let by_pipeline = pipeline_end.and_then(|r| match r {
+        "segment-ended" => {
+            inc(&lc.retune_ends);
+            Some(End::Segment)
+        }
+        "source-ended" => Some(End::Source),
+        r if r.starts_with("retune") || r.starts_with("rate-change") => {
+            inc(&lc.retune_ends);
+            Some(End::Retune)
+        }
+        // `stopped` is this session's own detach (or an operator's): the transport says why.
+        _ => None,
+    });
+    by_pipeline
+        .unwrap_or_else(|| End::of_session(shared, end))
+        .count(lc);
 }
 
 /// The refusal for a request whose segment is ending: `503 replumbing` while the run continues
@@ -435,6 +519,8 @@ impl ListenManager {
             segment,
             settings,
             config: None,
+            recipes: None,
+            pipeline_audio: AtomicBool::new(pipeline_switch_default()),
         };
         publish_limits(&m.counters, &m.config());
         m
@@ -446,6 +532,33 @@ impl ListenManager {
         publish_limits(&self.counters, &config);
         self.config = Some(config);
         self
+    }
+
+    /// Wires the chooser's recipe path (ADR-0015 §12.9 stage 4) to the run's recipe runtime.
+    /// The runtime is built on first use, so an opener that never takes the recipe path never
+    /// creates one.
+    #[must_use]
+    pub fn with_recipes(mut self, recipes: RecipesFn) -> Self {
+        self.recipes = Some(recipes);
+        self
+    }
+
+    /// Turns the stage-4 switch on or off for this opener, whatever [`PIPELINE_SWITCH_ENV`]
+    /// says. A test (and an operator changing the flag without a restart) needs this: the
+    /// environment is process-wide, and the decision is per opener.
+    pub fn set_pipeline_audio(&self, on: bool) {
+        self.pipeline_audio.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether this opener runs the chooser's recipe path.
+    pub fn pipeline_audio(&self) -> bool {
+        self.recipes.is_some() && self.pipeline_audio.load(Ordering::SeqCst)
+    }
+
+    /// The run's recipe runtime. Only called once [`Self::pipeline_audio`] is true, so a run
+    /// whose opener never takes the recipe path never builds one.
+    fn runtime(&self) -> Arc<crate::recipes::runtime::RecipeRuntime> {
+        (self.recipes.as_ref().expect("the recipe path is wired"))()
     }
 
     /// The settings a request is admitted under now.
@@ -595,13 +708,42 @@ impl ListenManager {
             cfg.probe_bandwidth_hz,
             pr,
         );
-        let plan = plan.map_err(|why| {
-            OpenRefusal::new(
-                422,
-                "no-analog-mode",
-                format!("no analog modulation recognised: {why}"),
-            )
-        })?;
+        // **The chooser** (T-869, ADR-0015 §12.2): probe → mode → *which* pipeline. It is the one
+        // place a mode is decided, so it decides for both paths: which recipe (if any) fits what
+        // was measured, whether today's chain serves it, and — the weak-carrier rule — whether a
+        // narrow selection with measured energy is a channel at all.
+        let take_recipes = self.pipeline_audio();
+        let recipes = take_recipes.then(|| self.runtime().audio_entries());
+        let probe_params = plan
+            .as_ref()
+            .ok()
+            .map(|p| estimated_params(&pr, p, refined.as_ref(), fc))
+            .unwrap_or_default();
+        let choice = crate::audio::choose(&crate::audio::Ask {
+            selection: (lo, hi),
+            channels: want_channels,
+            probe: &pr,
+            plan,
+            params: &probe_params,
+            recipes: recipes.as_deref().unwrap_or(&[]),
+            audio: &cfg.audio,
+        });
+        if crate::debug_enabled() {
+            eprintln!("hk-pipeline: listen chooser: {choice:?}");
+        }
+        let plan = match &choice {
+            crate::audio::Choice::Refuse { why } => {
+                return Err(OpenRefusal::new(
+                    422,
+                    "no-analog-mode",
+                    format!("no analog modulation recognised: {why}"),
+                ));
+            }
+            chosen => chosen
+                .plan()
+                .expect("a chosen answer carries its plan")
+                .clone(),
+        };
         let (clo, chi) = plan.channel_extent_hz();
         // A refined emission only has to overlap the selection.
         let reach = match &refined {
@@ -624,6 +766,55 @@ impl ListenManager {
                 "the demodulated channel is not inside the tuned window",
             ));
         }
+        let params = estimated_params(&pr, &plan, refined.as_ref(), fc);
+        // T-070: the refined tuning goes on the target emitter (or the inventory emitter at the
+        // refined channel), whichever path serves the audio — it is the probe's measurement, not
+        // the chain's.
+        let refine_emitter = refined.as_ref().and_then(|o| {
+            crate::refine::store_and_explain(shared, emitter, o, SOURCE_LISTEN, time.host_time)
+        });
+
+        // Stage 4 (ADR-0015 §12.9): the chosen recipe runs as an ephemeral audio pipeline, or
+        // attaches to the one already serving this target ([`crate::recipes::session`]). A
+        // pipeline that cannot be started is not a refusal: the legacy chain below serves it.
+        if let crate::audio::Choice::Recipe {
+            id, version, seed, ..
+        } = &choice
+        {
+            let measured = crate::recipes::audio::Measured {
+                mode: plan.mode_name().into(),
+                mode_confidence: pr.mode.confidence,
+                mode_rules: pr.mode.rules_version.clone(),
+                params: params.clone(),
+                snr_db: pr.params.snr_box_db.value(),
+                noise_dbfs: plan.noise_power.map(|n| 10.0 * n.log10()),
+                refinement: refined.as_ref().map(crate::refine::audio_refinement),
+                provenance_ref: Some(prov.id()),
+            };
+            match self
+                .runtime()
+                .open_listen_audio((id, *version), emitter, seed, measured)
+            {
+                Ok(opened) => {
+                    inc(&shared.counters.listen.attached);
+                    inc(&shared.counters.listen.open);
+                    return Ok(OpenedStream {
+                        session: Box::new(PipelineSession {
+                            _attached: opened.session,
+                            slot: slot.clone(),
+                        }),
+                        ..opened
+                    });
+                }
+                Err(crate::recipes::session::NoPipeline::Refuse(r)) => return Err(*r),
+                Err(crate::recipes::session::NoPipeline::Legacy(why)) => {
+                    if crate::debug_enabled() {
+                        eprintln!("hk-pipeline: listen falls back to the legacy chain: {why}");
+                    }
+                }
+            }
+        }
+
         let demod = build_demod(
             plan.clone(),
             &cfg.audio,
@@ -640,22 +831,6 @@ impl ListenManager {
             tune.sample_rate_hz,
             Some(plan.mode == hk_demod::AnalogMode::Wfm),
         ));
-        let mut params = pr.params.estimated_params();
-        if plan.mode == hk_demod::AnalogMode::Wfm {
-            params.pilot_hz = pr
-                .mode
-                .features
-                .pilot
-                .filter(|p| p.found)
-                .and_then(|p| p.frequency_hz);
-        }
-        if let Some(o) = &refined {
-            params.bandwidth_hz = Some(o.tuning.bandwidth_hz);
-            params.cfo_hz = Some(o.tuning.center_hz - fc);
-            if let Some(p) = o.mode_params.get("pilot_hz") {
-                params.pilot_hz = Some(*p);
-            }
-        }
         let mut header = StreamHeader::new(
             format!("listen/{}", STREAM_SEQ.fetch_add(1, Ordering::Relaxed)),
             StreamKind::Audio,
@@ -669,12 +844,20 @@ impl ListenManager {
         header.emitter_id = emitter;
         header.provenance_ref = Some(prov.id());
         header.max_frame_len = audio_max_frame_len(channels);
+        // A weak-carrier plan is not a recognised mode (T-869): the selector's own confidence
+        // is its confidence in *unknown*, so reporting it beside `mode: nbfm` would claim what
+        // nothing measured. Zero, and the rules version says which rule produced the plan.
+        let (mode_confidence, mode_rules) = if choice.weak_carrier() {
+            (0.0, format!("{}+weak-carrier", pr.mode.rules_version))
+        } else {
+            (pr.mode.confidence, pr.mode.rules_version.clone())
+        };
         header.audio = Some(AudioInfo {
             channels,
             frame_samples: AUDIO_FRAME_SAMPLES as u32,
             mode: plan.mode_name().into(),
-            mode_confidence: pr.mode.confidence,
-            mode_rules: pr.mode.rules_version.clone(),
+            mode_confidence,
+            mode_rules,
             params,
             snr_db: pr.params.snr_box_db.value(),
             squelch: SquelchInfo {
@@ -709,11 +892,7 @@ impl ListenManager {
         let stop = Arc::new(AtomicBool::new(false));
         // T-633: the transport records how the session ended here before dropping the guard.
         let end_slot = SessionEndSlot::default();
-        // T-070: the refined tuning goes on the target emitter (or the inventory emitter at the
-        // refined channel) and keeps being refined in the background while streaming.
-        let refine_emitter = refined.as_ref().and_then(|o| {
-            crate::refine::store_and_explain(shared, emitter, o, SOURCE_LISTEN, time.host_time)
-        });
+        // The refined tuning keeps being refined in the background while streaming (T-070).
         let refined_tuning = refined
             .as_ref()
             .map(|o| (o.tuning.center_hz, o.tuning.bandwidth_hz));
@@ -793,6 +972,47 @@ impl StreamOpener for ListenManager {
                  on two-channel streams); mode and parameters are estimated (header audio profile)"
             ),
         })
+    }
+}
+
+/// The parameters the header reports: what the probe estimated, plus what refinement measured.
+fn estimated_params(
+    pr: &hk_demod::audio::ProbeResult,
+    plan: &hk_demod::audio::AudioPlan,
+    refined: Option<&RefinementOutcome>,
+    fc: f64,
+) -> hk_model::EstimatedParams {
+    let mut params = pr.params.estimated_params();
+    if plan.mode == hk_demod::AnalogMode::Wfm {
+        params.pilot_hz = pr
+            .mode
+            .features
+            .pilot
+            .filter(|p| p.found)
+            .and_then(|p| p.frequency_hz);
+    }
+    if let Some(o) = refined {
+        params.bandwidth_hz = Some(o.tuning.bandwidth_hz);
+        params.cfo_hz = Some(o.tuning.center_hz - fc);
+        if let Some(p) = o.mode_params.get("pilot_hz") {
+            params.pilot_hz = Some(*p);
+        }
+    }
+    params
+}
+
+/// The session guard of a listener served by an **audio pipeline** (T-869): the attachment —
+/// dropping it detaches, and the last listener to leave stops a session-owned pipeline — and
+/// this request's admission slot, so an audio pipeline counts against the listener budget for
+/// exactly as long as somebody is listening (§12.4: audio pipelines count as listeners).
+struct PipelineSession {
+    _attached: Box<dyn std::any::Any + Send>,
+    slot: Slot,
+}
+
+impl Drop for PipelineSession {
+    fn drop(&mut self) {
+        self.slot.release();
     }
 }
 

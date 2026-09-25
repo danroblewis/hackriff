@@ -34,7 +34,7 @@
 //! lost. In lossless replay the chain's gate cursor holds capture instead.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::thread;
@@ -310,6 +310,41 @@ impl Target {
     }
 }
 
+/// Who owns a running pipeline's lifetime (ADR-0015 §12.3).
+///
+/// Both modes are irreducible, and the difference is not cosmetic: a Listen chain is owned by
+/// its consumer, a recipe pipeline is a named object with a lifecycle. `POST /api/pipelines`
+/// makes an [`Owner::Explicit`] pipeline that outlives every consumer; the `listen` opener makes
+/// an [`Owner::Session`] one that stops when the last session that asked for it goes away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// Started by `POST /api/pipelines`: it runs until it is stopped or the source ends.
+    Explicit,
+    /// Started by the `listen` opener: ephemeral, never saved, and stopped when its last
+    /// listener detaches.
+    Session,
+}
+
+impl Owner {
+    /// As the API serves it (`GET /api/pipelines`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Session => "session",
+        }
+    }
+}
+
+/// How a pipeline is started, beside its recipe and target.
+#[derive(Clone, Default)]
+pub(crate) struct StartOpts {
+    /// `Session` for the `listen` opener's ephemeral pipeline (default `Explicit`).
+    pub session: bool,
+    /// What the chooser measured on the channel (T-869): the `audio` header reports it instead
+    /// of the recipe's declaration.
+    pub measured: Option<Arc<crate::recipes::audio::Measured>>,
+}
+
 /// A pipeline's counters.
 #[derive(Debug, Default)]
 pub struct PipelineStats {
@@ -456,6 +491,12 @@ pub(crate) struct PipelineCtl {
     pub id: String,
     pub recipe_id: String,
     pub target: Target,
+    /// Who owns its lifetime (ADR-0015 §12.3).
+    pub owner: Owner,
+    /// Sessions attached through the `listen` opener. A `Session`-owned pipeline stops when this
+    /// falls back to zero; an `Explicit` one is never stopped by a listener leaving (attaching to
+    /// a named pipeline must not be able to kill it).
+    pub listeners: AtomicUsize,
     pub streams_ctx: StreamCtx,
     pub started: Timestamp,
     pub shared: Weak<Shared>,
@@ -486,6 +527,21 @@ pub(crate) struct PipelineCtl {
 }
 
 impl PipelineCtl {
+    /// The pipeline's served streams of one kind (`audio`, `inspector`, `messages`, `stage`).
+    pub(crate) fn streams_of(&self, kind: &str) -> Vec<StreamEntry> {
+        lock(&self.streams)
+            .iter()
+            .filter(|s| s.kind == kind)
+            .cloned()
+            .collect()
+    }
+
+    /// Why the pipeline ended, once it has (`segment-ended`, `source-ended`, `retune: …`,
+    /// `rate-change: …`, `stopped`, or a node failure).
+    pub(crate) fn end_reason(&self) -> Option<String> {
+        lock(&self.end).clone()
+    }
+
     /// The channel in force, `(centre, bandwidth)` Hz.
     pub(crate) fn channel(&self) -> (f64, f64) {
         let cs = lock(&self.control);
@@ -517,6 +573,8 @@ pub struct RecipeRuntime {
     pub(crate) capture_replays: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// This runtime: a pipeline's refinement worker applies its results through it (T-870).
     me: Weak<RecipeRuntime>,
+    /// Serialises the `listen` opener's attach and detach decisions ([`Self::listen_attach`]).
+    listen_attach: Mutex<()>,
 }
 
 pub(crate) fn in_window(center: f64, rate: f64, lo: f64, hi: f64) -> bool {
@@ -757,6 +815,7 @@ impl RecipeRuntime {
             pipelines: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(1),
             edit_timeout_ms: AtomicU64::new(EDIT_TIMEOUT.as_millis() as u64),
+            listen_attach: Mutex::new(()),
             captures: std::sync::OnceLock::new(),
             capture_replays: std::sync::Arc::default(),
             me: me.clone(),
@@ -916,8 +975,18 @@ impl RecipeRuntime {
         self.pipeline_json(&id)
     }
 
-    /// Starts `recipe` on `target`; returns the pipeline id.
+    /// Starts `recipe` on `target` as an ordinary named pipeline; returns the pipeline id.
     pub fn start(&self, recipe: Recipe, target: Target) -> Result<String, RuntimeError> {
+        self.start_with(recipe, target, &StartOpts::default())
+    }
+
+    /// Starts `recipe` on `target` under `opts` (see [`StartOpts`]); returns the pipeline id.
+    pub(crate) fn start_with(
+        &self,
+        recipe: Recipe,
+        target: Target,
+        opts: &StartOpts,
+    ) -> Result<String, RuntimeError> {
         let registry = self.registry();
         if recipe.schema != RECIPE_SCHEMA {
             return Err(RuntimeError::new(400, "invalid", "not a recipe document"));
@@ -1024,6 +1093,7 @@ impl RecipeRuntime {
             bandwidth_hz,
             emitter_id: emitter,
             channels: hop.as_ref().map_or_else(Vec::new, |h| h.channel_infos()),
+            measured: opts.measured.clone(),
         };
         let stats = Arc::new(PipelineStats::default());
         let mut sinks = Vec::with_capacity(g.outputs.len());
@@ -1052,6 +1122,12 @@ impl RecipeRuntime {
             id: id.clone(),
             recipe_id: recipe.id.clone(),
             target,
+            owner: if opts.session {
+                Owner::Session
+            } else {
+                Owner::Explicit
+            },
+            listeners: AtomicUsize::new(0),
             streams_ctx,
             started: Timestamp::now(),
             shared: Arc::downgrade(&shared),
@@ -1165,6 +1241,24 @@ impl RecipeRuntime {
         lock(&self.pipelines).get(id).cloned()
     }
 
+    /// Every pipeline the runtime holds, in id order.
+    pub(crate) fn running_pipelines(&self) -> Vec<Arc<PipelineCtl>> {
+        lock(&self.pipelines).values().cloned().collect()
+    }
+
+    /// The run's counters (the `listen` budget an audio pipeline is admitted under).
+    pub(crate) fn counters(&self) -> Arc<Counters> {
+        Arc::clone(&self.counters)
+    }
+
+    /// Serialises the `listen` opener's attach/detach decisions (T-869,
+    /// [`crate::recipes::session`]): finding-or-starting the audio pipeline for a target, and
+    /// deciding whether the listener that just left was the last one. Held for those two
+    /// sections only.
+    pub(crate) fn listen_attach(&self) -> std::sync::MutexGuard<'_, ()> {
+        lock(&self.listen_attach)
+    }
+
     fn found(&self, id: &str) -> Result<Arc<PipelineCtl>, RuntimeError> {
         self.pipeline(id)
             .ok_or_else(|| RuntimeError::new(404, "not_found", "no such pipeline"))
@@ -1182,6 +1276,7 @@ impl RecipeRuntime {
             "state": if running { "running" } else { "ended" },
             "end_reason": *lock(&ctl.end),
             "target": ctl.target.to_json(),
+            "owner": ctl.owner.as_str(),
             "channel": {
                 "center_hz": cs.center_hz,
                 "bandwidth_hz": cs.bandwidth_hz,
