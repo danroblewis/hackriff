@@ -27754,6 +27754,55 @@ tasks:
     branch: task-rcfix-surface-nav
     result: |
       DONE 2026-09-25 on task-rcfix-surface-nav (9aab332e, queued): a LOAD FLAKE, not a product defect - surface-nav passed alone 3/3 at 92d0f6f1 (load 25-32). The steady window opened when the gestures' requests were answered on the wire, but an aborted read is 'answered' (canceled) while /api/tiles still builds it and holds the slot; the refusal ~4 s in was over the page's own leftover reads (cap at AIMD floor 1, not a cap that failed to react). Fix (spec only, no assertion loosened): after the wire drain, poll a serial probe until the route reports it holds no slot but the probe's (cost.in_flight - cost.in_flight_held == 0); a slot held > 31.2 s while the page is idle fails as the T-454 leak with the server's numbers. Red proof with a fault-injected hk: the RC case red 3/3 on the old spec, green 3/3 on the new; a never-released slot green on the old, red on the new. Spec 4/4 alone, just test-ui 81/81, tsc clean. Product follow-up: T-959 (client uses in_flight_held, not an average charge).
+  - id: T-933
+    milestone: MMAP
+    title: Sheet peek strip covers the lower half of the lifted minimap at every width
+    status: done
+    branch: task-t933
+    priority: P2
+    deps: []
+    parallel_group: UI-CHROME
+    needs: none
+    model: sonnet
+    effort: medium
+    notes: |
+      FOUND BY rc-20260925.
+      FOUND 2026-09-25 by the T-931 RC-fix worker (rects measured on main 37bf55ff + T-919): the sheet's peek strip covers the lower half of the lifted minimap at EVERY width. The minimap sits 70 px above the bottom (y 680-790 at 860 px tall); the peek strip is at y 734-790 - at 1440 px it spans x 856-1376, at 420 px x 8-356 (nearly the whole minimap). The minimap is the where-am-I overview (docs/16 §8) and its capture-window segments are honesty marks; half of it is hidden whenever the sheet peeks.
+      DELIVER: lay out the minimap and the sheet peek strip so neither covers the other at 1440/1000/420 px (e.g. lift the minimap above the peek strip when the sheet spans that x range, or dock the peek beside it) consistent with docs/23 §10.6 P1/P3 (minimal overlay, fixed positions); extend the app-phone / app-dismiss floating-control assertions (or add one) so an overlapping peek strip and minimap goes red - prove red on current main.
+      WHAT THE USER WILL SEE ON STAGING: the whole minimap is visible whether the sheet is peeking or not, at any window width.
+      TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+
+      Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
+
+      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 05:09).
+      Merge gate fail (attempt 2) was not a test failure: it was 1 uncommitted file, docs/tasks.yaml, left in the worktree from an earlier `just task note T-933` call (the sanctioned board-note tool, which edits the file directly rather than through a commit) that the previous hand-back forgot to commit. No code change was needed - the ui/src/app/centre/surface.ts fix (anchored to the sheet's fixed bottom edge, not its live height/top) and the app-dismiss.e2e.mjs / app-sheet.e2e.mjs assertions from the prior two passes are unchanged. Committed the pending note, re-ran the full targeted suite (typecheck, unit tests, and the two touched e2e specs after a rebuild) to confirm nothing regressed, and the working tree is now clean.
+      Tests: npm run typecheck (ui/) -> exit 0 (tsc --noEmit clean); npm test (ui/, 85 files) -> exit 0 (85/85 test files passed); HK_BIN=target/debug/hk HK_E2E_PORT=9221 node e2e/run.mjs app-dismiss app-sheet -> exit 0 (2/2 files passed: app-dismiss 3/3 subtests (minimap y 616-726 vs sheet peek y 734-790, disjoint at 1440/1000/420 px); app-sheet 5/5 subtests (mid-drag minimap clearance unchanged: 'before 134, mid-drag [134]'))
+      precheck exit None
+      Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
+      Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
+      Resources: 4 CPU-s, peak 0.3 GB
+    commit: 952d3847
+  - id: T-934
+    milestone: M2-hardening
+    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
+    status: in-progress
+    branch: task-t934
+    priority: P2
+    deps: []
+    parallel_group: DEFLAKE-WC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND BY T-891.
+      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
+      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
+      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
+      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
+      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
+      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
   - id: T-935
     milestone: MAUTO
     title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
@@ -27927,6 +27976,14 @@ tasks:
 
       2026-09-25 coordinator, from explorer window 2 (journal-20260925.md, 05:52-06:23): another future time: /api/timeline window.buffered.drops[0].at_s = 1790341844.69 while the wall clock was 1790340962 - a ring DROP timestamp ~880 s in the future, on a FRESH data dir (w2/data-aprs), so not only the reused-dir case - check the ring's drop-time arithmetic too.
     branch: task-t942
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 07:27).
+      Root cause of the restart-kills-history defect: the run-end seal was seal_through(last_frame + 1 h), which sealed tiles of time blocks that had not happened yet. Scheme 1's level 2 is a ONE-HOUR tile, so the tile of the hour the run died in landed on disk with its block end (the next hour boundary) as the newest sealed time; Pyramid::recover resumed the watermark from the newest sealed block end of EVERY level, and ingest answers Late for every frame whose level-0 block ends at or before the watermark - so the whole of the next run's history was refused, silently, until wall clock passed the hour. latest_ns is resumed from the same value, which is the explorer's second finding (time.latest_s an exact hour boundary 34 min ahead, /api/analysis/strongest found:false, the pane drawn short of the top): one cause, both surfaces. Fix: (1) new Pyramid::seal_all separates the forcing from the clock - it seals every open tile whatever its block and leaves the watermark at the last frame; hk-pipeline's two end-of-run seals use it, so a finished run's history is still complete on disk at every level. (2) The watermark is a decision, not a property of the tiles, so it is persisted with the data's own edge (new 16-byte `edge` file beside `recording_began`) and read back exactly; a store written before T-942 falls back to level 0's newest sealed block end - the tightest tile bound and the only level ingest tests - instead of a coarse level's hour. (3) reopen_sealed_ahead undoes the forced seal at open: a level-0 tile sealed past the watermark is read back and reopened so the restart keeps filling the minute it was in the middle of, while a coarser one is dropped and re-folded from its children by the rebuild that already runs there (reopening both would double-count). A total loss is also no longer silent: a run that has folded nothing and refused 100 frames says so once on stderr.
+      Tests: just test-crate hk-store -> exit 0 (231 passed, 0 failed (includes the two new history::tests::restart tests)); just test-crate hk-pipeline -> exit 0 (446 passed, 6 skipped - includes the new history_survives_restart and the five tests an earlier draft of this fix broke); just test-crate hk-api -> exit 0 (307 passed - hk-api reads the pyramid watermark in tiles.rs, so it is in scope); cargo nextest run -p hk-pipeline -E 'binary(history_survives_restart) or binary(history_survives_retune) or binary(aware_042_pipeline) or binary(iterative_scan_device) or binary(space_050_pipeline) or binary(signal_062_pipeline) or binary(replumb_spectrum_handshake)' -> exit 0 (8 passed - final confirmation after the last edit); cargo nextest run -p hk-pipeline -E 'binary(history_survives_restart)'  [with the +1h seal and the all-levels watermark recovery re-injected] -> exit 100 (RED PROOF on the old code, reproducing the staging reading exactly: 'no spectrum history for the run AFTER a restart over its own 4 s of capture (ingested 0, LATE 33251)'. Both hk-store restart tests also go red with the old recover() re-injected (watermark 1789300860000000000 vs 1789300830000000000).)
+      precheck exit 0
+      Commits: ef60f883
+      Observed, not chased: A store dropped without close() (a crash) leaves a stale or absent `edge` file. That is self-correcting - tiles sealed past the stale watermark are reopened (level 0, content preserved) or re-folded from their children (coarser) - but a coarse tile whose children were evicted by the BYTE BUDGET in that window would be rebuilt from fewer children than it was first folded from. Not reproduced; the window is a block that has not ended, whose children are the most recent tiles on disk. | save_edge() adds one 8->16-byte fsync per seal and per checkpoint on the capture thread (~2/min at scheme 1's 60 s checkpoint interval). Visible in a unit test that checkpointed every frame: 45 checkpoints cost 37 s of wall clock on this loaded box, i.e. ~0.8 s per small-file fsync here. At the shipped cadence it is negligible, but it is real per-seal work on the thread that gates the ring (T-453's constraint).
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-943
     milestone: MMAP
     title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
@@ -28403,55 +28460,6 @@ tasks:
       Seen by at least 4 workers as 'observed, not chased' (latest T-844 on 2026-09-25: fails ALONE 3/3 with hk-store byte-identical to main; earlier load ~10-17): hk-store src/decoded.rs tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at decoded.rs:1529 `assert c.dropped_records > 0` with CaptureInfo{frames: 29, dropped_records: 0}. The test runs a 600 ms wall-clock loop (Instant::now() + 600 ms, sleep 5 ms) against disconnect_after 100 ms and assumes a stall long enough to force drops happened inside it - the wall-clock-chooses-the-assertion shape (docs/10 §3.6). Same class as T-934 (its three tests); a separate ticket so the two run in parallel.
       DELIVER per deflake-triage: drive the stall deterministically (a stall injected until the policy's disconnect has been observed - wait on the writer's reported state/counter, a generous deadline only bounding a hang), assert drops are counted; no #[ignore], no retry, no threshold change. Red-on-regression proof: a policy that never counts drops goes red.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-store -E 'test(/a_disk_stall/)' alone + just test-crate hk-store), then HAND BACK. Never `just gate`.
-  - id: T-933
-    milestone: MMAP
-    title: Sheet peek strip covers the lower half of the lifted minimap at every width
-    status: done
-    branch: task-t933
-    priority: P2
-    deps: []
-    parallel_group: UI-CHROME
-    needs: none
-    model: sonnet
-    effort: medium
-    notes: |
-      FOUND BY rc-20260925.
-      FOUND 2026-09-25 by the T-931 RC-fix worker (rects measured on main 37bf55ff + T-919): the sheet's peek strip covers the lower half of the lifted minimap at EVERY width. The minimap sits 70 px above the bottom (y 680-790 at 860 px tall); the peek strip is at y 734-790 - at 1440 px it spans x 856-1376, at 420 px x 8-356 (nearly the whole minimap). The minimap is the where-am-I overview (docs/16 §8) and its capture-window segments are honesty marks; half of it is hidden whenever the sheet peeks.
-      DELIVER: lay out the minimap and the sheet peek strip so neither covers the other at 1440/1000/420 px (e.g. lift the minimap above the peek strip when the sheet spans that x range, or dock the peek beside it) consistent with docs/23 §10.6 P1/P3 (minimal overlay, fixed positions); extend the app-phone / app-dismiss floating-control assertions (or add one) so an overlapping peek strip and minimap goes red - prove red on current main.
-      WHAT THE USER WILL SEE ON STAGING: the whole minimap is visible whether the sheet is peeking or not, at any window width.
-      TESTING PROTOCOL: targeted tests only (just test-ui; the touched specs alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
-
-      Review (fix attempt 1) FAILED: sheet clearance was measured from the peek-state sheet's LIVE height (gated on dataset.snap==='peek'), so the minimap (and every pane above it) followed the sheet up/down during a drag toward full and during the .28s open/close transition — violating docs/23 P3 fixed positions. Fixed by anchoring off the sheet's fixed BOTTOM edge (sheet.css pins it; only the top moves with height) minus the constant PEEK_PX, applied unconditionally (no longer needs dataset.snap). Extended app-sheet.e2e.mjs's existing drag test with a mid-drag insetBottom sample; proved red with the defect re-injected (134 -> 314 mid-drag), green with the fix. app-dismiss/app-phone/app-sheet all re-verified after merging main@7a9fa8ab. app-phone.e2e.mjs's idle-fade subtest is an intermittent flake reproduced identically on unmodified main (7a9fa8ab) run alone — not caused by this change.
-
-      Merge-gate fail (attempt 2): 1 uncommitted file (docs/tasks.yaml) left from an earlier 'just task note' call, no code change needed. Committed it (495d1528) and re-verified: typecheck clean, npm test 85/85, e2e app-dismiss + app-sheet green after a rebuild. origin/main still at the cited 7a9fa8ab, already merged into this branch.
-    result: |
-      DONE (work-runner, from handback.json, 2026-09-25 05:09).
-      Merge gate fail (attempt 2) was not a test failure: it was 1 uncommitted file, docs/tasks.yaml, left in the worktree from an earlier `just task note T-933` call (the sanctioned board-note tool, which edits the file directly rather than through a commit) that the previous hand-back forgot to commit. No code change was needed - the ui/src/app/centre/surface.ts fix (anchored to the sheet's fixed bottom edge, not its live height/top) and the app-dismiss.e2e.mjs / app-sheet.e2e.mjs assertions from the prior two passes are unchanged. Committed the pending note, re-ran the full targeted suite (typecheck, unit tests, and the two touched e2e specs after a rebuild) to confirm nothing regressed, and the working tree is now clean.
-      Tests: npm run typecheck (ui/) -> exit 0 (tsc --noEmit clean); npm test (ui/, 85 files) -> exit 0 (85/85 test files passed); HK_BIN=target/debug/hk HK_E2E_PORT=9221 node e2e/run.mjs app-dismiss app-sheet -> exit 0 (2/2 files passed: app-dismiss 3/3 subtests (minimap y 616-726 vs sheet peek y 734-790, disjoint at 1440/1000/420 px); app-sheet 5/5 subtests (mid-drag minimap clearance unchanged: 'before 134, mid-drag [134]'))
-      precheck exit None
-      Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
-      Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
-      Resources: 4 CPU-s, peak 0.3 GB
-    commit: 952d3847
-  - id: T-934
-    milestone: M2-hardening
-    title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
-    status: in-progress
-    branch: task-t934
-    priority: P2
-    deps: []
-    parallel_group: DEFLAKE-WC
-    needs: none
-    model: opus
-    effort: medium
-    notes: |
-      FOUND BY T-891.
-      THREE WALL-CLOCK TESTS keep failing ALONE under load, "observed, not chased" by at least 5 workers (T-891 on 2026-09-25 at load ~28: all three, 2/2 runs each at main 333d8284; also earlier T-579/T-581 and two hk-core workers' results on the board). None has an owner - this ticket is it:
-      1. hk-api tests/ondemand.rs silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay: `assert!(records > 20)` after 1.5 s of wall clock (sees 9-11 records under load; ping 50 ms, peer timeout 400 ms).
-      2. hk-core src/source/hackrf.rs tests::a_slow_reader_gets_counted_drops_and_an_exact_gap: sleeps 200 ms and assumes the fake producer overflowed a 2-buffer pool ('the pool overflowed').
-      3. hk-cli src/pipeline.rs tests::daemon_drives_the_scheduler_and_serves_token_gated_status: needs > 10 scheduler steps in a wall-clock window (sees 9-10; T-072 item 5 recorded the same in M0).
-      DELIVER per docs/10 §3.6 and deflake-triage: each is the wall-clock-chooses-the-assertion kind - make it wait on the counted event (records received from the answering peer, the drop counter / gap record, the scheduler step count) with a generous deadline that only bounds a hang, never a sleep that decides what is asserted; if an assertion is genuinely a throughput bound, move it to the `timing` tier (just timing) and keep a deterministic correctness assertion in the gate. No #[ignore], no retry, no threshold loosening. Red-on-regression proof for each: re-inject the defect the test guards (peer not dropped / drop not counted / scheduler not stepping) and show it goes red.
-      TESTING PROTOCOL: targeted tests only (the three binaries alone, and under `just test-crate` of each crate), then HAND BACK. Never `just gate`.
   - id: T-969
     milestone: MAUTO
     title: "All captured signals decode: add the 88.5 (PI 3AAB) and 106.1 (PI 1323) FM members to T-936's set"
