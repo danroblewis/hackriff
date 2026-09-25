@@ -26006,6 +26006,8 @@ tasks:
       FOUND BY coordinator 2026-09-23 (ADR-0015 accepted; section 12 legacy-parity chain).
 
       2026-09-25 coordinator, explorer finding for the chooser: at 162.4008 MHz (NOAA WX, SNR ~5 dB) Listen was refused 4422 no-analog-mode ('no occupied band: C13 OBW99 abstained (LowSnr) and no dominant carrier line'; FillsBand/LowSnr for drag regions). The refusal is honest, but for a weak NFM carrier the chooser could demodulate with the squelch closed rather than refuse outright - decide it here with the chooser (evidence: ~/.hackriff-ops/explorer/journal-20260925.md, NOAA section).
+
+      2026-09-25 coordinator, explorer APRS/pager/ISM: Listen probes once at open and refuses if nothing is present at that instant (144.37-144.41 refused LowSnr) - a user cannot open a squelched listener on a packet channel and wait for the next burst; APRS, pagers and ISM all need that. Decide with the chooser: open squelched on a burst channel vs refuse.
     core_interface: true
   - id: T-870
     milestone: MAUTO
@@ -27622,6 +27624,8 @@ tasks:
       DELIVER: one region per station in the 2.4 Msps sweep: find why the near-duplicate merge / OBW grouping splits a WFM emission at the fine-sweep resolution (FFT bin width, CFAR guard, per-segment merge across sweep steps?) and fix it at the source; overlap-is-an-error (CLAUDE.md) should already force re-analysis of 13 abutting boxes - say why it did not. Test through the mock SDR on the explorer FM fixtures (or a synthetic multi-station WFM scene at the sweep's resolution): one detection per station, red on current code.
       WHAT THE USER WILL SEE ON STAGING: one box per FM station in a 2.4 MHz sweep of 88-108.
       core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer ISM entry: the opposite merge error too - a 4.81 MHz-wide candidate at 914.8385 MHz (8 Msps at 915) is almost certainly several bursts plus DC merged. Fix both directions: the overlap/re-analysis invariant should split it.
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
@@ -27699,6 +27703,8 @@ tasks:
       DELIVER: root-cause the late classification after a restart (a persisted watermark/last-sealed time from the previous run compared against the new run's capture clock? a clock-base mismatch?) and fix so a restarted run on an existing data dir records history; any frame genuinely rejected is counted AND surfaced, never a silent 100 % loss. Test: restart-on-existing-dir through the mock SDR ingests frames; red on current code.
       WHAT THE USER WILL SEE ON STAGING: restarting the app keeps adding to history.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, explorer APRS entry (likely the same time-base root cause - one owner): GET /api/analysis/strongest answered found:false for every range with window t0 1790337595..t1 1790337600, 34 min AHEAD of the wall clock (date +%s 1790335567); /api/navigation time.latest_s is also 1790337600, an exact hour boundary; the pager surface preview said 'newest recorded 5:00:00 AM' at 04:32 and the pane was 'drawn to 689.6 s short of the top', hiding all data. Include: the latest-time / strongest window never sits in the future, and the pane draws live rows.
   - id: T-943
     milestone: MMAP
     title: Selected-region panel lists signals outside the region and offers no Listen/Decode; list-row context menu opens nothing
@@ -27790,6 +27796,8 @@ tasks:
       FOUND 2026-09-25 by the explorer (162.2 MHz tuned, 2.4 Msps): (a) the DC point is listed as a signal - a candidate at the exact tuned centre (162.1998 MHz, 8.5 kHz); it should be excluded by the DC notch (the excluded coverage state, T-595) and never listed; (b) a steady line at ~161.984 MHz is the readout's "peak -57.5 dB" but never became a detection or an explanation (spur? interferer? - either way list it or explain it). Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: (a) candidates overlapping the DC-notch exclusion are not admitted (test: mock SDR with a DC spike -> no candidate at centre; red on current code); (b) find why a steady -57.5 dB line is not detected at 162 MHz (floor estimate, CFAR guard, a spur mask that swallowed it?) - if it is masked as a known spur, the inventory/explanation must say so rather than drop it silently; test on a synthetic steady line near a DC notch.
       core_interface (detection). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator, more explorer evidence (APRS/pagers/ISM): the DC point is listed on EVERY tune (144.600, 930.800, 434.200); fixed spurs listed as candidates with band-plan explanations - 144.000 MHz, a 37.5 kHz comb at 930.884-931.071 (14 kHz lines), integer-MHz carriers at 912.000/915.000/916.99/918.008 (159 of 585 'bursts' on /ws/open/bits came from the 918.000 spur). Deliver a per-device, per-rate spur/DC mask applied before candidates are admitted and before chains attach (T-951's follow-hops relies on it), with the artifact-of relation where the source is known.
   - id: T-949
     milestone: MAUTO
     title: "FLEX pager capture into fixtures/ (LFS, hidden truth) + new use cases: terrestrial paging, terrestrial APRS"
@@ -27906,6 +27914,22 @@ tasks:
     notes: |
       FOUND 2026-09-25 by the explorer (pagers, ISM): /api/analyze ends every job failed / no_evaluator ("stage evaluation over IQ (MAUTO M-2) is not built on this server"; docs/api.md: nothing implements hk_synth::engine's Evaluator over acquired IQ, server_backend() is None). So blind symbol/bit recovery -> decoder synthesis on an unknown burst (e.g. the 916.094 MHz 100 kBd FSK emitter with a consistent sync 0x0C5F and no CRC model - a blind CRC poly/init/xorout search over recovered payloads is exactly the synthesis step) is unavailable - the product's north star for unknown signals.
       DEFERRED: this is the next MAUTO tranche (the production Evaluator over acquired IQ, ADR-0015), not a follow-up - held for the supervisor's milestone planning once the pool clears (user rule 2026-09-25 01:45). Model: Fable/Opus xhigh; core_interface.
+  - id: T-957
+    milestone: MMAP
+    title: "app-surface e2e red on main since the 03:53 RC: layers-menu artifacts toggle times out; fog key off by one 'none' entry"
+    status: todo
+    priority: P1
+    deps: []
+    parallel_group: UI-SURFACE-RC
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND BY T-933.
+      FOUND 2026-09-25 04:56 by the T-933 worker: ui/e2e/app-surface.e2e.mjs has 2 failures on main's tree WITHOUT T-933's change (reproduced with surface.ts unmodified, base 0d0d7f70): (a) the layers-menu 'artifacts' toggle times out; (b) the fog symbology key list is off by one 'none' entry. The 03:53 RC at 92d0f6f1 had app-surface GREEN, so a landing between 92d0f6f1 and 0d0d7f70 broke it - browser e2e runs only in the daily RC now, so the merge gate could not see it. Suspects touching the layers menu / symbology key: T-916 (892d3edc, shadow follow-ups: auto/viewport contrast, ladder fallback), T-810 (1ce98bea, density refetch), T-898 (d4d4ce7d, retune paths layer), T-919 (37bf55ff, status box), T-886, T-913.
+      DELIVER (deflake-triage): run app-surface ALONE x3 on main (HK_E2E_PORT >= 9216); fails alone => bisect the first-parent merges 92d0f6f1..0d0d7f70 to the landing, then fix the PRODUCT (the menu toggle / the key list) so the spec passes UNCHANGED - change a spec assertion only if a deliberate product change made it provably wrong (say which, with the ticket). Passes alone => make it deterministic (wait on the menu's rendered state, never a timeout choice). Red-on-regression proof.
+      WHAT THE USER WILL SEE ON STAGING: the layers menu's artifacts toggle works and the fog key lists exactly the drawn states.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
