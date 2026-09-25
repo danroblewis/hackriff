@@ -69,7 +69,8 @@ async function retune(backend, centerHz) {
   assert.fail("the mock never accepted the retune");
 }
 
-/** The pane's frequency window, parsed from `.hk-surface-where` (T-478: numbers, never the string). */
+/** The pane's frequency window, parsed from its scale block's `data-where` (T-478: numbers, never
+ * the string; T-996: the per-viewport panel that used to carry the sentence is retired). */
 function windowOf(where) {
   const m = /^([\d.]+) MHz ± ([\d.]+) (Hz|kHz|MHz|GHz)/.exec(where ?? "");
   assert.ok(m, `the pane readout is not a frequency window: ${JSON.stringify(where)}`);
@@ -79,11 +80,11 @@ function windowOf(where) {
 }
 
 async function pane0(page) {
-  const ROWS = `JSON.stringify([...document.querySelectorAll('.hk-surface-viewport')].map((v) => ({
-    viewport: v.getAttribute('data-viewport'),
-    following: v.getAttribute('data-following') === 'true',
-    where: v.querySelector('.hk-surface-where')?.textContent ?? '',
-    why: v.querySelector('.hk-surface-why')?.textContent ?? '',
+  const ROWS = `JSON.stringify([...document.querySelectorAll('.sf-scale')].map((v) => ({
+    viewport: 'pane',
+    following: v.dataset.following === 'true',
+    where: v.dataset.where ?? '',
+    why: document.querySelector('.map-retune-why')?.textContent ?? '',
   })))`;
   const rows = JSON.parse(await page.eval(ROWS));
   const r = rows.filter((x) => x.viewport === "pane")[0];
@@ -97,7 +98,7 @@ async function openApp(backend) {
   assert.equal(await page.goto(`${backend.origin}/#token=${backend.token}`), "load");
   await page.waitForSurfaceMounted({ timeoutMs: 30000 });
   await page.waitFor("a pane readout to exist",
-    "document.querySelectorAll('.hk-surface-viewport[data-viewport=\"pane\"] .hk-surface-where').length > 0",
+    "!!document.querySelector('.sf-scale')?.dataset.where",
     { timeoutMs: 20000 });
   await page.frames(4);
   return { browser, page };

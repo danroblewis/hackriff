@@ -79,7 +79,7 @@ function pressPoint(box) {
 const BARE_AT = `(() => {
   const c = document.querySelector('.sf-canvas').getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const boxes = [...document.querySelectorAll('.sf-pins .sf-pin, .map-ctl > *, .sheet, .sf-readout, .sf-chrome, .sf-note, .sf-maptip, .research:not([hidden])')]
+  const boxes = [...document.querySelectorAll('.sf-pins .sf-pin, .map-ctl > *, .sheet, .sf-readout, .sf-chrome, .sf-note, .sf-status-line, .sf-scale, .sf-maptip, .research:not([hidden])')]
     .map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
   const free = (x, y) => !boxes.some((r) => x >= r.x - 8 && x <= r.right + 8 && y >= r.y - 8 && y <= r.bottom + 8);
   const y1 = c.bottom - ${MINIMAP_PX} / dpr - 8;
@@ -110,6 +110,7 @@ const STATE = `JSON.stringify({
   pills: document.querySelector('.map-inv')?.textContent ?? null,
   rows: [...document.querySelectorAll('.side-inv .row[data-id]')].map((r) => r.dataset.id.slice(0, 8)),
   chrome: document.querySelector('.sf-chrome')?.textContent?.slice(0, 200) ?? null,
+  where: document.querySelector('.sf-where')?.textContent?.slice(0, 200) ?? null, // T-996's one-line readout
   note: document.querySelector('.sf-note')?.textContent?.slice(0, 200) ?? null,
 })`;
 

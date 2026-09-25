@@ -22,6 +22,7 @@ import { parseFrequency } from "../../controls/freq";
 import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 import { trackOverlay } from "./dismiss";
+import type { RowAction, WidthAction } from "../../surface/chrome";
 import { registerMapHome } from "./top-chrome";
 import { getTimeLabelMode, onTimeLabelMode, setTimeLabelMode, type TimeLabelMode } from "../../surface/hud";
 import { registerMapInvHome } from "./inv-home";
@@ -130,6 +131,18 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   centreHz(): number | null;
   /** The retune offer for the active pane when no tuned window covers it, else null. */
   gotoOffer(): GotoOffer | null;
+  /**
+   * T-996: the ACTIVE viewport's own persistent Retune (T-476) and capture-width presets (T-496),
+   * rehomed here from the retired per-viewport panel — "the Retune button stays where Go-to lives"
+   * (user, 2026-09-25). Strings and a bit, exactly as `RowAction`/`WidthAction` always were: this
+   * cluster still learns nothing about tuning, and the press is a callback the host routes through
+   * its own gated `DeviceAction` path. Asked EVERY FRAME (`syncRetune`), because the sentence names
+   * the window the viewport is showing now — a label from a 1 s poll names somewhere it is not.
+   */
+  paneRetune?(): RowAction | null;
+  pressPaneRetune?(): void;
+  paneWidths?(): readonly WidthAction[];
+  pressPaneWidth?(key: string): void;
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
@@ -328,7 +341,10 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  * has now left, so it is withdrawn), and `syncFollow()` when the follow state may have changed.
  */
 export function mountMapControls(host: MapControlHost): {
-  el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
+  el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void;
+  syncResearch(): void;
+  /** T-996: re-read the active viewport's Retune / width offers. Called per RENDER FRAME. */
+  syncRetune(): void;
   tuningChanged(): void;
   /** T-1000: re-state which pane the per-pane chrome acts on (after an active-pane change, split or close). */
   syncActive(): void;
@@ -354,6 +370,16 @@ export function mountMapControls(host: MapControlHost): {
   // T-900: the offer is a transient on the one overlay stack — Escape dismisses it when topmost.
   const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
   const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
+
+  // T-996: the ACTIVE viewport's persistent capture controls, under Go-to — "the Retune button
+  // stays where Go-to lives", beside the nudges and the Go-to offer, which is where every device
+  // command on this map already is. Small and never faded (it is a device command with a stated
+  // destination, docs/23 §10.2), and shown only while the host offers one for this viewport.
+  const retuneWhy = h("span", { class: "map-retune-why" });
+  const retuneGo = h("button", { type: "button", class: "map-retune-go" }, "Retune") as HTMLButtonElement;
+  const widthRow = h("div", { class: "map-widths", role: "group", "aria-label": "Capture width" });
+  const retune = h("div", { class: "map-glass map-retune", role: "group", "aria-label": "Capture this viewport", hidden: true },
+    h("div", { class: "map-retune-row" }, retuneGo, retuneWhy), widthRow);
 
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
@@ -474,7 +500,13 @@ export function mountMapControls(host: MapControlHost): {
   const layersPane = h("span", { class: "map-pane-badge", "aria-hidden": "true", hidden: true });
   layersBtn.append(layersPane);
 
-  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, invHome, offer, modeBanner, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
+  // T-996: the left column under the nudges is a STACK, not a set of fixed `top:` constants — the
+  // T-997 inventory pills, the persistent capture block, the transient Go-to offer and (below
+  // 1180 px) the tool-mode banner are each as tall as their words make them, so a fixed top per
+  // block is exactly how the offer came to be drawn over the width presets at 400 px. In flow, each
+  // starts where the last ended; the pills lead it, so their one fixed place under Go-to holds.
+  const stack = h("div", { class: "map-stack" }, invHome, retune, offer, modeBanner);
+  const el = h("div", { class: "map-ctl", "data-band": "chrome" }, goto, nudgeHome, stack, statusHome, topright, layers, paneMenu, moreMenu, zoom, fab);
 
   // T-824 (MAP-24): the idle state is also stated once on <body> (`chrome-idle`), so every other
   // piece of floating chrome — the top bar, the dock, the lists' chip (`chrome/phone.css`) and the
@@ -686,6 +718,40 @@ export function mountMapControls(host: MapControlHost): {
   };
   fab.addEventListener("click", toggleFollow);
 
+  // ---- T-996: the active viewport's Retune and width presets, re-asked every frame ----
+  //
+  // Same discipline the per-viewport row had (T-476/T-496/T-407): buttons are created once and only
+  // ever UPDATED — a button rebuilt each frame is a button that cannot be pressed, because the
+  // element under the finger between pointerdown and pointerup would be a different one — and each
+  // width button reads its `key` fresh from its own record, never a value closed over at mint time,
+  // so the list can change WHICH preset a position stands for without the listener naming a stale
+  // one. A refusal is STATED (disabled, with `why` beside it and as the title), never hidden: a
+  // control that vanishes teaches nothing, which is the complaint T-476 exists for.
+  const widthBtns: { el: HTMLButtonElement; key: string }[] = [];
+  const setText = (e: HTMLElement, t: string) => { if (e.textContent !== t) e.textContent = t; };
+  const apply = (b: HTMLButtonElement, a: RowAction) => {
+    setText(b, a.label);
+    if (b.title !== a.why) b.title = a.why;
+    b.disabled = !a.enabled;
+    b.setAttribute("aria-disabled", a.enabled ? "false" : "true");
+  };
+  const syncRetune = () => {
+    const a = host.paneRetune?.() ?? null;
+    if (retune.hidden === !!a) retune.hidden = !a;
+    if (a) { apply(retuneGo, a); setText(retuneWhy, a.why); }
+    const ws = host.paneWidths?.() ?? [];
+    while (widthBtns.length < ws.length) {
+      const rec = { el: h("button", { type: "button", class: "map-width" }) as HTMLButtonElement, key: "" };
+      rec.el.addEventListener("click", () => { if (!rec.el.disabled) host.pressPaneWidth?.(rec.key); });
+      widthBtns.push(rec);
+      widthRow.append(rec.el);
+    }
+    while (widthBtns.length > ws.length) widthBtns.pop()!.el.remove();
+    if (widthRow.hidden !== (ws.length === 0)) widthRow.hidden = ws.length === 0;
+    ws.forEach((w, i) => { widthBtns[i].key = w.key; apply(widthBtns[i].el, w); });
+  };
+  retuneGo.addEventListener("click", () => { if (!retuneGo.disabled) host.pressPaneRetune?.(); });
+
   const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
   researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });
   syncResearch();
@@ -693,6 +759,7 @@ export function mountMapControls(host: MapControlHost): {
   syncFollow();
   syncActive();
   syncMeasure();
+  syncRetune();
   registerMapHome({ status: statusHome, nudge: nudgeHome, review: reviewHome, more: moreBody });
   registerMapInvHome(invHome);
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
@@ -716,5 +783,5 @@ export function mountMapControls(host: MapControlHost): {
   // A gesture moved the view: the Go-to offer describes a window the pane has left, and whether
   // the pane still shows the tuned window (the FAB's state, T-955) may have changed with it.
   const viewMoved = () => { hideOffer(); syncFollow(); };
-  return { el, viewMoved, syncFollow, syncLayers, syncMeasure, syncResearch, syncActive, toggleFollow, tuningChanged };
+  return { el, viewMoved, syncFollow, syncLayers, syncMeasure, syncResearch, syncRetune, syncActive, toggleFollow, tuningChanged };
 }

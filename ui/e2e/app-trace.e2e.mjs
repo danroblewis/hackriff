@@ -137,12 +137,14 @@ const TAP = `(() => {
 
 /** What the page is saying and what the socket delivered, read in ONE evaluation so they agree. */
 const SNAPSHOT = `(() => {
-  const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+  // T-996: the pane's own scale block is where a pane states itself (the per-viewport panel is
+  // retired); its dataset is the frame's own report — window, level, tier and tile counts.
+  const row = document.querySelector('.sf-scale');
   const canvas = document.querySelector('.sf-canvas');
   const box = canvas ? canvas.getBoundingClientRect() : null;
   return JSON.stringify({
     trace: document.querySelector('.sf-trace')?.textContent ?? "",
-    headline: row ? row.children[1].textContent : "",
+    headline: row ? `${row.dataset.where} · ${row.dataset.when}` : "",
     // **The rectangle every pixel in this observation is indexed by, read in the SAME evaluation as
     // the words** — see [[heldObservation]] for what a stale one costs.
     // T-918: the canvas is full-bleed; the pane (trace strip on top) starts below the inset it states.
@@ -150,7 +152,7 @@ const SNAPSHOT = `(() => {
       h: box.height - (Number(canvas.dataset.insetTop) || 0) - (Number(canvas.dataset.insetBottom) || 0) } : null,
     // PaneReport, as the pane itself states it: N tiles - N coarse stand-ins - N pending. What the
     // renderer actually drew this frame WITH; see isResident below.
-    counts: row?.querySelector('.hk-surface-counts')?.textContent ?? "",
+    counts: row?.dataset.counts ?? "",
     tap: { headers: window.__hkTap.headers, rows: window.__hkTap.rows, geom: window.__hkTap.geom,
            held: window.__hkTap.held, withheld: window.__hkTap.withheld,
            recent: window.__hkTap.recent.slice(-400) },
@@ -457,9 +459,9 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
     // The same condition as isResident(), in the page, so the wait establishes exactly the state
     // the accept predicate re-verifies. Two spellings of one rule is the defect this file was
     // rewritten for; this is one rule in the two places the harness needs it.
-    const row = document.querySelector('.hk-surface-viewport[data-viewport="pane"]');
+    const row = document.querySelector('.sf-scale');
     const c = /(\\d+) tiles · (\\d+) coarse stand-ins? · (\\d+) pending/
-      .exec(row?.querySelector('.hk-surface-counts')?.textContent ?? "");
+      .exec(row?.dataset.counts ?? "");
     if (!c || Number(c[1]) === 0 || Number(c[2]) !== 0 || Number(c[3]) !== 0) return false;
   }
   const at = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
@@ -494,8 +496,7 @@ const scrubbedExpr = (lagS, { resident = false, afterglowInHand = false } = {}) 
  */
 const PANE_REPORT = (expr) => `JSON.stringify({
   ok: ${expr},
-  counts: document.querySelector('.hk-surface-viewport[data-viewport="pane"]')
-    ?.querySelector('.hk-surface-counts')?.textContent ?? "",
+  counts: document.querySelector('.sf-scale')?.dataset.counts ?? "",
   trace: document.querySelector('.sf-trace')?.textContent ?? "",
 })`;
 async function whileTilesArrive(page, what, expr) {
@@ -581,7 +582,7 @@ async function scrubOntoCell(page, lagS, tries = 8) {
 
 /** The pane is at the growing edge — the chrome's own fact, never the readout string (T-478). */
 const FOLLOWING_EXPR =
-  `document.querySelectorAll('.hk-surface-viewport[data-viewport="pane"][data-following="true"]').length > 0`;
+  `document.querySelectorAll('.sf-scale[data-following="true"]').length > 0`;
 
 /**
  * **Bring the tuned band, with a control region on each side, into the columns the surface itself
@@ -598,7 +599,7 @@ async function fitBandIntoUncovered(page, { tries = 12 } = {}) {
   for (let i = 0; i <= tries; i++) {
     await page.waitFor("the tap to see a stream header and the pane to state its frequency window",
       `!!(window.__hkTap.geom && window.__hkTap.geom.bandwidthHz > 0) &&
-       / MHz ± /.test(document.querySelector('.hk-surface-viewport[data-viewport="pane"]')?.children[1]?.textContent ?? "")`,
+       / MHz ± /.test(document.querySelector('.sf-scale')?.dataset.where ?? "")`,
       { timeoutMs: 30000 });
     const snap = JSON.parse(await page.eval(SNAPSHOT));
     const unocc = await page.unoccludedColumns(".sf-canvas", { y0: snap.rect.y, y1: snap.rect.y + TRACE_PX });
@@ -1115,12 +1116,13 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
   // Inside the strip: the top `TRACE_PX` device px of the canvas, at dpr 1.
   const y = rect.y + TRACE_PX / 2;
   assert.ok(TRACE_PX / 2 < rect.h, "the canvas is shorter than the strip — this test is not aimed at it");
-  const before = (await page.$text(".sf-chrome")) ?? "";
+  // T-996: `.sf-where` — the kept centre/span/LIVE line — is where the viewport states itself.
+  const before = (await page.$text(".sf-where")) ?? "";
   await page.drag({ x: rect.x + rect.w * 0.65, y }, { x: rect.x + rect.w * 0.3, y });
-  await page.waitFor("the per-viewport readout to change after a drag begun in the strip",
-    `(document.querySelector('.sf-chrome')?.textContent ?? "") !== ${JSON.stringify(before)}`,
+  await page.waitFor("the viewport readout to change after a drag begun in the strip",
+    `(document.querySelector('.sf-where')?.textContent ?? "") !== ${JSON.stringify(before)}`,
     { timeoutMs: 15000 });
-  const after = (await page.$text(".sf-chrome")) ?? "";
+  const after = (await page.$text(".sf-where")) ?? "";
   t.diagnostic(`chrome before: ${before.slice(0, 80)}`);
   t.diagnostic(`chrome after:  ${after.slice(0, 80)}`);
 

@@ -270,45 +270,69 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   // (docs/23 §10.1: no chrome subtracts from the canvas). The statuses that were rows under the
   // stage float over it in one bottom-left stack, as screen-space chrome, with the readout.
   assert.match(host, /el\.replaceChildren\(stage\);/, "the stage is the surface's only row: full-bleed, nothing above or below it");
-  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome", "data-open": "false" \}, statusBody, statusLine\)/,
-    "the statuses float over the stage as one chrome stack, collapsed by default");
+  // T-996: the statuses float over the stage as ONE LINE — no white per-viewport panel, no `More`.
+  assert.match(host, /h\("div", \{ class: "sf-status", "data-band": "chrome" \}, fogEl, priorsEl, statusLine, said\)/,
+    "the statuses do not float over the stage as one line with its conditional statements");
   assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
 });
 
-// T-919 (user P1, docs/23 §10.6 rule 1 + §10.2): the floating status is a COMPACT LINE that
-// expands on demand and has a visible dismiss — it is not a permanent 560 x 184 px panel over the
-// waterfall. What is compiled in here is the composition and the toggle; that the collapsed box is
-// actually small, that the tier/level statement is in it in every state, and that expand / collapse
-// / dismiss work on the real page are `ui/e2e/app-status.e2e.mjs`'s to measure.
-test("T-919: the status box is a collapsed line by default, with a toggle and a dismiss that never hides the honesty statements", () => {
+// T-996 (user, 2026-09-25, map-UI nit-picks via the supervisor): the white per-viewport panel
+// ("100.980 MHz ± 937 kHz · LIVE") and the `More` expansion behind it are RETIRED. What is on the
+// picture instead: a Google-Maps-style scale bar bottom-right of every pane, and one line
+// bottom-left. What is compiled in here is the composition; that the bar's pixels match the pane's
+// own Hz/px and s/px at three zooms, and that it all fits at 400 px, is `ui/e2e/app-status.e2e.mjs`.
+test("T-996: no white centre/span panel and no `More` expansion — a scale bar per pane and one status line", () => {
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  // The paragraphs — the ones that made it tall — are the BODY, and the body starts hidden.
-  assert.match(host, /class: "sf-status-body", id: "sf-status-body", hidden: true \},\s*\n?\s*traceEl, ringEl, fogEl, priorsEl, note\)/,
-    "the sentences are not the collapsible body, or the body does not start closed");
-  // The line is always on the picture, and carries the per-viewport level/tier row (§10.2: an
-  // honesty statement is never hidden) and the colour-scale sentence (T-470).
-  assert.match(host, /class: "sf-status-line" \},\s*\n?\s*chrome, readout,/,
-    "the always-visible line must carry the viewport level readout and the colour-scale readout");
+  // Gone: the panel, its toggle, its dismiss, and the per-viewport rows the app used to mount.
   for (const [re, why] of [
-    [/class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded"/, "no accessible expand control"],
-    [/class: "sf-status-close", type: "button", "aria-label": "Close the status detail"/, "no visible dismiss (P1)"],
-    [/trackOverlay\("surface-status", \(\) => setStatusOpen\(false\)\)/, "the detail is not on the one Escape stack (T-900)"],
-    [/statusClose\.addEventListener\("click", \(\) => setStatusOpen\(false\)\)/, "the dismiss does not close the detail"],
-  ] as const) assert.match(host, re, why);
-  // Dismissing returns to the LINE, never to nothing: nothing removes or hides `statusEl` itself.
-  assert.doesNotMatch(host, /statusEl\.hidden|statusLine\.hidden|statusEl\.remove\(\)/,
-    "the status line itself can be hidden, which would switch an honesty statement off");
+    [/sf-status-toggle/, "the `More` toggle is still built"],
+    [/sf-status-body/, "the expansion body is still built"],
+    [/sf-status-close/, "the expansion's dismiss is still built"],
+    [/class: "sf-chrome"/, "the app still mounts the white per-viewport panel"],
+    [/setStatusOpen/, "the expand/collapse machinery is still here"],
+  ] as const) assert.doesNotMatch(host, re, why);
+  // The app no longer hands `SurfaceChrome` an element at all (the developer preview still does).
+  assert.doesNotMatch(host, /\bchrome, minimapPx|chromeAction, onChromeAction/,
+    "the surface still mounts the per-viewport chrome rows");
+
+  // There: the per-pane scale layer, placed inside the render frame from that frame's own statuses.
+  assert.match(host, /class: "sf-scales"/, "no scale-bar layer over the canvas");
+  assert.match(host, /new ScaleBars\(scaleEl\)/);
+  assert.match(host, /const scaleFrame = \([^]*?statuses: readonly PaneStatus\[\],[^]*?\) => \{/,
+    "the scale bars are not built from the frame's own per-viewport statuses");
+  assert.match(host, /scaleFrame\(panes, hPx, dpr, statuses\);/,
+    "the scale bars are not laid out in the render frame (a poll would state last second's zoom)");
+  assert.match(host, /scaleMarkOf\(/);
+  // The KEPT readout: where the viewport is looking, and peak dB only under the pointer.
+  assert.match(host, /class: "sf-where"/, "the centre/span/LIVE readout was dropped, not kept");
+  assert.match(host, /setText\(whereEl, \[st\.freqLabel, st\.timeLabel/,
+    "the kept readout is not written from the frame's own status");
+  assert.match(host, /hoverPeak = slicePk \?/, "peak dB is not carried to the hover readout");
+  assert.match(host, /const peak = hoverPeak && hit && hit\.pane\.id === preview\?\.activePane/,
+    "peak dB is not scoped to the pane under the pointer");
+
+  // T-476/T-496's device controls kept their arithmetic and moved to where Go-to lives.
+  assert.match(host, /paneRetune: \(\) => chromeAction\(pv\.activePane\)/);
+  assert.match(host, /pressPaneRetune: \(\) => pressRetune\(pv\.activePane\)/);
+  assert.match(host, /paneWidths: \(\) => widthActions\(pv\.activePane\)/);
+  assert.match(host, /renderRetune\(\);/, "the cluster's Retune is not re-derived per render frame");
+  const ts = readFileSync("src/app/chrome/map-controls.ts", "utf8");
+  assert.match(ts, /class: "map-glass map-retune"/, "the capture controls have no home under Go-to");
+  assert.match(ts, /retuneGo\.addEventListener\("click", \(\) => \{ if \(!retuneGo\.disabled\) host\.pressPaneRetune\?\.\(\); \}\)/,
+    "the Retune press is not a plain click on a persistent button (T-407: never a gesture threshold)");
+  // A width preset crosses as an OPAQUE key: the cluster routes the press back by the key it was
+  // handed and never parses what it means (the host does, on the other side of the boundary).
+  assert.match(ts, /host\.pressPaneWidth\?\.\(rec\.key\)/);
+  assert.doesNotMatch(ts, /WIDTH_PRESETS|Number\(rec\.key\)/, "the cluster learned what a width preset means");
+
   const css = readFileSync("src/app/centre/centre.css", "utf8");
   assert.match(css, /\.sf-status \{[\s\S]*?max-width: min\(560px, calc\(100% - 80px\)\)/,
     "the status has no width bound, or runs under the right-edge cluster");
-  assert.match(css, /\.sf-status:not\(\[data-open="true"\]\) \.sf-chrome \{[^}]*max-height: 46px/,
-    "the collapsed viewport row is not bounded to a line");
-  // What the collapse may NOT put away: the level/tier (§10.2) and the offer's own sentence, which
-  // is what a press consents to (T-476's painted-offer rule).
-  for (const keep of ["hk-surface-level", "hk-surface-why"]) {
-    assert.doesNotMatch(css, new RegExp(`\\.sf-status:not\\(\\[data-open="true"\\]\\) \\.${keep} \\{[^}]*display: none`),
-      `the collapsed line hides .${keep}`);
-  }
+  assert.match(css, /\.sf-scale \{[\s\S]*?translate: calc\(-100% - 56px\) calc\(-100% - 12px\)/,
+    "the scale block is not anchored inside its pane's bottom-right corner");
+  assert.match(css, /\.sf-scales \{[^}]*pointer-events: none/,
+    "the scale layer can take a pan from the surface under it");
+  assert.doesNotMatch(css, /\.sf-status:not\(\[data-open="true"\]\)/, "the collapse rules survive the retired panel");
 });
 
 // ——— T-955: a painted Go-to offer is re-derived when the radio retunes (by anyone) ———

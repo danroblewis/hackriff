@@ -76,12 +76,46 @@
 .map-goto:focus-within { border-color: var(--amber); }
 .map-hint { color: var(--dim); font-size: 11px; }
 
+/* T-996: the left column under the nudge row — the T-997 inventory pills, the capture block, the Go-to offer and (at or below
+   1180 px) the tool-mode banner — is one STACK in flow (`map-controls.ts`), each block starting where
+   the one above it ended. The fixed `top:` per block it replaces assumed each block's height, and
+   the offer was drawn over the width presets as soon as a block wrapped (400 px). The stack is the
+   only in-flow child of the cluster and is itself pointer-transparent; it starts under the nudge row
+   and so below the top-right cluster, which is why its blocks may use the full width. */
+.map-ctl > .map-stack {
+  position: static; pointer-events: none; margin-top: 88px; width: min(460px, 100%);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+.map-stack > * { pointer-events: auto; max-width: 100%; box-sizing: border-box; }
+.map-stack > [hidden] { display: none; }
+
 /* The retune offer under Go-to. Never faded (§10.2). */
-.map-offer { top: 44px; left: 0; display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; max-width: min(460px, calc(100% - var(--topright-w, 132px))); border-color: var(--amber); }
+.map-offer { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-color: var(--amber); }
 .map-offer-why { flex: 1; min-width: 0; font-size: 11.5px; }
 .map-offer-go { min-height: 28px; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
 .map-offer-go:disabled { opacity: .5; cursor: not-allowed; }
 .map-offer-x { min-width: 28px; min-height: 28px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+
+/* T-996: the active viewport's capture controls, under the nudges — "the Retune button stays where
+   Go-to lives". Two small rows: the persistent Retune with the destination it would take (the
+   painted-offer rule, T-476/T-407: a press lands where the row SAID, so the sentence is on screen
+   beside the button, never only in a tooltip), and the capture-width presets. Never faded: it is a
+   device command with a stated destination (§10.2). Hidden entirely when the host offers none. */
+.map-retune { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px; border-color: var(--amber); }
+.map-retune-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.map-retune-why { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-retune-go {
+  flex: none; min-height: 26px; border: 1px solid var(--amber); color: var(--amber);
+  background: var(--amber-soft); border-radius: 6px; padding: 2px 10px; cursor: pointer; font: 12px var(--ui);
+}
+.map-retune-go:disabled { opacity: .5; cursor: not-allowed; }
+.map-widths { display: flex; gap: 4px; flex-wrap: wrap; }
+.map-width {
+  min-height: 24px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 6px;
+  background: none; color: var(--muted); font: 11px var(--mono); cursor: pointer;
+}
+.map-width:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+.map-width:disabled { opacity: .45; cursor: not-allowed; }
 
 /* Layers: top-right, its panel beneath it. T-1025: eight chips in a row, not one box. */
 .map-topright { top: 0; right: 0; }
@@ -113,7 +147,7 @@
 .map-pane-item:disabled { opacity: .5; cursor: not-allowed; }
 
 /* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
-.map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
+.map-mode { position: absolute; top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
 
 /* Zoom: right edge, vertically centred. */
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
@@ -193,14 +227,15 @@
 .map-nudge { top: 44px; left: 0; display: flex; align-items: center; padding: 3px 6px; min-height: 36px; box-sizing: border-box; }
 .map-nudge .nudge-btn { min-height: 28px; min-width: 28px; }
 
-/* ---- T-997: the inventory pills, the left stack's third row -------------------------------------
+/* ---- T-997: the inventory pills, the first row of the left stack -------------------------------
    The lists' counts used to be a chip pinned at MID-HEIGHT on the left edge (T-895) — over each
    pane's time ruler (`surface/hud.ts` prints the time labels down that edge), belonging to no
    cluster. They are two small pills here instead: docked under Go-to and the nudge row, in one
    fixed position at every width, fading with the rest of the cluster (`map-fade`), and each opening
    the bottom sheet on its own list (`chrome/inv-pills.ts`). No hamburger glyph: the pills ARE the
-   affordance. Every row below them moves down by one row's height — the left stack is a stack. */
-.map-inv { top: 88px; left: 0; display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
+   affordance. T-996: they are the FIRST block of `.map-stack` (in flow, not a `top:` constant), so
+   the capture block, the Go-to offer and the mode banner start under them and never overlap them. */
+.map-inv { display: flex; align-items: center; gap: 2px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; }
 .map-pill { display: flex; align-items: baseline; gap: 4px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 7px; background: none; color: var(--text); font: 12px var(--ui); cursor: pointer; }
 .map-pill:hover { background: var(--raise); }
 .map-pill:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
@@ -209,13 +244,13 @@
 .map-pill-n.confirmed { color: var(--teal); }
 .map-pill small { color: var(--muted); font-size: 11px; }
 .map-pill-sep { color: var(--dim); }
-.map-offer { top: 132px; }
 
 /* Not enough room for the pill between Go-to and the cluster: it drops under the cluster (right),
    beside the nudges (left); the tool-mode banner moves below both rows. */
 @media (max-width: 1180px) {
   .map-status { top: 44px; left: auto; right: 0; transform: none; max-width: calc(100% - 8px); }
-  .map-mode { top: 176px; }
+  /* T-996: the banner joins the left column's stack, under the pills, the capture block and the offer. */
+  .map-stack > .map-mode { position: static; transform: none; }
 }
 @media (max-width: 900px) {
   .map-status .readouts { display: none; }
@@ -233,10 +268,8 @@
   .map-nudge .nudge-label { display: none; }
   .map-nudge .nudge-btn { padding: 2px 4px; }
   .map-status { top: 88px; gap: 6px; padding-right: 8px; }
+  /* The status pill takes the row at 88 px here and is as wide as the phone, so the whole stack —
+     the T-997 pills first — starts under it: one position per width, never an overlap. */
+  .map-ctl > .map-stack { margin-top: 132px; }
   .map-status .mode { padding: 4px 7px; font-size: 11.5px; }
-  /* T-997: the status pill takes the row at 88 px here and is as wide as the phone, so the pills
-     drop under it rather than beside it — one fixed position per width, never an overlap. */
-  .map-inv { top: 132px; }
-  .map-offer { top: 176px; }
-  .map-mode { top: 220px; }
 }
