@@ -28001,6 +28001,13 @@ tasks:
       FOUND 2026-09-25 by the explorer: Explore -> "Go to frequency" 162.2M offers "Retune to 162.2000 MHz at 15.819 MHz span" (shots/0416-goto-offer.png) - the retune offer takes its span from the current VIEW width, so accepting it from a zoomed-out view puts the HackRF at 16 Msps. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 03:43-06:43, live HackRF in SF, staging build), screenshots in ~/.hackriff-ops/explorer/shots/, server log ~/.hackriff-ops/explorer/hk-serve-run1.log.
       DELIVER: the go-to retune offer proposes the device's default working span (or keeps the current tuned span) - never the view width - snapped to a realizable config through the gated DeviceAction path (CLAUDE.md navigation rules); the view may stay wide. Assert the request the client builds (ui/test); red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 06:44).
+      The floating Go-to's retune offer was planned via paneRetuneOffer over the pane's own viewport box, so a wide/zoomed-out view (e.g. 15.819 MHz) leaked straight into the DeviceAction's spanHz, retuning the HackRF to ~16 Msps for a plain frequency jump. Added surface/retune.ts's goToSpanHz(grid, defaultSpanHz), which returns the front end's own current tuned span (grid.current.span_hz) when known, else a caller-chosen default (surface.ts's GOTO_DEFAULT_SPAN_HZ, reusing an existing WIDTH_PRESETS_HZ entry) -- never the view. surface.ts's gotoOffer/press path now goes through paneWidthOffer/acceptPaneWidth (T-496's named-span-at-pane-centre path) instead of paneRetuneOffer, keeping the covering-window check (still view-based, since that is a screen fact) but sourcing the requested span from goToSpanHz. The pane row's own persistent Retune control (which legitimately targets the viewport) is untouched. The view may stay wide, as the ticket requires.
+      Tests: cd ui && npx tsc --noEmit -p tsconfig.json -> exit 0 (typecheck clean); cd ui && npm test -- surface-retune app-map-controls -> exit 0 (36 + 10 tests passed, including the new T-947 red-then-fixed pair); cd ui && npm test -> exit 0 (85/85 UI test files passed)
+      precheck exit 0
+      Commits: a5e4658f
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-948
     milestone: M2-hardening
     title: DC point listed as a candidate at the tuned centre; a steady -57.5 dB line at 161.984 MHz never detected or explained
