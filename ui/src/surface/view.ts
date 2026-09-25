@@ -86,6 +86,10 @@ export interface SurfaceViewOptions {
    * by the same `toClip` on the same frame and **cannot** use two mappings.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /** **Is this pane's coverage-fog layer shown?** (T-807 / MAP-07). Asked per pane, per frame, and
+   * handed to the data pass as `PaneView.fog` — a cell-rule flag, never geometry. Omit it and the
+   * fog is shown everywhere, which is every host before T-807. */
+  fog?: ((paneId: string) => boolean) | null;
   /**
    * **The instantaneous spectrum trace** (T-457, `./trace.ts`): quads for the strip carved off the
    * top of each pane, in that strip's own clip space.
@@ -172,6 +176,8 @@ export class SurfaceView {
   private readonly canvas: HTMLCanvasElement;
   /** Per-pane marks, re-derived every frame. See [[SurfaceViewOptions.marks]]. */
   marks: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /** Per-pane coverage-fog visibility (T-807), asked every frame. Null = shown on every pane. */
+  fog: ((paneId: string) => boolean) | null;
   /** Per-pane spectrum trace, re-derived every frame. See [[SurfaceViewOptions.trace]]. */
   trace: ((pane: PaneView, edgeNs: number, report: PaneReport, strip: PaneRect) => readonly TracePath[]) | null;
   /** Height of the trace strip above each pane, device px. 0 hides it and returns the space. */
@@ -184,6 +190,7 @@ export class SurfaceView {
 
   constructor(opts: SurfaceViewOptions) {
     this.marks = opts.marks ?? null;
+    this.fog = opts.fog ?? null;
     this.trace = opts.trace ?? null;
     this.tracePx = opts.tracePx ?? 0;
     this.hudAxes = opts.hudAxes ?? !!opts.hud;
@@ -239,7 +246,12 @@ export class SurfaceView {
     // per frequency window instead of one strip trying to be true of two.
     const traceH = this.trace ? Math.max(0, Math.min(Math.floor(this.tracePx), Math.floor(paneH / 3))) : 0;
     const paneViews = this.panes.views(edgeNs, w, paneH)
-      .map((v) => ({ ...v, rect: { ...v.rect, y: v.rect.y + mapH, h: Math.max(1, v.rect.h - traceH) } }));
+      .map((v) => ({
+        ...v, rect: { ...v.rect, y: v.rect.y + mapH, h: Math.max(1, v.rect.h - traceH) },
+        // T-807: the pane's coverage-fog layer, asked every frame like `marks`. The minimap is not
+        // asked: it is where coverage is surveyed at a glance, so its fog is always shown.
+        ...(this.fog ? { fog: this.fog(v.id) } : {}),
+      }));
     const mapRect: PaneRect | null = mapH > 0 ? { x: 0, y: 0, w, h: mapH } : null;
     // `scales: false` (T-528): the map is another viewport onto the same surface and is drawn with
     // the same ramp and the same range — but it is a viewport over the WHOLE surface, so it may not
