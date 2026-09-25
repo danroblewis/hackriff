@@ -28735,7 +28735,7 @@ tasks:
   - id: T-974
     milestone: M2-hardening
     title: hk-cli api_contract tests fail alone in worker worktrees but pass in the merge gate (retune stream, recipe routes, ws header, band-collapsed activity)
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: DEFLAKE-API-CONTRACT
@@ -28761,6 +28761,7 @@ tasks:
       Commits: 333bc083
       Observed, not chased: hk-cli api_contract inventory_and_analysis_strongest_find_the_blind_fm_station fails ALONE on main's code (3 of 6 runs with my changes reverted, 2 of 4 with them): api_contract.rs:1719 'two boxes served stacked in time and frequency' — two candidates, 99.8309-99.8517 MHz over 1790360024.517-027.598 s (count 7) and 99.8363-99.9161 MHz over 1790360024.389-026.650 s (count 4), both closed intervals, both served by /api/inventory. The T-369 overlap re-analysis did not resolve the pair; looks like a real product defect in overlap resolution, not a flake. | hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops fails ALONE 3/3 on this worktree and 2/2 on base code with my changes reverted: decoded.rs:1529 panics with CaptureInfo {... frames: 31-32, dropped_records: 0, end_reason: Some("finished")} — the injected disk stall produced no counted drops. | planning_tune still prefers the run-wide published tune (Counters::tune), which after a re-plumb keeps the PREVIOUS window's tune until the new segment's first block; a pipeline started in that interval is planned against the old window. Not observed failing; the pipeline thread re-plans on its chunks.
       Resources: 218 CPU-s, peak 2.9 GB
+    commit: deebfca2
   - id: T-975
     milestone: MAUTO
     title: Explorer P25 capture into fixtures/ with hidden truth (852.859 MHz intermittent C4FM, 2.4 Msps) + a P25 sync reference oracle
