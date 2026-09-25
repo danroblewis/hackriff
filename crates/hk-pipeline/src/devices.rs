@@ -434,9 +434,10 @@ pub(super) fn finish(common: &Common, errors: &mut Vec<String>) {
         .into_iter()
         .flatten()
         .max();
-        // The reader's own rule (`crate::history::run`), taken once for every front end.
+        // The reader's own rule (`crate::history::run`), taken once for every front end —
+        // including T-942's: through the last frame, never past it.
         if let Some(t) = latest
-            && let Err(e) = p.seal_through(t.saturating_add_nanos(3_600_000_000_000))
+            && let Err(e) = p.seal_all(t)
         {
             errors.push(format!("sealing history: {e}"));
         }
