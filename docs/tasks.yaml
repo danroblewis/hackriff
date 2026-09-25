@@ -27489,6 +27489,14 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user directive 2026-09-25 02:25 (explorer) via supervisor.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 04:11).
+      Added a RADIO-OWNER tile (holder, until, staging live/replay) and an EXPLORER row (current target, phase, journal tail) to the ops dashboard (ops/monitor.py), reading $HACKRIFF_OPS/radio-lock via hkpy.radio (T-922) and the explorer journal/wrap-up marker per .claude/agents/explorer.md (T-923). New radio_status()/explorer_status() functions feed data.json alongside stage_status(); the existing client-side tick() renders the two new cards, following the Staging server card's log-tail pattern. New test file py/tests/test_monitor_radio_explorer.py covers free/held/stale radio-lock states and no-window/running/wrap-up/summarized/ended explorer phases. Both are read-only - no explorer/radio code was touched, only the dashboard that displays their state.
+      Tests: uv run --locked --project py python -m pytest py/tests/test_monitor_radio_explorer.py py/tests/test_monitor_layout.py -q -> exit 0 (13 passed); cd py && uv run --locked ruff check . -> exit 0 (All checks passed); for f in ops/*.py; do python3 -m py_compile "$f" || exit 1; done -> exit 0 (ops/monitor.py compiles)
+      precheck exit 0
+      Commits: dd35f3b8
+      Observed, not chased: py/tests/test_monitor_flow.py::test_heavy_builds_run_in_a_child_and_errors_surface fails on unmodified main too (FileNotFoundError: /Users/daniellewis/hackriff, a hardcoded macOS path) - reproduces identically before my change (verified via git stash), so not mine; pre-existing environment mismatch on this Linux worktree, not scoped to T-925.
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-926
     milestone: MAUTO
     title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
