@@ -749,3 +749,15 @@ def test_an_over_budget_episode_ends_in_one_recovered_line():
     assert not rec[0]["key"].startswith(__import__("alert").WAKE_PREFIXES)
     rules, _, _ = fire(rows, since, 3 * W.LOAD_FOR + 10, load=1.0)
     assert "recovered" not in rules                                    # once per episode
+
+
+def test_the_explorer_windows_server_and_agent_are_the_explorers():
+    """2026-09-25 04:0x: the explorer's hk serve on the HackRF (ppid 1, started by the agent) alarmed as unowned."""
+    rows = table(
+        row(63953, 1, "/Users/d/.hackriff-ops/target-serve/release/hk serve --hackrf --bind 127.0.0.1:8897 "
+                      "--data-dir /Users/d/.hackriff-ops/explorer/data --center-hz 98000000", cpu=387.0),
+        row(62901, 62445, "claude --agent explorer --model opus --effort high", cpu=20.0),
+        row(62445, 1, "bash /Users/d/hackriff/ops/explorer-window.sh --window 3h"),
+    )
+    agg, unowned = W.owners(rows, {})
+    assert set(agg["explorer"]["pids"]) == {63953, 62901, 62445} and unowned == []
