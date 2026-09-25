@@ -76,7 +76,7 @@ test("default collapsed; the chip opens the lists, the close and Escape put the 
   const g = globalThis as Record<string, unknown>;
   const saved = { document: g.document, window: g.window, fetch: g.fetch };
   const winHandlers: Record<string, Handler[]> = {};
-  const bottoms: Record<string, number> = { ".app > .bar": 48, ".sf-bar": 150, ".map-goto": 210 };
+  const bottoms: Record<string, number> = { ".app > .bar": 48, ".map-goto": 150, ".map-topright": 210 };
   g.document = {
     createElement: (t: string) => new FakeEl(t),
     querySelector: (sel: string) => sel in bottoms ? { getBoundingClientRect: () => ({ height: 30, bottom: bottoms[sel] }) } : null,
@@ -106,7 +106,7 @@ test("default collapsed; the chip opens the lists, the close and Escape put the 
     chip.fire("click");
     assert.ok(side.classes.has("is-open") && !side.classes.has("is-collapsed"));
     assert.equal(chip.attrs["aria-expanded"], "true");
-    assert.equal(side.style.props["--side-top"], `${210 + SIDE_TOP_GAP_PX}px`, "placed below Go-to on narrow screens");
+    assert.equal(side.style.props["--side-top"], `${210 + SIDE_TOP_GAP_PX}px`, "placed below the lowest floating top chrome on narrow screens");
     close.fire("click");
     assert.ok(side.classes.has("is-collapsed") && !side.classes.has("is-open"), "the close puts the map back");
 
@@ -138,10 +138,11 @@ test("layout: collapsed takes no map but the chip (≤ 56 px); open starts below
   assert.match(css, /\.side\.is-collapsed > :not\(\.side-chip\)[^{]*\{ display: none; \}/);
   assert.match(css, /\.side\.is-open > \.side-chip \{ display: none; \}|\.side\.is-open > \.side-chip[^{]*\{ display: none; \}/);
   assert.doesNotMatch(css, /\.side[^{]*\{[^}]*opacity/, "collapsing is not a fade");
-  // The open column starts below the measured top chrome (bar, toolbar, Go-to), so neither the
-  // toolbar nor the floating cluster gives up an inset for it (the inset squeezed T-528's toolbar).
+  // The open column starts below the measured top chrome (bar, Go-to, top-right cluster), so the
+  // floating cluster gives up no inset for it (an inset squeezed T-528's old toolbar). T-882: the
+  // toolbar row itself is gone, so nothing styles it.
   assert.match(css, /\.side\.is-open \{ top: var\(--side-top/);
-  assert.match(css, /\.sf-bar \{ padding-left: 12px;/);
+  assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ""), /\.sf-bar/);
   assert.match(ctl, /left: var\(--panel-gap, 8px\);/);
   // Narrow open overlay: clear of the zoom/FAB gutter and above the sheet's peek strip.
   assert.match(css, /\.side\.is-open \{ width: auto; right: 64px; bottom: calc\(70px \+ 56px \+ 8px\)/);
