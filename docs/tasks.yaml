@@ -18708,7 +18708,7 @@ tasks:
   - id: T-566
     milestone: MAUTO
     title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: API
     model: opus
@@ -18753,6 +18753,7 @@ tasks:
       Observed, not chased: Acceptance item 5's second half is not implementable in this build: `GET /api/inventory/{id}/pipelines` does not exist, and neither does `CandidatePipeline` (grep for either across crates/, docs/api.md and docs/07 returns nothing) - it is ADR-0015 §11's object, owed by a later MAUTO ticket. The `trace_ref: {job_id, node_id}` delta should ride with whichever ticket creates that route. | Two outcome vocabularies exist for the same ADR-0021 concept: the live job trace (hk_synth::trace::OutcomeKind) serialises snake_case (`pruned_floor`), while the stored emitter_synthesis row (hk_model::repo::synthesis::Outcome) serialises kebab-case (`pruned-floor`). Both spellings are documented correctly in their own sections of docs/api.md (the trace fetch section vs the AnalyzeResult TraceNode section), and the trace route's `?outcome=pruned-floor` is a 400 while `?outcome=pruned_floor` is a 200 - pinned by the new contract assertions. Worth unifying deliberately rather than by accident. | `/api/inventory`'s 400s carry only `{"error": ...}` with no `code` field (unlike /api/analyze's `{error, code}`); the new filter follows that route's existing shape, so its contract assertions check the status only, as the neighbouring `status=bogus` / `relations=bogus` assertions do.
       Use cases: RESEARCH-001, RESEARCH-003, RESEARCH-007
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: dd8274c8
   - id: T-567
     milestone: MAUTO
     title: "MAUTO: the sealed Resolution - unknown as a durable finding, not-searched as its own state, and the shuffled-null control that caps a manufactured verdict"
