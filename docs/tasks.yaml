@@ -26446,7 +26446,7 @@ tasks:
   - id: T-886
     milestone: M3
     title: "T-878 follow-ups: merged-away tracks lose their classification row, posterior hidden on tied emitters, classify chain memory at 20 Msps, first-come classify coverage"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-878
@@ -26473,6 +26473,7 @@ tasks:
       Commits: 0f789554
       Observed, not chased: GET /api/inventory/<id>/classification serves classification: null on a rank-3-tied emitter, because T-878's restatement is written through append_classification_ranked (legacy-shaped: family/confidence/open-set only), so the current row carries no M3 detail even when the chain's original row did. Consistent with the route's documented meaning of null and now harmless (latest carries the posterior, and the route already tells clients to read latest first), but if a chain writes a full M3 row the restatement still drops its distribution. Evidence: crates/hk-pipeline/src/classify.rs:185 (append_classification_ranked of r.classification) and the assertion at crates/hk-api/tests/inventory_classification_api.rs (t886 test, 'classification is null here'). | At 20 Msps the classify chain's buffer is bound by fsk::MAX_RETAIN_SAMPLES (16 Msamples = 0.8 s), which is BELOW the member-box arrival lag measured here (p90 1.40 s, max 1.59 s at 2.4 Msps). So at the HackRF's full rate a classify chain will often no longer hold a group's samples when its box arrives and will count classify_missed - a pre-existing property of the ceiling, not introduced by this ticket (the new sizing never asks for more than the ceiling). Evidence: crates/hk-pipeline/src/chains/fsk.rs:85 and the MEMBER_LAG_S measurement recorded in crates/hk-pipeline/src/chains/classify.rs.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 6d32083c
   - id: T-887
     milestone: M3
     title: "Device-path FSK features disagree with the dev grid: cyclic_db ~7 dB low on short bursts, sigma_aa ~2x - the rows T-877 cannot claim"
