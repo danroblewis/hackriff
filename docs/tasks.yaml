@@ -26727,6 +26727,23 @@ tasks:
 
       2026-09-24 coordinator, from T-909's quick fix (task-t809 780b449d): hover/select placement still keys on the box CENTRE - a large box whose centre frequency is outside the pane but which overlaps it gets no hit area. Place the hit area from the box's visible intersection with the pane (clip the polygon), not from its centre.
     effort_reason: a symbolization model on the per-frame render pass (shared-time-axis invariant) across box, generalization, hit-test and labels
+  - id: T-914
+    milestone: MMAP
+    title: app-surface.e2e.mjs layers-menu checks derive the overlay list from the registry, not a literal - every layer ticket (T-811/T-812/T-821/T-897) stops being blamed
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: UI-E2E
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      SPEC UPDATE (supervisor 2026-09-24 20:10: "the list comes from the registry, not a literal"). ui/e2e/app-surface.e2e.mjs's T-806 layers-menu checks ("overlays in paint order, defaults on", "a split must inherit the registry", the toggled pane's overlays) hard-code the rendered overlay list [["rules", true], ["detections", true]]. T-806's registry (ui/src/surface/layers.ts) already declares research/artifacts/priors/pins, and the menu lists the overlays that have a renderer registered - so EVERY layer ticket that registers a renderer (T-811 artifacts, T-812 priors, T-821 research, later T-897 paths) fails the literal, and their literal edits conflict with each other. The merge runner then misattributed it as a main-side defect (19:59 BLOCKED_ON_SPEC holding T-821). Same family: T-882's app-centre-signals source check matched the exact overlayFns literal (fixed on task-t882 a1a8f000).
+      DELIVER: the checks derive their expectation from the app's own registry - the registered/rendered overlay layers in the registry's paint order (z) with each one's declared visibleByDefault (read from the page; a read-only accessor if needed; thin client) - and assert the menu shows EXACTLY that, plus split inheritance and per-pane toggles per layer. Equally strict: red if the menu drops a registered layer, reorders, or shows a wrong default (prove each by injected mutation); plus a fixed assertion that rules and detections appear first and on, so it cannot pass vacuously. In flight on task-deflake-app-surface-overlays (built on task-t811). No layer ticket should need to touch this spec afterwards.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface.e2e.mjs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216; just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY coordinator + supervisor 2026-09-24 20:10.
+    branch: task-deflake-app-surface-overlays
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
