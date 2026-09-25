@@ -27490,7 +27490,8 @@ tasks:
   - id: T-926
     milestone: MAUTO
     title: "P1: RDS decodes across the whole FM band unprompted - measure the live 88-108 MHz ratio (present / pilot+RDS / PI-PS decoded), fix detection->WFM->RDS across ALL detections to >= 90 %, per-station capture set as the guard"
-    status: todo
+    status: in-progress
+    branch: task-t926
     priority: high
     deps:
     - T-922
