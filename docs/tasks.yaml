@@ -23808,7 +23808,7 @@ tasks:
   - id: T-807
     milestone: MMAP
     title: 'Coverage-fog layer: grey/unknown/unobserved/excluded as an explicit toggleable figure-ground plane'
-    status: todo
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: opus
@@ -23847,6 +23847,7 @@ tasks:
       Observed, not chased: task-t807 was originally cut from provisional batch 51f73939 which was later rewound; any other branch cut from that tip (the work runner's cut point around 16:2x on 09-24) carries the same ungated merges and will look like it 'conflicts' or bloat its diff. | ui/e2e/app-surface.e2e.mjs, including the new T-807 spec, was NOT verified in a browser. `node e2e/run.mjs app-surface` failed all 6 tests (the 'surface to finish addressing' waits timed out at 60 s, exceptions []) at load average 43-55, both WITH this change and with ui/src checked out at HEAD~1 (the baseline). So the failure is environmental (load, or a stale local target/debug/hk), not this diff. The coordinator's gate should run it; the T-806 spec's overlays selector is now scoped to [data-axis=overlays] because the menu gained a Coverage section. | No Rust crate touched, so `just precheck` reduced to `cargo fmt --all --check` (exit 0). Its clippy half with no crates would have linted the whole workspace, so it was not run. | docs/24 §3a's 'base recedes' (desaturating the ramp) was deliberately NOT done here: it would move the ramp that the shadow's brightness-ceiling guarantee and the 'tier never moves the ramp' rule depend on. That belongs to MAP-13 (T-813), the figure-ground pass across all layers.
       Use cases: AWARE-042
       Resources: 405 CPU-s, peak 2.5 GB
+    commit: e219d285
   - id: T-808
     milestone: MMAP
     title: 'Detections/events layer: confirmed prominent, candidate weaker, never stacked'
