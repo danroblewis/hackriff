@@ -29811,7 +29811,7 @@ tasks:
   - id: T-1024
     milestone: MLIVE
     title: "Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)"
-    status: in-progress
+    status: done
     branch: task-t1024
     priority: medium
     deps: []
@@ -29827,6 +29827,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, the round-trip test, just precheck hk-store), then HAND BACK with the table. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (tile storage ruling): Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)
+    commit: 1b996394
   - id: T-1025
     milestone: MMAP
     title: "Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them"
