@@ -1315,3 +1315,44 @@ def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_chi
     R.os.killpg(pid, signal.SIGTERM)
     t0 = time.time()
     assert R._gone(pid, wait_s=10) and time.time() - t0 < 5
+
+
+def test_a_remote_run_is_an_ssh_session_whose_hangup_stops_the_remote_group(tmp_path, monkeypatch):
+    """User, 2026-09-24 23:35: worker agents on a second computer. The local claim pid is `sleep | ssh`; the remote
+    wrapper runs the worker in its own session, kills it when stdin closes, and pushes the branch when it ends."""
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "ubuntu@10.0.0.9"}}))
+    w = R.remote_wrapper("/r/.claude/worktrees/t9", "task-t9", "exec 'claude' '-p' < '/o/work/T-9/brief.md'",
+                         {"HK_WORKER": "1", "CARGO_BUILD_JOBS": "6"})
+    assert w.startswith("setsid bash -c ") and "</dev/null & p=$!" in w
+    assert "( cat >/dev/null; kill -TERM -- -$p 2>/dev/null ) &" in w                  # this Mac hung up -> stop it
+    assert "push -q -f origin HEAD:refs/heads/task-t9" in w and w.endswith("exit $rc")
+    assert "HK_WORKER=1" in w and "cd /r/.claude/worktrees/t9" in w
+    argv = R.ssh_argv("box", "true")
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-2:] == ["ubuntu@10.0.0.9", "true"]
+
+
+def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-9, T-11")
+    assert R.host_for({"id": "T-9"}) is None                                          # no host configured
+    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "u@h"}}))
+    assert R.host_for({"id": "T-9"}) == "box" and R.host_for({"id": "T-11"}) == "box"
+    assert R.host_for({"id": "T-10"}) is None
+
+
+def test_a_finished_remote_run_is_synced_back_before_the_normal_reap(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"box": {"ssh": "u@h"}}))
+    monkeypatch.setattr(R, "WORKDIR", str(tmp_path / "work"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    calls = []
+    monkeypatch.setattr(R, "sh", lambda args, cwd=R.REPO, timeout=120, check=False: calls.append((args, cwd)) or "")
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: calls.append((args, None)))
+    R.sync_back({"host": "box", "ticket": "T-9", "branch": "task-t9", "wt": str(wt)})
+    flat = [" ".join(a) for a, _ in calls]
+    assert flat[0] == "git fetch -q box +refs/heads/task-t9:refs/remotes/box/task-t9"
+    assert calls[1] == (["git", "reset", "-q", "--hard", "box/task-t9"], str(wt))         # this Mac's worktree
+    assert any(a[0] == "scp" and a[-1].endswith("/work/T-9/handback.json") for a, _ in calls)

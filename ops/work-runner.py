@@ -37,6 +37,7 @@ import json
 import zlib
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -407,6 +408,94 @@ def clone_cmd(wt):
     return f'[ -d "{REPO}/target" ] && [ ! -e "{wt}/target" ] && cp -c -R -p "{REPO}/target" "{wt}/target"; '
 
 
+# ---------- remote hosts (user, 2026-09-24 23:35: worker agents on a second computer) ----------
+# A remote host only WORKS - builds, targeted tests, hands back; the Mac alone gates and merges. The box keeps the
+# Mac's paths (REPO, $HACKRIFF_OPS, the worktrees), so a brief, a hand-back path or a log line needs no translation.
+# The ssh session IS the run: its stdout is out.json and its stderr run.log, streamed into this Mac's work dir as
+# for a local worker (liveness, the dashboard's log view and the result files unchanged); killing its local
+# process group closes the remote side's stdin, and the remote wrapper then stops the whole remote run.
+HOSTS_FILE = f"{S}/hosts.json"      # {"box": {"ssh": "ubuntu@10.198.1.109"}}; absent = no remote host
+SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]
+
+
+def hosts():
+    try:
+        return json.load(open(HOSTS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def host_for(t):
+    """Stage 1: a ticket goes remote only when named by hand (WORK_REMOTE_TICKETS=T-nnn,...)."""
+    named = {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+    h = hosts()
+    return next(iter(h), None) if h and t.get("id") in named else None
+
+
+def ssh_argv(host, remote_cmd):
+    return ["ssh", *SSH_OPTS, hosts()[host]["ssh"], remote_cmd]
+
+
+def remote_wrapper(wt, branch, script, env):
+    """The remote side of a run: the worker in its own session, stopped when this Mac hangs up; the branch pushed to
+    the mirror when it ends, whatever its outcome (the Mac fetches it before the reap)."""
+    envs = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+    inner = f"cd {shlex.quote(wt)} && exec env {envs} nice -n 5 bash -c {shlex.quote(script)}"
+    return (f"setsid bash -c {shlex.quote(inner)} </dev/null & p=$!; "
+            f"( cat >/dev/null; kill -TERM -- -$p 2>/dev/null ) & w=$!; "
+            f"wait $p; rc=$?; kill $w 2>/dev/null; "
+            f"git -C {shlex.quote(wt)} push -q -f origin HEAD:refs/heads/{branch} >&2; exit $rc")
+
+
+def remote_prepare(host, wt, branch, d):
+    """Mirror the gated base and this branch to the box, make the worktree there, copy LFS objects."""
+    base = merge_target()
+    sh(["git", "push", "-q", "-f", host, f"{base}:refs/heads/main"], check=True)
+    if sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
+        sh(["git", "push", "-q", "-f", host, f"{branch}:refs/heads/{branch}"], check=True)
+    sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
+        f"{hosts()[host]['ssh']}:{REPO}/.git/lfs/objects/"], timeout=1800, check=True)
+    q = shlex.quote
+    sh(ssh_argv(host, f"set -e; cd {q(REPO)}; git fetch -q origin; mkdir -p {q(d)}; "
+                      f"if [ ! -d {q(wt)} ]; then if git rev-parse -q --verify origin/{branch} >/dev/null; "
+                      f"then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
+                      f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; fi; "
+                      f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true"), timeout=600, check=True)
+
+
+def remote_put(host, path, text):
+    p = subprocess.run(ssh_argv(host, f"mkdir -p {shlex.quote(os.path.dirname(path))} && cat > {shlex.quote(path)}"),
+                       input=text, text=True, capture_output=True, timeout=120)
+    if p.returncode:
+        raise RuntimeError(f"remote_put {host}:{path}: {p.stderr.strip()[:200]}")
+
+
+def remote_popen(host, wt, branch, script, env, out, err):
+    """The local end of a remote run: `sleep | ssh` in its own session - the claim's pid; stdin held open by sleep."""
+    ssh = " ".join(shlex.quote(a) for a in ssh_argv(host, remote_wrapper(wt, branch, script, env)))
+    return subprocess.Popen(["bash", "-c", f"sleep 2147483647 | {ssh}"], stdin=subprocess.DEVNULL, stdout=out,
+                            stderr=err, start_new_session=True)
+
+
+def sync_back(c):
+    """A remote run ended: its branch into this Mac's worktree, its handback.json into the work dir - then the
+    normal reap judges it exactly as a local run."""
+    host, tid, branch, wt = c["host"], c["ticket"], c["branch"], c["wt"]
+    d = f"{WORKDIR}/{tid}"
+    try:
+        sh(["git", "fetch", "-q", host, f"+refs/heads/{branch}:refs/remotes/{host}/{branch}"], check=True, timeout=300)
+        if os.path.isdir(wt):
+            sh(["git", "reset", "-q", "--hard", f"{host}/{branch}"], cwd=wt, check=True)
+        subprocess.run(["scp", *SSH_OPTS, "-q", f"{hosts()[host]['ssh']}:{d}/handback.json", f"{d}/handback.json"],
+                       capture_output=True, timeout=120)
+        dirty = sh(ssh_argv(host, f"git -C {shlex.quote(wt)} status --porcelain --untracked-files=no"), timeout=60).strip()
+        if dirty:
+            log(f"REMOTE {tid}: {len(dirty.splitlines())} file(s) left uncommitted on {host} (not fetched): {dirty[:160]}")
+        log(f"REMOTE {tid}: synced back from {host} at {sh(['git', 'rev-parse', '--short', host + '/' + branch]).strip()}")
+    except Exception as e:
+        log(f"REMOTE {tid}: sync back from {host} FAILED: {e}")
+
+
 def launch(t, dry):
     tid, branch, wt = t["id"], branch_of(t["id"]), worktree_of(t["id"])
     model = MODEL_ALIAS.get((t.get("model") or "sonnet").lower(), "sonnet")
@@ -437,6 +526,21 @@ def launch(t, dry):
     # eight minutes of a tick). So the clone runs INSIDE the worker's own process, which then
     # `exec`s claude under the same pid - the claim's pid is valid from the first second, reap sees
     # it alive through both phases, and the tick returns at once. The brief is read from its file.
+    host = host_for(t)
+    if host:
+        try:
+            remote_prepare(host, wt, branch, d)
+            remote_put(host, f"{d}/brief.md", brief)
+        except Exception as e:
+            log(f"REMOTE {tid}: could not prepare {host} ({e}) - not dispatched this tick")
+            return None
+        script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
+        env = dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
+        p = remote_popen(host, wt, branch, script, env, open(f"{d}/out.json", "w"), open(f"{d}/run.log", "a"))
+        log(f"DISPATCH {tid} [{model}/{effort}] pid={p.pid} -> {host}:{wt} (remote; this Mac holds the ssh session)")
+        return {"ticket": tid, "branch": branch, "wt": wt, "pid": p.pid, "started": time.time(), "model": model,
+                "effort": effort, "group": t.get("parallel_group"), "milestone": t.get("milestone"), "kind": "work",
+                "review": needs_review(t), "session_id": session, "host": host}
     clone = clone_cmd(wt)
     script = clone + "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/brief.md'"
     env = dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt))
@@ -814,6 +918,8 @@ def reap(claims, dry):
             continue
         # finished
         changed = True
+        if c.get("host"):
+            sync_back(c)
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
         # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
         # run for hours beside the gate, which is the 2026-09-22 contention in another form.
@@ -1059,6 +1165,12 @@ def _run_fix(c, n, prompt, out_name=None):
     out_path = f"{d}/{out_name or f'fix{n}.json'}"
     out = open(out_path, "w")
     err = open(f"{d}/run.log", "a")
+    if c.get("host"):      # the session lives on that host: a resume runs there
+        remote_put(c["host"], f"{d}/prompt-{os.path.basename(out_path)}.md", prompt)
+        script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/prompt-{os.path.basename(out_path)}.md'"
+        p = remote_popen(c["host"], wt, c["branch"], script, dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), out, err)
+        log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] on {c['host']}: resumed session {c['session_id'][:8]} pid={p.pid}")
+        return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)
