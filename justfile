@@ -173,6 +173,13 @@ knobs *args:
 hold *args:
     uv run --locked --project py python -m hkpy.knobs hold "$@"
 
+# The HackRF radio lock (T-922): one owner at a time. `take <owner> <duration e.g. 3h> <why>`,
+# `release <owner>`, `status`. ops/stage.sh serves its SigMF replay while anyone else holds it;
+# the watchdog releases a stale one (past `until`) with an alert. See ops/README.md.
+[positional-arguments]
+radio *args:
+    uv run --locked --project py python -m hkpy.radio "$@"
+
 [positional-arguments]
 touchpoints *args:
     uv run --locked --project py python -m hkpy.flow --touchpoints "$@"

@@ -659,6 +659,39 @@ def kill_now(rows: list[dict]) -> list[int]:
     return done
 
 
+# ---------------------------------------------------------------- radio lock (T-922)
+RADIO_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "py", "hkpy", "radio.py")
+
+
+def _radio():
+    """py/hkpy/radio.py by path (stdlib only), so the watchdog needs no uv environment."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hk_radio", RADIO_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def radio_stale(now: float, dry: bool = False) -> list[dict]:
+    """(g) A radio lock past its `until` is released, with a red alert: its owner overran its window
+    or died holding the radio, and staging stays on replay until the lock is gone. `--dry-run`
+    reports without removing it."""
+    try:
+        R = _radio()
+        lock = R.read(S)
+        if lock is None or not R.is_stale(lock, now):
+            return []
+        what = R.describe(lock, now)
+        if not dry:
+            R.release_stale(S, now)
+    except Exception as e:  # never let the lock path stop the watchdog
+        logline(f"radio-lock check failed: {e}")
+        return []
+    return [{"rule": "radio-stale", "level": "red", "key": "watchdog:radio-stale",
+             "title": f"stale radio lock {'would be ' if dry else ''}released: {lock['owner']}",
+             "body": f"{what}\nstaging goes back to LIVE on its next tick (ops/stage.sh)."}]
+
+
 def tick(since: dict, dry: bool = False) -> dict:
     rows = read_ps()
     claims = load_claims()
@@ -669,6 +702,7 @@ def tick(since: dict, dry: bool = False) -> dict:
         load1 = 0.0
     alarms, kills = evaluate(rows, agg, unowned, load1, since, time.time(), claims)
     alarms += liveness(rows, since, time.time(), dry)
+    alarms += radio_stale(time.time(), dry)
     killed = [] if dry else kill_now(kills)
     snap = {
         "ts": time.time(), "at": time.strftime("%Y-%m-%d %H:%M:%S"),
