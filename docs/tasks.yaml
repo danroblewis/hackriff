@@ -24517,7 +24517,8 @@ tasks:
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
-    status: todo
+    status: in-progress
+    branch: task-t824
     priority: high
     parallel_group: MAP-CHROME
     model: opus
