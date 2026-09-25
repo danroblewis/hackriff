@@ -28327,6 +28327,8 @@ tasks:
       FOUND 2026-09-25 by the explorer (AIS 161.975/162.025, SIGNAL-015): there is no AIS (GMSK 9600 Bd, NRZI, HDLC, CRC-16/X.25) recipe or decoder in the app; with AIS on the air the only path would be blind synthesis (no evaluator yet, T-956). No AIS reached this antenna tonight (two oracles; the explorer's numpy AIS oracle is unvalidated), so there is no capture. Evidence: ~/.hackriff-ops/explorer/journal-20260925.md (explorer window 1, 03:43-05:16, live HackRF in SF) - sections named below; fm-gap.json, shots/, hk-serve-run*.log beside it. (section 'AIS').
       DELIVER: an AIS recipe (two-channel, GMSK 9600 demod, NRZI, HDLC bitstuff (T-613's block), CRC-16/X.25, NMEA/AIVDM payload as a stream output) with rate/deviation verified from the signal; a synthetic AIS scene (hidden truth: MMSI, message types) through the mock SDR, blind; add a small independent AIS reference decoder under py/fixtures (like rds_ref.py) validated on the synthetic scene, so the next explorer window has a validated oracle.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: fix round (74142789, Opus, coordinator-manual) after the review FAIL: octets LSB-first in synth/oracle, destuff block gains bit_order msb|lsb (frames mode only, default msb unchanged; ADR-0011 row + corrected sentence), recipe order sync (stuffed line) -> destuff -> crc, frame_bits 1260 (stuffed worst case 1236), oracle raim/comm_state slices fixed, dedupe on the whole report, training search bounded. Validated against GPSD's worked !AIVDM example (decoded independently) and the RFC 1662 residue 0xF0B8; each fix red on a007f7de, green after. Python 109, ais_recipe 3, framing/bitstuff 19. Opus RE-REVIEW PASS. Follow-up filed: shared-flag HDLC framing (noise between bursts can swallow ~half of real frames on air).
     model_reason: "sonnet/high: a well-specified recipe over existing blocks, plus a new validated oracle"
   - id: T-964
     milestone: MSCAN
@@ -28859,6 +28861,27 @@ tasks:
       DELIVER: the ratio table per station (app vs oracle), PI and PS unprompted counts, written to T-926's result; if < 90 %, name the remaining cause per station and file it through the coordinator.
       TESTING PROTOCOL: live measurement only; no code changes expected. HAND BACK with the table.
     blocked_on: "a radio window: ~15 min of the HackRF under the radio lock in a scheduled explorer/nightly window (staging stays live in the daytime); T-926 + T-941 landed"
+  - id: T-1013
+    milestone: MAUTO
+    title: "HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)"
+    status: todo
+    priority: high
+    deps:
+    - T-963
+    parallel_group: HDLC-SHARED-FLAG
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      FOUND BY the Opus re-review of T-963 (2026-09-25, PASS; derived from the code, not yet run on air). Real-air frame loss in HDLC framing for continuously demodulated channels (AIS; the same shape applies to any HDLC recipe over a continuous line, e.g. AX.25/APRS T-952):
+      - After a terminator match, sync_search resets its search (crates/hk-blocks/src/blocks/framing/sync_search.rs:165-166), so a closing flag never also opens the next frame as it does in HDLC.
+      - The two fixed AIS channels are demodulated continuously; the gaps between bursts produce random bits, which match 0x7E about once per 256 bits. That opens a junk frame that the next 0x7E closes ~256 bits later, so the search is mid-junk-frame roughly half the time.
+      - A real burst's opening flag arriving while a junk frame is open is consumed CLOSING the junk frame; the real frame's stuffed data can never contain 0x7E, so the real frame is missed. Estimated ~half of real frames lost.
+      - Neither test shows it: the Rust test (crates/hk-blocks/tests/ais_recipe.rs, framing/tests.rs) pads with idle ones, and the Python oracle (py/fixtures/ais_ref.py) searches every flag pair.
+      DELIVER: a failing-first test that feeds random (noise) bits between real AIS frames through the recipe and asserts every real frame decodes (red today); then the fix - a sync_search terminator option that also re-opens a frame on the same flag (shared-flag HDLC semantics), default unchanged for existing recipes; enable it in recipes/ais.recipe.json (and check T-952's AX.25 recipe). This changes the ADR-0011 sync_search contract: update its block row and state the default. Also the reviewer's nit: refuse bitstuff bit_order: lsb with direction: stuff (crates/hk-blocks/src/blocks/symbol/bitstuff.rs:205), since the reversal would happen after stuffing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (cargo nextest run -p hk-blocks -E 'binary(ais_recipe)'; the framing lib tests; just precheck hk-blocks), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY review of T-963 2026-09-25: HDLC framing loses real frames on a continuous line: sync_search's terminator never re-opens the next frame, so noise-born junk frames swallow real opening flags (~half of AIS frames on air)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
