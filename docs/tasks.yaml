@@ -26651,7 +26651,7 @@ tasks:
   - id: T-906
     milestone: MMAP
     title: "Past-surveys drawer follow-ups: Go restores the frequency SPAN too; honest 'nothing looked at' text; sweep records (T-815 review)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-815
@@ -26681,6 +26681,7 @@ tasks:
       Observed, not chased: just precheck was not run with a crate list because no crate was touched; ran cargo fmt --all --check (exit 0), and just test-ui covers typecheck for the ui/ diff
       Use cases: AWARE-042
       Resources: 53 CPU-s, peak 0.7 GB
+    commit: 52d1cdf8
   - id: T-907
     milestone: M2-hardening
     title: e2e harness waitForSurfaceMounted returns immediately on the APP page (waits on [data-slot=note], only on /surface) - app specs can race an unmounted surface; app-surface boot flake
