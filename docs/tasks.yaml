@@ -26588,7 +26588,7 @@ tasks:
   - id: T-903
     milestone: MLIVE
     title: live-edge T-523 + T-890 cases red together 1 in 6 on task-t890 in file order (own-level probe never re-asked) - establish the rate, then root-cause
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-890
@@ -26606,6 +26606,7 @@ tasks:
       2026-09-24 coordinator: dispatched by the coordinator (supervisor/user priority 14:55). Sibling: the canvas-journey live-edge-zone grey (14-30 % during aggressive pan/zoom; the 13:39 batch and task-t890's gate) is being triaged/fixed by the T-890 worker on task-t890-cj - coordinate, do not duplicate.
     effort_reason: an unexplained intermittent starvation on the tile-probe path; needs a quiet-box rate measurement and hard debugging
     branch: task-t903
+    commit: f6b3efe6
   - id: T-904
     milestone: M2-hardening
     title: "Detection rows grow without bound (~125 MB/h at 2.4 Msps, ~3 GB/day): a retention/rollup policy for per-frame detections; tracks/emitters stay durable"
