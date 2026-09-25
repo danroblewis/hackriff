@@ -9,6 +9,9 @@
 //! ```text
 //!   normalised snippet + C13 ParameterSet + C14 SymbolParameters
 //!        │
+//!        ├─ fm.rs         the broadcast-FM pre-classification rule: a 19 kHz pilot and its
+//!        │                suppressed 38/57 kHz subcarriers, priced by their own false-alarm
+//!        │                probability (T-970) — a likelihood, beside the SNR gate, never a veto
 //!        ├─ features.rs   Azzouz–Nandi statistics, cumulants, IF shape, spectral moments,
 //!        │                cyclic lines, cyclic-prefix correlation — each a value or an abstention
 //!        ├─ tree.rs       coarse split and per-family admissibility (physics, not tuning)
@@ -30,7 +33,9 @@
 //! - **Snap an out-of-taxonomy signal to the nearest family.** The χ² open set answers `unknown`.
 //! - **Let a band-plan prior decide against the evidence.** [`fuse`](fuse::fuse) tempers the prior
 //!   until a 10:1 likelihood call stands, and flags `prior-mismatch`.
-//! - **Report certainty.** The posterior is capped at [`MAX_CONFIDENCE`].
+//! - **Report certainty.** The posterior is capped at [`MAX_CONFIDENCE`], and an **abstention** at
+//!   [`MAX_UNKNOWN_CONFIDENCE`]: `unknown` is a real outcome, not a confident claim about the
+//!   world, so it is never reported on the scale a positive call reaches (T-970).
 //!
 //! # Evaluation
 //!
@@ -44,6 +49,7 @@ pub mod density;
 pub mod dl;
 pub mod eval;
 pub mod features;
+pub mod fm;
 pub mod harness;
 pub mod openset;
 pub mod structure;
@@ -73,6 +79,7 @@ pub use density::{DensityModel, FamilyScore};
 pub use dl::{DL_INPUT_DIM, DlStage, ShadowRecord, classify_shadowed, dl_input};
 pub use eval::EvalReport;
 pub use features::{FeatureInput, Features, features};
+pub use fm::{MpxEvidence, WfmCall, mpx_evidence, wfm_rule};
 // `FamilyPriorSet`, `FamilyPriors`, `NoPriors`, `StaticPriors` and the `fuse` function come
 // through the `hk_model::classify` re-export above (T-218).
 pub use harness::{

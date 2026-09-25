@@ -694,6 +694,10 @@ export class TileCache<T> {
   private ceiling: number;
   /** See [[inFlightShareStatedAt]]. */
   private shareStatedAt: number | null = null;
+  /** The route's last statement of what this client holds, and when (T-959). Null until it states
+   * one, in which case the abandoned-read charge is this client's own estimate and nothing more. */
+  private heldStated: number | null = null;
+  private heldStatedAt: number | null = null;
   /** Consecutive refusals, for the backoff; and completions since the last one, for the recovery. */
   private refusals = 0;
   private goodRuns = 0;
@@ -770,6 +774,17 @@ export class TileCache<T> {
   /** How long ago, in ms on this cache's clock, [[inFlightShareStatedAt]] was — or null. */
   get inFlightShareAgeMs(): number | null {
     return this.shareStatedAt === null ? null : Math.max(0, this.now() - this.shareStatedAt);
+  }
+  /**
+   * What the route last **stated** this client holds (`cost.in_flight_held`), or null if it never
+   * has — in which case the abandoned-read charge is an estimate and says so. Reported beside the
+   * charge because "why is this client not issuing" has two answers — its own leftover reads, or
+   * another client — and only the route can tell them apart.
+   */
+  get serverHeldStated(): number | null { return this.heldStated; }
+  /** How long ago, in ms on this cache's clock, [[serverHeldStated]] was stated — or null. */
+  get serverHeldStatedAgeMs(): number | null {
+    return this.heldStatedAt === null ? null : Math.max(0, this.now() - this.heldStatedAt);
   }
   get inFlightCount(): number { return this.inflight.size; }
   get queueDepth(): number { return this.queue.length; }
@@ -972,6 +987,64 @@ export class TileCache<T> {
     const left = Math.max(MIN_RESIDUAL_MS, this.serverMs - (this.now() - f.startedAt));
     this.abandonedUntil.push(this.now() + left);
     this.stats.abandoned++;
+  }
+
+  /**
+   * **What the route says this client holds replaces what this client guessed** (T-959).
+   *
+   * [[abandon]]'s charge is an estimate — the route's *measured mean* minus what this read has
+   * already run — and the mean is the wrong number for the read that matters: under load an
+   * overview tile takes 7-9 s, so the charge expires while the route is still producing it, and the
+   * page's next reads are refused over slots its own leftover reads still hold. A client that then
+   * reads those refusals as contention halves its cap for its own slow reads (T-932's release-
+   * candidate red: cap pinned at 1, refused with nothing of its own on the wire).
+   *
+   * Every tile answer and every refusal already states `cost.in_flight_held` — the slots this
+   * client held at that instant, server-side. Against the reads it is still *waiting* for (the one
+   * thing the route cannot know) that gives two bounds the charge is squeezed between: it can never
+   * exceed the slots the route says it holds, and it can never be fewer than those slots minus the
+   * reads still wanted. Extra charges are dropped, missing ones are added, and a charge the
+   * statement positively attributes to an abandoned read has its estimate re-anchored to now,
+   * because the route's word is newer than an expiry computed when the read was abandoned.
+   *
+   * The expiry stays, so nothing can wedge: with no further statement each charge lapses after a
+   * service time, the client asks again, and a refusal re-states the count. What changes is that
+   * the client no longer *asserts* a slot is free while the route is holding it.
+   *
+   * @param serverHeld `cost.in_flight_held`, this client's holdings as the route counted them.
+   * @param includesThisRead whether the read being answered is one of them — true for an admitted
+   * answer (its slot is released as the answer is written), false for a refusal and for a hot-tile
+   * -cache hit, neither of which took one.
+   */
+  private reconcileHeld(serverHeld: number, includesThisRead: boolean): void {
+    if (!Number.isFinite(serverHeld) || serverHeld < 0) return;
+    const t = this.now();
+    // Reads this client is still waiting for. It is an UPPER bound on how many of the route's held
+    // slots are live rather than abandoned: a batched source (T-573) answers several of these on
+    // one worker, so the count of keys in flight is never fewer slots than they occupy and may be
+    // many more.
+    const waiting = Math.max(0, this.inflight.size - (includesThisRead ? 0 : 1));
+    // Hence two SOUND bounds on the abandoned reads the route is still producing, rather than one
+    // number that assumes a slot per key:
+    //  - at most `serverHeld` — this client cannot be holding more slots than the route says it is;
+    //  - at least `serverHeld - waiting` — even if every read it waits for holds a slot of its own.
+    const upper = serverHeld;
+    const lower = Math.max(0, serverHeld - waiting);
+    this.abandonedUntil = this.abandonedUntil.filter((until) => until > t);
+    // Ascending, so trimming drops the charges the route has demonstrably finished and the
+    // re-anchoring below lands on the ones nearest to being released.
+    this.abandonedUntil.sort((a, b) => a - b);
+    while (this.abandonedUntil.length > upper) this.abandonedUntil.shift();
+    while (this.abandonedUntil.length < lower) this.abandonedUntil.push(t + this.serverMs);
+    // **Re-anchored only up to the LOWER bound**, because only those are charges the statement
+    // positively attributes to an abandoned read. Re-anchoring a charge the route's held count
+    // could equally be explaining with this client's own live reads would be charging the same slot
+    // twice, for as long as the answers kept coming — a stall, in the name of not releasing early.
+    for (let i = 0; i < Math.min(lower, this.abandonedUntil.length); i++) {
+      this.abandonedUntil[i] = Math.max(this.abandonedUntil[i], t + this.serverMs);
+    }
+    this.heldStatedAt = t;
+    this.heldStated = serverHeld;
   }
 
   /**
@@ -2004,7 +2077,21 @@ export class TileCache<T> {
         this.ceiling = Math.max(1, err.share);
         this.shareStatedAt = this.now();
       }
-      this.limit = Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
+      // **`held` says WHOSE slots refused this read** (T-959), and it is the one reading that is not
+      // evidence about contention: at `held >= share` this client is being refused over reads it
+      // owns — the ones it is waiting for, and the ones it abandoned that the route is still
+      // producing. Halving the cap there is the client punishing itself for its own slow reads, and
+      // it is what pinned a page at a cap of 1 while nothing of its own was on the wire (T-932).
+      // The cap is already right; what is wrong is the client's belief that those slots are free, so
+      // the charge is corrected instead and the backoff below does the waiting. At `held < share`
+      // (`held 0` being the plain case) the slots are somebody else's and the multiplicative
+      // decrease is exactly right. A server that states no `held` is pre-T-959: it halves, as before.
+      const ownReadsRefusedIt = typeof err.held === "number"
+        && err.share !== null && err.share > 0 && err.held >= err.share;
+      if (typeof err.held === "number") this.reconcileHeld(err.held, false);
+      this.limit = ownReadsRefusedIt
+        ? Math.min(this.limit, this.ceiling)
+        : Math.max(1, Math.min(Math.floor(this.limit / 2), this.ceiling));
       this.goodRuns = 0;
       this.refusals = Math.min(this.refusals + 1, 4);
       // The refusal itself cost the server nothing, but whatever is holding the slots has not
@@ -2064,6 +2151,11 @@ export class TileCache<T> {
     if (data.serverInFlightShare && data.serverInFlightShare > 0) {
       this.ceiling = Math.max(1, data.serverInFlightShare);
       this.shareStatedAt = this.now();
+    }
+    // **And what this client HOLDS** (T-959): the one number in the answer that is about the route's
+    // slots rather than about this tile, and the only correction the abandoned-read charge can get.
+    if (typeof data.serverInFlightHeld === "number") {
+      this.reconcileHeld(data.serverInFlightHeld, data.serverHoldsThisRead !== false);
     }
     this.limit = Math.min(this.limit, this.ceiling);
   }
@@ -2254,6 +2346,20 @@ export function parseKey(key: string): TileAddr | null {
   const n = p.slice(2).map(Number);
   if (n.some((v) => !Number.isFinite(v))) return null;
   return { device: p[0], scheme: p[1], levelF: n[0], levelT: n[1], fIndex: n[2], tIndex: n[3], cells: n[4] };
+}
+
+/**
+ * The abandoned-read charge, as a readout states it (T-959): how many slots this client is charging
+ * itself for reads the route is still producing, and **whether that number is the route's word or
+ * this client's estimate** — which is the difference between "my own leftover reads are holding the
+ * slots" and "another client is". Empty when there is nothing charged and nothing stated.
+ */
+export function heldText(charged: number, stated: number | null, ageMs: number | null): string {
+  if (charged === 0 && stated === null) return "";
+  if (stated === null) return `${charged} abandoned charged (estimated — the route has not stated one)`;
+  const s = (ageMs ?? 0) / 1000;
+  return `${charged} abandoned charged (route held ${stated}, stated ` +
+    `${s < 10 ? s.toFixed(1) : Math.round(s).toFixed(0)} s ago)`;
 }
 
 /**

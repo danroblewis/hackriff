@@ -35,6 +35,10 @@ export interface AudioStatus {
   stereo?: boolean;
   /** Two-channel streams only: pilot lock losses since the stream began. */
   stereo_lock_losses?: number;
+  /** NBFM streams only (T-988): the backend's blind CTCSS/DCS answer. */
+  subaudible?: "measuring" | "ctcss" | "tone" | "dcs" | "none";
+  subaudible_s?: number; ctcss_hz?: number; tone_hz?: number; tone_snr_db?: number; tone2_hz?: number;
+  dcs_code?: string; dcs_polarity?: "normal" | "inverted"; dcs_alias?: string;
 }
 
 /** Channels a playable header carries (1 when the profile omits it). */

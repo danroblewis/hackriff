@@ -375,7 +375,7 @@ export class SurfaceView {
         if (!s) continue;
         const r = paneRuler(v.id, v.box, v.rect, s.cellHz, s.cellS, edgeNs, dpr);
         rulers.push(r);
-        const q = hudTickQuads(r, { alpha, majorPx: 10 * dpr, minorPx: 5 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
+        const q = hudTickQuads(r, { alpha, majorPx: 5 * dpr, minorPx: 3 * dpr, thickPx: Math.max(1, Math.round(dpr)) });
         if (q.length) { this.overlay.draw(v.rect, q); hudQuads.push(...q); }
         labels.push(...hudLabels(r, hPx, dpr, reserve));
       }

@@ -387,6 +387,37 @@ pub(crate) mod testutil {
         }
     }
 
+    /// Runs `bits` through a block whose output is also `Bits` (e.g. `bitstuff` in bits mode,
+    /// destuffing a continuous line before framing, T-952), in chunks of `chunk`; returns the
+    /// concatenated output bits.
+    pub fn run_bits_to_bits(block: &mut dyn Block, bits: &[u8], chunk: usize) -> Vec<u8> {
+        let info = block.init(&[port(PortType::Bits, chunk)]).unwrap();
+        let mut outputs = vec![Output::for_port(&info[0])];
+        let mut all = Vec::new();
+        for (k, c) in bits.chunks(chunk).enumerate() {
+            outputs[0].begin_chunk();
+            let meta = ChunkMeta {
+                index: (k * chunk) as u64,
+                flags: if k == 0 {
+                    ChunkFlags::DISCONTINUITY
+                } else {
+                    ChunkFlags::NONE
+                },
+                ..ChunkMeta::start(1200.0)
+            };
+            let inputs = [Input {
+                meta,
+                data: PortSlice::Bits(c),
+            }];
+            block.process(&mut Io::new(&inputs, &mut outputs)).unwrap();
+            let PortVec::Bits(v) = &outputs[0].data else {
+                panic!("bits output expected")
+            };
+            all.extend_from_slice(v);
+        }
+        all
+    }
+
     /// Runs `bits` through `block` in chunks of `chunk` (the last chunk flagged `END` when
     /// `end`); returns the frames and the flags seen on the output.
     pub fn run_bits(block: &mut dyn Block, bits: &[u8], chunk: usize, end: bool) -> Vec<Owned> {
