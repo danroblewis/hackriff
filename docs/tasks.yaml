@@ -27785,7 +27785,8 @@ tasks:
   - id: T-936
     milestone: MAUTO
     title: "All captured signals decode: failing-first blind FM/RDS acceptance tests through the mock SDR on the explorer captures (T-545 pattern)"
-    status: todo
+    status: in-progress
+    branch: task-t936
     priority: P1
     deps:
     - T-935
@@ -27872,7 +27873,8 @@ tasks:
   - id: T-941
     milestone: M2-hardening
     title: "Class-boundary retune leaves the run with no inventory: detect/control stragglers lock the old segment's inventory"
-    status: todo
+    status: in-progress
+    branch: task-t941
     priority: P1
     deps: []
     parallel_group: PIPE-REPLUMB
@@ -27888,7 +27890,8 @@ tasks:
   - id: T-942
     milestone: M2-hardening
     title: After a restart on an existing data dir every history frame is late (frames_ingested 0) - history silently not recorded
-    status: todo
+    status: in-progress
+    branch: task-t942
     priority: P1
     deps: []
     parallel_group: STORE-HISTORY
