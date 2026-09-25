@@ -25993,8 +25993,10 @@ tasks:
       FOUND BY T-852 worker 2026-09-24 (observed through the mock SDR).
 
       2026-09-24 coordinator: the relaunched worker DISPROVED the premise - splitting 2fsk by h made it worse (0/16; narrow half collides with gfsk at p~0.9). The device rows are integer-h FSK with spectral lines (blind_qpsk 0.200), unseen by the log-uniform dev grid; task-t877 1d62fe12 fits 2fsk as a line/continuous mixture (sweeps unchanged or better, unknown recall 1.00/88) but device rows still miss on cyclic_db and sigma_aa, which are device-path inputs (T-887). Decision: hold (option 1), keep the device floor, re-measure after T-887. Also: verifier sharpens narrow-2fsk vs gfsk near-ties to p>=0.9 - check before landing. Unmeasured-default features: T-888.
+
+      2026-09-24 coordinator: T-887 (task-t887 053a50b8, queued) with T-888 now claims fsk on 16/16 above-gate device rows WITHOUT T-877's line/continuous mixture (sigma_aa fixed at the estimator; densities = T-888's refit). Once T-887 lands, re-measure task-t877's mixture on top: if it adds nothing (claims already 16/16, sweeps unchanged), CANCEL T-877 with that evidence; if it improves the open-set sweeps, rebase and land it. The verifier near-tie sharpening noted above is now T-908.
     core_interface: true
-    blocked_on: T-876 landing and T-887 (device-path cyclic_db/sigma_aa mismatch); then re-measure device_fsk_classify on task-t877 (1d62fe12) - the branch reds it today (0/16 vs floor 4) and must not be queued before
+    blocked_on: "T-887 landing, then re-measure task-t877 (1d62fe12) on top: device claims are already 16/16 without it - cancel with evidence if it adds nothing"
   - id: T-878
     milestone: M3
     title: "The classifier runs only inside a decode chain that succeeded: pocsag/acars/retune/lora/multipath scenes get no classification row"
@@ -26043,49 +26045,6 @@ tasks:
       Resources: 1551 CPU-s, peak 2.8 GB
     branch: task-t879
     commit: 3421c16d
-  - id: T-882
-    milestone: MMAP
-    title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
-    status: in-progress
-    branch: task-t882
-    priority: high
-    deps:
-    - T-802
-    - T-806
-    parallel_group: MAP-CHROME
-    needs: none
-    model: opus
-    effort: medium
-    acceptance: |
-      OBSERVED 2026-09-24 by the T-802 worker (task-t802, handback ~/.hackriff-ops/work/T-802/handback.json): T-802's user DoD line says "the old toolbar row is gone", but the surface toolbar (Live, Trace, Contrast, Signals, Measure, Record, Split, Close, Whole surface) remains - T-802 kept it because T-528's hit test and two e2e specs (Split, Whole surface) drive those buttons.
-      DELIVER: remove the surface toolbar row and rehome every control, per docs/26 + ui/mockups/map-ui-v1.html: Live -> the follow-live FAB (T-802, already there); Trace / Signals / Contrast -> the layers menu (T-806, base style vs overlays); Measure -> the on-canvas measurement tool (T-822); Record -> the detail sheet's "Record clip" action (T-804). Pane management (Split, Close, Whole surface) has NO decided home in docs/26: propose one (e.g. a per-pane corner overflow menu) in the handback with a screenshot, keep it presentation-only, and do not block on it - ship the rest if that one needs the user's call. Retarget T-528's hit test and the Split/Whole-surface e2e specs at the new controls (same assertions, new selectors; never weaken them). Thin client: presentation only; a control that commands the radio still goes through the one gated DeviceAction path.
-      WHAT THE USER WILL SEE ON STAGING: open Explore - no toolbar row above the canvas; the canvas is full-bleed with only the floating controls, the layers menu holds Trace/Signals/Contrast, and pane split/close/whole-surface live where the handback says.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
-    notes: |
-      FOUND BY T-802 worker 2026-09-24 (user DoD: the old toolbar row is gone).
-
-      2026-09-24 T-803 worker: at 1000/920 px the toolbar overflows (Split, Close, Whole surface off-screen) and at 420 px Live/Trace/Auto-contrast sit under the top bar with the rest off-screen - the row runs off-screen rather than wrapping, and T-528's hit test runs only at 1440 px. Removing the row fixes this; ALSO extend the rehomed controls' hit test to 1000/920/420 px so an unreachable control goes red. Evidence: diagnostic lines in ui/e2e/app-sheet.e2e.mjs (task-t803).
-
-      2026-09-24 coordinator: now depends on T-895 (left column collapses to a chip) - same chrome files, and the user sees that first. P3/P5: the rehomed controls take fixed positions (not draggable); the existing zoom/FAB/layers/Go-to controls are kept as they are.
-    depends_on: [T-802, T-806, T-895]
-  - id: T-883
-    milestone: M2-hardening
-    title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
-    status: todo
-    priority: high
-    deps: []
-    parallel_group: E2E-HARNESS
-    needs: none
-    model: opus
-    effort: medium
-    acceptance: |
-      OBSERVED 2026-09-24 by the T-802 worker in .claude/worktrees/t802: single-file runs of `node e2e/run.mjs app-surface.e2e.mjs` printed an `app-sheet.e2e.mjs` spec that does not exist in that worktree (it exists only in the concurrently-running T-803 worktree), one run started two lanes for one file with one lane running a copy of app-surface.e2e.mjs WITHOUT the T-802 test, and lanes came up on ports 9431/9591/9471, not the HK_E2E_PORT=9342 it set. Unverified guess: ui/e2e/run.mjs's shared LOCK_DIR / sweepStaleRuns() or lane-port state is machine-global rather than per-worktree, so concurrent runs in different worktrees see (and may sweep/kill) each other's children - a candidate cause of the load-only e2e reds in flaky.jsonl.
-      DELIVER: reproduce with two concurrent run.mjs invocations in two worktrees; if cross-talk is real, make each run's lock/lane/port state and its sweep scoped to its own run (or its own worktree) so one run can never report, reuse or kill another's; a harness test that goes red on the old code. Harness code only (ui/e2e/run.mjs, harness.mjs, backend.mjs) - no product spec assertion changes.
-      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-    notes: |
-      FOUND BY T-802 worker 2026-09-24.
-
-      2026-09-24 CORROBORATED by the T-803 worker (separate worktree, same hour): in a parallel run its lane log showed another worktree's specs, including T-802's 'floating controls' test that is not in its tree; one surface-drag test timed out that run and passed on re-run. Two independent worktrees saw each other's runs.
   - id: T-880
     milestone: MCANVAS
     title: "Scrubbed spectrum trace draws a max over two cells on short panes: T-475 colour check red 2/12 at ~2 s pane windows (suspected f64 epoch-ns floor/ceil in trace.ts maxHoldColumns)"
@@ -26133,6 +26092,49 @@ tasks:
       Observed, not chased: Full-crate runs: `just test-crate hk-store` exit 100 (211/212) and `just test-crate hk-api` exit 100 (286/287); every test touched by this diff passed. The two failures are unrelated to it and both FAIL ALONE 3/3 at load avg ~15-17: (a) hk-store decoded::tests::a_disk_stall_longer_than_the_disconnect_policy_keeps_recording_and_counts_drops panics at crates/hk-store/src/decoded.rs:1529 `assert!(c.dropped_records > 0)` with dropped_records: 0, frames: 29; (b) hk-api::ondemand silent_peers_are_dropped_after_the_peer_timeout_and_answering_peers_stay panics at crates/hk-api/tests/ondemand.rs:365 `records > 20` with '10 records' in 1.5 s. Both are wall-clock-bound; not re-checked on a quiet box or on main. | as_of_s still reads the observation log for this band only (a whole-band page would compete with the band's records for MAX_RECORD_LIMIT). A server with no IQ ring and no dwell in flight (capture stopped, ring refused) still gets a departed band's horizon at the departure; not observed in practice. | A per-band untouched region (never-swept band C) now carries a non-null as_of_s, so a held copy draws grey only up to it and pending above - more honest, but a visible change to the top strip of never-swept panes between refreshes.
       Resources: 917 CPU-s, peak 3.5 GB
     commit: 0f4a2113
+  - id: T-882
+    milestone: MMAP
+    title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
+    status: in-progress
+    branch: task-t882
+    priority: high
+    deps:
+    - T-802
+    - T-806
+    parallel_group: MAP-CHROME
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker (task-t802, handback ~/.hackriff-ops/work/T-802/handback.json): T-802's user DoD line says "the old toolbar row is gone", but the surface toolbar (Live, Trace, Contrast, Signals, Measure, Record, Split, Close, Whole surface) remains - T-802 kept it because T-528's hit test and two e2e specs (Split, Whole surface) drive those buttons.
+      DELIVER: remove the surface toolbar row and rehome every control, per docs/26 + ui/mockups/map-ui-v1.html: Live -> the follow-live FAB (T-802, already there); Trace / Signals / Contrast -> the layers menu (T-806, base style vs overlays); Measure -> the on-canvas measurement tool (T-822); Record -> the detail sheet's "Record clip" action (T-804). Pane management (Split, Close, Whole surface) has NO decided home in docs/26: propose one (e.g. a per-pane corner overflow menu) in the handback with a screenshot, keep it presentation-only, and do not block on it - ship the rest if that one needs the user's call. Retarget T-528's hit test and the Split/Whole-surface e2e specs at the new controls (same assertions, new selectors; never weaken them). Thin client: presentation only; a control that commands the radio still goes through the one gated DeviceAction path.
+      WHAT THE USER WILL SEE ON STAGING: open Explore - no toolbar row above the canvas; the canvas is full-bleed with only the floating controls, the layers menu holds Trace/Signals/Contrast, and pane split/close/whole-surface live where the handback says.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched ui/e2e specs alone with HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24 (user DoD: the old toolbar row is gone).
+
+      2026-09-24 T-803 worker: at 1000/920 px the toolbar overflows (Split, Close, Whole surface off-screen) and at 420 px Live/Trace/Auto-contrast sit under the top bar with the rest off-screen - the row runs off-screen rather than wrapping, and T-528's hit test runs only at 1440 px. Removing the row fixes this; ALSO extend the rehomed controls' hit test to 1000/920/420 px so an unreachable control goes red. Evidence: diagnostic lines in ui/e2e/app-sheet.e2e.mjs (task-t803).
+
+      2026-09-24 coordinator: now depends on T-895 (left column collapses to a chip) - same chrome files, and the user sees that first. P3/P5: the rehomed controls take fixed positions (not draggable); the existing zoom/FAB/layers/Go-to controls are kept as they are.
+    depends_on: [T-802, T-806, T-895]
+  - id: T-883
+    milestone: M2-hardening
+    title: "e2e run.mjs cross-talk between worktrees: one run printed another worktree's spec, doubled lanes, ignored HK_E2E_PORT"
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: E2E-HARNESS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-802 worker in .claude/worktrees/t802: single-file runs of `node e2e/run.mjs app-surface.e2e.mjs` printed an `app-sheet.e2e.mjs` spec that does not exist in that worktree (it exists only in the concurrently-running T-803 worktree), one run started two lanes for one file with one lane running a copy of app-surface.e2e.mjs WITHOUT the T-802 test, and lanes came up on ports 9431/9591/9471, not the HK_E2E_PORT=9342 it set. Unverified guess: ui/e2e/run.mjs's shared LOCK_DIR / sweepStaleRuns() or lane-port state is machine-global rather than per-worktree, so concurrent runs in different worktrees see (and may sweep/kill) each other's children - a candidate cause of the load-only e2e reds in flaky.jsonl.
+      DELIVER: reproduce with two concurrent run.mjs invocations in two worktrees; if cross-talk is real, make each run's lock/lane/port state and its sweep scoped to its own run (or its own worktree) so one run can never report, reuse or kill another's; a harness test that goes red on the old code. Harness code only (ui/e2e/run.mjs, harness.mjs, backend.mjs) - no product spec assertion changes.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-802 worker 2026-09-24.
+
+      2026-09-24 CORROBORATED by the T-803 worker (separate worktree, same hour): in a parallel run its lane log showed another worktree's specs, including T-802's 'floating controls' test that is not in its tree; one surface-drag test timed out that run and passed on re-run. Two independent worktrees saw each other's runs.
   - id: T-884
     milestone: MAUTO
     title: "T-860 follow-ups: wire ConfirmPolicy.synthesized config, republish synthesized decodes to the stream, provenance strings, TemplateFixed seeding, withheld-row leak"
@@ -26214,6 +26216,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-877 worker 2026-09-24.
+
+      2026-09-24 coordinator: landed scope = sigma_aa fix (half-level edges) + T-888 merged; device FSK 16/16. cyclic_db fix (packet_window) held behind T-908 (verifier). Observed, not chased: device burst 25 dB seed 854 #5 looks split/collided (OBW 15 kHz vs ~25, envelope variation 0.85, no deviation estimate, sigma_aa z +14.6) - a detection/overlap question, not estimator bias; file if it recurs.
     effort_reason: root-causing a feature bias across the estimator and the synthetic generator, blind, on the classification contract
   - id: T-888
     milestone: M3
@@ -26652,6 +26656,24 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (the touched app-*.e2e.mjs specs alone, HK_E2E_PORT/HK_E2E_JOURNEY_PORT >= 9216), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-809 worker 2026-09-24.
+  - id: T-908
+    milestone: M3
+    title: The 2fsk/gfsk verifier prefers gfsk on a true 2fsk record and sharpens it to p 0.9; fix it, then re-land T-887's packet_window dev-grid fix for cyclic_db
+    status: todo
+    priority: high
+    deps:
+    - T-887
+    parallel_group: M3A
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-24 by the T-887 worker (task-t887 053a50b8; handback ~/.hackriff-ops/work/T-887/handback.json). T-887 root-caused the device-path cyclic_db mismatch: cyclic-line strength grows ~9.5 dB per decade of symbols, the device's 20.2 dB matches its 112-symbol burst, while every dev-grid 2fsk record holds 270-1,170 symbols. The generator fix (`packet_window`, WIP commit 8492468b on task-t887: each 2fsk record's symbol-estimator view cut to one packet of random length, 64 symbols up to the whole record) moved the device cyclic_db z from -2.8..-1.7 to -0.8..+0.1 - but was held back because it turned hk-classify's verifier_gain 2fsk/gfsk test red: confidently-wrong calls 0 -> 1. On one blind acceptance draw (2fsk seed 1307003, 25 dB) the refit lifted p(2fsk) 0.045 -> 0.055, just over the verifier's 0.05 candidate cut-off, so the verifier ran - and the verifier PREFERS gfsk on that 2fsk draw with or without the cut (21.54 vs 20.16 per symbol on the whole record), pushing the tree's wrong gfsk call to p 0.906. The verifier weakness existed already; the old densities hid it (T-877's worker saw the same near-tie sharpening).
+      DELIVER: (1) fix the 2fsk-vs-gfsk verifier so it never sharpens a wrong family into a confident call - root-cause why its per-symbol score prefers gfsk on a true 2fsk record (shaping/ISI model? h estimate?), fix, and prove on verifier_gain with 0 confidently-wrong calls; (2) then re-land `packet_window` from 8492468b, refit densities with fit-densities, and report device cyclic_db z, device_fsk_classify claims (must stay 16/16) and accuracy_sweep / open_set_stats / verifier_gain before/after; (3) measure whether gfsk/msk/4fsk dev-grid records carry the same long-record cyclic_db bias and apply the same window if so. Blind throughout. core_interface (classification contract): Opus-reviewed.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-887 worker 2026-09-24.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
