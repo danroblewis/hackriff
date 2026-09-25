@@ -490,19 +490,23 @@ def slot_cap(host):
 # your session limit resets 9:20am"; each was scored an 'error' (released only after RELEASE_AFTER_H), and dispatch kept
 # launching into the wall - 15 tickets in 7 min, the whole frontier, then 0 running until a person resumed them. Now such
 # a run is 'limited': nothing launches until the named reset, then each limited run resumes its own session.
-_USAGE_LIMIT = re.compile(r"usage limit|spend limit|session limit resets|limit reached", re.I)
+# The CLI's own account-limit prefixes (review: 'limit reached' alone also matched 'Context limit reached', one session's
+# problem, which would freeze all dispatch and resume the same full context every 30 min).
+_USAGE_LIMIT = re.compile(r"^(You've hit your|You've reached your|You're out of usage credits|Your org is out of usage)\b"
+                          r"|\b(usage|spend|usage credit) limit reached\b", re.I | re.M)
 
 
 def usage_limit_until(text, at):
-    """The reset instant a limit message names ('resets 9:20am'), taken as the next such time after `at` (when the
-    message was written); unparseable -> `at` + 30 min."""
+    """The reset instant a limit message names ('resets 9:20am') on `at`'s day - tomorrow only when that is more than
+    12 h behind `at` (a node2 result is copied back after the fact: 09:20 read at 09:20:15 has already reset, it is not
+    tomorrow's); unparseable -> `at` + 30 min."""
     m = re.search(r"resets\s+(\d{1,2})(?::(\d\d))?\s*([ap]m)", text, re.I)
     if not m:
         return at + 1800
     lt = time.localtime(at)
     t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(m[1]) % 12 + (12 if m[3].lower() == "pm" else 0),
                      int(m[2] or 0), 0, 0, 0, -1))
-    return t if t >= at else t + 86400
+    return t + 86400 if at - t > 12 * 3600 else t
 
 
 def usage_limited():
@@ -1225,7 +1229,8 @@ def reap(claims, dry):
             if until > usage_limited():
                 open(f"{S}/usage-limited", "w").write(f"{until:.0f}\n")
                 attention(tid, c["branch"], "USAGE_LIMIT", f"the account usage limit stopped this run; nothing launches "
-                          f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume ({text[:120]})")
+                          f"until {time.strftime('%H:%M', time.localtime(until))}, then limited runs resume (lift early: rm {S}/usage-limited) "
+                          f"({text[:120]})")
             c["state"], c["limited_until"] = "limited", until
             record_done(c, "limited", res)
             continue
@@ -2055,7 +2060,10 @@ def reap_worktrees(claims, dry):
     REAP_AFTER_MIN. Branches are never deleted, only worktrees."""
     if os.path.exists(BULKMARK):
         return   # main is provisional during a bulk gate: "merged" cannot be trusted
-    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited")}   # a held fix resumes there
+    live = {c.get("wt") for c in claims.values() if c.get("state") in ("running", "fix-held", "limited")   # a held fix resumes there
+            or (c.get("state") == "error" and time.time() - c.get("started", 0) < RELEASE_AFTER_H * 3600)}
+    # An 'error' claim's worktree is kept until the claim is released: its ERROR line tells a person to look, and a
+    # resume needs it (2026-09-25: three limit-killed claims, T-961/T-974/T-981, lost theirs within the hour).
     if not dry:
         sh(["git", "worktree", "prune"])   # entries whose directory is gone (gateaudit: 1,730 failures)
     out = sh(["git", "worktree", "list", "--porcelain"])

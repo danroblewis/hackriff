@@ -753,7 +753,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     g("init", "-q", "-b", "main")
     g("commit", "-q", "--allow-empty", "-m", "base")
     wts = repo / ".claude" / "worktrees"
-    for name in ("t356", "t900", "tgone", "t844"):
+    for name in ("t356", "t900", "tgone", "t844", "t961", "t962", "t974"):
         g("worktree", "add", "-q", "-b", f"task-{name}", str(wts / name))
     (wts / "t356" / ".githooks").mkdir()
     (wts / "t356" / ".githooks" / "pre-commit").write_text("#!/bin/sh\n")
@@ -761,7 +761,7 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     (wts / "t900" / "notes-i-never-committed.md").write_text("someone's work\n")
     shutil.rmtree(wts / "tgone")                                   # registered, directory gone
     old = 1_000_000_000
-    for name in ("t356", "t900", "t844"):
+    for name in ("t356", "t900", "t844", "t961", "t962", "t974"):
         os.utime(wts / name, (old, old))
 
     real_sh = R.sh
@@ -773,11 +773,17 @@ def test_a_worktree_holding_only_build_output_is_reaped_and_real_files_are_kept_
     said = []
     monkeypatch.setattr(R, "log", said.append)
     claims = {"T-356": {"state": "blocked", "wt": str(wts / "t356")},
-              "T-844": {"state": "fix-held", "wt": str(wts / "t844")}}   # review 07:30: a held fix resumes there
+              "T-844": {"state": "fix-held", "wt": str(wts / "t844")},   # review 07:30: a held fix resumes there
+              # 2026-09-25: limit-killed 'error' claims lost their worktrees within the hour and could not resume
+              "T-961": {"state": "error", "wt": str(wts / "t961"), "started": time.time() - 3600},
+              "T-962": {"state": "error", "wt": str(wts / "t962"), "started": time.time() - (R.RELEASE_AFTER_H + 1) * 3600},
+              "T-974": {"state": "limited", "wt": str(wts / "t974")}}
 
     R.reap_worktrees(claims, dry=False)
     assert not (wts / "t356").exists()                             # only build output: reaped
     assert (wts / "t844").exists()                                 # clean and old, but a held fix's: kept
+    assert (wts / "t961").exists() and (wts / "t974").exists()     # an unreleased error claim's, a limited one's: kept
+    assert not (wts / "t962").exists()                             # an error claim past its release: reaped
     assert (wts / "t900" / "notes-i-never-committed.md").exists()  # a real file: kept
     assert "tgone" not in g("worktree", "list").stdout             # pruned
     kept = [m for m in said if "kept - untracked" in m]
@@ -1675,9 +1681,18 @@ def test_the_reset_a_usage_limit_message_names_is_the_next_one_after_it_was_writ
     at = time.mktime((2026, 9, 25, 8, 11, 0, 0, 0, -1))
     assert time.localtime(R.usage_limit_until(LIMIT_TEXT, at))[3:5] == (9, 20)
     assert R.usage_limit_until(LIMIT_TEXT, at) - at == 69 * 60
-    late = time.mktime((2026, 9, 25, 10, 0, 0, 0, 0, -1))
-    assert R.usage_limit_until(LIMIT_TEXT, late) - late == (23 * 60 + 20) * 60        # tomorrow's 9:20
+    copied_back = time.mktime((2026, 9, 25, 9, 20, 15, 0, 0, -1))                   # review: a node2 result read late
+    assert R.usage_limit_until(LIMIT_TEXT, copied_back) < copied_back                  # already reset - never tomorrow
+    evening = time.mktime((2026, 9, 25, 21, 30, 0, 0, 0, -1))
+    assert R.usage_limit_until(LIMIT_TEXT, evening) - evening == (11 * 60 + 50) * 60  # > 12 h behind: tomorrow's 9:20
     assert R.usage_limit_until("You've hit your limit", at) == at + 1800             # unparseable: half an hour
+
+
+def test_only_the_accounts_limit_messages_count_as_a_usage_limit():
+    assert R._USAGE_LIMIT.search(LIMIT_TEXT)
+    assert R._USAGE_LIMIT.search("API Error: spend limit reached (daily; resets 2026-09-26 00:00 UTC)")
+    assert not R._USAGE_LIMIT.search("Context limit reached · /compact or /clear to continue")   # one session's
+    assert not R._USAGE_LIMIT.search("Error: Exceeded USD budget (5)")                           # --max-budget-usd
 
 
 def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launches_until_the_reset(killed_run, monkeypatch, tmp_path):
@@ -1686,9 +1701,10 @@ def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launc
     import os
     claim, fixes, alerts, seen = killed_run
     d = tmp_path / "work" / "T-802"
-    (d / "out.json").write_text(json.dumps({"is_error": True, "result": LIMIT_TEXT, "session_id": "s1"}))
+    text = "You've hit your monthly spend limit · raise it at claude.ai/settings/usage"   # no reset named: +30 min,
+    (d / "out.json").write_text(json.dumps({"is_error": True, "result": text, "session_id": "s1"}))  # clock-independent
     (d / "handback.json").write_text(json.dumps({"outcome": "done", "summary": "a stale one from the earlier run"}))
-    at = time.time() - 60
+    at = int(time.time()) - 60                                  # the marker file keeps whole seconds
     os.utime(d / "out.json", (at, at))
     wrote = []
     monkeypatch.setattr(R, "write_result", lambda c, hb: wrote.append(c["ticket"]))
@@ -1698,7 +1714,7 @@ def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launc
     assert c["state"] == "limited" and c["session_id"] == "s1" and fixes == [] and wrote == []   # never the stale handback
     assert [k for _, k, _ in seen] == ["USAGE_LIMIT"]
     until = R.usage_limited()
-    assert until == c["limited_until"] and until == R.usage_limit_until(LIMIT_TEXT, at) and until > time.time()
+    assert until == c["limited_until"] and until == R.usage_limit_until(text, at) == at + 1800 and until > time.time()
     # while it holds: no dispatch, no deflaker, no fix run, and the limited run stays put
     monkeypatch.setattr(R, "hosts", lambda: {"node2": {"cap": 6}})
     assert R.dispatch_remote(claims, dry=False) is False
@@ -1706,7 +1722,7 @@ def test_a_run_the_usage_limit_stopped_is_limited_not_an_error_and_nothing_launc
     assert R.relaunch_held_fixes(claims) is False and claims["T-802"]["state"] == "limited"
     # its worktree is kept while it waits
     live = {x.get("wt") for x in claims.values() if x.get("state") in ("running", "fix-held", "limited")}
-    assert c["wt"] in live and '("running", "fix-held", "limited")' in pathlib.Path(R.__file__).read_text()
+    assert c["wt"] in live
     # the reset passes: the held-fix pass resumes the session with the limit's own KILLED line, through the cap
     (tmp_path / "usage-limited").write_text(f"{time.time() - 1:.0f}\n")
     relaunched = []
