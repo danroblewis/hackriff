@@ -28780,7 +28780,7 @@ tasks:
   - id: T-984
     milestone: MMAP
     title: Annotations drawn twice with the Research layer on; new annotation reaches Research only on its 15 s refresh; no e2e for authoring
-    status: todo
+    status: done
     priority: P3
     deps:
     - T-820
@@ -28803,6 +28803,7 @@ tasks:
       Observed, not chased: The `research` overlay layer (LAYER_DEFS, hint 'measurements · annotations') now has no observable effect on annotations at all: every Marker always carries a non-null collection_id, so the unfiledOn fallback in researchBoxesFor's `on()` predicate is now dead for the only case that used to reach it (unfiled annotations, now excluded from researchBoxesFor entirely). The layer stays registered and harmless (defensive fallback if a collection lookup ever fails) but its hint text is now slightly stale; left as presentation-only text, out of this ticket's scope.
       Use cases: RESEARCH-003, RESEARCH-001
       Resources: 4 CPU-s, peak 0.3 GB
+    commit: e21408f1
   - id: T-985
     milestone: MAUTO
     title: Explorer window-3 captures into fixtures/ (NBFM+CTCSS 461.125, DMR BS 464.6125) with hidden truth, CTCSS + DMR sync oracles, 4 new use cases
