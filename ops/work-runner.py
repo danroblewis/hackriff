@@ -2632,6 +2632,10 @@ def tick(dry):
                 frontier["dispatchable"] = frontier.get("dispatchable", 0) + 1
                 frontier.setdefault("dispatchable_ids", []).append(t["id"])
         frontier["held_groups"] = held
+        # Always present, empty when none (supervisor 04:27: a missing key read as a broken status, not as zero).
+        frontier.setdefault("dispatchable", 0)
+        frontier.setdefault("dispatchable_ids", [])
+        frontier.setdefault("held_by_branch", [])
     except Exception:
         pass
     status = {"tick": int(time.time()), "running": running, "frontier": frontier, "group_cap": GROUP_CAP, "budget": {"cores": CORES, "gate_reserve": GATE_RESERVE, "worker_cores": WORKER_CORES, "worker_jobs": WORKER_JOBS, "worker_test_threads": WORKER_TEST_THREADS}, "cap": CAP,

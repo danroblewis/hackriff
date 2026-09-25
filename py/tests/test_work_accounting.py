@@ -1547,6 +1547,10 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     R.tick(dry=False)
     st = json.load(open(tmp_path / "work-runner-status.json"))
     assert st["frontier"]["held_by_branch"] == ["T-44"] and st["frontier"]["dispatchable_ids"] == ["T-45"]
+    tasks[:] = []                                                          # nothing ready: the keys stay, empty
+    R.tick(dry=False)
+    f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
+    assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
     assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "probe_age_s": 0}
     assert st["hosts"]["mac"] == {"running": 0, "cap": 2}
     assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]
