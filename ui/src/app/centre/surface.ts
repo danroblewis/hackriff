@@ -85,6 +85,7 @@ import {
   BASE_STYLES, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
+import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 
 const S_TO_NS = 1e9;
@@ -396,7 +397,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const focusId = s.focus.kind === "signal" ? s.focus.id : null;
     return markQuads(signalMarkBoxes(Object.values(s.inventory.rows), focusId), edge, pane.box, pane.rect);
   };
-  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads };
+  const artifactQuads: OverlayLayerFn = (pane, edge) =>
+    artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
   const drawnLayers = new Set<LayerId>(Object.keys(overlayFns) as LayerId[]);
