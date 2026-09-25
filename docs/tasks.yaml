@@ -28196,7 +28196,7 @@ tasks:
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
-    status: done
+    status: in-progress
     priority: P2
     deps: []
     parallel_group: UI-BOOT
