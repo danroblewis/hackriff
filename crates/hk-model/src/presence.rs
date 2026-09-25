@@ -602,6 +602,12 @@ impl Watched {
         }
     }
 
+    /// Whether any coverage record exists — i.e. whether [`Self::observed_ns`] measures watched
+    /// time (judged against the continuous floor) or elapsed time (judged against the gap).
+    pub fn is_recorded(&self) -> bool {
+        self.from.is_some()
+    }
+
     /// How much of `[a, b]` counts as observed, ns: the only part of a silence that is evidence of
     /// absence. Elapsed time before the record's start, watched time inside it.
     pub fn observed_ns(&self, a: i64, b: i64) -> i64 {
@@ -710,10 +716,20 @@ pub fn intervals_observed(
     if let (Some(last), Some(reports)) = (out.last_mut(), followed.last()) {
         let end = last.time.end.as_unix_nanos();
         let now_ns = now.as_unix_nanos();
-        let silence = if reports.is_empty() {
+        // Whether the silence below is **observed** time (watched on the band, or reported by the
+        // tracker) rather than elapsed time. The idle gap `clamp(2 × revisit, 1 s, 60 s)` exists
+        // to discount the time the receiver was *not* looking — "two missed revisits" of wall
+        // clock. Observed silence has already had that time taken out, so comparing it with a
+        // revisit-scaled gap would discount it twice: under a sweep with revisit P and dwell d, a
+        // stopped burst would stay open for ~2·P²/d of wall time — minutes, up to the IQ ring's
+        // horizon — where ADR-0019 §3 promises ~2·P (T-940 review). So observed silence is
+        // judged against the continuous floor: one [`MIN_IDLE_GAP_S`] of *watching* and hearing
+        // nothing, which a sweep accumulates in about two visits — the same "two missed revisits"
+        // the gap encodes, now counted where it was measured. Elapsed silence keeps `gap`.
+        let (silence, observed) = if reports.is_empty() {
             // Every source is closed: its end is final, and the silence after it is what the
             // receiver watched of the band since — never time it spent tuned elsewhere.
-            watched.observed_ns(end, now_ns)
+            (watched.observed_ns(end, now_ns), watched.is_recorded())
         } else {
             // A source is still followed live. The tracker is the end detector for it, and what it
             // has reported is all that is known: silence past its latest report is time the
@@ -726,9 +742,10 @@ pub fn intervals_observed(
                 .map(|&(t_end, silence)| t_end.saturating_add(silence))
                 .max()
                 .unwrap_or(end);
-            (horizon.min(now_ns) - end).max(0)
+            ((horizon.min(now_ns) - end).max(0), true)
         };
-        last.open = silence <= gap.as_nanos();
+        let threshold = if observed { IdleGap::continuous() } else { gap };
+        last.open = silence <= threshold.as_nanos();
     }
     out
 }
@@ -1313,6 +1330,41 @@ mod tests {
         assert!(!intervals_observed(&rows, gap, t(400.0), &forgot)[0].open);
         // And unrecorded keeps the elapsed-time reading, unchanged.
         assert!(!intervals_observed(&rows, gap, t(400.0), &Watched::unrecorded())[0].open);
+    }
+
+    /// T-940 review: under a **sweep** the gap is `2 × revisit` of *wall* time, and observed
+    /// silence has already had the unwatched time taken out — judging one against the other
+    /// discounts twice. Revisit 10 s, dwell 0.5 s: the gap is 20 s, and watched silence grows
+    /// 0.5 s per visit, so the old reading held a stopped burst open for ~380 s. Observed
+    /// silence is judged against the continuous floor instead: two visits of hearing nothing.
+    #[test]
+    fn a_swept_band_closes_after_two_silent_visits_not_2p_squared_over_d() {
+        let gap = IdleGap::from_revisit_s(10.0);
+        assert_eq!(gap.as_secs_f64(), 20.0);
+        // Dwells of 0.5 s every 10 s from 0 s; the burst lived in the first one.
+        let dwells: Vec<TimeRange> = (0..60)
+            .map(|k| {
+                let a = 10.0 * k as f64;
+                TimeRange::new(t(a), t(a + 0.5))
+            })
+            .collect();
+        let w = Watched::recorded(t(0.0), &dwells);
+        let rows = [span(0.1, 0.3, 1)];
+        // One further silent visit (0.2 + 0.5 s watched): not yet an end.
+        assert!(intervals_observed(&rows, gap, t(10.6), &w)[0].open);
+        // Two further silent visits: ended, ~20 s after the burst — ADR-0019 §3's 2·P.
+        assert!(!intervals_observed(&rows, gap, t(20.6), &w)[0].open);
+        // The defect: nowhere near 380 s.
+        assert!(!intervals_observed(&rows, gap, t(60.0), &w)[0].open);
+        // A still-followed track under the same sweep: its report is observed silence too.
+        let f = [followed(0.1, 0.3, 1.2)];
+        assert!(!intervals_observed(&f, gap, t(30.0), &w)[0].open);
+        let f = [followed(0.1, 0.3, 0.7)];
+        assert!(intervals_observed(&f, gap, t(30.0), &w)[0].open);
+        // Unrecorded coverage is elapsed time and keeps the measured gap, unchanged.
+        let none = Watched::unrecorded();
+        assert!(intervals_observed(&rows, gap, t(15.0), &none)[0].open);
+        assert!(!intervals_observed(&rows, gap, t(21.0), &none)[0].open);
     }
 
     /// T-940: observed time is the measure of the window's intersection with the coalesced spans,

@@ -125,9 +125,24 @@ fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&str>) -> (u16,
     (status, serde_json::from_str(body).unwrap_or(Value::Null))
 }
 
-/// The explorer's query: the last minute, ending at the wall clock's now.
+/// The capture's live edge, off the server's own capture clock (`GET /api/timeline`'s `window.t1_s`,
+/// the IQ ring's newest sample) — never the test's wall clock, which would choose *what* is
+/// asserted on from a clock the pipeline does not run on (docs/10 §3.6).
+fn capture_edge(addr: SocketAddr) -> f64 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (st, v) = call(addr, "GET", "/api/timeline", None);
+        if let Some(t1) = v["window"]["t1_s"].as_f64().filter(|_| st == 200) {
+            return t1;
+        }
+        assert!(Instant::now() < deadline, "no capture window: {st} {v}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The explorer's query: the last minute, ending at the capture's live edge.
 fn station_rows(addr: SocketAddr) -> Vec<Value> {
-    let now = unix_now();
+    let now = capture_edge(addr);
     let (st, v) = call(
         addr,
         "GET",
