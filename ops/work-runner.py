@@ -454,10 +454,20 @@ def host_ready(h):
     return bool(p.get("reachable")) and time.time() - p.get("at", 0) < PROBE_FRESH_S
 
 
+def named_remote():
+    """Tickets named by hand for a remote host (WORK_REMOTE_TICKETS=T-nnn,...): never run on this Mac."""
+    return {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+
+
+def slot_cap(host):
+    """How many workers a host takes: this Mac's dispatch cap, or the remote host's hosts.json cap."""
+    return dispatch_cap() if not host else int((hosts().get(host) or {}).get("cap", REMOTE_DEFAULT_CAP))
+
+
 def host_for(t, claims=None):
     """The remote host a ticket goes to, or None for this Mac. WORK_REMOTE_TICKETS=T-nnn,... still names tickets
     by hand (they go to the first host whatever its cap)."""
-    named = {x.strip() for x in os.environ.get("WORK_REMOTE_TICKETS", "").split(",") if x.strip()}
+    named = named_remote()
     hs = hosts()
     if not hs:
         return None
@@ -466,7 +476,7 @@ def host_for(t, claims=None):
     if claims is None or not remote_eligible(t):
         return None
     for h, cfg in hs.items():
-        if host_ready(h) and busy_workers(claims, h) < int(cfg.get("cap", REMOTE_DEFAULT_CAP)):
+        if host_ready(h) and busy_workers(claims, h) < slot_cap(h):
             return h
     return None
 
@@ -1586,7 +1596,7 @@ def handle_gate_failures(claims, dry):
             # A conflict run is a worker: it waits for a slot under the dispatch cap, one per tick,
             # and never while a hold is in force (a held one would all relaunch at once). The line
             # stays unseen until then, so a backlog cannot burst.
-            if (conflict_runs >= 1 or busy_workers(claims) >= dispatch_cap()
+            if (conflict_runs >= 1 or busy_workers(claims, c.get("host")) >= slot_cap(c.get("host"))
                     or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch()):
                 continue
             c.setdefault("gate_fails_seen", []).append(line)
@@ -1825,7 +1835,8 @@ def busy_workers(claims, host=None):
 def dispatch_remote(claims, dry):
     """Remote hosts first: none of this Mac's holds (disk, load, the gate's reserve) bind a remote host; the full stop
     (dispatch-paused) does. One launch per host per tick."""
-    if not hosts() or os.path.exists(f"{S}/dispatch-paused"):
+    # The alone-mode gate hold binds here too: in that mode the merge runner waits for EVERY claim, remote included.
+    if not hosts() or os.path.exists(f"{S}/dispatch-paused") or gate_holds_dispatch():
         return False
     try:
         tasks = board()
@@ -1900,9 +1911,12 @@ def dispatch(claims, dry):
         return changed_remote
     changed = False
     taken = {}   # launches per parallel_group this tick, on top of the running-claim count
+    named = named_remote()
     for t in candidates(tasks, claims):
         if free <= 0:
             break
+        if t["id"] in named:              # named for a remote host: waits for it, never falls back to this Mac
+            continue
         g = t.get("parallel_group")
         if g and taken.get(g, 0) + sum(1 for c in claims.values() if c.get("state") == "running" and c.get("group") == g) >= GROUP_CAP:
             continue

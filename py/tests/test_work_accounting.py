@@ -1492,3 +1492,29 @@ def test_a_new_task_branch_starts_from_the_gated_base_while_a_batch_gates(tmp_pa
     with pytest.raises(RuntimeError):
         R.launch({"id": "T-9", "model": "opus"}, dry=False)
     assert calls[-1][:3] == ["git", "worktree", "add"] and calls[-1][-1] == "gatedbase123"
+
+
+def test_a_named_remote_ticket_never_falls_back_to_the_mac_and_alone_mode_holds_remote_dispatch(tmp_path, monkeypatch):
+    """Review 2026-09-25: a named ticket skipped by the remote pass (one launch per host per tick, or a failed prepare)
+    was launched on the Mac; and in alone mode remote dispatch kept adding workers the gate was waiting out."""
+    monkeypatch.setattr(R, "S", str(tmp_path))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "cap": 3}}))
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "node2.json").write_text(json.dumps({"at": R.time.time(), "reachable": True}))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-31,T-32")
+    tasks = [{"id": t, "title": "x", "needs": "none", "status": "todo"} for t in ("T-31", "T-32")]
+    monkeypatch.setattr(R, "board", lambda: tasks)
+    monkeypatch.setattr(R, "candidates", lambda ts, cl: [t for t in ts if t["id"] not in cl])
+    for k, v in {"dispatch_cap": lambda: 3, "disk_free_gb": lambda: 500.0, "gate_holds_dispatch": lambda: False,
+                 "queue_depth": lambda: 0}.items():
+        monkeypatch.setattr(R, k, v)
+    monkeypatch.setattr(R.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
+    launched = []
+    monkeypatch.setattr(R, "launch", lambda t, dry, host=None: launched.append((t["id"], host)) or {"ticket": t["id"], "host": host, "kind": "work"})
+    claims = {}
+    R.dispatch(claims, dry=False)
+    assert launched == [("T-31", "node2")]                    # T-32 waits for node2's next tick, not the Mac
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: True)
+    launched.clear()
+    assert R.dispatch_remote({}, dry=False) is False and launched == []
