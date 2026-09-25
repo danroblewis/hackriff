@@ -18708,8 +18708,7 @@ tasks:
   - id: T-566
     milestone: MAUTO
     title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
-    status: in-progress
-    branch: task-t566
+    status: done
     priority: normal
     parallel_group: API
     model: opus
@@ -18744,6 +18743,17 @@ tasks:
     notes: |
       Filed 2026-09-21 with ADR-0021 (T-549/T-550).
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    branch: task-t566
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:16).
+      Most of M-8's trace half was already landed by T-859/T-860 and verified here: GET /api/analyze/{id}/trace with stage/outcome/family/tried/limit filters, trace_summary + resolution + progress.tried/not_tried/elided on AnalyzeJob, the once-per-stage `trace` stream record and `done` carrying the resolution, and 404 not_found vs 410 gone kept distinct (docs/api.md, docs/stream-contract.md §16, api_contract). The remaining delta, ADR-0021 §11.1's inventory row, is this change: every /api/inventory row now carries `resolution: {kind, reason, t, profile, withheld}`, never absent - an un-analysed emitter reads kind `not-searched` with no time (un-looked-at is a positive state), a finished search that identified nothing reads its own sealed kind with when and at what profile, `kind: null` means the latest analysis solved, and a withheld-identity row reads all-null with `withheld: true` rather than borrowing the un-looked-at answer (T-159/T-163). `?resolution=not-searched|unknown|structured-unidentified|unsupported-structure` filters on it and any other value is 400 invalid, never silently ignored; the filter reads the same stored row the field is served from (Repository::resolution_is over synthesis()) and runs on the existing per-row post-gating path, so field and filter cannot disagree and a withheld row matches no value. docs/api.md moved with crates/hk-cli/tests/api_contract.rs per T-079. New/extended tests also pin that the trace route honours the outcome and family filters over real nodes and refuses unknown filter values.
+      Tests: cargo nextest run -p hk-api -> exit 0 (297 passed (includes the new inventory_api resolution test)); cargo nextest run -p hk-model -> exit 0 (395 passed, 1 skipped); cargo nextest run -p hk-pipeline -E 'binary(analyze_jobs)' -> exit 0 (14 passed (trace outcome/family filter assertions added)); cargo nextest run -p hk-cli -E 'binary(api_contract) and (test(inventory_and_analysis_strongest) or test(analyze_jobs_run_over_the_ring))' -> exit 0 (2 passed); cargo check --tests -p hk-pipeline -p hk-context -p hk-store -p hk-detect -p hk-cli -> exit 0 (clean (every InventoryQuery construction site still builds))
+      precheck exit 0
+      Commits: ad5b5f41
+      Observed, not chased: Acceptance item 5's second half is not implementable in this build: `GET /api/inventory/{id}/pipelines` does not exist, and neither does `CandidatePipeline` (grep for either across crates/, docs/api.md and docs/07 returns nothing) - it is ADR-0015 §11's object, owed by a later MAUTO ticket. The `trace_ref: {job_id, node_id}` delta should ride with whichever ticket creates that route. | Two outcome vocabularies exist for the same ADR-0021 concept: the live job trace (hk_synth::trace::OutcomeKind) serialises snake_case (`pruned_floor`), while the stored emitter_synthesis row (hk_model::repo::synthesis::Outcome) serialises kebab-case (`pruned-floor`). Both spellings are documented correctly in their own sections of docs/api.md (the trace fetch section vs the AnalyzeResult TraceNode section), and the trace route's `?outcome=pruned-floor` is a 400 while `?outcome=pruned_floor` is a 200 - pinned by the new contract assertions. Worth unifying deliberately rather than by accident. | `/api/inventory`'s 400s carry only `{"error": ...}` with no `code` field (unlike /api/analyze's `{error, code}`); the new filter follows that route's existing shape, so its contract assertions check the status only, as the neighbouring `status=bogus` / `relations=bogus` assertions do.
+      Use cases: RESEARCH-001, RESEARCH-003, RESEARCH-007
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: dd8274c8
   - id: T-567
     milestone: MAUTO
     title: "MAUTO: the sealed Resolution - unknown as a durable finding, not-searched as its own state, and the shuffled-null control that caps a manufactured verdict"
@@ -18816,8 +18826,6 @@ tasks:
       leaves 24 and the formula untouched. A GO or CONDITIONAL buys RECALL, through an explicit
       ADR-0022 amendment, never automatically. Do not wire calibrated bits into the gate here.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
-
-      Review fix (attempt 1): the reviewer found that a hold-out the shuffled-null control CAPPED kept its evaluator characterisation (engine.rs result_of filtered only on solved), and seal() read that characterisation before reaching the tied/capped branch - so a fit the null windows reproduce, the exact case ADR-0021 s8.2 exists to stop, sealed as structured-unidentified, which is s7A.5's durable positive finding and seeds a C18 structure-proposed signature. Fixed in two hunks: a capped hold-out's characterisation is dropped (it asserts framed-and-check-valid, the very claim the control said it could not tell from chance), and seal() tests the capped null control FIRST so nothing below it can outrank s8.2. New test t567_a_null_capped_fit_is_unknown_and_never_structured_unidentified, verified RED on the pre-fix code and green with it. hk-synth 111 passed; precheck clean.
   - id: T-576
     milestone: MAUTO
     title: "MAUTO: the false-confirm acceptance suite - zero confirms on negatives, the analytic null's measured tail, and a recall control so the suite is not passed by never confirming"
@@ -23971,12 +23979,12 @@ tasks:
   - id: T-810
     milestone: MMAP
     title: Density layer at coarse zoom (features per cell from /api/tiles/events) instead of numbered cluster bubbles; drilling in resolves to boxes (re-scoped from pin clustering, user 19:35)
-    status: in-progress
+    status: done
     branch: task-t810
     priority: normal
     parallel_group: MAP-LAYERS
-    model: sonnet
-    effort: medium
+    model: opus
+    effort: high
     depends_on: [T-809, T-910]
     use_cases: [AWARE-042]
     found_by: 'user 2026-09-22: approved the docs/26 map-UI ticket set and the mockup ui/mockups/map-ui-v1.html'
@@ -24002,6 +24010,17 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): zoomed out, nearby pins merge into numbered clusters; zooming in splits them back into individual pins. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): RE-SCOPED: not pin clustering. Where many features would generalize at coarse zoom, draw a DENSITY/heat layer (features per cell, from /api/tiles/events) - the GIS 'aggregate at small scale' - toggleable per pane in the layers menu, stroke/fill that never tints a measurement (keep the overlays on/off byte-identical guard); zooming in resolves to T-910's boxes. No numbered cluster bubbles. WHAT THE USER WILL SEE ON STAGING: zoomed far out, busy regions glow by how many signals are there; zoom in and they resolve into rectangles.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:49).
+      Merge gate (fix attempt 2) found one uncommitted file left in the worktree: docs/tasks.yaml, modified by a `just task note T-810` I ran after the fix-1 landing to record what the gate found. That note text is not product work — it's a side effect of the note CLI writing the board file locally — and per CLAUDE.md the board reaches its authoritative state through the runner reading handback.json, not through a feature branch's own docs/tasks.yaml diff, so I discarded it (`git checkout -- docs/tasks.yaml`) rather than committing it. The same information is already in this handback's summary and in commit 75102b1c's message. No other uncommitted changes existed; nothing further to fix. Verified the branch already contains the last-gated main (333d8284, an ancestor of my merge commit 17d76234) so no further merge was needed. Re-ran targeted tests clean.
+      Tests: cd ui && node test/run.mjs surface-density -> exit 0 (14/14 pass); just test-ui -> exit 0 (build + typecheck + 80/80 test files passed)
+      precheck exit 0
+      Commits: 75102b1c, 17d76234
+      Observed, not chased: GET /api/tiles/events's ALLOWED query-parameter list (crates/hk-api/src/tiles.rs, tile_events_json) has no `client` entry, unlike /api/tiles and /api/tiles/batch (T-630's per-caller in-flight share). density.ts sidesteps this by building its own URL instead of reusing lattice.ts's tileUrl(), so this FE ticket is unaffected, but the backend gap itself is real. | DENSITY_MIN_CELLS_PER_PX=50 is a first-guess presentation constant (like the hatch/dash lengths T-910 also flagged as unchecked); it has not been tuned against real staging data and may want a follow-up pass once the density layer is visible in practice.
+      Use cases: AWARE-042
+      Resources: 4 CPU-s, peak 0.3 GB
+    effort_reason: two sonnet rounds failed review on a live-edge refresh policy (supervisor 2026-09-25 02:18)
+    commit: 5fc927d8
   - id: T-811
     milestone: MMAP
     title: 'Artifacts layer: image/harmonic/IMD relationships drawn as linked overlays to their source'
@@ -24095,8 +24114,7 @@ tasks:
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
-    status: in-progress
-    branch: task-t813
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -24126,6 +24144,16 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): ADDED: (a) the SYMBOLOGY TABLE on the polygon - Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style; class carried by fill/outline/label, never glyph shape; colour-blind safe; (b) LABEL PLACEMENT - freq · bw · class inside or just above a box wide enough to hold it, overlapping labels thinned by priority (Confirmed > Candidate), GIS-style. Coordinate with T-910 (which draws the polygons).
+    branch: task-t813
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:31).
+      Figure-ground/CVD-safety pass across the map layers. Audit found T-807/T-808/T-809/T-910 already meet docs/23 §7 structurally: coverage-fog states are desaturated flats plus pattern (never a saturated hue pair), and T-910's SYMBOLOGY table already ties every FeatureClass (confirmed/candidate/unexplained/artifact/curated) to a distinct outline/fill in addition to colour. Added what was missing: a CVD-simulation verification utility (ui/src/surface/cvd.ts, Vienot/Brettel/Mollon protanopia/deuteranopia matrices + redmean distance) and a regression test (ui/test/surface-cvd.test.ts) asserting every differently-meaning mark ink stays distinguishable under simulated colour-blindness and that classes sharing a box colour are told apart by shape/pattern. Also added markKeyEntries() to ui/src/surface/legend.ts, wired into the layers menu's 'Detections' overlay row (ui/src/app/centre/surface.ts) the same way fogKeyEntries() already wires into 'Coverage', so a viewer can open Layers and read what each mark means, not just infer it from colour.
+      Tests: just test-ui -> exit 0 (79/79 test files passed (build + tsc --noEmit + node test suites), including the new 6-test surface-cvd.test.ts)
+      precheck exit 0
+      Commits: 4e3f9983
+      Observed, not chased: Old .sf-pin.confirmed/.candidate/.unknown/.curated CSS rules in ui/src/app/centre/centre.css (shape-glyph pins: filled square/open diamond/circle+?/pennant) appear dead since T-910's user decision that detections draw no DOM glyph at all (.sf-pin.area/.sf-pin.symbol only) - not touched, out of this ticket's scope, and removing them risked breaking a path I didn't fully trace (e.g. the collections/curated marker pins, which may still use the shaped glyph classes via research-slice.ts). Worth a follow-up cleanup ticket if confirmed dead. | ui/src/surface/preview-main.ts (the standalone /surface preview page) still only shows legendEntries()/fogKeyEntries(), not markKeyEntries() - left as-is since the preview page is a dev tool, not the product surface docs/23 targets, and MAP-13's acceptance names the mockup/app as reference.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: 767c19c2
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
@@ -24561,8 +24589,7 @@ tasks:
   - id: T-824
     milestone: MMAP
     title: 'Phone-width + fade/immersive pass across the floating chrome'
-    status: in-progress
-    branch: task-t824
+    status: done
     priority: high
     parallel_group: MAP-CHROME
     model: opus
@@ -24595,6 +24622,16 @@ tasks:
 
       2026-09-24 coordinator, USER PRINCIPLE P1 (docs/23 §10.6 rule 1): overlays are meant to be CLOSED, not faded - fade-to-35 % is an idle courtesy only, never a substitute for a dismiss. The dismiss itself is T-900 (now a dependency); this pass keeps it working at phone width.
     requested_by: "user 2026-09-24 (via supervisor): the visible Google-Maps result he is waiting for - dispatch first after T-801 lands"
+    branch: task-t824
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 02:00).
+      Phone-width + fade/immersive pass (MAP-24). (1) One idle timer for all the chrome: the map cluster's IdleFade now sets chrome-idle on <body>. Before this, the HUD faded on that class but nothing ever set it. The top bar, dock and lists' chip now fade to 35% along with the cluster, and any pointer, touch, key, wheel or focus brings them back. Things that never fade, per docs/23 §10.2: the sheet, Research, open menus, the retune offer, the mode banner, focused controls and every honesty statement (pane rows, IQ-ring words, coverage sentence). The bar also stays solid while its stream status is shown. (2) Phone width, new ui/src/app/chrome/phone.css at <=600 px: the top bar is one 40 px row that scrolls sideways (it used to wrap to about 146 px). Go-to stops short of the top-right cluster (the width var now matches the four buttons). The zoom stack docks above the FAB. Research is a full-height panel above the cluster, and the sheet drops to peek when Research opens (focus-sheet.ts, not persisted). Under 900 px the sheet's peek strip no longer covers the surface's statements, and the sheet handle is now a 24 px target. The page never scrolls sideways at 400 px. (3) Touch, in surface/input.ts with the gesture meanings in preview.ts: a two-finger pinch zooms both axes around the midpoint and pans with it. A finger held for 450 ms and then dragged marks a region, the same commitRegion path as Shift+drag, so the retune is only ever offered. A quick drag pans, a tap selects, and a long-press opens the context menu when you lift. None of these reach a route. WHAT TO OPEN ON STAGING: Explore in Chrome devtools device mode at 400x820 (or on a phone). The bar is one row and the controls don't overlap. Leave it alone for 6 s and the bar, controls, dock and chip dim to 35%; the sheet and the grey statement rows below the canvas stay solid. Touch or move the pointer and they come back. Pinch the canvas to zoom. Hold a finger for half a second, then drag, to select a region: the sheet shows 'Selected region'. Open Research from the top-right: it fills the screen and the sheet collapses; close it with its x.
+      Tests: just test-ui -> exit 0 (build + tsc + 77/77 node test files passed (incl. new app-phone.test.ts and 6 new touch tests in surface-input.test.ts)); node test/run.mjs surface-input (against the pre-change input.ts) -> exit 1 (red proof: 4 touch tests fail on the old handler (no pinch, no hold-to-mark, no long-press)); node test/run.mjs app-phone (with the body-class write removed) -> exit 1 (red proof: 'one idle signal' fails when IdleFade does not set chrome-idle); node --test ui/e2e/app-phone.e2e.mjs (against a local hk serve over the default fixture) -> exit 0 (400 px: no sideways scroll, bar 40 px, every control pressable >=24 px, no overlaps, idle opacities bar/dock/zoom/fab/chip 0.35 with sheet/pane rows/coverage note 1, sheet + Research open/close, CDP touch pinch span 1.68 MHz->494 kHz, held-drag commits a region, zero /api/control requests); node --test ui/e2e/app-sheet.e2e.mjs -> exit 0 (5 passed (a first run under load 28 timed out at surface mount on all 5; rerun green)); node --test ui/e2e/app-side-chip.e2e.mjs -> exit 0 (4 passed); node --test --test-name-pattern=1440 ui/e2e/app-dismiss.e2e.mjs -> exit 0 (passes alone; the full-file run failed only at 1440 with 1122 columns occluded both before and after (a first-paint/load flake, not the sheet)); node --test ui/e2e/app-surface.e2e.mjs / app-detail.e2e.mjs / surface-region.e2e.mjs -> exit 0 (passed); HK_E2E_CONCURRENCY=1 node e2e/run.mjs live-edge -> exit 1 (4 live-edge cases fail identically with HK_E2E_UI_DIST pointed at main's UI build (the runner warns that the backend produced no coverage in 60 s at load ~30): environmental, not this change)
+      precheck exit 0
+      Commits: 54f40e73
+      Observed, not chased: Under load ~25-33 on 2026-09-25, surface-nav (spec timeout 600 s), app-pins (surface mount >60 s) and app-trace (590 s timeout) could not be judged: a fresh hk serve took ~260-300 s to become ready, and run.mjs warned 'no observed coverage in 60000 ms'. live-edge failed identically on main's UI build. Not re-triaged on a quiet box. | precheck: this diff has no Rust. `cargo fmt --all --check` exit 0; I did not run clippy, since with no crate args it clippies the whole workspace. The UI's tsc typecheck is part of just test-ui (exit 0). | At desktop width the Research slide-in (top 56 px, right 8 px, z 7) still sits under the floating top-right cluster (z 20); I only fixed this at phone width. Worth a look under T-821/T-825. | The surface's statement rows under the canvas (slice/IQ ring/pane rows/coverage sentence) take ~250 px at 400 px wide, which leaves the canvas short on a phone. They are honesty statements, so I left them alone; compacting them is a design decision. | An app-page request goes to '/api/scheduler/api/scheduler?...' (doubled path), seen in the harness's API request list; did not investigate.
+      Resources: 621 CPU-s, peak 2.5 GB
+    commit: 9917c15c
   - id: T-825
     milestone: MMAP
     title: 'UI tests + honesty guards for the map-UI and research surfaces'
@@ -25677,8 +25714,7 @@ tasks:
   - id: T-861
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
-    status: in-progress
-    branch: task-t861
+    status: done
     priority: normal
     deps:
     - T-856
@@ -25700,6 +25736,16 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY coordinator 2026-09-23 (ADR-0015 section 10 chain, supervisor request).
+    branch: task-t861
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:23).
+      Implemented three of MAUTO M-10's four deliverables in full (ADR-0015 section 4.2/4.3): hk-synth::template::save_as_template builds a provenance.discovered Template from a solved PipelineResult (recipe fully bound, output_policy clamped to the job's source class, never upgraded); hk-pipeline::synth::attach now derives the result's S1-block hk-mod@1 family and, on every solved result inside the existing attach transaction, appends a legacy Classification at ArbRank::Decoder (C15 label) and mints a C18 Signature with SignatureProvenance::RecipeConfirmed from the bound recipe params/check/band (a schema T-201 defined but never wired a producer for); decode_row now stamps metadata.family on stored synthesized decodes, and hk-store::dataset gained synthesized_emissions, reading Decode rows via EmitterLink (never Demodulation, which synthesized decodes never have) so T-205's labelled-capture export now covers MAUTO decodes. The fourth deliverable, the POST /api/analyze/{id}/results/{rank}/template HTTP route, is NOT done: hk-api has no existing ApiState capability/trait for templates (no /api/templates route exists anywhere yet, and TemplateLibrary is unused outside hk-synth's own tests), so wiring it needs a new TemplateControl trait + ApiState field + hk-cli backend + docs/api.md + contract tests -- a second pass of comparable size to what landed. save_as_template itself is real and tested; only the transport is missing.
+      Tests: cargo nextest run -p hk-synth -E 'test(/save_as_template/)' -> exit 0 (2 passed); just test-crate hk-synth -> exit 0 (107 passed); cargo nextest run -p hk-pipeline -E 'test(/synth::attach/) or binary(analyze_jobs)' -> exit 0 (27 passed); cargo nextest run -p hk-store -E 'test(/dataset::/)' -> exit 0 (9 passed)
+      precheck exit 0
+      Commits: 0655d1c8
+      Observed, not chased: The POST /api/analyze/{id}/results/{rank}/template route (ADR-0015 section 4.3) is not wired: no ApiState capability exists for templates at all today (grep for TemplateLibrary/TemplateControl outside hk-synth's own crate finds nothing), so serving save_as_template needs a new hk-api trait, ApiState field, hk-cli backend implementation, docs/api.md delta and hk-cli/tests/api_contract.rs coverage -- proposed as a follow-up ticket the coordinator can size and allocate. | save_as_template's free list is always empty (every solved-recipe param fixed), not narrowed ranges for unsolved stages at twice the measured uncertainty as ADR-0015 section 4.3 also describes: PipelineResult does not currently carry the original per-stage search-space domains past stage_reached, so there is nothing to narrow from. Widening this needs that data added to PipelineResult/candidate tracking first -- noted in the function's own doc comment, not silently dropped. | recipe_family (and therefore the C15 label and the C18 signature's family field) only recognises five block ids (fsk_demod, msk_demod, am_demod, psk_demod, ppm_demod) at S1 -- every block the built-in generic skeletons commit to a family at today. A future demod block reaching S1 in a solved search (e.g. an OFDM/CSS/DSSS block, currently absent from the catalogue per ADR-0011 section 9.2) will label_classification/propose_signature return None for family rather than mis-map; this is intentional (documented in recipe_family's own comment) but worth flagging as the catalogue grows.
+      Resources: 0 CPU-s, peak 0.0 GB
+    commit: b1735776
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
@@ -26454,7 +26500,8 @@ tasks:
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
-    status: todo
+    status: in-progress
+    branch: task-t891
     priority: normal
     deps:
     - T-277
@@ -26640,7 +26687,8 @@ tasks:
   - id: T-898
     milestone: MMAP
     title: Retune history drawn as a traced directions-style path per device, from the recorded tune intervals (user P2)
-    status: todo
+    status: in-progress
+    branch: task-t898
     priority: normal
     deps:
     - T-897
@@ -27029,7 +27077,8 @@ tasks:
   - id: T-913
     milestone: M2-hardening
     title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
-    status: todo
+    status: in-progress
+    branch: task-t913
     priority: normal
     deps:
     - T-904
@@ -27108,7 +27157,8 @@ tasks:
   - id: T-916
     milestone: MLIVE
     title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
-    status: todo
+    status: in-progress
+    branch: task-t916
     priority: normal
     deps:
     - T-911
@@ -27128,7 +27178,8 @@ tasks:
   - id: T-917
     milestone: M2-hardening
     title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"
-    status: todo
+    status: in-progress
+    branch: task-t917
     priority: normal
     deps: []
     parallel_group: PIPE
@@ -27186,6 +27237,46 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched app-*.e2e.mjs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-918 worker 2026-09-25.
+  - id: T-920
+    milestone: M2-hardening
+    title: "IQ ring unavailable / lossless-gate test red on Linux (node2) but green on the Mac: view_pause_keeps_capture + api_contract coverage iq-ring available:false - Jetson portability"
+    status: in-progress
+    branch: task-t920
+    priority: high
+    deps: []
+    parallel_group: SDR
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      OBSERVED 2026-09-25 by the T-567 worker running on the REMOTE host node2 (Linux; T-567 handback ~/.hackriff-ops/work/T-567/handback.json): two tests fail DETERMINISTICALLY in isolation there (4/4 runs, gate_waits: 0), while BOTH PASS alone on the Mac on current main (coordinator check 2026-09-25 ~01:40, Darwin arm64: holding_the_view_... 3.1 s PASS; coverage_greys_... 0.65 s PASS):
+      1. hk-pipeline view_pause_keeps_capture::holding_the_view_cannot_stop_the_runs_rows_the_ring_or_detection - asserts the lossless gate / that holding the view cannot stop rows, the ring or detection.
+      2. hk-cli api_contract coverage_greys_only_what_was_never_observed_and_names_the_device_that_looked (~line 7328) - the iq-ring source row reports available:false.
+      Both point at the IQ RING behaving differently on Linux. The product's compute target (the Jetson) is Linux, so an IQ ring that is unavailable or lossy on Linux is a PRODUCT portability defect (the ring gates capture, demod/decode of recent history and the IQ-horizon rule), not only a remote-worker nuisance.
+      DELIVER: on node2 (Linux) - it does not reproduce on the Mac - root-cause both (ring allocation/mmap/mlock limits, page size, clock source, a platform cfg, an env var the Mac sets, a missing capability/ulimit on the box?) and fix the product so the ring is available and lossless on Linux, OR if it is purely the host's configuration (e.g. a ulimit), make the product STATE the reason (never silently available:false) and document the host requirement for the Jetson; each with a regression test that runs on Linux. Report which.
+      DISPATCH NOTE: must run on node2 / a Linux host; a Mac run proves nothing.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the two binaries + the ring crate), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-567 worker on node2 + coordinator Mac check 2026-09-25.
+    effort_reason: platform root cause on the capture/ring path (the Jetson target is Linux); needs a Linux host
+  - id: T-921
+    milestone: MAUTO
+    title: Re-measure the confirm false-positive rate with T-577's harness driving the REAL CheckTally (and assist::codes on the new count); lower min_check_width to 8 only if the measurement allows (T-575 residue)
+    status: todo
+    priority: normal
+    deps:
+    - T-575
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FROM T-575's fix round (task-t575 5075887f, 2026-09-25): the ADR-0022 §4.3.1 count change (init-cancel guard `degenerate_frame`; shift/multiple/divisor dedup; affine-rank cap) SHIPPED, but `min_check_width` stays 16 because ADR-0022 allows 8 only once the new count is RE-MEASURED with T-577's harness - and that harness carries its own copy of the counting logic rather than running the real `CheckTally` - and because the `assist::codes` search path does not use the new count yet (T-577 §2.5).
+      DELIVER: (1) make T-577's measurement harness drive the REAL `CheckTally` (crates/hk-blocks/src/evidence.rs), not a copy; (2) route the `assist::codes` search path through the new count; (3) re-measure the false-confirm rate per decision at width 8 and 16 on T-577's populations (shift artefact, init-cancel, N2 model) and record it in docs/results; (4) ONLY if the measured rate at 8 is within ADR-0022's budget, lower `min_check_width` to 8 in SynthesizedConfirm and SolveRule with that evidence cited, and update ADR-0015 / docs/07 / docs/api.md; otherwise keep 16 and record why. The gate may only get stricter unless the measurement says otherwise. core_interface.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the timing/measurement tier for the rate run), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-575 fix round 2026-09-25.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."

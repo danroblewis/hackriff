@@ -179,9 +179,11 @@ export interface OverlayQuad {
    * (`./hud.ts`) along a pane's bottom and left edges; `research-box` is T-821's collection mark
    * (a marker or annotation, `app/map/research-slice.ts`); `path-stroke` is one step of T-897's
    * traced (t, f) route (`./paths.ts`); `prior-band` is T-812's dashed band-plan allocation
-   * edge/bracket (`./priors.ts`); the remaining two are the map's own.
+   * edge/bracket (`./priors.ts`); `density-cell` is T-810's coarse-zoom features-per-cell hatch
+   * (`./density.ts`) — the map's "density, not clustering" rule, drawn only where a box there would
+   * already generalize to a symbol; the remaining two are the map's own.
    * All are strokes, and `overlay.ts` can draw nothing else. */
-  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke" | "prior-band";
+  readonly kind: "pane-outline" | "live-segment" | "signal-box" | "selection-box" | "measurement-box" | "research-box" | "pending-region" | "trace-slice" | "trace-hold" | "time-rule" | "hud-tick" | "artifact-link" | "path-stroke" | "prior-band" | "density-cell";
   /** The pane id, or the device id, this mark is about. */
   readonly id: string;
   /** T-910: a screen-door pattern the overlay shader cuts into this quad (a dashed outline, a hatch

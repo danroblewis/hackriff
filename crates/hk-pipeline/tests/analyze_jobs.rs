@@ -634,6 +634,66 @@ fn a_job_acquires_what_it_reads_searches_and_streams_to_done() {
             .iter()
             .all(|n| n["tried"] == json!(true))
     );
+    // Every filter is honoured, not only the cheap ones: `outcome` and `family` select on the
+    // node's own served fields, so the "why not PSK" panel fetches the rows it renders and no
+    // others (ADR-0021 §4.2).
+    let outcome = jobs
+        .trace(
+            "a1",
+            &TraceQuery {
+                outcome: Some(OutcomeKind::PrunedFloor),
+                ..TraceQuery::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        outcome["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["outcome"] == json!("pruned_floor")),
+        "{outcome}"
+    );
+    assert!(
+        outcome["nodes"].as_array().unwrap().len() < n_all,
+        "a filter that selects nothing away is not a filter: {outcome}"
+    );
+    let family = all["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|n| n["hypothesis"]["family"].as_str())
+        .expect("a node carrying a family")
+        .to_owned();
+    let by_family = jobs
+        .trace(
+            "a1",
+            &TraceQuery {
+                family: Some(family.clone()),
+                ..TraceQuery::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        by_family["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["hypothesis"]["family"] == json!(family)),
+        "{by_family}"
+    );
+    assert!(!by_family["nodes"].as_array().unwrap().is_empty());
+    let absent = jobs
+        .trace(
+            "a1",
+            &TraceQuery {
+                family: Some("no-such-family".into()),
+                ..TraceQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(absent["nodes"], json!([]), "{absent}");
+    assert_eq!(absent["elided"], json!([]), "elided buckets filter too");
     assert_eq!(
         jobs.trace(
             "a1",
