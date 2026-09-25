@@ -27737,7 +27737,7 @@ tasks:
   - id: T-932
     milestone: MLIVE
     title: "RC red: surface-nav - the tile route refuses a request while nothing moves the view and the client cap never adapts, at main 92d0f6f1"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: UI
@@ -27754,6 +27754,7 @@ tasks:
     branch: task-rcfix-surface-nav
     result: |
       DONE 2026-09-25 on task-rcfix-surface-nav (9aab332e, queued): a LOAD FLAKE, not a product defect - surface-nav passed alone 3/3 at 92d0f6f1 (load 25-32). The steady window opened when the gestures' requests were answered on the wire, but an aborted read is 'answered' (canceled) while /api/tiles still builds it and holds the slot; the refusal ~4 s in was over the page's own leftover reads (cap at AIMD floor 1, not a cap that failed to react). Fix (spec only, no assertion loosened): after the wire drain, poll a serial probe until the route reports it holds no slot but the probe's (cost.in_flight - cost.in_flight_held == 0); a slot held > 31.2 s while the page is idle fails as the T-454 leak with the server's numbers. Red proof with a fault-injected hk: the RC case red 3/3 on the old spec, green 3/3 on the new; a never-released slot green on the old, red on the new. Spec 4/4 alone, just test-ui 81/81, tsc clean. Product follow-up: T-959 (client uses in_flight_held, not an average charge).
+    commit: 9a4de46c
   - id: T-935
     milestone: MAUTO
     title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
@@ -28177,6 +28178,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
 
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the 1006 close is on EVERY WebSocket opener session, /ws/open/listen too (every listen and bits tap ended 1006 when closed) - fix at the shared opener close path.
+
+      2026-09-25 09:45 coordinator: review attempt 3 (after 2 fix rounds, runner review-failed) FAILED on a real correctness bug - a vanished peer is reaped after ~40 s not ~20 s: serve() blocks on conn.lock() behind a writer stuck in sink.write (ConnSink::write holds conn for the whole write, peer timeout 20 s), and PeerGone/Detached still take the lock before shutdown (attempt 2 fixed only SlowConsumer/DrainTimeout). Fix: serve() uses try_lock and skips the close frame when busy, going straight to handle.close + shutdown; on_close for PeerGone/Detached shuts down before (or instead of) the close write, with the short close-write timeout; add a test whose records fill the send buffer so the writer holds conn mid-write (the silent_peers test's tiny Ticking records never do). Review text: ~/.hackriff-ops/work/T-954/review.json. Coordinator runs this fix round as a manual Opus worker.
   - id: T-955
     milestone: MMAP
     title: Reload restores the previous view + a stale retune offer; follow-live freezes at -14 s after an API retune
