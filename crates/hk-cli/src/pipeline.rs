@@ -1236,6 +1236,10 @@ pub fn serve_api(
             handle.iq_buffer(),
             handle.data_dir(),
         ))), // T-205
+        // T-844: the C38 models, modes and durable shadow log (`None` answers 503).
+        ml: handle
+            .ml()
+            .map(|m| Arc::new(crate::control::PipelineMl(m)) as Arc<dyn hk_api::MlControl>),
         // T-469: the persisted IQ recordings that extend the audio horizon past the ring.
         recordings: Some(Arc::new(PipelineRecordings::new(
             handle.data_dir().join("hackriff.db"),

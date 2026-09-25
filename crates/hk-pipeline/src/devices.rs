@@ -253,6 +253,9 @@ pub(super) fn start(
     let shared = Arc::new(Shared {
         dc_twin: super::dc_twin_rule(common),
         receiver: Arc::clone(&common.receiver),
+        // T-844: a further front end runs no chains, so nothing here classifies; carried for
+        // symmetry with `run::start_segment` so a chain added later observes like the primary's.
+        ml: common.ml.clone(),
         counters: Arc::clone(&counters),
         ring,
         gate,

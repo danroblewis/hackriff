@@ -63,7 +63,14 @@ fn start_server() -> (TempDataDirGuard, Serving, SocketAddr) {
 /// [`start_server`] with an explicit IQ-ring retention (T-338), so a test can reconfigure the
 /// capture window and watch the timeline follow it.
 fn start_server_retaining(retention_s: Option<f64>) -> (TempDataDirGuard, Serving, SocketAddr) {
-    let dir = temp_data_dir();
+    start_server_in(temp_data_dir(), retention_s)
+}
+
+/// [`start_server_retaining`] over a data directory the test has already seeded.
+fn start_server_in(
+    dir: PathBuf,
+    retention_s: Option<f64>,
+) -> (TempDataDirGuard, Serving, SocketAddr) {
     let guard = TempDataDirGuard::new(dir.clone());
     let serving = start(&ServeOptions {
         source: ServeSource::HackRf {
@@ -4485,6 +4492,208 @@ fn dataset_export_and_manifest_lookup_answer_as_documented() {
     let (st, _) = put(addr, "/api/datasets", "{}");
     assert_eq!(st, 405);
     let (st, _) = post(addr, "/api/datasets/x", "{}");
+    assert_eq!(st, 405);
+
+    stop_server(serving);
+}
+
+/// T-844: `GET /api/ml/models`, `PUT /api/ml/models/{id}/mode` and `GET /api/ml/shadow`, over a
+/// data directory seeded with an installed probe model and one record already in the durable
+/// shadow log — so the served shapes are asserted on real content, not on empty arrays — and the
+/// documented refusals: `active` without §4.6 evidence is 409 `needs_evidence`, a forced one is
+/// recorded and audited, an unauthenticated change is 401, bad queries are 400.
+#[test]
+fn ml_models_modes_and_the_shadow_log_answer_as_documented() {
+    let dir = temp_data_dir();
+    // Guarded from creation (T-232), not only from `start_server_in` below: the probe model and the
+    // seeded shadow record are written into it first.
+    let _setup_guard = TempDataDirGuard::new(dir.clone());
+    std::fs::create_dir_all(&dir).unwrap();
+    let probe = hk_pipeline::ml::install_probe_model(&dir, "fsk", &["2fsk", "gfsk", "msk", "4fsk"])
+        .unwrap();
+    let t_ns = 1_789_300_820_000_000_000_i64;
+    {
+        use hk_store::ml::*;
+        let store = ShadowStore::open(hk_pipeline::ml::shadow_dir(&dir)).unwrap();
+        store
+            .append(&ShadowRecord {
+                schema: SHADOW_SCHEMA,
+                t: hk_model::Timestamp::from_unix_nanos(t_ns),
+                model: probe.to_string(),
+                consumer: hk_pipeline::ml::DL_CONSUMER.into(),
+                subject: ShadowSubject {
+                    kind: "detection".into(),
+                    detection: "det-contract".into(),
+                },
+                snr_db: Some(22.0),
+                snr_bin_db: snr_bin_db(Some(22.0)),
+                prediction: ShadowPrediction {
+                    label: "gfsk".into(),
+                    p: 0.6,
+                    energy: -3.0,
+                    unknown_score: 0.2,
+                    provider: "cpu-mlp".into(),
+                    precision: "fp32".into(),
+                    latency_ms: 0.1,
+                    batch_size: 1,
+                    mode: "shadow".into(),
+                },
+                classical: ClassicalDecision {
+                    family: "fsk".into(),
+                    class: Some("2fsk".into()),
+                    class_p: Some(0.7),
+                    confidence: 0.8,
+                    open_set_score: 0.1,
+                    stage: "feature-tree".into(),
+                },
+            })
+            .unwrap();
+    }
+    let (_dir_guard, serving, addr) = start_server_in(dir.clone(), None);
+
+    let (st, v) = get(addr, "/api/ml/models");
+    assert_eq!(st, 200, "{v}");
+    let models = v["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1, "{v}");
+    let m = &models[0];
+    assert_eq!(m["id"], json!("probe-fsk"), "{m}");
+    assert_eq!(m["family"], json!("fsk"), "{m}");
+    assert_eq!(m["consumer"], json!("hk-classify/dl"), "{m}");
+    assert_eq!(m["format"], json!("hk-mlp@1"), "{m}");
+    assert_eq!(m["enable_evidence"], Value::Null, "{m}");
+    assert_eq!(
+        (m["loaded"].as_bool(), m["modes"].clone()),
+        (Some(false), json!([]))
+    );
+    assert_eq!(v["hosts"].as_array().unwrap().len(), 2, "{v}");
+    assert!(v["hosts"][0]["stats"]["shadow_records"].is_u64(), "{v}");
+    assert_eq!(v["producer"]["consumer"], json!("hk-classify/dl"), "{v}");
+    assert!(v["producer"]["offered"].is_u64(), "{v}");
+    assert!(is_array(&v["restore_errors"]), "{v}");
+
+    // Installed is not on: a change of mode is the operator's act, and it is authenticated.
+    let path = "/api/ml/models/probe-fsk/mode";
+    let (st, _) = call(addr, "PUT", path, None, Some(r#"{"mode":"shadow"}"#));
+    assert_eq!(st, 401);
+    let (st, v) = put(addr, path, r#"{"mode":"shadow"}"#);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["mode"]["mode"], json!("shadow"), "{v}");
+    assert_eq!(v["mode"]["previous"], json!("off"), "{v}");
+    assert_eq!(v["mode"]["forced"], json!(false), "{v}");
+    assert_eq!(v["mode"]["provider"], json!("cpu-mlp"), "{v}");
+    let (_, v) = get(addr, "/api/ml/models");
+    assert_eq!(v["models"][0]["loaded"], json!(true), "{v}");
+    assert_eq!(
+        v["models"][0]["modes"],
+        json!([{"consumer": "hk-classify/dl", "mode": "shadow", "forced": false}])
+    );
+
+    // `active` needs the §4.6 evidence; `force` gets past it and says so.
+    let (st, v) = put(addr, path, r#"{"mode":"active"}"#);
+    assert_eq!(
+        (st, v["code"].as_str()),
+        (409, Some("needs_evidence")),
+        "{v}"
+    );
+    let (st, v) = put(addr, path, r#"{"mode":"active","force":true}"#);
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["mode"]["mode"].clone(), v["mode"]["forced"].clone()),
+        (json!("active"), json!(true))
+    );
+    let (st, v) = put(addr, path, r#"{"mode":"off"}"#);
+    assert_eq!(st, 200, "{v}");
+    let audit = std::fs::read_to_string(dir.join("control-audit.jsonl")).unwrap();
+    let ml: Vec<Value> = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["action"] == json!("ml_mode"))
+        .collect();
+    assert_eq!(
+        ml.len(),
+        4,
+        "every change, refused or not, is audited: {audit}"
+    );
+    assert!(
+        ml.iter()
+            .any(|e| e["new"]["forced"] == json!(true) && e["result"] == json!("ok")),
+        "the forced change is in the audit log: {ml:?}"
+    );
+
+    for (body, status, code) in [
+        (r#"{}"#, 400, "invalid"),
+        (r#"{"mode":"on"}"#, 400, "invalid"),
+        (r#"{"mode":"shadow","evidence":"trust me"}"#, 400, "invalid"),
+        (
+            r#"{"mode":"shadow","consumer":"someone-else"}"#,
+            400,
+            "invalid",
+        ),
+    ] {
+        let (st, v) = put(addr, path, body);
+        assert_eq!(
+            (st, v["code"].as_str()),
+            (status, Some(code)),
+            "{body}: {v}"
+        );
+    }
+    let (st, v) = put(
+        addr,
+        "/api/ml/models/no-such-model/mode",
+        r#"{"mode":"shadow"}"#,
+    );
+    assert_eq!((st, v["code"].as_str()), (404, Some("not_found")), "{v}");
+
+    // The durable log, served with its per-SNR agreement.
+    let (st, v) = get(addr, "/api/ml/shadow");
+    assert_eq!(st, 200, "{v}");
+    let r = &v["records"][0];
+    assert_eq!(r["model"], json!(probe.to_string()), "{r}");
+    assert_eq!(r["subject"]["detection"], json!("det-contract"), "{r}");
+    assert_eq!(r["prediction"]["mode"], json!("shadow"), "{r}");
+    assert_eq!(r["classical"]["class"], json!("2fsk"), "{r}");
+    assert_eq!(r["agrees"], json!(false), "{r}");
+    assert_eq!(r["t_s"].as_f64(), Some(t_ns as f64 / 1e9), "{r}");
+    assert_eq!(r["t_ns"].as_i64(), Some(t_ns), "{r}");
+    assert!(
+        r.get("t").is_none(),
+        "nanoseconds are served under `_ns` only: {r}"
+    );
+    let a = &v["aggregates"][0];
+    assert_eq!(
+        (
+            a["family"].clone(),
+            a["snr_bin_db"].clone(),
+            a["n"].clone(),
+            a["compared"].clone(),
+            a["agree"].clone()
+        ),
+        (json!("fsk"), json!(20), json!(1), json!(1), json!(0)),
+        "{a}"
+    );
+    assert_eq!(v["store"]["records"], json!(1), "{v}");
+    assert_eq!(v["store"]["max_bytes"], json!(256_u64 << 20), "{v}");
+    let (_, v) = get(addr, "/api/ml/shadow?family=analog");
+    assert_eq!(
+        (v["records"].clone(), v["aggregates"].clone()),
+        (json!([]), json!([])),
+        "{v}"
+    );
+    let (_, v) = get(
+        addr,
+        "/api/ml/shadow?model=probe-fsk&t0=1789300800&t1=1789300900&limit=5",
+    );
+    assert_eq!(v["records"].as_array().unwrap().len(), 1, "{v}");
+    for q in ["t0=abc", "t0=20&t1=10", "limit=0", "limit=5000", "model="] {
+        let (st, v) = get(addr, &format!("/api/ml/shadow?{q}"));
+        assert_eq!((st, v["code"].as_str()), (400, Some("invalid")), "{q}: {v}");
+    }
+
+    let (st, _) = post(addr, "/api/ml/models", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = put(addr, "/api/ml/shadow", "{}");
+    assert_eq!(st, 405);
+    let (st, _) = get(addr, "/api/ml/models/probe-fsk/mode");
     assert_eq!(st, 405);
 
     stop_server(serving);
@@ -11501,6 +11710,9 @@ fn time_law_routes(now: f64, emitter: Option<&str>, selection: Option<&str>) -> 
         "/api/scheduler/arms",
         "/api/scheduler/leases",
         "/api/datasets",
+        // T-844: the C38 models, modes and the durable shadow log
+        "/api/ml/models",
+        "/api/ml/shadow",
         // T-469: the persisted IQ recordings that extend the audio horizon past the ring
         "/api/recordings",
         "/api/captures",
