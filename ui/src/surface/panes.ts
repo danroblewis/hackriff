@@ -721,6 +721,16 @@ export interface PaneStatus {
   /** Other panes in this frame resolved to a different `(levelF, levelT)`. Not a warning: a fact
    * the pane must say about itself, so a legitimate difference is not read as a bug. */
   readonly differsFrom: readonly string[];
+  /**
+   * **What the last-known (shadow) cells on this pane were read at** (T-916), in one clause — or
+   * `null` when no tile drawn here carries a shadow read from a coarser source than its own level.
+   *
+   * The pane already states the level it was drawn at; a shadow answered by the spectrum-history
+   * ladder is drawn at a *different* one, and a max-hold over the ladder's larger box reads hotter
+   * than the row the band was last live on (10–15 dB over the departed FM band, T-911). Saying so
+   * is the same rule as [[tierLabel]]: the surface never implies a resolution it did not have.
+   */
+  readonly shadowLabel: string | null;
 }
 
 /**
@@ -739,6 +749,27 @@ function tierStatement(r: PaneReport): string {
   }
   return "overview tier: folded from the spectrum-history pyramid, because this window is wider or "
     + "longer than the detail lattice can be read over. Survey resolution, not live-IQ detail.";
+}
+
+/**
+ * **The pane's statement about where its last-known cells came from** (T-916), or `null` when every
+ * shadow on it was read at the tile's own level (or there is none).
+ *
+ * Only the coarser case is named, and deliberately: an own-level shadow *is* the cell its band's
+ * last live row was drawn with (T-911), so there is nothing about it the pane's own level does not
+ * already say. The ladder's answer is a second resolution on one screen, and the direction of its
+ * error is known — a max-hold over a bigger box can only read the same or hotter — so the sentence
+ * states the cell AND which way it leans, rather than leaving a viewer to discover that a departed
+ * band's noise floor looks livelier than it was.
+ */
+function shadowStatement(r: PaneReport): string | null {
+  if (r.shadowLadder <= 0) return null;
+  const cell = r.shadowCellHz > 0 || r.shadowCellS > 0
+    ? `${fmtBandwidth(r.shadowCellHz)} × ${fmtSpan(r.shadowCellS)} cells`
+    : "a coarser, unstated cell";
+  return `last-known cells on ${r.shadowLadder} tile${r.shadowLadder === 1 ? "" : "s"} were read from the `
+    + `spectrum-history ladder (${cell}), not this pane's own level: a max-hold over a larger box, so `
+    + `they read at or hotter than the row the band was last live on`;
 }
 
 const cellHzAt = (lat: Lattice, level: number) => lat.f0Hz * 2 ** level;
@@ -811,6 +842,7 @@ export function paneStatuses(
       blank: r.blank,
       shortNs: r.shortNs,
       surveyed: r.surveyed,
+      shadowLabel: shadowStatement(r),
       differsFrom,
     });
   }

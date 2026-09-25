@@ -293,3 +293,89 @@ fn open_search_share_floor_is_at_least_a_fifth() {
     assert_eq!(s.open_search_min_share, 0.2);
     assert!(s.ordered.is_empty() && !s.open_skeletons.is_empty());
 }
+
+/// ADR-0022 §5.1, the laundering rule (T-575). A template a search **discovered** must carry the
+/// look-elsewhere that search spent, and every later use inherits it as `L_check`; only `builtin`
+/// or `user` templates that fix the whole check are template-fixed. Without this, a search could
+/// try 10⁴ polynomials, save the winner, and confirm with it free forever.
+#[test]
+fn a_discovered_template_carries_and_passes_on_its_discovery_look_elsewhere() {
+    use hk_synth::result::CheckOrigin;
+    let recipes = builtin_recipes().unwrap();
+    let reg = hk_blocks::Registry::builtin();
+    let adsb: serde_json::Value =
+        serde_json::from_str(include_str!("../../../templates/adsb.template.json")).unwrap();
+    let load = |v: &serde_json::Value| {
+        let mut lib = TemplateLibrary::default();
+        lib.add_text("t", &v.to_string(), &recipes, &reg)
+            .map(|()| lib)
+    };
+
+    // The shipped builtin: recipe-backed, nothing free — template-fixed, L_check 0.
+    let lib = load(&adsb).unwrap();
+    let t = &lib.get("adsb@1").unwrap().template;
+    assert_eq!(t.check_origin(), CheckOrigin::TemplateFixed);
+
+    // The same document saved from an analyze result: discovered, priced by its search.
+    let mut found = adsb.clone();
+    found["id"] = "adsb-found".into();
+    found["provenance"] = serde_json::json!({
+        "kind": "discovered", "job_id": "a7", "discovery_look_elsewhere_bits": 21.5 });
+    let lib = load(&found).unwrap();
+    let t = &lib.get("adsb-found@1").unwrap().template;
+    assert_eq!(
+        t.check_origin(),
+        CheckOrigin::Discovered {
+            look_elsewhere_bits: Some(21.5)
+        }
+    );
+    assert!(
+        t.check_origin().searched(),
+        "inherited L ⇒ the null control gates it"
+    );
+    assert_eq!(t.check_origin().inherited_bits(), Some(21.5));
+
+    // Seeding hands the origin to the search, so the root built from it pays.
+    let seeded = lib.seed(
+        &hint(vec![hyp("ppm", 0.9, false)], 0.2),
+        &MeasuredParams::default(),
+    );
+    let s = seeded
+        .ordered
+        .iter()
+        .find(|s| s.template == "adsb-found@1")
+        .expect("seeded under ppm");
+    assert_eq!(s.check_origin, t.check_origin());
+
+    // Unpriced: refused at load — an unknown charge is not a zero one.
+    let mut unpriced = found.clone();
+    unpriced["provenance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("discovery_look_elsewhere_bits");
+    assert_eq!(
+        load(&unpriced).unwrap_err().code,
+        TemplateErrorCode::DiscoveryUnpriced
+    );
+    let mut negative = found.clone();
+    negative["provenance"]["discovery_look_elsewhere_bits"] = (-1.0).into();
+    assert_eq!(
+        load(&negative).unwrap_err().code,
+        TemplateErrorCode::DiscoveryUnpriced
+    );
+    // A builtin cannot claim a discovery charge (nor, by construction, shed one).
+    let mut claims = adsb.clone();
+    claims["provenance"]["discovery_look_elsewhere_bits"] = 3.0.into();
+    assert_eq!(
+        load(&claims).unwrap_err().code,
+        TemplateErrorCode::DiscoveryUnpriced
+    );
+
+    // A builtin with any free parameter is not proven to fix its check: searched.
+    let lib = TemplateLibrary::builtin().unwrap();
+    let pocsag = &lib.get("pocsag@1").unwrap().template;
+    assert!(!pocsag.free.is_empty());
+    assert_eq!(pocsag.check_origin(), CheckOrigin::Searched);
+    let generic = &lib.get("generic-fsk-framed@1").unwrap().template;
+    assert_eq!(generic.check_origin(), CheckOrigin::Searched);
+}

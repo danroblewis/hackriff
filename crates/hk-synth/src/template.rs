@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::candidate::FreeParam;
+use crate::result::CheckOrigin;
 use crate::result::PipelineResult;
 use crate::skeleton::{Skeleton, SkeletonSlots};
 use crate::stage::Stage;
@@ -59,6 +60,13 @@ pub struct TemplateProvenance {
     /// `discovered` only: when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<String>,
+    /// `discovered` only, and **required** there: the look-elsewhere the discovering search spent
+    /// finding the check (its `L_check`), recorded at save-as-template time (ADR-0022 §5.1). Every
+    /// later use **inherits** it as `L_check`, so a search cannot launder its own multiplicity by
+    /// saving the winner and confirming free forever. The loader refuses a discovered template
+    /// without it (`discovery_unpriced`) and a builtin or user template with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_look_elsewhere_bits: Option<f32>,
     /// Where each fact-bearing field came from. Every such field of a **builtin** must be covered
     /// (the loader refuses `fact_unsourced`); a user template's uncovered fields default to
     /// `{kind: user}`.
@@ -358,6 +366,37 @@ impl Template {
         }
     }
 
+    /// Where the check a search seeded from this template reaches comes from (ADR-0022 §5.1),
+    /// which decides its `L_check` and whether ADR-0021 §8.2's null control gates it.
+    ///
+    /// - A template **discovered** by an earlier search inherits that search's look-elsewhere —
+    ///   [`CheckOrigin::Discovered`] with `discovery_look_elsewhere_bits` — and counts as searched,
+    ///   whatever else it fixes. This is the laundering rule; no other input can make a
+    ///   discovered template template-fixed.
+    /// - A `builtin` or `user` template is [`CheckOrigin::TemplateFixed`] only when it is
+    ///   recipe-backed and leaves **no** parameter free: generator, width, start bit, tail, bit
+    ///   order and class count were then all fixed before the data was seen. A free parameter
+    ///   anywhere is read as a possibly-searched check ([`CheckOrigin::Searched`]) — this build
+    ///   cannot yet tell a check slot's parameter from a clock's, and the conservative reading
+    ///   costs recall (the null control must pass), never soundness.
+    /// - A skeleton is an open search: [`CheckOrigin::Searched`].
+    pub fn check_origin(&self) -> CheckOrigin {
+        match self.provenance.kind {
+            AuthorKind::Discovered => CheckOrigin::Discovered {
+                look_elsewhere_bits: self
+                    .provenance
+                    .discovery_look_elsewhere_bits
+                    .filter(|b| b.is_finite() && *b >= 0.0),
+            },
+            AuthorKind::Builtin | AuthorKind::User
+                if self.recipe.is_some() && self.skeleton.is_none() && self.free.is_empty() =>
+            {
+                CheckOrigin::TemplateFixed
+            }
+            AuthorKind::Builtin | AuthorKind::User => CheckOrigin::Searched,
+        }
+    }
+
     /// The skeleton this template offers, for a generic template.
     pub fn as_skeleton(&self) -> Option<Skeleton> {
         self.skeleton
@@ -433,6 +472,14 @@ pub fn save_as_template(result: &PipelineResult, req: SaveAsTemplate) -> Templat
             job_id: Some(req.job_id),
             emitter_id: req.emitter_id,
             t: Some(req.t),
+            // ADR-0022 §5.1, the laundering rule: the discovering search's `L_check` rides with
+            // the template and every later use inherits it. A result with no priced hold-out
+            // records none, and such a template is refused at load and can never confirm.
+            discovery_look_elsewhere_bits: result
+                .holdout
+                .as_ref()
+                .and_then(|h| h.l_check)
+                .filter(|b| b.is_finite() && *b >= 0.0),
             facts: Vec::new(),
         },
         recipe: Some(RecipeRef {
@@ -547,6 +594,39 @@ mod tests {
             }
         }
 
+        /// T-575 × T-861: save-as-template records the discovering search's `L_check`
+        /// (ADR-0022 §5.1), and the saved template hands it on as an inherited charge.
+        #[test]
+        fn a_saved_template_carries_its_discovery_look_elsewhere() {
+            let mut r = solved();
+            r.holdout = Some(crate::result::HoldoutEvidence {
+                evidence_bits: 40.0,
+                analytic_bits: 30.0,
+                check_bits: Some(27.0),
+                l_check: Some(21.0),
+                check_width: Some(16),
+                differences: 3,
+                check_origin: CheckOrigin::Searched,
+                stages: Vec::new(),
+                null_control: None,
+            });
+            let t = save_as_template(
+                &r,
+                SaveAsTemplate {
+                    id: "found".into(),
+                    name: "Found".into(),
+                    description: String::new(),
+                    job_id: "a9".into(),
+                    emitter_id: None,
+                    t: "2026-09-25T00:00:00Z".into(),
+                    source_class: ContentClass::Unrestricted,
+                },
+            );
+            assert_eq!(t.provenance.discovery_look_elsewhere_bits, Some(21.0));
+            assert_eq!(t.check_origin().inherited_bits(), Some(21.0));
+            assert!(t.check_origin().searched());
+        }
+
         #[test]
         fn writes_a_discovered_template_with_the_recipe_fully_bound() {
             let r = solved();
@@ -579,6 +659,14 @@ mod tests {
             );
             assert!(t.skeleton.is_none());
             assert!(t.free.is_empty(), "the result's recipe is already bound");
+            // No priced hold-out: no discovery charge, so the template can never confirm.
+            assert_eq!(t.provenance.discovery_look_elsewhere_bits, None);
+            assert_eq!(
+                t.check_origin(),
+                CheckOrigin::Discovered {
+                    look_elsewhere_bits: None
+                }
+            );
             assert_eq!(t.output_policy, r.recipe.output_policy);
             // Never confirms anything and accrues no field validation on save.
             assert!(t.validation.is_empty());

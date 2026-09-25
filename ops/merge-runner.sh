@@ -358,7 +358,8 @@ run_rc(){ # main is ready (landed, clean, nothing staged) - checked by the calle
       *) echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - suite $a red with no named test (build/harness/crash) in the release candidate; last green: $last; repro: just gate --files crates/ --phase acceptance" >> "$NEEDS" ;;
     esac
   done
-  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | grep -vc '^$') red) -> P1 items in $NEEDS; nothing un-lands"
+  # Count reds, not lines: the browser runner lists every failed spec on ONE 'failed:' line (03:53: '1 red' for 4 items).
+  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | awk '$1=="spec"{n+=NF-1; next} NF{n++} END{print n+0}') red) -> P1 items in $NEEDS; nothing un-lands"
   notify_coordinator "the release candidate at ${sha:0:8} is RED - P1 item(s) RC_RED in the attention file (last green $last); file them found_by rc-$(date +%Y%m%d)." "RC red - P1 tickets"
   return 0
 }

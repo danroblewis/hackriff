@@ -69,6 +69,11 @@ import {
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
+// T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
+// directions line — one per front end, in the same render pass as the tiles.
+import {
+  parseTuneHistory, tuneHistoryRequest, tuneKeyEntries, tuneQuads, type TunePath,
+} from "../../surface/tunepath";
 import { liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -82,6 +87,7 @@ import { commitMeasurement, type MeasureView } from "../explore/measure";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { trackOverlay } from "../chrome/dismiss";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
@@ -239,7 +245,45 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // The statements that used to be those rows (trace, IQ ring, fog, priors, per-viewport level,
   // orientation) float bottom-left with the readout, above the map strip: screen-space chrome over
   // the canvas, never faded (docs/23 §10.2: honesty statements).
-  const statusEl = h("div", { class: "sf-status", "data-band": "chrome" }, traceEl, ringEl, fogEl, priorsEl, chrome, note, readout);
+  //
+  // T-919 (user P1, docs/23 §10.6 rule 1): T-918's stack could grow to ~560 × 184 px — a large
+  // PERMANENT overlay over the waterfall, which is exactly what P1 forbids ("an overlay exists to
+  // be closed"; a panel's default state is its smallest). It is a compact STATUS LINE now:
+  //
+  //  - **Collapsed (the default)** — one line: the per-viewport row (`.sf-chrome`, trimmed by CSS
+  //    to where · level/tier and T-476's persistent Retune) beside the colour-scale sentence and
+  //    the hover readout. The tier/level and the scale are honesty statements, so they are on the
+  //    picture in every state: §10.2 says a statement about what the data *is* may not be made less
+  //    legible, and that applies to hiding it behind a press as much as to fading it.
+  //  - **Expanded** — adds the sentences that are a paragraph each: the spectrum trace, the IQ-ring
+  //    rules in words (retention bound, oldest IQ, whether this viewport has IQ), the fog note, the
+  //    ranked band-plan priors and T-450's orientation note.
+  //
+  // The dismiss (×, and Escape through the one overlay stack, T-900) returns it to the collapsed
+  // line, never to nothing — a viewer can put a paragraph away, not switch an honesty statement off.
+  const statusBody = h("div", { class: "sf-status-body", id: "sf-status-body", hidden: true },
+    traceEl, ringEl, fogEl, priorsEl, note);
+  const statusToggle = h("button", {
+    class: "sf-status-toggle", type: "button", "aria-controls": "sf-status-body", "aria-expanded": "false",
+    title: "The full status: spectrum trace, capture rules, coverage, priors and orientation",
+  }, "More") as HTMLButtonElement;
+  const statusClose = h("button", {
+    class: "sf-status-close", type: "button", "aria-label": "Close the status detail", title: "Close", hidden: true,
+  }, "×") as HTMLButtonElement;
+  const statusLine = h("div", { class: "sf-status-line" },
+    chrome, readout, h("div", { class: "sf-status-btns" }, statusToggle, statusClose));
+  const statusEl = h("div", { class: "sf-status", "data-band": "chrome", "data-open": "false" }, statusBody, statusLine);
+  const statusOverlay = trackOverlay("surface-status", () => setStatusOpen(false));
+  function setStatusOpen(on: boolean): void {
+    statusEl.dataset.open = on ? "true" : "false";
+    statusBody.hidden = !on;
+    statusClose.hidden = !on;
+    statusToggle.setAttribute("aria-expanded", on ? "true" : "false");
+    statusToggle.textContent = on ? "Less" : "More";
+    statusOverlay.open(on);
+  }
+  statusToggle.addEventListener("click", () => setStatusOpen(statusEl.dataset.open !== "true"));
+  statusClose.addEventListener("click", () => setStatusOpen(false));
   stage.append(statusEl);
   el.replaceChildren(stage);
 
@@ -477,9 +521,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
   // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
   // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
-  // Which addresses are asked for, when, over what request, and where an answer may be written is
-  // `./density-poll.ts`'s (T-927): one read per address with a deadline, stamped with the edge it was
-  // issued at, written back against what the panes ask for NOW. Here it is only polled and drawn.
+  // Per-pane, per-address copies and WHEN each is asked again — plus the read's deadline, the joined
+  // request's edge stamp and the write-back against the CURRENT addresses — are `./density-poll.ts`'s
+  // (T-927). Here the layer is only polled and drawn.
   const densityPoll = new DensityPoll((url, signal) => client.get<unknown>(url, { signal }));
   const densityQuadsFn: OverlayLayerFn = (pane) => {
     const lat = preview?.view.surface.lat;
@@ -492,8 +536,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   const refreshDensity = () => {
     const p = preview;
     if (!p) return;
+    const edgeNs = p.view.panes.lastEdgeNs;
     densityPoll.tick(
-      p.view.surface.lat, p.view.panes.views(p.view.panes.lastEdgeNs), p.view.panes.lastEdgeNs,
+      p.view.surface.lat, p.view.panes.views(edgeNs), edgeNs,
       (id) => isLayerVisible(layersFor(id), "density"), (id) => p.view.panes.isFollowing(id),
     );
   };
@@ -502,8 +547,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // other layer. The poll below only refreshes the records; it never positions anything (T-388).
   let paths: MarkPath[] = [];
   const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
+  // T-898 (docs/23 §10.6 rule 2): the radio's own route — the recorded tune intervals as the
+  // backend traced them (`GET /api/tune-history`), laid out HERE, per frame, through the pane's
+  // own box. The poll below only refreshes the records; it never positions anything (T-388).
+  let tunePaths: TunePath[] = [];
+  const tuneQuadsFn: OverlayLayerFn = (pane) => tuneQuads(tunePaths, pane.box, pane.rect);
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
-    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
+    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads,
+    paths: pathQuadsFn, tune: tuneQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -1221,7 +1272,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             // T-813: the detections layer's key — same symbology, quoted from `marks.ts`, `markKeyEntries` draws.
-            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "detections" ? markKeyEntries() : undefined } };
+            // T-813: the detections key is `marks.ts`'s own symbology. T-898: the retune layer's
+            // key is one row per front end, so the route on screen is labelled by its radio.
+            const key = l.id === "detections"
+              ? markKeyEntries()
+              : l.id === "tune"
+                ? tuneKeyEntries(tunePaths).map((e) => ({ key: e.key, label: e.label, note: e.note, pixel: () => e.rgb }))
+                : undefined;
+            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key } };
           }).concat(store.get().research.collections.map((c) => ({ plane: "overlay" as const, z: COLLECTION_Z, row: {
             id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
             on: collectionVisibleOn(reg, c),
@@ -1321,6 +1379,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (!url) { paths = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) paths = parsePaths(body);
+    }, 2000);
+
+    // T-898: the `tune` layer's records — the device's own retune route — on the same terms: one
+    // read over the union of the boxes of the panes showing the layer, nothing when none does.
+    startPoll(async () => {
+      const url = tuneHistoryRequest(pv.view.panes.list()
+        .filter((x) => isLayerVisible(layersFor(x.id), "tune"))
+        .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
+      if (!url) { tunePaths = []; return; }
+      const body = await client.get<unknown>(url).catch(() => null);
+      if (body) tunePaths = parseTuneHistory(body);
     }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----

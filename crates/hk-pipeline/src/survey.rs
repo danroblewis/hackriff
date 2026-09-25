@@ -65,7 +65,8 @@
 //! **succeeded** is never re-surveyed. Either way the count is bounded per capture state and
 //! independent of how many boxes are classified under it, which is the whole point.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -119,6 +120,10 @@ pub struct ReceiverSurvey {
     states: AtomicU64,
     /// Total time spent measuring, µs — the cost this module's bound is about.
     cost_us: AtomicU64,
+    /// A measurement is running on its `hk-survey-measure` thread (T-917). Run-wide, like the rest
+    /// of this struct, so a measurement a stopped segment walked away from still counts against
+    /// the next segment's: at most one runs at a time, whatever the re-plumb rate.
+    measuring: AtomicBool,
 }
 
 impl Default for ReceiverSurvey {
@@ -138,6 +143,7 @@ impl ReceiverSurvey {
             abstained: AtomicU64::new(0),
             states: AtomicU64::new(0),
             cost_us: AtomicU64::new(0),
+            measuring: AtomicBool::new(false),
         }
     }
 
@@ -246,6 +252,63 @@ impl SurveyCounts {
     }
 }
 
+/// How often [`measure_off_thread`] looks at `stop` while it waits.
+const MEASURE_POLL: Duration = Duration::from_millis(20);
+
+/// Runs `job` (one survey measurement) on its own `hk-survey-measure` thread and waits for its
+/// answer, returning `Ok(None)` within [`MEASURE_POLL`] of `stop` being set instead (T-917).
+///
+/// On `None` the measuring thread is left to finish on its own: it holds only its copy of the
+/// window and the estimator, never the segment's [`Shared`], so the segment it outlives can be
+/// torn down and salvaged underneath it, and its answer goes nowhere. Before starting it waits for
+/// any measurement already running — one a previous segment walked away from — so at most one runs
+/// at a time for the whole run.
+fn measure_off_thread<R: Send + 'static>(
+    survey: &Arc<ReceiverSurvey>,
+    stop: &AtomicBool,
+    job: impl FnOnce() -> R + Send + 'static,
+) -> anyhow::Result<Option<R>> {
+    while survey
+        .measuring
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        std::thread::sleep(MEASURE_POLL);
+    }
+    /// Clears `measuring` however the job ends, a panic included.
+    struct Clear(Arc<ReceiverSurvey>);
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            self.0.measuring.store(false, Ordering::Release);
+        }
+    }
+    let clear = Clear(Arc::clone(survey));
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("hk-survey-measure".into())
+        .spawn(move || {
+            let _clear = clear;
+            // The receiver is gone when the segment stopped first; the answer is then unwanted.
+            let _ = tx.send(job());
+        })?;
+    loop {
+        match rx.recv_timeout(MEASURE_POLL) {
+            Ok(r) => return Ok(Some(r)),
+            Err(RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("the survey measurement panicked")
+            }
+        }
+    }
+}
+
 /// The `hk-survey` reader: accumulates one window of the raw tuned span per capture state and
 /// measures the receiver's own cyclic lines over it (see the [module docs](self)).
 pub(crate) fn run(shared: Arc<Shared>, survey: Arc<ReceiverSurvey>) -> anyhow::Result<()> {
@@ -303,21 +366,41 @@ pub(crate) fn run(shared: Arc<Shared>, survey: Arc<ReceiverSurvey>) -> anyhow::R
                     continue;
                 };
                 next_index = None;
-                let info = InputInfo {
-                    time,
-                    discontinuity: hk_core::Discontinuity::NONE,
-                    dropped_before: 0,
-                    provenance: &prov,
+                // The measurement. This thread holds nothing while it runs but the ring cursor it
+                // has already advanced past the samples it copied out — no repository lock, no
+                // chain, nothing the detector or the chains wait on — and it reads nothing more
+                // until the answer is back, so which windows are measured is unchanged by load.
+                //
+                // **It runs on a thread of its own, and this one waits for it watching `stop`
+                // (T-917).** The measurement is one uninterruptible call of up to seconds of one
+                // core (the module docs' 0.39 core-s per second of capture, so ~8 s for a 2 s
+                // window at 20 Msps), and it was run *here*: a re-plumb that arrived mid-survey
+                // waited for it, and past `REPLUMB_JOIN_BOUND` this worker was reported as "still
+                // running after its segment ended" and abandoned. Measured on a loaded test box
+                // (opt-level 0 `hk-estimate`, load 30), one 2 M-sample survey took 21.7 s.
+                let (samples, cfg) = (std::mem::take(&mut window), survey.cfg);
+                let job_prov = prov.clone();
+                let job = move || {
+                    let info = InputInfo {
+                        time,
+                        discontinuity: hk_core::Discontinuity::NONE,
+                        dropped_before: 0,
+                        provenance: &job_prov,
+                    };
+                    let t0 = Instant::now();
+                    let ran = c14.survey_receiver_lines(info, &samples, &cfg);
+                    let cost = t0.elapsed();
+                    let lines = ran.then(|| c14.receiver_lines().cloned()).flatten();
+                    (c14, lines, cost)
                 };
-                // The measurement. It runs here, on this thread, holding nothing but the ring
-                // cursor it has already advanced past the samples it copied out — no repository
-                // lock, no chain, nothing the detector or the chains wait on.
-                let t0 = Instant::now();
-                let ran = c14.survey_receiver_lines(info, &window, &survey.cfg);
-                let cost = t0.elapsed();
-                let lines = ran.then(|| c14.receiver_lines().cloned()).flatten();
+                let Some((back, lines, cost)) = measure_off_thread(&survey, &shared.stop, job)?
+                else {
+                    // The segment stopped mid-measurement. The answer is dropped with the thread
+                    // computing it, never recorded after the segment it describes has gone.
+                    return Ok(());
+                };
+                c14 = back;
                 survey.record(prov.get(), lines, cost);
-                window = Vec::new();
             }
             ReadOutcome::Overrun { resume_at, .. } => {
                 // Lapped: whatever was held is no longer contiguous with what comes next.
@@ -366,6 +449,64 @@ mod tests {
             source_index: 0,
             source_samples: 4_800_000,
         }
+    }
+
+    /// T-917: a segment that stops mid-measurement is not held by it. The wait returns within a
+    /// poll of `stop`, whatever the measurement still has to do, and a second measurement (the
+    /// next segment's) waits for the abandoned one rather than running beside it.
+    #[test]
+    fn t917_a_stop_mid_measurement_returns_within_a_poll_and_measurements_never_overlap() {
+        use std::sync::atomic::AtomicUsize;
+        let survey = Arc::new(ReceiverSurvey::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let slow = |running: &Arc<AtomicUsize>, peak: &Arc<AtomicUsize>, d: Duration| {
+            let (running, peak) = (Arc::clone(running), Arc::clone(peak));
+            move || {
+                let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(d);
+                running.fetch_sub(1, Ordering::SeqCst);
+                7u32
+            }
+        };
+        let stopper = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                stop.store(true, Ordering::SeqCst);
+            })
+        };
+        let t0 = Instant::now();
+        let got = measure_off_thread(
+            &survey,
+            &stop,
+            slow(&running, &peak, Duration::from_secs(3)),
+        )
+        .unwrap();
+        let waited = t0.elapsed();
+        stopper.join().unwrap();
+        assert_eq!(got, None, "a stopped segment drops the answer");
+        assert!(
+            waited < Duration::from_millis(1500),
+            "returned {waited:?} after starting a 3 s measurement stopped at 100 ms"
+        );
+        assert!(survey.measuring.load(Ordering::SeqCst), "the job runs on");
+
+        // The next segment: waits for the abandoned job, then runs its own to completion.
+        let fresh = AtomicBool::new(false);
+        let got = measure_off_thread(
+            &survey,
+            &fresh,
+            slow(&running, &peak, Duration::from_millis(10)),
+        )
+        .unwrap();
+        assert_eq!(got, Some(7));
+        assert_eq!(peak.load(Ordering::SeqCst), 1, "never two at once");
+        // And a stop while waiting for another's measurement returns too.
+        survey.measuring.store(true, Ordering::SeqCst);
+        assert_eq!(measure_off_thread(&survey, &stop, || 1u32).unwrap(), None);
     }
 
     /// The cadence: one measurement per capture state, not one per classification, and never one

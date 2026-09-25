@@ -38,7 +38,7 @@
 // the tile a pane is looking at, converts its grid into overlay geometry through the same `toClip`
 // the tiles are drawn with, and never reaches a device route.
 
-import { addrSpelling, extentOf, levelsFor, tilesFor, type Box, type Lattice, type TileAddr } from "./lattice";
+import { addrSpelling, levelsFor, tilesFor, type Box, type Lattice, type TileAddr } from "./lattice";
 import type { OverlayQuad } from "./minimap";
 import { toClip, type PaneRect } from "./surface";
 
@@ -201,27 +201,28 @@ export function densityQuads(
   return out;
 }
 
-// ## When a density tile is asked for again (T-810, review fix 2)
+// ## When a density tile is asked for again (T-810, review fixes 2 and 3)
 //
 // `/api/tiles/events` is "not a tile channel: counts change with every append to the observation
-// ledger" (docs/api.md), so fetching each address once and keying on the address alone froze a
-// live-edge tile's counts until the pane crossed a tile boundary — hours at a coarse level — and
-// left a failed fetch empty for as long. The rule below is the tile cache's own freshness rule
-// (`tilecache.ts`'s `behindTheEdge`, T-460/T-495), not a second policy:
+// ledger" (docs/api.md), so fetching each address once froze a live-edge tile's counts until the
+// pane crossed a tile boundary, and left a failed fetch empty for as long. Nor may a tile be SEALED
+// once the edge passes its end, the way the tile cache seals spectrum tiles: an event is counted in
+// the cell of its START, most observations are written when a track CLOSES (after the tracker's idle
+// timeout, 60 s by default and adaptive up to an hour), and a start can move earlier — so counts
+// keep arriving in tiles the edge left long ago. The rule is therefore:
 //
 //  - a copy records **the live edge at the instant it was asked for** (`edgeAtFetchNs`);
-//  - it is stale iff `edgeAtFetchNs < min(edge, tile end)` — the edge has moved on since it was
-//    asked AND it was asked before the tile's end. So a tile the edge is inside is revalidated, the
-//    first re-ask after the edge has passed its end completes it, and from then on it is **sealed**
-//    and never asked again (a copy asked after the edge passed the end cannot change);
-//  - only for a pane that is **following** the live edge (a frozen pane is a view over the past,
-//    exactly the tile cache's `following` list);
-//  - at most once per [[DENSITY_LIVE_REFRESH_MS]] per address, and the host keeps one batch in
-//    flight per pane, so the poll can never become a request storm;
+//  - while its pane is **following**, it is stale when the edge has moved since (`edgeAtFetchNs <
+//    edge`, i.e. rows arrived) AND at least [[DENSITY_LIVE_REFRESH_MS]] has passed — every tile on
+//    screen, with no cap at the tile's end. Bounded by [[DENSITY_MAX_TILES_PER_PANE]] per pane per
+//    period, one batch in flight per pane, and [[sharedDensityReader]] sharing one request between
+//    panes asking for the same address;
+//  - a **frozen** pane is a view over the past: it asks once and keeps its own copy. Copies are held
+//    **per pane**, so a frozen pane never picks up the counts a following pane refreshed;
 //  - a failed fetch keeps whatever copy was in hand and is retried with exponential backoff
 //    ([[DENSITY_RETRY_BASE_MS]] doubling to [[DENSITY_RETRY_MAX_MS]]) — never recorded as fetched.
 
-/** The least wall time between two asks for one live-edge density address. */
+/** The least wall time between two asks for one density address by one following pane. */
 export const DENSITY_LIVE_REFRESH_MS = 5000;
 /** First retry delay after a failed density fetch; doubles per consecutive failure. */
 export const DENSITY_RETRY_BASE_MS = 1000;
@@ -237,52 +238,88 @@ interface DensityEntry {
   failures: number;
 }
 
-/** Per-address density copies and the one rule for when each is asked for again. Pure: no fetch,
- * no clock — the host passes `nowMs` and the edge, and reports each answer back. */
+const entryKey = (pane: string, a: TileAddr): string => `${pane}|${addrSpelling(a)}`;
+
+/** Per-pane, per-address density copies and the one rule for when each is asked for again. Pure:
+ * no network, no clock — the host passes `nowMs` and the edge, and reports each answer back. */
 export class DensityFetches {
   private readonly map = new Map<string, DensityEntry>();
 
-  /** The addresses of `addrs` that need a request now. */
-  due(lat: Lattice, addrs: readonly TileAddr[], edgeNs: number, following: boolean, nowMs: number): TileAddr[] {
+  /** The addresses of `addrs` that pane `pane` needs a request for now. */
+  due(pane: string, addrs: readonly TileAddr[], edgeNs: number, following: boolean, nowMs: number): TileAddr[] {
     return addrs.filter((a) => {
-      const e = this.map.get(addrSpelling(a));
+      const e = this.map.get(entryKey(pane, a));
       if (!e) return true;
       if (e.failures > 0) return nowMs - e.askedAtMs >= Math.min(DENSITY_RETRY_MAX_MS, DENSITY_RETRY_BASE_MS * 2 ** (e.failures - 1));
-      if (!following || !Number.isFinite(edgeNs)) return false;
-      const end = extentOf(lat, a).t1Ns;
-      if (!(e.edgeAtFetchNs < Math.min(edgeNs, end))) return false; // sealed, or edge not moved
-      return nowMs - e.askedAtMs >= DENSITY_LIVE_REFRESH_MS;
+      if (!following) return false;
+      return e.edgeAtFetchNs < edgeNs && nowMs - e.askedAtMs >= DENSITY_LIVE_REFRESH_MS;
     });
   }
 
-  /** Record a successful answer for `a`, asked when the edge stood at `edgeAtFetchNs`.
+  /** Record a successful answer for pane `pane`'s `a`, asked when the edge stood at `edgeAtFetchNs`.
    *
-   * A non-finite edge (no spectrum row yet, so the host has no edge to name) is stored as
-   * `-Infinity`, never as `NaN` (T-927, follow-up 4): `NaN < anything` is FALSE, so a `NaN` fetch
-   * edge would make [[due]]'s staleness test read "sealed" for ever and this address would never be
-   * asked again — an accidental seal on a live-edge tile. `-Infinity` is the truth of that case:
-   * this copy was asked before any edge was known, so it is stale as soon as one is. */
-  succeeded(a: TileAddr, tile: DensityTile, edgeAtFetchNs: number, nowMs: number): void {
+   * A non-finite edge — the host has no edge to name yet, before the first row — is stored as
+   * `-Infinity`, never as `NaN` (T-927, follow-up 4): `NaN < edge` is FALSE, so a `NaN` fetch edge
+   * makes [[due]]'s "rows arrived since" test read "nothing to ask about" for ever, and this copy is
+   * never refreshed again — an accidental seal, the very thing review fix 3 removed. `-Infinity` is
+   * the truth of that case: asked before any edge was known, so stale as soon as one is. */
+  succeeded(pane: string, a: TileAddr, tile: DensityTile, edgeAtFetchNs: number, nowMs: number): void {
     const edge = Number.isFinite(edgeAtFetchNs) ? edgeAtFetchNs : Number.NEGATIVE_INFINITY;
-    this.map.set(addrSpelling(a), { tile, edgeAtFetchNs: edge, askedAtMs: nowMs, failures: 0 });
+    this.map.set(entryKey(pane, a), { tile, edgeAtFetchNs: edge, askedAtMs: nowMs, failures: 0 });
   }
 
-  /** Record a failed ask for `a`: the copy in hand (if any) is kept, and a retry is scheduled. */
-  failed(a: TileAddr, nowMs: number): void {
-    const k = addrSpelling(a);
+  /** Record a failed ask: the copy in hand (if any) is kept, and a retry is scheduled. */
+  failed(pane: string, a: TileAddr, nowMs: number): void {
+    const k = entryKey(pane, a);
     const e = this.map.get(k);
     this.map.set(k, { tile: e?.tile ?? null, edgeAtFetchNs: e?.edgeAtFetchNs ?? Number.NEGATIVE_INFINITY, askedAtMs: nowMs, failures: (e?.failures ?? 0) + 1 });
   }
 
-  /** The copies in hand for `addrs`, in their order. */
-  tiles(addrs: readonly TileAddr[]): DensityTile[] {
+  /** Pane `pane`'s copies for `addrs`, in their order. */
+  tiles(pane: string, addrs: readonly TileAddr[]): DensityTile[] {
     const out: DensityTile[] = [];
-    for (const a of addrs) { const t = this.map.get(addrSpelling(a))?.tile; if (t) out.push(t); }
+    for (const a of addrs) { const t = this.map.get(entryKey(pane, a))?.tile; if (t) out.push(t); }
     return out;
   }
 
-  /** Drop every address not in `keep` (the union of what the panes currently show). */
-  retain(keep: ReadonlySet<string>): void {
-    for (const k of [...this.map.keys()]) if (!keep.has(k)) this.map.delete(k);
+  /** Drop every copy but those `keep` names — each a `[pane, addr]` a pane currently shows. */
+  retain(keep: Iterable<readonly [string, TileAddr]>): void {
+    const k = new Set<string>();
+    for (const [p, a] of keep) k.add(entryKey(p, a));
+    for (const key of [...this.map.keys()]) if (!k.has(key)) this.map.delete(key);
   }
+}
+
+/** One shared read's answer: the tile (`null` when it failed or did not parse) **and the live edge
+ * the request that fetched it was ISSUED at** — which is not the edge of the tick that joined it. */
+export interface DensityAnswer {
+  readonly tile: DensityTile | null;
+  readonly edgeAtFetchNs: number;
+}
+
+/**
+ * The density reader the host polls with: one request per address in flight, SHARED by every pane
+ * that asks for it meanwhile, so two following panes due for the same address in one tick send one
+ * `GET`, not two. `get` is the host's read (a URL in, a body out); this file never reaches the
+ * network itself. A failed or unparseable answer resolves a `null` tile (the caller retries it).
+ *
+ * The answer carries `edgeAtFetchNs` — the `edgeNs` of the ask that **issued** the request — because
+ * a pane joining a request in flight must record the copy at the edge it was actually taken at, not
+ * at its own later tick (T-927, follow-up 2). Recording the joining tick's edge claims a snapshot
+ * seconds fresher than it is, and `DensityFetches.due`'s "rows arrived since" test then skips the
+ * refresh that would have caught the counts that arrived in between.
+ */
+export function sharedDensityReader(get: (url: string) => Promise<unknown>): (a: TileAddr, edgeNs: number) => Promise<DensityAnswer> {
+  const inflight = new Map<string, Promise<DensityAnswer>>();
+  return (a, edgeNs) => {
+    const k = addrSpelling(a);
+    let q = inflight.get(k);
+    if (!q) {
+      q = get(densityUrl(a))
+        .then((body) => ({ tile: parseDensityTile(a, body), edgeAtFetchNs: edgeNs }), () => ({ tile: null, edgeAtFetchNs: edgeNs }))
+        .finally(() => { inflight.delete(k); });
+      inflight.set(k, q);
+    }
+    return q;
+  };
 }

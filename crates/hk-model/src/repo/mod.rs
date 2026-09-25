@@ -70,6 +70,7 @@ mod cluster;
 mod cluster_tests;
 mod clusters; // T-202 C18 clusters of unknown emissions
 mod collections; // T-817 (MAP-17): marker collections; bookmarks are a facade over one
+mod confirm_rate; // T-575 ADR-0022 §8 confirm-decision counter
 mod gating;
 mod harmonic; // T-374 (C40): harmonic families
 #[cfg(test)]
@@ -133,6 +134,7 @@ pub use collections::{
     Collection, CollectionSummary, MARKERS_PER_COLLECTION_MAX, Marker, MarkerWindow,
     PROVENANCE_TEXT_MAX, StorePage, ViewTier,
 };
+pub use confirm_rate::CONFIRM_DECISION_WINDOW_NS;
 pub use harmonic::{HarmonicFamilyRow, MAX_FAMILY_CANDIDATES};
 pub use inventory::{EmitterUpsert, LatestMeasurement};
 pub use lifecycle::LIFECYCLE_TEXT_MAX;
@@ -196,6 +198,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0017_multipath_relation.sql"), // T-222 C40 content-correlated multipath
     include_str!("migrations/0018_call_observed_until.sql"), // T-308 C23 truncated-call boundary
     include_str!("migrations/0019_detection_retention.sql"), // T-904 detection retention + rollup
+    include_str!("migrations/0020_explanation_detection.sql"), // T-913 pin cited detections
 ];
 
 /// Schema version this build creates and understands.
@@ -479,13 +482,14 @@ impl RepoBatch<'_> {
         inventory::upsert_track_on(self.conn, track)
     }
 
-    /// [`Repository::link_detections_to_track`] in this transaction.
+    /// [`Repository::link_detections_to_track`] in this transaction (returns the number of
+    /// detections that were not stored and so could not be linked, T-913).
     pub fn link_detections_to_track(
         &mut self,
         track_id: TrackId,
         detections: &[DetectionId],
         linked_at: Timestamp,
-    ) -> Result<(), RepoError> {
+    ) -> Result<usize, RepoError> {
         inventory::link_detections_on(self.conn, track_id, detections, linked_at)
     }
 
