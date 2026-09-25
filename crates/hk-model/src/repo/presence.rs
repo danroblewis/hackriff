@@ -153,10 +153,10 @@ impl Repository {
         self.conn
             .prepare_cached(
                 "UPDATE emitter_observation SET live_silence_ns = NULL \
-                 WHERE source_kind IN ('track', 'track-live') AND source_id = ?1 \
+                 WHERE source_kind IN ('track', ?2) AND source_id = ?1 \
                    AND live_silence_ns IS NOT NULL",
             )?
-            .execute(params![uuid.into_bytes()])?;
+            .execute(params![uuid.into_bytes(), TRACK_LIVE_SOURCE])?;
         Ok(())
     }
 
