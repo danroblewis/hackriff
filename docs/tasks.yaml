@@ -17084,7 +17084,7 @@ tasks:
   - id: T-544
     milestone: MAUTO
     title: "SIGNAL-087 first real instance: blind wideband hunt for a continuously-keyed (100%-duty) channel, captured as a SigMF fixture with HIDDEN ground truth (BART skipped)"
-    status: todo
+    status: blocked
     priority: high
     parallel_group: FIXTURE
     model: opus
@@ -17176,6 +17176,7 @@ tasks:
       unlisted channel in this band.
 
     needs: hardware
+    blocked_on: "user directive 2026-09-25: hardware/HIL tickets stay blocked - needs a HackRF HIL window (the 8899 demo and ops/stage.sh hold the radio)"
   - id: T-545
     milestone: MAUTO
     title: "BART 851 MHz, phase 2: failing blind acceptance tests through the MOCK SDR replaying the capture"
