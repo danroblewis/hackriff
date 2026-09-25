@@ -26674,6 +26674,33 @@ tasks:
     notes: |
       FOUND BY T-887 worker 2026-09-24.
     core_interface: true
+  - id: T-913
+    milestone: M2-hardening
+    title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
+    status: todo
+    priority: normal
+    deps:
+    - T-904
+    parallel_group: STORE
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-24 by T-904's Opus review (non-blocking; task-t904). Follow-ups to the detection retention/rollup policy:
+      1. on_air_ns sums member durations, so co-timed FSK lobes linked to one track are counted twice and can exceed the hull (nothing reads it yet - fix before anything does).
+      2. DetectionExtent::of_rollup uses the f_lo..f_hi envelope while the per-frame path uses centered(f_center, obw) - rollups are wider for suspect masking; make them comparable.
+      3. A pinned row inside a rollup's hull is counted in both, contradicting "never count the same air twice" (harmless for boolean masking today).
+      4. Module docs say multipath reads rollups past the age; crates/hk-context/src/multipath.rs:317 is unchanged (last <= 60 s only) - correct the docs.
+      5. Evidence::Detection in explanation.body is not pinned (nothing produces it today) - pin it or document why not.
+      6. idx_detection_t_end is built synchronously at startup: on a database that ran unpruned for weeks that is a long startup and a big WAL - build it off the startup path or measure and bound it.
+      7. detection_storage runs count(*) every 60 s even with retention off - a full scan on a large DB holding a read snapshot that delays checkpoints; use an estimate or a maintained counter.
+      8. The pass reports its own lock wait but not how long the DETECT WRITER waits behind it; the 0.5-1.95 s outliers at 20 Msps are unexplained - measure the writer's BEGIN IMMEDIATE wait under `just timing` on a quiet box (T-453: measure, don't assume).
+      9. (T-904 worker) At 20 Msps the WAL still peaks ~295 MB mid-pass before shrinking to 64 MB; and the 20 Msps store was still growing 112 MB/h at 12 min - run 1-2 h to see whether it plateaus.
+      10. (T-904 worker) The mock SDR rejects the metadata of the 20 Msps fixtures/store/2026-09-13/urban_* fixtures (old provenance schema) - migrate those SigMF metas.
+      DELIVER each with a test or a measurement, as appropriate.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-904 Opus review + worker 2026-09-24.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
