@@ -27258,6 +27258,24 @@ tasks:
     notes: |
       FOUND BY T-567 worker on node2 + coordinator Mac check 2026-09-25.
     effort_reason: platform root cause on the capture/ring path (the Jetson target is Linux); needs a Linux host
+  - id: T-921
+    milestone: MAUTO
+    title: Re-measure the confirm false-positive rate with T-577's harness driving the REAL CheckTally (and assist::codes on the new count); lower min_check_width to 8 only if the measurement allows (T-575 residue)
+    status: todo
+    priority: normal
+    deps:
+    - T-575
+    parallel_group: W
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      FROM T-575's fix round (task-t575 5075887f, 2026-09-25): the ADR-0022 §4.3.1 count change (init-cancel guard `degenerate_frame`; shift/multiple/divisor dedup; affine-rank cap) SHIPPED, but `min_check_width` stays 16 because ADR-0022 allows 8 only once the new count is RE-MEASURED with T-577's harness - and that harness carries its own copy of the counting logic rather than running the real `CheckTally` - and because the `assist::codes` search path does not use the new count yet (T-577 §2.5).
+      DELIVER: (1) make T-577's measurement harness drive the REAL `CheckTally` (crates/hk-blocks/src/evidence.rs), not a copy; (2) route the `assist::codes` search path through the new count; (3) re-measure the false-confirm rate per decision at width 8 and 16 on T-577's populations (shift artefact, init-cancel, N2 model) and record it in docs/results; (4) ONLY if the measured rate at 8 is within ADR-0022's budget, lower `min_check_width` to 8 in SynthesizedConfirm and SolveRule with that evidence cited, and update ADR-0015 / docs/07 / docs/api.md; otherwise keep 16 and record why. The gate may only get stricter unless the measurement says otherwise. core_interface.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the timing/measurement tier for the rate run), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-575 fix round 2026-09-25.
+    core_interface: true
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
