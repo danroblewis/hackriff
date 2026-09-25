@@ -2152,3 +2152,101 @@ def test_a_fresh_deflake_never_checks_out_an_earlier_runs_commits(tmp_path, monk
     c = R.launch_deflake("deflake-a", _req("deflake-a", 600.0), {"branch": "task-deflake-a"}, dry=False)
     assert c["branch"] == "task-deflake-a-r2" and c["run"] == 2
     assert g("rev-parse", "task-deflake-a-r2") == g("rev-parse", "main")    # cut from the base, not from the WIP
+
+
+def _sleeper(cwd, *argv, deaf=False):
+    """A stand-in for a leftover e2e process: its own session (as the harness's Chrome and `hk serve` are), a cwd and
+    a cmdline of the test's choosing; `deaf` ignores SIGTERM."""
+    code = ("import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " if deaf else "") + "import time; time.sleep(300)"
+    return subprocess.Popen([sys.executable, "-c", code, *argv], cwd=cwd, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _ended(p, s=15):
+    for _ in range(s * 10):
+        if p.poll() is not None:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.fixture
+def node2_leftovers(remote_host):
+    """Incident 2026-09-25 16:17: T-1025 ended ~15:19; at 16:17 its e2e `hk serve` (ppid 1, cmdline naming the
+    worktree) and a headless Chrome tree (ppid 1, own session, cmdline naming only an hk-e2e-chrome user-data-dir, cwd
+    `<wt>/ui`) still ran on node2. Here: the host is this machine, the far worktrees are dirs under tmp_path."""
+    local_ops, local_repo, far = remote_host
+    wts = far / "repo" / ".claude" / "worktrees"
+    for n in ("t9/ui", "t92/ui", "t90", "t93"):
+        (wts / n).mkdir(parents=True)
+    procs = {
+        "chrome": _sleeper(wts / "t9" / "ui", f"--user-data-dir={far}/tmp/hk-e2e-chrome-SeSGdz", "--headless=new"),
+        "serve": _sleeper(far, "serve", "--replay", f"{wts}/t9/fixtures/fm.sigmf-meta", "--loop"),
+        # another running claim's e2e, whose cmdline happens to name this run's fixture: that claim's, never ours
+        "other_claim": _sleeper(wts / "t92" / "ui", "serve", "--replay", f"{wts}/t9/fixtures/fm.sigmf-meta"),
+        "prefix": _sleeper(wts / "t90"),                            # t9 is a string prefix of t90, not its directory
+        "user_chrome": _sleeper(far, f"--user-data-dir={far}/tmp/hk-e2e-chrome-Other", "--headless=new"),
+    }
+    claims = {"T-9": {"ticket": "T-9", "host": "node2", "branch": "task-t9", "state": "running", "kind": "work",
+                      "wt": f"{local_repo}/.claude/worktrees/t9"},
+              "T-92": {"ticket": "T-92", "host": "node2", "branch": "task-t92", "state": "running", "kind": "work",
+                       "wt": f"{local_repo}/.claude/worktrees/t92"}}
+    time.sleep(0.3)                      # the children have chdir'd and exec'd before the scan
+    yield local_ops, local_repo, far, procs, claims
+    for p in procs.values():
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+def test_a_finished_remote_runs_leftovers_are_stopped_on_the_host(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    procs["deaf"] = _sleeper(far / "repo" / ".claude" / "worktrees" / "t9", "cargo", "nextest", deaf=True)  # TERM ignored
+    time.sleep(0.3)
+    found = R.remote_leaked(claims["T-9"], claims, dry=False)
+    assert sorted(r["pid"] for r in found) == sorted([procs["chrome"].pid, procs["serve"].pid, procs["deaf"].pid])
+    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and _ended(procs["deaf"])
+    for k in ("other_claim", "prefix", "user_chrome"):
+        assert procs[k].poll() is None, k
+    assert R.remote_leaked(claims["T-9"], claims, dry=False) == []                    # nothing left the second time
+
+
+def test_a_dry_run_names_the_leftovers_and_stops_nothing(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    ours = {procs[k].pid for k in ("chrome", "serve")}
+    assert {r["pid"] for r in R.remote_leaked(claims["T-9"], claims, dry=True)} == ours
+    # with no other claim on the host, the other e2e naming this worktree is this run's too - and the scan (whose own
+    # cmdline names the worktree) never names itself or the shell that ran it
+    assert {r["pid"] for r in R.remote_leaked(claims["T-9"], {"T-9": claims["T-9"]}, dry=True)} == ours | {procs["other_claim"].pid}
+    assert all(p.poll() is None for p in procs.values())
+
+
+def test_a_claim_sharing_the_worktree_protects_everything_in_it(node2_leftovers):
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    claims["T-9-fix"] = dict(claims["T-9"], ticket="T-9-fix")
+    assert R.remote_leaked(claims["T-9"], claims, dry=False) == []
+    assert all(p.poll() is None for p in procs.values())
+
+
+def test_the_reap_stops_a_remote_runs_leftovers_and_says_so(node2_leftovers, monkeypatch):
+    """The wiring: a remote run the host reports gone, synced back - its leftovers there are killed, logged with host,
+    pid and cmdline, and one LEAKED attention names the host."""
+    local_ops, local_repo, far, procs, claims = node2_leftovers
+    (local_repo / ".claude" / "worktrees" / "t9").mkdir(parents=True)
+    c = dict(claims["T-9"], pid=1, started=0, deflake="d")          # a deflake claim: its own outcomes, stubbed below
+    claims["T-9"] = c
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "remote_run_state", lambda c: "gone")
+    monkeypatch.setattr(R, "sync_back", lambda c: True)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "reap_deflake", lambda claims, tid, c: None)
+    seen, logged = [], []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    monkeypatch.setattr(R, "log", logged.append)
+    R._reap_one(claims, "T-9", c, dry=False, killed=[])
+    assert _ended(procs["chrome"]) and _ended(procs["serve"]) and procs["other_claim"].poll() is None
+    [a] = seen
+    assert a[2] == "LEAKED" and "on node2" in a[3] and str(procs["serve"].pid) in a[3]
+    lines = [x for x in logged if x.startswith("LEAKED T-9 on node2")]
+    assert len(lines) == 2 and any(f"pid {procs['chrome'].pid} (cwd " in x and "/t9/ui)" in x for x in lines)
+    assert c["leaked"] == 2

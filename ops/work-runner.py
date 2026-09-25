@@ -676,6 +676,107 @@ def remote_attach(c):
     return p.pid
 
 
+# A finished remote run's leftovers, found and stopped ON THE HOST (the local leak check sees only this Mac).
+# 2026-09-25 16:17: T-1025's browser e2e - an `hk serve` and an 11-process headless Chrome tree, 442% CPU - ran on
+# node2 61 min after the run ended. None of it was in the run's recorded group or session: the worker's shells, the
+# e2e harness and Chrome each start their own session, and all were reparented to init. What they do share is the
+# run's WORKTREE: every one's cwd is inside it (Chrome's is `<wt>/ui`), and `hk serve`'s cmdline names it; Chrome's
+# cmdline does not. So a process of the host's account is this run's when its cwd is inside the worktree or its
+# cmdline names it - and never when it also matches another live claim's worktree on that host. The scan runs
+# python3 on the host (Linux: /proc; macOS, the tests' host: ps + lsof), excludes itself and its ancestors, sends
+# SIGTERM, waits up to 10 s, and SIGKILLs only what still matches after a fresh scan (pids recycle).
+_REMOTE_REAP_PY = r'''
+import json, os, re, signal, subprocess, sys, time
+mode, wt, others = sys.argv[1], sys.argv[2], sys.argv[3:]
+me = os.getuid()
+
+def procs():
+    rows = {}
+    if os.path.isdir("/proc/self"):
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                if os.stat("/proc/" + p).st_uid != me:
+                    continue
+                cmd = open("/proc/%s/cmdline" % p, "rb").read().replace(b"\0", b" ").decode(errors="replace").strip()
+                ppid = int(open("/proc/%s/stat" % p).read().rsplit(")", 1)[1].split()[1])
+                try:
+                    cwd = os.readlink("/proc/%s/cwd" % p)
+                except OSError:
+                    cwd = ""
+            except (OSError, ValueError, IndexError):
+                continue
+            rows[int(p)] = {"pid": int(p), "ppid": ppid, "cwd": cwd, "cmd": cmd}
+    else:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,command="], capture_output=True, text=True).stdout
+        for l in out.splitlines():
+            f = l.split(None, 3)
+            if len(f) >= 3 and int(f[2]) == me:
+                rows[int(f[0])] = {"pid": int(f[0]), "ppid": int(f[1]), "cwd": "", "cmd": f[3] if len(f) > 3 else ""}
+        out = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-u", str(me)], capture_output=True, text=True).stdout
+        pid = None
+        for l in out.splitlines():
+            if l[:1] == "p":
+                pid = int(l[1:])
+            elif l[:1] == "n" and pid in rows:
+                rows[pid]["cwd"] = l[1:]
+    return rows
+
+def names(path):
+    ps = {path.rstrip("/"), os.path.realpath(path)}
+    rx = re.compile("|".join(re.escape(p) + r"(?=[/\s'\"]|$)" for p in ps))
+    return lambda r: any(r["cwd"] == p or r["cwd"].startswith(p + "/") for p in ps) or bool(rx.search(r["cmd"]))
+
+mine, theirs = names(wt), [names(o) for o in others]
+first = procs()
+keep, p = set(), os.getpid()
+while p > 1 and p not in keep:
+    keep.add(p)
+    p = first.get(p, {}).get("ppid", 0)
+
+def leaked(rows):
+    return [r for p, r in sorted(rows.items()) if p > 1 and p not in keep and mine(r) and not any(t(r) for t in theirs)]
+
+found, killed, still = leaked(first), [], []
+if mode == "kill" and found:
+    for r in found:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    ids = {r["pid"] for r in found}
+    for _ in range(20):
+        still = [r for r in leaked(procs()) if r["pid"] in ids]
+        if not still:
+            break
+        time.sleep(0.5)
+    for r in still:
+        try:
+            os.kill(r["pid"], signal.SIGKILL)
+            killed.append(r["pid"])
+        except OSError:
+            pass
+print(json.dumps({"found": found, "killed": killed}))
+'''
+
+
+def remote_leaked(c, claims, dry):
+    """The processes of a finished remote run still alive on its host, stopped there (SIGTERM, then SIGKILL) unless
+    dry: [{pid, ppid, cwd, cmd}] in the host's paths. Another live claim on the host protects what names its worktree
+    (so a claim sharing this worktree protects everything in it)."""
+    host = c["host"]
+    live = ("running", "fix-held", "limited", "sync-error")
+    others = sorted({o["wt"] for t, o in claims.items() if t != c["ticket"] and o.get("host") == host
+                     and o.get("wt") and o.get("state") in live})
+    q = shlex.quote
+    rc, out = remote_sh(host, "python3 - " + " ".join(q(a) for a in ["dry" if dry else "kill", c["wt"], *others]),
+                        timeout=120, input=_REMOTE_REAP_PY)
+    if rc:
+        raise RuntimeError(f"remote leak scan on {host} exited {rc}: {out.strip()[-160:]}")
+    return json.loads(out.strip().splitlines()[-1])["found"]
+
+
 _REAL_REPO = REPO
 
 
@@ -1331,6 +1432,19 @@ def _reap_one(claims, tid, c, dry, killed):
                       + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in leaked[:5]))
     except Exception as e:
         log(f"leak check error for {tid}: {e}")
+    if c.get("host") and c["kind"] != "review":
+        try:
+            gone = remote_leaked(c, claims, dry)
+            if gone:
+                c["leaked"] = c.get("leaked", 0) + len(gone)
+                for r in gone:
+                    log(f"LEAKED {tid} on {c['host']}: pid {r['pid']} (cwd {r['cwd']}) {r['cmd'][:160]}"
+                        + (" - DRY-RUN, left running" if dry else " - killed"))
+                attention(tid, c["branch"], "LEAKED",
+                          f"{len(gone)} process(es) outlived the run on {c['host']} and were killed there (SIGTERM then "
+                          "SIGKILL): " + ", ".join(f"{r['pid']} {r['cmd'][:70]}" for r in gone[:5]))
+        except Exception as e:
+            log(f"remote leak check error for {tid} on {c['host']}: {e}")
     if c.get("deflake"):
         reap_deflake(claims, tid, c)       # its own outcomes: not a board ticket, no result: block
         return changed
