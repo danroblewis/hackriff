@@ -519,7 +519,7 @@ export function emptyListText(s: EmptyState): string {
 
 // ---- row view model ----
 
-export interface Chip { cls: "known" | "unknown" | "flag" | "cluster" | "artifact"; text: string; title?: string }
+export interface Chip { cls: "known" | "unknown" | "flag" | "cluster" | "artifact" | "identity"; text: string; title?: string }
 
 /** The family/flag chip(s) for a row, from already-known fields only (`family`,
  * `classification.family`, `explanations[0].flags`); "unknown" when no family is known yet. */
@@ -556,6 +556,36 @@ export function clusterChip(r: Pick<Row, "cluster_id" | "cluster_group">): Chip 
     ? `signature cluster ${g.label} · ${g.rows_in_view} rows measure alike`
     : `signature cluster ${g.label} · seen before`;
   return { cls: "cluster", text, title: CLUSTER_CHIP_TITLE };
+}
+
+/** Why the identity chip shows what it shows, on hover (T-967). */
+export const IDENTITY_CHIP_TITLE =
+  "The decoded identity — a station name, callsign or similar the receiver's decoder committed, "
+  + "with its own confidence/vote share when it recorded one. Backend-rendered, never re-parsed here.";
+
+/**
+ * The decoded-identity chip for a row (T-967, the explorer's field report: a CRC-valid RDS PI/PS
+ * decode was invisible in the list — "unknown", "100% unk" — because nothing rendered it).
+ *
+ * Prefers `identity_label` (RDS's PS station name, or the same shape from another decoder) since a
+ * bare code is not what a user scans for; falls back to the bare `identity_value` when no label
+ * was decoded, so a decoded-but-unlabelled identity (an ADS-B ICAO address, an AIS MMSI) still
+ * shows *something* rather than nothing. `identity_confidence` — the decoder's own vote share —
+ * is appended only when it reads under 100 %, so a settled identity is not cluttered with a
+ * redundant "100%". `null` without a decoded identity at all; "withheld" on a gated row, exactly
+ * as the focus panel's identity box already reads it. No parsing of decode fields happens here —
+ * every word comes straight off already-rendered backend fields (thin-client rule, CLAUDE.md).
+ */
+export function identityChip(
+  r: Pick<Row, "identity_scheme" | "identity_value" | "identity_label" | "identity_confidence" | "withheld">,
+): Chip | null {
+  if (!r.identity_scheme) return null;
+  if (r.withheld) return { cls: "identity", text: "withheld", title: IDENTITY_CHIP_TITLE };
+  const label = r.identity_label ?? r.identity_value ?? null;
+  if (!label) return null;
+  const c = r.identity_confidence;
+  const vote = c !== null && c !== undefined && c < 1 ? ` · ${Math.round(c * 100)}%` : "";
+  return { cls: "identity", text: `${label}${vote}`, title: IDENTITY_CHIP_TITLE };
 }
 
 // ---- T-587: artefact vs real emission vs not-yet-decided ----

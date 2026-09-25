@@ -13,13 +13,20 @@ use crate::cluster::{
     never_openable, tag_in_vocabulary, tag_is_identity_free,
 };
 use crate::content::ContentClass;
-use crate::decode::{Decode, DecodeView, WITHHELD_LABEL};
+use crate::decode::{
+    Decode, DecodeIdentitySummary, DecodeView, WITHHELD_LABEL, decoded_confidence, decoded_label,
+};
 use crate::emitter::DecodedIdentity;
 use crate::ids::{DecodeId, EmitterId};
 use crate::time::Timestamp;
 
 /// Shortest metadata value treated as a possible identifier when checking labels.
 const MIN_LABEL_SECRET_LEN: usize = 3;
+
+/// How many of an identity's most recent decodes [`Repository::latest_decode_identity_summary`]
+/// reads looking for a label/confidence — enough to cross a decoder's per-frame-model rows (RDS's
+/// group/PS/RadioText each get their own) without scanning the identity's whole history.
+const RECENT_DECODES_FOR_IDENTITY_SUMMARY: usize = 8;
 
 /// The audited reclassification chain of an identity, folded to `(old, new)`: the most
 /// restrictive class it was ever opened from, and the latest class it was opened to. So
@@ -387,6 +394,54 @@ impl Repository {
         rows.into_iter()
             .map(|d| gate_decode(&tx, d, access))
             .collect()
+    }
+
+    /// A backend-rendered summary of the identity's most recent decode(s) — a human-readable
+    /// label (RDS's PS station name and similarly-named fields) and the decoder's own
+    /// confidence/vote share, when it recorded one (T-967, `/api/inventory`'s `identity_label` /
+    /// `identity_confidence`). `None` when the identity is withheld from
+    /// [`IdentityAccess::Standard`] (never confirms one indirectly, matching
+    /// [`Repository::decodes_for_identity`]), or when none of its recent decodes carry a
+    /// recognised field.
+    ///
+    /// Bounded to the identity's [`RECENT_DECODES_FOR_IDENTITY_SUMMARY`] most recent decodes,
+    /// read newest first over the same `idx_decode_identity` index `decodes_for_identity` uses —
+    /// unlike that method, which returns the identity's *entire* decode history for the decode
+    /// panel, this is for a list row's compact summary and must stay cheap on a page of up to 500
+    /// rows.
+    pub fn latest_decode_identity_summary(
+        &self,
+        identity: &DecodedIdentity,
+    ) -> Result<Option<DecodeIdentitySummary>, RepoError> {
+        let tx = self.read_tx()?;
+        if !IdentityAccess::Standard.reveals(decode_identity_class(&tx, identity)?) {
+            return Ok(None);
+        }
+        let rows: Vec<Decode> = bodies(
+            &tx,
+            "SELECT body FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
+             ORDER BY t DESC, decode_id DESC LIMIT ?3",
+            params![
+                identity.scheme.as_string(),
+                identity.value,
+                RECENT_DECODES_FOR_IDENTITY_SUMMARY as i64
+            ],
+        )?;
+        let (mut label, mut confidence) = (None, None);
+        for d in rows {
+            let gated = gate_decode(&tx, d, IdentityAccess::Standard)?.decode;
+            if label.is_none() {
+                label = decoded_label(&gated);
+            }
+            if confidence.is_none() {
+                confidence = decoded_confidence(&gated);
+            }
+            if label.is_some() && confidence.is_some() {
+                break;
+            }
+        }
+        Ok((label.is_some() || confidence.is_some())
+            .then_some(DecodeIdentitySummary { label, confidence }))
     }
 
     /// Opens an emitter's decoded identity to `new_class` after the user asserts it is their own

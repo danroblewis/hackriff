@@ -219,6 +219,68 @@ pub struct DecodeView {
     pub labels_withheld: bool,
 }
 
+/// A backend-rendered summary of the most recent decode naming an identity (T-967): the
+/// human-readable label a decoder committed alongside the bare identity code — RDS's PS station
+/// name for an `rds-pi` identity, and the same shape for any decoder that writes a comparably
+/// named field — and, when the decoder recorded one, its own confidence in that value (RDS's
+/// `pi_share`, the fraction of votes the winning PI code carried). Thin-client rule (CLAUDE.md):
+/// the UI renders `label` as given and never parses a decode's raw fields to build one itself.
+/// `None` in both fields is not served — [`Repository::latest_decode_identity_summary`] answers
+/// `None` for the whole summary instead, so a client never renders an empty label.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecodeIdentitySummary {
+    /// The friendliest label the decoder recorded, trimmed; `None` when nothing recognisable was
+    /// found among the recent decodes naming this identity.
+    pub label: Option<String>,
+    /// The decoder's own confidence/vote share behind the identity's latest value, 0–1; `None`
+    /// when the decoder recorded no such figure.
+    pub confidence: Option<f64>,
+}
+
+/// The keys, in priority order, a decoder might use for the human-readable label behind an
+/// identity — RDS's `ps` (the station name) today, plus generic names other decoders use for the
+/// same idea, so a new decoder does not need this module's knowledge to be shown.
+const IDENTITY_LABEL_KEYS: [&str; 4] = ["ps", "callsign", "flight", "station"];
+
+/// The keys, in priority order, a decoder might use for its own confidence/vote share in the
+/// value it most recently committed — RDS's `pi_share` (how many of the recent groups agreed)
+/// today, plus a generic fallback name.
+const IDENTITY_CONFIDENCE_KEYS: [&str; 2] = ["pi_share", "share"];
+
+/// A decode's metadata and content merged into one field map — the same view
+/// `hk_api::decode::fields_of` renders for `/api/inventory/{id}/decode`, so a label written to
+/// either field (decoders are not consistent about which, T-967) is found the same way.
+fn decode_fields(metadata: &Value, content: Option<&Value>) -> serde_json::Map<String, Value> {
+    let mut out = match metadata {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if let Some(Value::Object(c)) = content {
+        for (k, v) in c {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
+/// The first non-empty label [`IDENTITY_LABEL_KEYS`] finds in `d`'s fields, trimmed.
+pub(crate) fn decoded_label(d: &Decode) -> Option<String> {
+    let fields = decode_fields(&d.metadata, d.content.as_ref());
+    IDENTITY_LABEL_KEYS.iter().find_map(|k| {
+        let s = fields.get(*k)?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_owned())
+    })
+}
+
+/// The first finite value [`IDENTITY_CONFIDENCE_KEYS`] finds in `d`'s fields, clamped to `0..=1`.
+pub(crate) fn decoded_confidence(d: &Decode) -> Option<f64> {
+    let fields = decode_fields(&d.metadata, d.content.as_ref());
+    IDENTITY_CONFIDENCE_KEYS.iter().find_map(|k| {
+        let v = fields.get(*k)?.as_f64()?;
+        v.is_finite().then(|| v.clamp(0.0, 1.0))
+    })
+}
+
 /// What a bitstream carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
