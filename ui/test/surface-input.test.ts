@@ -372,3 +372,106 @@ test("measureMode: T-340's control — NO call reaches the network over the whol
   assert.deepEqual(net, [], "a measurement gesture reached the network");
   assert.equal(measures.length, 1, "no measurement was produced at all, so the run proves nothing");
 });
+
+// ---------------------------------------------------------------------------
+// 7. T-820 / MAP-20: the Annotate and Pin tool modes — docs/23 §10.4's other two columns
+// ---------------------------------------------------------------------------
+
+test("annotateMode 'annotate': a bare drag strokes an annotation BOX and pans nothing", () => {
+  const boxes: SurfaceRegion[] = [];
+  const seen: (SurfaceRegion | null)[] = [];
+  const h = harness({ annotateMode: "annotate", onAnnotateBox: (r) => boxes.push(r), onAnnotateDrag: (r) => seen.push(r) });
+  stroke(h, MID, [{ x: 460, y: 340 }, { x: 520, y: 380 }]);
+  assert.deepEqual(h.calls, [], "an annotation stroke moved the viewport under the box being drawn");
+  assert.deepEqual(h.settles, [], "…and nothing was panned, so there is no follow/pause to commit");
+  assert.equal(boxes.length, 1);
+  assert.deepEqual(boxes[0].a, { x: 400, y: H - 300 });
+  assert.deepEqual(boxes[0].b, { x: 520, y: H - 380 });
+  assert.equal(seen[seen.length - 1], null, "the rubber band is retracted on release");
+});
+
+test("annotateMode 'annotate': a box flat on either axis is not offered (the store refuses a zero-extent box)", () => {
+  const boxes: SurfaceRegion[] = [];
+  const points: unknown[] = [];
+  const h = harness({ annotateMode: "annotate", onAnnotateBox: (r) => boxes.push(r), onAnnotatePoint: (p) => points.push(p) });
+  stroke(h, MID, [{ x: MID.x, y: 500 }]);
+  stroke(h, MID, [{ x: 600, y: MID.y }]);
+  assert.deepEqual(boxes, []);
+  assert.deepEqual(points, [], "a real drag is not a tap either: it drops no note");
+});
+
+test("annotateMode 'annotate': a TAP drops a text note at the point, and does not also focus a row", () => {
+  const points: { p: { pane: string; at: { x: number; y: number } }; kind: string }[] = [];
+  const clicks: unknown[] = [];
+  const h = harness({
+    annotateMode: "annotate", onAnnotateBox: () => { throw new Error("a tap is not a box"); },
+    onAnnotatePoint: (p, kind) => points.push({ p, kind }), onClick: (p) => clicks.push(p),
+  });
+  stroke(h, MID, [{ x: 402, y: 302 }]);
+  assert.deepEqual(points.map((x) => x.kind), ["text"]);
+  assert.equal(points[0].p.pane, "p0");
+  assert.deepEqual(points[0].p.at, { x: 400, y: H - 300 }, "the note lands where the press was");
+  assert.deepEqual(clicks, [], "one gesture, one meaning: the tap is the note, not also a focus");
+});
+
+test("annotateMode 'pin': a TAP drops a MARKER; a drag still pans (and settles) exactly as Navigate", () => {
+  const points: string[] = [];
+  const clicks: unknown[] = [];
+  const h = harness({ annotateMode: "pin", onAnnotatePoint: (_p, kind) => points.push(kind), onClick: (p) => clicks.push(p) });
+  stroke(h, MID, [{ x: 401, y: 301 }]);
+  assert.deepEqual(points, ["marker"]);
+  assert.deepEqual(clicks, []);
+  const h2 = harness({ annotateMode: "pin", onAnnotatePoint: () => { throw new Error("a drag drops no marker"); } });
+  stroke(h2, MID, [{ x: 460, y: 340 }]);
+  assert.deepEqual(h2.calls.map((c) => c.fn), ["drag"]);
+  assert.deepEqual(h2.settles, ["p0"]);
+});
+
+test("Shift+drag NEVER changes meaning in Annotate or Pin either: it still marks a region", () => {
+  for (const mode of ["annotate", "pin"] as const) {
+    const regions: SurfaceRegion[] = [];
+    const h = harness({
+      annotateMode: mode, onRegion: (r) => regions.push(r),
+      onAnnotateBox: () => { throw new Error(`${mode}: shift+drag drew an annotation`); },
+      onAnnotatePoint: () => { throw new Error(`${mode}: shift+drag dropped a note`); },
+    });
+    stroke(h, MID, [{ x: 460, y: 340 }], { shift: true });
+    assert.equal(regions.length, 1, mode);
+  }
+});
+
+test("annotateMode: the mode is latched at the press — turning it off mid-stroke does not turn the box into a pan", () => {
+  const boxes: SurfaceRegion[] = [];
+  const opts: Parameters<typeof attachSurfaceInput>[2] & { annotateMode: "annotate" | null } = {
+    annotateMode: "annotate", onAnnotateBox: (r) => boxes.push(r),
+  };
+  const h = harness(opts);
+  h.fire("pointerdown", { button: 0, clientX: MID.x, clientY: MID.y, pointerId: 1 });
+  opts.annotateMode = null;
+  h.fire("pointermove", { buttons: 1, clientX: 480, clientY: 360 });
+  h.fire("pointerup", { button: 0, clientX: 480, clientY: 360 });
+  assert.deepEqual(h.calls, []);
+  assert.equal(boxes.length, 1);
+});
+
+test("annotate/pin: T-340's control — NO call reaches the network over the whole gesture vocabulary", () => {
+  const g = globalThis as { fetch?: unknown };
+  const real = g.fetch;
+  const net: unknown[] = [];
+  g.fetch = (...args: unknown[]) => { net.push(args); return Promise.reject(new Error("a gesture must not reach the network")); };
+  let produced = 0;
+  try {
+    for (const mode of ["annotate", "pin"] as const) {
+      const h = harness({
+        annotateMode: mode, onAnnotateBox: () => { produced++; }, onAnnotatePoint: () => { produced++; },
+        onAnnotateDrag: () => {}, onClick: () => {}, onHover: () => {}, onRegion: () => {},
+      });
+      stroke(h, MID, [{ x: 700, y: 500 }]);
+      stroke(h, MID, [{ x: 401, y: 301 }]);
+      stroke(h, MID, [{ x: 460, y: 340 }], { shift: true });
+      h.fire("wheel", { preventDefault: () => {}, clientX: 400, clientY: 300, deltaY: -120, deltaX: 0, deltaMode: 0 });
+    }
+  } finally { if (real) g.fetch = real; else delete g.fetch; }
+  assert.deepEqual(net, [], "an authoring gesture reached the network from the input layer");
+  assert.equal(produced, 3, "box + note in Annotate, marker in Pin — or the run proves nothing");
+});

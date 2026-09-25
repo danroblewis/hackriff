@@ -66,6 +66,26 @@ export interface SurfaceInputOptions {
    * applies here, never `SurfaceRegion`'s degenerate-axis refusal.
    */
   onMeasure?: (r: SurfaceRegion) => void;
+  /**
+   * **The Annotate and Pin tool modes** (T-820 / MAP-20, docs/23 §10.4's gesture table), sampled
+   * once at the press exactly like [[measureMode]], and — like it — re-binding only the BARE
+   * drag/click. `Shift + drag` is still checked first and still marks a region.
+   *
+   * - `"annotate"`: a bare drag strokes out an annotation **box** ([[onAnnotateDrag]] while it is
+   *   drawn, [[onAnnotateBox]] when it commits); a bare tap drops a **text note** at the point.
+   * - `"pin"`: a bare tap drops a **marker**; a bare drag is unchanged — it pans (the table's "-").
+   *
+   * In either mode a tap never also focuses a row (`onClick` does not fire): one gesture, one meaning.
+   */
+  annotateMode?: "annotate" | "pin" | null;
+  /** An annotation box being stroked, every move; `null` when it ended or was abandoned. */
+  onAnnotateDrag?: (r: SurfaceRegion | null) => void;
+  /** An annotation box that **committed**: travel past [[DRAG_PX]] and a positive extent on BOTH
+   * axes — the store's own rule for a `box` (docs/api.md, Annotations: a box needs a positive extent
+   * in both axes), so a stroke the server would refuse is never offered to it. */
+  onAnnotateBox?: (r: SurfaceRegion) => void;
+  /** A tap in a tool mode that drops a point annotation: `"text"` in Annotate, `"marker"` in Pin. */
+  onAnnotatePoint?: (p: { pane: string; at: GlPoint }, kind: "text" | "marker") => void;
   /** **Ctrl+Shift+wheel adjusts the shadow's brightness instead of zooming** (T-526) — a client-only
    * display preference, never a view or device change. `notches` is the gesture's own signed count
    * (positive brightens); the host clamps and persists (`./shadow-gain.ts`) and calls
@@ -123,12 +143,14 @@ export function attachSurfaceInput(
     | {
       x: number; y: number; x0: number; y0: number; map: boolean; pane: string | null; travel: number;
       region: SurfaceRegion | null; measuring: SurfaceRegion | null;
+      annotating: SurfaceRegion | null; tool: "annotate" | "pin" | null;
     }
     | null = null;
 
   const endRegion = () => {
     if (dragging?.region) opts.onRegionDrag?.(null);
     if (dragging?.measuring) opts.onMeasureDrag?.(null);
+    if (dragging?.annotating) opts.onAnnotateDrag?.(null);
   };
 
   // **What the press means is decided ONCE, at the press, and it is decided by `dragIntent`.**
@@ -157,9 +179,16 @@ export function attachSurfaceInput(
     // press's own intent does a tool mode get to claim a bare drag for itself.
     const region = dragIntent(e) === "region" && pane && opts.onRegion ? { pane, a: p, b: p } : null;
     const measuring = !region && opts.measureMode === true && pane && opts.onMeasure ? { pane, a: p, b: p } : null;
-    dragging = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring };
+    // T-820: the Annotate/Pin mode, latched here too. Only a pane press that is not a region or a
+    // measurement is claimed; the map strip keeps its own meaning in every mode.
+    const tool = !region && !measuring && pane && opts.annotateMode ? opts.annotateMode : null;
+    const annotating = tool === "annotate" && pane && opts.onAnnotateBox ? { pane, a: p, b: p } : null;
+    dragging = {
+      x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, map, pane, travel: 0, region, measuring, annotating, tool,
+    };
     if (region) opts.onRegionDrag?.(region);
     if (measuring) opts.onMeasureDrag?.(measuring);
+    if (annotating) opts.onAnnotateDrag?.(annotating);
     canvas.setPointerCapture(e.pointerId);
   };
 
@@ -180,6 +209,11 @@ export function attachSurfaceInput(
       opts.onMeasureDrag?.(dragging.measuring);
       return; // a measurement stroke is not a pan either
     }
+    if (dragging.annotating) {
+      dragging.annotating = { ...dragging.annotating, b: point(e) };
+      opts.onAnnotateDrag?.(dragging.annotating);
+      return; // nor is an annotation box: the view must not move under what is being drawn on it
+    }
     if (dragging.map) preview.dragMap(dx, dy);
     else if (dragging.pane) preview.drag(dragging.pane, dx, dy);
     moved();
@@ -192,8 +226,10 @@ export function attachSurfaceInput(
   // well as an up, because a stroke the browser takes away still ended — leaving a pane frozen one
   // pixel off live because the pointer was captured elsewhere is the reported bug with a different
   // cause. A region stroke never panned, so there is nothing to commit for one.
-  const settle = (d: { map: boolean; pane: string | null; region: SurfaceRegion | null; measuring: SurfaceRegion | null }) => {
-    if (d.region || d.measuring) return;
+  const settle = (d: {
+    map: boolean; pane: string | null; region: SurfaceRegion | null; measuring: SurfaceRegion | null; annotating: SurfaceRegion | null;
+  }) => {
+    if (d.region || d.measuring || d.annotating) return;
     if (d.map) preview.endDragMap();
     else if (d.pane) preview.endDrag(d.pane);
     else return;
@@ -226,6 +262,22 @@ export function attachSurfaceInput(
       const r: SurfaceRegion = { ...d.measuring, b: point(e) };
       const far = Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= DRAG_PX;
       if (far) opts.onMeasure?.(r);
+      return;
+    }
+    if (d.annotating) {
+      opts.onAnnotateDrag?.(null);
+      // The region's rule exactly: net displacement as a distance, and extent on both axes. A tap
+      // in Annotate is not a box — it is a text note at the point, below.
+      const r: SurfaceRegion = { ...d.annotating, b: point(e) };
+      const far = Math.hypot(e.clientX - d.x0, e.clientY - d.y0) >= DRAG_PX;
+      if (far) {
+        if (r.a.x !== r.b.x && r.a.y !== r.b.y) opts.onAnnotateBox?.(r);
+      } else if (d.pane) opts.onAnnotatePoint?.({ pane: d.pane, at: r.a }, "text");
+      return;
+    }
+    if (d.tool === "pin") {
+      // A pin-mode drag panned (and `settle` committed it); only a tap drops a marker.
+      if (d.travel < DRAG_PX && d.pane) opts.onAnnotatePoint?.({ pane: d.pane, at: point(e) }, "marker");
       return;
     }
     if (d.travel < DRAG_PX && !d.map) opts.onClick?.(point(e), e);

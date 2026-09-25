@@ -48,6 +48,7 @@ import {
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
+import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import {
@@ -78,6 +79,7 @@ import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
+import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
@@ -143,6 +145,8 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/** The surface's tool modes (docs/23 §10.4's table columns). */
+type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
  * describes before the surface has booted. Used for nothing once `preview.activePane` exists. */
 const FIRST_PANE = "pane1";
@@ -159,7 +163,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every render frame by `SurfaceView` from the same ruler its ticks were stroked from. Never read
   // by the pointer: a label must not steal a pan from the surface underneath it.
   const hudEl = h("div", { class: "sf-hud", "aria-hidden": "true" });
-  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, captureEl);
+  // T-820 (MAP-20): the annotations' labels, placed per frame like the HUD's (band 2 DOM text over
+  // the canvas, never read by the pointer), and the tool-mode banner naming what a drag will do
+  // (docs/23 §10.4: "a pressed button, a cursor change, and a banner").
+  const annoEl = h("div", { class: "sf-annos", "aria-hidden": "true" });
+  const modeEl = h("div", { class: "sf-mode", role: "status", hidden: true });
+  const stage = h("div", { class: "sf-stage" }, canvas, hudEl, annoEl, modeEl, captureEl);
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -226,7 +235,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     title: "Measure: drag on the surface to read Δf/Δt between two points and save it "
       + "(GET/POST /api/measurements, docs/25 §4). Esc exits.",
   }, "Measure");
-  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn, measureBtn,
+  // T-820 / MAP-20: the Annotate and Pin tool modes, the other two columns of docs/23 §10.4's table.
+  // Mutually exclusive with Measure and with each other — one tool mode at a time, so a bare drag
+  // has exactly one meaning at any instant.
+  const annotateBtn = h("button", {
+    class: "mini sf-annotatebtn", type: "button", "aria-pressed": "false",
+    title: "Annotate: drag on the surface to draw an annotation box, or click to drop a text note; "
+      + "you are asked for its label, and it is saved (POST /api/annotations, docs/25 §5). Esc exits.",
+  }, "Annotate");
+  const pinBtn = h("button", {
+    class: "mini sf-pinbtn", type: "button", "aria-pressed": "false",
+    title: "Pin: click on the surface to drop a labelled marker there (POST /api/annotations). "
+      + "Dragging still pans. Esc exits.",
+  }, "Pin");
+  const actions = h("div", { class: "sf-actions" }, liveBtn, traceBtn, contrastBtn, vscaleBtn, signalsBtn, measureBtn, annotateBtn, pinBtn,
     recordIqButton(ctx),
     h("button", { class: "mini", type: "button", title: "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", onclick: () => splitActive() }, "Split ⇔"),
     h("button", { class: "mini", type: "button", title: "Close the active viewport. The last one never closes.", onclick: () => closeActive() }, "Close"),
@@ -280,12 +302,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // Whether a plain drag marks out a measurement instead of panning. Read live by
   // `attachSurfaceInput` through the getter below, exactly the pointer-state discipline `pending`
   // above already follows: not store state, because it is meaningless once the mode is off.
-  let measureMode = false;
+  /** The surface's tool mode (docs/23 §10.4): `navigate` is the default and binds nothing extra. */
+  let tool = "navigate" as ToolMode;
   let pendingMeasure: { pane: string; region: MarkRegion } | null = null;
   /** Saved measurements, this session. A durable object once `POST /api/measurements` answers
    * (docs/25 §4/§10); kept here rather than in the store because no other surface reads it yet —
    * T-821's collections panel is where a shared, fetched, cross-window list belongs. */
   let measurements: MarkMeasurement[] = [];
+  // ---- annotations (T-820 / MAP-20) ----
+  /** The annotations in the viewed window, as `GET /api/annotations` last answered, plus any saved
+   * since. Durable: they are read back from the store on every load, so a reload shows them. */
+  let annotations: MarkAnnotation[] = [];
+  /** The annotation box being stroked, or `null`. Pointer state, like `pending`. */
+  let pendingAnnotate: { pane: string; region: MarkRegion } | null = null;
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
   store.select((s) => s.device, (d) => {
@@ -379,7 +408,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // The rubber band goes through the same pass on the same frame as everything else it is being
     // drawn over, and only on the pane it is being stroked on (T-458).
     const pendingRegion = pending && pending.pane === pane.id ? pending.region : null;
-    const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region : null;
+    const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region
+      : pendingAnnotate && pendingAnnotate.pane === pane.id ? pendingAnnotate.region : null;
     // The found-signal boxes are the `detections` LAYER now (T-806, below), so this composition —
     // selections, measurements and the in-progress gesture, which are the user's own interaction
     // and are always drawn — passes `false` for them.
@@ -763,13 +793,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every press, the same "decided once, at the press" discipline the shift+drag region above
   // already follows. Escape exits it, matching the mockup (`ui/mockups/map-ui-v1.html`'s `#mode`
   // banner) and every other modal affordance on this surface (the row/selection context menu).
-  const setMeasureMode = (on: boolean) => {
-    measureMode = on;
-    measureBtn.setAttribute("aria-pressed", String(on));
-    if (!on) { pendingMeasure = null; hoverEl.textContent = ""; }
+  const MODE_BANNER: Record<ToolMode, string> = {
+    navigate: "",
+    measure: "Measure — drag to lay two cursors and save Δf/Δt · Shift+drag still marks a region · Esc exits",
+    annotate: "Annotate — drag to draw a box, click to drop a text note · Shift+drag still marks a region · Esc exits",
+    pin: "Pin — click to drop a marker · drag still pans · Esc exits",
   };
-  measureBtn.addEventListener("click", () => setMeasureMode(!measureMode));
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && measureMode) setMeasureMode(false); });
+  const setTool = (next: ToolMode) => {
+    tool = next;
+    measureBtn.setAttribute("aria-pressed", String(tool === "measure"));
+    annotateBtn.setAttribute("aria-pressed", String(tool === "annotate"));
+    pinBtn.setAttribute("aria-pressed", String(tool === "pin"));
+    modeEl.textContent = MODE_BANNER[tool];
+    modeEl.hidden = tool === "navigate";
+    stage.dataset.tool = tool;
+    if (tool !== "measure") pendingMeasure = null;
+    if (tool !== "annotate") pendingAnnotate = null;
+    hoverEl.textContent = "";
+  };
+  const setMeasureMode = (on: boolean) => setTool(on ? "measure" : "navigate");
+  measureBtn.addEventListener("click", () => setTool(tool === "measure" ? "navigate" : "measure"));
+  annotateBtn.addEventListener("click", () => setTool(tool === "annotate" ? "navigate" : "annotate"));
+  pinBtn.addEventListener("click", () => setTool(tool === "pin" ? "navigate" : "pin"));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && tool !== "navigate") setTool("navigate"); });
 
   /** The `view` a measurement is stamped with (docs/25 §10.2): what the pane was showing at the
    * instant of the drag, read from the very frame the stroke landed on.
@@ -799,6 +845,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
       tier,
       device_id: v.device ?? null,
     };
+  };
+
+  /** Keep a just-saved annotation on the canvas until the next windowed read includes it. */
+  const keepAnnotation = (a: MarkAnnotation | null) => {
+    if (a && !annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+  };
+  /** The label spans, pooled per pane and reused frame to frame (set-if-changed, like the HUD's). */
+  const labelPools = new Map<string, HTMLElement[]>();
+  const placeAnnotationLabels = (pane: PaneView) => {
+    const scale = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+    const labels = annotationLabels(annotations, pane.box, pane.rect);
+    let pool = labelPools.get(pane.id);
+    if (!pool) { pool = []; labelPools.set(pane.id, pool); }
+    while (pool.length < labels.length) { const e = h("div", { class: "sf-anno-label" }); pool.push(e); annoEl.append(e); }
+    pool.forEach((e, i) => {
+      const l = labels[i];
+      e.hidden = !l;
+      if (!l) return;
+      setText(e, l.text);
+      e.style.transform = `translate(${l.x * scale}px, ${(canvas.height - l.y) * scale}px)`;
+    });
+    // A pane closed by `closeActive` drops its pool, so its labels do not linger.
+    const live = new Set(preview?.lastFrame?.views.map((v) => v.id) ?? []);
+    for (const [id, p] of labelPools) if (id !== pane.id && live.size > 0 && !live.has(id)) { p.forEach((e) => e.remove()); labelPools.delete(id); }
   };
 
   // ---- boot ----
@@ -842,7 +912,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
               setText(ringEl, "Capture rules (retention bound, oldest IQ) are hidden on this pane — Layers menu to show them");
             }
           }
-          return [...composeOverlays(layersFor(pane.id), overlayFns, pane, edge), ...markQuads(boxesFor(pane), edge, pane.box, pane.rect)];
+          placeAnnotationLabels(pane);
+          return [
+            ...composeOverlays(layersFor(pane.id), overlayFns, pane, edge),
+            ...annotationQuads(annotations, null, pane.box, pane.rect),
+            ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
+          ];
         },
         trace: traceFor, tracePx: TRACE_PX,
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
@@ -878,7 +953,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
             : hit.mark.kind === "measurement-box" ? "measurement"
               : hit.mark.kind === "pending-region" ? null : "selection"
           : null;
-        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
+        const anno = hit ? annotationAt(annotations, hit.pane.box, hit.pane.rect, p) : null;
+        const annoLabel = anno ? ` · annotation (${anno.kind}): ${anno.label}` : "";
+        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}${annoLabel}` : "";
       },
       onClick: (p) => {
         const hit = hitAt(p.x, p.y);
@@ -897,7 +974,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const region = regionOf(r);
         if (region) commitRegion(ctx, region, fmtHz);
       },
-      get measureMode() { return measureMode; },
+      get measureMode() { return tool === "measure"; },
+      get annotateMode() { return tool === "annotate" || tool === "pin" ? tool : null; },
+      onAnnotateDrag: (r) => {
+        const region = r ? regionOf(r) : null;
+        pendingAnnotate = r && region ? { pane: r.pane, region } : null;
+      },
+      onAnnotateBox: (r) => {
+        pendingAnnotate = null;
+        const region = regionOf(r);
+        const view = region ? measureViewOf(r.pane) : null;
+        if (!region || !view) return;
+        const label = normLabel(window.prompt("Label for this annotation box:", ""));
+        const body = label ? boxRequest(region, label, view) : null;
+        if (body) void commitAnnotation(ctx, body).then(keepAnnotation);
+      },
+      onAnnotatePoint: (p, kind) => {
+        const v = paneById(p.pane);
+        const view = v ? measureViewOf(p.pane) : null;
+        if (!v || !view) return;
+        const q = clampToRect(v.rect, p.at);
+        const label = normLabel(window.prompt(kind === "marker" ? "Label for this marker:" : "Text note:", kind === "marker" ? "marker" : ""));
+        if (label) void commitAnnotation(ctx, pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view)).then(keepAnnotation);
+      },
       onMeasureDrag: (r) => {
         const region = r ? regionOf(r) : null;
         pendingMeasure = r && region ? { pane: r.pane, region } : null;
@@ -1004,6 +1103,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
     startPoll(async () => { mirror(); }, 1000);
+
+    // T-820 / MAP-20: the annotations in view, read back from the store — which is what makes one
+    // drawn before a reload visible after it. The window is the union of the panes' boxes as last
+    // drawn; a GET is a read of research state and never reaches a device route.
+    startPoll(async () => {
+      const views = preview?.lastFrame?.views ?? [];
+      if (views.length === 0) return;
+      const w = {
+        f0Hz: Math.min(...views.map((v) => v.box.f0Hz)), f1Hz: Math.max(...views.map((v) => v.box.f1Hz)),
+        t0S: Math.min(...views.map((v) => v.box.t0Ns)) / S_TO_NS, t1S: Math.max(...views.map((v) => v.box.t1Ns)) / S_TO_NS,
+      };
+      annotations = await fetchAnnotations(ctx, w);
+    }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     store.select((s) => s.nav.gotoHz, (hz) => {
