@@ -113,6 +113,41 @@ pub struct DecodeEvidence {
     pub t: Timestamp,
 }
 
+/// Where a decode came from, when it was not an ordinary decoder's output (docs/07 §2.15 delta,
+/// ADR-0015 §5.5 + ADR-0022 §11.3). Absent on every decoder-, plugin- and recipe-produced row.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DecodeProvenance {
+    /// Decoded by a pipeline decoder synthesis found (MAUTO), over the job's **hold-out** window.
+    ///
+    /// The numbers are what `ConfirmPolicy.synthesized` read, so a confirmation's arithmetic is
+    /// reconstructible from the stored row rather than only from the job (ADR-0022 §11.3).
+    Synthesized {
+        /// The analyze job, `a<n>`.
+        job_id: String,
+        /// Decoded on hold-out (always `true`: search-window frames are never stored).
+        holdout: bool,
+        /// Hold-out `evidence_bits` (the rank currency, **not** the confirm key).
+        evidence_bits: f64,
+        /// Hypotheses the job charged to look-elsewhere, all stages.
+        hypotheses: u64,
+        /// The confirm key: analytic-null hold-out bits, each net of its own stage's `L_j`.
+        analytic_holdout_bits: f64,
+        /// `width × differences − L_check`; `None` when the prefix carried no check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check_bits: Option<f64>,
+        /// `L_check`; `None` when an inherited charge was never recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        l_check: Option<f64>,
+        /// Whether the check was searched (open search or a discovered template).
+        check_searched: bool,
+        /// The template's provenance kind (`builtin`, `user`, `discovered`), or `None` for open
+        /// search.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template_provenance: Option<String>,
+    },
+}
+
 /// Structured output from a decoder plugin or bit-framing inference (docs/07 §2.15).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Decode {
@@ -148,6 +183,9 @@ pub struct Decode {
     pub content_class: ContentClass,
     /// Frame time.
     pub t: Timestamp,
+    /// Non-decoder provenance (a synthesized pipeline's decode); `None` for every ordinary row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<DecodeProvenance>,
 }
 
 /// Label written in place of a decode label (`frame_model`, `decoder_id`, `decoder_version`) that

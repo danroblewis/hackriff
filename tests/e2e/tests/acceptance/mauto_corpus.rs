@@ -135,6 +135,8 @@ fn rows() -> Vec<Row> {
             ],
         });
     }
+    // T-568: the negative-control populations, run blind through the mock SDR.
+    rows.extend(crate::mauto_negatives::manifest_rows());
     rows
 }
 
@@ -160,21 +162,21 @@ fn declarations() -> Vec<Unreachable> {
     for (fam, reason) in [
         (
             "ofdm",
-            "N3 generator exists (hkpy.synth ofdm_nonstandard_cp, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth ofdm_nonstandard_cp, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
         (
             "dsss",
-            "N3 generator exists (hkpy.synth dsss_m_sequence, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth dsss_m_sequence, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
         (
             "16qam",
-            "N3 generator exists (hkpy.synth qam16_unframed, T-623) but no row runs it: its \
-             `unsupported-structure` + missing_block assertion needs an engine that writes a \
-             Resolution, run by the negative-control suite",
+            "N3 negative: run blind by the NEG row (hkpy.synth qam16_unframed, T-568: 0 solved, \
+             framed only on a measured framing); the recall grid does not apply to it, and its \
+             `unsupported-structure` + missing_block answer needs the sealed Resolution",
         ),
     ] {
         d.push(Unreachable {
@@ -182,21 +184,21 @@ fn declarations() -> Vec<Unreachable> {
             planes: &[],
             when: &[],
             reason,
-            ticket: Ticket::Filed("T-568"),
+            ticket: Ticket::Filed("T-567"),
         });
     }
     for (fam, reason) in [
         (
             "fm-voice",
-            "N2 generator exists (hkpy.synth nbfm_voice, T-624) but no row runs it: its \
-             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
-             writes a Resolution, run by the negative-control suite",
+            "N2 negative: run blind by the NEG row (hkpy.synth nbfm_voice, T-568: 0 labels >= \
+             framed); the recall grid does not apply to it, and its `nothing-scored`, \
+             deepest_verdict <= demodulated answer needs the sealed Resolution",
         ),
         (
             "am-voice",
-            "N2 generator exists (hkpy.synth am_voice, T-624) but no row runs it: its \
-             `nothing-scored`, deepest_verdict <= demodulated assertion needs an engine that \
-             writes a Resolution, run by the negative-control suite",
+            "N2 negative: run blind by the NEG row (hkpy.synth am_voice, T-568: 0 labels >= \
+             framed); the recall grid does not apply to it, and its `nothing-scored`, \
+             deepest_verdict <= demodulated answer needs the sealed Resolution",
         ),
     ] {
         d.push(Unreachable {
@@ -204,16 +206,17 @@ fn declarations() -> Vec<Unreachable> {
             planes: &[],
             when: &[],
             reason,
-            ticket: Ticket::Filed("T-568"),
+            ticket: Ticket::Filed("T-567"),
         });
     }
     d.push(Unreachable {
         family: "thermal-noise",
         planes: &[],
         when: &[],
-        reason: "the structureless population (N1) belongs to the negative-control suite; \
-                 SNR/support/check/CFO and an edge to fail past do not apply to it",
-        ticket: Ticket::Filed("T-568"),
+        reason: "the structureless population (N1) is the NEG plane's n1-thermal row (T-568); \
+                 SNR/support/check/CFO and an edge to fail past do not apply to it, and its full-n \
+                 run (docs/22 n = 400) is the false-confirm suite's",
+        ticket: Ticket::Filed("T-576"),
     });
     d.push(Unreachable {
         family: "css-lora",
@@ -283,6 +286,25 @@ fn declarations() -> Vec<Unreachable> {
             ticket: Ticket::Filed("T-565"),
         });
     }
+    // --- The negative plane (T-568): the two sub-populations with no IQ.
+    d.push(Unreachable {
+        family: "n3-css",
+        planes: &[],
+        when: &[],
+        reason: "CSS is P9 (docs/22 §4.3): lora_ism_burst exists but no MAUTO block dechirps or \
+                 scores CSS, so an unsupported-structure answer on it cannot yet be told from a \
+                 missing block",
+        ticket: Ticket::Filed("T-565"),
+    });
+    d.push(Unreachable {
+        family: "n4-terminator-50ohm",
+        planes: &[],
+        when: &[],
+        reason: "SKIPPED: the 50-ohm terminator capture is a user action, outstanding (docs/22 \
+                 §10); until it lands the receiver-only null is UNMEASURED and N4 is the 433 MHz \
+                 antenna window alone",
+        ticket: Ticket::Filed("T-375"),
+    });
     d
 }
 
@@ -412,10 +434,12 @@ fn manifest_populated_rows_name_tests_that_exist_and_are_not_ignored() {
 fn manifest_declarations_cite_open_tickets_and_none_is_a_catch_all() {
     let yaml = std::fs::read_to_string(hk_e2e::paths::repo_root().join("docs/tasks.yaml"))
         .expect("read docs/tasks.yaml");
-    let families = &corpus::docs22_axes()[0];
+    let axes = corpus::docs22_axes();
+    let families = &axes[0];
+    let negatives = axes.iter().find(|a| a.id == "NP").expect("the NP axis");
     for d in declarations() {
         assert!(
-            families.levels.contains(&d.family),
+            families.levels.contains(&d.family) || negatives.levels.contains(&d.family),
             "declaration names unknown family {}",
             d.family
         );

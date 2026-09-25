@@ -174,7 +174,7 @@ flip_done(){ # ticket merge_sha
   case "$t" in T-*) ;; *) return 0 ;; esac
   [ -f "$REPO/py/hkpy/tasks.py" ] || { log "flip_done $t: no task CLI on main yet - the board keeps todo until reconcile"; return 0; }
   if (cd "$REPO" && uv run --locked --project py python -m hkpy.tasks set "$t" status=done commit="${sha:0:8}" >>"$LOG" 2>&1 \
-      && git add docs/tasks.yaml && git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
+      && git add docs/tasks.yaml && HK_MERGE_RUNNER=1 git commit -q -m "Board: $t landed as ${sha:0:8} (merge runner)"); then
     log "BOARD $t -> done (${sha:0:8})"
   else
     (cd "$REPO" && git checkout -q -- docs/tasks.yaml 2>/dev/null)
@@ -346,7 +346,7 @@ process(){
     # before any commit that touches it, and a merge commit is one of the two writers that can
     # put a malformed board on main. An unchecked `git commit` here would log "MERGED ✓" for a
     # merge that never happened, which is the same false-success shape as T-840's lost MERGE_HEAD.
-    if ! git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
+    if ! HK_MERGE_RUNNER=1 git commit -m "Merge $ticket ($branch): gate passed (automated merge, no AI)" >>"$LOG" 2>&1; then
       log "COMMIT REFUSED for $branch (pre-commit hook or hook failure) - NOT merged"
       git merge --abort 2>/dev/null || true
       echo "$(date '+%m-%d %H:%M')  $branch  $ticket  COMMIT_REFUSED" >> "$NEEDS"

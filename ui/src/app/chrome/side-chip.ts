@@ -18,6 +18,7 @@
 import type { MountFn } from "../context";
 import { renderedInventory, type Row } from "../explore/inventory";
 import { h } from "../dom";
+import { trackOverlay } from "./dismiss";
 
 /** The chip's height bound in CSS px (the ticket's "no taller than 56 px"). `map-layout.css`
  * sizes the chip to fit inside it. */
@@ -71,6 +72,8 @@ export const mountSideChip: MountFn = (el, ctx) => {
   el.prepend(chip, top);
 
   let open = false;
+  // T-900: Escape goes through the one overlay stack, so it closes only the topmost overlay.
+  const overlay = trackOverlay("side", () => setOpen(false));
   function place() {
     if (typeof document === "undefined" || !document.querySelector) return;
     const px = sideTopPx(TOP_CHROME.map((sel) => {
@@ -87,13 +90,11 @@ export const mountSideChip: MountFn = (el, ctx) => {
     el.classList.toggle("is-open", on);
     el.classList.toggle("is-collapsed", !on);
     chip.setAttribute("aria-expanded", String(on));
+    overlay.open(on);
     if (on) { place(); close.focus?.(); } else chip.focus?.();
   }
   if (typeof window !== "undefined") {
     window.addEventListener("resize", () => { if (open) place(); });
-    window.addEventListener("keydown", (e: Event) => {
-      if (open && (e as KeyboardEvent).key === "Escape") setOpen(false);
-    });
   }
 
   ctx.store.select(

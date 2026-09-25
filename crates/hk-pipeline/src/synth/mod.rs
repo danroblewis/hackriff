@@ -36,6 +36,7 @@
 //! *below* this evidence rather than instead of it (ADR-0017).
 
 pub mod acquire; // T-857 (MAUTO M-6): ring read, burst set, pin-on-analyze
+pub mod attach; // T-860 (MAUTO M-9): attach, synthesized decodes, ConfirmPolicy.synthesized
 pub mod jobs; // T-859 (MAUTO M-8): /api/analyze jobs, stream, cancel
 
 use hk_demod::fsk::{FmStructure, Levels};
@@ -387,6 +388,7 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
         trace,
         resolution,
         receiver: obs.receiver,
+        job: None,
     }
 }
 

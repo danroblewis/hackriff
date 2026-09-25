@@ -6,7 +6,9 @@
 //! 2. [`AudioPlan::from_probe`]: the channel to demodulate (centre from the measured emission,
 //!    bandwidth per mode from OBW99), the noise power the squelch compares against
 //!    (C13 noise density × channel bandwidth), whether AGC runs.
-//! 3. [`AudioDemod`]: DDC → demodulator → 48 kS/s mono audio, with squelch and AGC.
+//! 3. [`AudioDemod`]: DDC → demodulator → 48 kS/s mono audio, with squelch and AGC — or, on a
+//!    WFM channel whose consumer asked for it ([`AudioDemod::with_stereo`], T-874), interleaved
+//!    `L, R` audio from the pilot-locked L−R channel (mono content in both while unlocked).
 //!
 //! | Mode | Channel | Audio |
 //! |---|---|---|
@@ -371,7 +373,18 @@ impl AudioDemod {
         match &mut self.kind {
             Kind::Wfm(w) => {
                 w.process(x);
-                self.out.extend(w.take_audio());
+                let m = w.take_audio();
+                if w.is_stereo() {
+                    // One S per M, aligned (the same filter on both paths): L = M + S, R = M − S.
+                    let side = w.take_side();
+                    self.out.reserve(2 * m.len());
+                    for (&mm, &ss) in m.iter().zip(&side) {
+                        self.out.push(mm + ss);
+                        self.out.push(mm - ss);
+                    }
+                } else {
+                    self.out.extend(m);
+                }
             }
             Kind::Nbfm {
                 disc,
@@ -429,14 +442,53 @@ impl AudioDemod {
     /// raw IQ). Other modes are unchanged. Call before the first [`Self::process`]; the audio is
     /// the same either way (RDS only taps the MPX the audio path already computes).
     pub fn with_rds(mut self) -> Result<Self, DemodError> {
-        if matches!(self.kind, Kind::Wfm(_)) {
+        if let Kind::Wfm(old) = &self.kind {
+            let stereo = old.is_stereo();
             let wc = WfmConfig {
                 rds: Some(crate::rds::RdsConfig::default()),
                 ..WfmConfig::default()
             };
-            self.kind = Kind::Wfm(Box::new(WfmDemod::new(wc, MPX_RATE_HZ)?));
+            let mut w = WfmDemod::new(wc, MPX_RATE_HZ)?;
+            if stereo {
+                w.enable_stereo();
+            }
+            self.kind = Kind::Wfm(Box::new(w));
         }
         Ok(self)
+    }
+
+    /// Asks for two-channel audio (T-874, ADR-0015 §12.13). Only broadcast FM carries a second
+    /// channel, so this enables the L−R path on a WFM channel and leaves every other mode mono;
+    /// [`Self::channels`] says which it became — the stream header's `channels` comes from there,
+    /// never from the request. Call before the first [`Self::process`].
+    pub fn with_stereo(mut self) -> Self {
+        if let Kind::Wfm(w) = &mut self.kind {
+            w.enable_stereo();
+        }
+        self
+    }
+
+    /// Channels of the audio [`Self::take_audio`] yields: 2 (interleaved `L, R`) after
+    /// [`Self::with_stereo`] on a WFM channel, otherwise 1. Fixed for the demodulator's life.
+    pub fn channels(&self) -> u32 {
+        match &self.kind {
+            Kind::Wfm(w) if w.is_stereo() => 2,
+            _ => 1,
+        }
+    }
+
+    /// Two-channel audio only: L−R is being decoded right now (the stereo pilot is locked).
+    /// `false` on a mono demodulator, and while the two channels carry the same mono audio.
+    pub fn stereo_locked(&self) -> bool {
+        matches!(&self.kind, Kind::Wfm(w) if w.stereo_locked())
+    }
+
+    /// Two-channel audio only: locked → unlocked transitions of the pilot so far.
+    pub fn stereo_lock_losses(&self) -> u64 {
+        match &self.kind {
+            Kind::Wfm(w) => w.stereo_lock_losses(),
+            _ => 0,
+        }
     }
 
     /// RDS groups decoded since the last call (empty unless [`Self::with_rds`] on a WFM channel).
@@ -447,7 +499,8 @@ impl AudioDemod {
         }
     }
 
-    /// Audio produced since the last call (48 kS/s mono, ±1).
+    /// Audio produced since the last call (48 kS/s, ±1; interleaved `L, R` when
+    /// [`Self::channels`] is 2).
     pub fn take_audio(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.out)
     }
@@ -634,6 +687,151 @@ mod tests {
         let mut d = AudioDemod::new(quiet, AudioConfig::default(), FS, FC).unwrap();
         d.process(info(&p, 0), &iq[..65_536]).unwrap();
         assert!(!d.squelch_open());
+    }
+
+    /// A broadcast-FM station `off` Hz from the tuned centre carrying left = 1 kHz and right =
+    /// 2.5 kHz (BS.450 multiplex, 75 kHz peak deviation). `pilot(t)` says whether the 19 kHz
+    /// pilot is on the air at `t` (the L−R subcarrier always is).
+    fn stereo_station(n: usize, off: f64, pilot: impl Fn(f64) -> bool) -> Vec<Complex32> {
+        let mut iq = noise(n, 13, 0.002);
+        let mut ph = 0.0f64;
+        for (k, s) in iq.iter_mut().enumerate() {
+            let t = k as f64 / FS;
+            let l = 0.4 * (TAU * 1_000.0 * t).sin();
+            let r = 0.4 * (TAU * 2_500.0 * t + 0.3).sin();
+            let wt = TAU * 19_000.0 * t + 0.7;
+            let p = if pilot(t) { 0.1 * wt.sin() } else { 0.0 };
+            let mpx = 0.9 * (0.5 * (l + r) + 0.5 * (l - r) * (2.0 * wt).sin()) + p;
+            ph = (ph + TAU * (off + 75e3 * mpx) / FS) % TAU;
+            *s += Complex32::new(0.3 * ph.cos() as f32, 0.3 * ph.sin() as f32);
+        }
+        iq
+    }
+
+    fn wfm_plan(off: f64) -> AudioPlan {
+        AudioPlan {
+            mode: AnalogMode::Wfm,
+            sideband: None,
+            channel_center_hz: FC + off,
+            channel_bandwidth_hz: 200e3,
+            noise_power: None,
+            agc: false,
+            deemphasis_s: Some(75e-6),
+        }
+    }
+
+    /// Runs `d` over `iq`; returns the audio and whether the pilot was locked after each chunk.
+    fn demod_all(mut d: AudioDemod, iq: &[Complex32]) -> (AudioDemod, Vec<f32>) {
+        let p = provenance();
+        let mut audio = Vec::new();
+        let mut idx = 0;
+        for chunk in iq.chunks(8192) {
+            d.process(info(&p, idx as u64), chunk).unwrap();
+            d.drain_audio_into(&mut audio);
+            idx += chunk.len();
+        }
+        (d, audio)
+    }
+
+    /// T-874 (ADR-0015 §12.13): asked for stereo, a WFM channel yields interleaved L/R with the
+    /// two programmes separated; its mid channel is the mono stream's audio; mono is unchanged.
+    #[test]
+    fn stereo_wfm_separates_left_and_right_and_mono_is_its_mid() {
+        let off = 200e3;
+        let iq = stereo_station((1.5 * FS) as usize, off, |_| true);
+        let mk = || AudioDemod::new(wfm_plan(off), AudioConfig::default(), FS, FC).unwrap();
+        assert_eq!(mk().channels(), 1, "mono unless asked");
+        let (mono_d, mono) = demod_all(mk(), &iq);
+        assert!(!mono_d.stereo_locked() && mono_d.stereo_lock_losses() == 0);
+        let (st_d, st) = demod_all(mk().with_stereo(), &iq);
+        assert_eq!(st_d.channels(), 2);
+        assert!(st_d.stereo_locked(), "the pilot locked");
+        assert_eq!(st_d.stereo_lock_losses(), 0);
+        assert_eq!(st.len(), 2 * mono.len(), "one L/R pair per mono sample");
+
+        let tail = st.len() / 2 / 3 * 2..st.len() - st.len() % 2;
+        let lr = &st[tail.clone()];
+        let left: Vec<f32> = lr.iter().step_by(2).copied().collect();
+        let right: Vec<f32> = lr.iter().skip(1).step_by(2).copied().collect();
+        let (l1, l2) = (
+            tone_db(&left, AUDIO_RATE_HZ, 1_000.0),
+            tone_db(&left, AUDIO_RATE_HZ, 2_500.0),
+        );
+        let (r1, r2) = (
+            tone_db(&right, AUDIO_RATE_HZ, 1_000.0),
+            tone_db(&right, AUDIO_RATE_HZ, 2_500.0),
+        );
+        eprintln!("left 1k {l1:.1} dB 2.5k {l2:.1} dB; right 1k {r1:.1} dB 2.5k {r2:.1} dB");
+        assert!(
+            l1 > -1.0 && r2 > -1.0,
+            "each channel carries its own programme"
+        );
+        assert!(l2 < -20.0 && r1 < -20.0, "≥ 20 dB separation");
+
+        // The mid channel (L+R)/2 is exactly the mono path's audio (same filter, same samples).
+        let worst = mono
+            .iter()
+            .zip(st.chunks_exact(2))
+            .map(|(&m, lr)| (m - 0.5 * (lr[0] + lr[1])).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "mid differs from mono by {worst}");
+        // Mono tone content is the mix, as it always was.
+        let m_tail = &mono[mono.len() / 3..];
+        assert!(tone_db(m_tail, AUDIO_RATE_HZ, 1_000.0) > -5.0);
+        assert!(tone_db(m_tail, AUDIO_RATE_HZ, 2_500.0) > -5.0);
+
+        // Only broadcast FM has a second channel: other modes stay mono when asked.
+        let nbfm = AudioPlan {
+            mode: AnalogMode::Nbfm,
+            channel_bandwidth_hz: 12.5e3,
+            deemphasis_s: None,
+            ..wfm_plan(off)
+        };
+        let d = AudioDemod::new(nbfm, AudioConfig::default(), FS, FC).unwrap();
+        assert_eq!(d.with_stereo().channels(), 1);
+    }
+
+    /// T-874 honesty: no pilot, no L−R — the two channels are identical, bit for bit; and a pilot
+    /// that goes away is a counted lock loss, after which the channels are identical again.
+    #[test]
+    fn stereo_without_a_pilot_is_honest_mono_and_a_lost_pilot_is_counted() {
+        let off = -150e3;
+        let mk = || {
+            AudioDemod::new(wfm_plan(off), AudioConfig::default(), FS, FC)
+                .unwrap()
+                .with_stereo()
+        };
+        let iq = stereo_station(FS as usize, off, |_| false);
+        let (d, st) = demod_all(mk(), &iq);
+        assert_eq!(
+            d.channels(),
+            2,
+            "the stream shape is fixed; its content is not stereo"
+        );
+        assert!(!d.stereo_locked());
+        assert!(
+            st.chunks_exact(2).all(|lr| lr[0] == lr[1]),
+            "unlocked: L = R exactly, never an L−R guessed from an unlocked carrier"
+        );
+
+        let iq = stereo_station((2.0 * FS) as usize, off, |t| t < 1.0);
+        let (d, st) = demod_all(mk(), &iq);
+        assert!(!d.stereo_locked(), "the pilot went away");
+        assert_eq!(
+            d.stereo_lock_losses(),
+            1,
+            "the loss is reported, not hidden"
+        );
+        let last = &st[st.len() - (0.2 * AUDIO_RATE_HZ) as usize * 2..];
+        assert!(
+            last.chunks_exact(2).all(|lr| lr[0] == lr[1]),
+            "mono again after the loss"
+        );
+        let mid = &st[(0.8 * AUDIO_RATE_HZ) as usize * 2..(0.9 * AUDIO_RATE_HZ) as usize * 2];
+        assert!(
+            mid.chunks_exact(2).any(|lr| lr[0] != lr[1]),
+            "stereo while locked"
+        );
     }
 
     #[test]

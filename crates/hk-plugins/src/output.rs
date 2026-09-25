@@ -206,6 +206,7 @@ pub fn parse_line(
             identity: field::<DecodedIdentity>(&obj, "identity")?,
             content_class,
             t,
+            provenance: None,
         };
         let n = policy::sanitize_decode(policy, schema_id, &mut decode);
         (PluginOutput::Decode(decode), n)

@@ -1600,6 +1600,27 @@ pub fn inventory_entry_json_at(
                 "detail": r.detail,
             })
         });
+        // T-860 (ADR-0015 §5.4, MAUTO M-9): the latest `emitter_synthesis` row, summarised — the
+        // full row is `POST /api/analyze {"emitter_id"}`. `null` means **not searched**, never
+        // "searched and found nothing" (ADR-0021 §7A.4: a finished search that found nothing has
+        // a row, with its `resolution`). Withheld rows read `null` whatever storage holds, like
+        // `estimated_params` and `cluster_id`: a template id or a decode count appearing is not
+        // allowed to confirm a withheld identity indirectly (T-159/T-163).
+        let synthesis = if withheld {
+            None
+        } else {
+            repo.synthesis(e.id)?
+                .map(|row| synthesis_summary_json(&row))
+        };
+        // T-860 (ADR-0015 §5.5 trust rules): whether the identity rests only on synthesized
+        // decodes. A synthesized identity — even a real one, such as `adsb-icao` from a
+        // template-bound pipeline — is strong evidence and never an unexplained fact, so the
+        // provenance is shown beside it. `null` without an identity, and on a withheld row.
+        let identity_synthesized = if withheld {
+            None
+        } else {
+            repo.identity_synthesized(e.id)?
+        };
         // T-191: the user-adjusted band, beside (never replacing) the measured f_lo_hz/f_hi_hz.
         let user_band = repo.user_band(e.id)?.map(|b| user_band_json(&b, withheld));
         let rec = repo.emitter_recurrence(e.id, RECENT_APPEARANCES)?;
@@ -1727,6 +1748,8 @@ pub fn inventory_entry_json_at(
             // for another cause — and this is where they stop reading as one silence.
             "cluster_status": cluster_status,
             "identity_scheme": scheme,
+            // T-860: the identity rests only on synthesized decodes (null without one / withheld).
+            "identity_synthesized": identity_synthesized,
             "identity_class": class,
             "withheld": withheld,
             "snr_db": measurement.map(|m| m.snr_peak_db),
@@ -1738,6 +1761,8 @@ pub fn inventory_entry_json_at(
             // T-219 (C40): why this row defers to another, when it does. Never a deletion — the
             // row, its detections, tracks and history are all kept and the claim is reversible.
             "relation": relation,
+            // T-860 (ADR-0015 §5.4): the latest analysis, summarised; null = not searched.
+            "synthesis": synthesis,
         });
         // ADR-0017 §7.1: present only when the request named a window — see the function docs for
         // why absent and `null` must stay different answers.
@@ -1749,6 +1774,34 @@ pub fn inventory_entry_json_at(
         }
         Ok(row)
     }
+}
+
+/// The inventory row's `synthesis` summary of an `emitter_synthesis` row (ADR-0015 §5.4): what
+/// was analysed, how deep it got, and — for a region-analyze job (MAUTO M-9) — the job, its
+/// profile and template, the confirm outcome, the confirm key and the decodes it stored. Every
+/// sentence is backend-rendered; the full row is served by `POST /api/analyze {"emitter_id"}`.
+fn synthesis_summary_json(row: &hk_model::repo::synthesis::EmitterSynthesis) -> Value {
+    let job = row.job.as_ref();
+    json!({
+        "t_s": ts_s(row.t),
+        "engine": row.engine,
+        "verdict": row.verdict,
+        "stage_reached": row.stage_reached,
+        "summary": row
+            .pipeline
+            .as_ref()
+            .map(|p| p.summary.as_str())
+            .or(row.resolution.as_ref().map(|r| r.summary.as_str())),
+        "resolution": row.resolution.as_ref().map(|r| r.kind),
+        "job_id": job.map(|j| j.job_id.as_str()),
+        "profile": job.map(|j| j.profile.as_str()),
+        "template": job.and_then(|j| j.template.as_ref()),
+        "analytic_holdout_bits": job.and_then(|j| j.analytic_holdout_bits),
+        "decodes_stored": job.map(|j| j.decodes_stored),
+        "confirm": job
+            .and_then(|j| j.confirm.as_ref())
+            .and_then(|c| c.get("outcome")),
+    })
 }
 
 #[cfg(test)]

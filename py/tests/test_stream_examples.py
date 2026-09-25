@@ -116,3 +116,40 @@ def test_audio_is_written_to_wav_with_gaps_filled():
     assert samples[:2] == (1000, -1000)
     assert set(samples[960:1920]) == {0}
     assert samples[1920:1922] == (1000, -1000)
+
+
+def test_stereo_audio_is_written_as_two_channel_wav_and_asked_for_only_on_request():
+    """T-874: a two-channel stream (interleaved L, R) becomes a two-channel WAV, a gap is filled
+    per frame (both channels), and ``channels=2`` is sent only with ``--stereo``."""
+    header = {
+        "schema": "hackriff.stream", "version": "1.5", "stream_id": "listen/2", "kind": "audio",
+        "content_class": "unrestricted", "source": "test", "datatype": "ri16_le",
+        "sample_rate_hz": 48000, "audio": {"channels": 2, "frame_samples": 960, "mode": "wfm"},
+        "max_frame_len": 32 + 8 * 960, "record_header_len": 32, "t_start": 0,
+        "hackriff_version": "test",
+    }
+    lr = struct.pack("<1920h", *([1000, -2000] * 960))
+    stream = (
+        _frame(json.dumps(header).encode())
+        + _record(1, 0, 0, 0, lr)
+        + _record(3, 0, 1, 960, b'{"level_dbfs":-20.0,"squelch_open":true,"stereo":true}')
+        + _record(1, 2, 2, 1920, lr)  # one frame of 960 missing before it
+    )
+    out = io.BytesIO()
+    n = hk_audio_wav.write_wav(hkstream.StreamReader(io.BytesIO(stream)), out, 10.0,
+                               log=io.StringIO())
+    assert n == 3 * 960, "sample frames, not interleaved values"
+    out.seek(0)
+    with wave.open(out, "rb") as w:
+        assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (2, 2, 48000)
+        assert w.getnframes() == 3 * 960
+        pcm = w.readframes(w.getnframes())
+    samples = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+    assert samples[:4] == (1000, -2000, 1000, -2000)
+    assert set(samples[2 * 960:2 * 1920]) == {0}
+    assert samples[2 * 1920:2 * 1920 + 2] == (1000, -2000)
+
+    mono = hkstream.handshake_line("open/listen", "t", f_lo=1.0, f_hi=2.0, channels=None)
+    assert b"channels" not in mono, "a client that does not ask gets mono"
+    stereo = hkstream.handshake_line("open/listen", "t", f_lo=1.0, f_hi=2.0, channels=2)
+    assert stereo.endswith(b"&channels=2\n")

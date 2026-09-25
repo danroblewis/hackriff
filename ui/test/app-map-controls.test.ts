@@ -186,7 +186,7 @@ test("T-882: the rehomed controls live in the cluster — Measure, the viewport 
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
   assert.doesNotMatch(host, /sf-bar|sf-actions|sf-live|sf-tracebtn|sf-contrast|sf-vscale|sf-signalsbtn|sf-measurebtn/,
     "a retired toolbar control is still built by the surface mount");
-  // T-812: the priors readout sits below the stage beside the ring readout; the stage is still first.
-  assert.match(host, /el\.replaceChildren\(stage, traceEl, ringEl, (priorsEl, )?chrome, note\);/, "the stage is the first row: full-bleed, no bar above it");
+  // T-812: the priors readout sits below the stage after the fog readout; the stage is still first.
+  assert.match(host, /el\.replaceChildren\(stage, traceEl, ringEl, fogEl, (priorsEl, )?chrome, note\);/, "the stage is the first row: full-bleed, no bar above it");
   assert.match(host, /paneMenuExtras: \[recordBtn\]/, "Record IQ has a home in the viewport menu");
 });

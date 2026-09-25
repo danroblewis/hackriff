@@ -59,6 +59,10 @@
    a short stage (T-882 made the layers menu taller by the colour-scale group). */
 .map-layers, .map-pane-menu { z-index: 2; max-height: calc(100% - 54px); overflow-y: auto; }
 .map-layers { top: 46px; right: 0; width: min(280px, 100%); box-sizing: border-box; padding: 10px 12px; background: color-mix(in srgb, var(--panel) 92%, transparent); }
+/* T-900: the layers menu's visible dismiss (P1: closeable, never only faded). */
+.map-layers-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -4px 6px 0; font: 600 11px var(--ui); color: var(--muted); }
+.map-layers-close { min-width: 28px; min-height: 28px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.map-layers-close:hover, .map-layers-close:focus-visible { border-color: var(--line); color: var(--text); }
 .map-layers h4 { margin: 0 0 6px; font: 600 10.5px/1 var(--ui); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .map-row { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; }
 .map-row input { margin: 0; accent-color: var(--amber); }
@@ -98,3 +102,8 @@
 @media (max-width: 900px) {
   .map-ctl { left: 8px; right: 8px; }
 }
+
+/* T-807 (MAP-07): the coverage fog's key, under its switch. Swatches are painted by the one cell rule. */
+.map-layer-key { list-style: none; margin: 2px 0 4px 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; font-size: 10.5px; color: var(--muted); }
+.map-layer-key li { display: flex; align-items: center; gap: 5px; }
+.map-key-swatch { width: 22px; height: 12px; flex: none; image-rendering: pixelated; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); }

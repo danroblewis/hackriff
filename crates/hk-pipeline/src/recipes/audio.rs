@@ -261,6 +261,9 @@ impl AudioSink {
             refined_center_hz: refined.map(|(c, _)| c),
             refined_bandwidth_hz: refined.map(|(_, b)| b),
             refine_updates,
+            // A recipe's `audio` output is mono (hk-recipe; T-874 changed only Listen's opener).
+            stereo: None,
+            stereo_lock_losses: None,
         };
         let mut m = match status.to_value() {
             Value::Object(m) => m,

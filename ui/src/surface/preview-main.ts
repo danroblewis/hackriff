@@ -18,6 +18,7 @@ import {
   viewportScaleButton, type ContrastButton,
 } from "./contrast";
 import { newClientId, setTileClientId } from "./clientid";
+import { markSurface } from "./mounted";
 import { shareText } from "./tilecache";
 import { attachSurfaceInput } from "./input";
 import { legendEntries, rangeEntry, rangeLabel, swatchPixels, type LegendEntry } from "./legend";
@@ -77,6 +78,7 @@ function mountRangeRow(root: HTMLElement): (r: DisplayRange) => void {
 function fail(message: string, detail = ""): void {
   const stage = slot("stage");
   stage.replaceChildren(h("div", { class: "sp-fail" }, h("b", {}, message), detail ? h("p", {}, detail) : ""));
+  markSurface("failed", detail ? `${message} ${detail}` : message);
 }
 
 async function main(): Promise<void> {
@@ -136,6 +138,7 @@ async function main(): Promise<void> {
     fail("WebGL2 is unavailable in this browser.", e instanceof Error ? e.message : String(e));
     return;
   }
+  markSurface("mounted");
 
   // ——— controls. Every one of these is a view change; none reaches the front end. ———
   const button = (label: string, title: string, fn: () => void) =>

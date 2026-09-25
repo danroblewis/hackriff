@@ -393,6 +393,40 @@ export const REFUSED_MARK = {
 /** The mark for a place no pane covers (between panes). Not a claim about anything. */
 export const BACKDROP: Rgb = [0.04, 0.04, 0.05];
 
+/**
+ * **The coverage-fog layer** (T-807 / MAP-07, docs/24 §3b and §13.3): which states the layers menu's
+ * `coverage` switch governs, and what they draw as while it is off.
+ *
+ * The fog is the surface's statement of **what is not known**: [[CELL.UNOBSERVED]] (THE grey —
+ * nothing ever looked) and [[CELL.UNKNOWN]] (the record that would say is gone). Those two are
+ * the fog. Every other state carries, or is a fact about, a measurement of *this* cell or band —
+ * `observed`, `no level held`, `nothing folded yet`, the last-known [[CELL.SHADOW]] and the
+ * [[CELL.EXCLUDED]] notch — and is drawn whether or not the fog is shown: hiding a measurement we
+ * hold is "we have it but did not render it", and stripping the notch's ink would let the
+ * receiver's own LO leakage read as a signal on air.
+ *
+ * **Hidden is not grey and not a level.** A fog cell with the layer off draws [[FOG_HIDDEN]] — a
+ * flat, neutral bare ground (the mockup's "bare ground"), darker than [[GREY]] so the absence
+ * recedes, with no texture (every measurement has one) and off the ramp. It is also never the
+ * ramp's bottom: `cmap(0)` is blue-black, this is neutral. It is a *choice the viewer made*, stated
+ * in words by the pane's readout, never a claim about the radio — so it cannot manufacture
+ * "observed" out of "unobserved", and grey still comes from one state byte and nothing else.
+ *
+ * It is a flag on **this** rule, not a quad (§13.3: "the coverage switch sets a cell-rule flag; it
+ * never adds a quad") — the generated `cellMark` takes it, so the shader and [[cellPixel]] cannot
+ * disagree about which states it hides.
+ */
+export const FOG_STATES: readonly CellState[] = [CELL.UNOBSERVED, CELL.UNKNOWN];
+
+/** The bare ground a fog state draws as while the coverage layer is hidden. Flat, neutral, darker
+ * than [[GREY]], and on no position of the ramp. */
+export const FOG_HIDDEN: Rgb = [0.085, 0.09, 0.095];
+
+/** Is this state one the coverage-fog layer governs? */
+export function isFogState(state: number): boolean {
+  return (FOG_STATES as readonly number[]).includes(state);
+}
+
 /** The rule in TypeScript, for tests and for anything that must reason about a cell off-GPU. */
 export function markFor(state: number): CellMark {
   return CELL_MARKS[state] ?? CELL_MARKS[CELL.UNOBSERVED];
@@ -424,10 +458,13 @@ export function cellPixel(args: {
   /** The shadow's brightness multiplier, client-adjustable (T-526, `./shadow-gain.ts`). Defaults to
    * [[SHADOW_MARK]]'s own gain, which is what every caller that does not pass one still gets. */
   readonly shadowGain?: number;
+  /** The pane's coverage-fog layer (T-807). Defaults to shown — the registry's default. */
+  readonly fog?: boolean;
 }): [number, number, number] {
   const m = markFor(args.state);
   let col: [number, number, number];
-  if (m.kind === "ramp") col = cmap(args.x);
+  if (args.fog === false && isFogState(args.state)) col = [...FOG_HIDDEN] as [number, number, number];
+  else if (m.kind === "ramp") col = cmap(args.x);
   else if (m.kind === "shadow") {
     const gain = args.shadowGain ?? m.gain;
     if (patternHit(m.pattern, args.px, { x: m.pitchPx, y: m.pitchPx })) col = [...m.ink] as [number, number, number];
@@ -467,7 +504,8 @@ const patFn = (name: PatternName) => `pat_${name}`;
  * [[FALLBACK_MARK]]:
  *
  * ```glsl
- * vec3 cellMark(int s, float x, vec2 px, float gain); // the seven states; `gain` is the shadow's only
+ * vec3 cellMark(int s, float x, vec2 px, float gain, bool fog); // the seven states; `gain` is the shadow's only;
+ *                                                                //   `fog` false hides FOG_STATES (T-807)
  * vec3 tierMark(int t, vec3 col, vec2 px, vec2 srcPx);  // the three honesty tiers
  * vec3 fallbackMark(vec3 col, vec2 px);           // the stand-in
  * ```
@@ -514,7 +552,8 @@ export const CELL_RULE_GLSL: string = (() => {
   return `
 ${pats.join("\n")}
 
-vec3 cellMark(int s, float x, vec2 px, float gain) {
+vec3 cellMark(int s, float x, vec2 px, float gain, bool fog) {
+  if (!fog && (${FOG_STATES.map((f) => `s == ${f}`).join(" || ")})) return ${vec3(FOG_HIDDEN)};
 ${cell.join("\n")}
 }
 

@@ -495,6 +495,11 @@ impl Repository {
 
     /// The scheme of an emitter's decoded identity and how many CRC-valid decodes carry that
     /// identity, or `None` without an identity. Metadata only: the value never leaves this call.
+    ///
+    /// **Synthesized decodes do not count** (decoder id `synth:…`, ADR-0015 §5.5): a decode made
+    /// by a pipeline decoder synthesis found confirms only through `ConfirmPolicy.synthesized`,
+    /// whose gate prices the search that found it (ADR-0022). Counting it here would let a
+    /// template-bound identity confirm on one decode without that gate.
     pub fn identity_decode_evidence(
         &self,
         id: EmitterId,
@@ -512,7 +517,7 @@ impl Repository {
         let n: i64 = tx
             .prepare_cached(
                 "SELECT count(*) FROM decode WHERE identity_scheme = ?1 AND identity_value = ?2 \
-                 AND crc_status = ?3",
+                 AND crc_status = ?3 AND decoder_id NOT LIKE 'synth:%'",
             )?
             .query_row(params![scheme, value, enum_text(&CrcStatus::Valid)?], |r| {
                 r.get(0)
