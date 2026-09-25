@@ -2,7 +2,7 @@
 // (`ui/test/app-side-chip.test.ts`) proves the counts, the default and the spy-client rule over a
 // fake DOM; this proves what only a browser's own hit test can: at every width the Explore map opens
 // with the lists as a chip no taller than 56 px, that chip is pressable, and neither the chip nor the
-// OPEN overlay covers the surface's toolbar (T-528), Go-to, the zoom stack, the FAB (T-802) or the
+// OPEN overlay covers the floating top-right controls (T-528's rule; the toolbar row is gone since T-882), Go-to, the zoom stack, the FAB (T-802) or the
 // sheet's handle (T-803); the close (×) then gives every pixel back to the map. Nothing here reaches
 // a device route.
 import test from "node:test";
@@ -14,7 +14,7 @@ const CONTROL = /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_fil
 
 // T-528's hit test, over every control this ticket must never cover: each is what a click at its
 // own centre lands on.
-const GUARDED = ".sf-actions button, .map-goto input, .map-zoom-in, .map-zoom-out, .map-fab, .sheet-grab";
+const GUARDED = ".map-topright button, .map-goto input, .map-zoom-in, .map-zoom-out, .map-fab, .sheet-grab";
 const hitTest = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.stringify(sel)})].map((el) => {
   const r = el.getBoundingClientRect();
   if (r.width === 0 || r.height === 0) return { sel: el.className, ok: false, covered: 'not drawn' };
@@ -27,7 +27,7 @@ const hitTest = (sel) => `JSON.stringify([...document.querySelectorAll(${JSON.st
 // the control's side alone passes while the control hides the lists).
 const OVERLAPS_SIDE = `JSON.stringify((() => {
   const s = document.querySelector('#view-explore > .side').getBoundingClientRect();
-  return [...document.querySelectorAll('.map-goto, .map-zoom, .map-fab, .sheet-grab, .sf-actions button')]
+  return [...document.querySelectorAll('.map-goto, .map-zoom, .map-fab, .sheet-grab, .map-topright button')]
     .map((el) => ({ cls: el.className || el.tagName, r: el.getBoundingClientRect() }))
     .filter(({ r }) => r.width > 0 && r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top)
     .map(({ cls }) => cls);
@@ -39,7 +39,7 @@ for (const width of [1440, 1000, 920, 420]) test(`at ${width} px the lists are a
   const page = await browser.page(undefined, { width, height: 860 });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
   await page.waitFor("the surface, its floating controls, the sheet and the side chip",
-    `!!document.querySelector('.sf-actions button') && !!document.querySelector('.map-ctl .map-fab') &&
+    `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-ctl .map-fab') &&
      document.querySelector('.sheet')?.dataset.snap === 'peek' && !!document.querySelector('.side-chip')`,
     { timeoutMs: 60000 });
   await page.frames(3);
