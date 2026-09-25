@@ -6,7 +6,7 @@
 //     top-right cluster, the nudges, the mode switch, zoom, the FAB, the sheet's handle, the lists' chip) is on screen,
 //     at least 24 px, and what a press at its centre lands on — Go-to never under the top-right cluster.
 //     The sheet's peek strip covers none of the surface's statements (coverage sentence, pane rows).
-//  2. Idle: after ~6 s untouched the floating chrome — the cluster (with the bar's former controls), the dock, the chip —
+//  2. Idle: after ~6 s untouched the floating chrome — the cluster (with the bar's former controls), the chip —
 //     fades to ~35 %, while the sheet and the honesty statements do not; a touch brings it all back.
 //  3. Sheets and menus stay reachable and closeable: the sheet's handle opens it and its close shuts
 //     it; Research opens as a full-height panel above the cluster, the sheet drops to peek, and its
@@ -89,12 +89,16 @@ test(`at ${W} px the floating chrome fits, fades when idle, and touch keeps to t
   await page.waitFor("the chrome to go idle (~6 s)", "document.body.classList.contains('chrome-idle')", { timeoutMs: 15000 });
   await new Promise((r) => setTimeout(r, 800)); // the .5 s opacity transition
   await shot("2-idle");
+  // T-994: the Outputs dock bar is retired — there is no bottom bar left to fade, and none at all
+  // while nothing is open (the Active-outputs strip that replaced it exists only then).
+  assert.equal(await page.eval(`document.querySelector('.app > .dock')`), null, "the Outputs dock bar is retired");
+  assert.equal(await page.eval(`document.querySelector('.app > .out-strip').hidden`), true, "nothing open: no outputs strip");
   const idle = JSON.parse(await page.eval(`JSON.stringify({
-    status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, dock: ${opacity(".app > .dock")}, zoom: ${opacity(".map-zoom")},
+    status: ${opacity(".map-status")}, nudge: ${opacity(".map-nudge")}, zoom: ${opacity(".map-zoom")},
     fab: ${opacity(".map-fab")}, pills: ${opacity(".map-inv")}, sheet: ${opacity(".sheet")},
     chrome: ${opacity(".sf-chrome")}, note: ${opacity(".sf-note")} })`));
   t.diagnostic(`idle opacities: ${JSON.stringify(idle)}`);
-  for (const k of ["status", "nudge", "dock", "zoom", "fab", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
+  for (const k of ["status", "nudge", "zoom", "fab", "pills"]) assert.ok(idle[k] < 0.5, `${k} did not fade when idle (${idle[k]})`);
   for (const k of ["sheet", "chrome", "note"]) assert.equal(idle[k], 1, `${k} faded — the sheet and honesty statements never fade`);
   // T-1025: the wake-up touch lands on the DEVICE chip, found by its own box, not on a fixed
   // (200, 110) that happened to be over the Explore button while the status pill was one wide box.

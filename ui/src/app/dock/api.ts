@@ -54,7 +54,18 @@ function events(ctx: AppContext): AudioSessionEvents {
   };
 }
 
-/** The shared `AudioSession` (T-150 internal use: `dock/index.ts`'s Mute control). */
+// T-994: the Active-outputs mount's "re-read the open-output records now" (set once it mounts).
+let refresher: (() => void) | null = null;
+
+/** Registers the poll `refreshOutputs` kicks (`dock/index.ts`'s mount). */
+export function setOutputsRefresher(fn: (() => void) | null): void { refresher = fn; }
+
+/** Re-reads `GET /api/pipelines` / `GET /api/outputs` now rather than at the next poll — called after
+ * an action that opened or closed a decode or a recording, so its box badge follows promptly. The
+ * badge still shows only what the server then answers. A no-op before the mount. */
+export function refreshOutputs(): void { refresher?.(); }
+
+/** The shared `AudioSession` (T-150 internal use: the Active-outputs strip's Mute control). */
 export function getAudioSession(ctx: AppContext): AudioSession {
   session ??= new AudioSession(ctx.token, events(ctx));
   return session;

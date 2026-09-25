@@ -33,7 +33,7 @@ test("one idle signal: the cluster's IdleFade writes the <body> class the HUD an
   }
 });
 
-test("fade reaches the dock — and the pills, by being in the cluster — never what §10.2 exempts", () => {
+test("fade reaches the Active-outputs strip — and the pills, by being in the cluster — never what §10.2 exempts", () => {
   const rules = [...phoneCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
   const fading = rules.filter((r) => /opacity:\s*\.35/.test(r.body));
   assert.ok(fading.length > 0, "no fade rule at all, so this proves nothing");
@@ -42,7 +42,8 @@ test("fade reaches the dock — and the pills, by being in the cluster — never
   // T-993: no top bar over the map to fade — its controls are in the cluster and fade with it.
   // T-997: nor the lists' chip, which is retired; the pills that replaced it are IN the cluster and
   // carry `map-fade`, so they fade by that one rule (asserted at the foot of this test).
-  assert.ok(sels.some((s) => s.includes("> .dock")), "> .dock does not fade");
+  // T-994: the dock bar is retired; the Active-outputs strip that replaced it fades like it did.
+  assert.ok(sels.some((s) => s.includes("> .out-strip")), "> .out-strip does not fade");
   assert.match(src("src/app/chrome/map-controls.ts"), /class: "map-glass map-inv map-fade"/,
     "the inventory pills must fade with the rest of the cluster");
   const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side"];

@@ -16,8 +16,8 @@
    (none named here), a focused control (`:focus-within` / `:focus-visible`), or an honesty statement —
    so the status pill stays solid while its stream status says the picture is not live (`.conn` shown). Fade is
    an idle courtesy, never a dismiss (§10.6 rule 1): every overlay keeps its own close (T-900). */
-.app:has(#view-explore:not([hidden])) > .dock { transition: opacity .5s ease; }
-body.chrome-idle .app:has(#view-explore:not([hidden])) > .dock:not(:focus-within) { opacity: .35; }
+.app:has(#view-explore:not([hidden])) > .out-strip { transition: opacity .5s ease; }
+body.chrome-idle .app:has(#view-explore:not([hidden])) > .out-strip:not(:focus-within) { opacity: .35; }
 
 /* ---- 2. Below the sheet breakpoint ---------------------------------------------------------------
    T-824 shortened the surface here (`padding-bottom: calc(70px + 56px + 8px)`) because the sheet's
@@ -46,12 +46,9 @@ body.chrome-idle .app:has(#view-explore:not([hidden])) > .dock:not(:focus-within
      everything in Explore's), and sits above the floating cluster (z 20) — a panel the cluster's
      zoom stack and FAB painted over would be neither readable nor the full-height panel §10.3 asks
      for. Its close (×) and the cluster's Research button both dismiss it. */
-  .research { top: 56px; bottom: 70px; left: 8px; right: 8px; width: auto; z-index: 25; }
-
-  /* The dock's own row scrolls sideways, never the page (§10.5). */
-  .app:has(#view-explore:not([hidden])) > .dock { overflow-x: auto; overflow-y: hidden; }
+  .research { top: 56px; bottom: 8px; left: 8px; right: 8px; width: auto; z-index: 25; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app:has(#view-explore:not([hidden])) > .dock { transition: none; }
+  .app:has(#view-explore:not([hidden])) > .out-strip { transition: none; }
 }
