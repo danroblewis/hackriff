@@ -371,6 +371,14 @@ pub(crate) fn run(shared: Arc<Shared>, survey: Arc<ReceiverSurvey>) -> anyhow::R
                 // chain, nothing the detector or the chains wait on — and it reads nothing more
                 // until the answer is back, so which windows are measured is unchanged by load.
                 //
+                // **That cursor still stops capture.** In lossless mode a claim held while the
+                // writer runs a slack (half the ring) ahead of it holds the capture thread for the
+                // whole measurement — deliberately, since it is what makes the windows above
+                // load-independent. What it is not is a failed source, so nothing waiting for
+                // samples may charge the hold to its own wall clock: the listen probe did, and
+                // refused 504 `probe-timeout` while the writer was stopped on purpose
+                // ([`crate::gate::FlowGate::holding`], T-929).
+                //
                 // **It runs on a thread of its own, and this one waits for it watching `stop`
                 // (T-917).** The measurement is one uninterruptible call of up to seconds of one
                 // core (the module docs' 0.39 core-s per second of capture, so ~8 s for a 2 s
