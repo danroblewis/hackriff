@@ -19,6 +19,7 @@
 // computed by `surface/retune.ts` and handed in as strings.
 import { parseFrequency } from "../../controls/freq";
 import { h } from "../dom";
+import { trackOverlay } from "./dismiss";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -201,7 +202,9 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   const offerX = h("button", { type: "button", class: "map-offer-x", "aria-label": "Dismiss the retune offer" }, "✕");
   const offer = h("div", { class: "map-glass map-offer", role: "status", hidden: true }, offerWhy, offerGo, offerX);
   let shown: GotoOffer | null = null;
-  const hideOffer = () => { shown = null; offer.hidden = true; };
+  // T-900: the offer is a transient on the one overlay stack — Escape dismisses it when topmost.
+  const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
+  const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
 
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
@@ -209,7 +212,12 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
   }, svg(["path", "M12 3l9 5-9 5-9-5 9-5z"], ["path", "M3 12l9 5 9-5"], ["path", "M3 16l9 5 9-5"])) as HTMLButtonElement;
   const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn);
   const layersList = h("div", { class: "map-layers-rows" });
+  // T-900 (docs/23 §10.6 P1): an open menu is an overlay, so it has a visible dismiss, not just a fade.
+  const layersClose = h("button", {
+    type: "button", class: "map-layers-close", "aria-label": "Close layers — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Layers"), layersClose),
     layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
@@ -256,6 +264,7 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     offerWhy.textContent = shown.why;
     offerGo.disabled = !shown.enabled;
     offer.hidden = false;
+    offerOverlay.open(true);
   });
   offerGo.addEventListener("click", () => {
     const o = shown;
@@ -299,8 +308,10 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
   };
   let layersOpen = false;
+  const layersOverlay = trackOverlay("layers", () => { setLayersOpen(false); layersBtn.focus(); });
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
+    layersOverlay.open(open);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
     layersBtn.setAttribute("aria-expanded", String(open));
@@ -308,9 +319,7 @@ export function mountMapControls(host: MapControlHost): { el: HTMLElement; viewM
     fade.hold("layers", open); // an open menu never fades
   };
   layersBtn.addEventListener("click", () => setLayersOpen(!layersOpen));
-  el.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Escape" && layersOpen) { setLayersOpen(false); layersBtn.focus(); }
-  });
+  layersClose.addEventListener("click", () => { setLayersOpen(false); layersBtn.focus(); });
 
   const zoomBy = (k: number) => { host.zoom(k); hideOffer(); host.viewChanged(); };
   zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
