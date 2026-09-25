@@ -26289,6 +26289,8 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-860 Opus review 2026-09-24.
+
+      2026-09-25 coordinator, ADDED from T-575's Opus review (task-t575): (8) backward clock step undercounts the confirm decision rate (confirm_rate.rs:48-56: rows with t > now neither counted nor pruned, so the claim can read 'holds' when it should be 'void' - surfaced state only); (9) a decision counted after its emitter was deleted reports decision_rate: None (attach.rs:467-474); (10) api_contract cannot see decision_rate until a search backend exists - add it with the config wiring; (11) load_dir trusts each template document's own 'kind', so a user-dir file can claim builtin/user and be treated as template-fixed - M-10's save/edit paths must keep 'discovered'; (12) template seeding (search root from a TemplateSeed) must copy check_origin, and save-as-template must write discovery_look_elsewhere_bits from the discovering search's l_check; (13) a device-wide status view of the confirm decision counter (void budget claim) - today it is per job/synthesis row only.
   - id: T-885
     milestone: MAUTO
     title: "Rule on synthesized confirm with zero in-window detections: T-860 fails closed, narrowing ADR-0015 §6's one-burst confirm (ADR clarification)"
