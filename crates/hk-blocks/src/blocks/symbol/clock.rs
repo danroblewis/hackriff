@@ -75,8 +75,11 @@ pub(crate) fn build(p: &Params, _: &BuildCtx<'_>) -> Result<Box<dyn Block>, Bloc
         "max-contrast" => Algo::MaxContrast,
         _ => Algo::Gardner,
     };
+    // An explicit `symbol_rate_bd` wins over the candidate list (fixed mode): the MAUTO synth
+    // sweeps that key on a template's clock node, and a recipe's candidates must not swallow it.
     let cands: Vec<f64> = p
         .get("symbol_rate_candidates_bd")
+        .filter(|_| get_f64(p, "symbol_rate_bd").is_none())
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
         .unwrap_or_default();
@@ -937,6 +940,29 @@ mod tests {
                 .map(|(_, v)| v);
             assert_eq!(got, Some(rate), "estimated rate for {rate} Bd");
         }
+    }
+
+    /// T-951 review: a swept/explicit `symbol_rate_bd` disables estimation.
+    #[test]
+    fn an_explicit_rate_overrides_the_candidate_list() {
+        let fs = 24_000.0;
+        // A 2400 Bd waveform: the estimator would say 2400; the fixed 512 must stand.
+        let x: Vec<f32> = (0..20_000)
+            .map(|i| if (i / 10) % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let mut b = build(
+            "clock_recovery",
+            json!({"symbol_rate_candidates_bd": [512, 1200, 2400], "symbol_rate_bd": 512}),
+            PortType::Real,
+        );
+        run_bounded(b.as_mut(), real_info(fs, 4096), &x, &[1024]);
+        let got = b
+            .status()
+            .extra
+            .iter()
+            .find(|(k, _)| *k == "symbol_rate_bd")
+            .map(|(_, v)| v);
+        assert_eq!(got, Some(512.0));
     }
 
     #[test]
