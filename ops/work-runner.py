@@ -118,6 +118,9 @@ REVIEW_MAX_MINUTES = int(os.environ.get("WORK_REVIEW_MAX_MINUTES", "45"))
 # attempts; the coordinator hears about it only when the cap is spent.
 FIX_ATTEMPTS = int(os.environ.get("WORK_FIX_ATTEMPTS", "2"))
 KILL_RESUMES = 2   # resumes of a run killed by a signal; not fix attempts - nothing failed
+# A work run that hits MAX_MINUTES is resumed ONCE to wrap up (commit what is done, hand back) instead of parking
+# for a person: five did on 2026-09-24 (T-852, T-878, T-888, T-887, T-904), each finished by hand afterwards.
+TIMEOUT_RESUMES = 1
 # A claim that ended in NO_WORK / ERROR / TIMEOUT is released after this long if the ticket is still
 # todo, so an accident (a killed process, a crashed worker) cannot freeze a ticket for ever. BLOCKED
 # and review/gate escalations are NOT released: those need a person.
@@ -385,7 +388,8 @@ HAND BACK: your LAST step is to write this file, exactly this shape (JSON, no co
    "use_cases": ["<the use-case ids your tests assert on>", ...]}}
 The runner validates it, writes the ticket's result from it on your branch, routes on `outcome`, and refuses
 "done" if any test exit is non-zero - unless that red is not yours: mark it "known_flake": true or
-"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A CANCEL is yours to propose with evidence in the repo; an Opus review
+"reproduces_on_main": true (and say how you know in its summary) and the branch still queues; the gate decides. A deliberate red
+proof (your new test on the old code, or the defect re-injected) is marked "expect": "red" and counts only beside a green run. A CANCEL is yours to propose with evidence in the repo; an Opus review
 confirms it before it lands. Also end your final message with one line `HANDBACK: <outcome>` as a fallback.
 Never exit with no commits and no hand-back file - that reads as a lost agent, not a finding.
 
@@ -768,6 +772,18 @@ def not_own_red(t):
     return all(led.get(s) is not None and led[s].passed_alone > 0 for s in specs)
 
 
+def hand_back_reds(hb):
+    """(red, own): the hand-back's failing tests, and those of them that are the branch's own defect.
+    A worker's red proof (its new test on the OLD code, or the defect re-injected) exits non-zero by design
+    and says so with "expect": "red" - the deflaker's convention with the same guard: it counts only beside
+    a green run. Three DONE hand-backs read BLOCKED 'needs a person' on exactly that in 24 h (T-894 15:25,
+    T-905 20:16 on 2026-09-24; the app-trace deflaker at 01:32 before its own fix)."""
+    tests = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict)]
+    green = any(int(t.get("exit", 0) or 0) == 0 for t in tests)
+    red = [t for t in tests if int(t.get("exit", 0) or 0) != 0 and not (t.get("expect") == "red" and green)]
+    return red, [t for t in red if not not_own_red(t)]
+
+
 def reap(claims, dry):
     changed = False
     killed = []
@@ -787,9 +803,14 @@ def reap(claims, dry):
                     pass
                 c["state"] = "timeout"
                 c["ended"] = time.time()
-                attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
                 record_done(c, "timeout", {})
                 changed = True
+                if (c["kind"] == "work" and c.get("session_id") and c.get("timeout_resumes", 0) < TIMEOUT_RESUMES
+                        and os.path.isdir(c.get("wt", "")) and _gone(pid)):
+                    claims[tid] = launch_fix(dict(c, kind="work"), f"TIMEOUT your run reached the {limit}-min limit and was stopped")
+                    log(f"TIMEOUT {tid}: resumed once to wrap up ({claims[tid].get('state')})")
+                else:
+                    attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
         # finished
         changed = True
@@ -837,11 +858,7 @@ def reap(claims, dry):
             c["session_id"] = res["session_id"]      # what a gate-failure fix resumes
         hb, hb_err = load_handback(d, tid)
         outcome, why = handback_outcome(hb, text)
-        red = [t for t in (hb or {}).get("tests", []) if isinstance(t, dict) and int(t.get("exit", 0) or 0) != 0]
-        # A red the worker shows is NOT its own - a known flake, or one that reproduces on main - goes to the
-        # queue: the gate and its flake triage are the arbiter (supervisor, 2026-09-24 18:55: T-809 read as
-        # BLOCKED 'needs a person' for app-surface failing the same way on main's build at load 44).
-        own = [t for t in red if not not_own_red(t)]
+        red, own = hand_back_reds(hb)
         if hb and outcome == "done" and own:
             bad = own[0]
             outcome, why = "blocked", f"claimed done with a failing test: {bad.get('cmd')} exit {bad.get('exit')}"
@@ -938,6 +955,30 @@ def fix_reason(fail_line, branch):
         return "OTHER", " ".join(fail_line.split())[:200]
 
 
+def _gone(pid, wait_s=30):
+    """The stopped run's whole process group has exited (SIGKILL after wait_s): a resume must not share the
+    session with it. The leader is this runner's own unreaped Popen child - os.kill(pid, 0) succeeds on a
+    zombie - so reap it first, and ask the GROUP, not the cpulimit wrapper (review, 2026-09-24)."""
+    for i in range(wait_s + 3):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        if i == wait_s:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(1)
+    return False
+
+
 def launch_fix(c, fail_line):
     tid, branch, wt = c["ticket"], c["branch"], c["wt"]
     d = f"{WORKDIR}/{tid}"
@@ -961,6 +1002,19 @@ full gate, never edit docs/tasks.yaml by hand.
 """
         r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
         return dict(r, kill_resumes=k)
+    if fail_line.startswith("TIMEOUT"):
+        t = c.get("timeout_resumes", 0) + 1
+        prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
+with the same limit, to WRAP UP - not to continue open-ended.
+In {wt}: `git status` and `git log --oneline main..{branch}` show what you have. Start no new scope. Get what is done into a
+committed, tested state: targeted tests only, commit on {branch}, write {d}/handback.json. If the ticket's acceptance is met,
+hand back DONE. If it is not, hand back BLOCKED and say precisely what remains (files, tests, the next step) in
+blocked.needs, so the coordinator can split or re-brief it - a clear remainder is a good outcome here, a half-commit is not.
+End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
+checkout, never the full gate, never edit docs/tasks.yaml by hand.
+"""
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json")
+        return dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):

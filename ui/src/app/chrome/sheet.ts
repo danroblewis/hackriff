@@ -18,6 +18,8 @@
 // never replaces the host's children, because a body can itself be another area's `data-slot`
 // (Explore's focus panel is), and that area owns its subtree.
 
+import { trackOverlay } from "./dismiss";
+
 export type SheetSnap = "peek" | "half" | "full";
 export const SNAPS: readonly SheetSnap[] = ["peek", "half", "full"];
 
@@ -185,6 +187,7 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
   host.classList.add("sheet");
   host.setAttribute("aria-label", opts.label);
 
+  const overlay = trackOverlay(`sheet:${opts.storageKey}`, () => { ctl.set("peek"); grab.focus?.(); });
   let snap = readSnap(storage, opts.storageKey, opts.initial ?? "peek");
   const heights = () => {
     const vh = window.innerHeight;
@@ -201,6 +204,8 @@ export function mountSheet(host: HTMLElement, opts: SheetOptions): SheetControll
     // Collapsed content is not on screen, so it must not be in the tab order either.
     if (body) body.inert = snap === "peek";
     close.hidden = snap === "peek";
+    // T-900: an open sheet is an overlay on the one stack, so Escape collapses it when it is topmost.
+    overlay.open(snap !== "peek");
   }
 
   let drag: { y0: number; h0: number; moved: boolean; lastY: number; lastT: number; v: number } | null = null;

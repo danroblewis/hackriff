@@ -19,7 +19,9 @@
 // parsing is `controls/freq.ts`'s input formatting; the offer's words and its acceptability are
 // computed by `surface/retune.ts` and handed in as strings.
 import { parseFrequency } from "../../controls/freq";
+import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
+import { trackOverlay } from "./dismiss";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
  * step. The pane's own `zoomBoth` holds the aspect lock and the bounds (T-472), so a press at a
@@ -39,7 +41,11 @@ export interface PaneControl {
 export interface GotoOffer { why: string; enabled: boolean; press(): void }
 
 /** One row of the layers menu: a base style (radio) or an overlay (checkbox). Display only. */
-export interface LayerRow { id: string; label: string; hint: string; on: boolean }
+export interface LayerRow {
+  id: string; label: string; hint: string; on: boolean;
+  /** A key of the marks this layer draws (T-807's coverage fog), painted by the one cell rule. */
+  key?: readonly LegendEntry[];
+}
 
 /**
  * What the layers menu shows (T-806 / MAP-06, docs/24 §4): two independent axes for the ACTIVE
@@ -52,6 +58,9 @@ export interface LayerMenu {
   /** How the menu names the pane it acts on ("pane 2 of 3"). */
   pane: string;
   bases: LayerRow[];
+  /** The `data`-plane layers (T-807: the coverage fog) — flags on the one cell rule, painted below
+   * every overlay. Optional so a host with none offers no section. */
+  data?: LayerRow[];
   overlays: LayerRow[];
   viewWide: LayerRow[];
   /** The colour scale (T-470/T-528, rehomed from the toolbar by T-882): exactly one of the surface's
@@ -63,6 +72,7 @@ export interface LayerMenu {
 export interface LayerMenuHost {
   layerMenu(): LayerMenu;
   setBase(id: string): void;
+  /** Toggle one of the active pane's layers — an overlay, or a `data` row (the coverage fog). */
   toggleOverlay(id: string): void;
   toggleViewWide(id: string): void;
   /** Choose the colour-scale mode (a display range, never a gain). Optional: a host with no scale. */
@@ -215,6 +225,26 @@ const svg = (...shapes: Shape[]): SVGSVGElement => {
   return s;
 };
 
+/** Swatch size for a layer's key, CSS px. */
+const KEY_W = 22, KEY_H = 12;
+
+/**
+ * A layer's key: one small swatch per mark, each painted by `swatchPixels` — the same `cellPixel`
+ * rule the shader is generated from, so the menu cannot show a mark the canvas does not draw.
+ */
+function layerKey(entries: readonly LegendEntry[]): HTMLElement {
+  return h("ul", { class: "map-layer-key", "aria-label": "What each mark means" }, ...entries.map((e) => {
+    const c = h("canvas", { class: "map-key-swatch", width: KEY_W, height: KEY_H, "aria-hidden": "true" }) as HTMLCanvasElement;
+    const ctx = typeof c.getContext === "function" ? c.getContext("2d") : null;
+    if (ctx) {
+      const img = ctx.createImageData(KEY_W, KEY_H);
+      img.data.set(swatchPixels(e, KEY_W, KEY_H));
+      ctx.putImageData(img, 0, 0);
+    }
+    return h("li", { "data-mark": e.key, title: e.note }, c, e.label);
+  }));
+}
+
 /**
  * Build the cluster. Returns the element (the host appends it over the canvas) and two hooks the
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
@@ -237,7 +267,9 @@ export function mountMapControls(host: MapControlHost): {
   const offerX = h("button", { type: "button", class: "map-offer-x", "aria-label": "Dismiss the retune offer" }, "✕");
   const offer = h("div", { class: "map-glass map-offer", role: "status", hidden: true }, offerWhy, offerGo, offerX);
   let shown: GotoOffer | null = null;
-  const hideOffer = () => { shown = null; offer.hidden = true; };
+  // T-900: the offer is a transient on the one overlay stack — Escape dismisses it when topmost.
+  const offerOverlay = trackOverlay("retune-offer", () => hideOffer());
+  const hideOffer = () => { shown = null; offer.hidden = true; offerOverlay.open(false); };
 
   const layersBtn = h("button", {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
@@ -261,9 +293,13 @@ export function mountMapControls(host: MapControlHost): {
     b.addEventListener("click", () => { run(); setPaneOpen(false); });
     return b;
   };
+  // T-900 (P1): the viewport menu is an overlay too — a visible dismiss, and Esc via the one stack.
+  const paneClose = h("button", {
+    type: "button", class: "map-layers-close map-pane-close", "aria-label": "Close the viewport menu — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
   const closeItem = paneItem("close", "Close viewport", "Close the active viewport. The last one never closes.", () => host.closePane());
   const paneMenu = h("div", { class: "map-glass map-pane-menu", id: "map-pane-menu", role: "group", "aria-label": "Viewport", hidden: true },
-    h("h4", {}, "Viewport"),
+    h("div", { class: "map-layers-head" }, h("span", {}, "Viewport"), paneClose),
     paneItem("split", "Split ⇔", "Two viewports onto the same surface, side by side. They show the identical box until one is moved. The new one starts with this viewport's layers and diverges as you toggle.", () => host.split()),
     closeItem,
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
@@ -273,7 +309,12 @@ export function mountMapControls(host: MapControlHost): {
   const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true },
     "Measure: drag on the surface to read Δf · Δt. Release to keep it. Esc exits.");
   const layersList = h("div", { class: "map-layers-rows" });
+  // T-900 (docs/23 §10.6 P1): an open menu is an overlay, so it has a visible dismiss, not just a fade.
+  const layersClose = h("button", {
+    type: "button", class: "map-layers-close", "aria-label": "Close layers — back to the map", title: "Close (Esc)",
+  }, "×") as HTMLButtonElement;
   const layers = h("div", { class: "map-glass map-layers", id: "map-layers", role: "group", "aria-label": "Layers", hidden: true },
+    h("div", { class: "map-layers-head" }, h("span", {}, "Layers"), layersClose),
     layersList,
     h("div", { class: "map-note" }, "Display only: a layer changes what is drawn, never what is measured or detected."));
 
@@ -320,6 +361,7 @@ export function mountMapControls(host: MapControlHost): {
     offerWhy.textContent = shown.why;
     offerGo.disabled = !shown.enabled;
     offer.hidden = false;
+    offerOverlay.open(true);
   });
   offerGo.addEventListener("click", () => {
     const o = shown;
@@ -341,7 +383,8 @@ export function mountMapControls(host: MapControlHost): {
     const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
       input.checked = l.on;
       input.addEventListener("change", () => { press(); renderLayers(); });
-      return h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+      const label = h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+      return l.key?.length ? h("div", {}, label, layerKey(l.key)) : label;
     };
     layersList.replaceChildren(
       h("div", { class: "map-layers-axis", "data-axis": "base", role: "radiogroup", "aria-label": `Base style, ${m.pane}` },
@@ -349,6 +392,11 @@ export function mountMapControls(host: MapControlHost): {
         ...m.bases.map((l) => row(l,
           h("input", { type: "radio", name: "map-base", value: l.id, "data-base": l.id }) as HTMLInputElement,
           () => host.setBase(l.id)))),
+      ...(m.data?.length ? [h("div", { class: "map-layers-axis", "data-axis": "data", role: "group", "aria-label": `Coverage, ${m.pane}` },
+        h("h4", {}, `Coverage · ${m.pane} · under every overlay`),
+        ...m.data.map((l) => row(l,
+          h("input", { type: "checkbox", "data-layer": l.id }) as HTMLInputElement,
+          () => host.toggleOverlay(l.id))))] : []),
       h("div", { class: "map-layers-axis", "data-axis": "overlays", role: "group", "aria-label": `Overlays, ${m.pane}` },
         h("h4", {}, `Overlays · ${m.pane} · paint order ↓`),
         ...m.overlays.map((l) => row(l,
@@ -370,6 +418,8 @@ export function mountMapControls(host: MapControlHost): {
     if (refocus) (layersList.querySelector(refocus) as HTMLElement | null)?.focus();
   };
   let layersOpen = false;
+  const layersOverlay = trackOverlay("layers", () => { setLayersOpen(false); layersBtn.focus(); });
+  const paneOverlay = trackOverlay("pane-menu", () => { setPaneOpen(false); paneBtn.focus(); });
   let paneOpen = false;
   const syncPaneMenu = () => {
     const last = host.paneCount() <= 1;
@@ -378,6 +428,7 @@ export function mountMapControls(host: MapControlHost): {
   };
   const setPaneOpen = (open: boolean) => {
     paneOpen = open;
+    paneOverlay.open(open);
     paneMenu.hidden = !open;
     paneBtn.setAttribute("aria-pressed", String(open));
     paneBtn.setAttribute("aria-expanded", String(open));
@@ -386,6 +437,7 @@ export function mountMapControls(host: MapControlHost): {
   };
   const setLayersOpen = (open: boolean) => {
     layersOpen = open;
+    layersOverlay.open(open);
     if (open && paneOpen) setPaneOpen(false);
     layers.hidden = !open;
     layersBtn.setAttribute("aria-pressed", String(open));
@@ -394,12 +446,9 @@ export function mountMapControls(host: MapControlHost): {
     fade.hold("layers", open); // an open menu never fades
   };
   layersBtn.addEventListener("click", () => setLayersOpen(!layersOpen));
+  layersClose.addEventListener("click", () => { setLayersOpen(false); layersBtn.focus(); });
   paneBtn.addEventListener("click", () => setPaneOpen(!paneOpen));
-  el.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key !== "Escape") return;
-    if (layersOpen) { setLayersOpen(false); layersBtn.focus(); }
-    if (paneOpen) { setPaneOpen(false); paneBtn.focus(); }
-  });
+  paneClose.addEventListener("click", () => { setPaneOpen(false); paneBtn.focus(); });
 
   const syncMeasure = () => {
     const on = host.measuring();

@@ -38,6 +38,8 @@ for (const width of [1440, 1000, 920, 420]) test(`at ${width} px the lists are a
   t.after(() => browser.close());
   const page = await browser.page(undefined, { width, height: 860 });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the surface, its floating controls, the sheet and the side chip",
     `!!document.querySelector('.map-topright button') && !!document.querySelector('.map-ctl .map-fab') &&
      document.querySelector('.sheet')?.dataset.snap === 'peek' && !!document.querySelector('.side-chip')`,

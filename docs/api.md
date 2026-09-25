@@ -353,7 +353,7 @@ The full classification (likelihood, prior, provenance, reasons) is not on the r
 
 **`total` (T-171).** The number of rows the query's filters match, ignoring `cursor`/`limit`, so a UI can show a count past one page (e.g. "512 confirmed" instead of capping at "500+"). It is computed with the same filters as the list, as a single indexed `COUNT(*)` — except a `tag` filter naming a label outside the controlled vocabulary (gating hides such tags on a withheld-identity row, so matching them needs per-row checks SQL alone can't do): that path scans and gates up to 5 000 candidate rows and reports the match count found within that scan, a lower bound past the cap. That combination (a non-vocabulary tag filter over a very large inventory) is rare.
 
-**Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
+**Lifecycle (T-078).** Every emitter starts `candidate`. An auto rule (e.g. a continuous trust-confirmed track, or a valid decode/identity) or a user promotes it to `confirmed`; a user (or nothing) can delete either. `deleted` is final for that row — it leaves the default list and entity resolution, but its detections, tracks, links and history are kept (visible with `state=deleted`; per-frame detection rows age out under the same retention policy as every other row's, T-904 — see `/api/status` `storage`); a later sighting of the same signal creates a *new* candidate. See `docs/07` §2.11.
 
 ### `/api/inventory/{id}` — one entry, promote, delete (T-078), user band (T-191)
 
@@ -1177,6 +1177,40 @@ The same address as `/api/tiles` (plus the `/api/inventory` `state` filter), ans
 
 `counts` is row-major on **exactly** the tile's axes (`nt` time rows × `nf` frequency cells, earliest row and lowest frequency first), so a client indexes it with the tile's own index.
 
+### `GET /api/paths` — traced (t, f) paths over a viewport (T-897, [docs/23](23-map-ui-philosophy.md) §10.6 rule 2)
+
+The backend half of the map's `paths` layer ([ADR-0023](adr/0023-map-ui-and-research-state.md) §2): every **chirp**, **sweep** and **frequency-hop sequence** whose route crosses a (time × frequency) window, as an ordered list of `(t, f)` vertices at **absolute capture time**. Code: `hk_model::path` (the derivation, unit-tested on its own), `crates/hk-api/src/paths.rs` (the route).
+
+| Query | |
+|---|---|
+| `f_lo`, `f_hi` | Hz, `0 <= f_lo < f_hi` — **required** (a viewport route answers about a viewport) |
+| `t0`, `t1` | Unix s, `t0 < t1` — **required** |
+| `kind` | optional: `chirp`, `sweep` or `hop` |
+| `limit` | optional, 1..=1000, default 200 |
+
+```jsonc
+{ "window":  { "f_lo_hz": 1.0e8, "f_hi_hz": 1.004e8, "t0_s": 1790000000.0, "t1_s": 1790000010.0 },
+  "context": { "f_lo_hz": 0.996e8, "f_hi_hz": 1.008e8, "t0_s": 1789999940.0, "t1_s": 1790000070.0 },
+  "paths": [
+    { "id": "chirp:0192…", "kind": "chirp",          // chirp | sweep | hop — a morphology, never an identity
+      "t0_s": 1790000000.31, "t1_s": 1790000003.30, "f_lo_hz": 99800000.0, "f_hi_hz": 99890000.0,
+      "rate_hz_per_s": 30010.0,                      // chirp: fitted slope; sweep: median ramp's; hop: null
+      "ramps": 1, "hops": 0, "channels_hz": [],      // sweep: ramps >= 2; hop: dwells and the channels visited
+      "vertices": [ { "t_s": 1790000000.31, "f_hz": 99800400.0, "detection": "0192…", "at": "start" },
+                    { "t_s": 1790000000.81, "f_hz": 99815300.0, "detection": "0192…", "at": "centre" }, "…" ],
+      "provenance": { "method": "hk-model/path@1", "detections": ["0192…", "…"],
+                      "provenance_refs": ["…"], "detector_versions": ["…"], "surveys": ["…"] } } ],
+  "total": 1, "limit": 200, "truncated": false,
+  "detections_read": 72, "detections_truncated": false, "method": "hk-model/path@1" }
+```
+
+- **Derived on read, from measurement only.** A path is `hk_model::derive_paths` over the stored detections — immutable rows — recomputed per request, the way presence intervals are recomputed from the observation ledger. No band plan, catalogue or known hop set is read and nothing is snapped to a raster. A **chirp** is a ladder of detections abutting in time and frequency, each centre stepping the same way (≥ 3, each step ≥ ½ width); a **sweep** is two or more such ramps joined by a flyback (sawtooth) or a reversal (triangle); a **hop** sequence is ≥ 5 contiguous dwells, alike in width and length, over ≥ 3 channels. A steady carrier cut into segments and an isolated burst draw **no** path. Spur-, image-, impulse- and IMD-flagged detections are never traced.
+- **Every vertex is a measurement, and says which.** `at: "centre"` is a detection's measured centre at its time midpoint; `"start"`/`"end"` is a hop dwell's measured centre at its start/end, or a ramp's end carried along the neighbouring measured slope to the detection's start/end time — **clamped inside that detection's measured frequency extent**. `detection` names the row it came from.
+- **Stable across pans.** Paths are traced through `context` — the window widened by its own span on each side in both axes, the time margin clamped to 60–600 s (a path's kind depends on its neighbours: one ramp of a sawtooth alone is a chirp, so a deep zoom must read the neighbours a wide one does) — so a route crossing the window's edge is the same route (same vertices, same `id`) whichever part of it is on screen. A path is served when its extent overlaps `window`. `id` is `kind:first-detection`, stable across polls.
+- **Bounded, and says so.** At most 20 000 detections are traced (the newest; `detections_truncated`) and at most `limit` paths served (earliest first; `truncated`).
+- **Honest limit.** A sweep that completes inside one analysis frame has no ladder (ADR-0017 §1.3(b)) and draws no path; its measured sweep *rate* is the `sweep_rate_hz_per_s` feature field, not a route.
+- `400 invalid` for a missing or malformed window, `kind` or `limit`; `503 unavailable` with no inventory. Read-only: it reaches no device and is not audited.
+
 ### `GET /ws/tiles/rows` — rows pushed to a subscription over an **address range** (T-468)
 
 WebSocket; token as for every `/ws/` route. Query: the tile address **without** `t_index` — `level_f`, `level_t`, `f_index` (required), `scheme` (`view` default, `overview`, or a store scheme id), `device` (`any` default), `cells` (8…256, default 256) — and the **row range**: `t_from` (**required**) and `t_to` (optional). Row `r` at `level_t` is the time cell `[r·t_cell, (r+1)·t_cell)` from the Unix epoch, which is row `r mod cells` of the tile `t_index = r div cells` that [`GET /api/tiles`](#get-apitiles--one-tile-of-the-unified-surface-at-independent-level_f-level_t-t-438-docs16-7-step-5--8) serves at the same address — so a client files every row under the tile key it already uses.
@@ -1199,6 +1233,9 @@ Messages are JSON text, in order:
                 "nt": 5, "nf": 32, "aligned": true, "present": true,
                 "plane": { "runs": [1, 160], "cells": 160, "uniform": "observed", "…": "…" } },
   "answered": { "level": 0, "store": "view-lattice", "f_cell_hz": …, "t_cell_s": …, "tried": [0] },
+  "resolution": { "source": "spectrum-history", "live": false, "statement": "…",   // T-902
+                  "fold": { "frequency": { "direction": "exact", "source_cells": 32, "served": 32, "…": "…" },
+                            "time": { "direction": "exact", "source_cells": 5, "served": 5, "…": "…" } } },
   "final": false }
 { "type": "unobserved", "row0": 0, "rows": 4096, "t0_s": …, "t1_s": …, "final": true, "rule": "…" }
 { "type": "end", "row": 44731500200, "reason": "range-complete" }   // only when t_to is given
@@ -1211,6 +1248,7 @@ Messages are JSON text, in order:
 - **Grey is decided by each block's `coverage`**, the selected device's plane on the block's own axes, in the same four-state alphabet and run encoding as the tile route's (T-467): `unobserved` is grey, `excluded` is drawn. A named device with no record here is `present: false` and uniformly `unobserved`.
 - **`unobserved`** — a client should keep it as a **row range**, never expand it into tiles (`ui/src/surface/rowfeed.ts` does) — is a stretch the coverage map calls uniformly unobserved for the selected device, answered from the map alone (T-461's short-circuit, over a range): no `max_db`, no level. It may span many tiles. While consecutive probes keep finding grey the probe span doubles from 4096 rows, so a range starting at `t_from=0` reaches the first recorded row in a few dozen messages.
 - **The level that answered** is the tile read's own rule: finest affordable first, walking coarser only when a level holds nothing (T-426), stated per block in `answered`.
+- **The honesty tier those rows were measured at is stated per block, in `resolution`** (T-902) — `source` (`live-iq` / `spectrum-history` / `survey-overview`), `live`, `statement` and per-axis `fold`, computed by **the tile route's own rule** (`tiles::tier_of`) over the level in `answered`: a tile wider than a capture window is `survey-overview`, so is an answering level coarser than the address on either axis (`fold.<axis>.direction` `replicated`), and otherwise it is the tile route's `spectrum-history`. `fold.time.served` is the block's row count, not `cells`. A client that builds a tile out of pushed rows before `/api/tiles` has answered for it states **this** tier — the weakest of the blocks it holds — and never borrows one from a neighbouring tile (the implied-detail defect T-893 found); a block without a recognised `source` is refused, not defaulted.
 - **Cost.** Each block is read under the tile read's per-chunk lock discipline, so a subscription never holds the history mutex longer than one tile chunk. A subscription holds **no** `/api/tiles` in-flight slot (it is long-lived; a slot is the unit of a request); instead at most **16** are open per server and the seventeenth is refused `503`. The server never paces a sealed range — it writes as fast as the socket takes it; a reader that wants to walk slower asks for a shorter range.
 - **Refusals complete the upgrade** (the `/ws/open/{name}` convention — a browser cannot read an HTTP error body on a failed upgrade): one `{"type": "refused", "status", "reason"}` message, then close code `4000 + status` — `4400` a bad or missing range or address, `4404` no such node, `4503` at the subscription cap. A request that is not a WebSocket upgrade is `426`. Anything the client sends other than a close or a ping is ignored; a close ends the subscription.
 - **What rows do not carry:** no `shadow` (a last-known tier is a question about a tile, not a row) and no emitters — the same exclusions as the tile route.
@@ -1237,6 +1275,23 @@ Opaque, per-build JSON object of counters (source samples, chain stats, control-
 | `attention.unloaded_engines` | number | Baseline keys saved and unloaded by the cap (reloaded on their next fold) |
 | `attention.refused_folds` | number | Folds whose learning the cap refused; their novelty is still scored against what is loaded |
 | `attention.gain_overflow_folds` | number | Folds under a gain state beyond a subject's kept gain slots (4 per level class); scored, not learned |
+
+**Storage and detection retention (T-904)** are reported under `"storage"`: how big the run's database is and what the retention policy for per-frame detection rows did. Refreshed by the run's `hk-retention` thread (its own connection, off the real-time path) every 60 s and after every pass — `measured_s` says when — and `null` in a run with no retention thread (a library run). The composed daemons (`hk serve`, `hk run`, `hackriffd`) prune by default; `HK_DETECTION_RETENTION` sets the age (default `1h`; `1d`, `12h`, …; `off` or `0` keeps every row and still reports the figures), `HK_DETECTION_ROLLUP` `on`/`off`, `HK_DETECTION_PRUNE_INTERVAL` the time between passes.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `storage.db_bytes` | number | Database file bytes (`page_count × page_size`). SQLite reuses freed pages rather than shrinking the file, so pruning bounds this rather than lowering it |
+| `storage.free_bytes` | number | Of `db_bytes`, pages on the free list — space the next inserts reuse |
+| `storage.wal_bytes` | number \| null | The `-wal` file's bytes (`null`: no WAL file) |
+| `storage.detection_rows` | number | Per-frame `Detection` rows stored |
+| `storage.rollup_rows` | number | Rollup rows (below) |
+| `storage.oldest_detection_s` / `newest_detection_s` | number \| null | End time (Unix s) of the oldest-ending and the newest stored detection. Age is measured on this capture clock, never the wall clock, so a replayed recording is not "old": an **open** survey's rows age from that survey's own newest detection (a replay into an existing data directory, or a host clock behind the store, never ages rows the running tracker still holds), a closed survey's from `newest_detection_s` |
+| `storage.next_prune_s` | number \| null | Wall-clock Unix s the next pass is due; `null` when pruning is off |
+| `storage.retention` | object | The policy in force: `enabled`, `max_age_s` (`null` when off), `min_age_s` (600: the floor, ten times the tracker's 60 s idle timeout — a shorter `HK_DETECTION_RETENTION` is clamped up to it), `clamped_from_s` (the age asked for when it was clamped, else `null`), `rollup`, `keep_per_emitter`, `batch`, `interval_s`, `rollup_gap_s`, `rollup_span_s` |
+| `storage.last_prune` | object \| null | The last pass: `t_s`, `duration_s`, `watermark_s` / `cutoff_s` (the newest survey's), `examined`, `deleted`, `kept_pinned`, `kept_tail`, `kept_moved`, `rollups_inserted`, `rollups_extended`, `batches`, **`lock_ms_max`** / `lock_ms_total` (the measured write-lock holds, T-453: lock granted → commit, excluding the post-commit WAL checkpoint, which runs with the lock released), `wait_ms_max` (the longest wait for the lock behind the detector's own writes — paid by the pass, not by ingest), `complete`, `error`. `null` before the first pass (one minute into the run) |
+| `storage.passes` / `deleted_total` / `errors` | number | Totals for the run |
+
+**What is pruned, and why the served routes do not change.** Only per-frame `Detection` rows (and their track links) older than the age are deleted, in batches of `batch` rows per write transaction with a pause between batches. Tracks, emitters, presence intervals, the observation ledger, links, relations and decodes are durable and never touched, so `/api/inventory`, `/api/events` and presence for a pruned window answer as they did. Three kinds of reader of detection rows are kept answerable. (1) The per-emitter "newest linked detections" reads — `/api/inventory`'s `snr_db`/`peak_dbfs`/`measured`, the overlap re-analysis's measured bands, the artefact and retune evidence — rank by start time and read at most 256 rows, so each emitter's newest `keep_per_emitter` (256) rows are never pruned and those answers are exact. (2) A row named by id — decode provenance (a demodulation's detection), a recording's trigger, a retune verdict, a direct emitter link, an annotation, an anomaly subject, a classification input, an observation-ledger source — is pinned for good. (3) The time-windowed reads (occupancy spans, the channel plan) read **rollups** past the age: before a row is deleted it is folded into its track's rollup, one row per contiguous run (same survey and provenance, no gap over `rollup_gap_s`, no longer than `rollup_span_s`) holding the time hull, the time on air inside it (the members' summed duration), frequency envelope, mean/max OBW and SNR, peak level, count, clip count and the OR/AND of the flags. A rollup is a summary, never served as a detection. Detections remain not a served record kind. Contract: `api_contract.rs::discovery_history_floor_status_and_control_state_have_the_documented_shape` (the shape and defaults by value) and `::a_pruned_window_still_answers_inventory_and_events_as_before` (the whole `/api/inventory` and `/api/events` answers equal before and after a prune); the policy itself: `hk-model` `repo::retention_tests`.
 
 ## Control API (T-050)
 

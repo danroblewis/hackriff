@@ -1262,3 +1262,56 @@ def test_the_sweep_keeps_the_newest_executable_per_build_unit_everywhere_after_a
     made[gate_p]["old"].chmod(0o755)
     R.sweep_superseded(dry=False)
     assert made[gate_p]["old"].exists()                                          # once per landing, not every tick
+
+
+def test_a_workers_red_proof_beside_a_green_run_is_not_a_failing_test():
+    """2026-09-24: T-894 (15:25) and T-905 (20:16) handed back DONE with their new test's red run on the old
+    code listed at exit 1, and read BLOCKED 'needs a person'. "expect": "red" + a green run = evidence."""
+    proof = {"cmd": "cd ui && node test/run.mjs surface-survey (on old code)", "exit": 1, "expect": "red"}
+    fixed = {"cmd": "cd ui && node test/run.mjs surface-survey", "exit": 0}
+    assert R.hand_back_reds({"tests": [proof, fixed]}) == ([], [])
+    assert R.hand_back_reds({"tests": [proof]}) == ([proof], [proof])            # no green run beside it
+    plain = {"cmd": "cargo nextest run -p hk-x", "exit": 101}
+    assert R.hand_back_reds({"tests": [plain, fixed]}) == ([plain], [plain])     # an unmarked red still blocks
+    assert R.hand_back_reds(None) == ([], [])
+
+
+def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
+    """2026-09-24: T-852, T-878, T-888, T-887 and T-904 each hit the 180-min limit, were parked 'worktree kept'
+    and finished by hand. One wrap-up resume of the same session first; a second limit is a person's."""
+    claim, fixes, alerts, seen = killed_run
+    state = {"alive": True}
+    monkeypatch.setattr(R, "alive", lambda pid: state["alive"])
+    monkeypatch.setattr(R, "track_usage", lambda c: False)
+    monkeypatch.setattr(R.os, "killpg", lambda pid, sig: state.update(alive=False))
+    monkeypatch.setattr(R, "_gone", lambda pid: True)                      # the real one: the test below
+    claims = claim(session_id="abc", started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and fixes[0].startswith("TIMEOUT") and seen == []
+    state["alive"] = True                                                  # the wrap-up runs out of time too
+    claims = claim(session_id="abc", kind="fix", timeout_resumes=1, started=R.time.time() - (R.MAX_MINUTES + 5) * 60)
+    R.reap(claims, dry=False)
+    assert len(fixes) == 1 and [k for _, k, _ in seen] == ["TIMEOUT"]
+
+
+def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
+    runs = []
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
+    c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
+                     "TIMEOUT your run reached the 180-min limit and was stopped")
+    n, prompt, out = runs[0]
+    assert n == 0 and out == "wrapup1.json" and c["timeout_resumes"] == 1
+    assert "WRAP UP" in prompt and "Start no new scope" in prompt and "blocked.needs" in prompt
+
+
+def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_child():
+    """Review, 2026-09-24: os.kill(pid, 0) succeeds on a zombie, and the runner never waits on its Popen
+    children - the resume never fired and each timeout stalled the tick 31 s. A real child, dropped unwaited."""
+    import signal
+    p = subprocess.Popen(["sh", "-c", "sleep 60 & sleep 60"], start_new_session=True)
+    pid = p.pid
+    del p
+    R.os.killpg(pid, signal.SIGTERM)
+    t0 = time.time()
+    assert R._gone(pid, wait_s=10) and time.time() - t0 < 5

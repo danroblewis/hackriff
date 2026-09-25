@@ -41,6 +41,7 @@
 import { activeWindows, timeExtent, type ActiveWindow } from "../../navigators";
 import type { NavigationGrid } from "../../navigation";
 import { newClientId, setTileClientId } from "../../surface/clientid";
+import { markSurface } from "../../surface/mounted";
 import { attachSurfaceInput, type GlPoint } from "../../surface/input";
 import {
   markAt, markQuads, measurementMarkBoxes, normalizeRegion, pendingMarkBox, pointOn,
@@ -52,7 +53,7 @@ import { PinLayer, detectionPins, layoutPanePins, pinTipLines, type PlacedPin } 
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
-import { rangeLabel } from "../../surface/legend";
+import { fogKeyEntries, rangeLabel } from "../../surface/legend";
 import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
@@ -66,6 +67,8 @@ import {
   afterglowAbsence, peakOf, persistenceShortTiles, persistenceSlices, sampleFrame, sliceColumns, sliceWindow, tracePaths, type TracePath,
 } from "../../surface/trace";
 import type { OverlayQuad } from "../../surface/minimap";
+import { boxOf } from "../../surface/panes";
+import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
 import { liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -145,6 +148,9 @@ const HUD_IDLE_ALPHA = 0.45;
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
  * describes before the surface has booted. Used for nothing once `preview.activePane` exists. */
 const FIRST_PANE = "pane1";
+/** What the active pane says while its coverage fog is hidden (T-807). */
+const FOG_HIDDEN_TEXT = "Coverage fog hidden on this pane: never-observed and unknown spectrum are drawn as bare ground, "
+  + "not grey — nothing about what was sampled changed. Layers menu to show it.";
 /** The phosphor base style's one ink (T-806): a P31-style green, off the amplitude ramp. */
 const PHOSPHOR_INK: readonly [number, number, number] = [0.35, 1, 0.45];
 
@@ -173,6 +179,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // them. The data-* attributes are the same numbers the rules were drawn from on the same frame,
   // so ui/e2e can check the pixels against them rather than against a second calculation.
   const ringEl = h("div", { class: "sf-ring", role: "status" });
+  // T-807 (MAP-07): says so, in words, when the active pane's coverage fog is hidden — the bare
+  // ground it then draws is a viewer's choice, and a choice about grey must never pass for a fact.
+  const fogEl = h("div", { class: "sf-ring sf-fog", role: "status", hidden: true });
   // T-470/T-528: the display range, stated. Its CONTROL is the layers menu's "Colour scale" axis
   // (T-882); the sentence stays on the picture, because a fixed scale is honest only if it is quoted.
   const rangeEl = h("span", { class: "sf-range", role: "status" });
@@ -213,7 +222,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   recordBtn.dataset.paneAct = "record";
   // T-882: there is no toolbar row. Live is the follow-live FAB, Trace/Signals/Contrast are the
   // layers menu, Measure and pane management are the floating cluster's top-right (`map-controls`).
-  el.replaceChildren(stage, traceEl, ringEl, chrome, note);
+  el.replaceChildren(stage, traceEl, ringEl, fogEl, chrome, note);
 
   let preview: SurfacePreview | null = null;
   /** Hooks into the floating cluster (T-802), no-ops until it is mounted after the surface boots. */
@@ -381,10 +390,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
   };
   const artifactQuads: OverlayLayerFn = (pane, edge) =>
     artifactLinkQuads(artifactLinks(Object.values(store.get().inventory.rows), edge), pane.box, pane.rect);
-  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads };
+  // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
+  // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
+  // other layer. The poll below only refreshes the records; it never positions anything (T-388).
+  let paths: MarkPath[] = [];
+  const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
+  const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = { rules: ringQuads, detections: detectionQuads, artifacts: artifactQuads, paths: pathQuadsFn };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. */
   const drawnLayers = new Set<LayerId>([...Object.keys(overlayFns) as LayerId[], "pins"]);
+  /** The `data`-plane layers this build draws (T-807). Each is a flag on the one cell rule, handed
+   * to the data pass per pane — never a quad, so never an entry in `overlayFns`. */
+  const dataLayers = new Set<LayerId>(["coverage"]);
+  const fogShown = (paneId: string): boolean => isLayerVisible(layersFor(paneId), "coverage");
 
   // ---- the pins (T-809 / MAP-09, docs/24 §14) ----
   // Hover and keyboard focus are pointer/focus state, kept here like `pending` rather than in the
@@ -844,9 +862,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     try {
       probe = await probeSurface((path) => client.get(path));
     } catch (e) {
-      say(isBackpressure(e)
+      const why = isBackpressure(e)
         ? "The tile route is busy producing for another viewport. Nothing is wrong with the surface — it will come back."
-        : `The surface could not be addressed: ${e instanceof Error ? e.message : String(e)}. GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`);
+        : `The surface could not be addressed: ${e instanceof Error ? e.message : String(e)}. GET /api/tiles is what states the view lattice, and a client that guessed one would be addressing a pyramid that does not exist.`;
+      say(why);
+      markSurface("failed", why);
       return;
     }
     try {
@@ -866,9 +886,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
         windows: () => windows,
         // T-806: the pane's visible overlay layers in z order (the ring rules first, so a signal box
         // or selection that crosses one is drawn over it), then the user's own interaction marks.
+        // T-807: each pane's coverage-fog layer, a flag on the one cell rule (docs/24 §13.3).
+        fog: fogShown,
         marks: (pane, edge) => {
           if (pane.id === preview?.activePane) {
             syncLayerControls();
+            const fogHidden = !fogShown(pane.id);
+            if (fogEl.hidden !== !fogHidden) fogEl.hidden = !fogHidden;
+            if (fogHidden) setText(fogEl, FOG_HIDDEN_TEXT);
             // The readout beside the rules names two lines; when they are not drawn it says so
             // instead of describing strokes that are not on the screen.
             if (!isLayerVisible(layersFor(pane.id), "rules")) {
@@ -884,10 +909,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
         dom: pinsFrame,
       });
     } catch (e) {
-      say(`WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`);
+      const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
+      say(why);
+      markSurface("failed", why);
       return;
     }
     say(probe.note);
+    markSurface("mounted");
 
     // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
     // fetched, and changed only by the Ctrl+Shift+wheel gesture `input.ts` claims before any zoom.
@@ -1006,6 +1034,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
         return {
           pane: ids.length > 1 ? `pane ${n} of ${ids.length}` : "this pane",
           bases: BASE_STYLES.map((b) => ({ id: b.id, label: b.label, hint: b.hint, on: reg.base === b.id })),
+          data: paintOrder(reg).filter((l) => l.plane === "data" && dataLayers.has(l.id)).map((l) => {
+            const d = layerDef(l.id)!;
+            return { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "coverage" ? fogKeyEntries() : undefined };
+          }),
           // T-809: the `dom`-plane pins are an overlay-content toggle too (docs/24 §4's second axis).
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
@@ -1021,7 +1053,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
       },
       toggleOverlay: (id) => {
         const lid = id as LayerId;
-        if (!drawnLayers.has(lid)) return;
+        if (!drawnLayers.has(lid) && !dataLayers.has(lid)) return;
         const on = !isLayerVisible(layersFor(pv.activePane), lid);
         if (lid === "detections") setSignals(pv.activePane, on);
         else editLayers(setPaneLayer(pv.activePane, lid, on, seedFor(pv.activePane)), pv.activePane);
@@ -1068,6 +1100,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
     startPoll(async () => { mirror(); }, 1000);
+
+    // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
+    // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane
+    // with the layer off costs nothing; with it off everywhere there is no request at all. Read
+    // only: a path is a view over stored detections and reaches no device.
+    startPoll(async () => {
+      const url = pathsRequest(pv.view.panes.list()
+        .filter((x) => isLayerVisible(layersFor(x.id), "paths"))
+        .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
+      if (!url) { paths = []; return; }
+      const body = await client.get<unknown>(url).catch(() => null);
+      if (body) paths = parsePaths(body);
+    }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----
     // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a

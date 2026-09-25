@@ -711,6 +711,8 @@ test("the trace is the spectrum at the viewport's time position, and its numbers
   assert.equal(await page.eval("JSON.stringify(window.__cspViolations ?? [])"), "[]",
     "the app violated its own CSP — the tap changes nothing about that");
   assert.deepEqual(page.exceptions, [], "uncaught exception during load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The tap has to be the thing that sees the stream, or everything below is vacuous.
   await page.waitFor("the spectrum socket to deliver rows the tap can see",
@@ -860,6 +862,8 @@ test("the trace is drawn exactly where data exists and is ABSENT everywhere else
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
 
   // The canvas became a real render. Its BOX is deliberately not kept: the rectangle the pixels
   // below are indexed by comes back with them, from `heldObservation` — see the note there.
@@ -975,6 +979,8 @@ test("T-475: the SAME dB is the SAME COLOUR on the trace and in the cells below 
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // As above: the box that indexes the pixels is the observation's own, not this one.
   const opened = await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
@@ -1098,6 +1104,8 @@ test("a drag that STARTS IN THE TRACE STRIP pans the pane — the strip is a rea
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitFor("the trace to draw",
     `/slice [\\d:]+Z/.test(document.querySelector('.sf-trace')?.textContent ?? "")`, { timeoutMs: 90000 });
   const rect = await page.$rect(".sf-canvas");
@@ -1131,6 +1139,8 @@ test("a viewport scrubbed into the past traces THAT instant, from the pyramid, a
   const page = await browser.page(undefined, { initScript: TAP });
 
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   // The pre-scrub reading, captured by the read that matched it (see `traceMatching`): this line
   // used to wait for a peak and then read the readout again, and the second read is a later frame
   // which need not still have one. It is a *baseline*, not the claim — the claim below is stated
@@ -1206,6 +1216,8 @@ test("T-475: the AFTERGLOW is the rows before THIS viewport's instant — demons
   t.after(() => browser.close());
   const page = await browser.page(undefined, { initScript: TAP });
   assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  // T-907: the surface's own mounted/failed event (`data-surface`), before any other wait.
+  await page.waitForSurfaceMounted({ timeoutMs: 60000 });
   await page.waitForCanvas(".sf-canvas",
     (c) => c.distinct >= 16 && c.dominantShare < 0.97, { timeoutMs: 90000 });
   const LAG_S = 2;
