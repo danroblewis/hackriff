@@ -415,9 +415,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // for a pane when that pane's layers menu says so, else by the collection's stored default; an
   // unfiled annotation follows the `research` layer. The SELECTED mark is drawn whatever its layer —
   // it is the viewer's own selection, which is always shown (a row click must light its mark).
-  // Collections sit at z 40 (`COLLECTION_Z`), above every overlay drawn today, so they are appended
-  // after `composeOverlays`' output rather than routed through the registry, which lists only the
-  // collections a menu has touched.
+  // Collections sit at z 40 (`COLLECTION_Z`) and unfiled research at z 30: ABOVE rules/detections
+  // but BELOW artifacts (z 50) and priors (z 60). They are not routed through the registry (which
+  // lists only the collections a menu has touched), so the `marks` hook splits `composeOverlays`
+  // around `COLLECTION_Z` and draws these marks in the gap — paint order is ascending z throughout.
   let researchSrc: ResearchSlice | null = null;
   let researchRowsNow: ResearchRow[] = [];
   let researchColors = new Map<string, readonly [number, number, number, number]>();
@@ -882,10 +883,12 @@ function mount(el: HTMLElement, ctx: AppContext) {
               setText(ringEl, "Capture rules (retention bound, oldest IQ) are hidden on this pane — Layers menu to show them");
             }
           }
+          // Registry overlays below COLLECTION_Z, then research (z 30) and collection (z 40) marks,
+          // then registry overlays above it (artifacts, priors), then the user's interaction marks.
           const reg = layersFor(pane.id);
           const band = (keep: (z: number) => boolean) => ({ ...reg, layers: reg.layers.filter((l) => keep(l.z)) });
           return [
-            ...composeOverlays(band((z) => z <= COLLECTION_Z), overlayFns, pane, edge),
+            ...composeOverlays(band((z) => z < COLLECTION_Z), overlayFns, pane, edge),
             ...markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect),
             ...composeOverlays(band((z) => z > COLLECTION_Z), overlayFns, pane, edge),
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
@@ -996,7 +999,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // A read-only statement of the overlay layers this build draws, each as its REGISTRY def
     // (plane, z, default) — never the menu's rendering of them — so a check can derive what the
     // layers menu must offer from the registry itself rather than a literal every new renderer
-    // breaks. Presentation metadata only: static for the page's life, commands nothing.
+    // breaks. Each collection is a layer too (z COLLECTION_Z, default its stored `visible`), so the
+    // statement is re-written whenever the collections change, exactly when the menu re-states.
+    // Presentation metadata only: commands nothing.
     const stateOverlays = () => {
       stage.dataset.overlayLayers = JSON.stringify([
         ...[...drawnLayers].map((id) => layerDef(id)!)

@@ -287,6 +287,12 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
     return rows;
   };
 
+  // The server always serves its reserved Bookmarks collection (T-821, docs/api.md), and each
+  // collection is an overlay layer: wait for the registry to state it, so the check below covers a
+  // collection row rather than passing before the collections poll has landed.
+  await page.waitFor("the registry to state the reserved Bookmarks collection",
+    `(document.querySelector('.sf-stage')?.dataset.overlayLayers ?? '').includes('"collection:00000000-0000-7000-8000-000000000b00"')`,
+    { timeoutMs: 30000 });
   await page.click("document.querySelector('.map-layers-btn')");
   await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
   const one = JSON.parse(await page.eval(menu));
