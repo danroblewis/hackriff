@@ -748,6 +748,11 @@ pub struct RegionMeasurement {
     pub span_s: f64,
     /// Share of the excess power inside [`MeasuredEmission::band`].
     pub obw_fraction: f64,
+    /// The floor reference every SNR here was measured against, in the spectrum's own units: the
+    /// median of the tracker's floor over the region's neighbourhood, not the per-bin reference
+    /// under the region. `hk_detect::overlap` documents why that distinction decides whether a
+    /// 22 dB emission is visible at all.
+    pub floor_ref: f64,
     /// The emissions measured, by frequency.
     pub emissions: Vec<MeasuredEmission>,
 }
@@ -761,6 +766,7 @@ impl RegionMeasurement {
             bins,
             span_s: 0.0,
             obw_fraction: 0.0,
+            floor_ref: 0.0,
             emissions: Vec::new(),
         }
     }

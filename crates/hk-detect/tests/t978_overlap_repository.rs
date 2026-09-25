@@ -19,6 +19,8 @@
 
 mod common;
 
+use common::{GammaFrames, Scene, add_line, flat, provenance};
+use hk_detect::DetectorConfig;
 use hk_detect::overlap::{OverlapConfig, measure_region};
 use hk_detect::rules::Geometry;
 use hk_detect::{EdgeRule, IntegratedSnapshot};
@@ -393,4 +395,151 @@ fn the_retirement_is_revoked_when_the_spectrum_changes() {
     let mut both = vec![narrow, wide];
     both.sort();
     assert_eq!(listed, both, "both rows are shown again");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The measurement taken from the real detector, and the state that persists in a live run
+// ---------------------------------------------------------------------------------------------
+
+/// The integrated spectrum **the real `Detector` measured**, after frames carrying `emissions`
+/// (absolute centre, width, SNR over the floor) were pushed through `Detector::process` exactly as
+/// the pipeline's detect reader pushes them. Not a hand-built PSD: `mean_psd` and `mean_floor` here
+/// are the detector's own sliding integration over Gamma-distributed frames.
+fn detector_spectrum(
+    fc: f64,
+    fs: f64,
+    bins: usize,
+    emissions: &[(f64, f64, f64)],
+) -> IntegratedSnapshot {
+    const N_AVG: u32 = 10;
+    let mut s = Scene::new(
+        DetectorConfig::new(SurveyId::new()),
+        GammaFrames::new(bins, N_AVG, provenance(fc, fs, 24.0), 978),
+    );
+    let bin_hz = fs / bins as f64;
+    let mut p = flat(bins);
+    for &(f, w, snr) in emissions {
+        let centre = s.bin_of(f).round().max(0.0) as usize;
+        add_line(&mut p, centre, (w / bin_hz).round().max(1.0) as usize, snr);
+    }
+    // Two integration blocks (`IntegrationConfig`: 0.25 s each) so an evaluation exists.
+    let frames = (2.0 * 0.25 / s.src.frame_period_s()).ceil() as usize + 4;
+    for _ in 0..frames {
+        s.step(&p);
+    }
+    s.det
+        .integrated_snapshot()
+        .expect("the detector integrated at least one block")
+}
+
+/// **The regression the review named.** Stage 3's pairwise pass revokes standing `DuplicateOf`
+/// claims whenever `bands_compete` fails or `distinguishing_evidence` fires — which is exactly when
+/// the measured pass runs — so with only T-369's marker filtered out of `revoke_kind`, every later
+/// touch of either row undid the measurement, stage 4 reported the region unresolved again and the
+/// retired box came back until a fresh snapshot arrived. The inventory flickered and two relation
+/// rows were appended per touch, unbounded.
+///
+/// So: resolve, measure, apply — then touch **both** rows again, repeatedly, as a live run does, and
+/// the region must stay settled at one row with no further relation rows written.
+#[test]
+fn the_retirement_survives_every_later_touch() {
+    let (mut r, sv, p) = scene();
+    let narrow = candidate(&mut r, sv, p, 852_858_600.0, 9_300.0, 18.0);
+    let wide = candidate(&mut r, sv, p, 852_859_100.0, 26_200.0, 22.0);
+    let tol = Tolerances::default();
+
+    let out = r.resolve_overlaps(wide, RULE, t(20), &tol).unwrap();
+    let region = out.unresolved[0];
+    let snap = detector_spectrum(
+        852_860_000.0,
+        2.4e6,
+        2048,
+        &[(852_859_100.0, 26_200.0, 22.0)],
+    );
+    let m = measure_region(region, &snap, &OverlapConfig::default()).unwrap();
+    assert_eq!(
+        m.emissions.len(),
+        1,
+        "the detector's own integrated spectrum shows one emission: {:?}",
+        m.emissions
+    );
+    r.resolve_measured_region(&m, RULE, t(20), &tol).unwrap();
+    assert_eq!(shown(&r), vec![wide]);
+
+    let after_first = r.emitter_relations(narrow).unwrap().len();
+    for round in 1..=6 {
+        for id in [wide, narrow] {
+            let again = r.resolve_overlaps(id, RULE, t(20 + round), &tol).unwrap();
+            assert_eq!(
+                shown(&r),
+                vec![wide],
+                "round {round}: the retired box came back on a later touch ({again:?})"
+            );
+            assert!(
+                !again.unresolved.is_empty(),
+                "round {round}: the region stays reported, so a fresh measurement keeps coming \
+                 and the claim stays revocable"
+            );
+        }
+    }
+    assert_eq!(
+        r.emitter_relations(narrow).unwrap().len(),
+        after_first,
+        "a settled region writes no relation rows per touch"
+    );
+    assert!(
+        defers_to(&r, narrow).is_some(),
+        "and the claim is still the one the measurement made"
+    );
+}
+
+/// The same for the merged box: three boxes over two emissions the real detector separates, settled
+/// at the two real emissions and staying settled across later touches of every row.
+#[test]
+fn the_split_survives_every_later_touch() {
+    let (mut r, sv, p) = scene();
+    let merged = candidate(&mut r, sv, p, 861_434_600.0, 557_000.0, 24.0);
+    let low = candidate(&mut r, sv, p, 861_335_000.0, 30_000.0, 22.0);
+    let high = candidate(&mut r, sv, p, 861_450_000.0, 40_000.0, 26.0);
+    let tol = Tolerances::default();
+
+    let out = r.resolve_overlaps(merged, RULE, t(20), &tol).unwrap();
+    let region = out
+        .unresolved
+        .iter()
+        .copied()
+        .reduce(|a, b| FreqRange::new(a.lo_hz.min(b.lo_hz), a.hi_hz.max(b.hi_hz)))
+        .expect("the region is unresolved from the rows alone");
+    let snap = detector_spectrum(
+        861_430_000.0,
+        2.4e6,
+        2048,
+        &[
+            (861_335_000.0, 30_000.0, 22.0),
+            (861_450_000.0, 40_000.0, 26.0),
+        ],
+    );
+    let m = measure_region(region, &snap, &OverlapConfig::default()).unwrap();
+    assert_eq!(
+        m.emissions.len(),
+        2,
+        "the detector's own integrated spectrum separates two emissions: {:?}",
+        m.emissions
+    );
+    r.resolve_measured_region(&m, RULE, t(20), &tol).unwrap();
+
+    let mut real = vec![low, high];
+    real.sort();
+    for round in 1..=4 {
+        for id in [merged, low, high] {
+            r.resolve_overlaps(id, RULE, t(20 + round), &tol).unwrap();
+            let mut listed = shown(&r);
+            listed.sort();
+            assert_eq!(
+                listed, real,
+                "round {round}: the 557 kHz merge came back on a later touch"
+            );
+        }
+    }
+    assert_eq!(every(&r).len(), 3, "and nothing was deleted");
 }

@@ -28,6 +28,16 @@
 //!
 //! A snapshot is **taken**, not read: a measurement is used once and the next one is requested, so
 //! nothing here can resolve a region against a spectrum from minutes ago.
+//!
+//! # Known limitation with several front ends
+//!
+//! A run shares **one** hand-off across every front end (`run.rs`, `devices.rs`), so whichever
+//! reader reaches the request first answers it. A region in another device's band is then outside
+//! that snapshot's tuned span, `hk_detect::overlap::measure_region` answers `None` — never an empty
+//! measurement — and the request is simply made again on the next touch. So the output is never
+//! wrong, but a region can take several touches to be measured, and against a much busier reader it
+//! could wait indefinitely. Fixing it properly means a slot per receive chain, keyed the way
+//! `hk_model::relate::ReceiveChain` keys device-local physics; it is deliberately not done here.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};

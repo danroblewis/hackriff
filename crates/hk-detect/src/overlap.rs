@@ -23,10 +23,25 @@
 //!
 //! Over the region's bins, and against the floor those same bins carry:
 //!
-//! 1. a bin is **in** an emission when its SNR clears [`IntegrationConfig::extend_db`], and a run
-//!    of such bins is an emission only if one of them clears [`IntegrationConfig::seed_db`] — the
-//!    detector's own published seed/extend rule (`detect_integrated`), applied to a region rather
-//!    than to the whole span, so the same energy gets the same answer here as it does there;
+//! 0. the **floor reference** is the median of the tracker's floor over a context window
+//!    [`OverlapConfig::context_factor`] times the region's width. It is deliberately *not* the
+//!    per-bin `mean_floor` under the region: the integrated spectrum averages **the reference the
+//!    floor branch used**, and T-316's narrow floor-feature guard hands a span wider than the
+//!    OS guard band and narrower than its reference span its own running mean as the floor — which
+//!    is every box width this module exists to measure. Measured on the real `Detector` at the
+//!    pipeline's own 2.4 Msps / 2048-bin geometry, a 26.2 kHz emission 22 dB over the noise read
+//!    **+1.4 dB** against its own per-bin reference and disappeared; against the region's
+//!    neighbourhood it reads 22 dB. A median over a window the region occupies a fifth of is
+//!    robust to the emissions inside it, and it makes the measurement independent of what any
+//!    guard did to the local reference. (T-937 caps that guard for spans 10 dB clear of the
+//!    reference, which would fix this case too — but it had not landed in gated main when this was
+//!    written, and a measurement that depends on a guard's calibration to see a 22 dB signal is
+//!    the wrong shape regardless.)
+//! 1. a bin is **in** an emission when its SNR over that reference clears
+//!    [`IntegrationConfig::extend_db`], and a run of such bins is an emission only if one of them
+//!    clears [`IntegrationConfig::seed_db`] — the detector's own published seed/extend rule
+//!    (`detect_integrated`), applied to a region rather than to the whole span, so the same energy
+//!    gets the same answer here as it does there;
 //! 2. runs separated by fewer than [`OverlapConfig::split_bins`] cells are one emission: a gap of
 //!    one cell is the resolution, not evidence of two signals;
 //! 3. each emission's **centre** is the excess-weighted centroid and its **occupied bandwidth**
@@ -67,6 +82,10 @@ pub struct OverlapConfig {
     /// Most emissions reported for one region; past it the measurement says nothing rather than a
     /// truncated part of the truth.
     pub max_emissions: usize,
+    /// How many region widths the floor-reference context window spans (the region sits in the
+    /// middle of it). 5 leaves four fifths of the window outside the region, so the median is the
+    /// neighbourhood's noise even when the region is fully occupied.
+    pub context_factor: f64,
 }
 
 impl Default for OverlapConfig {
@@ -76,6 +95,7 @@ impl Default for OverlapConfig {
             split_bins: 2,
             obw_fraction: 0.99,
             max_emissions: 32,
+            context_factor: 5.0,
         }
     }
 }
@@ -113,9 +133,23 @@ pub fn measure_region(
     out.span_s = spectrum.span_s;
     out.obw_fraction = cfg.obw_fraction;
 
-    let snr_db =
-        |b: usize| db((spectrum.mean_psd[b] / spectrum.mean_floor[b].max(1e-300)).max(1e-30));
-    let excess = |b: usize| (spectrum.mean_psd[b] - spectrum.mean_floor[b]).max(0.0);
+    // 0. The floor reference: robust, scalar, and taken from the region's *neighbourhood*. See the
+    // module docs for why the per-bin reference under the region cannot be used.
+    let pad = (0.5 * (hi - lo) as f64 * (cfg.context_factor.max(1.0) - 1.0)).round() as usize;
+    let mut context: Vec<f64> = (lo.saturating_sub(pad)..(hi + pad).min(g.bins))
+        .filter(|&b| usable(b))
+        .map(|b| spectrum.mean_floor[b])
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .collect();
+    if context.is_empty() {
+        return None;
+    }
+    let mid = context.len() / 2;
+    let (_, &mut floor_ref, _) = context.select_nth_unstable_by(mid, f64::total_cmp);
+    out.floor_ref = floor_ref;
+
+    let snr_db = |b: usize| db((spectrum.mean_psd[b] / floor_ref.max(1e-300)).max(1e-30));
+    let excess = |b: usize| (spectrum.mean_psd[b] - floor_ref).max(0.0);
 
     // 1–2. Runs of bins over the extend threshold, bridged across gaps narrower than `split_bins`.
     let mut runs: Vec<(usize, usize)> = Vec::new();

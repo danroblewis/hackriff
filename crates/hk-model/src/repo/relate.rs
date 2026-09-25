@@ -675,11 +675,25 @@ fn revoke_kind(
     let mut out = Vec::new();
     for r in standing
         .iter()
-        // T-369: never a claim the region re-analysis authored. `why` here is always a pairwise
-        // test ("no longer an undistinguished overlap of the row shown"), and a region claim is
-        // made precisely when that pairwise test fails and the region's own measurements say the
-        // rows are one emission anyway. Stage 4 revokes its own ([`revoke_region_claim`]).
-        .filter(|r| r.emitter_id == emitter && r.kind == kind && !is_region_claim(r))
+        // T-369: never a claim **either** region re-analysis authored. `why` here is always a
+        // pairwise test ("no longer an undistinguished overlap of the row shown"), and a region
+        // claim is made precisely when that pairwise test fails and the region's own evidence says
+        // the rows are one emission anyway. Each re-analysis revokes its own
+        // ([`revoke_region_claim`], [`revoke_measured_claim`]).
+        //
+        // T-978: the measured claim has to be excluded here for the same reason and more sharply.
+        // Stage 3 revokes on exactly the two conditions that make the measured pass run at all —
+        // `bands_compete` failing, or `distinguishing_evidence`'s bandwidth-ratio guard firing —
+        // so with only `is_region_claim` filtered, every touch of either row revoked the
+        // measurement's verdict, stage 4 reported the region unresolved again, and the retired box
+        // reappeared until (and unless) a fresh snapshot arrived. That is a flickering inventory
+        // and two unbounded relation rows per touch, which is the defect T-978 exists to remove.
+        .filter(|r| {
+            r.emitter_id == emitter
+                && r.kind == kind
+                && !is_region_claim(r)
+                && !is_measured_claim(r)
+        })
     {
         out.push(insert_relation(
             conn,
@@ -1124,6 +1138,13 @@ fn is_measured_claim(r: &EmitterRelation) -> bool {
     verdict_of(r) == Some(MEASURED_REGION_VERDICT)
 }
 
+/// T-978: whether a standing claim on `id` was authored by the measured re-analysis.
+fn has_measured_claim(conn: &Connection, id: EmitterId) -> Result<bool, RepoError> {
+    Ok(read_relations(conn, CURRENT_RELATION_SQL, id)?
+        .iter()
+        .any(is_measured_claim))
+}
+
 fn verdict_of(r: &EmitterRelation) -> Option<&str> {
     r.detail
         .as_ref()
@@ -1371,6 +1392,22 @@ fn reanalyse_region(
             .map(|m| m.freq().hi_hz)
             .fold(f64::NEG_INFINITY, f64::max),
     );
+
+    // **T-978: the spectrum owns a region it has already ruled on.** A member carrying a standing
+    // measured claim has been resolved by a re-measurement of this very band, and stage 4's two
+    // triggers are the two conditions the measured pass exists to overrule — so stage 4 must
+    // neither contest such a row nor claim against it, or it would record a contested verdict for a
+    // region that is in fact resolved. The region is still an overlap the *rows* cannot resolve, so
+    // it stays reported in [`OverlapOutcome::unresolved`]: that is what keeps a fresh measurement
+    // coming, and so what keeps the claim revocable when the air changes.
+    for m in &members {
+        if has_measured_claim(conn, m.emitter_id)? {
+            if !out.unresolved.contains(&region) {
+                out.unresolved.push(region);
+            }
+            return Ok(());
+        }
+    }
 
     // Re-analysis: what the measurements themselves say lives in this region.
     let mut bands: Vec<FreqRange> = Vec::new();
