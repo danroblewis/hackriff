@@ -131,7 +131,7 @@ export const PATTERNS = {
   cross: "fract((px.x + px.y) / p.x) < 0.22 || fract((px.y - px.x) / p.x) < 0.22",
   /** Horizontal rules only: scanlines. The last-known [[CELL.SHADOW]] mark (T-520) — the one mark
    * ruled along a single axis, and ruled along *time*, the axis the value is carried down. */
-  scan: "fract(px.y / p.y) < 0.4",
+  scan: "fract(px.y / p.y) < 0.2",
   /** Vertical rules only. The [[CELL.EXCLUDED]] mark (T-595) — ruled along *frequency*, because a
    * DC notch is a stripe on the frequency axis; the one mark that is the transpose of [[scan]]. */
   stripe: "fract(px.x / p.x) < 0.4",
@@ -170,7 +170,7 @@ const COMPILED: Readonly<Record<PatternName, PatternFn>> = {
   dots: (px, p, fr) => fr(px.x / p.x) < 0.34 && fr(px.y / p.y) < 0.34,
   grid: (px, p, fr) => fr(px.x / p.x) < 0.10 || fr(px.y / p.y) < 0.10,
   cross: (px, p, fr) => fr((px.x + px.y) / p.x) < 0.22 || fr((px.y - px.x) / p.x) < 0.22,
-  scan: (px, p, fr) => fr(px.y / p.y) < 0.4,
+  scan: (px, p, fr) => fr(px.y / p.y) < 0.2,
   stripe: (px, p, fr) => fr(px.x / p.x) < 0.4,
 };
 

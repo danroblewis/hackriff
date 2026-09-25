@@ -172,6 +172,16 @@ export interface SurfaceProbe {
  * would be addressing a pyramid that does not exist. The other two degrade *and say so* — an
  * invented bound must never be indistinguishable from a reported one.
  */
+/**
+ * T-946(b): the orientation sentence re-derived from the backend's coverage as it is NOW. The probe's
+ * note is a first-paint census; a sweep that lights 20 MHz afterwards left "0.8 % … (32 of 4096)"
+ * on screen. Same route, same box, same opening as the probe — only the answer has moved.
+ */
+export async function refreshOrientationNote(get: Getter, probe: SurfaceProbe): Promise<string> {
+  const cov = (await get(coverageUrl(probe.origin.bounds, ORIENT_CELLS, ORIENT_ROWS))) as CoverageSlice;
+  return orientationNote(observedExtent(cov), probe.opening);
+}
+
 export async function probeSurface(get: Getter, nowS?: number, bp: BackpressureOptions = {}): Promise<SurfaceProbe> {
   const requests: string[] = [];
   const degraded: string[] = [];

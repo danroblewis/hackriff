@@ -54,7 +54,7 @@ import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
-import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
+import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
@@ -1126,6 +1126,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
       return;
     }
     say(probe.note);
+    // T-946(b): coverage grows while the view is open; the sentence follows the backend's census.
+    startPoll(async () => {
+      try { const t = await refreshOrientationNote((path) => client.get(path), probe); if (t !== note.textContent) say(t); } catch { /* keep the last sentence */ }
+    }, 10_000);
     markSurface("mounted");
 
     // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never

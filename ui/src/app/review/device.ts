@@ -33,13 +33,15 @@ export class DeviceTab {
   /** T-452: the price of the sweep the inputs currently describe, from `GET /api/control/scan?…`. */
   private proposed: { plan: ScanPlan; budget: ScanBudget } | null = null;
   private poll = 0;
+  /** After a span pick the select is still focused; let the next render show the served rate anyway. */
+  private syncRate = false;
 
   private readonly notice = h("div", { class: "hint" });
   private readonly run = h("div", { class: "rv-status" });
   private readonly spinner = h("span", { class: "hint", hidden: true }, "…");
   private readonly msg = h("div", { class: "hint" });
 
-  private readonly rate = h("select", { onchange: (e) => this.deviceCall(`span ${(e.target as HTMLSelectElement).selectedOptions[0]?.textContent}`, () => this.client.post("/api/control/rate", { sample_rate_hz: Number((e.target as HTMLSelectElement).value) })) });
+  private readonly rate = h("select", { onchange: (e) => this.onRate(e.target as HTMLSelectElement) });
   private readonly bias = h("input", { type: "checkbox", onchange: (e) => this.onBias(e.target as HTMLInputElement) });
   private readonly biasWrap = h("label", { class: "rv-toggle", hidden: true }, this.bias, " Bias tee");
   private readonly filter = h("select", { onchange: (e) => this.deviceCall(`baseband filter ${(e.target as HTMLSelectElement).selectedOptions[0]?.textContent}`, () => this.client.post("/api/control/baseband_filter", { bandwidth_hz: Number((e.target as HTMLSelectElement).value) })) });
@@ -158,7 +160,7 @@ export class DeviceTab {
     const rateKey = m.rates.join(",");
     if (rateKey !== this.rateKey) { this.rateKey = rateKey; this.rate.replaceChildren(...m.rates.map((r) => option(String(r), fmtBandwidth(r)))); }
     const sp = s.tuning?.sample_rate_hz ?? run?.sample_rate_hz;
-    if (sp !== undefined && document.activeElement !== this.rate) this.rate.value = String(sp);
+    if (sp !== undefined && !this.pending && (document.activeElement !== this.rate || this.syncRate)) { this.rate.value = String(sp); this.syncRate = false; }
 
     this.renderGains(m.gains);
     this.biasWrap.hidden = !m.biasTee.available;
@@ -337,6 +339,14 @@ export class DeviceTab {
     if (label) body.label = label;
     if (maxS > 0) body.max_s = maxS;
     void this.call("record start", () => this.client.post("/api/control/record/start", body));
+  }
+
+  /** T-946(d): the chosen value is read NOW — deviceCall re-renders before it sends, and that render
+   *  resets an unfocused select to the still-old tuning, which posted the OLD rate. */
+  private onRate(sel: HTMLSelectElement) {
+    const hz = Number(sel.value);
+    this.syncRate = true;
+    void this.deviceCall(`span ${sel.selectedOptions[0]?.textContent}`, () => this.client.post("/api/control/rate", { sample_rate_hz: hz }));
   }
 
   private async deviceCall(what: string, fn: () => Promise<unknown>) {
