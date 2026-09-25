@@ -1,6 +1,6 @@
 {
   "schema": "hackriff.recipe",
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "rds",
   "version": 1,
   "name": "RDS: data on FM",
@@ -301,7 +301,7 @@
   ],
   "output_policy": { "content_class": "unrestricted" },
   "refine": {
-    "objective": { "node": "crc", "metric": "error_rate", "goal": "min" },
+    "objective": { "builtin": "wfm-pilot" },
     "tune": ["center_hz"]
   }
 }

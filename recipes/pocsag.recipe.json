@@ -4,7 +4,7 @@
   "id": "pocsag",
   "version": 1,
   "name": "POCSAG: pager messages",
-  "description": "Tutorial 2 skeleton (ADR-0011 §5.1; T-095 tunes it). 2-FSK at 512/1200/2400 Bd (1200 here), batches of the 0x7CD215D8 sync word + 16 codewords, BCH(31,21) + even parity per codeword, message assembly (address codeword = start, message codewords appended, idle 0x7A89C197 ends, across batches), then RIC, function and numeric (4-bit BCD, LSB first) or alphanumeric (7-bit, LSB first) text. Follows every channel of a pager net (follow_hops). restricted-paging: frames are metadata-only unless a user rule vouches for the emitter.",
+  "description": "Tutorial 2 skeleton (ADR-0011 §5.1; T-095 tunes it). 2-FSK at 512/1200/2400 Bd (the rate is estimated from the waveform, T-951), batches of the 0x7CD215D8 sync word + 16 codewords, BCH(31,21) + even parity per codeword, message assembly (address codeword = start, message codewords appended, idle 0x7A89C197 ends, across batches), then RIC, function and numeric (4-bit BCD, LSB first) or alphanumeric (7-bit, LSB first) text. Follows every channel of a pager net (follow_hops); detections that are the DC point or a steady spur are not channels. restricted-paging: frames are metadata-only unless a user rule vouches for the emitter.",
   "match": {
     "families": ["fsk"],
     "bandwidth_hz": [6000, 25000],
@@ -22,8 +22,8 @@
     {
       "id": "clock",
       "block": "clock_recovery",
-      "label": "NRZ timing, 1200 Bd",
-      "params": { "symbol_rate_bd": 1200, "pulse": "nrz", "algorithm": "gardner" }
+      "label": "NRZ timing, rate from zero-crossing spacing (512/1200/2400 Bd)",
+      "params": { "symbol_rate_candidates_bd": [512, 1200, 2400], "pulse": "nrz", "algorithm": "gardner" }
     },
     { "id": "slice", "block": "slicer", "label": "Higher frequency = 0", "params": { "threshold": 0.0, "invert": true } },
     {

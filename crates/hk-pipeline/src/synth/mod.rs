@@ -170,6 +170,7 @@ pub fn estimated_params(obs: &CcObservation<'_>) -> Option<(&'static str, Estima
             roll_off: None,
             bandwidth_hz: Some(obs.bandwidth_hz),
             pilot_hz: None,
+            subaudible: None,
         },
     ))
 }
@@ -434,6 +435,7 @@ pub fn analysis(emitter: EmitterId, obs: &CcObservation<'_>) -> EmitterSynthesis
             kind: ResolutionKind::StructuredUnidentified,
             deepest_verdict: Some(verdict),
             reason: Some(ResolutionReason::NothingScored),
+            suspected: None,
             summary: format!(
                 "framed and check-valid under {} — {} of {} blocks pass — but {missing}. That is \
                  a result, not a failure: a confirmed emitter with no complete identification is \
@@ -607,6 +609,11 @@ fn unconfirmed(
         trace,
         resolution: Some(Resolution {
             kind: ResolutionKind::Unknown,
+            // ADR-0021 §7A.6, enforced by `EmitterSynthesis::validate`: only
+            // `unsupported-structure` names a suspected structure, and it must. This channel was
+            // demodulated and every framing in the build was scanned against it, so nothing here
+            // is a structure this build cannot reach — it is one that did not check out.
+            suspected: None,
             deepest_verdict: Some(verdict),
             reason: Some(ResolutionReason::NothingScored),
             summary,

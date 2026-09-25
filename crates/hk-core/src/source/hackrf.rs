@@ -1406,10 +1406,19 @@ mod tests {
         let mut buf = Vec::new();
         let first = src.read_block_ci8(&mut buf).unwrap().unwrap();
         let mut next = first.first_sample() + buf.len() as u64;
-        std::thread::sleep(Duration::from_millis(200));
+        // T-934: wait on the counted event, not a fixed 200 ms sleep. Nothing reads, so the fake
+        // producer MUST overflow the 2-buffer pool eventually; how soon depends on how often a
+        // loaded box schedules it. The deadline only bounds a hang (a drop never counted).
         let stats = src.stats();
-        let dropped = stats.transfers.dropped_samples.load(Ordering::Relaxed);
-        assert!(dropped > 0, "the pool overflowed");
+        let waited = Instant::now();
+        let dropped = loop {
+            let d = stats.transfers.dropped_samples.load(Ordering::Relaxed);
+            if d > 0 {
+                break d;
+            }
+            assert!(waited.elapsed() < DEADLINE, "the pool overflowed");
+            std::thread::sleep(Duration::from_millis(5));
+        };
         // The fake keeps producing while this loop catches up, so drops can still be counted
         // after the first snapshot: read until the gaps match the counter as it stands now.
         let mut gaps = 0;

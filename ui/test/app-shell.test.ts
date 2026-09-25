@@ -170,3 +170,22 @@ test("device slice carries the run's capture state and its cause", () => {
   assert.equal(deviceFrom(oldEnded).capture, "ended", "an older server's finished run reads as ended");
   assert.equal(deviceFrom({ ...replayState, run: undefined } as unknown as ControlState).capture, null);
 });
+
+test("T-955: a #token= fragment navigation stores the token and genuinely reloads — it is not a reload by itself", async () => {
+  const { reloadOnTokenHash } = await import("../src/app/net");
+  const handlers: (() => void)[] = [];
+  let reloads = 0;
+  const stored: Record<string, string> = {};
+  const win = {
+    addEventListener: (_t: "hashchange", fn: () => void) => { handlers.push(fn); },
+    location: { hash: "", reload: () => { reloads++; } },
+  };
+  reloadOnTokenHash(win, { setItem: (k, v) => { stored[k] = v; } });
+  win.location.hash = "#section";
+  handlers.forEach((f) => f());
+  assert.equal(reloads, 0, "a fragment without a token is an ordinary in-page link");
+  win.location.hash = "#token=abc";
+  handlers.forEach((f) => f());
+  assert.equal(reloads, 1, "a token handed over the fragment left the old page (and its stale view/offer) running");
+  assert.equal(stored["hk-token"], "abc");
+});
