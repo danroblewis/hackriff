@@ -27412,6 +27412,28 @@ tasks:
     notes: |
       FOUND BY user 2026-09-25 P1 + supervisor 02:44.
     core_interface: true
+  - id: T-927
+    milestone: MMAP
+    title: "Density layer follow-ups: a hung GET never clears (no timeout), joined-request edge stamp, stale late-batch addrs, NaN-edge guard, poll-period constant (T-810 re-review)"
+    status: todo
+    priority: normal
+    deps:
+    - T-810
+    parallel_group: MAP-LAYERS
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-25 by T-810's Opus re-review (PASS on task-t810 a50166bb), non-blocking follow-ups in the density layer (ui/src/surface/density.ts, ui/src/app/centre/surface.ts):
+      1. A HUNG REQUEST NEVER CLEARS: ApiClient.get has no timeout (ui/src/controls/client.ts:54-66); a density GET that never settles leaves the pane's in-flight marker set (surface.ts:520-529) and, with sharedDensityReader, stalls every pane asking for that address until the browser's own connection timeout. Add an AbortSignal timeout on the density reader (and consider it for the client generally), with a test.
+      2. A pane that JOINS an in-flight shared request records the edge at its own later tick (surface.ts:526) - a frozen pane joining keeps a snapshot a few seconds older than its ask. Record the edge the shared request was issued at.
+      3. A late batch completion writes densityByPane with the addrs from when it was sent (surface.ts:528): after a pan or layer-off the old set briefly returns (<= 1 s). Drop completions whose addr set is stale.
+      4. The old Number.isFinite(edgeNs) guard was dropped: a NaN edge would store edgeAtFetchNs = NaN and never refresh (an effective seal). Restore the guard.
+      5. DENSITY_POLL_MS = 1000 and the poll's literal 1000 (surface.ts:101, 1344) are two spellings of one period - use the constant.
+      DELIVER each with a test that goes red on the old behaviour. Thin client.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-810 Opus re-review 2026-09-25.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
