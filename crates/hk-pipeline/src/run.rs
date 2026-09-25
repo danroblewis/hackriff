@@ -1491,6 +1491,7 @@ impl Pipeline {
             thread: Some(thread),
             started: Instant::now(),
             recipes: std::sync::OnceLock::new(),
+            vlf: Arc::default(),
         })
     }
 }
@@ -2805,6 +2806,8 @@ pub struct PipelineHandle {
     started: Instant,
     /// The run's recipe runtime (T-088), created on first use.
     recipes: std::sync::OnceLock<Arc<crate::recipes::runtime::RecipeRuntime>>,
+    /// T-891: accessory-fed VLF services attached to this run (none by default); stopped with it.
+    vlf: Arc<crate::vlf::VlfServices>,
 }
 
 /// Detection resolution of the run.
@@ -3117,6 +3120,13 @@ impl PipelineHandle {
     /// Stops capture; the readers and chains then drain and finish.
     pub fn stop(&self) {
         self.stopper().stop();
+        self.vlf.stop_all();
+    }
+
+    /// T-891: the run's accessory-fed VLF services ([`crate::vlf`]); attach one with
+    /// [`crate::vlf::VlfServices::attach`]. Empty unless an accessory was given.
+    pub fn vlf(&self) -> Arc<crate::vlf::VlfServices> {
+        Arc::clone(&self.vlf)
     }
 
     /// A handle that stops this run from another thread (a watchdog, a signal handler) while
