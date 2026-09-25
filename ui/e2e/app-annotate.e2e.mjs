@@ -36,9 +36,16 @@ async function ready(page) {
 const DRAWS = "document.querySelector('.sf-stage')?.dataset.annotationDraws ?? '[]'";
 
 /** Every GET this page has made to the windowed annotations read (the Research panel's own poll and
- * initial load use it; a POST to the same path is a different method and not counted here). */
+ * initial load use it; a POST to the same path is a different method and not counted here).
+ *
+ * `r.url` is the ABSOLUTE URL CDP reports (`http://127.0.0.1:PORT/api/annotations?…`), never a
+ * path — a `startsWith("/api/annotations?")` check against it matches nothing and this array is
+ * silently always empty, which is exactly the vacuous "0 == 0" this test must not be able to pass
+ * on (review finding, T-984 fix round 2). `new URL(...).pathname` is compared instead, so a real
+ * extra GET is counted whatever host/port the lane happened to use.
+ */
 function annotationGets(page) {
-  return page.requests.filter((r) => r.method === "GET" && r.url.startsWith("/api/annotations?"));
+  return page.requests.filter((r) => r.method === "GET" && new URL(r.url).pathname === "/api/annotations");
 }
 
 test("T-984: an annotation box is drawn once, whichever layers are on, and reaches the Research panel from the create response", async (t) => {
