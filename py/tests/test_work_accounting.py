@@ -1618,6 +1618,44 @@ def _finished_remote_claim(git_node2, monkeypatch):
                     "state": "running", "model": "opus", "host": "node2", "session_id": "s"}}, seen
 
 
+def test_a_remote_run_whose_mac_worktree_was_reaped_gets_it_back_before_its_review(git_node2, monkeypatch):
+    """2026-09-25 13:33: T-977 ran on node2 while its Mac worktree was reaped; the branch was synced, then
+    launch_review started in a directory that did not exist and the whole tick raised, every tick."""
+    import os
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit")
+    assert not os.path.isdir(wt)
+    claims, seen = _finished_remote_claim(git_node2, monkeypatch)
+    claims["T-9"]["review"] = True
+    reviewed = []
+    monkeypatch.setattr(R, "launch_review", lambda c: reviewed.append(os.path.isdir(c["wt"])) or dict(c, pid=2, kind="review"))
+    R.reap(claims, dry=False)
+    assert reviewed == [True] and claims["T-9"]["kind"] == "review" and claims["T-9"]["state"] == "running"
+    assert git(wt, "rev-parse", "HEAD") == git(hwt, "rev-parse", "HEAD")
+
+
+def test_one_claim_that_raises_does_not_abort_the_tick(monkeypatch):
+    """The same incident: the exception escaped reap(), so save_claims never ran and T-970's reap (a result commit
+    and a review launch) was thrown away and redone 47 times; claims after the raising one were never reaped."""
+    calls, seen = [], []
+
+    def one(claims, tid, c, dry, killed):
+        calls.append(tid)
+        if tid == "T-1":
+            raise FileNotFoundError("[Errno 2] No such file or directory: '/wt/t1'")
+        return True
+    monkeypatch.setattr(R, "_reap_one", one)
+    monkeypatch.setattr(R, "handle_gate_failures", lambda claims, dry: False)
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    claims = {"T-1": {"ticket": "T-1", "branch": "task-t1", "state": "running"},
+              "T-2": {"ticket": "T-2", "branch": "task-t2", "state": "running"}}
+    assert R.reap(claims, dry=False) is True
+    assert calls == ["T-1", "T-2"]                                              # the next claim is still reaped
+    assert claims["T-1"]["state"] == "reap-error" and "FileNotFoundError" in claims["T-1"]["reap_error"]
+    assert [a[2] for a in seen] == ["REAP_ERROR"]
+
+
 def test_a_withheld_push_is_a_sync_error_never_no_work(git_node2, monkeypatch):
     """The 2026-09-25 shape: the worker committed on node2, the commit never reached this Mac. Held and said - and
     judged, with its commits, the tick the refs agree."""
