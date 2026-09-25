@@ -445,7 +445,8 @@ def to_remote(host, text):
 
 
 def ssh_argv(host, remote_cmd):
-    return ["ssh", *SSH_OPTS, hosts()[host]["ssh"], _REMOTE_PATH + to_remote(host, remote_cmd)]
+    # Explicit bash: the wrapper's `>(...)` is bash syntax, whatever the account's login shell is.
+    return ["ssh", *SSH_OPTS, hosts()[host]["ssh"], "bash -c " + shlex.quote(_REMOTE_PATH + to_remote(host, remote_cmd))]
 
 
 def remote_sh(host, remote_cmd, timeout=120, input=None):
@@ -464,8 +465,9 @@ def remote_wrapper(wt, branch, script, env, d, out_name):
     envs = " ".join(f"{k}={q(str(v))}" for k, v in env.items())
     inner = f"cd {q(wt)} && exec env {envs} nice -n 5 bash -c {q(script)}"
     return (f"mkdir -p {q(d)}; "
-            f"setsid bash -c {q(inner)} </dev/null > >(tee {q(d + '/' + out_name)}) 2> >(tee -a {q(d + '/run.log')} >&2) & p=$!; "
-            f"echo $p > {q(d + '/remote.pgid')}; wait $p; rc=$?; "
+            # tee -p: a dropped connection (SIGPIPE on the channel) must not kill the copy on the host, nor the worker.
+            f"setsid bash -c {q(inner)} </dev/null > >(tee -p {q(d + '/' + out_name)}) 2> >(tee -p -a {q(d + '/run.log')} >&2) & p=$!; "
+            f"echo $p > {q(d + '/remote.pgid')}; wait $p; rc=$?; rm -f {q(d + '/remote.pgid')}; "
             f"git -C {q(wt)} push -q --no-verify -f origin HEAD:refs/heads/{branch} >&2; exit $rc")
 
 
@@ -486,21 +488,23 @@ def remote_stop(c, wait_s=30):
     return rc == 0 and out.strip().endswith("gone")
 
 
-def remote_prepare(host, wt, branch, d):
-    """Mirror the gated base and this branch to the box, (re)make the worktree there at the branch, copy LFS objects,
-    and point the box's own `main` at the gated base (fix prompts merge it)."""
+def remote_prepare(host, wt, branch, d, resume=False):
+    """Mirror the gated base to the box as its `main` (fix prompts merge it) and copy LFS objects. The worktree is made
+    only when it does not exist, and never reset: on a resume (and on a re-dispatch) the host's copy - its commits and
+    its uncommitted files - is the newer one, and this Mac's branch is pushed only when the mirror has none."""
     base = merge_target()
     # --no-verify: the only pre-push hook is Git LFS's upload, which the mirror cannot serve - LFS objects go by rsync.
     sh(["git", "push", "-q", "--no-verify", "-f", host, f"{base}:refs/heads/main"], check=True)
-    if sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
-        sh(["git", "push", "-q", "--no-verify", "-f", host, f"{branch}:refs/heads/{branch}"], check=True)
+    if not resume and sh(["git", "rev-parse", "--verify", "-q", branch]).strip():
+        sh(["git", "push", "-q", "--no-verify", host, f"{branch}:refs/heads/{branch}"])      # no -f: never over the host's
     sh(["rsync", "-a", "-e", "ssh " + " ".join(SSH_OPTS), f"{REPO}/.git/lfs/objects/",
         f"{hosts()[host]['ssh']}:{to_remote(host, REPO)}/.git/lfs/objects/"], timeout=600, check=True)
     q = shlex.quote
     rc, out = remote_sh(host, f"set -e; cd {q(REPO)}; git fetch -q origin; git branch -f main origin/main; git worktree prune; mkdir -p {q(d)}; "
-                              f"if git rev-parse -q --verify origin/{branch} >/dev/null; then src=origin/{branch}; else src=origin/main; fi; "
-                              f"if [ -d {q(wt)} ]; then git -C {q(wt)} reset -q --hard $src; else git worktree add -q -B {branch} {q(wt)} $src; fi; "
-                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true", timeout=600)
+                              f"if [ ! -d {q(wt)} ]; then "
+                              f"if git rev-parse -q --verify origin/{branch} >/dev/null; then git worktree add -q -B {branch} {q(wt)} origin/{branch}; "
+                              f"else git worktree add -q -b {branch} {q(wt)} origin/main; fi; "
+                              f"git -C {q(wt)} lfs checkout >/dev/null 2>&1 || true; fi", timeout=600)
     if rc:
         raise RuntimeError(f"remote_prepare on {host}: {out.strip()[-200:]}")
 
@@ -961,7 +965,7 @@ def reap(claims, dry):
         pid = c["pid"]
         age_min = (time.time() - c["started"]) / 60
         limit = REVIEW_MAX_MINUTES if c["kind"] == "review" else MAX_MINUTES
-        if alive(pid):
+        if alive(pid) and not c.get("detached"):
             if track_usage(c):                      # the only chance to see this run's CPU time
                 changed = True
             if age_min > limit:
@@ -982,18 +986,21 @@ def reap(claims, dry):
                 else:
                     attention(tid, c["branch"], "TIMEOUT", f"{c['kind']} exceeded {limit} min; killed; worktree kept")
             continue
-        # finished - for a remote claim, the LOCAL ssh ended: ask the box before judging anything
-        if c.get("host"):
+        # finished - for a remote claim (a review runs on this Mac), the LOCAL ssh ended: ask the box first
+        if c.get("host") and c["kind"] != "review":
             state = remote_run_state(c)
             if state == "running":
-                c["pid"] = remote_attach(c)
+                c["pid"], c["detached"] = remote_attach(c), False
                 log(f"REMOTE {tid}: connection to {c['host']} dropped, run still going there - re-attached (pid {c['pid']})")
                 changed = True
                 continue
             if state == "unknown" or not sync_back(c):
-                if state == "unknown":
-                    log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits (stage 4 re-dispatches)")
+                if state == "unknown" and not c.get("detached"):
+                    log(f"REMOTE {tid}: {c['host']} unreachable - the claim waits, polled on the host (stage 4 re-dispatches)")
+                    c["detached"] = True           # its local pid is dead: never signal it again (pids recycle)
+                    changed = True
                 continue
+            c["detached"] = False
         changed = True
         # The root is gone; anything of this run still running is a LEAK, holding cores and disk
         # for work nobody is waiting for. Nothing used to notice - a killed session's cargo could
@@ -1183,8 +1190,8 @@ ticket exactly as your original brief says: targeted tests, commit on {branch}, 
 message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main checkout, never the
 full gate, never edit docs/tasks.yaml by hand.
 """
-        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json")
-        return dict(r, kill_resumes=k)
+        r = _run_fix(dict(c, fix_reason_class="KILLED"), c.get("fix_attempts", 0), prompt, out_name=f"resume{k}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, kill_resumes=k)
     if fail_line.startswith("TIMEOUT"):
         t = c.get("timeout_resumes", 0) + 1
         prompt = f"""Your run on {tid} reached its {MAX_MINUTES}-minute limit and was stopped; this resumes the same session ONCE,
@@ -1196,8 +1203,8 @@ blocked.needs, so the coordinator can split or re-brief it - a clear remainder i
 End your final message with HANDBACK: DONE or HANDBACK: BLOCKED <why>. Same rules as before: never touch the main
 checkout, never the full gate, never edit docs/tasks.yaml by hand.
 """
-        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json")
-        return dict(r, timeout_resumes=t)
+        r = _run_fix(dict(c, fix_reason_class="TIMEOUT"), c.get("fix_attempts", 0), prompt, out_name=f"wrapup{t}.json", fail_line=fail_line)
+        return r if r.get("state") == "fix-held" else dict(r, timeout_resumes=t)
     target = merge_target()
     target_note = "" if target == "main" else " - the last gated main; main itself holds a batch still gating"
     if is_conflict(fail_line):
@@ -1215,7 +1222,7 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-        return _run_fix(c, n, prompt)
+        return _run_fix(c, n, prompt, fail_line=fail_line)
     kind = "its REVIEW" if fail_line.startswith("REVIEW_FAIL") else "its merge gate on main"
     prompt = f"""Your branch {branch} FAILED {kind} (fix attempt {n} of {FIX_ATTEMPTS}). The finding:
 {fail_line}
@@ -1231,40 +1238,41 @@ Same rules as before: never touch the main checkout, never the full gate, never 
 When finished, REWRITE {d}/handback.json (same shape as before: outcome done|blocked, summary, commits, tests) and end
 your final message with one line HANDBACK: DONE or HANDBACK: BLOCKED <why>.
 """
-    return _run_fix(c, n, prompt)
+    return _run_fix(c, n, prompt, fail_line=fail_line)
 
 
-def _run_fix(c, n, prompt, out_name=None):
+def _run_fix(c, n, prompt, out_name=None, fail_line=""):
     tid, wt = c["ticket"], c["wt"]
     d = f"{WORKDIR}/{tid}"
     cmd = ["claude", "-p", "--resume", c["session_id"], "--model", c.get("model", "sonnet"), "--dangerously-skip-permissions",
            "--output-format", "json", "--max-budget-usd", BUDGET_USD]
     out_path = f"{d}/{out_name or f'fix{n}.json'}"
-    out = open(out_path, "w")
-    err = open(f"{d}/run.log", "a")
     if c.get("host"):      # the session lives on that host: a resume runs there, once the previous run is gone
         host, pname = c["host"], f"prompt-{os.path.basename(out_path)}.md"
         try:
             if not remote_stop(c):
                 raise RuntimeError("the previous remote run could not be confirmed stopped")
-            remote_prepare(host, wt, c["branch"], d)
+            remote_prepare(host, wt, c["branch"], d, resume=True)
             remote_put(host, f"{d}/{pname}", prompt)
-            for f in (f"{d}/review.json",):             # the Mac-side files a fix prompt points at
-                if os.path.exists(f):
-                    remote_put(host, f, open(f).read())
+            if os.path.exists(f"{d}/review.json"):             # the Mac-side files a fix prompt points at
+                remote_put(host, f"{d}/review.json", open(f"{d}/review.json").read())
             try:
-                remote_put(host, MERGE_LOG, "".join(open(MERGE_LOG).readlines()[-4000:]))
+                remote_put(host, MERGE_LOG, "".join(open(MERGE_LOG).readlines()[-20000:]))
             except OSError:
                 pass
+            script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/{pname}'"
+            p = remote_popen(host, wt, c["branch"], script, dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)),
+                             d, os.path.basename(out_path), open(out_path, "w"), open(f"{d}/run.log", "a"))
         except Exception as e:
             log(f"FIX {tid} on {host} NOT launched: {e}")
-            attention(tid, c["branch"], "FIX_HELD", f"fix attempt {n} on {host} not launched: {str(e)[:200]}")
-            return dict(c, state="fix-held", fail_line=c.get("fail_line") or c.get("fix_reason") or "")
-        script = "exec " + " ".join(f"'{a}'" for a in cmd) + f" < '{d}/{pname}'"
-        p = remote_popen(host, wt, c["branch"], script, dict(CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)),
-                         d, os.path.basename(out_path), out, err)
-        log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] on {c['host']}: resumed session {c['session_id'][:8]} pid={p.pid}")
-        return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n)
+            if not c.get("held_warned"):          # once per hold, not every tick while the host is away
+                attention(tid, c["branch"], "FIX_HELD", f"fix attempt {n} on {host} not launched: {str(e)[:200]}")
+            return dict(c, state="fix-held", fail_line=fail_line or c.get("fail_line") or "", held_warned=True)
+        log(f"FIX {tid} attempt {n} [{c.get('fix_reason_class', 'OTHER')}] on {host}: resumed session {c['session_id'][:8]} pid={p.pid}")
+        return dict(c, pid=p.pid, started=time.time(), kind="fix", state="running", out=out_path, fix_attempts=n,
+                    fail_line=None, held_warned=False, detached=False)
+    out = open(out_path, "w")
+    err = open(f"{d}/run.log", "a")
     p = subprocess.Popen(bounded(cmd), cwd=wt, stdin=subprocess.PIPE, stdout=out, stderr=err,
                          env=dict(os.environ, **CARGO_ENV, HK_WORKER="1", HACKRIFF_OPS=S, **e2e_env(wt)), start_new_session=True, text=True)
     p.stdin.write(prompt)

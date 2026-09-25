@@ -275,7 +275,7 @@ def test_fixes_merge_the_gated_base_while_a_batch_is_gating(tmp_path, monkeypatc
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     seen = {}
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt: seen.update(n=n, prompt=prompt) or c)
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, fail_line="": seen.update(n=n, prompt=prompt) or c)
     R.launch_fix(_claim("T-613", "task-t613"), "09-23 15:26  task-t613  T-613  CONFLICT(skipped from bulk)")
     assert seen["n"] == 1 and "no longer merges cleanly" in seen["prompt"]
     assert "git merge eab4bfae" in seen["prompt"] and "git checkout eab4bfae -- docs/tasks.yaml" in seen["prompt"]
@@ -817,7 +817,7 @@ def test_a_killed_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkey
     ran, and a later real gate failure would get one fix attempt instead of two."""
     monkeypatch.setattr(R, "merge_target", lambda: "main")
     runs = []
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
     c = {"ticket": "T-802", "branch": "task-t802", "wt": str(tmp_path), "session_id": "abc", "fix_attempts": 1, "kind": "work"}
     r = R.launch_fix(c, "KILLED your run ended after 40 min with no result")
     (n, prompt, out_name), = runs
@@ -1296,7 +1296,7 @@ def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
 
 def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
     runs = []
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running"))
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
                      "TIMEOUT your run reached the 180-min limit and was stopped")
@@ -1329,6 +1329,9 @@ def remote_host(tmp_path, monkeypatch):
     shim.mkdir()
     (shim / "setsid").write_text("#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n")
     (shim / "setsid").chmod(0o755)
+    # the host has GNU tee (-p); this machine may have BSD tee, which has none
+    (shim / "tee").write_text('#!/bin/bash\nargs=(); for a in "$@"; do [ "$a" = -p ] || args+=("$a"); done; exec /usr/bin/tee "${args[@]}"\n')
+    (shim / "tee").chmod(0o755)
     monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
     monkeypatch.setattr(R, "S", str(local_ops))
     monkeypatch.setattr(R, "REPO", str(local_repo))
@@ -1355,7 +1358,7 @@ def test_a_remote_run_records_its_group_and_tees_its_streams_on_the_host(remote_
     fd = far / "ops" / "work" / "T-9"
     assert r.returncode == 3 and "RESULT" in r.stdout and "progress" in r.stderr     # streamed to this Mac
     assert (fd / "out.json").read_text().strip() == "RESULT" and "progress" in (fd / "run.log").read_text()
-    assert (fd / "remote.pgid").read_text().strip().isdigit()
+    assert not (fd / "remote.pgid").exists()          # removed when the run ends: a later stop never hits a recycled group
 
 
 def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_host):
