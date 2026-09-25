@@ -40,6 +40,19 @@
 }
 .sp-edge { font: 11px/1.6 ui-monospace, Menlo, monospace; color: var(--hk-text-dim); }
 
+/* The one way off this frozen page and onto the surface's actual growing edge (T-982): / mounts
+   the same renderer with an edge/windows supplier attached. A link, not a button — it is
+   navigation, not a view change, and its whole point is to leave this page. */
+.sp-live {
+  padding: 2px 8px;
+  border: 1px solid #3a4152;
+  border-radius: 999px;
+  font: 11px/1.6 ui-monospace, Menlo, monospace;
+  color: #fad340;
+  text-decoration: none;
+}
+.sp-live:hover { border-color: #fad340; }
+
 .sp-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 .sp-btn {
   padding: 4px 10px;

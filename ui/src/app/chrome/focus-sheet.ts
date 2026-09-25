@@ -6,7 +6,17 @@
 // the viewer put it. Presentation only: it reads the store's `focus`, never the client.
 import type { MountFn } from "../context";
 import type { Focus } from "../explore/slice";
-import { mountSheet } from "./sheet";
+import { mountSheet, type SheetController, type SheetSnap } from "./sheet";
+
+// T-997: the one handle other chrome has on this sheet. The inventory pills (`inv-pills.ts`) open
+// the sheet on a list, and the lists live in its body, so they need to raise it — and nothing more.
+// `reveal` never lowers a taller state the viewer chose, so this cannot shrink the sheet either.
+let controller: SheetController | null = null;
+
+/** Raise the Selected sheet to at least `snap`. No-op before it mounts. */
+export function revealFocusSheet(snap: SheetSnap): void {
+  controller?.reveal(snap);
+}
 
 /** The sheet's persisted-snap key (per viewer; see `sheet.ts`). */
 export const FOCUS_SHEET_KEY = "hk-mui-sheet-selected";
@@ -74,6 +84,7 @@ export const mountFocusSheet: MountFn = (el, ctx) => {
     // `full` is bounded by where the floating top chrome actually ends, not by a fixed estimate.
     clearOf: () => floatingChromeBottom(),
   });
+  controller = sheet;
   watchToolbar(() => sheet.relayout());
   // The heading follows the focused row's served centre (refined when the server has refined it),
   // which can arrive after the focus does; only a change of focus ever raises the sheet.

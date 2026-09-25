@@ -52,6 +52,7 @@ import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
 import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
+import type { HudReserve } from "../../surface/hud";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
@@ -59,7 +60,7 @@ import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrien
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -85,10 +86,11 @@ import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
-import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
+import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
 import { focusSelection, focusSignal } from "../explore/slice";
-import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
+import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
+import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -101,7 +103,7 @@ import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
-  collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, selectResearch, setResearchOpen,
+  addResearchAnnotation, collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, rowKey, selectResearch, setResearchOpen,
   type Collection, type ResearchRow, type ResearchSlice,
 } from "../map/research-slice";
 
@@ -167,6 +169,33 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/**
+ * T-997: the floating chrome's TOP-LEFT column, measured against the canvas, so the time ruler's
+ * labels are dropped rather than printed underneath it (`surface/hud.ts`'s `HudReserve`). The
+ * cluster's children are absolutely placed by `map-controls.css`, and the ones that matter are the
+ * ones that reach into the ruler's own band down the left edge — Go-to, the nudge row, the
+ * inventory pills, the retune offer, and at phone width the status pill. Whichever they are, this
+ * asks the layout rather than repeating the CSS's numbers: one rect read per child, once per frame,
+ * BEFORE any DOM write of that frame (`view.ts` calls it above `HudAxes.update`), so it costs at
+ * most one layout and never a read-write thrash.
+ */
+const RULER_BAND_CSS = 14 + 150; // `hud.ts`'s TIME_LABEL_BOX_CSS: where a time label prints.
+function chromeReserve(canvas: HTMLCanvasElement, ctl: HTMLElement | null): HudReserve | null {
+  if (!ctl) return null;
+  const base = canvas.getBoundingClientRect();
+  let left = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const child of Array.from(ctl.children)) {
+    const r = child.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const x0 = r.left - base.left, x1 = r.right - base.left, y1 = r.bottom - base.top;
+    // Only what reaches into the band the time labels print in, and only above the fold: the zoom
+    // stack, the FAB and the top-right cluster are nowhere near the left ruler.
+    if (x0 > RULER_BAND_CSS) continue;
+    left = Math.min(left, x0); right = Math.max(right, x1); bottom = Math.max(bottom, y1);
+  }
+  return bottom > -Infinity ? { left, right, bottom } : null;
+}
+
 /** The surface's tool modes (docs/23 §10.4's table columns). */
 type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
@@ -201,6 +230,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // pans and zooms — one gesture everywhere (docs/23 §3). The MapTip is placed in the same pass.
   const pinsEl = h("div", { class: "sf-pins", role: "group", "aria-label": "Signal markers: Tab to a marker for its summary, Enter to select it, arrow keys for its neighbours" });
   const tipEl = h("div", { class: "sf-maptip", role: "tooltip", id: "sf-maptip", hidden: true });
+  // T-1000 (docs/23 §10.7): the ACTIVE pane's outline — the pane Go-to, zoom, the layers menu, the
+  // follow-live FAB and the viewport menu act on. Placed every render frame from the pane rectangles
+  // the frame was drawn with (and at once when the active pane changes), shown only while there are
+  // two or more panes. Never takes the pointer: a press goes through it to the pane underneath.
+  const activeEl = h("div", { class: "sf-active-pane", "aria-hidden": "true", hidden: true });
   const chrome = h("div", { class: "sf-chrome", "aria-label": "Per-viewport level readout" });
   const hoverEl = h("div", { class: "sf-hover", role: "status" });
   const note = h("div", { class: "sf-note", role: "status" });
@@ -221,7 +255,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, activeEl, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -633,6 +667,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
     pinLayer.update(layouts, (focusedPin ?? hoveredPin)?.pin.id ?? null, s.focus.kind === "signal" ? s.focus.id : null);
     placeTip();
   };
+  /** T-1000: outline the active pane, from pane rectangles in drawing-buffer px. Set-if-changed, like
+   * every other per-frame placement here. The outline's own `data-*` state which pane it is on, so a
+   * test compares it with the chrome's words and the pane's rectangle rather than parsing pixels. */
+  let outlined = "";
+  const placeActive = (panes: readonly PaneView[], hPx: number, dpr: number) => {
+    const p = preview;
+    const active = p ? p.activePane : null;
+    const name = activePaneName(panes.map((v) => v.id), active);
+    const v = name ? panes.find((x) => x.id === active) ?? null : null;
+    const box = v ? outlineBox(v.rect, hPx, dpr) : null;
+    const key = box && name ? `${v!.id}|${name.label}|${box.left}|${box.top}|${box.width}|${box.height}` : "";
+    if (key === outlined) return;
+    outlined = key;
+    activeEl.hidden = !box;
+    stage.dataset.activePane = name ? String(name.n) : "";
+    if (!box || !name) { delete activeEl.dataset.pane; return; }
+    activeEl.dataset.pane = String(name.n);
+    activeEl.dataset.paneId = v!.id;
+    activeEl.dataset.label = name.label;
+    Object.assign(activeEl.style, {
+      left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px`,
+    });
+  };
   /** CSS px from the canvas's top-left — the coordinate the pins are laid out in. */
   const cssPoint = (e: MouseEvent) => {
     const r = canvas.getBoundingClientRect();
@@ -642,13 +699,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // ---- T-821 (MAP-21): collections as overlay layers; every mark also a row in the Research panel ----
   // One model (`state.research`) behind both views: the rows are derived once per data change and
   // placed per frame through the pane's own box, like every other mark. A collection's layer is on
-  // for a pane when that pane's layers menu says so, else by the collection's stored default; an
-  // unfiled annotation follows the `research` layer. The SELECTED mark is drawn whatever its layer —
-  // it is the viewer's own selection, which is always shown (a row click must light its mark).
-  // Collections sit at z 40 (`COLLECTION_Z`) and unfiled research at z 30: ABOVE rules/detections
-  // but BELOW artifacts (z 50) and priors (z 60). They are not routed through the registry (which
-  // lists only the collections a menu has touched), so the `marks` hook splits `composeOverlays`
-  // around `COLLECTION_Z` and draws these marks in the gap — paint order is ascending z throughout.
+  // for a pane when that pane's layers menu says so, else by the collection's stored default.
+  // Collections sit at z 40 (`COLLECTION_Z`) and unfiled research (markers only, below) at z 30:
+  // ABOVE rules/detections but BELOW artifacts (z 50) and priors (z 60). They are not routed through
+  // the registry (which lists only the collections a menu has touched), so the `marks` hook splits
+  // `composeOverlays` around `COLLECTION_Z` and draws these marks in the gap — paint order is
+  // ascending z throughout.
+  //
+  // T-984: annotations are excluded here and drawn exactly ONCE, by `annotationQuads` below — always
+  // visible, dashed, never a claim about the air (T-820) — whatever a pane's research/collection
+  // layers show. Before this fix an unfiled annotation with the `research` layer on, or a filed one
+  // with its collection on, drew a SECOND "research-box" on top of the always-on dashed one.
   let researchSrc: ResearchSlice | null = null;
   let researchRowsNow: ResearchRow[] = [];
   let researchColors = new Map<string, readonly [number, number, number, number]>();
@@ -657,7 +718,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const r = store.get().research;
     if (r !== researchSrc) {
       researchSrc = r;
-      researchRowsNow = researchRows(r);
+      researchRowsNow = researchRows(r).filter((row) => row.kind !== "annotation");
       researchColls = new Map(r.collections.map((c) => [c.id, c]));
       researchColors = new Map(r.collections.map((c) => [c.id, parseColor(c.color)]));
     }
@@ -1107,9 +1168,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
     };
   };
 
-  /** Keep a just-saved annotation on the canvas until the next windowed read includes it. */
-  const keepAnnotation = (a: MarkAnnotation | null) => {
-    if (a && !annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+  /** The plain annotation id of the currently-selected Research row, or `null` — the id
+   * `annotationQuads` highlights, so selecting an annotation's row lights its (single) box. */
+  const annotationFocusId = (): string | null => {
+    const sel = store.get().research.selected;
+    return sel !== null && sel.startsWith("annotation:") ? sel.slice("annotation:".length) : null;
+  };
+
+  /**
+   * Keep a just-saved annotation on the canvas until the next windowed read includes it, AND put it
+   * in the Research slice immediately (T-984) — the panel's own poll (`RESEARCH_REFRESH_MS`, 15 s)
+   * would otherwise be the only way a fresh annotation reached it, so a panel opened right after
+   * authoring showed nothing until that poll landed. `req` is the request just sent: it carries the
+   * `view` the server used to stamp `provenance`, which this build never asks back for (the create
+   * response is narrowed to `MarkAnnotation`) — the next poll overwrites this with the server's own
+   * row regardless, so an approximate provenance here is corrected within one refresh cycle.
+   */
+  const keepAnnotation = (req: AnnotationRequest) => (a: MarkAnnotation | null) => {
+    if (!a) return;
+    if (!annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+    store.set(addResearchAnnotation({
+      id: a.id, collection_id: null, kind: a.kind, f_lo_hz: a.f_lo_hz, f_hi_hz: a.f_hi_hz,
+      t0_s: a.t0_s, t1_s: a.t1_s, label: a.label, body: null,
+      provenance: { tier: req.view.tier, device_id: req.view.device_id ?? null },
+    }));
   };
   /** The label spans, pooled per pane and reused frame to frame (set-if-changed, like the HUD's). */
   const labelPools = new Map<string, HTMLElement[]>();
@@ -1189,10 +1271,27 @@ function mount(el: HTMLElement, ctx: AppContext) {
           if (pane.id === preview?.activePane) renderPriorsReadout(pane.id);
           const band = (keep: (z: number) => boolean) => ({ ...reg, layers: reg.layers.filter((l) => keep(l.z)) });
           placeAnnotationLabels(pane);
+          if (pane.id === preview?.activePane) {
+            // T-984: how many of this frame's two annotation-drawing paths actually drew each
+            // loaded annotation — read back by `app-annotate.e2e.mjs` so it can assert "drawn once"
+            // from the page itself rather than re-deriving the fix's internal split. `dashed` is
+            // `annotationQuads` (T-820, always on); `researchBox` is `researchBoxesFor` including it
+            // as a second "research-box" (the T-984 defect, whichever research/collection layer was
+            // on). A correct build's `researchBox` is always 0: annotations own exactly one path.
+            // `researchBoxesFor` caches its own work keyed on the research slice's identity, so
+            // reading it a second time here costs nothing extra most frames.
+            const research = researchBoxesFor(pane);
+            stage.dataset.annotationDraws = JSON.stringify(annotations.map((a) => ({
+              id: a.id, label: a.label, dashed: 1, researchBox: research.some((b) => b.id === `annotation:${a.id}`) ? 1 : 0,
+            })));
+          }
           return [
             ...composeOverlays(band((z) => z < COLLECTION_Z), overlayFns, pane, edge),
-            // T-820: the human-authored annotations, always on and DASHED (never a claim about the air).
-            ...annotationQuads(annotations, null, pane.box, pane.rect),
+            // T-820: the human-authored annotations, always on and DASHED (never a claim about the
+            // air) — the SOLE place any annotation draws (T-984: `researchBoxesFor` excludes them,
+            // so a filed or unfiled annotation is never also a second "research-box"). Highlighted
+            // like a selected research row when its own Research-panel row is selected.
+            ...annotationQuads(annotations, annotationFocusId(), pane.box, pane.rect),
             ...markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect),
             ...composeOverlays(band((z) => z > COLLECTION_Z), overlayFns, pane, edge),
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
@@ -1202,7 +1301,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // The HUD rulers fade with the floating chrome: `chrome-idle` on <body> is the one idle
         // signal (docs/23 §10.2), and the labels' CSS reads the same class.
         hud: hudEl, hudAlpha: () => (document.body.classList.contains("chrome-idle") ? HUD_IDLE_ALPHA : 1),
-        dom: pinsFrame,
+        hudReserve: () => chromeReserve(canvas, stage.querySelector<HTMLElement>(".map-ctl")),
+        dom: (panes, edge, hPx, dpr) => { pinsFrame(panes, edge, hPx, dpr); placeActive(panes, hPx, dpr); },
       });
     } catch (e) {
       const why = `WebGL2 is unavailable in this browser: ${e instanceof Error ? e.message : String(e)}`;
@@ -1253,14 +1353,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const pin = pinLayer.pick(c.x, c.y);
         if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
-        if (!hit?.mark) return;
-        if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
-        else if (hit.mark.kind === "selection-box") store.set(focusSelection(hit.mark.id));
-        else if (hit.mark.kind === "research-box") {
+        if (!hit) return;
+        if (hit.mark?.kind === "signal-box") { store.set(focusSignal(hit.mark.id)); return; }
+        if (hit.mark?.kind === "selection-box") { store.set(focusSelection(hit.mark.id)); return; }
+        if (hit.mark?.kind === "research-box") {
           // T-821: a collection mark selects its row in the Research panel (opened to show it).
           store.set(selectResearch(hit.mark.id));
           store.set(setResearchOpen(true));
+          return;
         }
+        // T-984: an annotation is drawn once, by `annotationQuads`, never as a `research-box` (see
+        // `researchBoxesFor`) — its own hit test still selects its Research row, the same behaviour
+        // a marker's box gets ("a mark clicked on the canvas selects its row", `research.ts`).
+        const anno = annotationAt(annotations, hit.pane.box, hit.pane.rect, p);
+        if (anno) { store.set(selectResearch(rowKey("annotation", anno.id))); store.set(setResearchOpen(true)); }
         // A measurement box has no focus target yet (T-821's collections panel is where a click
         // through to it belongs); a click on one does nothing rather than mis-focusing a selection.
       },
@@ -1286,7 +1392,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!region || !view) return;
         const label = normLabel(window.prompt("Label for this annotation box:", ""));
         const body = label ? boxRequest(region, label, view) : null;
-        if (body) void commitAnnotation(ctx, body).then(keepAnnotation);
+        if (body) void commitAnnotation(ctx, body).then(keepAnnotation(body));
       },
       onAnnotatePoint: (p, kind) => {
         const v = paneById(p.pane);
@@ -1294,7 +1400,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!v || !view) return;
         const q = clampToRect(v.rect, p.at);
         const label = normLabel(window.prompt(kind === "marker" ? "Label for this marker:" : "Text note:", kind === "marker" ? "marker" : ""));
-        if (label) void commitAnnotation(ctx, pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view)).then(keepAnnotation);
+        if (label) {
+          const body = pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view);
+          void commitAnnotation(ctx, body).then(keepAnnotation(body));
+        }
       },
       onMeasureDrag: (r) => {
         const region = r ? regionOf(r) : null;
@@ -1338,9 +1447,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // through `pressOffer` above — the same gate as the pane row's Retune.
     const pv = preview;
     const acts = paneActions(pv.view.panes, () => pv.activePane, (on) => pv.view.minimap.setFollowing(on),
-      // T-955: follow-live brings the pane's FREQUENCY back to the front end's own current window
-      // too, when one is known — the same `frequency.current` the retune-offer span already reads
-      // (`goToSpanHz`), never a device call.
+      // T-955: the FAB's states are relative to the TUNED window's live edge, and a press from
+      // anywhere else brings the pane there (frequency too, only if it does not overlap) — the same
+      // `frequency.current` the retune-offer span already reads (`goToSpanHz`), never a device call.
+      // NOTE for T-1006 (per-pane device): this reads the GLOBAL `frequency.current`, not the
+      // pane's own device's window.
       () => {
         const cur = store.get().navGrid.grid?.frequency?.current;
         return cur ? { centerHz: cur.center_hz, spanHz: cur.span_hz } : null;
@@ -1381,7 +1492,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        // T-955: a Go-to names a CENTRE (T-947), so "covered" is whether the tuned window holds the
+        // pane's centre — not whether it holds the whole viewport, which a pane zoomed out past the
+        // capture never is. Checked against `frequency.current` as well as the active windows, so a
+        // retune by anyone withdraws the offer the moment the navigation poll reports it (the
+        // explorer's 0428: "Retune to 162.2000 MHz" still painted with the radio at 162.2, then 144.6).
+        const pane = pv.view.panes.get(pv.activePane);
+        const cur = store.get().navGrid.grid?.frequency?.current ?? null;
+        const c = pane?.freq.centerHz ?? NaN;
+        const heldNow = !!pane && (coveringWindow(windows, c, c, pane.device) !== null
+          || (!!cur && Math.abs(c - cur.center_hz) <= cur.span_hz / 2));
+        if (!o || heldNow) { lastPaintedGoto = null; return null; }
         const wo = widthOfferNow(pv.activePane, gotoSpanHz());
         if (!wo) { lastPaintedGoto = null; return null; }
         lastPaintedGoto = wo;
@@ -1440,6 +1561,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
         isOpen: () => store.get().research.open,
         toggle: () => store.set(setResearchOpen(!store.get().research.open)),
       },
+      // T-1000: the per-pane chrome's name for the pane it acts on — the outline's own words.
+      activeName: () => activePaneName(pv.view.panes.list().map((x) => x.id), pv.activePane),
     };
     const setMode = (mode: RangeMode) => {
       preview?.setRangeMode(mode);
@@ -1455,6 +1578,45 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
+    // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
+    store.select((s) => {
+      const c = s.navGrid.grid?.frequency?.current;
+      return c ? `${c.center_hz}/${c.span_hz}` : "";
+    }, () => controls.tuningChanged());
+
+    // ---- the active pane, made visible (T-1000, docs/23 §10.7) ----
+    // Whatever made a pane active — a press, a right-click, a wheel, a split, a close, a key — the
+    // outline and every piece of chrome that names it move in the SAME call, not on the next frame
+    // or poll. A Go-to offer on screen described the previous pane's window, so it is withdrawn.
+    // Presentation only: changing the active pane moves no view and reaches no route.
+    const activeChanged = () => {
+      const f = pv.lastFrame;
+      const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : window.devicePixelRatio || 1;
+      // The last frame's PANE rectangles (its `views` also carry the map strip's, which is not a
+      // pane), when that frame drew the panes there are now; after a split or a close it did not, and
+      // the very next frame (the `dom` hook) places the outline instead.
+      const ids = new Set(pv.view.panes.list().map((x) => x.id));
+      const drawn = f ? f.views.filter((v) => ids.has(v.id)) : [];
+      if (drawn.length === ids.size && ids.has(pv.activePane)) placeActive(drawn, canvas.height, dpr);
+      controls.syncActive();
+      syncLayerControls();
+      renderFollow();
+      viewMoved();
+    };
+    pv.onActiveChange(activeChanged);
+    // The pane keys: `[` / `]` step through the panes, `1`-`9` pick one, `L` toggles Live on the
+    // active pane through the FAB's own press. `paneKeyIntent` refuses typing, modifiers and repeats.
+    document.addEventListener("keydown", (e) => {
+      const k = paneKeyIntent(e);
+      if (!k) return;
+      if (k.kind === "live") { e.preventDefault(); controls.toggleFollow(); return; }
+      const ids = pv.view.panes.list().map((x) => x.id);
+      const next = k.kind === "step" ? stepPane(ids, pv.activePane, k.step) : ids[k.n - 1] ?? null;
+      if (!next) return;
+      e.preventDefault();
+      pv.activePane = next;
+    });
 
     const topBar = document.querySelector<HTMLElement>(".app > .bar");
     const fit = () => {
@@ -1564,13 +1726,33 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // T-906: keyed on the whole request (its `seq`), so a second Go to the same centre with a
     // different span still moves the pane; a request that names a span restores it (snapped by the
     // pane model), view arithmetic only.
+    //
+    // T-999: the SAME request can also name a time window (`gotoTimeWindow`) — a past survey's
+    // capture time, from the drawer's "go to". Applied to the active pane exactly as `setWindow`
+    // (`surface/preview.ts`) does it elsewhere: span first via `zoomTime`'s relative factor, THEN
+    // `goTo`'s absolute centre, because `goTo` freezes the pane at whatever span it finds — asking
+    // for the centre before the span would freeze it at the OLD span and only then resize around it,
+    // landing off from where the row named. `goTo` itself freezes the pane (`live: false`), which is
+    // the point: the past-survey jump must stick, not be read back to `live` on the next frame. Doing
+    // this here, in the one place that already writes the pane from `nav`, is what makes the write
+    // stick — `mirror()` below publishes the pane's OWN (now-moved) window afterwards, so there is no
+    // separate `reviewAt` write for a later `mirror()` pass to overwrite.
     store.select((s) => s.nav, (nav) => {
       const p = preview;
       if (!p) return;
       const pane = p.view.panes.get(p.activePane);
-      const w = pane ? gotoWindow(nav, pane.freq.spanHz) : null;
-      if (!w) return;
-      p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
+      if (!pane) return;
+      const w = gotoWindow(nav, pane.freq.spanHz);
+      if (w) p.view.panes.setFreq(p.activePane, w.centerHz, w.spanHz);
+      const t = gotoTimeWindow(nav);
+      if (t) {
+        if (t.spanS !== null) {
+          const spanNs = t.spanS * S_TO_NS;
+          p.view.panes.zoomTime(p.activePane, spanNs / Math.max(1, pane.time.spanNs), 0.5);
+        }
+        p.view.panes.goTo(p.activePane, t.tS * S_TO_NS);
+      }
+      if (!w && !t) return;
       mirror();
     });
 

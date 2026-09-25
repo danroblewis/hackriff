@@ -205,6 +205,12 @@ board_sync_now(){
 # charged an attempt for app-trace's T-475 colour check, which main failed until the deflake landed).
 main_is_red(){
   MAIN_RED_WHAT=""
+  # A CHECK red (lint / ui-unit, TRIAGE_CHECK): the same check on main alone. Red there = main's, the MAIN_RED hold.
+  if [ -n "${TRIAGE_CHECK:-}" ]; then
+    log "TRIAGE: is main itself red? running just $TRIAGE_CHECK alone on main"
+    if ! check_probe >>"$LOG" 2>&1; then MAIN_RED_WHAT="just $TRIAGE_CHECK"; return 0; fi
+    log "TRIAGE: main is green on just $TRIAGE_CHECK -> not main's"; return 1
+  fi
   [ "${TRIAGE_KIND:-test}" = "test" ] || return 1
   if [ -n "${TRIAGE_FILTER:-}" ]; then
     log "TRIAGE: is main itself red? re-running the failing tests alone on main"
@@ -244,6 +250,9 @@ main_is_red(){
 # so a restart mid-bisect re-queues them (startup). A bisect that names NO culprit re-queues the batch first as
 # one batch (proven green, unprobed, then the last red subset) and isolates only when a later no-culprit red subset
 # shares a member (by tip) with the recorded one.
+# The probe for a CHECK red: exactly the gate suite that went red, over the whole workspace (as the merge gate runs
+# it - HK_GATE_CRATES empty is --workspace). `just lint` is fmt + clippy --all-targets + ruff, a compile check, no test run.
+check_probe(){ ( cd "$REPO" && HK_GATE_CRATES="" just "$TRIAGE_CHECK" ); }
 bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + these, 1 = green, 2 = gave up
   # The SAME re-run main_is_red just answered "green" with on base, so the only difference between
   # the two verdicts is the branches merged here - by the tips recorded before the bisect began.
@@ -255,7 +264,9 @@ bisect_red(){ # base branch=sha... -> 0 = the triaged tests are RED on base + th
       log "BISECT: ${t%%=*} does not merge onto $base with the others - giving up"; return 2
     fi
   done
-  if [ -n "${TRIAGE_FILTER:-}" ]; then
+  if [ -n "${TRIAGE_CHECK:-}" ]; then
+    check_probe >>"$LOG" 2>&1 || rc=0
+  elif [ -n "${TRIAGE_FILTER:-}" ]; then
     ( cd "$REPO" && cargo nextest run --workspace --no-tests=pass -E "$TRIAGE_FILTER" ) >>"$LOG" 2>&1 || rc=0
   else
     ( cd "$REPO" && cargo build -q -p hk-cli --bin hk && cd ui && npm run build ) >>"$LOG" 2>&1 \
@@ -647,6 +658,17 @@ ready_filter(){
     git -C "$REPO" rev-parse --verify "$b" >/dev/null 2>&1 || { log "SKIP $b: no such branch"; continue; }
     a=$(git -C "$REPO" rev-list --count "main..$b" 2>/dev/null || echo 0)
     [ "${a:-0}" -eq 0 ] && { log "SKIP $b: nothing ahead of main (already merged?)"; continue; }
+    # HELD FOR REVIEW (supervisor 2026-09-25 12:24, incident T-955): a queued branch awaiting a review verdict outside
+    # the runner stays queued and is never gated while $S/review-hold/<branch> exists - the coordinator writes it
+    # when it sends the branch to review and removes it after the verdict. At 12:20 T-955's tip moved (a conflict
+    # fix) while it waited for its Opus review; the moved tip re-gated and landed review-FAILED code.
+    if [ -e "$S/review-hold/$b" ]; then
+      if ! cmp -s "$S/review-hold/$b" "$S/review-hold/.said-$b"; then   # said once per marker text (a subshell: no variable survives)
+        log "REVIEW HOLD $b: $(head -c 160 "$S/review-hold/$b" | tr '\n' ' ')- stays queued, not gated, until $S/review-hold/$b is removed"
+        cp "$S/review-hold/$b" "$S/review-hold/.said-$b"
+      fi
+      echo "$b" >> "$S/pm-held"; continue
+    fi
     # THE PIPELINE MANAGER'S SCOPE CHECK (user, 2026-09-23 17:30: "a lot of changes is fine; not
     # weird changes that aren't warranted - stick to the directive"; hkpy.pmbudget, tested). A
     # task-pm-* branch merges only with a `Serves:` line (an experiment, an incident, a user ask,
@@ -793,7 +815,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   TRIAGE_KIND="test"
   # This triage's own reds only: at 10:47 on 2026-09-24 the MAIN-IS-RED check re-ran the previous
   # triage's Rust filter (an accepted flake) instead of the browser spec that had just gone red.
-  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; TRIAGE_ALONE_FIRST=0; FLAKE_PASSES=2; FLAKE_SOLO_S=0
+  TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT=""; TRIAGE_TESTS=""; TRIAGE_CHECK=""; TRIAGE_ALONE_FIRST=0; FLAKE_PASSES=2; FLAKE_SOLO_S=0
   TRIAGE_T0=$(date '+%Y-%m-%dT%H:%M:%S')   # the red's own time: flakes.py matches its record to it
   # The browser tier (ui/e2e/run.mjs) reports its reds on one summary line, not as nextest FAIL
   # lines: `e2e: 11/13 files passed in 662.5 s (backend 2.9 s); failed: fog-of-war.e2e.mjs, ...`.
@@ -824,6 +846,15 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   # 2026-09-24 a board-check red was announced as "lint/build/ui-unit", the wrong place to look.
   local py; py=$(tail -n +"$from" "$LOG" | sed -n -E 's/^(FAILED|ERROR) (tests\/[^ ]+).*/\2/p' | sort -u | tr '\n' ' ')
   TRIAGE_WHAT=${py:+"pytest red: ${py% }"}
+  # A red with no named test in `just lint` (fmt/clippy/ruff - a compile error) or `just test-ui` is a CHECK red:
+  # try_bulk bisects the batch by that check alone (bisect_red). 2026-09-25 12:48-13:07: seven batches in a row
+  # went red on clippy (t844 x t989 in classify.rs, t940's presence_intervals()) and were re-queued whole each time.
+  if [ -z "$tests" ] && [ -z "$py" ]; then
+    case "$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just ([a-z0-9-]+) took [0-9]+s \(exit [1-9][0-9]*\)$/\1/p' | tail -1)" in
+      lint) TRIAGE_CHECK=lint; TRIAGE_WHAT="just lint" ;;
+      test-ui) TRIAGE_CHECK=test-ui; TRIAGE_WHAT="just test-ui" ;;
+    esac
+  fi
   [ -z "$tests" ] && { TRIAGE_KIND="suite"; log "TRIAGE: no FAIL lines found (${TRIAGE_WHAT:-lint/build/ui-unit failure}) - not a flake candidate"; return 1; }
   filter=""; for t in $tests; do filter="${filter:+$filter | }test(${t##*::})"; done
   TRIAGE_FILTER="$filter"   # try_bulk re-runs the same set on main alone if this batch is red
@@ -903,6 +934,17 @@ flake_accept(){ # kind names gate_log_start_line tickets retry_cmd -> rc of the 
   return $rc
 }
 
+# SUITE_BROKEN: rewound, the batch back in order and held until the queue changes (a fix). try_bulk's own locals
+# (branches, gated_sig, tickets, base) - for a red no probe can split: no named test, or a CHECK bisect that gave up.
+suite_broken_hold(){
+  for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
+  printf '%s' "$gated_sig" > "$S/suite-broken"
+  log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
+  echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
+  notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued." "main+batch broken - fix needed"
+  if [ "$(git -C "$REPO" rev-parse HEAD)" = "$base" ]; then rm -f "$BULKMARK"; fi
+}
+
 try_bulk(){
   local branches=("$@") tickets="" b wt base after rc
   for b in "${branches[@]}"; do tickets="$tickets $(ticket_of "$b")"; done
@@ -975,7 +1017,7 @@ try_bulk(){
   if [ "$rc" -ne 0 ] && [ "$GATE_TIMED_OUT" = 1 ]; then
     # A timed-out gate proves nothing about any test: treat it as a suite-wide red - rewind,
     # re-queue the batch once, hold until the queue changes - and say so where a person looks.
-    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_WHAT="gate timed out"
+    TRIAGE_KIND="suite"; TRIAGE_FILTER=""; TRIAGE_SPECS=""; TRIAGE_CHECK=""; TRIAGE_WHAT="gate timed out"
     echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  GATE_TIMEOUT after ${GATE_TIMEOUT}s - killed; batch re-queued once" >> "$NEEDS"
   elif [ "$rc" -ne 0 ]; then flake_retry "$base" "$gate_line" "$tickets"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
@@ -1024,14 +1066,9 @@ try_bulk(){
       fi
       log "SUITE: no split (${#culprits[@]} red alone of ${#branches[@]}, or red on base) -> the batch is held as before"
     fi
-    if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
-      for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
-      printf '%s' "$gated_sig" > "$S/suite-broken"
-      log "BULK gate FAILED without a test FAIL (${TRIAGE_WHAT:-lint/build/ui-unit}) -> rewound to $base; batch re-queued in order, NOT isolated - main+batch needs a fix"
-      echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  SUITE_BROKEN - no test FAIL; ${TRIAGE_WHAT:-lint/build/ui-unit} red on main+batch; fix and queue the fix, the batch is re-queued behind it" >> "$NEEDS"
-      notify_coordinator "batch ($tickets) failed WITHOUT a test failure - ${TRIAGE_WHAT:-lint/build/ui-unit} is red on main+batch; fix that first, the batch is re-queued." "main+batch broken - fix needed"
-      rm -f "$BULKMARK"
-      return 0
+    # A CHECK red (just lint / just test-ui) over 2+ branches is not held whole: main_is_red, then bisect, below.
+    if [ "${TRIAGE_KIND:-test}" = "suite" ] && { [ -z "${TRIAGE_CHECK:-}" ] || [ "${#branches[@]}" -lt 2 ]; }; then
+      suite_broken_hold; return 0
     fi
     # IS MAIN ITSELF RED? Costs one scoped re-run on the rewound main; saves a gate per branch.
     if main_is_red; then
@@ -1045,11 +1082,13 @@ try_bulk(){
     fi
     # Only for a red that failed alone on its FIRST isolated run: one that passed alone and then
     # failed is flaky even alone, and a bisection over it would blame whichever branch it ended on.
-    if [ "${TRIAGE_KIND:-test}" = "test" ] && [ "${TRIAGE_ALONE_FIRST:-0}" = 1 ] \
-       && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; } && [ "${#branches[@]}" -ge 2 ]; then
+    # A CHECK red is deterministic (a compile error, not a load-sensitive test), so it bisects by the check itself.
+    if { { [ "${TRIAGE_KIND:-test}" = "test" ] && [ "${TRIAGE_ALONE_FIRST:-0}" = 1 ] \
+           && { [ -n "${TRIAGE_FILTER:-}" ] || [ -n "${TRIAGE_SPECS:-}" ]; }; } \
+         || { [ "${TRIAGE_KIND:-test}" = "suite" ] && [ -n "${TRIAGE_CHECK:-}" ]; }; } && [ "${#branches[@]}" -ge 2 ]; then
       # The bulk gate's own end line first, so hkpy.flow / cycletime close THIS gate here; the probes
       # below are not gates and print no `gate: … took` lines.
-      log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS}) alone (instead of ${#branches[@]} serial gates)"
+      log "BULK gate FAILED -> rewound to $base; the batch introduced it - bisecting before any isolate. BISECT: ${#branches[@]} branches, by $(echo ${TRIAGE_FILTER:-${TRIAGE_SPECS:-just ${TRIAGE_CHECK:-}}}) alone (instead of ${#branches[@]} serial gates)"
       local tips=("${gated[@]}") b culprit tip side=""
       culprit=$(bisect_culprit "$base" "${tips[@]}"); tip=${culprit#*=}; culprit=${culprit%%=*}
       # The single-branch path's main-side question (process): a spec failing alone on 2+ other
@@ -1061,9 +1100,9 @@ try_bulk(){
         { printf '%s\n' "${others[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
         rm -f "$S/isolate-remaining"
         record_attempt "$culprit" "$tip"
-        log "GATE FAILED $culprit (bisected: red ALONE twice on base + it, green on base: $(echo ${TRIAGE_FILTER:-$TRIAGE_SPECS})) -> abort + flag for AI; ${#others[@]} other(s) re-queued first as one batch"
+        log "GATE FAILED $culprit (bisected: red ALONE twice on base + it, green on base: $(echo ${TRIAGE_FILTER:-${TRIAGE_SPECS:-just ${TRIAGE_CHECK:-}}})) -> abort + flag for AI; ${#others[@]} other(s) re-queued first as one batch"
         echo "$(date '+%m-%d %H:%M')  $culprit  $(ticket_of "$culprit")  GATE_FAIL" >> "$NEEDS"
-        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (bisected from the batch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} | cut -c1-200)" "gate failed - fix run"
+        notify_coordinator "$(ticket_of "$culprit") ($culprit) FAILED the merge gate (bisected from the batch): $(echo ${TRIAGE_SPECS:-} ${TRIAGE_FILTER:-} ${TRIAGE_CHECK:+just $TRIAGE_CHECK} | cut -c1-200)" "gate failed - fix run"
         rm -f "$BULKMARK"
         return 0
       fi
@@ -1078,8 +1117,12 @@ try_bulk(){
       local reds greens pg="" up="" rs="" t again="" why="no single branch confirmed red alone"
       [ -n "$side" ] && why="red alone, but $(echo $side) is main-side"
       grep -q '^gave-up' "$S/bisect-facts" 2>/dev/null && why="the bisect gave up"
+      # A CHECK red the bisect could not probe through is still main+batch broken: held as before, never re-queued blind.
+      if [ -n "${TRIAGE_CHECK:-}" ] && [ "$why" = "the bisect gave up" ]; then suite_broken_hold; return 0; fi
       reds=$(sed -n 's/^red //p' "$S/bisect-facts" 2>/dev/null | tail -1); greens=$(sed -n 's/^green //p' "$S/bisect-facts" 2>/dev/null)
       for t in $reds; do grep -qxF "$t" "$S/bisect-no-culprit" 2>/dev/null && again=1; done
+      # Each half green, the whole red: a semantic conflict between branches (t844 x t989, 2026-09-25) - name them.
+      [ -n "${TRIAGE_CHECK:-}" ] && echo "$(date '+%m-%d %H:%M')  (bulk)  $tickets  CHECK_PAIR - just $TRIAGE_CHECK red on base + $(for t in $reds; do printf '%s ' "${t%%=*}"; done)together, no branch red alone: a conflict inside that set; $([ -n "$again" ] && echo "isolating now" || echo "re-queued once, the next such red isolates")" >> "$NEEDS"
       if [ -z "$again" ]; then
         for b in "${branches[@]}"; do
           if printf '%s\n' ${reds} | grep -q "^$b="; then rs="$rs $b"
