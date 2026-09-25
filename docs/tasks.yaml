@@ -29637,7 +29637,7 @@ tasks:
   - id: T-1019
     milestone: MLIVE
     title: "Tile body still carries three 65 536-element JSON grid planes (coverage duplicated per cell, frames, occupancy_max): compact them like max_db f16 (850 kB -> ~200 kB, 12 ms per-tile floor -> ~3 ms)"
-    status: todo
+    status: done
     priority: medium
     deps: []
     parallel_group: TILE-WIRE
@@ -29660,6 +29660,7 @@ tasks:
       Commits: 62c3c1fa
       Observed, not chased: The f16 body measured through the route on the acceptance fixture is 922 024 B and compact 466 840 B, a 2.0x cut rather than the ticket's estimated 850 -> ~200 kB. The residual is base64'd binary16: max_db and occupancy_max are 174 764 B each by construction (2 B/cell, 4/3 for base64) and the ticket's ~200 kB target is only reachable by DROPPING occupancy_max (a real per-cell measurement, so not mine to drop) or by serving one binary body with no base64. build_ms - the thing the review said wall clock tracks - did hit the predicted ~4x (6.54 -> 1.57 ms on a full grid), so the latency goal is met; a further byte-level step would be a binary tile body, a separate ticket. | crates/hk-api/src/http.rs:1096 still quotes '856 178 B ?planes=f16' as the gzip-threshold rationale; that measurement is from T-533 and is unaffected by this change, so the comment was left alone.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: f8006f89
   - id: T-1020
     milestone: MLIVE
     title: "Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache"
