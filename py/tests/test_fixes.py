@@ -161,7 +161,7 @@ def test_runner_logs_the_class_and_records_it(tmp_path, monkeypatch):
 def test_a_review_fix_names_the_finding_and_the_log_caps_it_at_120(tmp_path, monkeypatch):
     R = _runner(tmp_path, monkeypatch)
     seen = {}
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt: seen.update(c=c) or c)
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": seen.update(c=c) or c)
     R.launch_fix({"ticket": "T-1", "branch": "task-t1", "wt": "/tmp", "session_id": "s", "kind": "work", "started": 0},
                  "REVIEW_FAIL VERDICT: FAIL " + "x" * 300 + " (full review: /r.json)")
     assert seen["c"]["fix_reason_class"] == "REVIEW_FAIL" and seen["c"]["fix_reason"] == "x" * 200

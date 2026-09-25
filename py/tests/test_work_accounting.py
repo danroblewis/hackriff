@@ -275,7 +275,7 @@ def test_fixes_merge_the_gated_base_while_a_batch_is_gating(tmp_path, monkeypatc
     monkeypatch.setattr(R, "S", str(tmp_path))
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     seen = {}
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt: seen.update(n=n, prompt=prompt) or c)
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, fail_line="": seen.update(n=n, prompt=prompt) or c)
     R.launch_fix(_claim("T-613", "task-t613"), "09-23 15:26  task-t613  T-613  CONFLICT(skipped from bulk)")
     assert seen["n"] == 1 and "no longer merges cleanly" in seen["prompt"]
     assert "git merge eab4bfae" in seen["prompt"] and "git checkout eab4bfae -- docs/tasks.yaml" in seen["prompt"]
@@ -817,7 +817,7 @@ def test_a_killed_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkey
     ran, and a later real gate failure would get one fix attempt instead of two."""
     monkeypatch.setattr(R, "merge_target", lambda: "main")
     runs = []
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running", fix_attempts=n))
     c = {"ticket": "T-802", "branch": "task-t802", "wt": str(tmp_path), "session_id": "abc", "fix_attempts": 1, "kind": "work"}
     r = R.launch_fix(c, "KILLED your run ended after 40 min with no result")
     (n, prompt, out_name), = runs
@@ -1296,7 +1296,7 @@ def test_a_timed_out_worker_is_resumed_once_to_wrap_up(killed_run, monkeypatch):
 
 def test_the_wrap_up_resume_has_its_own_prompt_and_spends_no_fix_attempt(df, monkeypatch):
     runs = []
-    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None: runs.append((n, prompt, out_name)) or dict(c, state="running"))
+    monkeypatch.setattr(R, "_run_fix", lambda c, n, prompt, out_name=None, fail_line="": runs.append((n, prompt, out_name)) or dict(c, state="running"))
     monkeypatch.setattr(R, "gate_holds_dispatch", lambda: False)
     c = R.launch_fix({"ticket": "T-9", "branch": "task-t9", "wt": "/w/t9", "session_id": "s", "fix_attempts": 0},
                      "TIMEOUT your run reached the 180-min limit and was stopped")
@@ -1315,3 +1315,95 @@ def test_a_stopped_runs_group_is_seen_gone_though_its_leader_is_our_unreaped_chi
     R.os.killpg(pid, signal.SIGTERM)
     t0 = time.time()
     assert R._gone(pid, wait_s=10) and time.time() - t0 < 5
+
+
+@pytest.fixture
+def remote_host(tmp_path, monkeypatch):
+    """A 'remote' host that is this machine: remote commands run in a local bash (with a setsid shim - macOS has
+    none), and the host's roots are distinct from the local ones so the path translation is exercised."""
+    import os
+    local_ops, local_repo, far = tmp_path / "ops", tmp_path / "repo", tmp_path / "far"
+    for d in (local_ops / "work", local_repo, far / "ops" / "work", far / "repo"):
+        d.mkdir(parents=True)
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    (shim / "setsid").write_text("#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n")
+    (shim / "setsid").chmod(0o755)
+    # the host has GNU tee (-p); this machine may have BSD tee, which has none
+    (shim / "tee").write_text('#!/bin/bash\nargs=(); for a in "$@"; do [ "$a" = -p ] || args+=("$a"); done; exec /usr/bin/tee "${args[@]}"\n')
+    (shim / "tee").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+    monkeypatch.setattr(R, "S", str(local_ops))
+    monkeypatch.setattr(R, "REPO", str(local_repo))
+    monkeypatch.setattr(R, "WORKDIR", str(local_ops / "work"))
+    monkeypatch.setattr(R, "LOG", str(tmp_path / "log"))
+    monkeypatch.setattr(R, "HOSTS_FILE", str(local_ops / "hosts.json"))
+    (local_ops / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": str(far / "repo"), "ops": str(far / "ops")}}))
+
+    def remote_sh(host, cmd, timeout=120, input=None):
+        r = subprocess.run(["bash", "-c", R.to_remote(host, cmd)], input=input, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    monkeypatch.setattr(R, "remote_sh", remote_sh)
+    return local_ops, local_repo, far
+
+
+def test_a_remote_run_records_its_group_and_tees_its_streams_on_the_host(remote_host):
+    """User, 2026-09-24 23:35: worker agents on a second computer. The wrapper runs the worker in its own session,
+    records the group, and keeps a complete copy of out/run.log on the host - a dropped connection loses nothing."""
+    local_ops, local_repo, far = remote_host
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(f"{local_repo}", "task-t9", "echo RESULT; echo progress >&2; exit 3",
+                                              {"HK_WORKER": "1", "A": "x y"}, d, "out.json"))
+    r = subprocess.run(["bash", "-c", w], capture_output=True, text=True, timeout=30)
+    fd = far / "ops" / "work" / "T-9"
+    assert r.returncode == 3 and "RESULT" in r.stdout and "progress" in r.stderr     # streamed to this Mac
+    assert (fd / "out.json").read_text().strip() == "RESULT" and "progress" in (fd / "run.log").read_text()
+    assert not (fd / "remote.pgid").exists()          # removed when the run ends: a later stop never hits a recycled group
+
+
+def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_host):
+    """Review FAIL 2026-09-24: a hang-up is not a stop. The group recorded on the host is asked about and stopped."""
+    local_ops, local_repo, far = remote_host
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    d = f"{local_ops}/work/T-9"
+    w = R.to_remote("node2", R.remote_wrapper(str(local_repo), "task-t9", "exec sleep 60", {}, d, "out.json"))
+    p = subprocess.Popen(["bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(50):
+        if (far / "ops" / "work" / "T-9" / "remote.pgid").exists():
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)
+    assert R.remote_run_state(c) == "running"
+    assert R.remote_stop(c, wait_s=5)
+    assert R.remote_run_state(c) == "gone"
+    p.wait(timeout=10)
+
+
+def test_the_host_unreachable_or_a_failed_sync_holds_the_claim(remote_host, monkeypatch):
+    local_ops, local_repo, far = remote_host
+    monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (255, "ssh: connect timed out"))
+    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo)}
+    assert R.remote_run_state(c) == "unknown" and not R.remote_stop(c, wait_s=1)
+    seen = []
+    monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
+    monkeypatch.setattr(R.subprocess, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1, b"", b"no route"))
+    (local_ops / "work" / "T-9").mkdir(parents=True, exist_ok=True)
+    assert R.sync_back(c) is False and [a[2] for a in seen] == ["REMOTE_SYNC"]
+    assert R.sync_back(c) is False and len(seen) == 1                                 # warned once, retried each tick
+
+
+def test_paths_cross_ssh_as_the_hosts_own(remote_host):
+    local_ops, local_repo, far = remote_host
+    argv = R.ssh_argv("node2", f"cat {local_ops}/work/T-9/handback.json; ls {local_repo}/.claude/worktrees/t9")
+    assert argv[0] == "ssh" and "BatchMode=yes" in argv and argv[-2] == "u@h"
+    assert f"{far}/ops/work/T-9/handback.json" in argv[-1] and f"{far}/repo/.claude/worktrees/t9" in argv[-1]
+    assert str(local_ops) not in argv[-1].replace(str(far), "")
+
+
+def test_only_a_ticket_named_by_hand_goes_remote_in_stage_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "HOSTS_FILE", str(tmp_path / "hosts.json"))
+    monkeypatch.setenv("WORK_REMOTE_TICKETS", "T-9, T-11")
+    assert R.host_for({"id": "T-9"}) is None                                          # no host configured
+    (tmp_path / "hosts.json").write_text(json.dumps({"node2": {"ssh": "u@h", "repo": "/r", "ops": "/o"}}))
+    assert R.host_for({"id": "T-9"}) == "node2" and R.host_for({"id": "T-11"}) == "node2"
+    assert R.host_for({"id": "T-10"}) is None
