@@ -1475,3 +1475,20 @@ def test_the_remote_pass_launches_one_per_host_per_tick_and_its_claims_are_saved
     claims = {}
     assert R.dispatch_remote(claims, dry=False) is True
     assert launched == [("T-21", "node2")] and claims["T-21"]["state"] == "running"
+
+
+def test_a_new_task_branch_starts_from_the_gated_base_while_a_batch_gates(tmp_path, monkeypatch):
+    """2026-09-25 00:31: T-567 was cut from main while the T-577/T-915 batch gated, carrying provisional merges."""
+    monkeypatch.setattr(R, "BULKMARK", str(tmp_path / "bulk-in-progress"))
+    (tmp_path / "bulk-in-progress").write_text("base=gatedbase123\nbranches=task-t1\n")
+    calls = []
+
+    def sh(args, cwd=R.REPO, timeout=120, check=False):
+        calls.append(args)
+        if args[:3] == ["git", "worktree", "add"]:
+            raise RuntimeError("stop here")                  # only the branch point is under test
+        return ""
+    monkeypatch.setattr(R, "sh", sh)
+    with pytest.raises(RuntimeError):
+        R.launch({"id": "T-9", "model": "opus"}, dry=False)
+    assert calls[-1][:3] == ["git", "worktree", "add"] and calls[-1][-1] == "gatedbase123"

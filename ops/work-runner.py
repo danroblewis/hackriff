@@ -661,7 +661,9 @@ def launch(t, dry, host=None):
         else:
             sh(["git", "worktree", "add", wt, branch], check=True)
     else:
-        sh(["git", "worktree", "add", wt, "-b", branch, "main"], check=True)
+        # From the GATED base, never a batch still gating on main (2026-09-25 00:31: T-567 was cut from main while
+        # the T-577/T-915 batch gated, so its branch carried those provisional merges to node2).
+        sh(["git", "worktree", "add", wt, "-b", branch, merge_target()], check=True)
     d = f"{WORKDIR}/{tid}"
     os.makedirs(d, exist_ok=True)
     brief = brief_for(t, wt, branch)
