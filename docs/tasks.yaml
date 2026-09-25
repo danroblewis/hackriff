@@ -27899,7 +27899,7 @@ tasks:
   - id: T-939
     milestone: MLIVE
     title: At 20 Msps the detect reader loses 3.1 G samples (39 overruns/4 min) and the live waterfall rows go empty
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: PIPE-DETECT-RT
@@ -27926,6 +27926,7 @@ tasks:
       Observed, not chased: LATENT ON MAIN, fixed in passing and named here: cpu_ns (ReaderCounters/SourceCounters, T-510) has always been an elapsed-time counter under an _ns name and would trip every_serialized_time_declares_its_unit the moment a swept run accumulates one CPU-second in a reader. It is exempted with the T-939 counters rather than left to fail for the next agent. | MEASURED, out of scope: the per-frame detection stage is 72 % of the reader's cost (21.6 of 30.1 ns/sample; ~700-900 us per 4096-bin frame at 488 frames/s), of which the floor tracker is 11.4 ns/sample. That is the lever that would raise the ceiling further on a slower box (the ticket's 'bound per-frame work'); it is core_interface DSP with detection thresholds attached and wants its own ticket with a bit-identity harness. | NOT chased because not observed: I suspected the clip scan (one VecDeque push per clipped sample) would blow up on a clipping 8-bit front end, and measured it - a louder scene moved clip_ns only 1.28 -> 1.72 ns/sample with no loss of throughput. No evidence of a pathology, so no ticket. | The honest mark for a shed interval today is the counters (readers.detect.shed_samples / shed_events in /api/status and the run summary) plus a log line on the first shed. The natural home is the coverage map's existing Analysis::Excluded span (hk-store, T-595) as a TIME-sliced span rather than the DC notch's frequency-sliced one; that needs a DwellRecord schema field in hk-model plus a fold in spans_from_records and touches /api/coverage's rasteriser - a ticket of its own.
       Use cases: AWARE-042, AWARE-044
       Resources: 5 CPU-s, peak 0.3 GB
+    commit: 6e13b289
   - id: T-940
     milestone: M2-hardening
     title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
