@@ -127,7 +127,7 @@ pub fn check(word: u32) -> Option<Checked> {
     Some(Checked {
         word,
         corrected: fix.count_ones() as u8,
-        parity_ok: word.count_ones().is_multiple_of(2),
+        parity_ok: word.count_ones() % 2 == 0,
     })
 }
 

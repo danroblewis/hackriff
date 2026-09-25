@@ -119,7 +119,12 @@ struct Group {
     from: u64,
 }
 
-fn add_member(groups: &mut Vec<Group>, m: &MemberBox, gap: u64, missed: &std::sync::atomic::AtomicU64) {
+fn add_member(
+    groups: &mut Vec<Group>,
+    m: &MemberBox,
+    gap: u64,
+    missed: &std::sync::atomic::AtomicU64,
+) {
     let (s, e) = (m.samples.start, m.samples.end);
     if let Some(g) = groups
         .iter_mut()
@@ -508,7 +513,10 @@ fn decode_span(
             continue;
         }
         let source = first + f.marker_sample * chan.spo;
-        if found.iter().any(|x| (x.source - source).abs() < 4.0 * symbol) {
+        if found
+            .iter()
+            .any(|x| (x.source - source).abs() < 4.0 * symbol)
+        {
             continue;
         }
         let frame_end = source + (flex::frame::FRAME_S - 0.02) * shared.fs;
@@ -560,7 +568,10 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 /// The Demodulation, Decodes and decoder evidence for a batch of frames (module docs).
 fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, batch: &[Found]) {
     let c = &shared.counters.chains;
-    let measured: Vec<&Found> = batch.iter().filter(|f| f.frame.measured.is_some()).collect();
+    let measured: Vec<&Found> = batch
+        .iter()
+        .filter(|f| f.frame.measured.is_some())
+        .collect();
     let (f_lo, f_hi) = (cand.f_lo_hz, cand.f_hi_hz);
     let class = classify_emitter(
         &shared.cfg.settings.classify,
@@ -583,7 +594,11 @@ fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, 
     };
     let words: usize = batch.iter().map(|f| f.frame.words()).sum();
     let clean: usize = batch.iter().map(|f| f.frame.clean_words()).sum();
-    let t0 = batch.iter().map(|f| f.t).min().unwrap_or(Timestamp::UNIX_EPOCH);
+    let t0 = batch
+        .iter()
+        .map(|f| f.t)
+        .min()
+        .unwrap_or(Timestamp::UNIX_EPOCH);
     let t1 = batch
         .iter()
         .map(|f| f.t)
@@ -616,6 +631,9 @@ fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, 
         demod_version: FLEX_DECODER_VERSION.into(),
     };
     let mut repo = shared.repo();
+    // What the run summary reports (`decodes`, `CRC-valid`, `content withheld`): every Decode
+    // row written, frames and pages alike, and which of them carried their own check.
+    let (mut decodes, mut crc_valid, mut withheld) = (0u64, 0u64, 0u64);
     let result = (|| -> Result<(), hk_model::RepoError> {
         repo.insert_demodulation(&demod)?;
         for f in batch {
@@ -672,6 +690,8 @@ fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, 
                 t: f.t,
                 provenance: None,
             })?;
+            decodes += 1;
+            crc_valid += 1;
             for p in fr.phases.iter().flat_map(|p| &p.pages) {
                 repo.insert_decode(&Decode {
                     id: DecodeId::new(),
@@ -704,6 +724,9 @@ fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, 
                     t: f.t,
                     provenance: None,
                 })?;
+                decodes += 1;
+                crc_valid += u64::from(p.complete);
+                withheld += u64::from(p.text.is_some() && !class.permits_content());
             }
         }
         crate::family::record_decoder_evidence(&mut repo, emitter, FLEX_DECODER_ID, 1.0, t1)?;
@@ -711,7 +734,9 @@ fn write(shared: &Shared, emitter: EmitterId, track: TrackId, cand: &Candidate, 
     })();
     match result {
         Ok(()) => {
-            add(&c.decodes, batch.len() as u64);
+            add(&c.decodes, decodes);
+            add(&c.crc_valid, crc_valid);
+            add(&c.content_withheld, withheld);
             add(&c.demodulations, 1);
             let mut inv = shared
                 .inventory

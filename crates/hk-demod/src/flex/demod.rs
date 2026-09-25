@@ -81,7 +81,10 @@ pub struct Hypothesis {
 impl Hypothesis {
     /// Rank key: explaining every phase first, then clean codewords.
     fn score(&self) -> (bool, usize) {
-        (self.dead_phases == 0 && self.live_phases > 0, self.clean_words)
+        (
+            self.dead_phases == 0 && self.live_phases > 0,
+            self.clean_words,
+        )
     }
 }
 
@@ -218,7 +221,9 @@ pub fn decode(samples: &[Complex32], fs: f64) -> Result<FlexReport, FlexError> {
         fi.push(f64::from((w[1] * w[0].conj()).arg()) * k);
     }
     let power = moving_average(
-        &x.iter().map(|v| f64::from(v.norm_sqr())).collect::<Vec<_>>(),
+        &x.iter()
+            .map(|v| f64::from(v.norm_sqr()))
+            .collect::<Vec<_>>(),
         sps.round() as usize,
     );
     let y = moving_average(&fi, sps.round() as usize);

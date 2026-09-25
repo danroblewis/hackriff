@@ -63,6 +63,26 @@ each sync, not 4 — recorded as a **disagreement** in the fixture's truth and `
 burst is a genuinely hard level-count case in 12 s of mostly-noise air; the disagreement is honest,
 not a bug being hidden.
 
+**Settled by the decoder (T-950): every channel's data is 4-level.** `hk_demod::flex` decodes all
+six syncs in this clip as frames whose frame information word is BCH(31,21)-valid, and at each it
+re-slices the frame's data under every (rate, level-count) hypothesis FLEX defines and keeps the
+one whose codewords check. The frame information word's own mode declaration and that measurement
+agree at every frame, and the level choice was decisive at every frame:
+
+| Channel | Frames | Declared / measured | Clean data codewords |
+|---|---|---|---|
+| 929.6084 MHz | 3 (cycle 8, frames 7, 8, 13) | 3200 Bd 4-level (6400 bit/s) | 61/64, 14/16, 62/64 |
+| 929.9331 MHz | 1 (frame 12) | 1600 Bd 4-level (3200 bit/s) | 16/16 |
+| 931.1580 MHz | 2 (frames 10, 11) | 3200 Bd 4-level (6400 bit/s) | 170/176, 15/16 |
+
+Outer deviation measured 4.48-4.57 kHz on all three (FLEX: +/-4.8 kHz). So the explorer was right
+at 929.6084 and 929.9331 MHz and wrong at 931.1580 MHz, and the oracle's 1-2 levels were the
+**header**: sync-1 and the frame information word are always 2-level at 1600 Bd, a 2 s re-slice
+after a sync on a channel that sends one or two 160 ms blocks is mostly header and idle, and a
+2-level histogram there is what a 4-level FLEX frame looks like. The truth annotations are left as
+T-949 wrote them (the acceptance member `captured_flex` asserts the level count the codewords
+chose, not either claim); this paragraph is the resolution.
+
 A fourth FLEX channel, 931.7331 MHz, was active in the explorer's wider 30 s live-detection window
 but is idle in this 12 s clip (`hackriff:truth.paging.explorer_claim`, scenario annotation's
 `not_in_clip_but_seen`) — recorded for context, not annotated as an emission since there is nothing

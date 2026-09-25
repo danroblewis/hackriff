@@ -345,8 +345,7 @@ pub fn parse_phase(letter: char, words: &[Option<Checked>]) -> Phase {
             } else {
                 (viw >> 14 & 0x7F) as usize
             };
-            let (text, complete, message_words) =
-                message(words, kind, long_address, j, mw1, len);
+            let (text, complete, message_words) = message(words, kind, long_address, j, mw1, len);
             phase.pages.push(Page {
                 phase: letter,
                 capcode,
@@ -546,7 +545,13 @@ mod tests {
         }
         bits.extend((0..4).map(|k| 0xCu32 >> k & 1));
         let word = |b: &[u32]| b.iter().enumerate().fold(0u32, |a, (k, v)| a | v << k);
-        let data = [biw, 555_555 + 0x8000, viw, word(&bits[..21]), word(&bits[21..42])];
+        let data = [
+            biw,
+            555_555 + 0x8000,
+            viw,
+            word(&bits[..21]),
+            word(&bits[21..42]),
+        ];
         let p = parse_phase('A', &phase_of(&data));
         assert_eq!(p.pages[0].kind, PageKind::Numeric);
         assert_eq!(p.pages[0].capcode, 555_555);

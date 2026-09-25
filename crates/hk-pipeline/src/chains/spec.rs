@@ -593,8 +593,7 @@ impl ChainSpec {
                     return Err("fsk-frames must not carry a record node".into());
                 }
                 // A FLEX frame is 1.875 s; a segment must hold one plus its overlap.
-                if !(*pad_s >= 0.0 && *segment_s >= 4.0 && *retain_s >= *segment_s + 2.0 * *pad_s)
-                {
+                if !(*pad_s >= 0.0 && *segment_s >= 4.0 && *retain_s >= *segment_s + 2.0 * *pad_s) {
                     return Err(
                         "fsk-frames needs pad_s >= 0, segment_s >= 4 and retain_s >= segment_s + \
                          2 pad_s"

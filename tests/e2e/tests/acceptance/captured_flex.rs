@@ -304,7 +304,11 @@ fn a_each_flex_channel_is_one_burst_region_found_blind() {
             ));
         }
     }
-    assert!(failures.is_empty(), "[{T950}] (1) DETECTION:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "[{T950}] (1) DETECTION:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -325,7 +329,10 @@ fn b_fsk_rate_levels_and_deviation_are_estimated() {
     let mut failures = Vec::new();
     for ch in run.channels() {
         let f = ch.center_hz();
-        let Some(row) = run.rows_near(f).into_iter().find(|r| !r["estimated_params"].is_null())
+        let Some(row) = run
+            .rows_near(f)
+            .into_iter()
+            .find(|r| !r["estimated_params"].is_null())
         else {
             failures.push(format!(
                 "{:.4} MHz: no emitter carries estimated_params (all null): nothing measured the \
@@ -385,7 +392,11 @@ fn b_fsk_rate_levels_and_deviation_are_estimated() {
             ));
         }
     }
-    assert!(failures.is_empty(), "[{T950}] (2) PARAMETERS:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "[{T950}] (2) PARAMETERS:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -421,7 +432,11 @@ fn c_the_flex_chain_is_chosen_automatically() {
             ));
         }
     }
-    assert!(failures.is_empty(), "[{T950}] (3) AUTO-SELECTION:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "[{T950}] (3) AUTO-SELECTION:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -505,7 +520,11 @@ fn d_every_sync_is_a_frame_and_its_words_are_bch_valid() {
             }
         }
     }
-    assert!(failures.is_empty(), "[{T950}] (4) FRAMES:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "[{T950}] (4) FRAMES:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -569,5 +588,9 @@ fn e_a_paging_explanation_ranks_in_the_top_k() {
             ));
         }
     }
-    assert!(failures.is_empty(), "[{T950}] (5) EXPLANATION:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "[{T950}] (5) EXPLANATION:\n{}",
+        failures.join("\n")
+    );
 }

@@ -102,7 +102,14 @@ fn synth(s: &Scene) -> Vec<Complex32> {
     let fiw_data = with_checksum(u32::from(s.fiw.0) << 4 | u32::from(s.fiw.1) << 8);
     let fiw = encode(fiw_data);
     for j in 0..32 {
-        freqs.push((if fiw >> j & 1 == 1 { OUTER_HZ } else { -OUTER_HZ }, hb));
+        freqs.push((
+            if fiw >> j & 1 == 1 {
+                OUTER_HZ
+            } else {
+                -OUTER_HZ
+            },
+            hb,
+        ));
     }
     // Sync-2: 25 ms of alternation at the data rate.
     let db = 1.0 / f64::from(s.baud);
@@ -124,7 +131,7 @@ fn synth(s: &Scene) -> Vec<Complex32> {
             _ => -OUTER_HZ,
         }
     };
-    let n = (s.blocks_sent * frame::BLOCK_BITS) as usize;
+    let n = s.blocks_sent * frame::BLOCK_BITS;
     for i in 0..n {
         if s.baud == 1600 {
             freqs.push((level(a[i], b[i]), db));
@@ -199,7 +206,11 @@ fn check_scene(s: &Scene) {
     let phases = if s.baud == 1600 { 1 } else { 2 } * if s.levels == 4 { 2 } else { 1 };
     assert_eq!(m.live_phases, phases);
     assert_eq!(m.words, phases * s.blocks_sent * 8);
-    assert_eq!(m.valid_words, m.words, "every on-air word checks: {:?}", f.phases);
+    assert_eq!(
+        m.valid_words, m.words,
+        "every on-air word checks: {:?}",
+        f.phases
+    );
     assert_eq!(m.clean_words, m.words, "and cleanly: {:?}", f.phases);
     assert!(f.levels_decisive, "{:?}", f.hypotheses);
     assert!(
@@ -217,9 +228,17 @@ fn check_scene(s: &Scene) {
         assert_eq!((c.capcode, c.text.as_deref()), (765_432, Some("HELLO")));
     }
     if s.levels == 4 {
-        assert!(f.inner_fraction > 0.02, "inner pair used: {}", f.inner_fraction);
+        assert!(
+            f.inner_fraction > 0.02,
+            "inner pair used: {}",
+            f.inner_fraction
+        );
     } else {
-        assert!(f.inner_fraction < 0.02, "no inner pair: {}", f.inner_fraction);
+        assert!(
+            f.inner_fraction < 0.02,
+            "no inner pair: {}",
+            f.inner_fraction
+        );
     }
 }
 

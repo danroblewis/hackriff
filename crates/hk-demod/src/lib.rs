@@ -36,10 +36,10 @@ pub mod audio;
 /// Streaming FIR decimator, discriminator and de-emphasis (public for the decoder-workbench
 /// blocks, ADR-0011 §1.6).
 pub mod dsp;
-/// C20 2-FSK/GFSK demodulation, prior-led trials, framed records and bits streams (T-013).
-pub mod fsk;
 /// FLEX paging: 2/4-level FSK frames, BCH(31,21), interleave and pages (T-950).
 pub mod flex;
+/// C20 2-FSK/GFSK demodulation, prior-led trials, framed records and bits streams (T-013).
+pub mod fsk;
 pub mod mode;
 pub mod pilot;
 pub mod rds;
