@@ -26480,7 +26480,8 @@ tasks:
   - id: T-891
     milestone: M5
     title: "M5 HF/VLF: the accessory-fed source in hk-core (+ mock) and the pipeline/API wiring that makes T-277's VLF analyses reachable (SPACE-001, SPACE-041, PROP-019)"
-    status: todo
+    status: in-progress
+    branch: task-t891
     priority: normal
     deps:
     - T-277
@@ -26666,7 +26667,8 @@ tasks:
   - id: T-898
     milestone: MMAP
     title: Retune history drawn as a traced directions-style path per device, from the recorded tune intervals (user P2)
-    status: todo
+    status: in-progress
+    branch: task-t898
     priority: normal
     deps:
     - T-897
@@ -27055,7 +27057,8 @@ tasks:
   - id: T-913
     milestone: M2-hardening
     title: "Detection retention follow-ups: on_air double count, rollup f-extent vs per-frame OBW, startup index build, periodic count(*), writer lock-wait measurement, WAL peak, 20 Msps fixture metas (T-904 review)"
-    status: todo
+    status: in-progress
+    branch: task-t913
     priority: normal
     deps:
     - T-904
@@ -27134,7 +27137,8 @@ tasks:
   - id: T-916
     milestone: MLIVE
     title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
-    status: todo
+    status: in-progress
+    branch: task-t916
     priority: normal
     deps:
     - T-911
@@ -27154,7 +27158,8 @@ tasks:
   - id: T-917
     milestone: M2-hardening
     title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"
-    status: todo
+    status: in-progress
+    branch: task-t917
     priority: normal
     deps: []
     parallel_group: PIPE
