@@ -90,6 +90,41 @@ export function fmtRulerClock(tNs: number, stepNs: number): string {
   return `${stepNs < 1e9 ? iso.slice(11, 23) : iso.slice(11, 19)}Z`;
 }
 
+/** The absolute capture instant in the viewer's LOCAL time, `HH:MM:SS` (T-998). Derived from the
+ * capture-time ns the pane's mapping produced — never from `Date.now()`. */
+export function fmtRulerLocal(tNs: number): string {
+  const d = new Date(tNs / 1e6);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** How the time ruler words its marks (T-998): "seconds ago" or local clock. Per viewer. */
+export type TimeLabelMode = "relative" | "absolute";
+const TIME_MODE_KEY = "hk-hud-time-labels";
+let timeMode: TimeLabelMode | null = null;
+type Listener = (m: TimeLabelMode) => void;
+const timeModeListeners = new Set<Listener>();
+
+export function getTimeLabelMode(): TimeLabelMode {
+  if (timeMode === null) {
+    let v: string | null = null;
+    try { v = localStorage.getItem(TIME_MODE_KEY); } catch { /* storage unavailable */ }
+    timeMode = v === "absolute" ? "absolute" : "relative";
+  }
+  return timeMode;
+}
+
+export function setTimeLabelMode(m: TimeLabelMode): void {
+  timeMode = m;
+  try { localStorage.setItem(TIME_MODE_KEY, m); } catch { /* storage unavailable */ }
+  for (const l of timeModeListeners) l(m);
+}
+
+export function onTimeLabelMode(l: Listener): () => void {
+  timeModeListeners.add(l);
+  return () => { timeModeListeners.delete(l); };
+}
+
 /** Marks at multiples of `step` inside `[lo, hi]`, ends inclusive to within `eps`. */
 function multiples(lo: number, hi: number, step: number): number[] {
   const eps = step * 1e-6;
@@ -204,7 +239,7 @@ export interface HudLabel {
 }
 
 /** Keep a label this far (CSS px) from a pane corner, so the two rulers never print over each other. */
-const CORNER_CSS = { freqLeft: 64, freqRight: 36, timeTop: 10, timeBottom: 30 };
+const CORNER_CSS = { freqLeft: 40, freqRight: 30, timeTop: 8, timeBottom: 16 };
 
 /**
  * The labels of one pane's rulers, in CSS px from the canvas's top-left. `canvasHpx` is the drawing
@@ -212,7 +247,7 @@ const CORNER_CSS = { freqLeft: 64, freqRight: 36, timeTop: 10, timeBottom: 30 };
  * A label that would collide with the other ruler at a corner is dropped, not moved: a label moved
  * off its tick would name a place it is not at.
  */
-export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1): HudLabel[] {
+export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1, mode: TimeLabelMode = getTimeLabelMode()): HudLabel[] {
   const k = dpr > 0 ? dpr : 1;
   const left = r.rect.x / k, top = (canvasHpx - (r.rect.y + r.rect.h)) / k;
   const w = r.rect.w / k, h = r.rect.h / k;
@@ -227,7 +262,7 @@ export function hudLabels(r: PaneRuler, canvasHpx: number, dpr = 1): HudLabel[] 
     if (!t.major || t.label === null) continue;
     const y = t.pos / k;
     if (y < CORNER_CSS.timeTop || y > h - CORNER_CSS.timeBottom) continue;
-    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: t.label, sub: t.sub, value: t.value });
+    out.push({ axis: "time", paneId: r.id, x: left, y: top + y, text: mode === "absolute" ? fmtRulerLocal(t.value) : t.label, sub: null, value: t.value });
   }
   return out;
 }

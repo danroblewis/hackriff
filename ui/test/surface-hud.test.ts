@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { CELL } from "../src/surface/cellrule";
 import {
-  HUD_TICK, HudAxes, fmtRulerAge, fmtRulerHz, hudLabels, hudTickQuads, paneRuler,
+  HUD_TICK, HudAxes, fmtRulerAge, fmtRulerHz, hudLabels, hudTickQuads, paneRuler, fmtRulerLocal, setTimeLabelMode, getTimeLabelMode,
 } from "../src/surface/hud";
 import { keyOf, type Lattice, type TileAddr } from "../src/surface/lattice";
 import { toClip, type PaneRect } from "../src/surface/surface";
@@ -122,9 +122,28 @@ test("labels land on their ticks in CSS px (GL rect → DOM, device px → CSS) 
     const tick = r.freq.find((x) => x.value === l.value)!;
     near(l.x, tick.pos / 2);
     near(l.y, (1200 - 1200) / 2 + 500, 1e-9); // the pane's bottom edge, in CSS px from the canvas top
-    assert.ok(l.x >= 64, "no frequency label under the time ruler's corner");
+    assert.ok(l.x >= 40, "no frequency label under the time ruler's corner");
   }
   for (const l of t) near(l.y, r.time.find((x) => x.value === l.value)!.pos / 2);
+});
+
+test("T-998: time labels are relative or local clock, both from the tick's capture time", () => {
+  const r = paneRuler("p", BOX, RECT, 1e3, 0.01, T0);
+  const rel = hudLabels(r, RECT.h, 1, "relative").filter((l) => l.axis === "time");
+  const abs = hudLabels(r, RECT.h, 1, "absolute").filter((l) => l.axis === "time");
+  assert.ok(rel.length > 0 && rel.length === abs.length);
+  for (const l of rel) { assert.equal(l.sub, null); assert.match(l.text, /^(−|live edge)/); }
+  for (const l of abs) {
+    assert.equal(l.sub, null);
+    assert.equal(l.text, fmtRulerLocal(l.value));
+    assert.match(l.text, /^\d\d:\d\d:\d\d$/);
+  }
+  const d = new Date(1_700_000_000_000);
+  assert.equal(fmtRulerLocal(1_700_000_000_000 * 1e6),
+    [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"));
+  setTimeLabelMode("absolute");
+  assert.equal(getTimeLabelMode(), "absolute");
+  setTimeLabelMode("relative");
 });
 
 // ---------------------------------------------------------------------------
