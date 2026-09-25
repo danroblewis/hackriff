@@ -1312,6 +1312,9 @@ pub(crate) fn config_for(
     let mut cfg = PipelineConfig::new(data_dir, plan)?;
     // The IQ capture buffer is on for the composed daemon (the library default is off, T-178).
     cfg.iq_buffer = hk_store::iqbuffer::IqBufferConfig::from_env();
+    // T-904: per-frame detection retention (1 hour, rolled up; HK_DETECTION_RETENTION, …) and the
+    // `/api/status` `storage` figures. Off for the library default.
+    cfg.retention = Some(hk_pipeline::retention::RetentionSettings::from_env());
     let reg = registry.clone();
     cfg.stream_sink = Some(Arc::new(move |h, p| reg.register(h, p)));
     let reg = registry.clone();

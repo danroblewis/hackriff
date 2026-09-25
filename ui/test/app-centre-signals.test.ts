@@ -128,7 +128,12 @@ test("T-522: the toggle is pure presentation — the source names no route, and 
     return src.slice(i, i + len);
   };
   const handler = at("const setSignals = (", 200);
-  const press = at("toggleOverlay: (id) =>", 400);
+  // The whole press handler, to the next host member — T-821's collection rows lengthened it past
+  // any fixed window, and a window that stops short would stop guarding the handler's tail.
+  const pressAt = src.indexOf("toggleOverlay: (id) =>");
+  assert.ok(pressAt > 0, "toggleOverlay: (id) => moved; re-point this guard");
+  const press = src.slice(pressAt, src.indexOf("toggleViewWide:", pressAt));
+  assert.ok(press.length > 0, "toggleViewWide: no longer follows toggleOverlay; re-point this guard");
   for (const [what, region] of [["the preference helpers", helpers], ["the switch", handler], ["the menu's press", press]] as const) {
     assert.ok(!/\/api\//.test(region), `no route is named in ${what}`);
     assert.ok(!/store\.set/.test(region), `${what} writes no store state directly`);

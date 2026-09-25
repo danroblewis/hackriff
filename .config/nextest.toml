@@ -199,12 +199,14 @@ fail-fast = false
 # tile_route (task-deflake-0922), a_run_that_really_ended and a_finished_run_still_answers_410
 # (task-deflake-cov: read the HTTP body to Content-Length), a_handshake (T-602),
 # unknown_is_only (T-596 follow-up), coverage_answers (T-621 refuses without the IQ ring).
-# Only the three throughput assertions remain, and they are the tier's definition.
+# Only the throughput assertions remain, and they are the tier's definition. T-904 added a
+# fourth: a detection-retention prune batch's write-lock hold (a latency bound, T-453).
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
   or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
   or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+  or test(a_prune_batch_holds_the_write_lock_briefly)
 )
 '''
 
@@ -467,4 +469,5 @@ default-filter = '''
 test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
 or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
 or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
+or test(a_prune_batch_holds_the_write_lock_briefly)
 '''

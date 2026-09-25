@@ -112,6 +112,8 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   /** Tell the rest of the page the view moved (the surface's `mirror`). */
   viewChanged(): void;
   toast(text: string): void;
+  /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
+  research?: { isOpen(): boolean; toggle(): void };
 }
 
 /**
@@ -251,7 +253,7 @@ function layerKey(entries: readonly LegendEntry[]): HTMLElement {
  * has now left, so it is withdrawn), and `syncFollow()` when the follow state may have changed.
  */
 export function mountMapControls(host: MapControlHost): {
-  el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void;
+  el: HTMLElement; viewMoved(): void; syncFollow(): void; syncLayers(): void; syncMeasure(): void; syncResearch(): void;
 } {
   const input = h("input", {
     class: "mono", placeholder: "Go to frequency, e.g. 433.92M or 101.3", "aria-label": "Go to frequency",
@@ -275,6 +277,11 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-layers-btn", "aria-label": "Layers", title: "Layers",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-layers",
   }, svg(["path", "M12 3l9 5-9 5-9-5 9-5z"], ["path", "M3 12l9 5 9-5"], ["path", "M3 16l9 5 9-5"])) as HTMLButtonElement;
+  // T-821 (MAP-21): the Research slide-in — collections, and every mark as a row.
+  const researchBtn = h("button", {
+    type: "button", class: "map-ibtn map-research-btn", "aria-label": "Research", title: "Research: collections and their marks",
+    "aria-pressed": "false", hidden: !host.research,
+  }, svg(["path", "M4 5h16M4 12h16M4 19h16"], ["path", "M8 3v18"])) as HTMLButtonElement;
   // T-882: Measure (T-822) and the viewport menu join Layers top-right, as in the mockup's
   // `.topright` (`#measure-btn`). Fixed positions, not draggable (the coordinator's note on T-882).
   const measureBtn = h("button", {
@@ -285,7 +292,7 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
   }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, measureBtn, paneBtn);
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, paneBtn);
   const paneItem = (act: string, label: string, title: string, run: () => void) => {
     const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
     // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
@@ -468,9 +475,13 @@ export function mountMapControls(host: MapControlHost): {
     syncFollow();
   });
 
+  const syncResearch = () => researchBtn.setAttribute("aria-pressed", String(!!host.research?.isOpen()));
+  researchBtn.addEventListener("click", () => { host.research?.toggle(); syncResearch(); });
+  syncResearch();
+
   syncFollow();
   syncMeasure();
   /** Re-render an open menu — the active pane changed, or a toggle elsewhere changed a layer. */
   const syncLayers = () => { if (layersOpen) renderLayers(); if (paneOpen) syncPaneMenu(); };
-  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure };
+  return { el, viewMoved: hideOffer, syncFollow, syncLayers, syncMeasure, syncResearch };
 }

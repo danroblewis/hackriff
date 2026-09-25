@@ -76,7 +76,7 @@ export interface MarkStyle {
  * came off the API, and `t1Ns === null` means *open at the live edge*, never *unknown*. */
 export interface MarkBox {
   readonly id: string;
-  readonly kind: "signal-box" | "selection-box" | "pending-region" | "measurement-box";
+  readonly kind: "signal-box" | "selection-box" | "pending-region" | "measurement-box" | "research-box";
   readonly f0Hz: number;
   readonly f1Hz: number;
   readonly t0Ns: number;

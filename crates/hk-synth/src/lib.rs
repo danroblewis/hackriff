@@ -26,7 +26,7 @@
 //! | [`search`] | profiles, budgets (count caps + wall backstop), stop reasons, job states, the ML slot (§3.3, §5.2) | **M-3 (T-854)** |
 //! | [`engine`] | the beam: memoisation, pruning, sweeps, validation, stop rules (§3.1–§3.4) | **M-3 (T-854)** |
 //! | [`admission`] | power policy, job admission, auto-analyze, cancel/throttle/thermal inputs (§3.3) | **M-3 (T-854)** |
-//! | [`trace_sink`] | the `TraceSink`: retention on insert, elided counts (ADR-0021 §2.3, §3) | **M-3 (T-854)** |
+//! | [`trace_sink`] | the `TraceSink`: incremental retention on insert, elided counts, peak residency, the allocation-measurement scope (ADR-0021 §2.3, §3) | **M-3 (T-854, T-565)** |
 //! | [`result`] | `PipelineResult` and the verdict ladder (§3.4) | M-3, M-9 |
 //! | [`trace`] | the search trace and the negative result (ADR-0021) | M-3 (producer), M-9 (sealing) |
 //! | [`objective`] | `EvidenceObjective` over T-070's `RefinementLoop`; hold-out validation, support alignment (§2.3) | **M-7 (T-858)** |

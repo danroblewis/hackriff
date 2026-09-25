@@ -295,12 +295,15 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
     `owners()` reports them as UNOWNED rather than folding them into a neighbour."""
     claims = claims or {}
     claim_pids: dict[int, str] = {}
+    claim_wts: list[tuple[str, str]] = []
     for tid, c in claims.items():
         if isinstance(c, dict) and c.get("state") == "running" and c.get("pid"):
             try:
                 claim_pids[int(c["pid"])] = str(c.get("ticket") or tid)
             except (TypeError, ValueError):
                 pass
+            if c.get("wt"):
+                claim_wts.append((str(c["wt"]).rstrip("/") + "/", str(c.get("ticket") or tid)))
 
     by_pid = {r["pid"]: r for r in rows}
     direct = {r["pid"]: o for r in rows if (o := anchor_owner(r, claim_pids))}
@@ -324,6 +327,11 @@ def attribute(rows: list[dict], claims: dict | None = None) -> dict[int, str]:
         up = owner_of(row["ppid"], depth + 1)
         if up is None and row["pgid"] != pid:
             up = owner_of(row["pgid"], depth + 1)
+        # A worker's background shell is reparented to launchd, so its test binaries and servers lose
+        # the ancestry to the claim; they still RUN FROM its worktree (2026-09-24: T-577's own
+        # degenerate_null test, T-882's and T-901's twice - each alarmed 'unowned, kill it').
+        if up is None:
+            up = next(("worker:" + t for wt, t in claim_wts if wt in row["cmd"]), None)
         if up is None:
             up = fallback_owner(row)
         if up is not None:
