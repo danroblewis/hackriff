@@ -40,6 +40,7 @@ pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
 pub mod decode; // T-159
 pub mod events; // T-264 (ADR-0017 TM-8): the durable catalogue behind the History surface
+pub mod gain; // T-945: the actuator for automatic front-end gain management (docs/28)
 pub mod http;
 pub mod inspector;
 pub mod inventory;
@@ -92,6 +93,7 @@ pub use control::{
     RunControl, RunState,
 };
 pub use datasets::{DatasetControl, DatasetFailure};
+pub use gain::{GainManager, GainRunError};
 pub use http::{ApiState, ROUTES, Server, ServerConfig};
 pub use iqbuffer::{ClipStart, IqBufferControl, IqBufferFailure, IqBufferQuery};
 pub use live_control::{
