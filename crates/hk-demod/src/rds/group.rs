@@ -7,7 +7,8 @@
 //!   reported with at least `pi_min_votes` votes and a `pi_min_share` majority.
 //! - **A reported PI is not yet a committed identity (T-962).** Reporting and *committing* are
 //!   two bars, and [`PiDecision::provisional`] is the gap between them: below
-//!   `pi_commit_votes` agreeing CRC-valid PI blocks the PI is reported **provisionally** — good
+//!   `pi_commit_votes` agreeing CRC-valid PI blocks **within `hk_model::RDS_PI_COMMIT_WINDOW_NS`
+//!   (5 s) of stream time** the PI is reported **provisionally** — good
 //!   enough to show ("PI 1704, 3 groups, provisional"), not good enough to write as a
 //!   transmitter identity or to rest a lifecycle change on. See [`GroupConfig::pi_commit_votes`]
 //!   for the bound and why it is a vote count rather than ADR-0022's bits budget.
@@ -20,6 +21,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use hk_model::{RDS_PI_COMMIT_WINDOW_NS, VoteWindow};
 use serde::{Deserialize, Serialize};
 
 use super::block::{BlockEvent, BlockSync, Offset, SyncConfig};
@@ -148,7 +150,15 @@ pub struct PiDecision {
     pub total_votes: u32,
     /// `votes / total_votes`.
     pub share: f64,
-    /// **T-962: the vote has not reached [`GroupConfig::pi_commit_votes`].**
+    /// **T-962 (round 2):** the most of those votes that fell within one
+    /// [`hk_model::RDS_PI_COMMIT_WINDOW_NS`] span of stream time, counted up to
+    /// `pi_commit_votes` ([`hk_model::VoteWindow`]). The bar is a rate: a PI commits only when
+    /// this reaches `pi_commit_votes`, so a long session of sparse chance agreements stays
+    /// provisional however many votes it accumulates.
+    #[serde(default)]
+    pub window_votes: u32,
+    /// **T-962: the vote has not reached [`GroupConfig::pi_commit_votes`] within one
+    /// [`hk_model::RDS_PI_COMMIT_WINDOW_NS`] span of stream time** ([`Self::window_votes`]).
     ///
     /// A provisional PI is a reading, not an identity: show it with its vote count, do not write
     /// it as a transmitter identity and do not rest a lifecycle change on it. `hk_demod::record`
@@ -255,6 +265,8 @@ pub struct RdsDecoder {
     ps: PsAssembler,
     frames: Vec<PsFrame>,
     pi_votes: BTreeMap<u16, u32>,
+    /// T-962: each PI's votes over stream time, the windowed commit rule.
+    pi_windows: BTreeMap<u16, VoteWindow>,
     pty: BTreeMap<u8, u32>,
     tp: [u32; 2],
     ta: [u32; 2],
@@ -284,6 +296,7 @@ impl RdsDecoder {
             ps: PsAssembler::default(),
             frames: Vec::new(),
             pi_votes: BTreeMap::new(),
+            pi_windows: BTreeMap::new(),
             pty: BTreeMap::new(),
             tp: [0; 2],
             ta: [0; 2],
@@ -397,8 +410,16 @@ impl RdsDecoder {
             ps_segment: None,
             blocks_ok,
         };
+        // Stream time of the group, ns (positions are in units of `RDS_BITRATE_BD /
+        // bits_per_unit` per second): the vote's capture time, never the wall clock.
+        let t_ns = (position * self.bits_per_unit / RDS_BITRATE_BD * 1e9) as i64;
         for p in [pi_a, pi_c].into_iter().flatten() {
             *self.pi_votes.entry(p).or_default() += 1;
+            self.pi_windows.entry(p).or_default().vote(
+                t_ns,
+                self.config.pi_commit_votes,
+                RDS_PI_COMMIT_WINDOW_NS,
+            );
         }
         if let Some(b) = b {
             let gtype = (b >> 12) as u8;
@@ -477,18 +498,25 @@ impl RdsDecoder {
             Some((_, v)) if f64::from(v) < self.config.pi_min_share * f64::from(total_votes) => {
                 (None, Some(PiAbstain::NoMajority))
             }
-            Some((p, v)) => (
-                Some(PiDecision {
-                    pi: p,
-                    votes: v,
-                    total_votes,
-                    share: f64::from(v) / f64::from(total_votes),
-                    // T-962: reported from `pi_min_votes`, committed only from
-                    // `pi_commit_votes`. The gap is the provisional state.
-                    provisional: v < self.config.pi_commit_votes,
-                }),
-                None,
-            ),
+            Some((p, v)) => {
+                let window = self.pi_windows.get(&p);
+                let window_votes = window.map_or(0, VoteWindow::window_votes);
+                let committed = window.is_some_and(|w| w.committed(self.config.pi_commit_votes));
+                (
+                    Some(PiDecision {
+                        pi: p,
+                        votes: v,
+                        total_votes,
+                        share: f64::from(v) / f64::from(total_votes),
+                        window_votes,
+                        // T-962: reported from `pi_min_votes`, committed only once
+                        // `pi_commit_votes` of them fell within `RDS_PI_COMMIT_WINDOW_NS` of
+                        // stream time. The gap is the provisional state.
+                        provisional: !committed,
+                    }),
+                    None,
+                )
+            }
         };
         let mut counts: Vec<(String, u32, usize)> = Vec::new();
         for (i, f) in self.frames.iter().enumerate() {
@@ -680,6 +708,44 @@ pub(crate) mod tests {
             pi.votes
         );
         assert!(pi.committed() && !pi.provisional, "[T-962] {pi:?}");
+    }
+
+    /// T-962 round 2: the commit bar is a **rate** over stream time, so a long session cannot
+    /// accumulate its way to an identity. The same clean groups, once spaced one per 15 s of
+    /// stream time (a chance lock's rate, 98.085 MHz), stay provisional however many agree; back
+    /// to back (a real station's 11.4 groups/s) they commit.
+    #[test]
+    fn t962_sparse_votes_over_a_long_session_stay_provisional() {
+        let bits = stream(&[b"HACKRIFF"], 6); // 24 groups
+        let spaced = |gap_s: f64| {
+            let mut dec = RdsDecoder::new(GroupConfig::default(), RDS_BITRATE_BD);
+            let extra = gap_s * RDS_BITRATE_BD - 104.0;
+            for (i, &b) in bits.iter().enumerate() {
+                let group = (i / 104) as f64;
+                dec.push_bit(b, i as f64 + group * extra);
+            }
+            dec.report().pi.expect("the PI is reported")
+        };
+        let sparse = spaced(15.0);
+        let n = GroupConfig::default().pi_commit_votes;
+        assert!(
+            sparse.votes >= 2 * n,
+            "the scene has twice the bar in lifetime votes: {sparse:?}"
+        );
+        assert!(
+            sparse.provisional && !sparse.committed(),
+            "[T-962] {} agreeing groups one per 15 s ({} s of stream) committed the PI: the bar \
+             is a rate ({n} within {} s), not a lifetime count. {sparse:?}",
+            sparse.votes,
+            sparse.votes * 15,
+            hk_model::RDS_PI_COMMIT_WINDOW_NS / 1_000_000_000
+        );
+        assert_eq!(sparse.window_votes, 1, "{sparse:?}");
+        let dense = spaced(104.0 / RDS_BITRATE_BD);
+        assert!(
+            dense.committed() && dense.window_votes == n,
+            "[T-962] {dense:?}"
+        );
     }
 
     #[test]

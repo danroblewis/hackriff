@@ -22,7 +22,8 @@
 //!
 //! **T-962: a provisional PI is written, and is not an identity.** `hk_demod::rds` reports a PI
 //! from `pi_min_votes` agreeing CRC-valid blocks but marks it
-//! [`provisional`](crate::rds::PiDecision::provisional) until it has `pi_commit_votes` of them,
+//! [`provisional`](crate::rds::PiDecision::provisional) until `pi_commit_votes` of them fall
+//! within [`hk_model::RDS_PI_COMMIT_WINDOW_NS`] (5 s) of stream time — a rate, not a count,
 //! and this writer also refuses an identity below [`hk_model::RDS_PI_COMMIT_VOTES`] (10 — the one
 //! bar every RDS producer shares, the `rds` recipe included; see that constant, and
 //! `GroupConfig::pi_commit_votes` for why a vote count and not ADR-0022 §6's bits budget). A
@@ -111,8 +112,11 @@ pub fn rds_label(session: &AnalogSession) -> Option<String> {
 /// Whether `pi` may be written as an identity (T-962): committed by its decoder **and** at or
 /// above the one bar every RDS producer shares, [`IdentityScheme::commit_votes`] — so a
 /// `GroupConfig` configured below [`hk_model::RDS_PI_COMMIT_VOTES`] cannot weaken it.
+///
+/// The bar is a rate (round 2): [`crate::rds::PiDecision::window_votes`] must reach it — the votes
+/// inside one [`IdentityScheme::commit_window_ns`] span of stream time — not the lifetime count.
 fn pi_is_identity(pi: &crate::rds::PiDecision) -> bool {
-    pi.committed() && pi.votes >= IdentityScheme::RdsPi.commit_votes()
+    pi.committed() && pi.window_votes >= IdentityScheme::RdsPi.commit_votes()
 }
 
 /// Builds the RDS Decode rows (no repository access).
@@ -159,6 +163,8 @@ pub fn rds_decodes(session: &AnalogSession, demod_id: DemodulationId) -> Vec<Dec
             "identity_provisional": !committed,
             "identity_votes": pi.votes,
             "identity_votes_needed": IdentityScheme::RdsPi.commit_votes(),
+            "identity_votes_in_window": pi.window_votes,
+            "identity_votes_window_s": IdentityScheme::RdsPi.commit_window_ns() as f64 / 1e9,
             "ps": rds.ps(),
             "ps_frames": rds.ps_frames,
             "pty": rds.pty,

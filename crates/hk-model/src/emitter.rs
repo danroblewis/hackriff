@@ -10,7 +10,7 @@
 //!   anomalies, explanations and annotations are append-only rows, loaded separately because
 //!   they can be numerous.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
 
@@ -42,7 +42,81 @@ pub const FRAMING_IDENTITY_SCHEME: &str = "hk-framing";
 /// correlated bits, so a handful of agreeing groups is not independent evidence. Below the bar the
 /// PI is a **provisional** reading — recorded and shown with its vote, never an identity, never a
 /// confirm (ADR-0022 §1.3: a confirm is a one-way door). Raising it is safe; lowering it is not.
+/// Because the argument is a rate, the votes must also fall within [`RDS_PI_COMMIT_WINDOW_NS`]
+/// of capture time ([`VoteWindow`]).
 pub const RDS_PI_COMMIT_VOTES: u32 = 10;
+
+/// **T-962 (round 2): the capture-time window the [`RDS_PI_COMMIT_VOTES`] agreeing votes must fall
+/// within** — [`IdentityScheme::commit_window_ns`] for [`IdentityScheme::RdsPi`]: **5 s**.
+///
+/// The bar is justified as a *rate* (10 votes is under a second of genuine lock; the false source
+/// managed ~3 in 45 s), so it is enforced as one: an identity commits only when 10 agreeing
+/// CRC-valid votes lie within 5 s of each other **in capture time** (the rows' own `t`, the
+/// groups' own stream positions — never the wall clock). A lifetime count is not a rate: a
+/// recipe pipeline left running on a chance lock at one agreeing group per 15 s would reach 10 in
+/// ~150 s and confirm the same false PI two and a half minutes later ([`VoteWindow`] is the fix).
+///
+/// Why 5 s: a synchronised stream carries 11.4 groups/s, so 10 votes span 0.8 s of clean air and
+/// still under 2 s at 50 % group loss — 5 s tolerates ~80 % loss (2.3 groups/s) and still
+/// commits. The observed chance lock (3 votes in 45 s, one per ~15 s) puts at most one vote in
+/// any 5 s window; reaching 10 in 5 s is a rate 30× higher than it ever showed. Widening it is
+/// the unsafe direction; narrowing it only costs a very lossy real station its identity (it still
+/// confirms on the verified-emission route), never a false one.
+pub const RDS_PI_COMMIT_WINDOW_NS: i64 = 5_000_000_000;
+
+/// The windowed vote rule every vote-gated identity producer applies (T-962): one per identity,
+/// fed each agreeing CRC-valid vote's **capture time**. It keeps at most the scheme's
+/// [`IdentityScheme::commit_votes`] most recent vote times (bounded memory, whatever the session
+/// length) and **commits** — once, and latched: a confirm is a one-way door (ADR-0022 §1.3) and
+/// so is the evidence behind it — the first time that many votes fall within
+/// [`IdentityScheme::commit_window_ns`] of each other. Out-of-order votes are placed by time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VoteWindow {
+    times: VecDeque<i64>,
+    votes: u32,
+    peak: u32,
+}
+
+impl VoteWindow {
+    /// Counts one agreeing vote at capture time `t_ns` against a bar of `needed` votes within
+    /// `window_ns`; returns whether the identity is (now, or already) committed.
+    pub fn vote(&mut self, t_ns: i64, needed: u32, window_ns: i64) -> bool {
+        self.votes = self.votes.saturating_add(1);
+        let needed = needed.max(1);
+        let at = self.times.partition_point(|&x| x <= t_ns);
+        self.times.insert(at, t_ns);
+        while self.times.len() > needed as usize {
+            self.times.pop_front();
+        }
+        // Most votes (of the kept ones) inside any `window_ns` span: ≤ `needed` elements.
+        let mut best = 0usize;
+        let mut lo = 0usize;
+        for hi in 0..self.times.len() {
+            while self.times[hi].saturating_sub(self.times[lo]) > window_ns {
+                lo += 1;
+            }
+            best = best.max(hi - lo + 1);
+        }
+        self.peak = self.peak.max(best as u32);
+        self.committed(needed)
+    }
+
+    /// Whether `needed` votes have ever fallen within the window (latched).
+    pub fn committed(&self, needed: u32) -> bool {
+        self.peak >= needed.max(1)
+    }
+
+    /// Agreeing votes counted over the identity's whole life.
+    pub fn votes(&self) -> u32 {
+        self.votes
+    }
+
+    /// The most agreeing votes seen within one window, counted up to the bar — what a
+    /// provisional reading reports as its progress toward committing.
+    pub fn window_votes(&self) -> u32 {
+        self.peak
+    }
+}
 
 /// The namespace of a decoded identity.
 ///
@@ -112,6 +186,15 @@ impl IdentityScheme {
         match self {
             IdentityScheme::RdsPi => RDS_PI_COMMIT_VOTES,
             _ => 1,
+        }
+    }
+
+    /// The capture-time window [`Self::commit_votes`] must fall within (T-962; [`VoteWindow`]):
+    /// [`RDS_PI_COMMIT_WINDOW_NS`] for an RDS PI; unbounded for a scheme one frame suffices for.
+    pub fn commit_window_ns(&self) -> i64 {
+        match self {
+            IdentityScheme::RdsPi => RDS_PI_COMMIT_WINDOW_NS,
+            _ => i64::MAX,
         }
     }
 
@@ -474,5 +557,30 @@ mod tests {
         );
         assert!("other:".parse::<IdentityScheme>().is_err());
         assert!("bogus".parse::<IdentityScheme>().is_err());
+    }
+
+    /// T-962: the bar is a rate. Ten agreeing votes one every 15 s never commit, however long the
+    /// session; ten inside a second do; memory stays at the bar.
+    #[test]
+    fn vote_window_is_a_rate_not_a_lifetime_count() {
+        let s = IdentityScheme::RdsPi;
+        let (n, w) = (s.commit_votes(), s.commit_window_ns());
+        let mut sparse = VoteWindow::default();
+        for k in 0..100i64 {
+            assert!(!sparse.vote(k * 15_000_000_000, n, w), "vote {k}");
+        }
+        assert_eq!((sparse.votes(), sparse.window_votes()), (100, 1));
+        assert!(sparse.times.len() <= n as usize);
+        let mut dense = VoteWindow::default();
+        let committed: Vec<bool> = (0..n as i64)
+            .map(|k| dense.vote(k * 87_719_298, n, w))
+            .collect();
+        assert!(committed[..n as usize - 1].iter().all(|c| !c));
+        assert!(committed[n as usize - 1] && dense.committed(n));
+        // Latched: later sparse votes do not un-commit it.
+        assert!(dense.vote(600_000_000_000, n, w));
+        // One frame suffices for a strong scheme.
+        let a = IdentityScheme::AdsbIcao;
+        assert!(VoteWindow::default().vote(0, a.commit_votes(), a.commit_window_ns()));
     }
 }

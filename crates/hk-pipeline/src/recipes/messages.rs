@@ -24,10 +24,13 @@
 //! - **A vote bar on weak identities (T-962).** A scheme whose check cannot carry an identity on
 //!   one frame ([`hk_model::IdentityScheme::commit_votes`] > 1; today `rds-pi`, whose block check
 //!   is 10 bits) is counted per writer: each CRC-valid row naming the identity is one agreeing
-//!   vote ([`IdentityTally`]), and until the count reaches the scheme's bar the row is written
+//!   vote at the row's own capture time ([`IdentityTally`]), and until the scheme's bar of votes
+//!   has fallen **within its capture-time window** (10 in 5 s for `rds-pi`: a rate, so a
+//!   long-running pipeline on a chance lock cannot accumulate its way there) the row is written
 //!   **without** its identity — no sighting, so no emitter is created, keyed or confirmed by it —
 //!   and marked `identity_provisional: true` with `identity_scheme`, `identity_value`,
-//!   `identity_votes` and `identity_votes_needed` in its metadata, linked to the pipeline's target
+//!   `identity_votes`, `identity_votes_needed`, `identity_votes_in_window` and
+//!   `identity_votes_window_s` in its metadata, linked to the pipeline's target
 //!   emitter when it has one. It is the same bar `hk-demod`'s always-on RDS decoder applies, so an
 //!   RDS PI becomes an identity on the same evidence whichever decoder heard it. One frame is at
 //!   least one RDS group, so counting frames never credits more groups than were received. The
@@ -42,6 +45,7 @@ use std::thread::{self, JoinHandle};
 use hk_blocks::{Output, PortVec};
 use hk_model::{
     ContentClass, CrcStatus, Decode, DecodeId, DecodedIdentity, EmitterId, Repository, Timestamp,
+    VoteWindow,
 };
 use hk_plugins::{Ingest, MetadataPolicy, output_metadata_policy};
 use hk_recipe::{DecodeMapping, OutputSpec, Recipe};
@@ -163,17 +167,20 @@ fn keyed(paths: &[String]) -> Vec<(String, String)> {
 /// provisional (fails closed; a noise-driven spray of values cannot grow the map).
 const MAX_TALLIED: usize = 256;
 
-/// Agreeing CRC-valid frames per identity, for schemes with a vote bar (T-962; module docs).
+/// Agreeing CRC-valid frames per identity, for schemes with a vote bar (T-962; module docs),
+/// each held as an [`hk_model::VoteWindow`] over the rows' own capture times.
 #[derive(Debug, Default)]
 pub struct IdentityTally {
-    votes: BTreeMap<(hk_model::IdentityScheme, String), u32>,
+    votes: BTreeMap<(hk_model::IdentityScheme, String), VoteWindow>,
 }
 
 impl IdentityTally {
-    /// Counts `d`'s identity as one more agreeing vote and, for a scheme with a vote bar, records
-    /// the vote in `d`'s metadata; below the bar it moves the identity off the row into that
-    /// metadata. Returns whether the row was made provisional. Rows without an identity, and
-    /// schemes a single frame suffices for, pass untouched.
+    /// Counts `d`'s identity as one more agreeing vote at the row's capture time `d.t` and, for a
+    /// scheme with a vote bar, records the vote in `d`'s metadata; until the scheme's bar of votes
+    /// has fallen within its capture-time window ([`hk_model::IdentityScheme::commit_window_ns`])
+    /// it moves the identity off the row into that metadata. Returns whether the row was made
+    /// provisional. Rows without an identity, and schemes a single frame suffices for, pass
+    /// untouched.
     pub fn gate(&mut self, d: &mut Decode) -> bool {
         let Some(id) = d.identity.as_ref() else {
             return false;
@@ -182,21 +189,23 @@ impl IdentityTally {
         if needed <= 1 {
             return false;
         }
+        let window_ns = id.scheme.commit_window_ns();
+        let t = d.t.as_unix_nanos();
         let key = (id.scheme.clone(), id.value.clone());
         let full = self.votes.len() >= MAX_TALLIED;
-        let votes = match self.votes.get_mut(&key) {
-            Some(n) => {
-                *n = n.saturating_add(1);
-                *n
-            }
+        let (committed, votes, in_window) = match self.votes.get_mut(&key) {
+            Some(w) => (w.vote(t, needed, window_ns), w.votes(), w.window_votes()),
             None => {
+                let mut w = VoteWindow::default();
+                let c = w.vote(t, needed, window_ns);
+                let r = (c, w.votes(), w.window_votes());
                 if !full {
-                    self.votes.insert(key, 1);
+                    self.votes.insert(key, w);
                 }
-                1
+                r
             }
         };
-        let provisional = votes < needed;
+        let provisional = !committed;
         if !d.metadata.is_object() {
             d.metadata = Value::Object(Map::new());
         }
@@ -206,6 +215,11 @@ impl IdentityTally {
         m.insert("identity_provisional".into(), Value::Bool(provisional));
         m.insert("identity_votes".into(), votes.into());
         m.insert("identity_votes_needed".into(), needed.into());
+        m.insert("identity_votes_in_window".into(), in_window.into());
+        m.insert(
+            "identity_votes_window_s".into(),
+            (window_ns as f64 / 1e9).into(),
+        );
         if provisional && let Some(id) = d.identity.take() {
             m.insert("identity_scheme".into(), id.scheme.as_string().into());
             m.insert("identity_value".into(), id.value.into());

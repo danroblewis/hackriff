@@ -100,6 +100,17 @@ fn seed_station(repo: &mut Repository) -> EmitterId {
 /// Runs the `group-info` writer targeting `station` over `groups` agreeing groups (frames
 /// `first..first + groups`), and waits for it to store them (dropping the sink joins it).
 fn feed(db: &std::path::Path, station: EmitterId, first: usize, groups: usize) {
+    feed_spaced(db, station, first, groups, 104);
+}
+
+/// [`feed`] with the groups `spacing_bits` apart in capture time (104 = back to back).
+fn feed_spaced(
+    db: &std::path::Path,
+    station: EmitterId,
+    first: usize,
+    groups: usize,
+    spacing_bits: u64,
+) {
     let recipe = rds_recipe();
     let sink = MessagesSink::spawn_standalone_targeting(
         db,
@@ -123,7 +134,7 @@ fn feed(db: &std::path::Path, station: EmitterId, first: usize, groups: usize) {
     };
     for i in first..first + groups {
         // One group every 104 bits at 1187.5 Bd.
-        let mut info = FrameInfo::new(i as u64, 104 * i as u64, 0);
+        let mut info = FrameInfo::new(i as u64, spacing_bits * i as u64, 0);
         info.bit_len = 104;
         info.check = CrcStatus::Valid;
         info.layers = Some(group_tree(PI));
@@ -254,6 +265,76 @@ fn t962_three_recipe_groups_do_not_confirm_and_ten_do() {
     );
     assert_eq!(
         with_identity[0].metadata["identity_votes"],
+        json!(RDS_PI_COMMIT_VOTES)
+    );
+}
+
+/// T-962 round 2: the bar is a **rate**, so it is enforced as one. A recipe pipeline runs until
+/// deleted; on a chance lock at one agreeing CRC-valid group per 15 s, a lifetime count reaches
+/// 10 in ~150 s and route A confirms the false PI two and a half minutes late. Twenty agreeing
+/// groups over 300 s of capture time — twice the bar — stay provisional: no identity, no confirm.
+#[test]
+fn t962_sparse_recipe_votes_over_minutes_never_commit() {
+    let dir = TempDir::new("t962-recipe-sparse");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+    // One group per 15 s of capture time (17 813 bits at 1187.5 Bd), all in one pipeline run.
+    let groups = 2 * RDS_PI_COMMIT_VOTES as usize;
+    feed_spaced(&db, station, 0, groups, 17_813);
+    let repo = Repository::open(&db).unwrap();
+    let placed = repo.emitter_by_identity(&pi_1704()).unwrap();
+    assert!(
+        placed.is_none(),
+        "[{T962}] {groups} agreeing groups one per 15 s (300 s) placed an identity: the bar was \
+         enforced as a lifetime count, not as {RDS_PI_COMMIT_VOTES} votes within \
+         {} s of capture time. Route A would confirm on it: {:?}",
+        hk_model::RDS_PI_COMMIT_WINDOW_NS / 1_000_000_000,
+        placed.as_ref().map(|e| identity_decision(&repo, e.id)),
+    );
+    assert!(repo.decodes_for_identity(&pi_1704()).unwrap().is_empty());
+    assert_eq!(identity_decision(&repo, station), None, "[{T962}]");
+    assert_eq!(
+        repo.emitter_lifecycle_state(station).unwrap(),
+        LifecycleState::Candidate,
+        "[{T962}] the station stays a Candidate"
+    );
+    let rows = linked_rows(&repo, station);
+    assert_eq!(rows.len(), groups, "[{T962}] every reading is kept");
+    for (k, d) in rows.iter().enumerate() {
+        assert!(d.identity.is_none(), "[{T962}] {d:?}");
+        assert_eq!(d.metadata["identity_provisional"], json!(true), "{d:?}");
+        assert_eq!(d.metadata["identity_votes"], json!(k + 1), "{d:?}");
+        assert_eq!(d.metadata["identity_votes_in_window"], json!(1), "{d:?}");
+        assert_eq!(d.metadata["identity_votes_window_s"], json!(5.0), "{d:?}");
+    }
+}
+
+/// T-962 round 2, the other side: the same PI with ten agreeing groups inside one second of
+/// capture time — a real station's rate — commits on the tenth, and route A confirms.
+#[test]
+fn t962_dense_recipe_votes_inside_a_second_commit() {
+    let dir = TempDir::new("t962-recipe-dense");
+    let db = dir.0.join("hk.sqlite");
+    let station = {
+        let mut repo = Repository::open(&db).unwrap();
+        seed_station(&mut repo)
+    };
+    // 10 groups 110 bits apart: the tenth lands 0.83 s after the first.
+    feed_spaced(&db, station, 0, RDS_PI_COMMIT_VOTES as usize, 110);
+    let repo = Repository::open(&db).unwrap();
+    let e = repo
+        .emitter_by_identity(&pi_1704())
+        .unwrap()
+        .expect("[T-962] ten agreeing groups inside a second make the PI an identity");
+    let (route, reason) = identity_decision(&repo, e.id).expect("[T-962] route A confirms");
+    assert_eq!(route, ConfirmRoute::Identity, "[{T962}] {reason}");
+    let with_identity = repo.decodes_for_identity(&pi_1704()).unwrap();
+    assert_eq!(with_identity.len(), 1, "[{T962}] the tenth row");
+    assert_eq!(
+        with_identity[0].metadata["identity_votes_in_window"],
         json!(RDS_PI_COMMIT_VOTES)
     );
 }
