@@ -44,18 +44,15 @@
 //!       average crosses half-way to the burst's on-level (`hk_estimate::params`,
 //!       `half_level_edges`): edges within +7 / +4 source samples, `sigma_aa` z **+2.2…+4.3 →
 //!       −0.9…+0.5**, and 13 of 16 above-gate rows claimed on the densities of the time.
-//!     - **`cyclic_db` is the dev grid's burst length, and is still open.** A cyclic line's
-//!       significance grows with the symbols it integrates, ~9.5 dB a decade on an h = 4 packet
-//!       (20.0 dB at 112 symbols, 26.5 at 448, 29.3 at 896; flat in C14's samples per OBW), and
-//!       the device's 20.2 dB is exactly a 112-symbol burst's: the device measurement is right.
-//!       Every dev-grid `2fsk` record holds 270–1 170 symbols, so the density has never seen a
-//!       burst this short, and these rows still read `cyclic_db` z −2.8…−1.7. Cutting each
-//!       `2fsk` draw's C14 view to a packet of drawn length and refitting took that to
-//!       −0.8…+0.1, but it moved one acceptance draw's `2fsk` prior over the verifier's
-//!       candidate floor, and the verifier — which prefers `gfsk` on that `2fsk` draw on either
-//!       view — confirmed the tree's wrong call past p = 0.9 (`verifier_gain`'s never-more-
-//!       confidently-wrong guard, 0 → 1). That generator change is held back until the verifier
-//!       half is resolved; the rows are claimed without it.
+//!     - **`cyclic_db` was the dev grid's burst length.** A cyclic line's significance grows with
+//!       the symbols it integrates, ~9.5 dB a decade on an h = 4 packet (20.0 dB at 112 symbols,
+//!       26.5 at 448, 29.3 at 896; flat in C14's samples per OBW), and the device's 20.2 dB is
+//!       exactly a 112-symbol burst's: the device measurement is right. Every dev-grid `2fsk`
+//!       record held 270–1 170 symbols. T-908 re-landed T-887's generator fix — each `2fsk`
+//!       draw's C14 view cut to a packet of drawn length (`hk_classify::synth`, `packet_window`)
+//!       — after fixing the verifier that had held it back (its fsk pulse test pinned the
+//!       receive channel at `BT` 1.0 and so preferred `gfsk` on narrow-deviation 2-FSK). With
+//!       the refitted densities these rows read `cyclic_db` z **−2.8…−1.7 → −0.8…+0.1**.
 //!
 //! With T-888's refit (`blind_bpsk`/`blind_qpsk` absent where C14 cannot measure them) and the
 //! half-level edges, **16 of 16** above-gate rows claim `fsk`. The floor asserted below is 15 —
