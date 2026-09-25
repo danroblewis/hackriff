@@ -24324,6 +24324,15 @@ tasks:
       MAP-24=T-824, MAP-25=T-825. Depends on the stores and the gesture design (T-458).
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): you can draw a box, marker or label directly on the canvas and it persists as an annotation (visible after reload). Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 17:15).
+      Annotation authoring on the canvas (MAP-20). Two new tool modes beside Measure, completing docs/23 §10.4's table: Annotate (bare drag = box, bare click = text note) and Pin (bare click = marker, drag still pans). They are latched at the press, Shift+drag still marks a region in every mode, and a tap in a tool mode never also focuses a row. A banner shows what a drag will do, and Esc returns to Navigate. Each gesture asks for a label (1–120 chars; cancel writes nothing) and POSTs {kind,f_lo_hz,f_hi_hz,t0_s,t1_s,label,view} to /api/annotations. The server stamps provenance. A windowed GET /api/annotations every 2 s draws the annotations in view back onto the canvas, so they persist across reloads. They are drawn DASHED in rose through the same toClip as the tiles, with DOM labels. TO SEE IT ON STAGING: open the app's Explore view (the surface canvas), press 'Annotate' in the toolbar above the canvas, drag a rectangle and type a label (or click once for a text note). Or press 'Pin' and click to drop a marker. Reload the page: the dashed rose box, note or marker and its label are still there, and hovering one names it in the readout.
+      Tests: just test-ui -> exit 0 (71/71 test files passed (build, typecheck, node tests incl. 7 new input, 7 geometry, 8 request tests))
+      precheck exit 0
+      Commits: 067d5044
+      Observed, not chased: No Rust crate touched, so precheck was cargo fmt --all --check only (exit 0); clippy scope empty. | Label entry uses window.prompt: functional but plain; an inline label editor (and edit/delete via PUT/DELETE) belongs with T-821's Research slide-in. | docs/23 §10.4 also names 'annotate this' from a Shift+drag region (the selection context menu); not added here — the tool mode covers authoring. | The 'research' layer in surface/layers.ts (default hidden) is still not wired; annotations (like T-822's measurements) are drawn as always-on user marks so they are visible after reload without a toggle.
+      Use cases: RESEARCH-003, RESEARCH-001
+      Resources: 51 CPU-s, peak 1.0 GB
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
