@@ -546,6 +546,8 @@ export interface PreviewOptions {
    * nothing drawn here can tint a measurement.
    */
   marks?: ((pane: PaneView, edgeNs: number) => readonly OverlayQuad[]) | null;
+  /** Per-pane coverage-fog visibility (T-807), forwarded to `SurfaceView`'s `fog`. */
+  fog?: ((paneId: string) => boolean) | null;
   /**
    * **The instantaneous spectrum trace** (T-457): quads for the strip carved off the top of each
    * pane. Like `marks`, a function called per frame — but handed the `PaneReport` the data pass just
@@ -646,6 +648,7 @@ export class SurfacePreview {
       freq: probe.opening.freq,
       spanNs: probe.opening.spanNs,
       marks: opts.marks ?? null,
+      fog: opts.fog ?? null,
       trace: opts.trace ?? null,
       tracePx: opts.tracePx ?? 0,
       hud: opts.hud ?? null,

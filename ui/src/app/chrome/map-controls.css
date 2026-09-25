@@ -98,3 +98,8 @@
 @media (max-width: 900px) {
   .map-ctl { left: 8px; right: 8px; }
 }
+
+/* T-807 (MAP-07): the coverage fog's key, under its switch. Swatches are painted by the one cell rule. */
+.map-layer-key { list-style: none; margin: 2px 0 4px 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; font-size: 10.5px; color: var(--muted); }
+.map-layer-key li { display: flex; align-items: center; gap: 5px; }
+.map-key-swatch { width: 22px; height: 12px; flex: none; image-rendering: pixelated; border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent); }

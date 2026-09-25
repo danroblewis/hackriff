@@ -254,7 +254,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   const menu = `JSON.stringify({
     head: [...document.querySelectorAll('#map-layers h4')].map((e) => e.textContent),
     bases: [...document.querySelectorAll('#map-layers input[data-base]')].map((i) => [i.value, i.checked]),
-    overlays: [...document.querySelectorAll('#map-layers input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
+    overlays: [...document.querySelectorAll('#map-layers [data-axis=overlays] input[data-layer]')].map((i) => [i.dataset.layer, i.checked]),
     signals: String(document.querySelector('#map-layers input[data-layer="detections"]').checked),
   })`;
   await page.click("document.querySelector('.map-layers-btn')");
@@ -263,7 +263,7 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   assert.deepEqual(one.bases, [["ramp", true], ["phosphor", false]], "base style: exactly one, ramp by default");
   assert.deepEqual(one.overlays, [["rules", true], ["detections", true], ["artifacts", false]], "overlays in paint order, defaults on");
   assert.match(one.head[0], /Base style · this pane/);
-  assert.match(one.head[1], /Overlays · this pane/);
+  assert.ok(one.head.some((t) => /^Overlays · this pane/.test(t)), `no overlays axis: ${one.head}`);
   assert.equal(one.signals, "true");
 
   // Split (the viewport menu since T-882, which closes the layers menu while it is open): the new
@@ -302,6 +302,57 @@ test("T-806: the layers menu has two axes, and a toggle changes only the active 
   const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
   assert.deepEqual(control.map((r) => r.url), [], "a layer toggle reached the front end");
   assert.deepEqual(page.exceptions, [], "uncaught exception while toggling layers");
+});
+
+test("T-807: the coverage fog is a per-pane layer you can switch off, and the page says so", async (t) => {
+  // MAP-07 in a real browser: the layers menu has a Coverage section with the fog switch (on by
+  // default) and its key — grey, unknown, observed, excluded, last-known, and what hidden fog looks
+  // like — painted by the one cell rule. Switching it off states in words that never-observed
+  // spectrum is drawn as bare ground; a split pane inherits it and diverges; nothing reaches a
+  // device route.
+  const browser = await Browser.open();
+  t.after(() => browser.close());
+  const page = await browser.page();
+  assert.equal(await page.goto(`${ORIGIN}/#token=${TOKEN}`), "load");
+  await page.waitFor("the surface to draw and the floating controls to mount",
+    `!!document.querySelector('.sf-canvas') && document.querySelector('.sf-canvas').width > 200 &&
+     !!document.querySelector('.map-layers-btn')`, { timeoutMs: 60000 });
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the layers menu to open", `!document.querySelector('#map-layers').hidden`, { timeoutMs: 5000 });
+  const state = `JSON.stringify({
+    fog: document.querySelector('#map-layers [data-axis=data] input[data-layer="coverage"]')?.checked ?? null,
+    key: [...document.querySelectorAll('#map-layers .map-layer-key li')].map((e) => e.dataset.mark),
+    said: document.querySelector('.sf-fog').hidden ? "" : document.querySelector('.sf-fog').textContent,
+    head: document.querySelector('#map-layers h4')?.textContent,
+  })`;
+  const one = JSON.parse(await page.eval(state));
+  assert.equal(one.fog, true, "the coverage fog must be shown by default: grey is the survey");
+  assert.deepEqual(one.key, ["unobserved", "unknown", "observed", "excluded", "shadow", "fog-hidden"]);
+  assert.equal(one.said, "");
+
+  await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);
+  await page.waitFor("the page to say the fog is hidden on this pane",
+    `!document.querySelector('.sf-fog').hidden && /Coverage fog hidden on this pane/.test(document.querySelector('.sf-fog').textContent)`,
+    { timeoutMs: 10000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false);
+
+  // Split: the new pane inherits the hidden fog; show it there, and pane 1 keeps its own choice.
+  await paneAct(page, "split");
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("the menu to act on pane 2", `/pane 2 of 2/.test(document.querySelector('#map-layers h4')?.textContent ?? '')`, { timeoutMs: 10000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false, "a split must inherit the fog layer");
+  await page.click(`document.querySelector('#map-layers input[data-layer="coverage"]')`);
+  await page.waitFor("pane 2's fog shown again", `document.querySelector('.sf-fog').hidden`, { timeoutMs: 10000 });
+  await paneAct(page, "close");
+  await page.click("document.querySelector('.map-layers-btn')");
+  await page.waitFor("pane 1 active, its fog still hidden",
+    `/this pane/.test(document.querySelector('#map-layers h4')?.textContent ?? '') && !document.querySelector('.sf-fog').hidden`,
+    { timeoutMs: 20000 });
+  assert.equal(JSON.parse(await page.eval(state)).fog, false, "pane 2's fog toggle leaked into pane 1");
+
+  const control = page.requests.filter((r) => /\/api\/control\/(center|rate|window|gains|bias_tee|baseband_filter)/.test(r.url));
+  assert.deepEqual(control.map((r) => r.url), [], "a fog toggle reached the front end");
+  assert.deepEqual(page.exceptions, [], "uncaught exception while toggling the coverage fog");
 });
 
 test("T-506: the canvas draws the IQ horizon and the retention bound where the ring window says", async (t) => {

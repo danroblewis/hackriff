@@ -19,6 +19,7 @@
 // parsing is `controls/freq.ts`'s input formatting; the offer's words and its acceptability are
 // computed by `surface/retune.ts` and handed in as strings.
 import { parseFrequency } from "../../controls/freq";
+import { swatchPixels, type LegendEntry } from "../../surface/legend";
 import { h } from "../dom";
 
 /** One zoom-button press scales both axes' spans by this (in) or its inverse (out) — the mockup's
@@ -39,7 +40,11 @@ export interface PaneControl {
 export interface GotoOffer { why: string; enabled: boolean; press(): void }
 
 /** One row of the layers menu: a base style (radio) or an overlay (checkbox). Display only. */
-export interface LayerRow { id: string; label: string; hint: string; on: boolean }
+export interface LayerRow {
+  id: string; label: string; hint: string; on: boolean;
+  /** A key of the marks this layer draws (T-807's coverage fog), painted by the one cell rule. */
+  key?: readonly LegendEntry[];
+}
 
 /**
  * What the layers menu shows (T-806 / MAP-06, docs/24 §4): two independent axes for the ACTIVE
@@ -52,6 +57,9 @@ export interface LayerMenu {
   /** How the menu names the pane it acts on ("pane 2 of 3"). */
   pane: string;
   bases: LayerRow[];
+  /** The `data`-plane layers (T-807: the coverage fog) — flags on the one cell rule, painted below
+   * every overlay. Optional so a host with none offers no section. */
+  data?: LayerRow[];
   overlays: LayerRow[];
   viewWide: LayerRow[];
   /** The colour scale (T-470/T-528, rehomed from the toolbar by T-882): exactly one of the surface's
@@ -63,6 +71,7 @@ export interface LayerMenu {
 export interface LayerMenuHost {
   layerMenu(): LayerMenu;
   setBase(id: string): void;
+  /** Toggle one of the active pane's layers — an overlay, or a `data` row (the coverage fog). */
   toggleOverlay(id: string): void;
   toggleViewWide(id: string): void;
   /** Choose the colour-scale mode (a display range, never a gain). Optional: a host with no scale. */
@@ -215,6 +224,26 @@ const svg = (...shapes: Shape[]): SVGSVGElement => {
   return s;
 };
 
+/** Swatch size for a layer's key, CSS px. */
+const KEY_W = 22, KEY_H = 12;
+
+/**
+ * A layer's key: one small swatch per mark, each painted by `swatchPixels` — the same `cellPixel`
+ * rule the shader is generated from, so the menu cannot show a mark the canvas does not draw.
+ */
+function layerKey(entries: readonly LegendEntry[]): HTMLElement {
+  return h("ul", { class: "map-layer-key", "aria-label": "What each mark means" }, ...entries.map((e) => {
+    const c = h("canvas", { class: "map-key-swatch", width: KEY_W, height: KEY_H, "aria-hidden": "true" }) as HTMLCanvasElement;
+    const ctx = typeof c.getContext === "function" ? c.getContext("2d") : null;
+    if (ctx) {
+      const img = ctx.createImageData(KEY_W, KEY_H);
+      img.data.set(swatchPixels(e, KEY_W, KEY_H));
+      ctx.putImageData(img, 0, 0);
+    }
+    return h("li", { "data-mark": e.key, title: e.note }, c, e.label);
+  }));
+}
+
 /**
  * Build the cluster. Returns the element (the host appends it over the canvas) and two hooks the
  * host calls: `viewMoved()` when a gesture moved the view (a Go-to offer describes a window the pane
@@ -341,7 +370,8 @@ export function mountMapControls(host: MapControlHost): {
     const row = (l: LayerRow, input: HTMLInputElement, press: () => void) => {
       input.checked = l.on;
       input.addEventListener("change", () => { press(); renderLayers(); });
-      return h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+      const label = h("label", { class: "map-row" }, input, l.label, h("small", {}, l.hint));
+      return l.key?.length ? h("div", {}, label, layerKey(l.key)) : label;
     };
     layersList.replaceChildren(
       h("div", { class: "map-layers-axis", "data-axis": "base", role: "radiogroup", "aria-label": `Base style, ${m.pane}` },
@@ -349,6 +379,11 @@ export function mountMapControls(host: MapControlHost): {
         ...m.bases.map((l) => row(l,
           h("input", { type: "radio", name: "map-base", value: l.id, "data-base": l.id }) as HTMLInputElement,
           () => host.setBase(l.id)))),
+      ...(m.data?.length ? [h("div", { class: "map-layers-axis", "data-axis": "data", role: "group", "aria-label": `Coverage, ${m.pane}` },
+        h("h4", {}, `Coverage · ${m.pane} · under every overlay`),
+        ...m.data.map((l) => row(l,
+          h("input", { type: "checkbox", "data-layer": l.id }) as HTMLInputElement,
+          () => host.toggleOverlay(l.id))))] : []),
       h("div", { class: "map-layers-axis", "data-axis": "overlays", role: "group", "aria-label": `Overlays, ${m.pane}` },
         h("h4", {}, `Overlays · ${m.pane} · paint order ↓`),
         ...m.overlays.map((l) => row(l,
