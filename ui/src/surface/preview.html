@@ -12,14 +12,24 @@
 
      It mounts ui/src/surface/ — T-440's renderer core, T-441's cell marks, T-442's pane model,
      T-443's minimap-as-viewport and chrome — against the live GET /api/tiles, over RECORDED
-     HISTORY only. It does not read the live edge (T-439) and it is not the cutover (T-445).
+     HISTORY only, and it still does, DELIBERATELY, after T-445's cutover: `preview.ts`'s
+     `SurfacePreview` only follows the live edge when its host hands it an `edge`/`windows`
+     supplier (`PreviewOptions`), and those need the app's own device/session state
+     (`centre/capture-clock.ts`, the active-window store) — state this page's bundle is kept apart
+     from on purpose, so it can build and ship without the app (`ui/test/surface-preview.test.ts`
+     holds its whole route surface to exactly GET /api/coverage and GET /api/navigation). So the
+     badge below is a statement of what this page IS, not a fault to be found — T-982 (2026-09-25)
+     found it read on a live server as one, so this page now links to / for the following, live
+     view: the SAME renderer (T-445 inverted T-450's old "additive" claim — the app reaches this
+     exact host, not a copy of it), the same everything, just with that supplier attached.
 
-     It is additive: the app at / is untouched, shares no state with this page, and imports
-     nothing from it. -->
+     Nothing under ui/src/app/ changed for this: the two pages still ship as separate bundles, and
+     this file's own edit can never touch dist/app.js. -->
 <div class="sp">
   <header class="sp-bar">
     <div class="sp-brand">hack<span>riff</span> <em>surface preview</em></div>
-    <div class="sp-badge" title="This view reads the spectrum-history pyramid. The time axis does not advance and no viewport follows a live edge.">historical · the edge does not advance</div>
+    <div class="sp-badge" title="This view reads the spectrum-history pyramid. The time axis does not advance and no viewport follows a live edge — by design, not a fault. See the live link.">historical · the edge does not advance</div>
+    <a class="sp-live" data-slot="live-link" href="/" title="The unified surface at /, following the live edge — the same renderer this page mounts (T-445), with the live edge attached. This page stays frozen on purpose; that one does not.">live view →</a>
     <div class="sp-edge" data-slot="edge">…</div>
     <div class="sp-actions" data-slot="actions"></div>
   </header>

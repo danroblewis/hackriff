@@ -135,6 +135,8 @@ for a human/AI to handle — AI is only needed for the exceptions.
 ```bash
 HACKRIFF_OPS=~/.hackriff-ops nohup bash ops/merge-runner.sh >/dev/null 2>&1 & disown
 # queue:    echo task-t519 >> $HACKRIFF_OPS/merge-queue.txt
+# review:   mkdir -p $HACKRIFF_OPS/review-hold && echo '<why>' > $HACKRIFF_OPS/review-hold/task-t519   # queued but never gated until
+#           rm $HACKRIFF_OPS/review-hold/task-t519 after the verdict (T-955, 2026-09-25: a tip moved mid-review landed)
 # failures: cat $HACKRIFF_OPS/merge-needs-attention.txt
 # merged:   cat $HACKRIFF_OPS/merge-done.txt   ·   log: $HACKRIFF_OPS/merge-runner.log
 ```
@@ -275,9 +277,12 @@ measures the code, not the neighbours. While the merge runner waits for that dra
 `$HACKRIFF_OPS/gate-wanted`, which the work runner reads as a running gate. **A full stop is a
 file:** `touch $HACKRIFF_OPS/dispatch-paused` stops every dispatch until the file is removed
 (reaping, results and queueing continue) — the conditional holds each have a window, this has none.
-A batch that goes red **without a test FAIL** (lint, a build error, the UI unit step) is re-queued
-in order and held until the queue changes, never isolated: main+batch is broken as a whole and every
-isolated gate would reproduce it. Before isolating a red batch the runner re-runs the failing tests
+A batch that goes red **without a test FAIL** in `just lint` or `just test-ui` is **bisected by that
+check** (`just lint` = fmt + clippy, a compile check, on base + half the batch, log2(n) probes): main red
+on it -> `MAIN_RED`; one branch red alone twice -> set aside as `GATE_FAIL`, the rest re-queued first;
+no single culprit (a pair conflict) -> re-queued once with the last red subset named (`CHECK_PAIR`),
+isolated the next time. Any other no-FAIL red, or a bisect that gives up, is re-queued in order and held
+until the queue changes (`SUITE_BROKEN`), never isolated. Before isolating a red batch the runner re-runs the failing tests
 (or browser specs) on the rewound `main`; if `main` itself is red it holds the batch (`MAIN_RED`)
 instead of re-proving the defect once per branch. **Every gate has a hard time limit** —
 `GATE_TIMEOUT` (default 3600 s): past it the gate's whole process group is killed, the batch is
