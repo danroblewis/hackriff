@@ -574,10 +574,25 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
         # '... (task-t567): batch, gated together'); a just-dispatched branch with no commits is 'merged' but not landed.
         subjects = _git(repo, "log", "main", "--merges", "--since=30 days ago", "--format=%s")
         landed = [t for t in sent if f"(task-{t.lower().replace('-', '')})" in subjects]   # the runner's branch_of
+        recent = _git(repo, "log", "main", "--merges", "--since=24 hours ago", "--format=%s")
+        try:
+            probe = json.load(open(os.path.join(ops, "hosts", f"{h}.json")))      # the work runner's per-tick probe
+        except (OSError, ValueError):
+            probe = {}
         out.append({"name": h, "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
+                    "landed_24h": sum(1 for t in sent if f"(task-{t.lower().replace('-', '')})" in recent), "probe": probe,
                     "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
                     "landed": len(landed)})
     return out
+
+
+def landings_by_host(ops: str, hours: int = 24, repo: str = REPO) -> dict:
+    """Landed task branches on main in the last `hours`, split by the host their worker ran on (remote hosts from
+    remote_hosts(); the rest ran on this Mac)."""
+    subjects = _git(repo, "log", "main", "--merges", f"--since={hours} hours ago", "--format=%s")
+    total = len(set(re.findall(r"\((task-t\d+[a-z]?)\)", subjects)))
+    remote = {h["name"]: h["landed_24h"] for h in remote_hosts(ops, repo)} if hours == 24 else {}
+    return {"mac": total - sum(remote.values()), **remote} if remote else {}
 
 
 def tick_line(ops: str, s: dict, now: datetime | None = None) -> str:

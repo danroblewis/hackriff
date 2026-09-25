@@ -1761,7 +1761,10 @@ def agents(status_map):
         if not alive and (c or s["age_s"] > ACTIVE):
             continue
         s["name"] = tid; s["status"] = status_map.get(tid); s["running"] = True; s["title"] = titles.get(tid, ""); s["milestone"] = mstone.get(tid, "")
-        s["label"] = f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
+        # A remote claim's row names its host (user via supervisor, 2026-09-25 00:40): its transcript is the copy the
+        # work runner appends from that host every tick, its pid the local ssh session holding the run.
+        s["host"] = c.get("host") or "mac"
+        s["label"] = (f"{c['host']} · " if c.get("host") else "") + f"work-runner · {c.get('model') or 'claude -p'} · " + str(s.get("label", ""))[:80]
         best[tid] = s
     out += sorted(best.values(), key=lambda a: (ticket_num(a["name"]), a["name"]))
     return out
@@ -2017,6 +2020,7 @@ def build_flow_panel(ops, now=None):
             "touchpoints_24h": {"count": len(tp_all), "items": tp_all[-10:]},
             # Remote worker hosts (user, 2026-09-25): running/landed per host and its mirror's drift from main.
             "remote_hosts": flow_mod.remote_hosts(ops),
+            "landings_by_host_24h": flow_mod.landings_by_host(ops, 24),
             "experiment": experiment,
         }
     except Exception as e:
@@ -2957,10 +2961,14 @@ function drawCauses(el, d){
 function drawRemoteHosts(el, d){
   if(!el) return; const H=d.remote_hosts||[];
   if(!H.length){ el.innerHTML='<div class=kv><span>no remote host configured</span></div>'; return; }
-  el.innerHTML=H.map(h=>{
+  const by=d.landings_by_host_24h||{};
+  el.innerHTML=(Object.keys(by).length?`<div class=kv><span>landings 24h by host:</span>${Object.entries(by).map(([k,v])=>`<span>${esc(k)} <b>${v}</b></span>`).join('')}</div>`:'')+H.map(h=>{
     const drift=h.behind==null?'<span>mirror never pushed</span>':(h.behind>0?`<span style="color:${C.amber}">mirror behind by <b>${h.behind}</b></span>`:'<span>mirror current</span>');
     const when=h.pushed_at?new Date(h.pushed_at*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'-';
-    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed</span><span>${h.dispatched} dispatched</span></div>`+
+    const p=h.probe||{}, age=p.at?Math.round(Date.now()/1000-p.at):null;
+    const reach=p.at==null?'<span>not probed yet</span>':(p.reachable?`<span>reachable · ${age}s ago</span>`:`<span style="color:${C.red}">UNREACHABLE · ${age}s ago</span>`);
+    return `<div class=kv><span><b>${esc(h.name)}</b></span><span>${h.running.length} running${h.running.length?' ('+h.running.map(esc).join(', ')+')':''}</span><span>${h.landed} landed (${h.landed_24h} in 24h)</span><span>${h.dispatched} dispatched</span></div>`+
+           `<div class=kv>${reach}<span>load ${p.load1??'-'} / ${p.cores??'-'} cores</span><span>disk ${p.disk_free_gb??'-'} GB free</span></div>`+
            `<div class=kv>${drift}<span>mirror ${esc(h.mirror||'-')} · pushed ${when}</span></div>`;
   }).join('');
 }
