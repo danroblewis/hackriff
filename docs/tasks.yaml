@@ -28726,7 +28726,7 @@ tasks:
   - id: T-982
     milestone: MMAP
     title: surface.html on a live server reads historical - the edge does not advance - with empty panes (/ renders live)
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-SURFACE-HTML
@@ -28747,6 +28747,7 @@ tasks:
       Commits: ab5d8403, a5d0402e, e34b6661, cf631d8c
       Observed, not chased: The pre-fix e2e reproduction (surface-contended-survey.e2e.mjs against the unfixed survey.ts) is PROBABILISTIC, not a hard freeze every run (97.5s vs 30.7s to resolve in two separate runs) - the float64-ns drift's sign/magnitude depends on real wall-clock timestamps at request time, so it is a coin flip per retry rather than deterministic. The unit test (surface-survey.test.ts) isolates the exact defect deterministically instead. Flagging this so a reviewer doesn't read the e2e's occasional quick pass pre-fix as evidence the bug wasn't real - it was reproduced directly via response-body instrumentation (~200ns measured drift, recorded in the commit message) before any fix was written. | app-surface.e2e.mjs: 5/9 subtests failed (T-882 toolbar-rehoming counts at narrow widths) on a run touching none of my changed files (ui/src/app/ untouched by either commit) - looks pre-existing/environmental, not chased further since unrelated to surface.html (noted in the previous handback too).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: ee7ac362
   - id: T-983
     milestone: MAUTO
     title: "Explorer: one server per window, and the window script reaps IQ rings on exit (each per-target server left a 4.2 GB ring)"
