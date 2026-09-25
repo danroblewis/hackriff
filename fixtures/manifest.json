@@ -785,6 +785,102 @@
       "purpose": "explorer-agent captured live P25 C4FM channel (800 MHz public-safety), blind truth cross-checked against the independent p25_ref.py frame-sync oracle (T-975)",
       "datetime": "2026-09-25",
       "clip_count": 0
+    },
+    {
+      "name": "lmr-461p125-nbfm-ctcss",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/lmr-461p125-nbfm-ctcss.sigmf-data",
+      "size_bytes": 72089600,
+      "sha256": "2d66efa36a10ca90f670ea7c3a3cd57e979f7d4eef0cca74b5d2d650e28f507b",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-090"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "461.1250 MHz: oracle 99.88 Hz (100 Hz, SNR 16.5 dB) vs explorer claim 233.6 Hz; 462.2250 MHz: oracle 67.86 Hz (no table match, SNR 5.4 dB) vs explorer claim None Hz; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live NBFM land-mobile/GMRS-adjacent voice bursts, blind truth cross-checked against the independent ctcss_ref.py CTCSS tone oracle (T-985)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "lmr-461p125-nbfm-ctcss",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/lmr-461p125-nbfm-ctcss.sigmf-meta",
+      "size_bytes": 9366,
+      "sha256": "d2b84e3bfe097171d5c15318fb5dde7edeaad0732f085a0faf86aeb88499bcad",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-090"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "461.1250 MHz: oracle 99.88 Hz (100 Hz, SNR 16.5 dB) vs explorer claim 233.6 Hz; 462.2250 MHz: oracle 67.86 Hz (no table match, SNR 5.4 dB) vs explorer claim None Hz; overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live NBFM land-mobile/GMRS-adjacent voice bursts, blind truth cross-checked against the independent ctcss_ref.py CTCSS tone oracle (T-985)",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "dmr-464p6125-bs",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/dmr-464p6125-bs.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "4e2672e893d7c87b9bfe9bcbf4b754e05fee7056efe3c7ca7df24a71449b99a0",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-091"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "464.6125 MHz: oracle 41 sync(s) {'BS_data': 41} in this 5 s clip vs explorer's 42 in the full 10 s file; 464.7000 MHz: oracle 66.75 Hz (no table match) (not re-verifying explorer's earlier claim); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live conventional DMR (Tier II) channel, blind truth cross-checked against the independent dmr_ref.py frame-sync oracle (T-985); a 5 s tail trim of the original 10 s capture",
+      "datetime": "2026-09-25",
+      "clip_count": 0,
+      "lfs": true,
+      "source": "store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-data",
+      "source_sha256": "91e70e4a04b4d65ab16ad25b4126de9ddfa2a99e78e2d510b6feed2b04532aac",
+      "source_start_s": 5.0
+    },
+    {
+      "name": "dmr-464p6125-bs",
+      "status": "committed",
+      "path": "hackrf/explorer-2026-09-25/dmr-464p6125-bs.sigmf-meta",
+      "size_bytes": 16397,
+      "sha256": "52477c2f20e8a03d0c3bfd2af9302c568253647e9e45f702386bf0584fcb014d",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-091"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "464.6125 MHz: oracle 41 sync(s) {'BS_data': 41} in this 5 s clip vs explorer's 42 in the full 10 s file; 464.7000 MHz: oracle 66.75 Hz (no table match) (not re-verifying explorer's earlier claim); overload clip_fraction 0.000",
+      "purpose": "explorer-agent captured live conventional DMR (Tier II) channel, blind truth cross-checked against the independent dmr_ref.py frame-sync oracle (T-985); a 5 s tail trim of the original 10 s capture",
+      "datetime": "2026-09-25",
+      "clip_count": 0
+    },
+    {
+      "name": "dmr-464p6125-bs-full",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-data",
+      "size_bytes": 48234496,
+      "sha256": "91e70e4a04b4d65ab16ad25b4126de9ddfa2a99e78e2d510b6feed2b04532aac",
+      "kind": "sigmf-data",
+      "use_cases": [
+        "SIGNAL-091"
+      ],
+      "license": "project-owned capture",
+      "purpose": "untrimmed 10 s original the committed dmr-464p6125-bs clip was trimmed from (fixtures/README.md's source/source_start_s convention)",
+      "datetime": "2026-09-25"
+    },
+    {
+      "name": "dmr-464p6125-bs-full",
+      "status": "external",
+      "path": "store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-meta",
+      "size_bytes": 2006,
+      "sha256": "fb425368d954d63693b11dcd1eab7702c192bb6d8a8a7739628cc87902e2367a",
+      "kind": "sigmf-meta",
+      "use_cases": [
+        "SIGNAL-091"
+      ],
+      "license": "project-owned capture",
+      "purpose": "untrimmed 10 s original the committed dmr-464p6125-bs clip was trimmed from (fixtures/README.md's source/source_start_s convention)",
+      "datetime": "2026-09-25"
     }
   ]
 }

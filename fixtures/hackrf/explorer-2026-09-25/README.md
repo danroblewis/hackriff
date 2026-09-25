@@ -111,3 +111,59 @@ order/polarity combinations with the corroboration filter above — a plausible 
 one-event difference on a genuinely marginal signal, not investigated further here). The two
 oracles agree exactly on the more decisive claim: **zero** frame syncs on every neighbouring
 channel tried (seven, in this build), so a false-positive floor is not what is driving the count.
+
+## Window 3: LMR/GMRS NBFM+CTCSS and conventional DMR (T-985)
+
+Two more captures from the explorer agent's 2026-09-25 window-3 sweep of 460-470 MHz land-mobile/
+GMRS (~06:37-07:03 PDT), taken through `POST /api/outputs/record/start` (whole tuned window)
+rather than the clip endpoint the earlier three used, so their source `.sigmf-meta` carried no
+`hackriff:clip_count` yet either (`build_explorer_2026_09_25.py` measures it directly, same gap
+`build_p25` fixed). Same hardware as above; LNA 32 / VGA 30 / amp on, bias-tee **off** (confirmed
+in this pass's provenance, unlike the FM/RDS pair's unknown).
+
+- `lmr-461p125-nbfm-ctcss` (`fixtures/store/explorer-2026-09-25/`, **external**: SIGNAL-090):
+  15 s x 2.4 Msps @ 461.675 MHz, 72 MB — over the 25 MB committed cap even before considering that
+  the truth burst alone (8.1 s) would be ~39 MB, so it goes to the store whole, untrimmed, same as
+  the FLEX capture above. Explorer's truth claims an 8.1 s NBFM burst at 461.125 MHz with a
+  233.6 Hz CTCSS tone (measured 233.0 Hz ±1 Hz by the explorer's own `tools/nbfm3.py`, matched to
+  the nearest standard tone), plus a continuous unidentified carrier at 461.9875 MHz and a brief
+  (0.2 s in this file) NBFM burst at 462.225 MHz.
+
+  **Oracle cross-check (T-985): CTCSS tone disagrees.** The independent oracle `ctcss_ref.py`
+  (NBFM discriminator → zero-phase low-pass < 300 Hz → Welch-averaged tone estimate → nearest
+  EIA 50-tone match) measured **100.0 Hz** (raw estimate 99.88 Hz, SNR 16.5 dB) over the claimed
+  burst window `[6.9 s, 15.0 s)` — the burst's own timing (a clear +5.5 dB power step at 6.5-7 s,
+  confirmed independently by direct power measurement, matching the claimed 6.9 s start to within
+  the measurement's own smoothing window) is right, but the tone is not 233.6 Hz in this oracle's
+  independent measurement. This is recorded as a **disagreement** in the fixture's truth and
+  `manifest.json`, not silently resolved either way: swept across the whole channel in 5 kHz
+  steps, the 100 Hz tone peaks sharply (16-18 dB) exactly at 461.120-461.125 MHz and nowhere else
+  nearby, so this is a real, confidently-measured tone, just not the one claimed. At 462.225 MHz
+  (the claimed 0.2 s burst) the oracle found no tone above its noise-guard threshold over the whole
+  15 s file, consistent with the explorer's own "not in this file" note (no disagreement, since no
+  same-file claim exists to check against).
+
+- `dmr-464p6125-bs` (`fixtures/hackrf/explorer-2026-09-25/`, **committed**, Git LFS: SIGNAL-091):
+  the raw capture is 10 s x 2.4 Msps @ 464.3 MHz, 48 MB — over the cap, but the independent oracle
+  found the *entire* frame-sync burst sits inside the file's final ~1.25 s (12% duty over the full
+  10 s), so a **5 s tail trim** (`[5.0 s, 10.0 s)`, `py/fixtures/trim.py`) keeps 100% of the real
+  signal content at exactly 24 000 000 bytes, under the cap. The untrimmed original is kept at
+  `fixtures/store/explorer-2026-09-25/dmr-464p6125-bs-full.sigmf-{meta,data}` (external), and the
+  committed clip's manifest row carries `source`/`source_sha256`/`source_start_s` pointing at it
+  (`fixtures/README.md`'s convention, same as `py/fixtures/build_2026_09_13.py`'s trimmed
+  fixtures). Explorer's truth claims a 4-level-FSK bursty channel at 464.6125 MHz with a DMR
+  BS-sourced DATA sync found 42x over the whole 10 s file, plus two continuous unidentified
+  carriers and an NBFM burst at 464.700 MHz with a 100 Hz tone "measured at 06:38, not re-verified
+  in this file".
+
+  **Oracle cross-check (T-985): sync count disagrees by one.** The independent oracle `dmr_ref.py`
+  (FM discriminator → 4800 Bd 4-level-sliced 48-bit ETSI SYNC-pattern correlation, tried across
+  both bit orders/polarities and all four standard SYNC patterns, with the same timing-phase
+  corroboration discipline as `p25_ref.py`'s intermittent-burst handling) found **41** `BS_data`
+  syncs in the trimmed 5 s clip against the explorer's claimed 42 over the full 10 s file —
+  recorded as a **disagreement**, not silently resolved (a plausible one-event difference between
+  two independently written correlation searches on a genuinely marginal signal, the same
+  character as the P25 capture's own off-by-one above). The 100 Hz tone at 464.700 MHz was not
+  re-measured as matching or disagreeing with the explorer's claim, since that claim is explicitly
+  for an earlier, wider observation window and not asserted for this specific clip.
+
