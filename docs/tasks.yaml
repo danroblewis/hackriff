@@ -27744,7 +27744,8 @@ tasks:
   - id: T-935
     milestone: MAUTO
     title: "Explorer FM captures into fixtures/ (LFS) with hidden truth: 101.3 PI 1694, 98.9 PI A4FF + 98.1 pilot"
-    status: todo
+    status: done
+    commit: "810bcc01"
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
@@ -27783,7 +27784,8 @@ tasks:
   - id: T-937
     milestone: MAUTO
     title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
-    status: todo
+    status: in-progress
+    branch: task-t937
     priority: P1
     deps: []
     parallel_group: DETECT-MERGE
@@ -27801,7 +27803,8 @@ tasks:
   - id: T-938
     milestone: MAUTO
     title: WFM/RDS recipe has no centre refinement; detection centres biased 10-25 kHz
-    status: todo
+    status: in-progress
+    branch: task-t938
     priority: P2
     deps: []
     parallel_group: RECIPE-RDS
@@ -27815,7 +27818,8 @@ tasks:
   - id: T-939
     milestone: MLIVE
     title: At 20 Msps the detect reader loses 3.1 G samples (39 overruns/4 min) and the live waterfall rows go empty
-    status: todo
+    status: in-progress
+    branch: task-t939
     priority: P1
     deps: []
     parallel_group: PIPE-DETECT-RT
@@ -27831,7 +27835,8 @@ tasks:
   - id: T-940
     milestone: M2-hardening
     title: "On-air FM stations (incl. Confirmed 101.3 while decoding) read liveness: ended; lists show Nothing on the air"
-    status: todo
+    status: in-progress
+    branch: task-t940
     priority: P1
     deps: []
     parallel_group: INV-LIVENESS
