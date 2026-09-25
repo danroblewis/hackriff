@@ -29167,7 +29167,7 @@ tasks:
   - id: T-994
     milestone: MMAP
     title: "Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires"
-    status: in-progress
+    status: done
     branch: task-t994
     priority: high
     deps: []
@@ -29196,6 +29196,7 @@ tasks:
       Commits: f29d6c6e, f46ce224, 366574d8
       Observed, not chased: app-selected-region.e2e.mjs test 1 fails on the base commit: 'listen-all is outside the window (y 1031-1117 of 1000)'. The sheet at half puts the region actions below the fold; after this change they sit at y 1093 because the sheet is 62 px lower. Test 2 (right-click a region row) also fails on base. | app-surface.e2e.mjs T-806 and T-807 fail on the base commit (layers menu keys: an extra 'none' key under Coverage/Overlays). Unrelated to this ticket. | Decode from the box menu (runAutoDecode) switches the app to the Decode tab, so the decode badge is seen only after returning to Explore. The ticket's 'Decode... (recipe picker)' is served by the Decode tab's recipe list, not by an in-menu picker. | Curated markers are not placed as pins on the surface (pinsFrame lays out detection pins only), so there is no curated-pin menu yet. | On main 2033e9dd (mock SDR, default FM fixture), detection boxes/pins disappear from the canvas for 20-30 s at a time while the side chip still counts 3 confirmed rows. A probe sampled .sf-pin.detection every 2 s with main's own UI build: 5,1,0,4,4,4,4,2,2, then 0,1,0,0,0,0,0. Possibly T-955 (opening window / follow-live).
       Resources: 2003 CPU-s, peak 8.3 GB
+    commit: 9a088af0
   - id: T-995
     milestone: MMAP
     title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
