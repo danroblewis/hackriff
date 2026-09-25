@@ -23955,7 +23955,8 @@ tasks:
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
-    status: todo
+    status: in-progress
+    branch: task-t812
     priority: normal
     parallel_group: MAP-LAYERS
     model: opus
@@ -24327,7 +24328,8 @@ tasks:
   - id: T-821
     milestone: MMAP
     title: 'Collections panel + table view synced with the canvas (every mark is also a row)'
-    status: todo
+    status: in-progress
+    branch: task-t821
     priority: normal
     parallel_group: MAP-RESEARCH
     model: opus
@@ -26074,7 +26076,8 @@ tasks:
   - id: T-882
     milestone: MMAP
     title: "Remove the surface toolbar row: rehome Live/Trace/Contrast/Signals/Measure/Record/Split/Close/Whole-surface into the floating map chrome (T-802's unmet DoD line)"
-    status: todo
+    status: in-progress
+    branch: task-t882
     priority: high
     deps:
     - T-802
@@ -26472,7 +26475,8 @@ tasks:
   - id: T-900
     milestone: MMAP
     title: "Overlays are closeable, not just fadeable: a visible dismiss (and Esc) on the sheet, Research slide-in and left column (user P1)"
-    status: todo
+    status: in-progress
+    branch: task-t900
     priority: high
     deps:
     - T-895
