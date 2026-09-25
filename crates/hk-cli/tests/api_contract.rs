@@ -4727,6 +4727,11 @@ fn recipe_and_pipeline_routes_match_the_documented_shapes() {
         "{p}"
     );
     assert_eq!(
+        p["refinement"],
+        Value::Null,
+        "only a recipe declaring refine.objective.builtin has a refinement (T-870): {p}"
+    );
+    assert_eq!(
         p["outputs"][0]["stream_id"],
         json!(format!("stage/{pid}/base"))
     );
@@ -7501,18 +7506,25 @@ fn coverage_answers_per_cell_in_time_and_says_when_it_no_longer_knows_whether_it
         row_t0(edge_row),
         row_t0(edge_row + 1)
     );
-    // And a band this radio has never been near names no horizon at all — `null` is "no record
-    // touches this band", which is not "reaches everywhere": everything there is honestly grey at
-    // every instant, and the answer stands as served.
+    // And a band this radio has never been near states the SAME horizon, read over any band
+    // (T-881): the radio's record reaches `as_of_s` somewhere else, which is exactly the evidence
+    // that 2.4 GHz was unobserved up to there — and past it a held copy cannot speak, here as
+    // anywhere. Before T-881 this was `null` ("no record touches this band"), so a kept answer was
+    // drawn grey over rows recorded after it was built; for a band the radio had LEFT that grey was
+    // the newest rows of its fog-of-war shadow. Read after the tuned band's answer, so at or past
+    // its horizon, and never past the window.
     let (st, far) = get(
         addr,
         &format!("/api/coverage?f_lo=2400000000&f_hi=2450000000&cells=8&rows=2&t0={t0}&t1={t1}"),
     );
     assert_eq!(st, 200, "{far}");
-    assert_eq!(
-        far["horizon"]["as_of_s"],
-        Value::Null,
-        "no record touches 2.4 GHz on this run, so there is no forward horizon to state: {far}"
+    let far_as_of = far["horizon"]["as_of_s"].as_f64().expect(
+        "a band the radio is not on is still bounded by how far the radio's record reaches",
+    );
+    assert!(
+        far_as_of >= as_of && far_as_of <= t1,
+        "the untouched band's horizon {far_as_of} is not the radio's record reach (tuned band's \
+         {as_of}, window end {t1}): {far}"
     );
 
     // ---- 2. the column is the SUM of the rows, and its duty is re-derived ----

@@ -414,22 +414,127 @@ pub struct OutputPolicy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefineSpec {
-    /// Objective read from a node's status.
+    /// What the refinement optimises.
     pub objective: RefineObjective,
     /// Channel parameters tuned: `center_hz`, `bandwidth_hz`.
     pub tune: Vec<String>,
 }
 
+impl RefineSpec {
+    /// Whether the refinement may move the channel centre.
+    pub fn tunes_center(&self) -> bool {
+        self.tune.iter().any(|t| t == "center_hz")
+    }
+
+    /// Whether the refinement may change the channel bandwidth.
+    pub fn tunes_bandwidth(&self) -> bool {
+        self.tune.iter().any(|t| t == "bandwidth_hz")
+    }
+}
+
+/// The builtin refinement objectives a recipe may name in `refine.objective.builtin`
+/// (ADR-0011 §8.7). Each is a registered `hk_demod::refine::Objective` the runtime maps by name
+/// (`hk_pipeline::recipes::refine`); `wfm-pilot` is T-070's WFM objective (19 kHz pilot C/N₀,
+/// occupied-bandwidth floor, RDS validation over the channel IQ window).
+pub const REFINE_BUILTINS: &[&str] = &["wfm-pilot"];
+
+/// What a refinement optimises. Two forms (ADR-0011 §8.7); ADR-0015 §2.3's `{evidence}` is the
+/// third, reserved by schema 3 and not read yet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawObjective", into = "RawObjective")]
+pub enum RefineObjective {
+    /// `{node, metric, goal}`: a node's status metric (ADR-0011 §1.3), e.g. `crc.error_rate → min`.
+    Metric(MetricObjective),
+    /// `{builtin}` (schema 3): a registered objective measured over the **channel IQ window**,
+    /// not over one node's port — Listen's `wfm-pilot` ([`REFINE_BUILTINS`]).
+    Builtin(String),
+}
+
+impl RefineObjective {
+    /// The node a `{node, metric}` objective reads; `None` for a builtin.
+    pub fn node(&self) -> Option<&str> {
+        match self {
+            Self::Metric(m) => Some(&m.node),
+            Self::Builtin(_) => None,
+        }
+    }
+
+    /// The builtin's name, if this is one.
+    pub fn builtin(&self) -> Option<&str> {
+        match self {
+            Self::Metric(_) => None,
+            Self::Builtin(b) => Some(b),
+        }
+    }
+}
+
 /// A status metric to optimise.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RefineObjective {
+pub struct MetricObjective {
     /// Node id.
     pub node: String,
     /// Status key: `error_rate`, `quality`, `snr_db` or `lock`.
     pub metric: String,
     /// Direction.
     pub goal: RefineGoal,
+}
+
+/// The wire shape of [`RefineObjective`]: one object whose keys pick the form, so a mixed or
+/// partial object is refused with a message naming the rule rather than "no variant matched".
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawObjective {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metric: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    goal: Option<RefineGoal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    builtin: Option<String>,
+}
+
+impl TryFrom<RawObjective> for RefineObjective {
+    type Error = &'static str;
+
+    fn try_from(r: RawObjective) -> Result<Self, Self::Error> {
+        match r {
+            RawObjective {
+                node: None,
+                metric: None,
+                goal: None,
+                builtin: Some(b),
+            } => Ok(Self::Builtin(b)),
+            RawObjective {
+                node: Some(node),
+                metric: Some(metric),
+                goal: Some(goal),
+                builtin: None,
+            } => Ok(Self::Metric(MetricObjective { node, metric, goal })),
+            RawObjective {
+                builtin: Some(_), ..
+            } => Err("refine.objective: builtin stands alone (no node, metric or goal)"),
+            _ => Err("refine.objective: either {builtin} or {node, metric, goal}"),
+        }
+    }
+}
+
+impl From<RefineObjective> for RawObjective {
+    fn from(o: RefineObjective) -> Self {
+        match o {
+            RefineObjective::Metric(m) => Self {
+                node: Some(m.node),
+                metric: Some(m.metric),
+                goal: Some(m.goal),
+                builtin: None,
+            },
+            RefineObjective::Builtin(b) => Self {
+                builtin: Some(b),
+                ..Self::default()
+            },
+        }
+    }
 }
 
 /// Optimisation direction.
@@ -861,14 +966,48 @@ impl Recipe {
             );
         }
         if let Some(r) = &self.refine {
-            if !index.contains_key(r.objective.node.as_str()) {
-                e.push("refine.objective.node", "unknown node");
-            }
-            if !["error_rate", "quality", "snr_db", "lock"].contains(&r.objective.metric.as_str()) {
-                e.push(
-                    "refine.objective.metric",
-                    "one of error_rate, quality, snr_db, lock",
-                );
+            match &r.objective {
+                RefineObjective::Metric(m) => {
+                    if !index.contains_key(m.node.as_str()) {
+                        e.push("refine.objective.node", "unknown node");
+                    }
+                    if !["error_rate", "quality", "snr_db", "lock"].contains(&m.metric.as_str()) {
+                        e.push(
+                            "refine.objective.metric",
+                            "one of error_rate, quality, snr_db, lock",
+                        );
+                    }
+                }
+                // ADR-0011 §8.7: a registered objective over the channel IQ window.
+                RefineObjective::Builtin(b) => {
+                    if !v3 {
+                        e.push(
+                            "refine.objective.builtin",
+                            "refine.objective.builtin needs schema_version 3",
+                        );
+                    }
+                    if !REFINE_BUILTINS.contains(&b.as_str()) {
+                        e.push(
+                            "refine.objective.builtin",
+                            format!(
+                                "unknown builtin objective (one of {})",
+                                REFINE_BUILTINS.join(", ")
+                            ),
+                        );
+                    }
+                    if self.input.port != PortType::Iq {
+                        e.push(
+                            "refine.objective.builtin",
+                            "a builtin objective measures the channel IQ: the input must be iq",
+                        );
+                    }
+                    if !matches!(self.input.channels, ChannelsSpec::Single) {
+                        e.push(
+                            "refine.objective.builtin",
+                            "a builtin objective refines one channel, not follow-hops",
+                        );
+                    }
+                }
             }
             if r.tune.is_empty()
                 || r.tune
@@ -1500,6 +1639,91 @@ mod tests {
                     .iter()
                     .any(|e| e.path == "schema_version")
             );
+        }
+    }
+
+    /// ADR-0011 §8.7 (T-870, ADR-0015 LP-6): `refine.objective` has two forms, `{builtin}` and
+    /// `{node, metric, goal}`; each round-trips in its own shape, and a mixed or partial object
+    /// is refused at parse.
+    #[test]
+    fn refine_objective_has_a_builtin_form_beside_the_node_metric_form() {
+        let mut v = audio_doc();
+        v["refine"] =
+            json!({"objective": {"builtin": "wfm-pilot"}, "tune": ["center_hz", "bandwidth_hz"]});
+        let r: Recipe = serde_json::from_value(v.clone()).unwrap();
+        r.validate(&audio_catalogue()).expect("a builtin objective");
+        let spec = r.refine.as_ref().unwrap();
+        assert_eq!(spec.objective, RefineObjective::Builtin("wfm-pilot".into()));
+        assert_eq!(spec.objective.builtin(), Some("wfm-pilot"));
+        assert_eq!(spec.objective.node(), None);
+        assert!(spec.tunes_center() && spec.tunes_bandwidth());
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["refine"],
+            v["refine"],
+            "round-trips as {{builtin}}"
+        );
+
+        let mut v = audio_doc();
+        v["refine"] = json!({"objective": {"node": "fm", "metric": "snr_db", "goal": "max"},
+                             "tune": ["center_hz"]});
+        let r: Recipe = serde_json::from_value(v.clone()).unwrap();
+        r.validate(&audio_catalogue())
+            .expect("a node metric objective");
+        let spec = r.refine.as_ref().unwrap();
+        assert_eq!(spec.objective.node(), Some("fm"));
+        assert!(spec.tunes_center() && !spec.tunes_bandwidth());
+        assert_eq!(serde_json::to_value(&r).unwrap()["refine"], v["refine"]);
+
+        for bad in [
+            json!({"builtin": "wfm-pilot", "goal": "max"}),
+            json!({"node": "fm", "metric": "snr_db"}),
+            json!({}),
+            json!({"builtin": "wfm-pilot", "extra": 1}),
+        ] {
+            let mut v = audio_doc();
+            v["refine"] = json!({"objective": bad, "tune": ["center_hz"]});
+            assert!(
+                serde_json::from_value::<Recipe>(v).is_err(),
+                "{bad} is not an objective"
+            );
+        }
+    }
+
+    /// ADR-0011 §8.6/§8.7: `builtin` is a schema-3 key, names a registered objective, and
+    /// measures one iq channel.
+    #[test]
+    fn a_builtin_objective_is_schema_3_registered_and_on_one_iq_channel() {
+        let with = |f: &dyn Fn(&mut Value), builtin: &str| {
+            let mut v = audio_doc();
+            v["refine"] = json!({"objective": {"builtin": builtin}, "tune": ["center_hz"]});
+            f(&mut v);
+            error_paths(v)
+        };
+        let path = "refine.objective.builtin".to_owned();
+        assert!(with(&|_| {}, "wfm-pilot").is_empty());
+        assert!(with(&|_| {}, "no-such-objective").contains(&path));
+        // A version-2 document: the builtin key is refused (and so is the audio output).
+        assert!(with(&|v| v["schema_version"] = 2.into(), "wfm-pilot").contains(&path));
+        assert!(
+            with(
+                &|v| v["input"]["channels"] = json!({"mode": "follow-hops", "channel_bandwidth_hz": 12500.0, "max_channels": 4}),
+                "wfm-pilot"
+            )
+            .contains(&path)
+        );
+        let mut v = minimal();
+        v["schema_version"] = 3.into();
+        v["refine"] = json!({"objective": {"builtin": "wfm-pilot"}, "tune": ["center_hz"]});
+        let r: Recipe = serde_json::from_value(v).unwrap();
+        assert!(
+            r.validate_structure()
+                .unwrap_err()
+                .iter()
+                .any(|e| e.path == path),
+            "a bits-input recipe has no channel IQ to measure"
+        );
+        for name in REFINE_BUILTINS {
+            assert!(with(&|_| {}, name).is_empty(), "{name} validates");
         }
     }
 
