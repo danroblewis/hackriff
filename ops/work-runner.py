@@ -501,7 +501,9 @@ def host_room(claims, h, exclude=None):
             load = json.load(open(f"{S}/hosts/{h}.json")).get("load1")
         except (OSError, ValueError):
             load = None
-        if load is None or load >= bound:
+        if load is None:
+            return f"no 1-min load reading (bound {bound})"
+        if load >= bound:
             return f"1-min load {load} >= {bound}"
     return None
 

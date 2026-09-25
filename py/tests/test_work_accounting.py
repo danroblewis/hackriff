@@ -44,13 +44,15 @@ WT = "/Users/daniellewis/hackriff/.claude/worktrees/t513"
 
 @pytest.fixture(autouse=True)
 def _never_the_real_ops_dir(tmp_path_factory, monkeypatch):
-    """Every runner path a test could write through points into tmp. 2026-09-25 05:53: a test here ran the real
+    """Every $HACKRIFF_OPS path (and the transcript dir) points into tmp. 2026-09-25 05:53: a test here ran the real
     tick() with only S patched - CLAIMS/LOG/WORKDIR are bound at import - and it overwrote the live
-    work-claims.json and dispatched two real deflakers."""
+    work-claims.json and dispatched two real deflakers. NOT redirected: REPO (git and worktree operations on the
+    real checkout) - a test that reaches tick(), sync_board or reap_worktrees must patch REPO or stub them."""
     ops = tmp_path_factory.mktemp("ops")
     for name in ("CLAIMS", "NEEDS", "DONE", "LOG", "WORKDIR", "MERGE_QUEUE", "BULKMARK", "LANDED", "DEFLAKE_REQUESTS",
                  "MERGE_NEEDS", "MERGE_LOG", "HOSTS_FILE"):
         monkeypatch.setattr(R, name, str(ops / pathlib.Path(getattr(R, name)).name))
+    monkeypatch.setattr(R, "PROJECTS", str(ops / "projects"))
     monkeypatch.setattr(R, "S", str(ops))
 
 def rows(*specs):
@@ -1627,4 +1629,4 @@ def test_a_remote_host_over_its_load_bound_takes_no_new_work(tmp_path, monkeypat
     cfg = json.loads((tmp_path / "hosts.json").read_text())
     cfg["node2"]["max_load1"] = 24
     (tmp_path / "hosts.json").write_text(json.dumps(cfg))
-    assert R.host_room({}, "node2") == "1-min load None >= 24"
+    assert R.host_room({}, "node2") == "no 1-min load reading (bound 24)"
