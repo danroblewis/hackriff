@@ -50,7 +50,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use hk_api::{ApiState, Server, ServerConfig, Token};
 use hk_e2e::{Fixture, SynthRequest};
 use hk_model::{
-    Detection, FreqRange, IdleGap, Liveness, Region, TimeRange, Timestamp, presence_in_window,
+    Detection, FreqRange, IdleGap, Liveness, Region, TimeRange, Timestamp, Watched,
+    presence_in_window,
 };
 use hk_store::iqbuffer::IqBufferConfig;
 use serde_json::{Value, json};
@@ -855,7 +856,11 @@ fn a_stopped_burster_has_ended_in_the_presence_model_too(r: &IsmRun) {
         let got: Vec<(Liveness, f64, usize)> = entries
             .iter()
             .map(|e| {
-                let intervals = repo.presence_intervals(e.emitter.id, gap, edge).unwrap();
+                // Silence as elapsed time: the reading this test was written against (T-940 added
+                // the coverage-observed reading, which the served routes take via coverage.rs).
+                let intervals = repo
+                    .presence_intervals(e.emitter.id, gap, edge, &Watched::unrecorded())
+                    .unwrap();
                 let p = presence_in_window(&intervals, window, gap);
                 (p.liveness, p.on_air_s, intervals.len())
             })
