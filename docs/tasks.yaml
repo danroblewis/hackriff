@@ -28160,6 +28160,8 @@ tasks:
       2026-09-25 coordinator, from the explorer's window summary (~/.hackriff-ops/explorer/journal-20260925.md): the unknown-at-0.999 defect is not only bursts: WFM stations with a LOCKED 19 kHz PILOT and a CRC-valid RDS decode (106.1 PI 1323, 98.085 PI 1704) are classified unknown 0.999 ('100% unk' in the UI). Include WFM in the tests. (The decode-confirms-the-emitter half is T-961.)
 
       2026-09-25 coordinator, explorer window 3 (journal-20260925.md): classification is NULL (not even unknown) on NBFM voice bursts (461.125 / 462.225 / 464.700 MHz, oracle: NBFM with CTCSS tones) and on DMR 4FSK bursts (464.6125, +24 dB) - include both in the tests; an emission always gets a classification row (unknown with an honest score is fine, null is not).
+
+      2026-09-25 review-fix round (worker, recovered the killed agent's uncommitted edits): (1) hk-demod consensus now refuses k-times harmonic locks (bits with <20% single-symbol runs, the receiver's own HARMONIC_SINGLE_RUN_MIN, now shared) - a 1600 Bd FLEX population otherwise agreed 11/11 on 4800 Bd and stored it; new blind test a_1600_bd_pager_population_stores_1600_bd_or_abstains_never_its_harmonic (red with the gate disabled, green with it); corrected the standard-rate spacing claim (50000/57600 Bd are 15.2% apart). (2) fuse: hk-classify sets every known likelihood to 0 at open_set=1.0, so the 0.9 unknown cap spreads the residual uniformly and ranks nothing - docs/api.md/tests no longer claim otherwise; new test pins ranking below saturation; the WFM-at-0.999 case is T-970. (3) ADR-0016 s3 amendment records the cap. Merged gated main 72f9d76c.
   - id: T-954
     milestone: M2-hardening
     title: /ws/open/bits closes 1006 after ~60 s; framed bursts carry no crc verdict field
