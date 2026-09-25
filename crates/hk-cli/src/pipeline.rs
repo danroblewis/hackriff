@@ -1118,6 +1118,8 @@ pub fn serve_api(
     // `ConfirmPolicy.synthesized`.
     let analyze = {
         let tuned_ctl = controller.clone();
+        let reg = registry.clone();
+        let attach_sink: hk_pipeline::StreamSink = Arc::new(move |h, p| reg.register(h, p));
         Arc::new(hk_pipeline::synth::jobs::AnalyzeJobs::with_attacher(
             Arc::new(hk_pipeline::synth::jobs::RingJobEnv::new(
                 handle.iq_buffer(),
@@ -1129,10 +1131,19 @@ pub fn serve_api(
             )),
             None,
             hk_pipeline::synth::jobs::PowerPolicy::Mains,
-            Some(Arc::new(hk_pipeline::synth::jobs::RepoAttacher::new(
-                handle.data_dir().join("hackriff.db"),
-                hk_pipeline::inventory::SynthesizedConfirm::default(),
-            ))),
+            // T-884 item 1: the run's **configured** `ConfirmPolicy.synthesized`, read from the
+            // inventory that holds it — never a fresh default, which would make the configuration
+            // field unreadable on the one path that gates an irreversible confirm.
+            // T-884 item 2: and a `messages` publisher, so a decode a job attaches to a known
+            // emitter reaches the stream like every other stored decode.
+            Some(Arc::new(
+                hk_pipeline::synth::jobs::RepoAttacher::with_stream(
+                    handle.data_dir().join("hackriff.db"),
+                    handle.synthesized_confirm(),
+                    Some(&attach_sink),
+                    controller.status().content_class,
+                ),
+            )),
         ))
     };
     let openers = hk_api::stream::OpenerRegistry::new()

@@ -208,6 +208,18 @@ pub trait Inventory: Send {
         Ok(())
     }
 
+    /// The `ConfirmPolicy.synthesized` clause this inventory confirms under (T-884 item 1).
+    ///
+    /// The run's inventory holds the configured [`ConfirmPolicy`], but MAUTO's attach step
+    /// ([`crate::synth::attach`]) runs outside it, over its own repository connection — so it has
+    /// to be told. Reading it from here rather than building a fresh [`SynthesizedConfirm`] is
+    /// what makes the configured field mean something on the one path that gates an irreversible
+    /// transition. The default is the default policy's, so an inventory that has no policy of its
+    /// own (the null inventory, a test double) is no weaker than the shipped rule.
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        ConfirmPolicy::default().synthesized
+    }
+
     /// The emitter whose inventory row `track`'s observations are recorded against, when this
     /// inventory has given it one (T-388).
     ///
@@ -1352,6 +1364,10 @@ impl TrackInventory {
 }
 
 impl Inventory for TrackInventory {
+    fn synthesized_confirm(&self) -> SynthesizedConfirm {
+        self.policy.synthesized.clone()
+    }
+
     fn capture_name(&mut self, name: &str) {
         self.capture = Some(name.to_owned());
     }

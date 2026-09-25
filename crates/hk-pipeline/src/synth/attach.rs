@@ -36,7 +36,6 @@ use hk_model::{
     EmitterId, FreqRange, IdentityScheme, LifecycleAuthor, LifecycleState, Region, RepoError,
     Repository, TimeRange, Timestamp,
 };
-use hk_model::{EmitterLink, LinkTarget};
 use hk_plugins::Ingest;
 use hk_stream::policy;
 use hk_synth::result::HoldoutFrame;
@@ -292,11 +291,15 @@ fn decode_row(
             check_bits: h.and_then(|h| h.check_bits).map(f64::from),
             l_check: h.and_then(|h| h.l_check).map(f64::from),
             check_searched: h.is_none_or(|h| h.check_origin.searched()),
+            // T-884 item 3: the three values `hk_model::DecodeProvenance` documents, and the
+            // three a `CheckOrigin` can actually distinguish. `builtin` and `user` are one case
+            // here on purpose: ADR-0022 §5.1 prices them identically (`L_check = 0`) and
+            // `CheckOrigin::TemplateFixed` does not carry which of the two authored the template.
             template_provenance: r.template.as_ref().map(|_| {
                 match h.map(|h| h.check_origin) {
-                    Some(hk_synth::result::CheckOrigin::TemplateFixed) => "builtin-or-user",
+                    Some(hk_synth::result::CheckOrigin::TemplateFixed) => "template-fixed",
                     Some(hk_synth::result::CheckOrigin::Discovered { .. }) => "discovered",
-                    _ => "template",
+                    _ => "searched",
                 }
                 .to_owned()
             }),
@@ -400,21 +403,18 @@ fn attach_in(
             );
             let is_valid = d.crc_status == CrcStatus::Valid;
             match emitter {
-                // The emitter is known: store the row and link it. A sighting here would let a
-                // structural or shared-channel identity mint a second entry for this emission.
+                // The emitter is known: store the row, link it, and republish it on the
+                // `messages` stream — but take **no** identity sighting, which would let a
+                // structural or shared-channel identity mint a second entry for this emission
+                // ([`Ingest::store_decode_linked`]). T-884 item 2: this path used to insert and
+                // link by hand, so a synthesized decode for a known emitter reached the database
+                // and never the stream.
                 Some(e) => {
                     let mut d = d;
                     if !policy::decode_is_allowlist_shaped(&d) {
                         policy::sanitize_decode(None, STRUCTURAL_SCHEME, &mut d);
                     }
-                    let id = d.id;
-                    let t = d.t;
-                    ingest.repo_mut().insert_decode(&d)?;
-                    ingest.repo_mut().link_emitter(&EmitterLink {
-                        emitter_id: e,
-                        target: LinkTarget::Decode(id),
-                        linked_at: t,
-                    })?;
+                    ingest.store_decode_linked(d, e, None)?;
                 }
                 // No emitter yet: ordinary ingestion, whose identity sighting creates the
                 // candidate — for this frame only. Every later frame is stored and linked to the
@@ -773,6 +773,80 @@ mod tests {
         .unwrap();
         assert!(reason.contains("(template-fixed)"), "{reason}");
         assert!(!reason.contains("null control"), "{reason}");
+    }
+
+    /// T-884 item 3: `template_provenance` says only what a `CheckOrigin` can distinguish, in the
+    /// vocabulary `hk_model::DecodeProvenance` documents. Red before the fix: a template-fixed
+    /// check wrote `builtin-or-user` and a searched one wrote `template`, neither of which the
+    /// data model named.
+    #[test]
+    fn t884_template_provenance_says_what_the_data_model_documents() {
+        let frame = HoldoutFrame {
+            t_ns: 1_757_774_400_000_000_000,
+            check_valid: true,
+            corrected: false,
+            frame_model: "adsb-df17".into(),
+            identity: None,
+            metadata: json!({}),
+            content: None,
+        };
+        let provenance = |origin: Option<CheckOrigin>| {
+            let mut r = solved();
+            r.template = Some(hk_synth::result::TemplateRef {
+                id: "adsb".into(),
+                version: 1,
+            });
+            match origin {
+                Some(o) => r.holdout.as_mut().unwrap().check_origin = o,
+                None => r.holdout = None,
+            }
+            let d = decode_row(
+                &frame,
+                &r,
+                "a1",
+                "sha256:abc",
+                1,
+                ContentClass::Unrestricted,
+            );
+            match d.provenance.expect("synthesized provenance") {
+                DecodeProvenance::Synthesized {
+                    template_provenance,
+                    ..
+                } => template_provenance,
+            }
+        };
+        assert_eq!(
+            provenance(Some(CheckOrigin::TemplateFixed)).as_deref(),
+            Some("template-fixed")
+        );
+        assert_eq!(
+            provenance(Some(CheckOrigin::Discovered {
+                look_elsewhere_bits: Some(4.0)
+            }))
+            .as_deref(),
+            Some("discovered")
+        );
+        assert_eq!(
+            provenance(Some(CheckOrigin::Searched)).as_deref(),
+            Some("searched")
+        );
+        // No hold-out evidence at all is the most-charged reading, not a free one.
+        assert_eq!(provenance(None).as_deref(), Some("searched"));
+        // An open search names no template, so there is nothing to say.
+        let d = decode_row(
+            &frame,
+            &solved(),
+            "a1",
+            "sha256:abc",
+            1,
+            ContentClass::Unrestricted,
+        );
+        match d.provenance.expect("synthesized provenance") {
+            DecodeProvenance::Synthesized {
+                template_provenance,
+                ..
+            } => assert_eq!(template_provenance, None),
+        }
     }
 
     /// ADR-0022 §4.2 (review M1): the check is worth at most `width × differences − L_check`,
