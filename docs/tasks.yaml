@@ -28242,7 +28242,7 @@ tasks:
   - id: T-952
     milestone: MAUTO
     title: "APRS: AFSK1200/AX.25 recipe (no APRS decode path exists)"
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: RECIPE-APRS
@@ -28265,6 +28265,7 @@ tasks:
       Observed, not chased: hk-recipe's `ascii` field type has no stride/skip option for AX.25's shifted-callsign encoding (ASCII<<1, 8-bit stride with the low bit dropped), so the aprs recipe keeps destination/source as raw 56-bit hex values rather than decoded callsign text; a future field-map DSL enhancement (a per-character bit skip/stride, analogous to `skip_bits` on uint fields but for `ascii`) would let a recipe decode shifted-ASCII callsigns directly. Noted in the recipe's own description and field map. | sync_search's `terminator` mode always includes the matched terminator word in the output frame (confirmed by reading crates/hk-blocks/src/blocks/framing/length.rs), with no way to exclude it while still using it to bound the frame; for AX.25 this means the closing HDLC flag stays attached as the info field's last byte (worked around by trimming it, following the same precedent ACARS's own recipe/test already set for its ETX/ETB). A `terminator.exclude_word` option would remove the need for this workaround in future recipes. | No digipeater path parsing (destination+source only) -- a deliberate v1 scope cut for this ticket; a real APRS receiver would also want repeater path addresses (WIDE1-1, WIDE2-1, etc.), which would need either variable-count address layers or a repeat-with-terminator-condition field map feature.
       Use cases: SIGNAL-089
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 6e7b83d0
   - id: T-953
     milestone: M3
     title: "Burst emitters get no family/params: burst-tap symbol rates never reach estimated_params; unknown at 0.999 confidence; no paging band-plan prior"
