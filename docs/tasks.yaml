@@ -27980,7 +27980,7 @@ tasks:
   - id: T-946
     milestone: MMAP
     title: "Sweep view legibility: shadow hides stations, sampled-fraction banner frozen at first paint, black live-pane rectangle, span select sends stale rate"
-    status: todo
+    status: done
     priority: P2
     deps: []
     parallel_group: UI-SHADOW
@@ -28001,6 +28001,7 @@ tasks:
       Commits: d7de029a, cdc127d9, 70fecce0
       Observed, not chased: (c) black live-pane rectangle not investigated | no DOM harness for DeviceTab select
       Resources: 27 CPU-s, peak 0.6 GB
+    commit: 454bce18
   - id: T-947
     milestone: MMAP
     title: Go-to-frequency retune offer takes its span from the view width (15.8 MHz -> 16 Msps)
