@@ -29192,6 +29192,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
 
       2026-09-25 layout pass (a295abab): left column under Go-to is now one flex stack (Retune/widths, Go-to offer, <=1180 px mode banner) instead of fixed top: constants; open lists clear it. New app-status e2e measures the column at 1280/1000/920/400 px with offer+mode shown (red before at 1000/920/400, green after). app-surface reds on this branch are all pre-existing: 4x 'closed: 12 vs 10' (T-1022's; green with T-1022's spec applied) and T-802 zoom-in no-op at the pane's time bound (intermittent, reproduces on base 3d4a20a1). canvas-journey #1 grey-vs-coverage, app-phone pinch and app-reload-retune T-955 also red on base.
+
+      Merged gated main ac899f5b (T-955 follow-live/tuningChanged, T-997 inventory pills) at 08c04352. The pills are the FIRST block of T-996's in-flow left stack under Go-to/nudges (88 px; 132 px at phone), then Retune/widths, Go-to offer, mode banner; lists are T-997's sheet content (side-chip.ts deleted as on main). app-status T-996 column test now also requires the pills and checks their overlap/pressability at 1280/1000/920/400. test-ui, tsc, and e2e app-status/app-phone/app-inv-pills/app-top-chrome/app-surface green on ports 9237/9238.
   - id: T-997
     milestone: MMAP
     title: "Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler"
