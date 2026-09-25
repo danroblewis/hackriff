@@ -76,7 +76,8 @@ test("default collapsed; the chip opens the lists, the close and Escape put the 
   const g = globalThis as Record<string, unknown>;
   const saved = { document: g.document, window: g.window, fetch: g.fetch };
   const winHandlers: Record<string, Handler[]> = {};
-  const bottoms: Record<string, number> = { ".app > .bar": 48, ".map-goto": 150, ".map-topright": 210 };
+  // T-993: no top bar in Explore; the bar's controls float as the nudge row and the status pill.
+  const bottoms: Record<string, number> = { ".map-goto": 150, ".map-nudge": 180, ".map-topright": 190, ".map-status": 210 };
   g.document = {
     createElement: (t: string) => new FakeEl(t),
     querySelector: (sel: string) => sel in bottoms ? { getBoundingClientRect: () => ({ height: 30, bottom: bottoms[sel] }) } : null,
