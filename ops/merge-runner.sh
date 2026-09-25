@@ -288,19 +288,27 @@ rc_due(){ # 0 = run the release candidate now
   return 0
 }
 run_rc(){ # main is ready (landed, clean, nothing staged) - checked by the caller
-  local sha tag rc from failed item last reds r
+  local sha tag rc from failed steps seg last reds item r sp what ecode
   sha=$(git -C "$REPO" rev-parse HEAD); tag="rc-$(date +%Y%m%d)"
-  printf 'sha=%s\nstarted=%s\n' "$sha" "$(date +%s)" > "$RCMARK"; rm -f "$S/rc-requested"
+  # The DAY is the scheduled run's, taken at its start: an on-demand `just rc` neither uses up nor moves
+  # the daily run (review: one ending after midnight skipped the next day's).
+  [ -e "$S/rc-requested" ] || printf 'day=%s\n' "$(date +%Y%m%d)" > "$S/rc-last"
+  rm -f "$S/rc-requested"
+  if [ "$DRY_RUN" = "1" ]; then log "DRY-RUN would run the release candidate on main ${sha:0:8}"; return 0; fi
+  printf 'sha=%s\nstarted=%s\n' "$sha" "$(date +%s)" > "$RCMARK"
   # Its own announcement, so hkpy.flow / cycletime start no merge gate here and credit its suites to none.
   log "RC gate (just gate --files crates/ --phase acceptance on main ${sha:0:8})…"
   from=$(( $(wc -l < "$LOG") ))
   limited just gate --files crates/ --phase acceptance; rc=$?
-  # The gate stops at its first red suite; an RC must still run the browser tier after an acceptance-ci red.
-  failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: FAILED just ([a-z0-9-]+) .*/\1/p' | tail -1)
+  # The gate stops at its first red suite, and acceptance-ci at its first red step (acceptance, then
+  # e2e-harness): an RC still runs what the red left unrun - the flake path's own resume rule.
+  failed=$(tail -n +"$from" "$LOG" | sed -n -E 's/^gate: just ([a-z0-9-]+) took [0-9]+s \(exit [1-9][0-9]*\)$/\1/p' | tail -1)
   if [ "$rc" -ne 0 ] && [ "$failed" = "acceptance-ci" ]; then
-    limited just gate --files crates/ --phase acceptance --resume-after acceptance-ci
+    seg=$(tail -n +"$from" "$LOG" | awk '/^gate: running just acceptance-ci/{buf=""; on=1} on{buf=buf"\n"$0} /^gate: just acceptance-ci took/{on=0} END{print buf}')
+    steps=""; [ "$(printf '%s' "$seg" | grep -cE '^\s+Summary \[')" -lt 2 ] && steps="e2e-harness"
+    limited just gate --files crates/ --phase acceptance --resume-after acceptance-ci ${steps:+--resume-steps $steps}
   fi
-  printf 'day=%s\nsha=%s\nrc=%s\nat=%s\n' "$(date +%Y%m%d)" "$sha" "$rc" "$(date +%s)" > "$S/rc-last"
+  printf 'sha=%s\nrc=%s\nat=%s\n' "$sha" "$rc" "$(date +%s)" > "$S/rc-result"
   rm -f "$RCMARK"
   if [ "$rc" -eq 0 ]; then
     git -C "$REPO" tag -f "$tag" "$sha" >/dev/null 2>&1
@@ -308,25 +316,37 @@ run_rc(){ # main is ready (landed, clean, nothing staged) - checked by the calle
     return 0
   fi
   last=$(git -C "$REPO" describe --tags --match 'rc-*' --abbrev=0 "$sha" 2>/dev/null || echo "none yet")
-  # One item per red: nextest's FAIL/TIMEOUT/crash lines (crate::binary test) and the browser runner's failed specs.
-  reds=$(tail -n +"$from" "$LOG" | sed -n -E \
-      -e 's/^ *(FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL|LEAK) \[[^]]*\] \([^)]*\) ([^ ]+) ([^ ]+).*/rust \2 \3/p' \
-      -e 's/^e2e: .*failed: (.*)$/spec \1/p' | sort -u)
-  [ -z "$reds" ] && reds="suite ${failed:-unknown}"
-  printf '%s\n' "$reds" | while read -r kind a b; do
-    case "$kind" in
-      rust) item="$a $b"
-            case "$a" in *::*) r="cargo nextest run -p ${a%%::*} -E 'binary(${a#*::}) & test(=$b)'" ;;
-                         *) r="cargo nextest run -p $a --lib -E 'test(=$b)'" ;; esac ;;
-      spec) for sp in $(echo "$a $b" | tr ',' ' '); do
-              echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - spec $sp red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: cd ui && node e2e/run.mjs ${sp%.e2e.mjs}; assertion: $(tail -n +"$from" "$LOG" | grep -m1 -A3 "✖ .*" | grep -m1 -E 'AssertionError|Error' | sed 's/^ *//' | cut -c1-200)" >> "$NEEDS"
-            done; continue ;;
-      *) item="suite $a"; r="just gate --files crates/ --phase acceptance" ;;
-    esac
-    echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - $item red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: $r; assertion: $(tail -n +"$from" "$LOG" | grep -m1 -A40 -F "$b" | grep -m1 -E 'panicked at|assertion|Error' | sed 's/^ *//' | cut -c1-200)" >> "$NEEDS"
+  # Final failures only: the lines nextest repeats under its `Summary [` (a test that passed on a retry, or a
+  # LEAK - which is a pass - is not there), in the runner's own red-line shape; and the browser runner's
+  # `failed:` list.
+  reds=$(tail -n +"$from" "$LOG" | awk '
+      /^ +Summary \[/ {s=1; next}
+      s && match($0, /^ +(TRY [0-9]+ )?(FAIL|SIG[A-Z]+|TIMEOUT|ABORT|LEAK-FAIL) \[[^]]*\] \([^)]*\) /) {
+        n=split(substr($0, RSTART+RLENGTH), f, " "); if (n >= 2) print "rust " f[1] " " f[2]; next }
+      s && !/^ +/ {s=0}
+      /^e2e: .*failed: / {sub(/.*failed: /, ""); gsub(/,/, " "); print "spec " $0}' | sort -u)
+  # A suite that went red with no named test (a build, a harness crash, a runner that died) is its own item.
+  for ecode in acceptance-ci test-ui-e2e; do
+    tail -n +"$from" "$LOG" | grep -qE "^gate: just $ecode took [0-9]+s \(exit [1-9]" || continue
+    case "$ecode" in acceptance-ci) printf '%s\n' "$reds" | grep -q '^rust ' ;; *) printf '%s\n' "$reds" | grep -q '^spec ' ;; esac \
+      || reds=$(printf '%s\nsuite %s\n' "$reds" "$ecode")
   done
-  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | wc -l | tr -d ' ') red) -> P1 items in $NEEDS; nothing un-lands"
-  notify_coordinator "the release candidate at ${sha:0:8} is RED - $(printf '%s\n' "$reds" | wc -l | tr -d ' ') P1 item(s) (RC_RED, last green $last); file them found_by rc-$(date +%Y%m%d)." "RC red - P1 tickets"
+  [ -z "$(printf '%s' "$reds" | tr -d '[:space:]')" ] && reds="suite ${failed:-unknown (rc $rc)}"
+  printf '%s\n' "$reds" | grep -v '^$' | while read -r kind a b; do
+    case "$kind" in
+      rust)
+        what=$(tail -n +"$from" "$LOG" | grep -A40 -F "$b" | grep -m1 -E 'panicked at|assertion' | sed 's/^ *//' | cut -c1-200)
+        echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - $a $b red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: cargo nextest run -p ${a%%::*} -E 'binary_id($a) & test(=$b)'; assertion: ${what:-see merge-runner.log}" >> "$NEEDS" ;;
+      spec)
+        for sp in $a $b; do
+          what=$(tail -n +"$from" "$LOG" | awk -v sp="$sp" 'index($0, "▶ " sp){f=1} f && /AssertionError|Error:/{sub(/^ +/, ""); print; exit}' | cut -c1-200)
+          echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - spec $sp red in the release candidate; last green: $last; first red tip: ${sha:0:8}; repro: cd ui && node e2e/run.mjs ${sp%.e2e.mjs}; assertion: ${what:-see merge-runner.log}" >> "$NEEDS"
+        done ;;
+      *) echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - suite $a red with no named test (build/harness/crash) in the release candidate; last green: $last; repro: just gate --files crates/ --phase acceptance" >> "$NEEDS" ;;
+    esac
+  done
+  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | grep -vc '^$') red) -> P1 items in $NEEDS; nothing un-lands"
+  notify_coordinator "the release candidate at ${sha:0:8} is RED - P1 item(s) RC_RED in the attention file (last green $last); file them found_by rc-$(date +%Y%m%d)." "RC red - P1 tickets"
   return 0
 }
 
