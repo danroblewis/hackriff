@@ -431,9 +431,12 @@ def test_a_landing_pushes_main_to_every_mirror_in_the_background_never_forced(tm
     """User, 2026-09-25 00:15: the merge runner pushes main to each remote host's mirror after every landing,
     logging 'PUSHED <host> <sha>'; never --force (a push that is not a fast-forward fails and says so)."""
     text = RUNNER.read_text()
-    assert text.count("    push_mirrors\n") == 2
-    assert text.index("push_mirrors", text.index('log "MERGED $branch ✓"')) - text.index('log "MERGED $branch ✓"') < 40
-    assert text.index("push_mirrors", text.index('log "BULK MERGED ✓ $tickets"')) - text.index('log "BULK MERGED ✓ $tickets"') < 40
+    assert text.count("    push_mirrors") == 2
+    single = text[text.index('log "MERGED $branch ✓"'):]
+    assert single.index("board_sync_now") < single.index("push_mirrors") < single.index("worktree_of")
+    bulk = text[text.index('log "BULK MERGED ✓ $tickets"'):]
+    # review 2026-09-25: never while the bulk marker stands (a killed runner's startup still rewinds the batch)
+    assert bulk.index('rm -f "$BULKMARK"') < bulk.index("board_sync_now") < bulk.index("push_mirrors") < bulk.index("notify_ok")
     fn = _function("push_mirrors")
     assert "-f" not in fn.split() and "--force" not in fn
     repo, mirror = tmp_path / "repo", tmp_path / "mirror.git"

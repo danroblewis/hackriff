@@ -545,15 +545,6 @@ def _git(repo: str, *args: str) -> str:
         return ""
 
 
-def _on_main(repo: str, branch: str) -> bool:
-    """The branch exists and main contains it (merge-base answers by exit code)."""
-    try:
-        r = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor", branch, "main"], capture_output=True, timeout=30)
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
     """Per remote worker host (hosts.json; user, 2026-09-25): its mirror's main as this repo last pushed it (the
     remote-tracking ref - local, no network) and how far main is ahead of it, its running claims, and how many of
@@ -574,7 +565,8 @@ def remote_hosts(ops: str, repo: str = REPO) -> list[dict]:
         pushed = _git(repo, "log", "-g", "-1", "--format=%ct", f"refs/remotes/{h}/main") if tip else ""
         running = sorted(t for t, c in claims.items() if isinstance(c, dict) and c.get("host") == h and c.get("state") == "running")
         sent = sorted(set(re.findall(rf"DISPATCH (T-\d+[a-z]?) [^\n]*-> {re.escape(h)}:", wlog)))
-        landed = [t for t in sent if _on_main(repo, "task-t" + t[2:].lstrip("0"))]
+        merged = set(_git(repo, "branch", "--format=%(refname:short)", "--merged", "main", "--list", "task-t*").split())
+        landed = [t for t in sent if t.lower().replace("-", "") in {b[len("task-"):] for b in merged}]   # the runner's branch_of
         out.append({"name": h, "mirror": tip[:8] or None, "behind": int(behind) if behind.isdigit() else None,
                     "pushed_at": int(pushed) if pushed.isdigit() else None, "running": running, "dispatched": len(sent),
                     "landed": len(landed)})
