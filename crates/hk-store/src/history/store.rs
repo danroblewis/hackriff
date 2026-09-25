@@ -34,6 +34,10 @@ pub struct PyramidStats {
     pub frames_out_of_order: u64,
     /// Sealed tiles written.
     pub tiles_written: u64,
+    /// T-942: tiles **reopened** at [`Pyramid::open`] because they had been sealed past the
+    /// store's own last frame by an end-of-run [`Pyramid::seal_all`]. The restarted run keeps
+    /// filling them instead of finding their time closed.
+    pub tiles_reopened: u64,
     /// T-453: coarse tiles built **on demand** by [`Pyramid::materialize`] rather than at a seal.
     /// Counts both the ones persisted (their time block had fully elapsed) and the transient
     /// live-edge ones, which is the point of the counter: it is the work the read path pays in
@@ -279,6 +283,11 @@ pub struct Pyramid {
     /// Every tile whose block ends at or before this has sealed.
     watermark_ns: i64,
     latest_ns: i64,
+    /// T-942: `(latest, watermark)` from [`EDGE_FILE`] as it was read at open (`None`: absent —
+    /// a store written before T-942, or one that has never folded a frame).
+    resumed_edge: Option<(i64, i64)>,
+    /// T-942: the pair [`EDGE_FILE`] holds on disk, so it is rewritten only when the edge moves.
+    edge_persisted: (i64, i64),
     /// T-507: when this store began recording, as it knew it **when it was opened** — the
     /// persisted [`RECORDING_BEGAN_FILE`], else (a store written before T-507) the start of the
     /// oldest block it held. `None`: opened empty.
@@ -356,6 +365,18 @@ const SOURCE_STATE_FILE: &str = "front_end.state";
 /// File of [`Pyramid::recording_began`] (T-507), under the scheme root: 8 bytes, the Unix ns of
 /// the earliest frame the store ever folded, little-endian.
 pub(super) const RECORDING_BEGAN_FILE: &str = "recording_began";
+
+/// File of this store's **edge** (T-942), under the scheme root: 16 bytes, two little-endian
+/// Unix-ns i64s — the end of the newest frame it folded ([`Pyramid::latest_frame_end`]), then its
+/// watermark ([`Pyramid::watermark`]).
+///
+/// Both are read back by [`Pyramid::recover`], and the pair is what makes a restart honest. The
+/// watermark is a *decision* the store made, not a property of the tiles on disk: a tile can be
+/// sealed past it ([`Pyramid::seal_all`], the end-of-run gesture), and without this file the next
+/// run had to infer a watermark from tile time blocks — which rounds *up*, by a whole hour at
+/// scheme 1's level 2, and then refuses everything the next run records as late (the T-942
+/// defect). Written on the same seal/checkpoint path as [`RECORDING_BEGAN_FILE`].
+pub(super) const EDGE_FILE: &str = "edge";
 
 /// Producer tiles one [`Pyramid::materialize`] call may fold, over the whole recursion.
 ///
@@ -465,6 +486,8 @@ impl Pyramid {
             floors: HashMap::new(),
             watermark_ns: i64::MIN,
             latest_ns: i64::MIN,
+            resumed_edge: None,
+            edge_persisted: (i64::MIN, i64::MIN),
             resumed_from_ns: None,
             began_persisted: false,
             first_folded_ns: i64::MAX,
@@ -499,6 +522,7 @@ impl Pyramid {
         };
         p.scan()?;
         p.load_source_states();
+        p.load_edge();
         p.recover()?;
         p.load_recording_began();
         Ok(p)
@@ -554,6 +578,62 @@ impl Pyramid {
             return Err(StoreError::Io { path, source: e });
         }
         self.began_persisted = true;
+        Ok(())
+    }
+
+    /// Reads [`EDGE_FILE`] (T-942). Absent in a store written before T-942, or in one that has
+    /// never folded a frame, in which case [`Pyramid::recover`] falls back to the tiles on disk.
+    fn load_edge(&mut self) {
+        let path = self.root.join(EDGE_FILE);
+        self.resumed_edge = fs::read(&path)
+            .ok()
+            .and_then(|b| <[u8; 16]>::try_from(b.as_slice()).ok())
+            .map(|b| {
+                let half = |i: usize| i64::from_le_bytes(b[i..i + 8].try_into().expect("8 bytes"));
+                (half(0), half(8))
+            });
+        self.edge_persisted = self.resumed_edge.unwrap_or((i64::MIN, i64::MIN));
+    }
+
+    /// Writes [`EDGE_FILE`] when the edge has moved since it was last written (temp → fsync →
+    /// rename, like tiles), on the same seal/checkpoint path as
+    /// [`Pyramid::save_recording_began`] — so the capture thread pays it once per seal or
+    /// checkpoint, not per frame.
+    fn save_edge(&mut self) -> Result<(), StoreError> {
+        let edge = (self.latest_ns, self.watermark_ns);
+        if edge.0 == i64::MIN || edge == self.edge_persisted {
+            return Ok(());
+        }
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&edge.0.to_le_bytes());
+        bytes.extend_from_slice(&edge.1.to_le_bytes());
+        let path = self.root.join(EDGE_FILE);
+        let tmp = self
+            .root
+            .join(format!("{EDGE_FILE}.tmp{}", std::process::id()));
+        if self.defer_writes {
+            self.write_queue.push(Job {
+                path,
+                tmp,
+                body: Body::Bytes {
+                    what: SmallFile::Edge,
+                    bytes,
+                },
+            });
+            self.edge_persisted = edge;
+            return Ok(());
+        }
+        let write = || -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            let _ = fs::remove_file(&tmp);
+            return Err(StoreError::Io { path, source: e });
+        }
+        self.edge_persisted = edge;
         Ok(())
     }
 
@@ -706,9 +786,10 @@ impl Pyramid {
         Timestamp::from_unix_nanos(self.watermark_ns)
     }
 
-    /// The stream time the history has reached: the end of the newest folded frame (on reopen,
-    /// the watermark), `None` before any. Replays and time-compressed scenes run on their own
-    /// clock, so "the last N seconds" means this, not the wall clock (T-125).
+    /// The stream time the history has reached: the end of the newest folded frame — on reopen,
+    /// the persisted one ([`EDGE_FILE`], T-942), else the watermark — and `None` before any.
+    /// Replays and time-compressed scenes run on their own clock, so "the last N seconds" means
+    /// this, not the wall clock (T-125).
     pub fn latest_frame_end(&self) -> Option<Timestamp> {
         (self.latest_ns != i64::MIN).then(|| Timestamp::from_unix_nanos(self.latest_ns))
     }
@@ -999,10 +1080,34 @@ impl Pyramid {
     /// Seals every tile ending at or before `t` (shutdown, tests, or an idle clock), rolls them
     /// up, and enforces the byte budget. Frames for sealed tiles are late afterwards.
     pub fn seal_through(&mut self, t: Timestamp) -> Result<(), StoreError> {
-        self.seal_through_ns(t.as_unix_nanos())
+        self.seal_upto(t.as_unix_nanos(), false)
+    }
+
+    /// **Seals every open tile whatever time block it is in, and leaves the watermark at `t`**
+    /// (T-942) — the end-of-run gesture, so a finished run's history is complete on disk at every
+    /// level.
+    ///
+    /// This is [`Pyramid::seal_through`] with the *forcing* separated from the *clock*, and the
+    /// separation is the fix. Forcing used to be expressed as sealing through the last frame plus
+    /// an hour, which put the watermark — a monotonic, persisted quantity — an hour into a future
+    /// that had not been recorded. Scheme 1's level 2 is a one-hour tile, so the next run on the
+    /// same data dir resumed with a watermark on the next hour boundary and `ingest` refused
+    /// **every** frame it folded as late, silently, until wall clock caught up (staging,
+    /// 2026-09-25: `frames_ingested 0`, `frames_late 2024`). The tiles this writes still end in
+    /// the future — that is what forcing means — but [`Pyramid::open`] knows it: a sealed tile
+    /// whose block ends after the store's last frame is reopened (level 0) or rebuilt from its
+    /// children (coarser), so the next run keeps filling it.
+    pub fn seal_all(&mut self, t: Timestamp) -> Result<(), StoreError> {
+        self.seal_upto(t.as_unix_nanos(), true)
     }
 
     fn seal_through_ns(&mut self, w: i64) -> Result<(), StoreError> {
+        self.seal_upto(w, false)
+    }
+
+    /// Seals open tiles whose block has ended at `w` — or, with `force`, all of them (T-942) —
+    /// and advances the watermark to `w` either way.
+    fn seal_upto(&mut self, w: i64, force: bool) -> Result<(), StoreError> {
         self.invalidate_derived();
         self.watermark_ns = self.watermark_ns.max(w);
         let w = self.watermark_ns;
@@ -1014,7 +1119,7 @@ impl Pyramid {
             keys.extend(
                 self.open[level]
                     .keys()
-                    .filter(|&&(_, tb)| self.geom.block_end_ns(level, tb) <= w)
+                    .filter(|&&(_, tb)| force || self.geom.block_end_ns(level, tb) <= w)
                     .copied(),
             );
             keys.sort_unstable_by_key(|&(fb, tb)| (tb, fb));
@@ -1121,6 +1226,7 @@ impl Pyramid {
             .unwrap_or(i64::MAX);
         self.save_source_states()?;
         self.save_recording_began()?;
+        self.save_edge()?;
         self.enforce_budget()
     }
 
@@ -2200,6 +2306,7 @@ impl Pyramid {
                         match what {
                             SmallFile::SourceStates => self.state_dirty = true,
                             SmallFile::RecordingBegan => self.began_persisted = false,
+                            SmallFile::Edge => self.edge_persisted = (i64::MIN, i64::MIN),
                         }
                         first_err.get_or_insert(StoreError::Io {
                             path: job.path,
@@ -2704,7 +2811,8 @@ impl Pyramid {
         self.last_checkpoint_ns = Some(self.latest_ns);
         result?;
         self.save_source_states()?;
-        self.save_recording_began()
+        self.save_recording_began()?;
+        self.save_edge()
     }
 
     /// Checkpoints and closes. Dropping without `close` loses at most one checkpoint interval of
@@ -2876,14 +2984,115 @@ impl Pyramid {
         }
     }
 
-    fn recover(&mut self) -> Result<(), StoreError> {
-        let top = self.geom.top();
-        for level in 0..=top {
-            if let Some((&(tb, _), _)) = self.sealed[level].last_key_value() {
-                self.watermark_ns = self.watermark_ns.max(self.geom.block_end_ns(level, tb));
+    /// **T-942: undoes the end-of-run FORCED seal** ([`Pyramid::seal_all`]), so a restart
+    /// continues the tiles the run before it was in the middle of instead of leaving them frozen
+    /// with a watermark standing over them.
+    ///
+    /// A tile whose time block ends after the store's newest frame was sealed because a run
+    /// ended, not because its time was over. There are two kinds and they need opposite
+    /// treatment:
+    ///
+    /// - **Level 0** is fed by `ingest` and holds measurements nothing else can reproduce: it is
+    ///   read back and reopened, keeping what it holds, and its file is rewritten when the block
+    ///   genuinely ends.
+    /// - **A coarser tile is a fold of its children**, and its children include the level-0 tile
+    ///   just reopened — which will fold into it *again* when it really seals. So it is dropped,
+    ///   not reopened, and [`Pyramid::recover`]'s rebuild below re-folds it from the sealed
+    ///   children it still has. Reopening both would count the reopened tile's rows twice.
+    ///
+    /// A `coarse_live` lattice is left alone at coarse levels: it never forces a seal past its
+    /// data (its run-end seal is through the last frame), and its coarse nodes are rebuilt by
+    /// replaying rows, not by folding sealed children.
+    fn reopen_sealed_ahead(&mut self) -> Result<(), StoreError> {
+        if self.watermark_ns == i64::MIN {
+            return Ok(());
+        }
+        let cut = self.watermark_ns;
+        for level in 0..self.geom.n_levels() {
+            if level > 0 && self.cfg.coarse_live {
+                continue;
+            }
+            let ahead: Vec<(i64, i64)> = self.sealed[level]
+                .keys()
+                .filter(|&&(tb, _)| self.geom.block_end_ns(level, tb) > cut)
+                .copied()
+                .collect();
+            for (tb, fb) in ahead {
+                let tile = if level == 0 {
+                    self.read_sealed(0, fb, tb)?
+                } else {
+                    None
+                };
+                self.drop_sealed_index(level, tb, fb);
+                match tile {
+                    Some(t) => {
+                        self.next_seal_ns =
+                            self.next_seal_ns.min(self.geom.block_end_ns(level, tb));
+                        self.open[level].insert((fb, tb), OpenTile::Full(Box::new(t)));
+                        self.stats.tiles_reopened += 1;
+                    }
+                    // A coarser tile (dropped, to be re-folded), or a level-0 file that would not
+                    // decode — in which case the index is the only thing that claimed it existed.
+                    None => {
+                        let _ = fs::remove_file(self.path(level, fb, tb));
+                    }
+                }
             }
         }
-        self.latest_ns = self.watermark_ns;
+        Ok(())
+    }
+
+    /// Forgets a sealed tile's index entries (T-942), leaving the file alone: the caller either
+    /// reopens the tile — whose next write replaces the file — or removes it.
+    fn drop_sealed_index(&mut self, level: usize, tb: i64, fb: i64) {
+        if let Some(bytes) = self.sealed[level].remove(&(tb, fb)) {
+            self.disk_bytes -= bytes;
+            self.level_bytes[level] -= bytes;
+        }
+        self.unprotected[level].remove(&(tb, fb));
+        self.due[level].retain(|&(_, t, f)| t != tb || f != fb);
+    }
+
+    fn recover(&mut self) -> Result<(), StoreError> {
+        let top = self.geom.top();
+        // **T-942: the resumed watermark is READ BACK, not inferred from the tiles.**
+        //
+        // It used to be the newest sealed block end of *every* level — a time block, not a
+        // measurement, and a block end is its lattice's rounding-**up** of the data inside it.
+        // Scheme 1's level 2 is a one-hour tile, so a store whose last run ended at 04:26 came
+        // back claiming everything to 05:00 had sealed, and `ingest` answers `Late` for every
+        // frame whose level-0 block ends at or before the watermark: the whole of the next run's
+        // history, refused, silently, for 34 minutes. `latest_frame_end` is resumed here too, so
+        // the store also reported its newest recorded row half an hour in the future, which is
+        // what `/api/navigation` and `/api/analysis/strongest` then served. Measured on staging
+        // by the explorer, 2026-09-25 (`frames_ingested 0`, `frames_late 2024`).
+        //
+        // The watermark is a decision, so it is persisted with the data's own edge
+        // ([`EDGE_FILE`]) and read back exactly. That also makes "sealed past the watermark"
+        // meaningful, which is what [`Pyramid::reopen_sealed_ahead`] undoes.
+        match self.resumed_edge {
+            Some((latest, watermark)) => {
+                self.watermark_ns = watermark;
+                self.latest_ns = latest;
+                // Every tile past the watermark was sealed by force, not by time.
+                self.reopen_sealed_ahead()?;
+            }
+            // **A store written before T-942 has no record of its own edge**, so the tiles are
+            // all there is to read it from — and a tile's time block rounds *up*. Level 0's
+            // newest sealed block end is the tightest of those bounds and the only one `ingest`
+            // tests: up to one level-0 block (a minute, at scheme 1) past the data if the last
+            // run forced a seal, counted as late and healed at the next block, against the hour
+            // of silence the coarse levels used to buy. Nothing is reopened here, because
+            // without the watermark there is no way to tell a forced seal from an asked-for one
+            // — so a legacy store loses at most its last coarse block's summary, once, and is
+            // written with an edge from this run on.
+            None => {
+                self.watermark_ns = self.sealed[0]
+                    .last_key_value()
+                    .map_or(i64::MIN, |(&(tb, _), _)| self.geom.block_end_ns(0, tb));
+                self.latest_ns = self.watermark_ns;
+            }
+        }
         let bins = usize::from(self.cfg.histogram.bins);
         let mut cps: Vec<(i64, i64)> = self.checkpoints.keys().copied().collect();
         cps.sort_unstable();

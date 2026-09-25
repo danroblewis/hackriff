@@ -430,7 +430,7 @@ Everything else sits in exactly one band:
 | Band | z | Space | Members | Laid out |
 |---|---|---|---|---|
 | **0** | `0` | **content** | the one `<canvas>`: tiles, traces, coverage plane, every overlay stroke, HUD ticks | **every render frame** |
-| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz) | **every render frame, in the same pass as band 0** |
+| **1** | `10` | **content** | `#pins` - focusable marks anchored in (capture time, Hz); the active pane's outline (§10.7), placed from the same frame's pane rectangles | **every render frame, in the same pass as band 0** |
 | **2** | `20` | screen | Go-to/search, layers button + panel, tool buttons, zoom cluster, follow-live FAB, pane-status readout, HUD axis *labels* | on interaction |
 | **3** | `30` | screen | the bottom sheet; the Research slide-in | on interaction |
 | **4** | `40` | screen | transients: MapTip, retune offer, mode banner, error toasts | on interaction |
@@ -535,11 +535,21 @@ partly planned; the tickets that close the gaps are named per principle.*
 1. **Minimize overlay; expose as much map as possible.** An overlay is temporary: it exists to be
    **closed**, returning its pixels to the map. Every band-2/3 overlay therefore has a visible
    **dismiss**; §10.2's fade-to-35 % is an idle courtesy for band-2 chrome, **never a substitute for
-   closing**. A panel's default state is its smallest: the left inventory column collapses to a chip or
-   a peek strip no taller than 56 px on every width, and expanded it is an overlay with a dismiss —
-   a column that keeps the height it had before the redesign is not minimal. (Left column: the
-   collapse ticket; closeability across the sheet, the Research slide-in and the left column: the
+   closing**. A panel's default state is its smallest: no list keeps a column of the map, and
+   expanded it is an overlay with a dismiss — a column that keeps the height it had before the
+   redesign is not minimal. (Closeability across the sheet and the Research slide-in: the
    closeable-overlays ticket, amending T-824.)
+   **T-997 (user, 2026-09-25) finished this for the inventory.** T-895's answer was a chip at the
+   LEFT EDGE, MID-HEIGHT — a hamburger plus "1 cand, 1 conf" — which the user rejected: "I don't like
+   where this is placed, in the vertical center, it overlaps the timeline markers and isn't very
+   useful." Two lessons, both general: a floating puck at mid-height belongs to no cluster, and the
+   left edge at mid-height is **the time ruler's own column** (the HUD axes print the time labels
+   there). The counts are now two small pills docked in the chrome cluster **under Go-to**, each
+   opening the bottom sheet **on its list**, and the lists themselves are a section of that sheet —
+   so the map's left edge carries nothing but its ruler, and the one panel over the canvas is the
+   sheet. The HUD enforces the other half: a time label that would print into the top-left chrome's
+   box is **dropped** (`surface/hud.ts`'s `HudReserve`), never printed underneath a control — a
+   label under chrome is a label lost, the same defect one row further up.
 2. **Anything with coordinates is drawn on the map.** A thing with a (time x frequency) place is
    rendered on the surface — as a point or pin (docs/24), a box, or a **traced path** (an ordered
    (t, f) polyline, like a directions line) — laid out through the pane's capture-time mapping in the
@@ -614,6 +624,53 @@ partly planned; the tickets that close the gaps are named per principle.*
      density layer (features per cell, from `/api/tiles/events`) replaces numbered cluster bubbles;
      drilling in resolves to boxes.
 
+### 10.7 The active pane, and which chrome is global (normative, T-1000, 2026-09-25)
+
+*From the user's split-view review (2026-09-25): "a common use would be to look at one signal from
+the past and the current waterfall". With two panes, most of the chrome acts on ONE of them, and
+before this section nothing on screen said which.*
+
+**Principle: chrome that acts on one pane must show which.** A split surface has exactly one
+**active pane** — the one last pressed, right-clicked, wheeled or pinched, the one a split just made,
+or the one chosen by key — and it is **visible**:
+
+- **An outline on the canvas** around the active pane's rectangle (`.sf-active-pane`), placed every
+  render frame from the rectangles the frame was drawn with, and at once — in the same event
+  dispatch — when the active pane changes. A neutral light line with a dark halo, so it is never read
+  as a signal box's class symbology (§10.6 rule 6). Drawn only while there are **two or more** panes:
+  with one there is nothing to disambiguate, and an outline would be overlay with no information in
+  it (§10.6 rule 1). Never faded (it says where the chrome's presses land) and never takes the pointer.
+- **Every per-pane control names it**, by layout position ("pane 2 of 3", left-to-right then
+  top-to-bottom — never an internal id), with the same words the outline carries.
+
+| Chrome | Acts on | Says so how |
+|---|---|---|
+| **Go-to** (and its retune offer) | the active pane | a "pane N" tag in the box; the input's accessible name |
+| **Zoom** +/- | the active pane | a number badge on the stack; the buttons' titles |
+| **Layers** (base style, coverage, overlays) | the active pane | a number badge on the button; the menu head and every section heading |
+| **Follow-live FAB** (until each pane has its own Live, T-c) | the active pane | a number badge; its title and accessible name |
+| **Viewport menu**: Close, Whole surface | the active pane | the menu head, "Viewport · pane N of M" |
+| **Tools** (Measure, Annotate, Pin) | the pane the stroke is made on — which the press makes active | the outline moves to it at the press |
+| **Colour scale** | **every pane** (docs/16 §8.5a: one scale, stated) | the layers menu's "every pane" section |
+| **Spectrum-trace strip** toggle | every pane | the layers menu's "Every pane" section |
+| **Outputs**: Listen, Decode, Record IQ, Stream out | **global** — the selected signal or region, not a pane | no pane name, by design |
+
+**Setting the active pane.** A primary press, a **right-click** (and the context-menu request
+itself), a wheel and a pinch on a pane each make it active — a right-click that opens a pane's menu
+while the chrome goes on acting on another pane is the defect this section closes. Keys, bare only
+(never while typing into a field, never with Ctrl/Cmd/Alt, never on auto-repeat):
+
+| Key | Does |
+|---|---|
+| `]` / `[` | the next / previous pane becomes active (layout order, wrapping) |
+| `1`-`9` | pane N becomes active |
+| `L` | toggles Live on the **active** pane — the FAB's own press: freeze a following pane, re-pin a frozen one |
+
+**Nothing here reaches a device route** (§10.4): which pane is active is view state, and `L` is a
+coordinate change on one pane. Guarded by `ui/test/app-active-pane.test.ts` (naming, the notifying
+accessor, right-click, the keys, the wiring) and `ui/e2e/app-active-pane.e2e.mjs` (click, right-click
+and keys each move the outline and the named chrome in the same event, at 1280 and 400 px).
+
 ---
 
 ## 11. Panel -> state -> route: the frontend/API map (normative)
@@ -629,8 +686,8 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Go-to frequency / search | MAP-02 | `map.chrome` | `GET /api/navigation` (achievable grid) | `POST /api/control/center` **only on explicit press** (device action) |
 | Layers button + panel | MAP-02/06 | `layers` | - | - (per-pane presentation; `PUT /api/collections/{id}` only when toggling a *collection's* stored visibility) |
 | Follow-live FAB, zoom cluster | MAP-02 | `map.chrome` + the pane model | - | - (pure view arithmetic) |
-| Left inventory column (Candidate / Confirmed lists + selections), collapsed to a chip by default | T-895 (P1) | `explore` (existing `inventory` / `selections` slices; the chip's open/closed is presentation only) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the chip's counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening, closing and the counts reach no route) |
-| Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/history` | - |
+| Candidate / Confirmed lists + selections **in the bottom sheet**, opened by two count pills in the top-left chrome | T-895, redesigned by T-997 (P1) | `explore` (existing `inventory` / `selections` slices; a pill writes only `inventory.tab` and raises the sheet) | `GET /api/inventory?state=candidate\|confirmed` (view-window filters, as today), `GET /api/streams` + `/ws/presence`, `GET /api/coverage` (empty-list wording); the pills' counts are the same rendered rows, no extra read | - new (a row's Promote/Delete keep the existing `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`; opening a list and the counts reach no route) |
+| Bottom sheet - Explore tab | MAP-03/14/15 | `map.sheet` | `GET /api/scheduler`, `/api/events`, `/api/coverage`, `/api/analysis/strongest`, `/api/observations` (the past-surveys pages), `/api/history` (served; no client reads it since T-445 retired the spectrum-grid pane) | - |
 | Bottom sheet - Selected tab | MAP-04 | `map.selection` | `GET /api/inventory/{id}`, `/api/inventory/{id}/presence`, `/api/inventory/{id}/classification`, `/api/signatures/match`, `/api/recipes/match` | `POST /api/analyze`, `POST /api/inventory/{id}/promote`, `DELETE /api/inventory/{id}`, `POST /api/outputs/record/start`, `/ws/open/listen` - **only from the compact action cluster's small buttons, never the sheet body** (§10.6 rule 4) |
 | HUD axes (ticks + labels) | MAP-05 | - (pane model) | `GET /api/tiles` `axes`/`extent`, `GET /api/timeline` `window` | - |
 | Coverage-fog layer | MAP-07 | `layers` | `GET /api/coverage`, the tile state plane | - |
@@ -638,11 +695,11 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
 | Pins + clusters | MAP-09/10 | `map.pins` (ephemeral) | `GET /api/events`, `GET /api/tiles/events` | - |
 | Artifacts layer | MAP-11 | `explore` (existing rows) | `GET /api/inventory` (`relation`) | - |
 | Band-plan priors layer | MAP-12 | `priors` | **`GET /api/priors`** *(reserved - MAP-12)* | - |
-| Research slide-in - Markers | MAP-21 | `research.collections`, `research.markers` | **`GET /api/collections`, `/api/collections/{id}/markers`** *(reserved - MAP-17)* | **`POST`/`PUT`/`DELETE`** in the same family |
-| Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST`/`PUT`/`DELETE /api/measurements`** - cursors only, never a `value` |
-| Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST`/`PUT`/`DELETE /api/annotations`** |
-| Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST`/`PUT`/`DELETE /api/views`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
-| Export menu | MAP-23 | `research` | the four `GET`s above | - (client-composed file; a share link is a later addition) |
+| Research slide-in - Markers | MAP-21 | `research.collections`, `research.markers` | **`GET /api/collections`, `/api/collections/{id}/markers`**, and **`GET /api/markers`** (the same list over every collection - what the canvas layer actually asks for) *(reserved - MAP-17)* | **`POST /api/collections`, `POST /api/collections/{id}/markers`, `PUT`/`DELETE /api/markers/{id}`, `PUT`/`DELETE /api/collections/{id}`** |
+| Research slide-in - Measurements | MAP-21/22 | `research.measurements` | **`GET /api/measurements`** *(reserved - MAP-18)* | **`POST /api/measurements`, `PUT`/`DELETE /api/measurements/{id}`** - cursors only, never a `value` |
+| Research slide-in - Annotations | MAP-20/21 | `research.annotations` | **`GET /api/annotations`** *(reserved - MAP-16)* | **`POST /api/annotations`, `PUT`/`DELETE /api/annotations/{id}`** |
+| Research slide-in - Views | MAP-19/21 | `research.views` | **`GET /api/views`** *(reserved - MAP-19)* | **`POST /api/views`, `PUT`/`DELETE /api/views/{id}`**; restoring is view arithmetic, and only a frequency outside the tuned window raises the usual gated retune offer |
+| Export menu | MAP-23 | `research` | **`GET /api/research/export`** (T-823: one read-only GET, optionally narrowed to a collection - the bundle is the server's) | - (the client only names and saves the file; a share link is a later addition) |
 
 **Three rules this table encodes.**
 
@@ -656,6 +713,12 @@ its owning ticket and is reserved in [`docs/api.md`](api.md). The client slices 
    correctly; they cannot catch a client asking for the wrong thing (T-367 requested `/api/timeline`
    with no band and drew an empty canvas while every suite stayed green). Every row above owes a
    `ui/test` assertion on the request it constructs (MAP-25).
+
+   **Landed as `ui/test/map-request-shape.test.ts` (T-825).** It parses this table, drives each
+   client's own request builder, and asserts every built path against the table: a route the client
+   builds that this table does not declare is red, a declared route with neither an assertion here
+   nor a named assertion elsewhere is red, and a route pinned as "no client yet" is red the day a
+   client starts building it. That is why the table is normative rather than descriptive.
 
 ---
 

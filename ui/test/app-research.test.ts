@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  BOOKMARKS_ID, MINE_MARK, RESEARCH_SELECTED_MARK, collectionLayer, collectionVisibleOn, filterRows, parseColor,
+  addResearchAnnotation, BOOKMARKS_ID, MINE_MARK, RESEARCH_SELECTED_MARK, collectionLayer, collectionVisibleOn, filterRows, parseColor,
   researchMarkBoxes, researchRows, rowKey, selectResearch, setCollectionVisible, setResearchData, setResearchOpen, sortRows,
   type Annotation, type Collection, type Marker,
 } from "../src/app/map/research-slice";
@@ -124,6 +124,20 @@ test("selection round trip: a row selects its mark, and a click on the drawn mar
   // A deleted mark takes its selection with it: no ghost highlight.
   store.set(setResearchData({ ...DATA, annotations: [] }));
   assert.equal(store.get().research.selected, null);
+});
+
+test("T-984: a just-saved annotation joins the slice at once, without waiting for setResearchData's poll", () => {
+  const store = createStore(initialState());
+  store.set(setResearchData({ ...DATA }));
+  const fresh = ann("n3", null, 200e6, 200.01e6, 500, 510, "fresh");
+  store.set(addResearchAnnotation(fresh));
+  assert.deepEqual(researchRows(store.get().research).map((r) => r.id).includes("n3"), true);
+  assert.equal(researchRows(store.get().research).find((r) => r.id === "n3")?.name, "fresh");
+  // A no-op once the id is already present — the next poll's `setResearchData` still wins outright,
+  // but re-adding it here never duplicates the row.
+  const before = store.get().research.annotations;
+  store.set(addResearchAnnotation({ ...fresh, label: "renamed by a race" }));
+  assert.equal(store.get().research.annotations, before, "an id already present is a no-op, not a second copy");
 });
 
 test("thin client: select, layer switch and Go reach NO route; loading reads only the research GETs", async () => {

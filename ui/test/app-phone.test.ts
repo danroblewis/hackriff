@@ -33,20 +33,27 @@ test("one idle signal: the cluster's IdleFade writes the <body> class the HUD an
   }
 });
 
-test("fade reaches the bar, the dock and the lists' chip — never what §10.2 exempts", () => {
+test("fade reaches the dock — and the pills, by being in the cluster — never what §10.2 exempts", () => {
   const rules = [...phoneCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
   const fading = rules.filter((r) => /opacity:\s*\.35/.test(r.body));
   assert.ok(fading.length > 0, "no fade rule at all, so this proves nothing");
   const sels = fading.flatMap((r) => r.sel.split(",").map((s) => s.trim()));
   for (const s of sels) assert.match(s, /^body\.chrome-idle /, `a fade not gated on idle: ${s}`);
-  for (const want of ["> .bar", "> .dock", ".side-chip"]) {
-    assert.ok(sels.some((s) => s.includes(want)), `${want} does not fade`);
-  }
-  const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side.is-open"];
+  // T-993: no top bar over the map to fade — its controls are in the cluster and fade with it.
+  // T-997: nor the lists' chip, which is retired; the pills that replaced it are IN the cluster and
+  // carry `map-fade`, so they fade by that one rule (asserted at the foot of this test).
+  assert.ok(sels.some((s) => s.includes("> .dock")), "> .dock does not fade");
+  assert.match(src("src/app/chrome/map-controls.ts"), /class: "map-glass map-inv map-fade"/,
+    "the inventory pills must fade with the rest of the cluster");
+  const NEVER = [".sheet", ".research", ".map-offer", ".map-mode", ".map-layers", ".map-pane-menu", ".sf-chrome", ".sf-note", ".sf-ring", ".sf-readout", ".side"];
   for (const s of sels) for (const n of NEVER) assert.ok(!s.includes(n), `${s} fades ${n}, which §10.2 says never fades`);
   assert.ok(sels.every((s) => /:not\(:focus-(within|visible)\)/.test(s)), "a focused control must never fade");
-  assert.ok(sels.some((s) => s.includes("> .bar") && s.includes(":not(:has(.conn:not([hidden])))")),
-    "the bar must stay solid while it states the stream is not live");
+  assert.ok(!sels.some((s) => s.includes("> .bar")), "T-993: the retired top bar has no rule over the map");
+  // The stream-status line moved into the cluster's status pill (T-993): it holds the pill solid.
+  const ctlCss = noComments(src("src/app/chrome/map-controls.css"));
+  assert.match(ctlCss, /\.map-ctl\.is-idle \.map-status:has\(\.conn:not\(\[hidden\]\)\) \{ opacity: 1; \}/,
+    "the status pill must stay solid while it states the stream is not live");
+  assert.match(ctlCss, /\.map-ctl\.is-idle \.map-fade:not\(:focus-within\) \{ opacity: \.35; \}/, "…and fades otherwise");
 });
 
 test("the phone breakpoint is one number, and isPhoneWidth reads it", () => {

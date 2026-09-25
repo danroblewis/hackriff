@@ -201,6 +201,69 @@ export interface CoverageCensus {
  * so opening the view on it would be opening on a guess.
  */
 export function observedExtent(cov: CoverageSlice | null | undefined): CoverageCensus {
+  return censusOver(cov, 0, Infinity);
+}
+
+/**
+ * How many of a grid's time rows, counted back from the NEWEST OBSERVED one, [[recentObservedExtent]]
+ * boxes by default (T-955). Small on purpose: it is a query-narrowing hint for the refinement pass in
+ * `probeSurface`, not a claim of resolution — the fine pass re-asks the same route over the box this
+ * returns (its frequency AND its rows' time), so a retune boundary this box still straddles is
+ * resolved there, where one row is an eighth of these four.
+ */
+export const RECENT_ROWS = 4;
+
+/** Is this cell's state evidence the radio was there? `"excluded"` is sampled spectrum (the DC
+ * notch, T-595), so it counts; `unknown` is not evidence of anything. */
+const isSampled = (s: string | undefined): boolean => s === "observed" || s === "excluded";
+
+/**
+ * The index of the newest time row holding any sampled cell, or `-1` (T-955).
+ *
+ * The anchor of "recent" has to be the newest thing actually OBSERVED, never the grid's last row:
+ * the grid ends at `navigation.time.latest_s`, which a live server was seen to report 34 min in
+ * the future (explorer 2026-09-25), and a coarse grid's last rows can be empty for other honest
+ * reasons (a capture that paused, a young ring). Counting back from the grid's end in either case
+ * finds nothing and falls back to the lifetime union — the reported bug.
+ */
+export function newestObservedRow(cov: CoverageSlice | null | undefined): number {
+  const g = cov?.grid;
+  const cells = cov?.any?.cells;
+  const nf = finite(g?.cells) ? g!.cells! : 0;
+  const nt = finite(g?.rows) ? g!.rows! : 0;
+  if (!Array.isArray(cells) || nf <= 0 || nt <= 0 || cells.length !== nf * nt) return -1;
+  for (let t = nt - 1; t >= 0; t--) {
+    for (let f = 0; f < nf; f++) if (isSampled(cells[t * nf + f]?.state)) return t;
+  }
+  return -1;
+}
+
+/**
+ * Like [[observedExtent]], but the box is built from only the `recentRows` rows ending at the
+ * NEWEST OBSERVED row (T-955) — what the radio is observing now, not everywhere it ever looked.
+ *
+ * A session that tuned to one band for an hour and then retuned has BOTH bands in one record
+ * horizon, and [[observedExtent]]'s box is a bounding rectangle over every observed cell ever, so it
+ * spans the whole gap between them — measured live as a page opening on "100–1100 MHz × 1.6 h" with
+ * the actually-tuned band drawn as a sliver inside it. Neither the union nor its centre is a window
+ * the radio ever captured in one configuration.
+ *
+ * Read off the coverage map's own recency, never off `frequency.current` (CLAUDE.md's rule against
+ * seeding the view from the front end rather than a measurement). **Use its FREQUENCY only for an
+ * opening**: its time extent is a few rows by construction, so opening on it would shrink the
+ * view's time span to minutes of an hour's history; `probeSurface` takes time from the whole census.
+ * `total`/`observed` count only the rows considered.
+ */
+export function recentObservedExtent(cov: CoverageSlice | null | undefined, recentRows = RECENT_ROWS): CoverageCensus {
+  const newest = newestObservedRow(cov);
+  if (newest < 0) return censusOver(cov, 0, Infinity); // nothing observed: the empty census, counted
+  return censusOver(cov, newest - Math.max(1, recentRows) + 1, newest);
+}
+
+/** Shared cell walk behind [[observedExtent]] and [[recentObservedExtent]]: rows `sinceRow ..=
+ * untilRow` are counted, so `(0, Infinity)` is the whole-grid census and the recent variant is the
+ * same arithmetic over a window of rows. */
+function censusOver(cov: CoverageSlice | null | undefined, sinceRow: number, untilRow: number): CoverageCensus {
   const g = cov?.grid;
   const cells = cov?.any?.cells;
   const nf = finite(g?.cells) ? g!.cells! : 0;
@@ -212,19 +275,22 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
   const fCell = finite(g?.f_cell_hz) ? g!.f_cell_hz! : 0;
   const t0 = finite(g?.t0_s) ? g!.t0_s! : 0;
   const tCell = finite(g?.t_cell_s) ? g!.t_cell_s! : 0;
+  const floor = Math.min(Math.max(0, sinceRow), nt);
+  const ceil = Math.max(floor, Math.min(nt, untilRow + 1)); // exclusive
   let observed = 0, unobserved = 0, unknown = 0;
   let f0 = Infinity, f1 = -Infinity, t0i = Infinity, t1i = -Infinity;
   // T-964: the time-collapsed state per frequency cell, ranked so the strongest claim survives the
-  // fold — sampled beats forgotten beats grey, the route's own `bands` ordering.
+  // fold - sampled beats forgotten beats grey, the route's own `bands` ordering. Over the rows this
+  // census counts (T-955: the whole grid, or the recent window).
   const rank = new Uint8Array(nf);
-  for (let i = 0; i < cells.length; i++) {
+  for (let i = floor * nf; i < ceil * nf; i++) {
     const s = cells[i]?.state;
     const f = i % nf, t = Math.floor(i / nf);
     if (s === "unobserved") { unobserved++; continue; }
     if (s === "unknown") { unknown++; rank[f] = Math.max(rank[f], 1); continue; }
     // T-595: `"excluded"` is sampled spectrum (the DC notch), so it counts towards the observed
     // extent the view opens on — the radio was demonstrably there.
-    if (s !== "observed" && s !== "excluded") continue;
+    if (!isSampled(s)) continue;
     observed++;
     rank[f] = 2;
     if (f < f0) f0 = f;
@@ -236,7 +302,9 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
   // sentence, one rule, whichever end computed it.
   const served = cov?.any?.bands;
   const n = (v: unknown) => (finite(v) ? v : 0);
-  const bands = finite(served?.cells) && served!.cells! > 0
+  // The route's count describes the WHOLE grid, so it stands in only for a whole-grid census; the
+  // recent-rows variant (T-955) folds its own rows.
+  const bands = floor === 0 && ceil === nt && finite(served?.cells) && served!.cells! > 0
     ? {
       observed: n(served!.observed_cells) + n(served!.excluded_cells),
       unobserved: n(served!.unobserved_cells),
@@ -257,7 +325,7 @@ export function observedExtent(cov: CoverageSlice | null | undefined): CoverageC
       t1Ns: (t0 + (t1i + 1) * tCell) * S_TO_NS,
     }
     : null;
-  return { observed, unobserved, unknown, total: cells.length, box, bands };
+  return { observed, unobserved, unknown, total: (ceil - floor) * nf, box, bands };
 }
 
 /**
