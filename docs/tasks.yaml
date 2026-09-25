@@ -23952,6 +23952,15 @@ tasks:
       lands first, the rest each add one layer module.
 
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): image/harmonic/IMD relationships drawn as lines linking the related signals on the canvas, switchable as a layer. Say in your handback exactly what to open on staging to see it.
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-24 17:06).
+      Added the `artifacts` overlay layer (ui/src/surface/artifacts.ts): every inventory row with relation.kind=artifact-of and a source row in view gets a dashed line from its box centre to the source's box centre (ink per mechanism: image/harmonic/intermod) with a larger square at the source end, laid out per frame through the pane's own toClip in the one overlay pass. Registered in centre/surface.ts overlayFns so the Layers menu offers it (off by default, z 50). Claims with no source in view or no presence interval draw nothing. FE only, no route touched. To see it on staging: open Explore, Layers menu > Artifacts, on a pane where an image/harmonic/IMD candidate has a relation claim (rows are fetched with relations=all).
+      Tests: node test/run.mjs surface-layers surface-artifacts (in ui/) -> exit 0 (9 passed; full just test-ui had 69/70 with only the since-updated surface-layers source-grep failing)
+      precheck exit 0
+      Commits: b0573c94
+      Observed, not chased: just precheck not run (no Rust crates touched); tsc not run
+      Use cases: AWARE-042
+      Resources: 52 CPU-s, peak 0.6 GB
   - id: T-812
     milestone: MMAP
     title: 'Band-plan priors layer + GET /api/priors viewport route (suggestions, never truth)'
