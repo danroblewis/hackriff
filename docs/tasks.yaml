@@ -29401,6 +29401,8 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (tile latency review): Hot tile cache holds ~35 tiles vs 135-290 per screen (staging: 0 hits / 27 misses): size it in viewports and report hit rate per pane in /api/status.tile_cache
 
       2026-09-25 supervisor amendment (partial - the message arrived truncated, start being re-requested): (c) with A (T-1018) + B (T-1019) landed, the RAM hot cache is an ACCELERATOR ONLY - size it in viewports, not 32 MB. Raw IQ (ring.ci8, native 8-bit) is fine - no change there.
+
+      2026-09-25 coordinator, user ruling (via supervisor 13:10): the tiles are NOT a cache - they are rolling history STORAGE filled alongside the raw IQ, budgeted and evicted coarse-last under T-1023 (one rolling storage budget). This ticket is only the RAM accelerator in front of that storage: size it in viewports, report its hit rate; it holds no data the disk pyramid does not.
   - id: T-1021
     milestone: MLIVE
     title: "After the exact-node read: measure history-mutex hold time per tile request against ingest latency (T-453) before changing the chunking"
@@ -29437,6 +29439,47 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the two specs alone), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-955 fix-round worker 2026-09-25 (red on main 166117b4): app-surface e2e red on main: expects 10 map controls, finds 12 - T-957's spec fix and T-993's moved top-bar controls landed in one batch (no browser e2e in the check-tier gate)
+  - id: T-1023
+    milestone: MLIVE
+    title: One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
+    status: todo
+    priority: high
+    deps: []
+    parallel_group: STORAGE-BUDGET
+    needs: none
+    model: opus
+    effort: high
+    acceptance: |
+      USER RULING (2026-09-25, via supervisor; ~/.hackriff-ops/handoffs/coordinator-1310-storage-budget.md): "I never specified a tile cache maximum, and I never said this was a cache. What I wanted was to fill our maximum rolling storage with both the raw data AND the pre-generated tiles, so people can zoom out and still see things from any point of the history."
+      FACTS: tiles already persist on disk (<data>/history/view/history/s2/L0..L15, zstd-3, quantised dB) under PyramidConfig::byte_budget, HARD-CODED 8 GiB (crates/hk-store/src/history/config.rs:247), fine-first eviction (T-116) - but no flag and no status line. The IQ ring has --iq-retention / --iq-buffer-max. Measured on staging (T-1024's numbers): one 2.4 MHz band at 0.04 s rows grows history/ ~1.1 MB/s (~3.9 GB/h), so 8 GiB is ~2 h of one band.
+      DELIVER:
+      1. ONE rolling storage budget = IQ ring + tile pyramid + DB, sized to the device (default derived from free disk on the data volume, stated), configurable: a `hk serve` flag beside --iq-retention/--iq-buffer-max, and a setting in the T-1007 settings menu (server call; the UI never computes it). The split between IQ ring and pyramid is explicit and reported.
+      2. Eviction keeps the COARSE levels: a zoom-out over the whole retained history must stay a READ of a stored coarse node, never a fold from finer data (the user's requirement; ties to T-1018, which reads the exact node first). Fine levels are evicted oldest-first before any coarse level; state the realised horizon per level.
+      3. /api/status reports the budget, bytes used per component (IQ ring, pyramid per level, DB) and the realised horizon per pyramid level (oldest retained t per level); docs/api.md + api_contract.rs together (T-079). The canvas's honesty tiers already say which level a pane was drawn at - make sure an evicted fine level degrades to the coarse stored level with its tier stated, never grey where coarse data exists ('show all data that exists').
+      ACCEPTANCE: through the mock SDR with a small budget: after the fine levels roll over, a request for an old window at a coarse level is answered from a stored node (resolution.answered.exact_node true, no fold), the fine request for the same window reports the coarse tier it fell back to; /api/status's horizons match what the tile route serves; changing the flag changes the budget (restart) and the setting (live, if supported - state which).
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, hk-api tiles/status, api_contract, just precheck), then HAND BACK with the measured horizon numbers. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile storage ruling): One rolling storage budget (IQ ring + tile pyramid + DB), sized to the device and configurable (flag + settings), eviction keeps the coarse levels so zoom-out over all history is a read; budget and per-level horizon in /api/status
+    core_interface: true
+    high_effort_reason: storage and eviction policy for all retained history (IQ ring + pyramid + DB) is a core data-model contract; eviction order decides what the canvas can ever show again
+  - id: T-1024
+    milestone: MLIVE
+    title: "Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)"
+    status: todo
+    priority: medium
+    deps: []
+    parallel_group: TILE-DISK
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER RULING context (2026-09-25; ~/.hackriff-ops/handoffs/coordinator-1310-storage-budget.md): tiles are rolling history storage, not a cache - so bytes per cell on disk decide how many hours of history the device keeps.
+      MEASURED on staging 2026-09-25 12:3x, one 2.4 MHz band at 0.04 s rows: history/ grows 1.1 MB/s (~3.9 GB/h); level-0 tiles average 120 kB per 256x256 = ~1.8 B/cell across four planes (zstd-3, quantised dB).
+      DELIVER (measurement first, then the cheapest honest reduction): measure which plane costs what on disk (max_db, occupancy/frames, coverage, anything else) at L0 and at a coarse level, compressed and raw, on a mock-SDR run and on the staging data dir (read-only copy). Coverage is derivable from the observation record and need not be stored per cell - confirm and, if so, stop storing it (read it from the record / coverage map). Propose and implement the reduction that buys the most hours without losing measured information (e.g. dropping derivable planes, delta/bit-packing, a better zstd level if CPU on the capture thread allows - T-453: per-arriving-row cost must be MEASURED on the capture thread). This is the disk half of T-1019 (the wire half); share encodings with it where sensible.
+      ACCEPTANCE: a table of bytes/cell per plane before/after; hours of one 2.4 MHz band per 8 GiB before/after; capture-thread per-row cost before/after (must not regress beyond a stated bound); tiles read back identical values for every stored plane (round-trip test) and derived coverage equals the stored coverage it replaced.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (hk-store history binaries, the round-trip test, just precheck hk-store), then HAND BACK with the table. Never `just gate`.
+    notes: |
+      FOUND BY user 2026-09-25 via supervisor (tile storage ruling): Tile bytes per cell on disk (~1.8 B/cell, 8 GiB = ~2 h of one band): measure per plane, stop storing derivable coverage, cheapest honest reduction (disk half of T-1019)
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
