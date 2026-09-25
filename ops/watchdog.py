@@ -468,6 +468,18 @@ def evaluate(rows: list[dict], agg: dict, unowned: list[dict], load1: float,
                        "body": "Owners: " + ", ".join(f"{k} {v['cpu']:.0f}%" for k, v in
                                                       sorted(agg.items(), key=lambda kv: -kv[1]["cpu"]))
                                + "\nTop 5:\n" + "\n".join(top_consumers(rows, attr))})
+        since.setdefault("ob:start", now)
+        since["ob:peak"] = max(since.get("ob:peak", 0.0), load1)
+    # ONE 'recovered' line per episode (supervisor 2026-09-25 01:52: the user sleeps; an episode is one alarm - the
+    # key's dedupe - and one all-clear). Held under plan as long as the alarm needed to fire; its own key per episode,
+    # outside the prefixes that wake the pipeline manager, so it reaches Discord and pages nobody.
+    live.add("load-ok")
+    if "ob:start" in since and _held(since, "load-ok", load1 <= plan, now, LOAD_FOR):
+        start, peak = since.pop("ob:start"), since.pop("ob:peak", load1)
+        alarms.append({"rule": "recovered", "level": "green", "key": f"recovered:over-budget:{int(start)}",
+                       "title": f"box load recovered: {load1:.1f} vs plan {plan:.0f}",
+                       "body": f"over budget from {time.strftime('%H:%M', time.localtime(start))} for "
+                               f"{(now - start) / 60:.0f} min, peak {peak:.1f}"})
 
     for k in [k for k in since if k.split(":")[0] in ("unowned", "zombie") and k not in live]:
         since.pop(k, None)                          # the process is gone; forget its clock

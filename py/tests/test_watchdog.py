@@ -732,3 +732,20 @@ def test_a_process_running_from_a_live_claims_worktree_is_that_workers():
     agg, unowned = W.owners(rows, claims)
     assert 44877 in agg["worker:T-577"]["pids"]
     assert {r["pid"] for r in unowned} >= {44900, 44901}      # a queued claim owns nothing; t5770 is not t577
+
+
+def test_an_over_budget_episode_ends_in_one_recovered_line():
+    """Supervisor 2026-09-25 01:52 (the user sleeps): one alarm per episode (its key's dedupe), and ONE all-clear when
+    the load has held under plan as long as the alarm needed - its own key, outside the prefixes that page anyone."""
+    rows = table(row(31000, 1, SNAP, cpu=100.0))
+    since = {}
+    fire(rows, since, 0.0, load=40.0)
+    rules, _, _ = fire(rows, since, W.LOAD_FOR, load=45.0)
+    assert "over-budget" in rules
+    fire(rows, since, W.LOAD_FOR + 10, load=1.0)                       # under plan: the clock starts
+    rules, _, alarms = fire(rows, since, 2 * W.LOAD_FOR + 10, load=1.0)
+    rec = [a for a in alarms if a["rule"] == "recovered"]
+    assert len(rec) == 1 and rec[0]["level"] == "green" and "peak 45.0" in rec[0]["body"]
+    assert not rec[0]["key"].startswith(__import__("alert").WAKE_PREFIXES)
+    rules, _, _ = fire(rows, since, 3 * W.LOAD_FOR + 10, load=1.0)
+    assert "recovered" not in rules                                    # once per episode
