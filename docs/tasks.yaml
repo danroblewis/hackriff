@@ -27925,11 +27925,24 @@ tasks:
     model: opus
     effort: medium
     notes: |
-      FOUND BY T-933.
       FOUND 2026-09-25 04:56 by the T-933 worker: ui/e2e/app-surface.e2e.mjs has 2 failures on main's tree WITHOUT T-933's change (reproduced with surface.ts unmodified, base 0d0d7f70): (a) the layers-menu 'artifacts' toggle times out; (b) the fog symbology key list is off by one 'none' entry. The 03:53 RC at 92d0f6f1 had app-surface GREEN, so a landing between 92d0f6f1 and 0d0d7f70 broke it - browser e2e runs only in the daily RC now, so the merge gate could not see it. Suspects touching the layers menu / symbology key: T-916 (892d3edc, shadow follow-ups: auto/viewport contrast, ladder fallback), T-810 (1ce98bea, density refetch), T-898 (d4d4ce7d, retune paths layer), T-919 (37bf55ff, status box), T-886, T-913.
       DELIVER (deflake-triage): run app-surface ALONE x3 on main (HK_E2E_PORT >= 9216); fails alone => bisect the first-parent merges 92d0f6f1..0d0d7f70 to the landing, then fix the PRODUCT (the menu toggle / the key list) so the spec passes UNCHANGED - change a spec assertion only if a deliberate product change made it provably wrong (say which, with the ticket). Passes alone => make it deterministic (wait on the menu's rendered state, never a timeout choice). Red-on-regression proof.
       WHAT THE USER WILL SEE ON STAGING: the layers menu's artifacts toggle works and the fog key lists exactly the drawn states.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-surface alone; just test-ui), then HAND BACK. Never `just gate`.
+  - id: T-958
+    milestone: MMAP
+    title: "app-phone e2e load-flake: 'waiting for the sheet's close to collapse it' times out (1/4 alone, also on main)"
+    status: todo
+    priority: P2
+    deps: []
+    parallel_group: UI-SHEET-FLAKE
+    needs: none
+    model: opus
+    effort: medium
+    notes: |
+      FOUND 2026-09-25 by the T-933 worker: ui/e2e/app-phone.e2e.mjs fails intermittently ALONE under load - 1 of 4 runs, on T-933's branch AND on unmodified main@7a9fa8ab - "timed out after 5000 ms waiting for the sheet's close to collapse it" (the idle-fade subtest's sheet open/close step). Seen before (the T-918 worker, under 3 parallel lanes: app-phone and app-dismiss once each, green alone right after), never owned. Browser e2e runs in the daily RC, where a flake reads as a P1 red.
+      DELIVER (deflake-triage): reproduce (alone x10 on a busy box); find what the wait keys on - a 5000 ms wall-clock deadline over a CSS transition / animation frame / ResizeObserver callback that load delays - and make it wait on the sheet's own reported state (a data attribute or transitionend the product sets when collapsed), with a deadline that only bounds a hang (docs/10 §3.6: never a wall-clock choice of what is asserted, no timeout raise as the fix, no retry/quarantine). Check app-dismiss's sheet steps for the same shape. Red-on-regression proof: a sheet that never collapses still goes red.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (app-phone, app-dismiss alone), then HAND BACK. Never `just gate`.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
