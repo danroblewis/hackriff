@@ -26860,7 +26860,7 @@ tasks:
   - id: T-909
     milestone: MMAP
     title: "Quick fix: draw the box, not the centre glyph, when a feature's box is >= 6 px (pins only as generalization) - staging not worse than before T-809 (user 19:35)"
-    status: in-progress
+    status: done
     priority: high
     deps: []
     parallel_group: MAP-LAYERS
@@ -26875,6 +26875,9 @@ tasks:
     notes: |
       FOUND BY user 2026-09-24 19:35 on staging.
     branch: task-t809
+    commit: 26cc2fa9
+    result: |
+      DONE 2026-09-24: landed with T-809 (merge 26cc2fa9). On task-t809 as 780b449d: a feature whose box is >= 6 px on screen in both axes draws NO centre glyph (T-808's box is the representation); the pin glyph remains only as the scale-dependent generalization below that; an invisible hit area covers the box, laid out in the same per-frame pass, so hover/click anywhere inside the box shows the MapTip / selects. ui/test 70/70 with 3 new tests red on the pre-fix code; app-pins e2e green. Full GIS re-scope: T-910.
   - id: T-910
     milestone: MMAP
     title: "GIS feature symbolization: signals as (t, f) polygons with class symbology, scale-dependent generalization below ~6 px, hit-test/select on the polygon, labels (re-scope of T-809's pins)"
