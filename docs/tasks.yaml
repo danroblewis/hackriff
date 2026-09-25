@@ -26674,6 +26674,25 @@ tasks:
     notes: |
       FOUND BY T-887 worker 2026-09-24.
     core_interface: true
+  - id: T-912
+    milestone: M2-hardening
+    title: "CI matches the check-tier gate: 'check' on push/PR, 'acceptance' nightly + manual; rust-toolchain.toml pins 1.93.1; nextest installed in the acceptance job"
+    status: todo
+    priority: normal
+    deps: []
+    parallel_group: CI
+    needs: none
+    model: sonnet
+    effort: medium
+    acceptance: |
+      USER RULE 2026-09-24 20:00 (via supervisor): the merge gate is the CHECK tier only (lint + unit + workspace tests); acceptance + browser e2e run once a day as a release-candidate run (`just rc`, the pipeline manager is building it). CI must match. Three small items in .github/workflows/ci.yml + repo root:
+      1. CI TRIGGERS: the `test` job (`just gate --phase check`) runs on push and pull_request; the `acceptance` job (`just gate --phase acceptance`) runs NIGHTLY (`schedule:` cron) plus `workflow_dispatch`, not on every push. Keep the two jobs' existing steps; update the header comments that say both run per push.
+      2. TOOLCHAIN PIN: add `rust-toolchain.toml` pinning 1.93.1 (the toolchain the local gate runs: rustc 1.93.1) with the components CI uses (clippy, rustfmt), and make both jobs install from it instead of `dtolnay/rust-toolchain@stable` (so local and CI can't drift).
+      3. NEXTEST IN THE ACCEPTANCE JOB: since T-631 hk-e2e runs under nextest (`just _e2e-run`), but only the `test` job installs it (`taiki-e/install-action` tool: just@1.58.0,nextest@0.9.144) - add nextest (same pinned version) to the acceptance job.
+      Note: nothing has been pushed yet (CLAUDE.md Status), so CI is unverified - validate the workflow syntax locally (e.g. actionlint if available) and state what could not be verified. A .github change forces the full gate by design (the gate must not certify its own weakening) - expected.
+      TESTING PROTOCOL (CLAUDE.md): targeted checks only (workflow syntax, `just gate --dry-run` classification), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY user rule 2026-09-24 20:00 via supervisor.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
