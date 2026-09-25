@@ -29644,6 +29644,27 @@ tasks:
       FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule
     high_effort_reason: "amends a stated invariant (navigation never commands the radio) and drives the gated DeviceAction path from gestures: settle/debounce, one-in-flight, largest-achievable snapping and per-pane device routing must all stay honest"
     core_interface: true
+  - id: T-1029
+    milestone: MAUTO
+    title: "test_explorer_launcher.py (T-983) is red on main under load: wall-clock polls for the launcher's log lines (reap, crash release) - make them deterministic or fix the launcher; blocks every py-class gate"
+    status: in-progress
+    priority: high
+    deps: []
+    parallel_group: DEFLAKE-EXPLORER-LAUNCHER
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      RED ON MAIN, blocks every py-class gate (found 2026-09-25 15:10): T-983 (landed 14:53, explorer launcher: one server per window, reaps IQ rings) added py/tests/test_explorer_launcher.py, whose tests poll wall-clock windows while a shell launcher (ops/explorer-window.sh) runs.
+      - The merge gate for T-955 (ui + board -> py class) failed on test_an_agent_crash_still_releases_and_keeps_its_status ('red on main+batch').
+      - The coordinator ran the file alone on the gated base 793f967e at load 40: test_a_second_server_under_the_window_is_stopped_and_reaped_untouched_first FAILED (test_explorer_launcher.py:295: polls 100 x 0.1 s for "rogue server's ring reaped" in window.log; the log shows 'window start ... radio lock released (exit 143)' but never the reap line), 20 passed.
+      - T-983's own Opus review had already failed it once for a Mac-only test hanging at teardown (SIGTERM to the launcher only while a 30 s claude stub ran).
+      DELIVER (deflake-triage rules): run the file alone >= 10x on main, quiet and under load; for each failing test decide: a wall-clock wait choosing what to assert is a BUG - make it deterministic (wait on the launcher's own completion/exit or a file/marker it writes, with the process tree reaped, never a fixed 10 s poll that load can outrun); a real launcher defect (the reap step skipped when the rogue server is killed first, the lock released before the reap, the teardown leaving the stub running) is fixed in ops/explorer-window.sh with a red-on-regression proof. Tests stay hermetic (tmp ops dir, never the real radio lock or staging). Never skip/xfail/loosen.
+      ACCEPTANCE: `uv run --locked --project py python -m pytest -q py/tests/test_explorer_launcher.py` green 10/10 at load >= 30 and quiet; no process outlives the test (check ps after); red-proof per fixed defect.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (the file above; `just lint-py`), then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY merge gate 2026-09-25 15:10 (T-955 batch red on main): test_explorer_launcher.py (T-983) is red on main under load: wall-clock polls for the launcher's log lines (reap, crash release) - make them deterministic or fix the launcher; blocks every py-class gate
+    dispatch: manual
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
