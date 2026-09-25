@@ -15,6 +15,10 @@
   left: var(--panel-gap, 8px);
   right: 8px;
   font: 12px var(--ui); color: var(--text);
+  /* T-824: the top-right cluster's real width (four 36 px buttons, their gaps, padding and border,
+     plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
+     than sliding under it (the old 132 px fallback was one button short). */
+  --topright-w: 170px;
 }
 /* T-803: no right-hand focus column any more (it became the bottom sheet, which leaves this
    cluster's right-edge column clear — `sheet.css`'s `--sheet-gutter`), so the right inset is fixed. */
