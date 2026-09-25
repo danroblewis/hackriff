@@ -202,7 +202,9 @@ fail-fast = false
 # Only the throughput assertions remain, and they are the tier's definition. T-904 added a
 # fourth: a detection-retention prune batch's write-lock hold (a latency bound, T-453). T-901
 # added the /ws/tiles/rows push-cadence bound, whose deterministic half is hk-store's
-# deferred-seal tests.
+# deferred-seal tests. T-868 added the LP-4 parity harness's CPU bound (the analog-wfm recipe's
+# audio branch against the legacy Listen chain, same IQ); its audio/RDS/refinement parity half
+# gates normally (hk-pipeline::listen_recipe_parity).
 default-filter = '''
 not (
   test(three_fm_stations_demodulate_concurrently_each_stream_its_own_station)
@@ -210,6 +212,7 @@ not (
   or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
   or test(a_prune_batch_holds_the_write_lock_briefly)
   or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
+  or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 )
 '''
 
@@ -474,4 +477,5 @@ or test(signal_062_listen_streams_auto_demodulated_fm_audio_and_detaches)
 or test(the_live_chain_grows_the_view_lattices_finest_node_without_blocking_capture)
 or test(a_prune_batch_holds_the_write_lock_briefly)
 or test(live_row_pushes_arrive_at_the_recording_cadence_without_multi_second_stalls)
+or test(the_recipe_chain_costs_within_a_factor_of_the_legacy_chain)
 '''
