@@ -85,7 +85,7 @@ import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
-import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
+import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest, type AnnotationRequest } from "../explore/annotate";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
@@ -102,7 +102,7 @@ import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
-  collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, selectResearch, setResearchOpen,
+  addResearchAnnotation, collectionLayer, collectionVisibleOn, parseColor, researchMarkBoxes, researchRows, rowKey, selectResearch, setResearchOpen,
   type Collection, type ResearchRow, type ResearchSlice,
 } from "../map/research-slice";
 
@@ -671,13 +671,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // ---- T-821 (MAP-21): collections as overlay layers; every mark also a row in the Research panel ----
   // One model (`state.research`) behind both views: the rows are derived once per data change and
   // placed per frame through the pane's own box, like every other mark. A collection's layer is on
-  // for a pane when that pane's layers menu says so, else by the collection's stored default; an
-  // unfiled annotation follows the `research` layer. The SELECTED mark is drawn whatever its layer —
-  // it is the viewer's own selection, which is always shown (a row click must light its mark).
-  // Collections sit at z 40 (`COLLECTION_Z`) and unfiled research at z 30: ABOVE rules/detections
-  // but BELOW artifacts (z 50) and priors (z 60). They are not routed through the registry (which
-  // lists only the collections a menu has touched), so the `marks` hook splits `composeOverlays`
-  // around `COLLECTION_Z` and draws these marks in the gap — paint order is ascending z throughout.
+  // for a pane when that pane's layers menu says so, else by the collection's stored default.
+  // Collections sit at z 40 (`COLLECTION_Z`) and unfiled research (markers only, below) at z 30:
+  // ABOVE rules/detections but BELOW artifacts (z 50) and priors (z 60). They are not routed through
+  // the registry (which lists only the collections a menu has touched), so the `marks` hook splits
+  // `composeOverlays` around `COLLECTION_Z` and draws these marks in the gap — paint order is
+  // ascending z throughout.
+  //
+  // T-984: annotations are excluded here and drawn exactly ONCE, by `annotationQuads` below — always
+  // visible, dashed, never a claim about the air (T-820) — whatever a pane's research/collection
+  // layers show. Before this fix an unfiled annotation with the `research` layer on, or a filed one
+  // with its collection on, drew a SECOND "research-box" on top of the always-on dashed one.
   let researchSrc: ResearchSlice | null = null;
   let researchRowsNow: ResearchRow[] = [];
   let researchColors = new Map<string, readonly [number, number, number, number]>();
@@ -686,7 +690,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const r = store.get().research;
     if (r !== researchSrc) {
       researchSrc = r;
-      researchRowsNow = researchRows(r);
+      researchRowsNow = researchRows(r).filter((row) => row.kind !== "annotation");
       researchColls = new Map(r.collections.map((c) => [c.id, c]));
       researchColors = new Map(r.collections.map((c) => [c.id, parseColor(c.color)]));
     }
@@ -1136,9 +1140,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
     };
   };
 
-  /** Keep a just-saved annotation on the canvas until the next windowed read includes it. */
-  const keepAnnotation = (a: MarkAnnotation | null) => {
-    if (a && !annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+  /** The plain annotation id of the currently-selected Research row, or `null` — the id
+   * `annotationQuads` highlights, so selecting an annotation's row lights its (single) box. */
+  const annotationFocusId = (): string | null => {
+    const sel = store.get().research.selected;
+    return sel !== null && sel.startsWith("annotation:") ? sel.slice("annotation:".length) : null;
+  };
+
+  /**
+   * Keep a just-saved annotation on the canvas until the next windowed read includes it, AND put it
+   * in the Research slice immediately (T-984) — the panel's own poll (`RESEARCH_REFRESH_MS`, 15 s)
+   * would otherwise be the only way a fresh annotation reached it, so a panel opened right after
+   * authoring showed nothing until that poll landed. `req` is the request just sent: it carries the
+   * `view` the server used to stamp `provenance`, which this build never asks back for (the create
+   * response is narrowed to `MarkAnnotation`) — the next poll overwrites this with the server's own
+   * row regardless, so an approximate provenance here is corrected within one refresh cycle.
+   */
+  const keepAnnotation = (req: AnnotationRequest) => (a: MarkAnnotation | null) => {
+    if (!a) return;
+    if (!annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+    store.set(addResearchAnnotation({
+      id: a.id, collection_id: null, kind: a.kind, f_lo_hz: a.f_lo_hz, f_hi_hz: a.f_hi_hz,
+      t0_s: a.t0_s, t1_s: a.t1_s, label: a.label, body: null,
+      provenance: { tier: req.view.tier, device_id: req.view.device_id ?? null },
+    }));
   };
   /** The label spans, pooled per pane and reused frame to frame (set-if-changed, like the HUD's). */
   const labelPools = new Map<string, HTMLElement[]>();
@@ -1218,10 +1243,27 @@ function mount(el: HTMLElement, ctx: AppContext) {
           if (pane.id === preview?.activePane) renderPriorsReadout(pane.id);
           const band = (keep: (z: number) => boolean) => ({ ...reg, layers: reg.layers.filter((l) => keep(l.z)) });
           placeAnnotationLabels(pane);
+          if (pane.id === preview?.activePane) {
+            // T-984: how many of this frame's two annotation-drawing paths actually drew each
+            // loaded annotation — read back by `app-annotate.e2e.mjs` so it can assert "drawn once"
+            // from the page itself rather than re-deriving the fix's internal split. `dashed` is
+            // `annotationQuads` (T-820, always on); `researchBox` is `researchBoxesFor` including it
+            // as a second "research-box" (the T-984 defect, whichever research/collection layer was
+            // on). A correct build's `researchBox` is always 0: annotations own exactly one path.
+            // `researchBoxesFor` caches its own work keyed on the research slice's identity, so
+            // reading it a second time here costs nothing extra most frames.
+            const research = researchBoxesFor(pane);
+            stage.dataset.annotationDraws = JSON.stringify(annotations.map((a) => ({
+              id: a.id, label: a.label, dashed: 1, researchBox: research.some((b) => b.id === `annotation:${a.id}`) ? 1 : 0,
+            })));
+          }
           return [
             ...composeOverlays(band((z) => z < COLLECTION_Z), overlayFns, pane, edge),
-            // T-820: the human-authored annotations, always on and DASHED (never a claim about the air).
-            ...annotationQuads(annotations, null, pane.box, pane.rect),
+            // T-820: the human-authored annotations, always on and DASHED (never a claim about the
+            // air) — the SOLE place any annotation draws (T-984: `researchBoxesFor` excludes them,
+            // so a filed or unfiled annotation is never also a second "research-box"). Highlighted
+            // like a selected research row when its own Research-panel row is selected.
+            ...annotationQuads(annotations, annotationFocusId(), pane.box, pane.rect),
             ...markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect),
             ...composeOverlays(band((z) => z > COLLECTION_Z), overlayFns, pane, edge),
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
@@ -1282,14 +1324,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const pin = pinLayer.pick(c.x, c.y);
         if (pin) { selectPin(pin); return; }
         const hit = hitAt(p.x, p.y);
-        if (!hit?.mark) return;
-        if (hit.mark.kind === "signal-box") store.set(focusSignal(hit.mark.id));
-        else if (hit.mark.kind === "selection-box") store.set(focusSelection(hit.mark.id));
-        else if (hit.mark.kind === "research-box") {
+        if (!hit) return;
+        if (hit.mark?.kind === "signal-box") { store.set(focusSignal(hit.mark.id)); return; }
+        if (hit.mark?.kind === "selection-box") { store.set(focusSelection(hit.mark.id)); return; }
+        if (hit.mark?.kind === "research-box") {
           // T-821: a collection mark selects its row in the Research panel (opened to show it).
           store.set(selectResearch(hit.mark.id));
           store.set(setResearchOpen(true));
+          return;
         }
+        // T-984: an annotation is drawn once, by `annotationQuads`, never as a `research-box` (see
+        // `researchBoxesFor`) — its own hit test still selects its Research row, the same behaviour
+        // a marker's box gets ("a mark clicked on the canvas selects its row", `research.ts`).
+        const anno = annotationAt(annotations, hit.pane.box, hit.pane.rect, p);
+        if (anno) { store.set(selectResearch(rowKey("annotation", anno.id))); store.set(setResearchOpen(true)); }
         // A measurement box has no focus target yet (T-821's collections panel is where a click
         // through to it belongs); a click on one does nothing rather than mis-focusing a selection.
       },
@@ -1315,7 +1363,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!region || !view) return;
         const label = normLabel(window.prompt("Label for this annotation box:", ""));
         const body = label ? boxRequest(region, label, view) : null;
-        if (body) void commitAnnotation(ctx, body).then(keepAnnotation);
+        if (body) void commitAnnotation(ctx, body).then(keepAnnotation(body));
       },
       onAnnotatePoint: (p, kind) => {
         const v = paneById(p.pane);
@@ -1323,7 +1371,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
         if (!v || !view) return;
         const q = clampToRect(v.rect, p.at);
         const label = normLabel(window.prompt(kind === "marker" ? "Label for this marker:" : "Text note:", kind === "marker" ? "marker" : ""));
-        if (label) void commitAnnotation(ctx, pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view)).then(keepAnnotation);
+        if (label) {
+          const body = pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view);
+          void commitAnnotation(ctx, body).then(keepAnnotation(body));
+        }
       },
       onMeasureDrag: (r) => {
         const region = r ? regionOf(r) : null;
