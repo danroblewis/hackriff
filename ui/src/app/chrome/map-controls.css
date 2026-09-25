@@ -20,8 +20,9 @@
      plus Go-to's gap to it), so Go-to and the retune offer stop short of it at phone width rather
      than sliding under it (the old 132 px fallback was one button short). T-820 added Annotate and
      Pin; T-993 Review and the ⋯ menu. T-1025 dropped the cluster's shared box, so the width is now
-     the eight chips and the gaps between them: 8 × 36 + 7 × 6 + 8 = 338 px. */
-  --topright-w: 338px;
+     the chips and the gaps between them; T-1028 added the retune-mode chip, so there are nine:
+     9 × 36 + 8 × 6 + 8 = 380 px. */
+  --topright-w: 380px;
   /* T-1025: one knob for every floating chip's face. Translucent enough that the canvas reads
      through it (the user's "the background is opaque, so it's still effectively a top bar"), with
      the blur doing the legibility work instead of opacity. Text-heavy MENUS override it (below). */
@@ -114,6 +115,15 @@
 
 /* T-882: measure mode's banner (the mockup's `#mode`), top-centre under Go-to's row. Never faded. */
 .map-mode { top: 46px; left: 50%; transform: translateX(-50%); padding: 6px 12px; font-size: 11.5px; border-color: var(--amber); color: var(--text); max-width: calc(100% - 16px); box-sizing: border-box; }
+
+/* T-1028: retune mode's chip and its banner. The chip is lit like any pressed mode button; a HELD
+   key (the momentary form, `R` down) is marked as well as lit, because "this ends when I let go" is
+   a different promise from "this stays on" and the user has to be able to tell them apart. The
+   banner stacks under a tool mode's rather than replacing it: retune mode re-binds no gesture, so
+   both can legitimately be on at once. */
+.map-retune-btn.is-on { background: var(--amber-soft); color: var(--amber); }
+.map-retune-btn[data-held="true"] { outline: 1px dashed var(--amber); outline-offset: -3px; }
+.map-retune-mode { margin-top: 36px; border-color: var(--amber); }
 
 /* Zoom: right edge, vertically centred. */
 .map-zoom { right: 0; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; padding: 2px; }
@@ -224,7 +234,7 @@
    eight of them, the nudges drop their label, and the pill states the device by its dot and label
    on the row under the nudges. */
 @media (max-width: 600px) {
-  .map-ctl { --topright-w: 292px; } /* T-1025: 8 × 32 + 7 × 4 + 8 */
+  .map-ctl { --topright-w: 328px; } /* T-1025, +T-1028's chip: 9 × 32 + 8 × 4 + 8 */
   .map-topright { gap: 4px; }
   .map-status { gap: 4px; }
   .map-topright .map-ibtn, .map-topright #review-btn { width: 32px; }

@@ -162,6 +162,32 @@ safety model of a device that transmits nothing but tunes a real radio.** The in
 > explicit act through the one gated `DeviceAction` path (one capture at a time, settle gap,
 > `device_id` recorded), snapped to the nearest achievable config and refused if the view moved.
 
+**The one amendment, and what makes it safe (T-1028, user 2026-09-25).** The user asked for a
+**retune mode**: *"they can turn on 'retune' mode and whenever they zoom or pan it retunes to that …
+For areas that are too large and can't be tuned, use the largest possible size instead of denying
+them … Maybe it's a keyboard thing, hold down a certain key while panning to retune."* So the line
+above holds **by default and with the mode off** — the empty-call-list controls all still run — and
+inside the mode the view's frequency window *is* the tune request:
+
+- **The mode is the discrete, explicit act.** What T-407/T-444 required of the *press* is now
+  required of the *mode*: it is turned on deliberately (a chip in the map controls, or `R` tapped),
+  it is visible while it is on (the chip lit, a banner naming what a gesture will now do, a status
+  line on the pane), and `R` **held** is the momentary form — release and the old rule is back.
+- **A gesture commands once, when it SETTLES** (pointer release / pinch end, or ~150 ms of stillness
+  for a wheel, which has no release), through the same gated `DeviceAction` path. The latest settled
+  view wins; a request already in flight is never cancelled and the next waits the settle gap. **A
+  press that never moved the view is not a gesture** — a click to focus a signal, a tap, a
+  long-press, a Pin-mode tap and a cancelled press reach nothing, in the mode or out of it. (T-486's
+  follow/pause commit runs at every release and is a different statement from "a gesture happened";
+  conflating the two is what let a click retune in T-1028's first cut.)
+- **Too wide is not an error here.** A view wider than one capture window tunes the **largest
+  achievable span centred on it**, clamped into the tunable range at the band edges. The pane keeps
+  showing the wider view and the coverage fog shows which part of it the radio took — the honesty
+  tiers are untouched, and nothing claims detail outside the tuned window. The refusal that remains
+  is a view with no overlap at all with the tunable range (or a replay's extent).
+- **Frequency only.** Time, the pane's follow/frozen state, the ring and detection are never touched:
+  a frozen pane in retune mode retunes and stays frozen.
+
 **Full-bleed makes this line more important, not less.** When the canvas is the entire screen and
 every control floats over it, there is more surface to drag across and more temptation to treat a
 gesture as a command. The design keeps the line bright by keeping the two categories physically
@@ -504,15 +530,24 @@ and a banner naming what a drag will do):
 | wheel, `Shift`/`Alt`/`Ctrl` + wheel, pinch | zoom, per `ui/CONTROLS.md` | unchanged | unchanged | unchanged |
 | `Esc` | - | -> Navigate | -> Navigate | -> Navigate |
 
+**Retune mode is not a tool mode** (T-1028): it re-binds no gesture — a bare drag still pans, a
+wheel still zooms, `Shift + drag` still marks a region — it changes what the view **coming to rest**
+means. So it composes with the table above rather than occupying a column of it, and it has its own
+chip and banner. `R` tapped latches it; `R` held is the mode for exactly one gesture. It is off by
+default, and `Esc` is not its exit (the chip and `R` are), because it is not a state a bare drag can
+have entered by accident.
+
 `Shift + drag` therefore **never changes meaning**, and a region it marks is the input to every action
 that needs an extent - the retune offer (T-444), "measure this", "annotate this" - so authoring is
 reachable without ever entering a mode. This closes T-445's open capability #2.
 
 **Nothing in this section reaches a device route.** Pan, wheel, pinch, pause, scrub, split, follow,
 every layer toggle, every sheet and menu, every tool mode, every authoring action and every research
-write must leave the spy-client call list **empty** (MAP-25). The single exception is unchanged: a pan
-to un-tuned *frequency* **offers** a retune, and an explicit press commits one through the one gated
-`DeviceAction` path.
+write must leave the spy-client call list **empty** (MAP-25). The exceptions are two, both explicit
+and both through the one gated `DeviceAction` path: a pan to un-tuned *frequency* **offers** a retune
+and an explicit press commits one; and, with **retune mode** on (§4's amendment, T-1028), a settled
+pan/zoom commits one. With the mode off, MAP-25's empty call list is required of the whole gesture
+vocabulary exactly as before, and that is the control the mode's own tests are written against.
 
 ### 10.5 Responsive, touch and accessibility floors
 

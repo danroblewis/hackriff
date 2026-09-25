@@ -63,6 +63,9 @@ import {
   acceptPaneRetune, acceptPaneWidth, coveringWindow, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
+import {
+  commitRetuneMode, isRetuneKey, retuneModeLabel, retuneModeTarget, RetuneModeController, type RetuneModeTarget,
+} from "../../surface/retune-mode";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
 import {
   GLOW_PX, HOLD_INK, HOLD_PX, SHADOW_PX, SLICE_PX, TRACE_COLUMNS, liveFrameFits, maxHoldColumns,
@@ -91,7 +94,7 @@ import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoTimeWindow, gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
-import { activePaneName, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
+import { activePaneName, isTypingTarget, outlineBox, paneKeyIntent, stepPane } from "./active-pane";
 import { trackOverlay } from "../chrome/dismiss";
 import { PEEK_PX } from "../chrome/sheet";
 import {
@@ -1093,6 +1096,66 @@ function mount(el: HTMLElement, ctx: AppContext) {
     });
   };
 
+  // ---- retune mode (T-1028): the one mode in which a gesture commands the radio ----
+  //
+  // The user's 2026-09-25 amendment to the navigation invariant. Everything that makes it safe is in
+  // `surface/retune-mode.ts`; what lives here is the three seams a host owns: WHICH pane (the active
+  // one, T-1000), WHEN a gesture settled (`attachSurfaceInput`'s `onGesture`), and HOW it is said on
+  // screen (the chip, the banner and the pane's status line). The mode is off at mount and nothing
+  // below runs while it is off, so `app-map-controls`/`surface-input`'s empty-call-list controls hold
+  // exactly as they did.
+  const retuneTargetNow = (paneId: string): RetuneModeTarget | null => {
+    const p = preview;
+    const pane = p?.view.panes.get(paneId);
+    if (!p || !pane) return null;
+    // The pane's OWN device would choose the grid here once a pane can name one (T-1006); until
+    // then there is one front end and one grid, exactly as the Retune button's `offerNow` reads it.
+    return retuneModeTarget(pane, store.get().navGrid.grid?.frequency ?? null, p.edgeNs, EDGE_GRACE_NS);
+  };
+  /** The last thing that happened to a pane in the mode, so the status line has something to say
+   * after the retune landed rather than blanking the instant the request resolves. */
+  let retuneSaid: { paneId: string; text: string } | null = null;
+  const retuneMode = new RetuneModeController({
+    commit: async (paneId) => {
+      const p = preview;
+      if (!p) return;
+      const r = await commitRetuneMode(ctx, {
+        targetNow: retuneTargetNow,
+        // T-437 §5.2, as everywhere else: the growing edge's tiles describe the tuning that ended.
+        invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+      }, paneId);
+      // What the pane says afterwards. A refusal is said too: in this mode the user did not press a
+      // button, so silence would read as "my pan did nothing" rather than "the front end said no" —
+      // and `applyDeviceAction` has already toasted the reason.
+      retuneSaid = r.target
+        ? { paneId, text: r.ok ? retuneModeLabel(r.target) : `${retuneModeLabel(r.target)}${r.reason === "refused" ? " The front end refused it." : ""}` }
+        : null;
+    },
+    onChange: () => { syncRetuneChip(); },
+  });
+  /** Set once the cluster is mounted; before that there is no chip to re-state. */
+  let syncRetuneChip: () => void = () => {};
+  /** The pane's own status line while the mode is acting on it (`chromeStatus`, per frame). */
+  const retuneStatusFor = (paneId: string): string | null => {
+    if (retuneMode.pendingPane === paneId) {
+      const t = retuneTargetNow(paneId);
+      const what = t ? retuneModeLabel(t) : "Retune mode: nothing to plan against yet.";
+      return retuneMode.inFlight ? `${what} (asking the front end…)` : `${what} (settling…)`;
+    }
+    return retuneSaid && retuneSaid.paneId === paneId && retuneMode.on ? retuneSaid.text : null;
+  };
+  /** `R`: held for one gesture, tapped to latch (`isRetuneKey` says which events count). */
+  const onRetuneKeyDown = (e: KeyboardEvent) => {
+    if (!isRetuneKey(e, isTypingTarget) || e.repeat) return;
+    e.preventDefault();
+    retuneMode.keyDown();
+  };
+  const onRetuneKeyUp = (e: KeyboardEvent) => {
+    if (!isRetuneKey(e, isTypingTarget)) return;
+    e.preventDefault();
+    retuneMode.keyUp();
+  };
+
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
   //
   // **One hit test, `preview.paneAt`, so hover and gesture cannot disagree about where a pointer is.**
@@ -1265,6 +1328,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
         // `retune.ts` out of the `/surface.html` preview's import graph.
         chromeAction, onChromeAction: pressRetune,
         widthActions, onWidthAction: pressWidth,
+        // T-1028: one line per pane about a retune the mode has pending/in flight, per frame for the
+        // same reason `chromeAction` is — it names the window the pane is showing NOW.
+        chromeStatus: retuneStatusFor,
         edge: () => edgeNs() || probe.origin.edgeNs,
         // T-893: rows are pushed to the columns a following pane draws, as they are recorded.
         rows: wsRowOpener(ctx.token),
@@ -1358,6 +1424,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     detach = attachSurfaceInput(canvas, preview, {
       onShadowGain: shadowGainWheelHandler(preview.view.surface),
       onView: () => { mirror(); viewMoved(); },
+      // T-1028: the only wire from a gesture to the front end, and it is inert while the mode is
+      // off — `moved`/`settled` return immediately then, so with the mode off this handler is the
+      // old rule byte for byte. A pinch and a drag report `ended` at their release (T-486's commit
+      // point); a wheel has none and is settled by stillness inside the controller.
+      onGesture: ({ pane, ended }) => { if (ended) retuneMode.settled(pane); else retuneMode.moved(pane); },
       onHover: (p, e) => {
         // A pin under the pointer wins the MapTip; the quadtree is the hit test (docs/24 §14.4).
         hoveredPin = p ? pinLayer.pick(cssPoint(e).x, cssPoint(e).y) : null;
@@ -1511,6 +1582,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // T-882: the retired toolbar row's controls, rehomed into the cluster. All view state.
       measuring: () => tool === "measure",
       setMeasuring: (on) => setMeasureMode(on),
+      // T-1028: retune mode's chip. A mode, like Measure — but the one whose state decides whether
+      // a settled gesture reaches the device, which is why it is stated twice (the lit chip and the
+      // banner) and why the held key is marked apart from the latch.
+      retuneMode: () => ({ on: retuneMode.on, held: retuneMode.isHeld }),
+      setRetuneMode: (on) => retuneMode.setSticky(on),
       // T-820 (MAP-20): the Annotate and Pin tool modes, beside Measure in the cluster.
       annotating: () => (tool === "annotate" || tool === "pin" ? tool : null),
       setAnnotating: (mode) => setTool(mode ?? "navigate"),
@@ -1614,6 +1690,20 @@ function mount(el: HTMLElement, ctx: AppContext) {
     renderLayers = controls.syncLayers;
     renderMeasure = controls.syncMeasure;
     viewMoved = controls.viewMoved;
+    // T-1028: the chip and its banner, re-stated whenever the mode changes or a retune becomes
+    // pending. Wired here rather than passed in, because the controller exists before the cluster.
+    syncRetuneChip = controls.syncRetuneMode;
+    syncRetuneChip();
+    // `R` held is the mode for one gesture; `R` tapped latches it. Registered on `document` like the
+    // pane keys beside them, and refused for a key going into a text field or carrying a modifier.
+    document.addEventListener("keydown", onRetuneKeyDown);
+    document.addEventListener("keyup", onRetuneKeyUp);
+    // A window that loses focus with `R` down never delivers the keyup, and the momentary mode would
+    // stay on until `R` was pressed again — a mode that tunes the radio, left on by alt-tabbing away
+    // from it. Dropping the hold is not the same act as a release (see `releaseHeld`): it must not
+    // latch the mode, which is what a tap does.
+    window.addEventListener("blur", () => retuneMode.releaseHeld());
+    document.addEventListener("visibilitychange", () => { if (document.hidden) retuneMode.releaseHeld(); });
     // T-955: a retune (by anyone — this page, another client, the API) re-derives the painted Go-to
     // offer and the FAB's tuned-live-edge state against the tuned window the backend now reports.
     store.select((s) => {
