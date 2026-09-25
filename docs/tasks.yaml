@@ -28075,7 +28075,7 @@ tasks:
   - id: T-945
     milestone: M2-hardening
     title: Automatic front-end gain management closed-loop on decode quality (overload flagged at every clip, nothing reduces gain)
-    status: in-progress
+    status: done
     branch: task-t945
     priority: P2
     deps: []
@@ -28100,6 +28100,7 @@ tasks:
       Observed, not chased: The mock SDR's gain model is a function of TOTAL gain only (hk_core::source::mock gain_scale sums lna+vga+amp), so no offline test can discriminate how gain is DISTRIBUTED across stages. The ladder's balanced-distribution rule is documented as a heuristic (docs/28 section 3.1) and is HIL work (T5), not proved here. | Nothing constructs a GainManager in the composed pipeline: the prerequisite is ADR-0005 arbitration - a gain run spends max_probes dwells of the one window's attention, so it should be SCHEDULED as a dwell of its own rather than fired from a detection callback (docs/28 section 4 rule 2). The policy is off by default so nothing regresses meanwhile. | The integration test depends on the python synth (fm_broadcast_rds, cached under target/synth-cache) and skips with 'SKIP: synth unavailable' where absent, like the existing signal_062_* tests. First generation of the 3-station 5 s scene costs ~90 s; cached runs are 10-17 s. | docs/28 section 5 restates the ticket's hardware note for the user: at that site RDS on all but the two strongest stations is front-end limited (8-bit, no preselector) and an FM-band antenna plus a notch/preselector is the physical fix - no gain policy substitutes for it.
       Use cases: SIGNAL-062
       Resources: 6 CPU-s, peak 0.1 GB
+    commit: 02a271b2
   - id: T-946
     milestone: MMAP
     title: "Sweep view legibility: shadow hides stations, sampled-fraction banner frozen at first paint, black live-pane rectangle, span select sends stale rate"
