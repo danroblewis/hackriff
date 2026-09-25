@@ -28317,6 +28317,8 @@ tasks:
       DELIVER: every scan step's tune interval is recorded in the coverage map (the SDR config/tune history is the provenance, CLAUDE.md) and served by /api/coverage and the tiles for the step's span and time; a whole-range pass lights the whole range (observed, or observed-but-not-measured where applicable - T-441's distinct marks); the sampled-fraction banner reads the backend's coverage. Test through the mock SDR: a scan over N steps -> /api/coverage observed for every stepped cell; red on current code.
       WHAT THE USER WILL SEE ON STAGING: after 'Scan everything', the whole 1 MHz-6 GHz surface shows where it looked.
       core_interface (coverage). TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+
+      2026-09-25 coordinator: node2 handback (ffab0588) was reaped as a false NO_WORK (sync-back bug); coordinator ran the core-interface Opus review: PASS (bands census on /api/coverage consistent with the served cells, grey stays unobserved, T-376 opening rule intact, thin client). SCOPE: this lands the census + banner only; the canvas symptom (no last-known shadow over the swept range after a full scan), the contradictory preview-page coverage line, the un-timed query's IQ-ring default window and record-limit truncation moved to T-1014.
     core_interface: true
   - id: T-965
     milestone: MSCAN
@@ -28690,6 +28692,30 @@ tasks:
       From T-820's conflict-fix handback (task-t820 624fbe16), observed not chased: (1) with the Research layer on (off by default) an annotation is drawn TWICE - T-820's dashed rose box plus T-821's research box; (2) a newly saved annotation appears in the Research data only after that panel's 15 s refresh. Also: no e2e spec covers annotation authoring (unit tests only).
       DELIVER: one drawing per annotation whichever layers are on (one owner of the annotation overlay in the registry-driven overlay table, T-821/T-914); a saved annotation shows in the Research panel from the create response, not the next poll; an app e2e that draws an annotation box and a pin and finds each drawn once. Thin client. Red on current code.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the new spec alone, HK_E2E_PORT >= 9216), then HAND BACK. Never `just gate`.
+  - id: T-1014
+    milestone: MSCAN
+    title: "After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation"
+    status: todo
+    priority: high
+    deps:
+    - T-964
+    parallel_group: SCAN-SHADOW
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      USER-VISIBLE (explorer, 2026-09-25; T-964's Opus review). T-964 fixed the /api/coverage census (a `bands` share: any frequency cell sampled in the window) and the orientation sentence, but NOT the canvas symptom its ticket promised: "after 'Scan everything', the whole 1 MHz-6 GHz surface shows where it looked".
+      Evidence: ~/.hackriff-ops/explorer/journal-20260925.md:262-281, shots/0512-scan-whole-surface.png and 0513-scan-whole-surface-2.png - the 237 s pass is an honest thin diagonal at the top of a 1.7 h time axis (correct per-instant coverage), but NO last-known shadow lights the swept range afterwards. The shadow ("fog of war") tier (T-485, T-519/520/521, all done) renders only in ui/src/app/centre/surface.ts:751 (persistenceSlices); the shots are from the surface preview page (ui/src/surface/preview-main.ts), so either the preview never draws shadows or the shadow did not render at the overview tier - not verified which.
+      DELIVER:
+      1. Reproduce through the mock SDR: run a full-range scan pass, then load BOTH the app page and the surface preview page zoomed out to 1 MHz-6 GHz; the swept range must show as last-known shadow (dim, distinct from live and from grey) wherever it was sampled, on both pages. Fix whichever is missing (the preview page's rendering, or the shadow at the overview tier). Grey stays genuinely unobserved.
+      2. ui/src/surface/preview-main.ts:119-120 still prints 'coverage map: ... (4.3 % sampled)' (the time x frequency share) directly under T-964's new banner ('100 % ... was ever sampled') - relabel it (e.g. '4.3 % of cells') or quote census.bands, so the screen does not contradict itself; and T-964's headline wording 'of this surface was ever sampled' should say 'of this frequency range' since the number is a frequency-axis share.
+      3. Explain in the API docs (docs/api.md, /api/coverage) that with no t0/t1 the window defaults to the capture window (the IQ ring's span, crates/hk-api/src/coverage.rs:2077-2091), which is why the explorer's un-timed query read 'observed only for the step in progress' - and have the scan UI query the pass's own time window.
+      4. crates/hk-api/src/coverage.rs:332-345 observation_spans reads at most MAX_RECORD_LIMIT records with no paging; a full pass writes ~418 records, so ~24 passes in one window silently truncate /api/coverage (and bands): page it or state the truncation in the response. Fix docs/api.md ~l.799's example counts (observed 2 + excluded 1 + unobserved 2 on a 4-cell grid).
+      Related: T-1008 (scan as a buttoned map overlay) draws the plan and progress; this ticket is what remains visible AFTER a scan.
+      ACCEPTANCE: e2e through the mock SDR - after one full pass, zoomed out, both pages show the swept cells as shadow and the unswept as grey (assert pixels/tier per cell against /api/coverage); the two coverage lines agree; truncation test.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone on your own ports >= 9216; the hk-cli scan_coverage binary; api_contract with docs/api.md together), then HAND BACK with screenshots. Never `just gate`.
+    notes: |
+      FOUND BY user feature (scan + fog of war) via explorer; review of T-964 2026-09-25: After a full scan the canvas still does not show where it looked: no last-known shadow over the swept range on the zoomed-out surface (app + preview page), contradictory coverage lines, un-timed /api/coverage defaults to the IQ ring window, record-limit truncation
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
