@@ -27491,6 +27491,27 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY T-917 + T-868 workers 2026-09-25.
+  - id: T-930
+    milestone: MAUTO
+    title: "Analyze trace panel follow-ups: the trace poll never stops for failed/queued-cancelled jobs (final only when job.trace is set), real-shape fixture, filter-labelled error, doc tidy (T-570 re-review)"
+    status: todo
+    priority: normal
+    deps:
+    - T-570
+    parallel_group: API
+    needs: none
+    model: opus
+    effort: medium
+    acceptance: |
+      OBSERVED 2026-09-25 by T-570's Opus re-review (PASS on task-t570 49869ad3), non-blocking:
+      1. THE TRACE POLL NEVER STOPS FOR FAILED JOBS (every job on this build) or a job cancelled while queued: the backend's `final` is `job.trace.is_some()` (crates/hk-pipeline/src/synth/jobs.rs:1017) and fail()/queued-cancel never set job.trace (:1176-1188, :940-960), so tracePollDone (ui/src/app/explore/analyze-trace-panel.ts:133-135) never returns true -> one trace GET every 2 s for as long as the job is watched. Fix at the source: the backend reports `final: true` for a job that ENDED without a trace (docs/api.md + api_contract.rs together, T-079) - or the client stops when the job has ended (not `cancelled`, which can still get a partial trace) and carries its resolution. Fix the doc comment at :201-202.
+      2. The mount-test fixtures pair final:true with a failed/no_evaluator job (ui/test/app-analyze-trace-panel-mount.test.ts `trace()` default + NOT_SEARCHED); the real server returns final:false with empty nodes - add the real-shape case (pins the headline path and item 1).
+      3. After a failed fetch for a new family filter the error line sits above the PREVIOUS filter's results (:176, lastTrace kept on purpose) - label which filter the list belongs to.
+      4. Cosmetic: back-to-back doc blocks at :110-120.
+      DELIVER each with a test (red on the old behaviour where applicable). Thin client.
+      TESTING PROTOCOL (CLAUDE.md): targeted tests only, then HAND BACK. Never `just gate`.
+    notes: |
+      FOUND BY T-570 Opus re-review 2026-09-25.
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
