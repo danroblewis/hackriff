@@ -27695,7 +27695,7 @@ tasks:
   - id: T-933
     milestone: MMAP
     title: Sheet peek strip covers the lower half of the lifted minimap at every width
-    status: in-progress
+    status: done
     branch: task-t933
     priority: P2
     deps: []
@@ -27721,6 +27721,7 @@ tasks:
       Commits: 0f905e18, 4ebe821d, 88c7876f, a4441745, 495d1528, 79d543ef
       Observed, not chased: app-surface.e2e.mjs's 'T-806: the layers menu has two axes...' and 'T-807: the coverage fog is a per-pane layer...' subtests fail on unmodified main too (isolated in the first review pass) - a real pre-existing red the coordinator should ticket separately. | app-phone.e2e.mjs's idle-fade/sheet-close step is intermittently flaky (~1/4 runs) even on unmodified main@7a9fa8ab run alone with no other load on the box (isolated in the second review pass) - worth a deflake pass, but not this ticket's scope and not caused by this change.
       Resources: 4 CPU-s, peak 0.3 GB
+    commit: 952d3847
   - id: T-934
     milestone: M2-hardening
     title: "Three wall-clock tests fail alone under load: hk-api ondemand silent_peers, hk-core hackrf slow_reader, hk-cli daemon_drives_the_scheduler"
