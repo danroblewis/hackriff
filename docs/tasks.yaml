@@ -25786,7 +25786,7 @@ tasks:
   - id: T-863
     milestone: MAUTO
     title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-855
@@ -25822,6 +25822,7 @@ tasks:
       Observed, not chased: UNOWNED BLOCKER for the §7 bar (and T-576's must-return column): no ticket owns the production search backend. hk_pipeline::synth::jobs::server_backend() returns None: nothing implements hk_synth::engine::Evaluator over acquired IQ (the only impls are test worlds at crates/hk-pipeline/tests/analyze_jobs.rs:221 and crates/hk-synth/tests/search_engine.rs:114), and nothing turns TemplateLibrary seeding into engine Roots with FreeParam domains (the only Root constructors are those same tests). hk_synth::objective::EvidenceObjective::measure already runs a candidate prefix through run_window with calibrated scoring and support alignment, so an Evaluator can reuse it. The work: that evaluator (including null windows, check summaries and hold-out frames), a propose() adapter over hk_synth::proposal, template→Root seeding, and returning it from server_backend(). acceptance_mauto::mauto_eval then binds with no edit. Suggest a coordinator-filed Opus/core ticket. | Blind detection gap (seen once, not retested): a generic_fsk_sweep draw at 25 695 Bd 2-FSK (about 4.5 ms bursts, 10 in 2 s at 1 MSps, 20 dB) left 2 stored detections and 0 inventory emitters at every SNR (run summary 'emitters: 0 in inventory at stop'). The suite now also targets uncovered detection groups (ADR-0015 §7 allows 'burst detection the run found'), but short high-rate bursts not forming an emitter may be a real inventory-formation limit. | §7's protocol rows (RDS fm_100p8M, POCSAG, ACARS, ADS-B, 915 MHz sensor) are listed as data (mauto_eval::PROTOCOL_ROWS) but not run: their content-level judges (PI/PS vs hk_demod::rds, ≥95 % pages, 14/16 squitters) mean nothing while no job searches. They belong with the backend ticket. | CI tier runs 2 seeds per population (15 open scenes, about 4 min in a debug build). The §7 rates need docs/22's n and HK_MAUTO_UNSEAL=M-12 for the sealed hold-out: a nightly or M-12-review run, not the gate.
       Use cases: RESEARCH-002, SIGNAL-052
       Resources: 332 CPU-s, peak 2.2 GB
+    commit: 59016bc3
   - id: T-864
     milestone: MAUTO
     title: "MAUTO M-13: Jetson budget/power measurement and profile re-baseline (interactive, needs the Jetson)"
