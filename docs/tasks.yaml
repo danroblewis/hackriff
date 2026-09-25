@@ -18708,7 +18708,8 @@ tasks:
   - id: T-566
     milestone: MAUTO
     title: "MAUTO: serve the trace and the resolution - GET /api/analyze/{id}/trace, trace_summary, the `trace` stream record"
-    status: todo
+    status: in-progress
+    branch: task-t566
     priority: normal
     parallel_group: API
     model: opus
@@ -25672,7 +25673,8 @@ tasks:
   - id: T-861
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
-    status: todo
+    status: in-progress
+    branch: task-t861
     priority: normal
     deps:
     - T-856
@@ -25734,7 +25736,8 @@ tasks:
   - id: T-863
     milestone: MAUTO
     title: "MAUTO M-12: acceptance_mauto blind suite (ADR-0015 section 7) with the generic-FSK synthetic generator in py/"
-    status: todo
+    status: in-progress
+    branch: task-t863
     priority: normal
     deps:
     - T-855
@@ -25886,7 +25889,8 @@ tasks:
   - id: T-868
     milestone: MAUTO
     title: "LP-4: parity harness: legacy Listen chain versus the recipe, on the same IQ"
-    status: todo
+    status: in-progress
+    branch: task-t868
     priority: normal
     deps:
     - T-867
