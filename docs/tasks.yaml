@@ -29026,7 +29026,7 @@ tasks:
   - id: T-988
     milestone: MAUTO
     title: Blind CTCSS/DCS tone identification on NBFM (row field + Listen header)
-    status: in-progress
+    status: done
     branch: task-t988
     priority: P1
     deps: []
@@ -29041,6 +29041,7 @@ tasks:
 
       2026-09-25 coordinator, TRUTH DISPUTE from T-985 (task-t985 0deae016): the independent CTCSS oracle py/fixtures/ctcss_ref.py finds a confident 100.0 Hz tone (SNR 16.5 dB, sharp across the channel) at 461.125 MHz in lmr-461p125-nbfm-ctcss - NOT the 233.6 Hz the explorer's truth claims (the explorer saw 233.6 Hz on 461.125 / 462.225 and 100 Hz on 464.700 in the live window). Recorded in the fixture's hackriff:truth + manifest, not resolved. The DMR oracle found 41 of the claimed 42 syncs; the DMR fixture is a 5 s tail trim (24 MB, LFS) holding all 41; the CTCSS capture is EXTERNAL (72 MB; the 8.1 s burst alone is ~39 MB). New use cases SIGNAL-090..093. Use that clip as the hard case: your estimator must agree with the evidence (and report both if two tones are present).
     model_reason: "opus/medium: new DSP (tone estimator, DCS Golay) on the demod path"
+    commit: cf018aee
   - id: T-989
     milestone: MAUTO
     title: Conventional DMR (Tier II) identification + header decode on any 4FSK 4800 sym/s emission
