@@ -28426,7 +28426,7 @@ tasks:
   - id: T-961
     milestone: MAUTO
     title: "RDS identity lands on a separate overlapping row (106.1: rds-pi:1323 beside an unknown-0.999 detection); a CRC-valid decode never confirms the emitter"
-    status: in-progress
+    status: done
     priority: P1
     deps: []
     parallel_group: INV-DECODE-ATTACH
@@ -28450,6 +28450,7 @@ tasks:
       Observed, not chased: LOAD FLAKE (not mine): hk-model repo::tests::detection_write_throughput_is_reported failed in a whole-crate run taken while four other agents held the box (37.6 s) and passes alone in 1.613 s. Its assertion is a write-throughput bound, so by docs/10 section 3.6 it belongs in the `timing` tier rather than the default one; it is not in .config/nextest.toml's timing set today. Evidence: `cargo nextest run -p hk-model -E 'test(/detection_write_throughput/)'` -> PASS 1.613s, vs FAIL at 37.668s in the full-crate run. | The ticket asked for the test to run through the mock SDR on the 106.1 fixture; that fixture is T-960 and has not landed (fixtures/hackrf/explorer-2026-09-25 holds only 101.3 and 98.9). The new test drives the exact two seams the recipe writer drives (Ingest::store_decode with no emitter context, then the family step and Inventory::chain_emitter) with the journal's measured numbers (106.1127/160 kHz detection, 106.1126/200 kHz channel, PI 1323); a fixture-level e2e belongs with T-960/T-969. | hk-pipeline's classify_decoder_emitters cannot be called from a test without a `Shared`, so the new test reproduces its two steps rather than calling it. A `Shared` test constructor would let the wiring itself be asserted; not attempted in scope. | Rule 2b can only ever fire for rds-pi today, because IdentityScheme::shares_channel is `!matches!(self, RdsPi)` - every other scheme, including pocsag-ric and the recipe schemes that are one-transmitter-per-channel in practice, is treated as channel-sharing. That is a deliberately conservative blast radius here, but it means a POCSAG or ACARS recipe decode still mints its own row; whether shares_channel is right per scheme is worth a look beside T-926's other sub-tickets.
       Use cases: SIGNAL-062
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: bb241b05
   - id: T-962
     milestone: MAUTO
     title: RDS PI committed and Confirmed from ~3 CRC-valid groups (98.085 PI 1704; oracle saw no RDS) - identity needs vote counts and a provisional state
