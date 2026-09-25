@@ -49,16 +49,17 @@ import {
   type MarkBox, type MarkMeasurement, type MarkRegion, type MarkRow, type MarkSelection,
 } from "../../surface/marks";
 import { fmtMeasureReadout, measureReadout } from "../../surface/measure";
+import { annotationAt, annotationLabels, annotationQuads, type MarkAnnotation } from "../../surface/annotations";
 import { PinLayer, detectionPins, isUnexplained, layoutPanePins, pinTipLines, type PlacedPin } from "../../surface/pins";
 import type { Box } from "../../surface/lattice";
 import type { RowAction, WidthAction } from "../../surface/chrome";
 import { loadRangeMode, saveRangeMode, scaleMode, scaleRows } from "../../surface/contrast";
 import { fogKeyEntries, markKeyEntries, rangeLabel } from "../../surface/legend";
-import { SurfacePreview, clampToRect, isBackpressure, probeSurface } from "../../surface/preview";
+import { SurfacePreview, clampToRect, isBackpressure, probeSurface, refreshOrientationNote } from "../../surface/preview";
 import { loadShadowGain, shadowGainWheelHandler } from "../../surface/shadow-gain";
 import { wsRowOpener } from "../../surface/rowfeed";
 import {
-  acceptPaneRetune, acceptPaneWidth, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
+  acceptPaneRetune, acceptPaneWidth, goToSpanHz, offerAcceptable, offerLabel, paneRetuneOffer, paneWidthOffer,
   widthOfferAcceptable, widthOfferLabel, type PaneRetuneOffer, type PaneWidthOffer,
 } from "../../surface/retune";
 import type { PaneRect, PaneReport, PaneView, RangeMode } from "../../surface/surface";
@@ -69,6 +70,11 @@ import {
 import type { OverlayQuad } from "../../surface/minimap";
 import { boxOf } from "../../surface/panes";
 import { parsePaths, pathQuads, pathsRequest, type MarkPath } from "../../surface/paths";
+// T-898: the device's OWN route through frequency (`GET /api/tune-history`), drawn like a
+// directions line — one per front end, in the same render pass as the tiles.
+import {
+  parseTuneHistory, tuneHistoryRequest, tuneKeyEntries, tuneQuads, type TunePath,
+} from "../../surface/tunepath";
 import { liveRow } from "./live-edge";
 import { recordIqButton, startCaptureClock } from "./capture-clock";
 import { durationText, iqBackingAt, iqNote, ringRuleQuads, ringRules } from "./capture-window";
@@ -79,17 +85,19 @@ import { openSelectionMenu, openSignalMenu } from "../menu";
 import { startPoll } from "../net";
 import { commitRegion } from "../explore/region";
 import { commitMeasurement, type MeasureView } from "../explore/measure";
+import { boxRequest, commitAnnotation, fetchAnnotations, normLabel, pointRequest } from "../explore/annotate";
 import { focusSelection, focusSignal } from "../explore/slice";
 import { gotoWindow, requestGoto, reviewAt, setNavigation, toast, type AppState } from "../state";
 import { mountMapControls, paneActions, type LayerMenu, type MapControlHost } from "../chrome/map-controls";
 import { trackOverlay } from "../chrome/dismiss";
+import { PEEK_PX } from "../chrome/sheet";
 import {
   BASE_STYLES, COLLECTION_Z, PLANE_ORDER, composeOverlays, defaultPaneLayers, isLayerVisible, layerDef, loadPaneLayers, paintOrder, savePaneLayers, withLayer,
   type LayerId, type OverlayLayerFn, type PaneLayers,
 } from "../../surface/layers";
 import { artifactLinkQuads, artifactLinks } from "../../surface/artifacts";
-import { DensityFetches, densityAddrs, densityQuads, isCoarseZoom, sharedDensityReader, type DensityTile } from "../../surface/density";
-import type { TileAddr } from "../../surface/lattice";
+import { densityQuads } from "../../surface/density";
+import { DENSITY_POLL_MS, DensityPoll } from "./density-poll";
 import { dropPaneLayers, inheritPane, paneLayersOf, setPaneBase, setPaneLayer } from "../map/layers-slice";
 import { PriorLabelLayer, parsePriors, priorLabels, priorQuads, priorsPath, type PriorsAnswer } from "../../surface/priors";
 import {
@@ -98,8 +106,6 @@ import {
 } from "../map/research-slice";
 
 const S_TO_NS = 1e9;
-/** The centre poll's period, ms — the unit the density refresh paces its asks in. */
-const DENSITY_POLL_MS = 1000;
 /** The map strip along the bottom of the canvas, device px. */
 const MINIMAP_PX = 110;
 /** A pane frozen within this of the edge still counts as showing the growing edge, for the retune
@@ -112,6 +118,12 @@ const TRACE_PX = 96;
  * (`ui/test/surface-retune.test.ts` asserts that), so which spans to offer as buttons lives here,
  * beside "Retune"'s own label text. An unachievable one is still offered, stated and disabled. */
 const WIDTH_PRESETS_HZ: readonly number[] = [500e3, 2e6, 5e6, 10e6, 20e6];
+/** T-947: the Go-to offer's span when nothing is currently tuned — the device's default working
+ * span, never the pane's view width. `gotoOffer` below prefers the front end's OWN current window
+ * (`grid.current.span_hz`, T-947's "or keeps the current tuned span") when one exists; this is only
+ * the fallback for a pane that has never been tuned. Picked from `WIDTH_PRESETS_HZ` rather than a
+ * new RF constant, for the same reason `retune.ts` names none of its own. */
+const GOTO_DEFAULT_SPAN_HZ = WIDTH_PRESETS_HZ[1];
 /** T-522: the found-signal overlay's shown/hidden preference, kept in `localStorage` the same way
  * `shell.ts`'s `PREFS_KEY` is — a per-viewer convenience, wrapped in try/catch so the page works
  * with storage unavailable, and never anything the backend needs to know about. */
@@ -155,6 +167,8 @@ export function paneMarkBoxes(
 /** The HUD ticks' ink while the chrome is faded (docs/23 §10.2's ~35 %, a touch brighter so the
  * ruler stays readable against the ramp). The labels fade by CSS on the same `chrome-idle` class. */
 const HUD_IDLE_ALPHA = 0.45;
+/** The surface's tool modes (docs/23 §10.4's table columns). */
+type ToolMode = "navigate" | "measure" | "annotate" | "pin";
 /** The first pane's id (`PaneModel`'s default `pane` prefix + 1): which registry the toolbar
  * describes before the surface has booted. Used for nothing once `preview.activePane` exists. */
 const FIRST_PANE = "pane1";
@@ -174,6 +188,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every render frame by `SurfaceView` from the same ruler its ticks were stroked from. Never read
   // by the pointer: a label must not steal a pan from the surface underneath it.
   const hudEl = h("div", { class: "sf-hud", "aria-hidden": "true" });
+  // T-820 (MAP-20): the annotations' labels, placed per frame like the HUD's (band 2 DOM text over
+  // the canvas, never read by the pointer). The tool-mode banner is the cluster's `.map-mode`.
+  const annoEl = h("div", { class: "sf-annos", "aria-hidden": "true" });
   // T-812 (MAP-12): the band-plan priors' labels — band 2 like the HUD's, placed per frame from the
   // pane's own box, and pointer-transparent. The ranked reasoning itself is in `priorsEl` below.
   const priorsLabelEl = h("div", { class: "sf-priors-labels", "aria-hidden": "true" });
@@ -204,7 +221,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // T-882: the retired toolbar row's two readouts, floated over the canvas's bottom-left above the
   // map strip (screen-space chrome, docs/23 §10.1 band 2). Status only: never takes the pointer.
   const readout = h("div", { class: "sf-readout", "data-band": "chrome" }, rangeEl, hoverEl);
-  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, tipEl, captureEl);
+  const stage = h("div", { class: "sf-stage" }, canvas, pinsEl, hudEl, priorsLabelEl, annoEl, tipEl, captureEl);
   // T-522: the found-signal overlay (Candidate/Confirmed boxes) shown/hidden, remembered per viewer.
   // Pure client presentation — it changes only `paneMarkBoxes`'s composition below, never a fetch,
   // a poll or what is detected, and it touches neither `state.inventory` nor the lists that read it.
@@ -332,12 +349,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // Whether a plain drag marks out a measurement instead of panning. Read live by
   // `attachSurfaceInput` through the getter below, exactly the pointer-state discipline `pending`
   // above already follows: not store state, because it is meaningless once the mode is off.
-  let measureMode = false;
+  /** The surface's tool mode (docs/23 §10.4): `navigate` is the default and binds nothing extra. */
+  let tool = "navigate" as ToolMode;
   let pendingMeasure: { pane: string; region: MarkRegion } | null = null;
   /** Saved measurements, this session. A durable object once `POST /api/measurements` answers
    * (docs/25 §4/§10); kept here rather than in the store because no other surface reads it yet —
    * T-821's collections panel is where a shared, fetched, cross-window list belongs. */
   let measurements: MarkMeasurement[] = [];
+  // ---- annotations (T-820 / MAP-20) ----
+  /** The annotations in the viewed window, as `GET /api/annotations` last answered, plus any saved
+   * since. Durable: they are read back from the store on every load, so a reload shows them. */
+  let annotations: MarkAnnotation[] = [];
+  /** The annotation box being stroked, or `null`. Pointer state, like `pending`. */
+  let pendingAnnotate: { pane: string; region: MarkRegion } | null = null;
 
   const say = (text: string) => { note.textContent = text; note.hidden = !text; };
   store.select((s) => s.device, (d) => {
@@ -431,7 +455,8 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // The rubber band goes through the same pass on the same frame as everything else it is being
     // drawn over, and only on the pane it is being stroked on (T-458).
     const pendingRegion = pending && pending.pane === pane.id ? pending.region : null;
-    const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region : null;
+    const pendingMeasureRegion = pendingMeasure && pendingMeasure.pane === pane.id ? pendingMeasure.region
+      : pendingAnnotate && pendingAnnotate.pane === pane.id ? pendingAnnotate.region : null;
     // The found-signal boxes are the `detections` LAYER now (T-806, below), so this composition —
     // selections, measurements and the in-progress gesture, which are the user's own interaction
     // and are always drawn — passes `false` for them.
@@ -518,64 +543,40 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // coarse-zoomed (`densityQuads`'s own gate). The poll below only refreshes each pane's tiles for
   // its CURRENT address, and only while that gate is true — it never positions anything (T-388's
   // rule, followed by every layer here) and never fetches what the frame would draw nothing with.
-  const densityByPane = new Map<string, DensityTile[]>();
-  // Per-pane, per-address copies and WHEN each is asked again (`DensityFetches`): while a pane
-  // follows, every tile it shows is re-asked on a bounded cadence as rows arrive (counts are
-  // back-dated to an event's start, so a tile the edge left still changes); a frozen pane asks once
-  // and keeps its own copy; a failed ask is retried with backoff. One request per address in
-  // flight, shared between panes (`sharedDensityReader`).
-  const densityFetches = new DensityFetches();
-  const densityInflight = new Set<string>();
-  const densityGet = sharedDensityReader((url) => client.get<unknown>(url));
-  // The refresh/backoff pacing is counted in POLL TICKS (the poll below runs every
-  // `DENSITY_POLL_MS`), never a browser clock — the centre modules are on the capture clock only
-  // (T-393/T-386's guard); this is request pacing, not a time anything is placed at.
-  let densityPolls = 0;
+  // Per-pane, per-address copies and WHEN each is asked again — plus the read's deadline, the joined
+  // request's edge stamp and the write-back against the CURRENT addresses — are `./density-poll.ts`'s
+  // (T-927). Here the layer is only polled and drawn.
+  const densityPoll = new DensityPoll((url, signal) => client.get<unknown>(url, { signal }));
   const densityQuadsFn: OverlayLayerFn = (pane) => {
     const lat = preview?.view.surface.lat;
     if (!lat) return [];
-    return densityQuads(densityByPane.get(pane.id) ?? [], pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
+    return densityQuads(densityPoll.tilesFor(pane.id), pane.box, pane.rect, lat, { dpr: window.devicePixelRatio || 1 });
   };
-  /** Ask for each density-on, coarse-zoomed pane's tile(s) that `DensityFetches.due` says need it
-   * (`isCoarseZoom`, the same gate `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane
-   * would draw nothing with is a request this layer has no use for). A `GET` of an inventory
-   * aggregate — never a device route — one batch in flight per pane; a pane whose current address
-   * needs no tile (a degenerate box) is simply left empty. */
+  /** One density poll: each density-on, coarse-zoomed pane's tile(s) (`isCoarseZoom`, the same gate
+   * `densityQuadsFn` draws by — asking for tiles a fine-zoomed pane would draw nothing with is a
+   * request this layer has no use for). A `GET` of an inventory aggregate, never a device route. */
   const refreshDensity = () => {
     const p = preview;
     if (!p) return;
-    const lat = p.view.surface.lat;
-    const ids = new Set(p.view.panes.list().map((x) => x.id));
-    for (const id of [...densityByPane.keys()]) if (!ids.has(id)) densityByPane.delete(id);
     const edgeNs = p.view.panes.lastEdgeNs;
-    const nowMs = ++densityPolls * DENSITY_POLL_MS;
-    const keep: [string, TileAddr][] = [];
-    for (const pane of p.view.panes.views(edgeNs)) {
-      const on = isLayerVisible(layersFor(pane.id), "density") && isCoarseZoom(lat, pane.box, pane.rect.w, pane.rect.h);
-      if (!on) { densityByPane.set(pane.id, []); continue; }
-      const addrs = densityAddrs(lat, pane.box, pane.rect.w, pane.rect.h, pane.device ?? "any");
-      for (const a of addrs) keep.push([pane.id, a]);
-      densityByPane.set(pane.id, densityFetches.tiles(pane.id, addrs));
-      if (densityInflight.has(pane.id)) continue;
-      const due = densityFetches.due(pane.id, addrs, edgeNs, p.view.panes.isFollowing(pane.id), nowMs);
-      if (due.length === 0) continue;
-      const id = pane.id;
-      densityInflight.add(id);
-      Promise.all(due.map((a) => densityGet(a).then((t) => {
-        if (t) densityFetches.succeeded(id, a, t, edgeNs, nowMs); else densityFetches.failed(id, a, nowMs);
-      })))
-        .then(() => { densityByPane.set(id, densityFetches.tiles(id, addrs)); })
-        .finally(() => { densityInflight.delete(id); });
-    }
-    densityFetches.retain(keep);
+    densityPoll.tick(
+      p.view.surface.lat, p.view.panes.views(edgeNs), edgeNs,
+      (id) => isLayerVisible(layersFor(id), "density"), (id) => p.view.panes.isFollowing(id),
+    );
   };
   // T-897 (docs/23 §10.6 rule 2): the traced paths — chirps, sweeps, hop sequences — as the backend
   // derived them (`GET /api/paths`), laid out HERE, per frame, through the pane's own box like every
   // other layer. The poll below only refreshes the records; it never positions anything (T-388).
   let paths: MarkPath[] = [];
   const pathQuadsFn: OverlayLayerFn = (pane) => pathQuads(paths, pane.box, pane.rect);
+  // T-898 (docs/23 §10.6 rule 2): the radio's own route — the recorded tune intervals as the
+  // backend traced them (`GET /api/tune-history`), laid out HERE, per frame, through the pane's
+  // own box. The poll below only refreshes the records; it never positions anything (T-388).
+  let tunePaths: TunePath[] = [];
+  const tuneQuadsFn: OverlayLayerFn = (pane) => tuneQuads(tunePaths, pane.box, pane.rect);
   const overlayFns: Partial<Record<LayerId, OverlayLayerFn>> = {
-    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads, paths: pathQuadsFn, priors: priorsQuads,
+    rules: ringQuads, detections: detectionQuads, density: densityQuadsFn, artifacts: artifactQuads,
+    paths: pathQuadsFn, tune: tuneQuadsFn, priors: priorsQuads,
   };
   /** The layer ids this build draws — the menu offers only these (a switch that draws nothing lies).
    * `base` is the base-style axis, not a toggle. `research` (annotations filed in no collection) and
@@ -907,9 +908,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const o = lastPainted.get(paneId);
     if (o) pressOffer(o);
   };
-  /** Press a painted offer: the pane row's (above) or the floating Go-to's (T-802), which shows
-   * the offer it derived after the move and passes that same object here — so both reach the one
-   * gate with the destination the user actually read, and both refuse if the view moved since. */
+  /** Press a painted offer — the pane row's viewport-covering retune (T-802's floating Go-to has
+   * had its own path since T-947, `pressGotoOffer` below, because it plans a named span rather than
+   * the viewport). Takes the SAME object the row derived after the move, so this reaches the one
+   * gate with the destination the user actually read, and refuses if the view moved since. */
   const pressOffer = (o: PaneRetuneOffer): void => {
     const p = preview;
     if (!p) return;
@@ -975,6 +977,35 @@ function mount(el: HTMLElement, ctx: AppContext) {
     });
   };
 
+  // ---- the floating Go-to's offer (T-802, corrected by T-947) ----
+  //
+  // T-947: the offer used to be `offerNow`'s — the SAME retune control the pane row paints, whose
+  // plan covers the pane's whole VIEWPORT. That is right for the row (the viewport is the region the
+  // user is looking at and wants sharpened) and wrong here: a Go-to only names a CENTRE, and the
+  // viewport it lands in is whatever the pane happened to be zoomed to before the jump — so a pane
+  // left zoomed out proposed a multi-megahertz capture nobody asked for (a 15.8 MHz view spanned a
+  // 15.819 MHz plan; found live 2026-09-25). What Go-to should plan for is a SPAN: the front end's own
+  // current window when it has one (`grid.current.span_hz` — "keep the current tuned span"), else
+  // `GOTO_DEFAULT_SPAN_HZ`. Built through `paneWidthOffer`/`acceptPaneWidth`, the exact path T-496
+  // already uses to plan a NAMED span at a pane's own centre rather than its viewport — so this reuses
+  // the width control's arithmetic instead of adding a second way to derive one.
+  let lastPaintedGoto: PaneWidthOffer | null = null;
+  const gotoSpanHz = (): number => goToSpanHz(store.get().navGrid.grid?.frequency ?? null, GOTO_DEFAULT_SPAN_HZ);
+  const pressGotoOffer = (): void => {
+    const p = preview;
+    if (!p || !lastPaintedGoto) return;
+    void acceptPaneWidth(ctx, {
+      // Re-derive at the SAME asked span the offer was painted for — `acceptPaneWidth` passes it
+      // back in, exactly as T-407's guard requires (comparing a fresh offer to itself proves
+      // nothing); if the current/default span has since changed that is `sameWidthTarget`'s job to
+      // catch, not this function's.
+      offerNow: widthOfferNow,
+      invalidateEdge: () => p.view.surface.cache.invalidateEdge(p.view.surface.lat, p.edgeNs),
+    }, lastPaintedGoto).then((r) => {
+      if (!r.ok && r.reason === "moved") store.set(toast("The viewport moved: the offer was for where it was. Press again."));
+    });
+  };
+
   // ---- pointer: hover readout, click to focus, right-click for the menu ----
   //
   // **One hit test, `preview.paneAt`, so hover and gesture cannot disagree about where a pointer is.**
@@ -1032,12 +1063,19 @@ function mount(el: HTMLElement, ctx: AppContext) {
   // every press, the same "decided once, at the press" discipline the shift+drag region above
   // already follows. Escape exits it, matching the mockup (`ui/mockups/map-ui-v1.html`'s `#mode`
   // banner) and every other modal affordance on this surface (the row/selection context menu).
-  const setMeasureMode = (on: boolean) => {
-    measureMode = on;
+  // T-820 (MAP-20): Measure, Annotate and Pin are ONE tool mode (docs/23 §10.4's table columns), so
+  // a bare drag has exactly one meaning at any instant. Their buttons and the banner naming the mode
+  // are the floating cluster's (`map-controls.ts`, T-882); this is the state they toggle.
+  const setTool = (next: ToolMode) => {
+    tool = next;
+    stage.dataset.tool = tool;
+    if (tool !== "measure") pendingMeasure = null;
+    if (tool !== "annotate") pendingAnnotate = null;
+    hoverEl.textContent = "";
     renderMeasure();
-    if (!on) { pendingMeasure = null; hoverEl.textContent = ""; }
   };
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && measureMode) setMeasureMode(false); });
+  const setMeasureMode = (on: boolean) => setTool(on ? "measure" : "navigate");
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && tool !== "navigate") setTool("navigate"); });
 
   /** The `view` a measurement is stamped with (docs/25 §10.2): what the pane was showing at the
    * instant of the drag, read from the very frame the stroke landed on.
@@ -1067,6 +1105,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
       tier,
       device_id: v.device ?? null,
     };
+  };
+
+  /** Keep a just-saved annotation on the canvas until the next windowed read includes it. */
+  const keepAnnotation = (a: MarkAnnotation | null) => {
+    if (a && !annotations.some((x) => x.id === a.id)) annotations = [...annotations, a];
+  };
+  /** The label spans, pooled per pane and reused frame to frame (set-if-changed, like the HUD's). */
+  const labelPools = new Map<string, HTMLElement[]>();
+  const placeAnnotationLabels = (pane: PaneView) => {
+    const scale = canvas.height > 0 ? canvas.clientHeight / canvas.height : 1;
+    const labels = annotationLabels(annotations, pane.box, pane.rect);
+    let pool = labelPools.get(pane.id);
+    if (!pool) { pool = []; labelPools.set(pane.id, pool); }
+    while (pool.length < labels.length) { const e = h("div", { class: "sf-anno-label" }); pool.push(e); annoEl.append(e); }
+    pool.forEach((e, i) => {
+      const l = labels[i];
+      e.hidden = !l;
+      if (!l) return;
+      setText(e, l.text);
+      e.style.transform = `translate(${l.x * scale}px, ${(canvas.height - l.y) * scale}px)`;
+    });
+    // A pane closed by `closeActive` drops its pool, so its labels do not linger.
+    const live = new Set(preview?.lastFrame?.views.map((v) => v.id) ?? []);
+    for (const [id, p] of labelPools) if (id !== pane.id && live.size > 0 && !live.has(id)) { p.forEach((e) => e.remove()); labelPools.delete(id); }
   };
 
   // ---- boot ----
@@ -1126,8 +1188,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
           priorLayer.update(pane.id, pa ? priorLabels(pane.id, pa.rows, pane.box, pane.rect, canvas.height, window.devicePixelRatio || 1) : []);
           if (pane.id === preview?.activePane) renderPriorsReadout(pane.id);
           const band = (keep: (z: number) => boolean) => ({ ...reg, layers: reg.layers.filter((l) => keep(l.z)) });
+          placeAnnotationLabels(pane);
           return [
             ...composeOverlays(band((z) => z < COLLECTION_Z), overlayFns, pane, edge),
+            // T-820: the human-authored annotations, always on and DASHED (never a claim about the air).
+            ...annotationQuads(annotations, null, pane.box, pane.rect),
             ...markQuads(researchBoxesFor(pane), edge, pane.box, pane.rect),
             ...composeOverlays(band((z) => z > COLLECTION_Z), overlayFns, pane, edge),
             ...markQuads(boxesFor(pane), edge, pane.box, pane.rect),
@@ -1146,6 +1211,10 @@ function mount(el: HTMLElement, ctx: AppContext) {
       return;
     }
     say(probe.note);
+    // T-946(b): coverage grows while the view is open; the sentence follows the backend's census.
+    startPoll(async () => {
+      try { const t = await refreshOrientationNote((path) => client.get(path), probe); if (t !== note.textContent) say(t); } catch { /* keep the last sentence */ }
+    }, 10_000);
     markSurface("mounted");
 
     // The shadow's brightness is a per-viewer display preference (T-526): loaded once here, never
@@ -1175,7 +1244,9 @@ function mount(el: HTMLElement, ctx: AppContext) {
               : hit.mark.kind === "research-box" ? "mark"
               : hit.mark.kind === "pending-region" ? null : "selection"
           : null;
-        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}` : "";
+        const anno = hit ? annotationAt(annotations, hit.pane.box, hit.pane.rect, p) : null;
+        const annoLabel = anno ? ` · annotation (${anno.kind}): ${anno.label}` : "";
+        hoverEl.textContent = hit ? `${fmtHz(hit.fHz)} · ${at(hit.tNs)}${markLabel ? ` · ${markLabel} ${hit.mark!.id.slice(0, 8)}` : ""}${annoLabel}` : "";
       },
       onClick: (p, e) => {
         const c = cssPoint(e);
@@ -1202,7 +1273,29 @@ function mount(el: HTMLElement, ctx: AppContext) {
         const region = regionOf(r);
         if (region) commitRegion(ctx, region, fmtHz);
       },
-      get measureMode() { return measureMode; },
+      get measureMode() { return tool === "measure"; },
+      get annotateMode() { return tool === "annotate" || tool === "pin" ? tool : null; },
+      onAnnotateDrag: (r) => {
+        const region = r ? regionOf(r) : null;
+        pendingAnnotate = r && region ? { pane: r.pane, region } : null;
+      },
+      onAnnotateBox: (r) => {
+        pendingAnnotate = null;
+        const region = regionOf(r);
+        const view = region ? measureViewOf(r.pane) : null;
+        if (!region || !view) return;
+        const label = normLabel(window.prompt("Label for this annotation box:", ""));
+        const body = label ? boxRequest(region, label, view) : null;
+        if (body) void commitAnnotation(ctx, body).then(keepAnnotation);
+      },
+      onAnnotatePoint: (p, kind) => {
+        const v = paneById(p.pane);
+        const view = v ? measureViewOf(p.pane) : null;
+        if (!v || !view) return;
+        const q = clampToRect(v.rect, p.at);
+        const label = normLabel(window.prompt(kind === "marker" ? "Label for this marker:" : "Text note:", kind === "marker" ? "marker" : ""));
+        if (label) void commitAnnotation(ctx, pointRequest(kind, pointOn(v.box, v.rect, q.x, q.y), label, view)).then(keepAnnotation);
+      },
       onMeasureDrag: (r) => {
         const region = r ? regionOf(r) : null;
         pendingMeasure = r && region ? { pane: r.pane, region } : null;
@@ -1262,8 +1355,11 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const host: MapControlHost = {
       ...acts,
       // T-882: the retired toolbar row's controls, rehomed into the cluster. All view state.
-      measuring: () => measureMode,
+      measuring: () => tool === "measure",
       setMeasuring: (on) => setMeasureMode(on),
+      // T-820 (MAP-20): the Annotate and Pin tool modes, beside Measure in the cluster.
+      annotating: () => (tool === "annotate" || tool === "pin" ? tool : null),
+      setAnnotating: (mode) => setTool(mode ?? "navigate"),
       split: () => splitActive(),
       closePane: () => closeActive(),
       wholeSurface: () => { pv.fitToSurface(); lastMirror = ""; mirror(); renderLive(); },
@@ -1272,11 +1368,17 @@ function mount(el: HTMLElement, ctx: AppContext) {
       goTo: (hz) => store.set(requestGoto(hz)),
       centreHz: () => store.get().device.centerHz,
       gotoOffer: () => {
+        // T-947: the viewport-covered check still reads the VIEW's own box (what is on screen right
+        // now), but the plan offered is `paneWidthOffer`'s — a NAMED span at the pane's centre, never
+        // the viewport's width. See the block above `pressGotoOffer` for why.
         const o = offerNow(pv.activePane);
         // Only when the pane now shows spectrum no tuned window covers: inside one, panning already
         // reaches it and the pane row's persistent control is where a finer capture is offered.
-        if (!o || o.covered) return null;
-        return { why: offerLabel(o), enabled: offerAcceptable(o), press: () => pressOffer(o) };
+        if (!o || o.covered) { lastPaintedGoto = null; return null; }
+        const wo = widthOfferNow(pv.activePane, gotoSpanHz());
+        if (!wo) { lastPaintedGoto = null; return null; }
+        lastPaintedGoto = wo;
+        return { why: widthOfferLabel(wo), enabled: widthOfferAcceptable(wo), press: pressGotoOffer };
       },
       layerMenu: (): LayerMenu => {
         const reg = layersFor(pv.activePane);
@@ -1293,7 +1395,14 @@ function mount(el: HTMLElement, ctx: AppContext) {
           overlays: paintOrder(reg).filter((l) => (l.plane === "overlay" || l.plane === "dom") && drawnLayers.has(l.id)).map((l) => {
             const d = layerDef(l.id)!;
             // T-813: the detections layer's key — same symbology, quoted from `marks.ts`, `markKeyEntries` draws.
-            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key: l.id === "detections" ? markKeyEntries() : undefined } };
+            // T-813: the detections key is `marks.ts`'s own symbology. T-898: the retune layer's
+            // key is one row per front end, so the route on screen is labelled by its radio.
+            const key = l.id === "detections"
+              ? markKeyEntries()
+              : l.id === "tune"
+                ? tuneKeyEntries(tunePaths).map((e) => ({ key: e.key, label: e.label, note: e.note, pixel: () => e.rgb }))
+                : undefined;
+            return { plane: l.plane, z: l.z, row: { id: l.id, label: d.label, hint: d.hint, on: l.visible, key } };
           }).concat(store.get().research.collections.map((c) => ({ plane: "overlay" as const, z: COLLECTION_Z, row: {
             id: collectionLayer(c.id), label: c.name, hint: c.reserved ? "collection · bookmarks" : "my collection",
             on: collectionVisibleOn(reg, c),
@@ -1349,7 +1458,25 @@ function mount(el: HTMLElement, ctx: AppContext) {
       // the map strip is lifted clear of it — layout arithmetic over two measured boxes, as below.
       const dock = document.querySelector<HTMLElement>(".app > .dock");
       const dr = dock?.getBoundingClientRect();
-      const under = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      const dockUnder = dr && dr.height > 0 ? Math.max(0, Math.ceil(r.bottom - dr.top)) : 0;
+      // T-933: the sheet's peek strip (`chrome/sheet.css`) floats ABOVE the dock even collapsed —
+      // it is never hidden (T-803's rule) — and the minimap spans the WHOLE canvas width
+      // (`mapRect`'s `x:0, w`), so it always shares an x-range with the sheet: the minimap must
+      // clear the peek strip too, not just the dock.
+      //
+      // Anchored off the sheet's BOTTOM edge, never its live top or height: `sheet.css` pins
+      // `bottom` (`--sheet-bottom`) and only the top edge moves as the sheet's height changes — a
+      // drag toward full (`chrome/sheet.ts`'s pointermove sets `style.height` with `snap` still
+      // "peek" until release) or the half/full <-> peek snap transition (`sheet.css`'s .28 s
+      // height transition). Reading the live top/height, as an earlier version of this fix did,
+      // made the minimap — and so every pane, which packs above it — follow the sheet up and down
+      // on every drag and close (review finding on this ticket). The peek clearance itself is a
+      // CONSTANT (`PEEK_PX`, `chrome/sheet.ts`), so this fixed-position rule (docs/23 §10.6 P3)
+      // applies whether or not the sheet is currently at peek — it does not need `dataset.snap`.
+      const sheet = document.querySelector<HTMLElement>(".sheet");
+      const sr = sheet?.getBoundingClientRect();
+      const sheetUnder = sr && sr.height > 0 ? Math.max(0, Math.ceil(r.bottom - (sr.bottom - PEEK_PX))) : 0;
+      const under = Math.max(dockUnder, sheetUnder);
       const lift = under > 0 ? under + 8 : 0;
       stage.style.setProperty("--chrome-bottom", `${under}px`);
       // The map strip is drawn in device px; the FAB and the readouts dock above it in CSS px.
@@ -1373,6 +1500,13 @@ function mount(el: HTMLElement, ctx: AppContext) {
     const ro = typeof ResizeObserver === "function" ? new ResizeObserver(fit) : null;
     ro?.observe(stage);
     if (topBar) ro?.observe(topBar);
+    // T-933: `fit`'s sheet clearance is anchored to the sheet's fixed bottom edge (never its live
+    // height, see above), so this observer is not about tracking drag/snap changes — it exists so
+    // that a sheet mounted AFTER this first `fit()` call (the sheet is a separate area mount, T-803)
+    // is still picked up once it appears, rather than the minimap staying un-lifted until the next
+    // stage resize.
+    const sheetEl = document.querySelector<HTMLElement>(".sheet");
+    if (sheetEl) ro?.observe(sheetEl);
     window.addEventListener("resize", fit);
     preview.start();
 
@@ -1380,7 +1514,7 @@ function mount(el: HTMLElement, ctx: AppContext) {
     // inventory lists stay scoped to it. The retune control is NOT on this cadence any more — it is
     // re-derived per frame through `chromeAction`, because its sentence names the window the pane is
     // showing *now* (T-476).
-    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, 1000);
+    startPoll(async () => { mirror(); refreshPriors(); refreshDensity(); }, DENSITY_POLL_MS);
 
     // T-897: the `paths` layer's records, for every pane that shows the layer — one read over the
     // union of their boxes (`pathsRequest`, asserted in `ui/test/surface-paths.test.ts`). A pane
@@ -1393,6 +1527,30 @@ function mount(el: HTMLElement, ctx: AppContext) {
       if (!url) { paths = []; return; }
       const body = await client.get<unknown>(url).catch(() => null);
       if (body) paths = parsePaths(body);
+    }, 2000);
+
+    // T-898: the `tune` layer's records — the device's own retune route — on the same terms: one
+    // read over the union of the boxes of the panes showing the layer, nothing when none does.
+    startPoll(async () => {
+      const url = tuneHistoryRequest(pv.view.panes.list()
+        .filter((x) => isLayerVisible(layersFor(x.id), "tune"))
+        .map((x) => boxOf(x, pv.view.panes.lastEdgeNs)));
+      if (!url) { tunePaths = []; return; }
+      const body = await client.get<unknown>(url).catch(() => null);
+      if (body) tunePaths = parseTuneHistory(body);
+    }, 2000);
+
+    // T-820 / MAP-20: the annotations in view, read back from the store — which is what makes one
+    // drawn before a reload visible after it. The window is the union of the panes' boxes as last
+    // drawn; a GET is a read of research state and never reaches a device route.
+    startPoll(async () => {
+      const views = preview?.lastFrame?.views ?? [];
+      if (views.length === 0) return;
+      const w = {
+        f0Hz: Math.min(...views.map((v) => v.box.f0Hz)), f1Hz: Math.max(...views.map((v) => v.box.f1Hz)),
+        t0S: Math.min(...views.map((v) => v.box.t0Ns)) / S_TO_NS, t1S: Math.max(...views.map((v) => v.box.t1Ns)) / S_TO_NS,
+      };
+      annotations = await fetchAnnotations(ctx, w);
     }, 2000);
 
     // ---- Go to / bookmarks: a frequency request moves the viewport (T-152's `nav.gotoHz`) ----

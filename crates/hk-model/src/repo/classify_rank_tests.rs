@@ -483,8 +483,10 @@ fn t211_migration_0007_keeps_pre_m3_rows_readable_and_m3_rows_round_trip() {
         // T-904: nor the 0019 retention objects — the rollup table, and five indexes on tables
         // 0001 creates (so DROP INDEX, like 0012's; 0019's own DROP of the survey-only index is
         // IF EXISTS, so replaying it is harmless).
+        // T-913: nor the 0020 explanation↔detection pin table (its index goes with it).
         conn.execute_batch(
-            "DROP TABLE IF EXISTS detection_rollup; \
+            "DROP TABLE IF EXISTS explanation_detection; \
+             DROP TABLE IF EXISTS detection_rollup; \
              DROP INDEX IF EXISTS idx_detection_t_end; \
              DROP INDEX IF EXISTS idx_detection_survey_t_end; \
              DROP INDEX IF EXISTS idx_demodulation_detection; \
@@ -629,5 +631,68 @@ fn the_window_projection_reruns_the_same_ladder_over_a_narrower_input_set() {
         family(r.current_classification(id).unwrap()),
         Some("readsb".into()),
         "the all-time arbitration is not restricted, projected or overwritten"
+    );
+}
+
+/// **T-886: `latest_classification_beside` walks past a restatement to the row that differs.**
+///
+/// The T-878 rank-3 tie writes three rows — the chain's unlocked label, the classifier's
+/// posterior, then the chain's label **restated** so it stays "latest among equals". The newest
+/// row is then identical to the current one, so `latest_classification` (the newest, whatever it
+/// is) answers with the restatement and a reader comparing it against the current classification
+/// sees nothing to show. The posterior is the second row back, and that is what a reader means by
+/// "what else has been said about this emitter".
+#[test]
+fn t886_the_latest_row_beside_the_current_one_is_the_classifiers_posterior() {
+    let mut r = Repository::open_in_memory().unwrap();
+    let id = r
+        .record_sighting(&track(101.3e6, tr(0.0, 5.0)), None)
+        .unwrap()
+        .emitter_id;
+    // Nothing recorded: neither reader invents a row.
+    assert!(r.latest_classification_beside(id, None).unwrap().is_none());
+
+    Writer::LegacyChain.write(&mut r, id, 1.0);
+    // `hk_pipeline::classify::record`: read the row that holds the family, append the posterior,
+    // then restate that row so "latest among equals" leaves the family where it was.
+    let chain = r.current_classification(id).unwrap().unwrap();
+    let mut posterior = sample("psk-qam", Stage::FeatureTree);
+    posterior.t = t(2.0);
+    r.record_classification(id, &posterior, ArbRank::Classifier)
+        .unwrap();
+    r.append_classification_ranked(id, &chain.classification, chain.stage, chain.arb_rank)
+        .unwrap();
+
+    let current = r.current_classification(id).unwrap().unwrap();
+    assert_eq!(current.classification.family, "wfm", "the chain keeps it");
+    // What `latest_classification` alone reports: a copy of the current row, so a reader
+    // comparing the two is told nothing was measured beside it.
+    let latest = r.latest_classification(id).unwrap().unwrap();
+    assert_eq!(latest, current, "the newest row is the restatement");
+    // What this route reports instead.
+    let beside = r
+        .latest_classification_beside(id, Some(&current))
+        .unwrap()
+        .expect("the posterior is still reachable");
+    assert_eq!(beside.stage, Stage::FeatureTree);
+    assert_eq!(beside.classification.family, "psk-qam");
+    assert_close(beside.detail.as_ref().unwrap(), &posterior);
+    // With no current row to stand beside it is exactly `latest_classification`.
+    assert_eq!(
+        r.latest_classification_beside(id, None).unwrap(),
+        Some(latest)
+    );
+
+    // An emitter whose only row *is* the current one has nothing beside it.
+    let solo = r
+        .record_sighting(&track(102.1e6, tr(0.0, 5.0)), None)
+        .unwrap()
+        .emitter_id;
+    Writer::LegacyChain.write(&mut r, solo, 1.0);
+    let cur = r.current_classification(solo).unwrap();
+    assert!(
+        r.latest_classification_beside(solo, cur.as_ref())
+            .unwrap()
+            .is_none()
     );
 }

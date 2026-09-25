@@ -55,13 +55,17 @@
 //! One chain thread per classified track, at most `max_chains` alive at once (above that the
 //! attach is refused and counted, `classify_admission_refused`). They are **not** counted against
 //! the run-wide [`MAX_RUNTIME_CHAINS`](super::MAX_RUNTIME_CHAINS): a track's classifying chain
-//! attaches before its decode chain, and must never take the slot the decode chain needs. Memory
-//! is the rolling `retain_s` buffer (capped at the fsk chain's sample ceiling) plus one owned copy
-//! of the chosen box, which is at most `window_s` plus its pads. Once a box spans the whole window
+//! attaches before its decode chain, and must never take the slot the decode chain needs. A track
+//! refused at the cap is **remembered and retried** when a slot frees (T-886,
+//! [`super::Chains::attach_measuring`]), so the cap bounds concurrency and never decides which
+//! regions are classified. Memory is the rolling buffer — [`retain_samples`], what the classifier
+//! reads plus the measured member-box arrival lag, held exactly and not at twice it (T-886) —
+//! plus one owned copy of the chosen box, which is at most `window_s` plus its pads. Once a box spans the whole window
 //! nothing later can beat it, so the chain stops reading and releases its cursor before it
 //! classifies, which keeps the lossless flow gate moving.
 //! Per classification the cost is [`crate::classify::classify_and_record`]'s documented bound.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::thread;
@@ -99,6 +103,125 @@ const EMITTER_POLL: Duration = Duration::from_millis(100);
 
 /// Most pending member groups one chain queues, as the fsk chain bounds its own (T-558).
 const MAX_PENDING_GROUPS: usize = 4096;
+
+/// Longest **member-box arrival lag** the rolling buffer is sized to cover (T-886).
+///
+/// The chain cannot classify a group whose samples it no longer holds, and a member box arrives
+/// well after the samples it describes: the detector emits a box when the burst ends or its
+/// continuing box reaches its period. So the buffer must span what the classifier *reads*
+/// (`window_s` plus its two pads) **plus** that lag — and nothing beyond it, which is memory paid
+/// for samples no group will ever ask for again.
+///
+/// **Measured, not assumed** (T-453): instrumented over the five scenes of
+/// `device_classify_every_track` at 2.4 Msps, the gap between a group's end and the newest
+/// buffered sample at the moment the group was processed was, over 84 groups, p50 **0.70 s**,
+/// p90 **1.40 s**, max **1.59 s**. Two seconds is that worst case with ~25 % margin.
+const MEMBER_LAG_S: f64 = 2.0;
+
+/// Samples the rolling buffer holds: the node's `retain_s`, **capped at what the chain can still
+/// use** ([`MEMBER_LAG_S`] plus the analysed extent and its pads), then at the fsk chain's sample
+/// ceiling whatever the rate.
+///
+/// T-886: the built-in spec asks for 3.0 s, of which 0.29 s is read and at most ~1.6 s more was
+/// ever needed to still be holding a group when it arrived. Sizing from what is read halves the
+/// buffer at the rates a replay runs at; at 20 Msps the sample ceiling binds first, and it is the
+/// exact-capacity buffer above that halves the residency there.
+pub(crate) fn retain_samples(node: &ClassifyNode, fs: f64) -> usize {
+    let usable = node.window_s + 2.0 * node.pad_s + MEMBER_LAG_S;
+    ((node.retain_s.min(usable) * fs) as usize).clamp(1, super::fsk::MAX_RETAIN_SAMPLES)
+}
+
+/// The chain's rolling window of one contiguous span of samples, holding **exactly**
+/// [`retain_samples`] of it (T-886).
+///
+/// The buffer this replaced was a `Vec` trimmed back to `retain` only once it had grown to *twice*
+/// it, so its residency peaked at `2 x retain` — 64 MB per chain at 20 Msps, 256 MB for the
+/// spec's four. Trimming a `Vec` to a fixed length on every append instead would copy the whole
+/// buffer per chunk, so the doubling was the price of the amortisation; a `VecDeque` drops from
+/// the front in `O(dropped)` and pays neither. Capacity grows geometrically (a chain on a
+/// millisecond burst never allocates the whole window) but is **never allowed past `retain`**, so
+/// the peak is the bound and not twice it.
+struct Rolling {
+    iq: VecDeque<Complex<i8>>,
+    /// Samples held at most.
+    retain: usize,
+    /// Sample index of `iq[0]`.
+    base: u64,
+    /// Capture time of `iq[0]`.
+    base_time: Timestamp,
+}
+
+impl Rolling {
+    fn new(retain: usize) -> Self {
+        Self {
+            iq: VecDeque::new(),
+            retain,
+            base: 0,
+            base_time: Timestamp::UNIX_EPOCH,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.iq.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.iq.clear();
+    }
+
+    /// Sample index one past the newest sample held.
+    fn end(&self) -> u64 {
+        self.base + self.iq.len() as u64
+    }
+
+    /// Bytes of sample buffer this chain holds — its residency, as a test measures it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn bytes(&self) -> usize {
+        self.iq.capacity() * std::mem::size_of::<Complex<i8>>()
+    }
+
+    /// Starts a new span at `first` (a discontinuity, a new provenance, or the first chunk).
+    fn restart(&mut self, first: u64, time: Timestamp) {
+        self.iq.clear();
+        self.base = first;
+        self.base_time = time;
+    }
+
+    /// Appends `samples`, dropping whatever the retention no longer covers.
+    fn extend(&mut self, samples: &[Complex<i8>], fs: f64) {
+        let cut = (self.iq.len() + samples.len())
+            .saturating_sub(self.retain)
+            .min(self.iq.len());
+        if cut > 0 {
+            self.iq.drain(..cut);
+            self.base += cut as u64;
+            self.base_time = self
+                .base_time
+                .saturating_add_nanos((cut as f64 * 1e9 / fs) as i64);
+        }
+        let need = self.iq.len() + samples.len();
+        if need > self.iq.capacity() {
+            // Geometric, but never past the retention: the peak is `retain`, not twice it.
+            let want = need.max(self.iq.capacity() * 2).min(self.retain.max(need));
+            self.iq.reserve_exact(want - self.iq.len());
+        }
+        self.iq.extend(samples.iter().copied());
+    }
+
+    /// Capture time of sample index `i`, which must be inside the span.
+    fn time_at(&self, i: u64, fs: f64) -> Timestamp {
+        self.base_time
+            .saturating_add_nanos(((i - self.base) as f64 * 1e9 / fs) as i64)
+    }
+
+    /// An owned copy of `[s, e)`, which must be inside the span.
+    fn copy(&self, s: u64, e: u64) -> Vec<Complex<i8>> {
+        self.iq
+            .range((s - self.base) as usize..(e - self.base) as usize)
+            .copied()
+            .collect()
+    }
+}
 
 /// What one classification may spend. Built from
 /// [`ChainShape::Classify`](super::spec::ChainShape::Classify); the module docs state each bound.
@@ -183,15 +306,13 @@ pub(crate) fn run(
     };
     let pad = (node.pad_s * fs) as u64;
     let window = ((node.window_s * fs) as u64).max(1);
-    let retain = ((node.retain_s * fs) as usize).clamp(1, super::fsk::MAX_RETAIN_SAMPLES);
+    let retain = retain_samples(&node, fs);
     let mut cr = ChainReader::new(
         Arc::clone(&shared),
         cand.first_sample.saturating_sub(pad),
         cursor,
     );
-    let mut buf: Vec<Complex<i8>> = Vec::new();
-    let mut base = 0u64;
-    let mut base_time = Timestamp::UNIX_EPOCH;
+    let mut buf = Rolling::new(retain);
     let mut prov: Option<ProvenanceHandle> = None;
     let mut groups: Vec<Group> = Vec::new();
     let mut chosen: Option<Chosen> = None;
@@ -219,22 +340,13 @@ pub(crate) fn run(
                         buf.clear();
                     } else {
                         let contiguous = !buf.is_empty()
-                            && ch.first_sample() == base + buf.len() as u64
+                            && ch.first_sample() == buf.end()
                             && prov.as_ref().is_some_and(|p| p.id() == ch.provenance.id());
                         if !contiguous {
-                            buf.clear();
-                            base = ch.first_sample();
-                            base_time = ch.time.host_time;
+                            buf.restart(ch.first_sample(), ch.time.host_time);
                             prov = Some(ch.provenance.clone());
                         }
-                        buf.extend_from_slice(&cr.buf[..ch.len]);
-                        if buf.len() > 2 * retain {
-                            let cut = buf.len() - retain;
-                            buf.drain(..cut);
-                            base += cut as u64;
-                            base_time =
-                                base_time.saturating_add_nanos((cut as f64 * 1e9 / fs) as i64);
-                        }
+                        buf.extend(&cr.buf[..ch.len], fs);
                     }
                     cr.release_to(ch.end_sample());
                 }
@@ -253,7 +365,7 @@ pub(crate) fn run(
 
         // Take every group whose samples have arrived. The newest group may still grow, so it is
         // taken early only once it already spans the whole window.
-        let buf_end = base + buf.len() as u64;
+        let buf_end = buf.end();
         let mut done = 0;
         if !full {
             let n = groups.len();
@@ -277,7 +389,7 @@ pub(crate) fn run(
                 let start = if buf.is_empty() {
                     g.start
                 } else {
-                    g.start.max(base + pad)
+                    g.start.max(buf.base + pad)
                 };
                 let end = g.end.min(start + window);
                 if end + pad > buf_end && !closed {
@@ -290,7 +402,7 @@ pub(crate) fn run(
                     inc(&c.classify_missed);
                     continue;
                 };
-                if end <= start || s < base || e <= end || buf.is_empty() {
+                if end <= start || s < buf.base || e <= end || buf.is_empty() {
                     inc(&c.classify_missed);
                     continue;
                 }
@@ -299,11 +411,10 @@ pub(crate) fn run(
                     continue;
                 }
                 chosen = Some(Chosen {
-                    iq: buf[(s - base) as usize..(e - base) as usize].to_vec(),
+                    iq: buf.copy(s, e),
                     time: SampleTime {
                         sample_index: s,
-                        host_time: base_time
-                            .saturating_add_nanos(((s - base) as f64 * 1e9 / fs) as i64),
+                        host_time: buf.time_at(s, fs),
                     },
                     prov: p.clone(),
                     request: SnippetRequest {
@@ -487,5 +598,141 @@ fn write(shared: &Shared, emitter: EmitterId, classification: &Classification) {
             inc(&c.errors);
             eprintln!("hk-pipeline: classify write: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The built-in `classify` node (`super::super::spec::BUILTIN_CHAINS`).
+    const SHIPPED: ClassifyNode = ClassifyNode {
+        pad_s: 0.02,
+        retain_s: 3.0,
+        window_s: 0.25,
+    };
+
+    /// The HackRF's rate, and the rate a replay test runs at.
+    const RATES: [(f64, &str); 2] = [(20e6, "HackRF"), (2.4e6, "replay")];
+
+    fn mb(bytes: usize) -> f64 {
+        bytes as f64 / (1 << 20) as f64
+    }
+
+    /// The buffer policy **before T-886**, for the before number: the node's whole `retain_s` at
+    /// the rate, capped at the fsk ceiling, trimmed back to it only once the `Vec` had grown to
+    /// twice it — so its residency peaked at `2 x retain`.
+    fn before_bytes(node: &ClassifyNode, fs: f64) -> usize {
+        let retain =
+            ((node.retain_s * fs) as usize).clamp(1, super::super::fsk::MAX_RETAIN_SAMPLES);
+        2 * retain * std::mem::size_of::<Complex<i8>>()
+    }
+
+    /// Feeds `seconds` of samples through the buffer in ring-sized chunks, as the chain does, and
+    /// returns it — its `bytes()` is the residency that run cost.
+    fn feed(node: &ClassifyNode, fs: f64, seconds: f64) -> Rolling {
+        let retain = retain_samples(node, fs);
+        let mut buf = Rolling::new(retain);
+        let chunk = vec![Complex::new(1i8, -1i8); 1 << 16];
+        buf.restart(0, Timestamp::UNIX_EPOCH);
+        let total = (seconds * fs) as usize;
+        let mut sent = 0;
+        while sent < total {
+            let n = chunk.len().min(total - sent);
+            buf.extend(&chunk[..n], fs);
+            sent += n;
+        }
+        buf
+    }
+
+    /// **T-886: the rolling buffer is sized by what the classifier reads, and never peaks at
+    /// twice it.**
+    ///
+    /// Measured here, per chain, feeding a full `retain_s` and more through the buffer:
+    ///
+    /// | rate | before (`retain_s` at 2x) | after | 4 chains, before → after |
+    /// |---|---|---|---|
+    /// | 20 Msps | 64.0 MB | 32.0 MB | 256 MB → 128 MB |
+    /// | 2.4 Msps | 27.5 MB | 10.5 MB | 110 MB → 42 MB |
+    #[test]
+    fn t886_the_classify_buffer_costs_what_it_reads_not_twice_the_node() {
+        for (fs, name) in RATES {
+            let before = before_bytes(&SHIPPED, fs);
+            let after = feed(&SHIPPED, fs, 4.0).bytes();
+            eprintln!(
+                "[T-886] {name} {:.1} Msps: {:.1} MB -> {:.1} MB per chain ({:.0} MB -> {:.0} MB \
+                 for the spec's four)",
+                fs / 1e6,
+                mb(before),
+                mb(after),
+                4.0 * mb(before),
+                4.0 * mb(after)
+            );
+            assert!(
+                after * 2 <= before,
+                "{name}: {:.1} MB is not at most half of {:.1} MB",
+                mb(after),
+                mb(before)
+            );
+            // Exactly the retention, never a byte of overshoot: the bound is the peak.
+            assert_eq!(
+                after,
+                retain_samples(&SHIPPED, fs) * std::mem::size_of::<Complex<i8>>()
+            );
+        }
+    }
+
+    /// The sizing keeps what the chain can still use: what it reads, plus the measured member-box
+    /// arrival lag — and never more than the node asks for, or the fsk ceiling allows.
+    #[test]
+    fn t886_the_retention_covers_the_analysed_window_and_the_measured_arrival_lag() {
+        let read_s = SHIPPED.window_s + 2.0 * SHIPPED.pad_s;
+        for (fs, name) in RATES {
+            let held_s = retain_samples(&SHIPPED, fs) as f64 / fs;
+            assert!(
+                held_s >= read_s,
+                "{name}: {held_s} s cannot hold the {read_s} s the classifier reads"
+            );
+            assert!(
+                held_s <= SHIPPED.retain_s,
+                "{name}: never more than the node asked for"
+            );
+            assert!(retain_samples(&SHIPPED, fs) <= super::super::fsk::MAX_RETAIN_SAMPLES);
+        }
+        // Below the ceiling the retention is exactly the measured worst-case lag plus what is
+        // read: 1.59 s of lag was the worst of 84 groups, so a group that arrives late is still
+        // in the buffer.
+        assert!(
+            (retain_samples(&SHIPPED, 2.4e6) as f64 / 2.4e6 - (read_s + MEMBER_LAG_S)).abs() < 1e-6
+        );
+        // A node asking for less than that keeps its own (smaller) answer.
+        let small = ClassifyNode {
+            retain_s: 0.5,
+            ..SHIPPED
+        };
+        assert_eq!(retain_samples(&small, 1e6), 500_000);
+    }
+
+    /// The buffer keeps the newest samples, with the sample index and capture time of what it
+    /// still holds — the arithmetic every chosen box is cut by.
+    #[test]
+    fn t886_the_rolling_buffer_drops_the_oldest_and_keeps_the_arithmetic() {
+        let fs = 1e6;
+        let mut buf = Rolling::new(10);
+        buf.restart(100, Timestamp::UNIX_EPOCH);
+        let s: Vec<Complex<i8>> = (0..8).map(|i| Complex::new(i as i8, 0)).collect();
+        buf.extend(&s, fs);
+        assert_eq!((buf.base, buf.end(), buf.is_empty()), (100, 108, false));
+        assert_eq!(buf.copy(102, 105), s[2..5]);
+        assert_eq!(buf.time_at(100, fs), Timestamp::UNIX_EPOCH);
+        // Past the retention the oldest go, and `base`/`base_time` follow them.
+        buf.extend(&s, fs);
+        assert_eq!((buf.base, buf.end()), (106, 116));
+        assert_eq!(buf.copy(106, 108), s[6..8]);
+        assert_eq!(
+            buf.time_at(106, fs),
+            Timestamp::UNIX_EPOCH.saturating_add_nanos(6_000)
+        );
+        assert_eq!(buf.bytes(), 10 * std::mem::size_of::<Complex<i8>>());
     }
 }

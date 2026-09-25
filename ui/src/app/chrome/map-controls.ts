@@ -106,6 +106,11 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   /** Measurement mode (T-822): whether a plain drag measures instead of panning. */
   measuring(): boolean;
   setMeasuring(on: boolean): void;
+  /** T-820 (MAP-20): the Annotate / Pin tool modes — `null` when neither is on. Mutually exclusive
+   * with Measure: the host keeps one tool mode, so a bare drag has one meaning. Optional, so a host
+   * without annotation authoring shows neither button. */
+  annotating?(): "annotate" | "pin" | null;
+  setAnnotating?(mode: "annotate" | "pin" | null): void;
   /** Centre the active pane on `hz`, keeping its spans. A view move; never a retune. */
   goTo(hz: number): void;
   /** The tuned centre, for `+`/`-` relative entries (`parseFrequency`'s contract), or null. */
@@ -118,6 +123,13 @@ export interface MapControlHost extends LayerMenuHost, PaneMenuHost {
   /** T-821: the Research slide-in's toggle (open/close a panel — presentation only). */
   research?: { isOpen(): boolean; toggle(): void };
 }
+
+/** The tool-mode banner's words (the mockup's `#mode`), per mode (docs/23 §10.4). */
+const MODE_TEXT = {
+  measure: "Measure: drag on the surface to read Δf · Δt. Release to keep it. Esc exits.",
+  annotate: "Annotate: drag to draw a box, click to drop a text note. Shift+drag still marks a region. Esc exits.",
+  pin: "Pin: click to drop a marker. Drag still pans. Esc exits.",
+} as const;
 
 /**
  * The pane arithmetic behind the zoom stack and the FAB, over a real `PaneModel`. Split out of the
@@ -291,11 +303,25 @@ export function mountMapControls(host: MapControlHost): {
     type: "button", class: "map-ibtn map-measure-btn", "aria-label": "Measure", "aria-pressed": "false",
     title: "Measure: drag on the surface to read Δf/Δt between two points and save it. Esc exits.",
   }, svg(["path", "M3 17l14-14 4 4L7 21H3v-4z"], ["path", "M13 7l2 2M10 10l2 2M7 13l2 2"])) as HTMLButtonElement;
+  // T-820 (MAP-20): Annotate (bare drag = a box, bare click = a text note) and Pin (bare click = a
+  // marker; drag still pans), the other two columns of docs/23 §10.4's table, beside Measure. Each
+  // asks for a label; the surface mount saves it (an authoring act, never a device route).
+  const annotateBtn = h("button", {
+    type: "button", class: "map-ibtn map-annotate-btn", "aria-label": "Annotate", "aria-pressed": "false",
+    hidden: !host.setAnnotating,
+    title: "Annotate: drag on the surface to draw an annotation box, or click to drop a text note; "
+      + "you are asked for its label, and it is saved as an annotation (docs/25 §5). Esc exits.",
+  }, svg(["path", "M4 4h16v12H8l-4 4z"], ["path", "M8 8h8M8 12h5"])) as HTMLButtonElement;
+  const pinBtn = h("button", {
+    type: "button", class: "map-ibtn map-pin-btn", "aria-label": "Pin", "aria-pressed": "false",
+    hidden: !host.setAnnotating,
+    title: "Pin: click on the surface to drop a labelled marker there, saved as an annotation. Dragging still pans. Esc exits.",
+  }, svg(["path", "M6 21V4"], ["path", "M6 4h12l-3 4 3 4H6"])) as HTMLButtonElement;
   const paneBtn = h("button", {
     type: "button", class: "map-ibtn map-pane-btn", "aria-label": "Viewport", title: "Viewport: split, close, whole surface, record",
     "aria-pressed": "false", "aria-expanded": "false", "aria-controls": "map-pane-menu",
   }, svg(["path", "M4 5h16v14H4z"], ["path", "M12 5v14"])) as HTMLButtonElement;
-  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, paneBtn);
+  const topright = h("div", { class: "map-glass map-topright map-fade" }, layersBtn, researchBtn, measureBtn, annotateBtn, pinBtn, paneBtn);
   const paneItem = (act: string, label: string, title: string, run: () => void) => {
     const b = h("button", { type: "button", class: "map-pane-item", "data-pane-act": act, title }, label) as HTMLButtonElement;
     // A menu item acts and closes the menu, like any menu; Record IQ (a host extra) keeps it open so
@@ -315,9 +341,9 @@ export function mountMapControls(host: MapControlHost): {
     paneItem("whole", "Whole surface", "Zoom the active viewport out to the device-available spectrum over the whole record horizon (never less than the retained capture window).", () => host.wholeSurface()),
     ...(host.paneMenuExtras ?? []),
     h("div", { class: "map-note" }, "View only: splitting, closing and zooming out never command the radio."));
-  // The mockup's `#mode` banner: while measuring, say so, and how to leave. Never faded.
-  const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true },
-    "Measure: drag on the surface to read Δf · Δt. Release to keep it. Esc exits.");
+  // The mockup's `#mode` banner: while a tool mode is on (Measure, or T-820's Annotate / Pin), say
+  // what a drag will do and how to leave. Never faded.
+  const modeBanner = h("div", { class: "map-glass map-mode", role: "status", hidden: true }, MODE_TEXT.measure);
   const layersList = h("div", { class: "map-layers-rows" });
   // T-900 (docs/23 §10.6 P1): an open menu is an overlay, so it has a visible dismiss, not just a fade.
   const layersClose = h("button", {
@@ -469,10 +495,21 @@ export function mountMapControls(host: MapControlHost): {
 
   const syncMeasure = () => {
     const on = host.measuring();
+    const anno = host.annotating?.() ?? null;
     measureBtn.setAttribute("aria-pressed", String(on));
-    modeBanner.hidden = !on;
+    annotateBtn.setAttribute("aria-pressed", String(anno === "annotate"));
+    pinBtn.setAttribute("aria-pressed", String(anno === "pin"));
+    const mode = on ? "measure" : anno;
+    modeBanner.hidden = mode === null;
+    if (mode !== null && modeBanner.textContent !== MODE_TEXT[mode]) modeBanner.textContent = MODE_TEXT[mode];
   };
   measureBtn.addEventListener("click", () => { host.setMeasuring(!host.measuring()); syncMeasure(); });
+  const toggleAnno = (mode: "annotate" | "pin") => {
+    host.setAnnotating?.(host.annotating?.() === mode ? null : mode);
+    syncMeasure();
+  };
+  annotateBtn.addEventListener("click", () => toggleAnno("annotate"));
+  pinBtn.addEventListener("click", () => toggleAnno("pin"));
 
   const zoomBy = (k: number) => { host.zoom(k); hideOffer(); host.viewChanged(); };
   zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));

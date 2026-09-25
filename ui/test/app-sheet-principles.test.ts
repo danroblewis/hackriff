@@ -43,12 +43,25 @@ class FakeEl {
   getAttribute(k: string) { return this.attrs[k] ?? null; }
   addEventListener(t: string, fn: Handler) { (this.handlers[t] ??= []).push(fn); }
   querySelector(sel: string) { return sel === ":scope > .sheet-body" ? this.children.find((c) => typeof c !== "string" && c.className === "sheet-body") ?? null : null; }
+  /** Enough of `matches`/`closest` for the selectors the panels resolve a menu target with
+   * (`.row[data-id]`, `[data-emitter]`): classes and attribute presence, all of which must hold. */
+  matches(sel: string): boolean {
+    const parts = sel.match(/\.[-\w]+|\[[-\w]+\]/g) ?? [];
+    return parts.length > 0 && parts.every((p) => p.startsWith(".") ? this.classes.includes(p.slice(1)) : this.attrs[p.slice(1, -1)] !== undefined);
+  }
+  closest(sel: string): FakeEl | null {
+    for (let e: FakeEl | null = this; e; e = e.parent) if (e.matches(sel)) return e;
+    return null;
+  }
   getBoundingClientRect() { return { height: parseFloat(this.style.height ?? "56"), bottom: 930 }; }
   setPointerCapture() {}
   get text(): string { return this.textContent + this.children.map((c) => (typeof c === "string" ? c : c.text)).join(""); }
   get classes(): string[] { return (this.attrs.class ?? this.className).split(/\s+/).filter(Boolean); }
   fire(t: string, ev: Record<string, unknown> = {}) {
-    for (const fn of this.handlers[t] ?? []) fn({ preventDefault() {}, stopPropagation() { ev.stopped = true; }, button: 0, pointerId: 1, target: this, currentTarget: this, ...ev });
+    // `touches: []` by default: the audit fires EVERY handler an element carries, and a
+    // long-press trigger (`menu/trigger.ts`) reads `e.touches` on touchstart. An empty list is the
+    // cancel path — no timer, no menu — which is what a synthetic fire should be.
+    for (const fn of this.handlers[t] ?? []) fn({ preventDefault() {}, stopPropagation() { ev.stopped = true; }, button: 0, pointerId: 1, touches: [], target: this, currentTarget: this, ...ev });
   }
 }
 
@@ -56,7 +69,7 @@ function withFakeDom<T>(fn: () => T): T {
   const g = globalThis as Record<string, unknown>;
   const saved = { document: g.document, window: g.window };
   g.document = { createElement: (t: string) => new FakeEl(t), querySelector: () => null };
-  g.window = { innerHeight: 1000, addEventListener() {} };
+  g.window = { innerHeight: 1000, addEventListener() {}, setTimeout: () => 0, clearTimeout: () => {} };
   try { return fn(); } finally { g.document = saved.document; g.window = saved.window; }
 }
 

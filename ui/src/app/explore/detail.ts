@@ -131,11 +131,26 @@ export const DETAIL_ACTIONS: readonly { id: string; label?: string; primary?: bo
   { id: "delete" },
 ];
 
+/** The same row for a selected REGION (T-943). The region panel used to carry no buttons at all —
+ * only a sentence telling the viewer to right-click — so Listen and Decode were unreachable from a
+ * selection on every surface that shows one. Ids are `selectionMenuItems`'s own, so each button
+ * calls exactly what the menu item calls; "Stream out" and "Promote" have no selection meaning and
+ * are absent rather than disabled. */
+export const SELECTION_DETAIL_ACTIONS: readonly { id: string; label?: string; primary?: boolean }[] = [
+  { id: "listen-all", primary: true },
+  { id: "decode" },
+  { id: "export", label: "Record clip" },
+  { id: "analyze" },
+  { id: "delete" },
+];
+
 /** Picks and orders the sheet's buttons from a menu item list (items the row doesn't offer — e.g.
  * Promote on a confirmed row — are simply absent). */
-export function detailActions<T extends { id: string; label: string }>(items: readonly T[]): (T & { primary: boolean })[] {
+export function detailActions<T extends { id: string; label: string }>(
+  items: readonly T[], order: readonly { id: string; label?: string; primary?: boolean }[] = DETAIL_ACTIONS,
+): (T & { primary: boolean })[] {
   const out: (T & { primary: boolean })[] = [];
-  for (const a of DETAIL_ACTIONS) {
+  for (const a of order) {
     const it = items.find((i) => i.id === a.id);
     // "Stop listening" keeps its own label: it says what the button will do now.
     if (it) out.push({ ...it, label: a.label ?? it.label, primary: a.primary ?? false });

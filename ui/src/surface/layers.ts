@@ -33,7 +33,7 @@ export type LayerPlane = "data" | "overlay" | "dom";
 
 export type LayerId =
   | "base" | "coverage" | "tier"
-  | "detections" | "density" | "paths" | "artifacts" | "priors" | "rules" | "research"
+  | "detections" | "density" | "paths" | "tune" | "artifacts" | "priors" | "rules" | "research"
   | `collection:${string}`
   | "pins";
 
@@ -72,6 +72,9 @@ export const LAYER_DEFS: readonly LayerDef[] = [
   // T-897 (docs/23 §10.6 rule 2): traced (t, f) routes — a chirp's diagonal, a sweep's sawtooth, a
   // hopper's staircase — over the boxes they belong to and under the user's own research marks.
   { id: "paths", plane: "overlay", z: 25, visibleByDefault: true, label: "Paths", hint: "chirps · sweeps · hops" },
+  // T-898 (docs/23 §10.6 rule 2): the DEVICE's own route through frequency - a directions line per
+  // front end, from the recorded tune intervals. Above the measured paths, under the user's marks.
+  { id: "tune", plane: "overlay", z: 26, visibleByDefault: true, label: "Retune history", hint: "where each radio has been tuned" },
   { id: "research", plane: "overlay", z: 30, visibleByDefault: false, label: "Research", hint: "measurements · annotations" },
   { id: "artifacts", plane: "overlay", z: 50, visibleByDefault: false, label: "Artifacts", hint: "image · harmonic · IMD" },
   { id: "priors", plane: "overlay", z: 60, visibleByDefault: false, label: "Band-plan priors", hint: "suggestions, never truth" },

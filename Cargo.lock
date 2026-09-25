@@ -937,6 +937,7 @@ dependencies = [
  "hk-sim",
  "hk-store",
  "hk-stream",
+ "hk-synth",
  "num-complex",
  "serde_json",
  "sha2 0.11.0",

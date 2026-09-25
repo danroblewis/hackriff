@@ -1077,7 +1077,8 @@ impl OccupancyService {
         let region = Region::new(FreqRange::new(0.0, 1e12), wide);
         // T-904: past the detection retention age the per-frame rows are gone and their rollups
         // stand in for them (one extent per contiguous run of a track); a rollup holds only rows
-        // that were deleted, so the two never count the same air twice.
+        // that were deleted — and since T-913 a row the pass *kept* (pinned, or in an emitter's
+        // protected tail) closes the run it falls in, so the two never count the same air twice.
         let rollups: Vec<DetectionExtent> = match repo.detection_rollups_in_region(&region) {
             Ok(r) => r
                 .iter()

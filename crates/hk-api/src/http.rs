@@ -142,6 +142,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     // T-897: traced (t, f) paths - chirps, sweeps, hop sequences - over a viewport (the map's
     // `paths` layer, docs/23 §10.6 rule 2)
     ("GET", "/api/paths"),
+    // T-898: the device's own route through frequency - the recorded tune intervals as a traced
+    // path per front end (the map's `tune` layer, docs/23 §10.6 rule 2)
+    ("GET", "/api/tune-history"),
     // T-469: the persisted IQ recordings that extend the audio horizon past the IQ ring
     ("GET", "/api/recordings"),
     // T-463: the one playhead of historical playback (view state over recorded history; audio at
@@ -311,6 +314,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/anomalies/{id}/reopen"),
     // T-273 trunking load index (metadata only, AWARE-067)
     ("GET", "/api/trunking/load"),
+    // T-891 VLF/LF science on the accessory-fed source (SPACE-001, SPACE-041, PROP-019)
+    ("GET", "/api/vlf"),
 ];
 
 /// Server settings.
@@ -424,6 +429,9 @@ pub struct ApiState {
     /// T-273: the trunking store behind `GET /api/trunking/load` ([`crate::trunking`]), the
     /// metadata-only load index over the GrantEvent stream (AWARE-067); `None` answers 503.
     pub trunking: Option<Arc<Mutex<Repository>>>,
+    /// T-891: the run's accessory-fed VLF services behind `GET /api/vlf` ([`crate::vlf`]); `None`
+    /// answers 503, an attached-but-empty set answers an empty `accessories` list.
+    pub vlf: Option<Arc<dyn crate::vlf::VlfControl>>,
     /// T-122: anomalies and novelty alarms for `/api/anomalies*` ([`crate::anomalies`]); `None`
     /// answers 503.
     pub anomalies: Option<Arc<dyn crate::anomalies::AnomalyControl>>,
@@ -1304,6 +1312,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::classification::route(state, &ctl)) // T-247; before inventory::route
         .or_else(|| crate::presence::route(state, &ctl)) // T-264; before inventory::route
         .or_else(|| crate::paths::route(state, &ctl)) // T-897
+        .or_else(|| crate::tune_history::route(state, &ctl)) // T-898
         .or_else(|| crate::signatures::route(state, &ctl)) // T-201 C18 signature matches
         .or_else(|| crate::clusters::route(state, &ctl)) // T-202 C18 clusters of unknowns
         .or_else(|| crate::inventory::route(state, &ctl))
@@ -1326,6 +1335,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) {
         .or_else(|| crate::schedule::route(state, &ctl)) // T-120
         .or_else(|| crate::reports::route(state, &ctl)) // T-121
         .or_else(|| crate::trunking::route(state, &ctl)) // T-273
+        .or_else(|| crate::vlf::route(state, &ctl)) // T-891
         .or_else(|| crate::anomalies::route(state, &ctl))
     // T-122
     {

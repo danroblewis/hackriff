@@ -130,14 +130,17 @@ test("MAP-02: go-to parsing and the FAB's words", () => {
 
 test("MAP-02: the cluster names no route; its one device path is the painted retune offer", () => {
   const src = readFileSync("src/app/chrome/map-controls.ts", "utf8").replace(/\/\/.*$/gm, "");
-  for (const banned of ["fetch(", "/api/", "client.", "applyDeviceAction", "acceptPaneRetune", "retunePlan"]) {
+  for (const banned of ["fetch(", "/api/", "client.", "applyDeviceAction", "acceptPaneRetune", "acceptPaneWidth", "retunePlan"]) {
     assert.ok(!src.includes(banned), `map-controls.ts reaches for ${banned}: the cluster is view-only`);
   }
   const host = readFileSync("src/app/centre/surface.ts", "utf8");
-  // The go-to offer is shown only where no tuned window covers the pane, and pressed through the
-  // same `pressOffer` → `acceptPaneRetune` as the pane row's Retune.
-  assert.match(host, /if \(!o \|\| o\.covered\) return null;/);
-  assert.match(host, /press: \(\) => pressOffer\(o\)/);
+  // The go-to offer is shown only where no tuned window covers the pane, and — since T-947 — pressed
+  // through `acceptPaneWidth`, planning the device's OWN current span (or a caller default), never
+  // the pane's viewport: the pane-row Retune (`pressOffer` → `acceptPaneRetune`) is untouched.
+  assert.match(host, /if \(!o \|\| o\.covered\) \{ lastPaintedGoto = null; return null; \}/);
+  assert.match(host, /press: pressGotoOffer/);
+  assert.match(host, /const pressGotoOffer = [^]*?acceptPaneWidth\(ctx, \{/);
+  assert.match(host, /const gotoSpanHz = \(\): number => goToSpanHz\(/);
   assert.match(host, /const pressRetune = [^]*?if \(o\) pressOffer\(o\);/);
 });
 

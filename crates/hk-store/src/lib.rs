@@ -27,6 +27,7 @@ pub mod ml; // T-844: the durable half of C38 shadow mode (ADR-0016 §6)
 pub mod outputs;
 pub mod radiometry;
 pub mod recordings; // T-469: the persisted IQ recordings that extend the audio horizon
+pub mod tunepath; // T-898: the device's own route through frequency, from the tune records
 
 // ADR-0012 §9/§11 (pre-added by T-113; the owners fill them in).
 pub mod baseline; // T-119

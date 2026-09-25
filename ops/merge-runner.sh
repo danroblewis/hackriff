@@ -358,9 +358,34 @@ run_rc(){ # main is ready (landed, clean, nothing staged) - checked by the calle
       *) echo "$(date '+%m-%d %H:%M')  main@${sha:0:8}  (rc)  RC_RED P1 - suite $a red with no named test (build/harness/crash) in the release candidate; last green: $last; repro: just gate --files crates/ --phase acceptance" >> "$NEEDS" ;;
     esac
   done
-  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | grep -vc '^$') red) -> P1 items in $NEEDS; nothing un-lands"
+  # Count reds, not lines: the browser runner lists every failed spec on ONE 'failed:' line (03:53: '1 red' for 4 items).
+  log "RC RED ${sha:0:8} ($(printf '%s\n' "$reds" | awk '$1=="spec"{n+=NF-1; next} NF{n++} END{print n+0}') red) -> P1 items in $NEEDS; nothing un-lands"
   notify_coordinator "the release candidate at ${sha:0:8} is RED - P1 item(s) RC_RED in the attention file (last green $last); file them found_by rc-$(date +%Y%m%d)." "RC red - P1 tickets"
   return 0
+}
+
+suite_red_alone(){ # base branch-or-sha "tests/x.py::a tests/y.py::b" -> 0 when those pytest tests are red on base + it
+  # pytest exits 1 (tests failed) or 2 (collection error) for a red; 4/5 (no such node / nothing collected) is not red -
+  # a test the branch does not have cannot be red with it, and a test new in the batch is not main's red.
+  local base=$1 b=$2 ids=$3 rc=0
+  git -C "$REPO" reset -q --hard "$base"
+  if [ -z "$b" ] || git -C "$REPO" merge -q --no-ff -m "suite probe $b (never kept)" "$b" >>"$LOG" 2>&1; then
+    ( cd "$REPO/py" && uv run --locked pytest -q -p no:cacheprovider $ids ) >>"$LOG" 2>&1; rc=$?
+  else
+    git -C "$REPO" merge --abort 2>/dev/null
+  fi
+  git -C "$REPO" reset -q --hard "$base"
+  log "SUITE: ${b:-(base)} alone on ${base:0:8} -> pytest exit $rc"
+  [ "$rc" = 1 ] || [ "$rc" = 2 ]
+}
+suite_split(){ # base "ids" name=sha... -> "RED name=sha" / "GREEN name=sha"; nothing when the ids are red on base itself
+  local base=$1 ids=$2 b; shift 2
+  printf '%s ' "${@%%=*}" > "$S/isolate-remaining"   # a runner killed mid-probe re-queues the whole batch (as bisect_culprit)
+  suite_red_alone "$base" "" "$ids" && return 0
+  for b in "$@"; do
+    # Twice, as bisect_culprit: one red run cannot tell a defect from a test flaky even alone.
+    if suite_red_alone "$base" "${b#*=}" "$ids" && suite_red_alone "$base" "${b#*=}" "$ids"; then echo "RED $b"; else echo "GREEN $b"; fi
+  done
 }
 
 process(){
@@ -961,6 +986,29 @@ try_bulk(){
     # TypeScript type error on main itself; isolating 6 branches would have been 6 identical
     # reds, 6 attempt-ledger strikes and ~90 min). So: rewind, put the batch BACK in the queue
     # in order, flag it once, and wait for a fix to be queued - never isolate.
+    # A pytest red names its tests: find the branch that breaks them ALONE (seconds per branch) instead of holding
+    # the whole batch for a person to find it - twice by hand (2026-09-24 18:12-18:15, 2026-09-25 04:43).
+    if [ "${TRIAGE_KIND:-test}" = "suite" ] && [ "${TRIAGE_WHAT#pytest red: }" != "${TRIAGE_WHAT:-}" ] && [ "${#branches[@]}" -ge 2 ]; then
+      local culprits=() rest=() tips=() b kind
+      for b in "${branches[@]}"; do tips+=("$b=$(git -C "$REPO" rev-parse "$b")"); done   # the gated tips, as bisect
+      while read -r kind b; do
+        [ "$kind" = RED ] && culprits+=("$b"); [ "$kind" = GREEN ] && rest+=("${b%%=*}")
+      done < <(suite_split "$base" "${TRIAGE_WHAT#pytest red: }" "${tips[@]}")
+      rm -f "$S/isolate-remaining"
+      if [ "${#culprits[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0 ]; then
+        { printf '%s\n' "${rest[@]}"; cat "$QUEUE" 2>/dev/null; } > "$QUEUE.tmp" && mv "$QUEUE.tmp" "$QUEUE"
+        for b in "${culprits[@]}"; do
+          record_attempt "${b%%=*}" "${b#*=}"; b=${b%%=*}
+          log "GATE FAILED $b (its own ${TRIAGE_WHAT} - red twice with it alone on $base, green on base) -> flag for AI"
+          echo "$(date '+%m-%d %H:%M')  $b  $(ticket_of "$b")  GATE_FAIL" >> "$NEEDS"
+          notify_coordinator "$(ticket_of "$b") ($b) breaks ${TRIAGE_WHAT} on its own (run with each batch branch alone); the rest of the batch is re-queued first." "gate failed - fix run"
+        done
+        log "SUITE: ${#culprits[@]} culprit(s) set aside (${culprits[*]%%=*}); ${#rest[@]} branch(es) re-queued first as one batch"
+        rm -f "$BULKMARK"
+        return 0
+      fi
+      log "SUITE: no split (${#culprits[@]} red alone of ${#branches[@]}, or red on base) -> the batch is held as before"
+    fi
     if [ "${TRIAGE_KIND:-test}" = "suite" ]; then
       for b in "${branches[@]}"; do echo "$b" >> "$QUEUE"; done
       batch_sig "${branches[@]}" > "$S/suite-broken"
