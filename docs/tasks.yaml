@@ -29193,7 +29193,7 @@ tasks:
   - id: T-997
     milestone: MMAP
     title: "Redesign the inventory chip ('1 cand, 1 conf' + hamburger): dock it top-left under Go-to as two pills that open the sheet on their list, never mid-height over the time ruler"
-    status: todo
+    status: done
     priority: medium
     deps: []
     parallel_group: MAP-CHIP
@@ -29215,6 +29215,7 @@ tasks:
       Commits: 84065b45, f121de8f, 16d2f2ee
       Observed, not chased: PRE-EXISTING, reproduces on main: ui/e2e/app-phone.e2e.mjs fails at 400 px on 'spreading two fingers did not zoom the view in (1680000 -> 1680000)'. Proven on a fresh worktree of main at 2033e9dd (npm ci && npm run build; node e2e/run.mjs app-phone) with the same hk binary: same assertion, same numbers. | LOAD-FLAKE, for the deflaker: ui/e2e/app-pins.e2e.mjs:52 reads document.querySelector('.sf-pins .sf-pin.detection').getAttribute('aria-label') right after its own waitFor; under 3 e2e lanes the candidate expired in between and the eval threw 'Cannot read properties of null'. Passes alone every time (4.2 s, 19 s, 58 s runs). | LOAD-FLAKE: ui/e2e/app-selected-region.e2e.mjs failed once at 3 lanes with '/api/coverage?f_lo=99120000&f_hi=102480000 asked about ... not the selected region 100290000-100800000' — the drawer's scope request racing the region focus. Passes alone. | At 400 px with the sheet at half, the surface's honesty row (.sf-chrome, 'display range ...') paints over the sheet's body. Pre-existing z/position interaction; app-phone only checks that overlap with the sheet at peek. Visible in /tmp/t997shots/inv-pills-400-2-candidate.png.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 6ee9f9aa
   - id: T-998
     milestone: MMAP
     title: Narrow time ruler (<= 40 px) with a 'seconds ago' vs timestamp toggle in the settings menu; same narrow treatment for the frequency ruler
