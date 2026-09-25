@@ -527,7 +527,7 @@ impl Block for Crc {
                     .map(|a| self.width as f64 - (a.len().max(1) as f64).log2())
                     .sum(),
             };
-            self.ev.record(&self.bits, clean, width);
+            self.ev.record(&self.bits, clean, width, self.width);
             if check == CrcStatus::Valid {
                 self.frames_ok += 1;
             } else {

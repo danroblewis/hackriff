@@ -145,8 +145,12 @@ impl Block for Checksum {
             self.bits.clear();
             extend_bits(&mut self.bits, f.bytes, 0, len);
             let upstream_clean = !matches!(f.info.check, CrcStatus::Corrected | CrcStatus::Invalid);
-            self.ev
-                .record(&self.bits, ok && upstream_clean, self.width as f64);
+            self.ev.record(
+                &self.bits,
+                ok && upstream_clean,
+                self.width as f64,
+                self.width,
+            );
             self.meter.push(!ok);
             if ok {
                 self.frames_ok += 1;
