@@ -585,3 +585,128 @@ fn last_known_cost_is_bounded_on_a_tuned_and_a_device_wide_viewport() {
         }
     }
 }
+
+/// T-911: a search **pinned to one level** reads only that level's cells, and crosses the time a
+/// band spent unobserved without paying for it.
+///
+/// The shadow is judged against the band's last live row, which is a cell of the tile's own level;
+/// the ladder search above answers band A from level 2 (a 4 kHz × 60 s max-hold), a different box
+/// and so a different number. Pinned to level 0, both bands come back from level 0 — B from its
+/// last 1-s cell, A from ITS last 1-s cell 95 s further back — and the 190 s between B and the
+/// search, and the 95 s between A and B, which no tile covers, cost nothing: only the two blocks
+/// that hold anything are read.
+#[test]
+fn a_pinned_search_reads_one_level_and_skips_empty_blocks_for_free() {
+    let dir = TempDir::new("lastknown-pinned");
+    let p = swept(&dir);
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 300 * S),
+        16,
+        0,
+        1_000_000,
+        1_000_000,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    for f in 0..4 {
+        let c = k.cells[f];
+        assert_eq!(
+            (c.max_db, c.level, c.t_ns),
+            (-60.0, 0, T0 + 5 * S),
+            "A col {f}: {c:?}"
+        );
+    }
+    for f in 8..12 {
+        let c = k.cells[f];
+        assert_eq!(
+            (c.max_db, c.level, c.t_ns),
+            (-70.0, 0, T0 + 103 * S),
+            "B col {f}: {c:?}"
+        );
+    }
+    for f in (4..8).chain(12..16) {
+        assert!(!k.cells[f].found(), "never observed: {:?}", k.cells[f]);
+    }
+    // Two 10-s blocks of 16 columns: the gaps were jumped by the tile index, never walked.
+    assert_eq!(k.source_cells, 2 * 10 * 16, "stages {:?}", k.stages);
+    assert!(
+        k.stages.iter().all(|s| s.level == 0 && !s.skipped),
+        "{:?}",
+        k.stages
+    );
+}
+
+/// T-911: when the output grid's row is coarser than the pinned level's, "newest" is the newest
+/// OUTPUT row, and every source cell inside it folds by max-hold — the value the output grid's own
+/// cell holds — never just the single newest source cell.
+#[test]
+fn a_pinned_search_folds_the_newest_output_row_by_max_hold() {
+    let dir = TempDir::new("lastknown-pinned-quantum");
+    let mut p = Pyramid::open(&dir.0, ladder()).unwrap();
+    // 16-20 kHz: -60, -50, -55, -65 dB in the four seconds from T0. With 2-s output rows the newest
+    // row is [T0+2, T0+4): max(-55, -65) = -55. The newest 1-s cell alone is -65.
+    for (k, v) in [-60.0, -50.0, -55.0, -65.0].into_iter().enumerate() {
+        let psd = vec![lin(v); 4];
+        p.ingest(&frame(T0 + k as i64 * S, S, 16_000.0, 1000.0, &psd))
+            .unwrap();
+    }
+    p.seal_through(ts(T0 + 100 * S)).unwrap();
+    let run = |quantum: i64| {
+        let mut s = p.last_known_search_at(
+            0,
+            FreqRange::new(BAND.0, BAND.1),
+            ts(T0 + 10 * S),
+            16,
+            quantum,
+            1_000_000,
+            1_000_000,
+        );
+        while !s.done() {
+            p.last_known_step(&mut s).unwrap();
+        }
+        s.finish().cells[0]
+    };
+    let per_row = run(2 * S);
+    assert_eq!(
+        (per_row.max_db, per_row.t_ns),
+        (-55.0, T0 + 4 * S),
+        "{per_row:?}"
+    );
+    let per_cell = run(0);
+    assert_eq!(
+        (per_cell.max_db, per_cell.t_ns),
+        (-65.0, T0 + 4 * S),
+        "{per_cell:?}"
+    );
+}
+
+/// T-911: the budget is paid honestly. A block it cannot afford one row of is reported unsearched,
+/// never answered as empty.
+#[test]
+fn a_pinned_search_out_of_budget_says_so() {
+    let dir = TempDir::new("lastknown-pinned-budget");
+    let p = swept(&dir);
+    // 16 columns: 160 cells reads B's whole block, and nothing is left for A's.
+    let mut s = p.last_known_search_at(
+        0,
+        FreqRange::new(BAND.0, BAND.1),
+        ts(T0 + 300 * S),
+        16,
+        0,
+        1_000_000,
+        160,
+    );
+    while !s.done() {
+        p.last_known_step(&mut s).unwrap();
+    }
+    let k = s.finish();
+    assert!(k.cells[8].found(), "B is in the affordable block");
+    assert!(!k.cells[0].found(), "A's block was not read");
+    let skipped: Vec<_> = k.stages.iter().filter(|s| s.skipped).collect();
+    assert_eq!(skipped.len(), 1, "{:?}", k.stages);
+    assert_eq!((skipped[0].from_ns, skipped[0].to_ns), (T0, T0 + 10 * S));
+}

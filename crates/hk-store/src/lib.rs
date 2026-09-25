@@ -37,10 +37,10 @@ pub use coverage::{
 };
 pub use history::{
     CellStats, ChannelSummary, FilterSummary, FrameInput, FrameOrigin, GainState, HistogramConfig,
-    IngestOutcome, LastKnown, LastKnownCell, LevelConfig, OriginField, OriginFilter, Overview,
-    OverviewCell, ProvenanceSummary, Pyramid, PyramidConfig, PyramidStats, RegionHistory,
-    RegionQuery, ResidentBytes, Resolution, ShadowFill, ShadowRun, StoreError, StraddleGuard,
-    ViewLattice,
+    IngestOutcome, LastKnown, LastKnownCell, LastKnownSearch, LastKnownStage, LevelConfig,
+    OriginField, OriginFilter, Overview, OverviewCell, ProvenanceSummary, Pyramid, PyramidConfig,
+    PyramidStats, RegionHistory, RegionQuery, ResidentBytes, Resolution, ShadowFill, ShadowRun,
+    StoreError, StraddleGuard, ViewLattice,
 };
 pub use radiometry::{
     FloorFlags, FloorIngest, FloorIngestQueue, FloorProduct, FloorProductConfig, FloorProductStats,
