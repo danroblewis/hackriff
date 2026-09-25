@@ -75,6 +75,7 @@ pub mod comb;
 pub mod components;
 pub mod config;
 pub mod detector;
+pub mod frontend;
 pub mod integrated;
 pub mod record;
 pub mod rules;
@@ -88,7 +89,7 @@ pub use burst::{BURST_DETECTOR, BurstConfig, BurstDetector, BurstStats};
 pub use cfar::{
     BranchMasks, CELL_NONE, CELL_REGION, CELL_SEED, CfarEngine, ClassifyStats, Thresholds,
 };
-pub use clip::{ClipCount, count_clipped_ci8};
+pub use clip::{ClipCount, ClipLedger, SpanClip, count_clipped_ci8};
 pub use comb::{Comb, CombFinder};
 pub use components::FrameOutcome;
 pub use config::{
@@ -97,6 +98,7 @@ pub use config::{
     Hysteresis, ImageRule, IntegrationConfig, RefHarmonicRule, Rules, RunContext,
 };
 pub use detector::{Detector, DetectorStats, SegmentInfo};
+pub use frontend::{FrameVerdict, FrontEndConfig, FrontEndMonitor};
 pub use integrated::{IntegratedEmitter, IntegratedEvaluation, IntegratedSnapshot, SpanMeasure};
 pub use record::{
     Candidate, CloseReason, ConfirmReason, Confirmation, DetectionRecord, DetectorEvent,

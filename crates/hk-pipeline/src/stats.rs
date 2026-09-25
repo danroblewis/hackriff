@@ -1059,6 +1059,9 @@ pub struct Counters {
     /// T-904: the detection store's size and the retention thread's last pass
     /// (`/api/status` `storage`).
     pub storage: crate::retention::StorageCounters,
+    /// T-981: the front end's clip state per spectrum row, and the front-end events
+    /// (`/api/status` `frontend`, `GET /api/frontend/events`).
+    pub frontend: crate::frontend::FrontEndReport,
 }
 
 impl Counters {
@@ -1110,6 +1113,7 @@ impl Counters {
             "compute": self.compute.to_json(),
             "observations": self.observations.to_json(),
             "storage": self.storage.to_json(),
+            "frontend": self.frontend.to_json(),
         })
     }
 

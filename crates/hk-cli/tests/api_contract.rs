@@ -2789,6 +2789,114 @@ fn tune_history_route_answers_as_documented() {
     stop_server(serving);
 }
 
+/// T-981: the front end's clip state — `/api/status`'s `frontend` block and
+/// `GET /api/frontend/events` — answers as `docs/api.md` documents it, on a live `hk serve` over
+/// the mock device. The blind end-to-end assertion (a saturating burst through the mock SDR is
+/// flagged on its row, counted, logged as one event and never stored as a detection) is
+/// `hk-pipeline/tests/frontend_overload.rs`; this pins the wire shape and the rule by value.
+#[test]
+fn frontend_status_block_and_events_route_answer_as_documented() {
+    let (_guard, serving, addr) = start_server();
+    wait_for(
+        "spectrum rows measured by the front-end judgement",
+        Duration::from_secs(60),
+        || {
+            get(addr, "/api/status").1["frontend"]["rows"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+        },
+    );
+    let (st, v) = get(addr, "/api/status");
+    assert_eq!(st, 200, "{v}");
+    let fe = &v["frontend"];
+    for field in [
+        "rows",
+        "clipped_rows",
+        "event_rows",
+        "events",
+        "clipped_samples",
+        "samples",
+        "suppressed_detections",
+        "evicted_events",
+    ] {
+        assert!(fe[field].is_u64(), "frontend.{field}: {fe}");
+    }
+    assert!(fe["adc_peak_max"].is_number(), "{fe}");
+    assert!(
+        fe["clipped_rows"].as_u64() <= fe["rows"].as_u64(),
+        "a clipped row is a measured row: {fe}"
+    );
+    assert!(
+        fe["event_rows"].as_u64() <= fe["clipped_rows"].as_u64(),
+        "an event row is a clipped row: {fe}"
+    );
+    let last = &fe["last_row"];
+    for field in ["t", "clip_fraction", "adc_peak"] {
+        assert!(last[field].is_number(), "frontend.last_row.{field}: {fe}");
+    }
+    for field in ["clipped", "event"] {
+        assert!(last[field].is_boolean(), "frontend.last_row.{field}: {fe}");
+    }
+    assert!(
+        fe["last_event"].is_null() || fe["last_event"]["t0"].is_number(),
+        "{fe}"
+    );
+    assert_eq!(fe["log"]["capacity"], json!(1024), "{fe}");
+    assert_eq!(fe["rule"]["clip_fraction"], json!(1e-4), "{fe}");
+    assert_eq!(fe["rule"]["step_db"], json!(6.0), "{fe}");
+    assert_eq!(fe["rule"]["saturation_fraction"], json!(0.01), "{fe}");
+
+    // Every capture time there could be: a replay's clock is its recording's, not the wall's.
+    let (t0, t1) = (0.0_f64, 4.0e9_f64);
+    let url = |extra: &str| format!("/api/frontend/events?t0={t0}&t1={t1}{extra}");
+    let (st, e) = get(addr, &url(""));
+    assert_eq!(st, 200, "{e}");
+    for field in ["window", "events", "total", "limit", "truncated", "log"] {
+        assert!(
+            e.get(field).is_some(),
+            "frontend/events missing {field}: {e}"
+        );
+    }
+    assert_eq!(e["limit"], json!(256), "{e}");
+    assert_eq!(e["window"]["t0"].as_f64(), Some(t0), "{e}");
+    assert_eq!(e["log"]["capacity"], json!(1024), "{e}");
+    let events = e["events"].as_array().expect("events is an array");
+    assert_eq!(e["total"].as_u64(), Some(events.len() as u64), "{e}");
+    for ev in events {
+        assert_eq!(ev["kind"], json!("clip"), "{ev}");
+        let (c, r) = (
+            ev["center_hz"].as_f64().unwrap(),
+            ev["sample_rate_hz"].as_f64().unwrap(),
+        );
+        assert_eq!(ev["f_lo_hz"].as_f64(), Some(c - r / 2.0), "{ev}");
+        assert_eq!(ev["f_hi_hz"].as_f64(), Some(c + r / 2.0), "{ev}");
+        assert!(ev["t1"].as_f64() > ev["t0"].as_f64(), "{ev}");
+    }
+    let (st, d) = get(addr, &url("&device=no-such-radio&limit=5"));
+    assert_eq!(st, 200, "{d}");
+    assert_eq!(
+        (d["total"].clone(), d["limit"].clone()),
+        (json!(0), json!(5)),
+        "{d}"
+    );
+    for bad in [
+        format!("/api/frontend/events?t0={t0}"),
+        format!("/api/frontend/events?t0={t1}&t1={t0}"),
+        url("&limit=0"),
+        url("&limit=5000"),
+        url("&f_lo=1"),
+    ] {
+        let (st, e) = get(addr, &bad);
+        assert_eq!(st, 400, "{bad}: {e}");
+    }
+    let (st, e) = post(addr, "/api/frontend/events", "{}");
+    assert_eq!(st, 405, "read-only route: {e}");
+    let (st, _) = call(addr, "GET", &url(""), None, None);
+    assert_eq!(st, 401, "token-gated like every other route");
+
+    stop_server(serving);
+}
+
 #[test]
 fn inventory_entry_promote_and_delete_answer_as_documented() {
     let (_dir_guard, serving, addr) = start_server();

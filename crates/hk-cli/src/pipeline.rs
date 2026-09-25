@@ -1178,6 +1178,8 @@ pub fn serve_api(
         trunking: Some(Arc::clone(&db)), // T-273: same run database, grant_event table (C23)
         // T-891: the run's accessory-fed VLF services (an empty list without an accessory).
         vlf: Some(Arc::new(PipelineVlf(handle.vlf()))),
+        // T-981: the front-end events the spectrum reader judged, for the canvas's mark.
+        frontend: Some(Arc::new(PipelineFrontEnd(handle.counters()))),
         status: Some(Arc::new(move || {
             let mut v = counters.to_json();
             if let Some(o) = v.as_object_mut() {
@@ -1397,6 +1399,31 @@ impl hk_api::vlf::VlfControl for PipelineVlf {
             .iter()
             .map(|s| serde_json::to_value(s.report(include_points)).unwrap_or_default())
             .collect()
+    }
+}
+
+/// `GET /api/frontend/events` over the run's front-end event log (T-981).
+struct PipelineFrontEnd(Arc<hk_pipeline::stats::Counters>);
+
+impl hk_api::frontend::FrontEndControl for PipelineFrontEnd {
+    fn events(&self, t0_s: f64, t1_s: f64) -> Vec<serde_json::Value> {
+        self.0
+            .frontend
+            .events_between(t0_s, t1_s)
+            .iter()
+            .map(hk_pipeline::frontend::FrontEndEvent::to_json)
+            .collect()
+    }
+
+    fn log(&self) -> serde_json::Value {
+        let s = self.0.frontend.to_json();
+        serde_json::json!({
+            "capacity": s["log"]["capacity"],
+            "retained": s["log"]["retained"],
+            "oldest_s": s["log"]["oldest_s"],
+            "evicted": s["evicted_events"],
+            "rule": s["rule"],
+        })
     }
 }
 

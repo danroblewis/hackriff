@@ -40,6 +40,7 @@ pub mod coverage; // T-368: the coverage map - grey means genuinely unobserved
 pub mod datasets; // T-205
 pub mod decode; // T-159
 pub mod events; // T-264 (ADR-0017 TM-8): the durable catalogue behind the History surface
+pub mod frontend; // T-981: front-end events (clipped whole-span steps) over a window
 pub mod http;
 pub mod inspector;
 pub mod inventory;

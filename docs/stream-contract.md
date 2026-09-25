@@ -130,7 +130,7 @@ Each record is a 32-byte little-endian header followed by the payload:
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | record type: 1 = data, 2 = dropped marker, 3 = status (1.1, §12) |
-| 1 | u8 | flags: bit 0 `GATED`, bit 1 `DISCONTINUITY`, bit 2 `OVERLOAD`, bit 3 `BURST_START`, bit 4 `BURST_END` |
+| 1 | u8 | flags: bit 0 `GATED`, bit 1 `DISCONTINUITY`, bit 2 `OVERLOAD` (sticky tune-state), bit 3 `BURST_START`, bit 4 `BURST_END`, bit 5 `CLIPPED` (this record's own samples clipped, T-981), bit 6 `FRONTEND_EVENT` (clipped and a whole-span energy step: the front end's energy, not a signal's, T-981) |
 | 2 | u16 | reserved, 0 |
 | 4 | u32 | payload length. For `GATED` records this is the withheld length: lengths are metadata, and no payload bytes follow. |
 | 8 | u64 | `seq` |
