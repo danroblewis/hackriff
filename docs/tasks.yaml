@@ -27825,7 +27825,7 @@ tasks:
   - id: T-936
     milestone: MAUTO
     title: "All captured signals decode: failing-first blind FM/RDS acceptance tests through the mock SDR on the explorer captures (T-545 pattern)"
-    status: in-progress
+    status: done
     priority: P1
     deps:
     - T-935
@@ -27855,6 +27855,7 @@ tasks:
       Observed, not chased: The WFM chain writes deviation_hz exactly 75000.0 on 101.3 MHz and 128000.0 on 98.9 MHz; 75000.0 is the WFM rule's nominal peak deviation, so it looks like a default rather than a measurement (docs/api.md: estimated_params is measured values only, never a fabricated default). Not asserted here for that reason. Evidence: the demodulation rows printed by the suite's report(), crates/hk-demod mode rules. | 98.9 MHz's Confirmed region stops at exactly 4.000 s of the 5 s capture - the built-in wfm-rds chain's analog-auto window_s is 4.0 (crates/hk-pipeline/src/chains/spec.rs:668), so the emitter's recorded presence looks bounded by the chain window rather than by the signal. It passes the 50 % extent floor today, but it is the same family of defect as T-940. | Chain-admission counters vary between identical replays of the same fixture (fm-98p9: 'mode rejected' 6 in one run and 3 in another, duplicate_emission 0/1) while every asserted outcome - regions, pilots, PIs, PS - was identical across four runs. If these tests ever flake it will be here, in chain budget admission, not in the DSP.
       Use cases: SIGNAL-062
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: fc1578db
   - id: T-937
     milestone: MAUTO
     title: Broadcast FM fragments into many narrow candidates in the 2.4 Msps sweep (349 for ~19 stations)
