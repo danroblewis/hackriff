@@ -80,3 +80,18 @@ test("an empty response is never silently blank — but a served not_applicable 
   const onlyElided: Pick<TraceFetch, "nodes" | "elided"> = { nodes: [], elided: [{ stage: "S1", outcome: "memoised", count: 1, bits_max: 0, bits_min: 0, evaluations: 1 }] };
   assert.equal(emptyTraceText(onlyElided), null);
 });
+
+test("nodes_elided, the fetch-failure sentence and the poll stop rule read only served fields", async () => {
+  const { nodesElidedNote, traceErrorText, tracePollDone } = await import("../src/app/explore/analyze-trace-panel");
+  const { ControlError } = await import("../src/controls/client");
+  assert.equal(nodesElidedNote({ trace_summary: { nodes_elided: 412 } }), "412 decisions elided from the recorded trace (nodes_elided)");
+  assert.equal(nodesElidedNote({ trace_summary: { nodes_elided: 0 } }), null);
+  assert.equal(nodesElidedNote({}), null);
+  assert.equal(traceErrorText(new ControlError(400, "invalid", "unknown outcome")), "trace fetch failed: HTTP 400 invalid — unknown outcome");
+  assert.equal(traceErrorText(new Error("network down")), "trace fetch failed: network down");
+  const j = { id: "a1", state: "searching", end_reason: null, error: null, target: {}, results: [] } as const;
+  assert.equal(tracePollDone({ final: true }, { ...j }), false, "final trace, pre-hand-back job copy: keep polling");
+  assert.equal(tracePollDone({ final: false }, { ...j, state: "failed", resolution: { kind: "not-searched" } }), false);
+  assert.equal(tracePollDone({ final: true }, { ...j, state: "failed", resolution: { kind: "not-searched" } }), true);
+  assert.equal(tracePollDone({ final: true }, { ...j, state: "done" }), true, "a solved job carries no resolution");
+});

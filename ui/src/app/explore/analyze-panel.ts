@@ -33,6 +33,8 @@ export interface AnalyzeJob {
   /** ADR-0021 §7A.2, present whenever no result reached `solved`; rendered by the trace panel
    * (T-570), never by this module. */
   resolution?: Readonly<Record<string, unknown>> | null;
+  /** ADR-0021 §4.1; the trace panel shows `nodes_elided` beside the list (T-570 item 5). */
+  trace_summary?: { nodes_elided?: number; nodes_recorded?: number; truncated?: boolean } | null;
 }
 
 // ---- pure view-model ----

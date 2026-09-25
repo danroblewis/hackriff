@@ -9,7 +9,8 @@ import type { AppContext } from "../context";
 import { h } from "../dom";
 import { startPoll } from "../net";
 import { toast } from "../state";
-import type { AnalyzeJob } from "./analyze-panel";
+import { ControlError } from "../../controls/client";
+import { jobIsActive, type AnalyzeJob } from "./analyze-panel";
 
 // ---- wire types (docs/api.md "The trace (`GET /api/analyze/{id}/trace`)", ADR-0021 §2) ----
 
@@ -110,6 +111,29 @@ export function truncationNote(t: Pick<TraceFetch, "bounds">): string | null {
  * root node already carries the sentence for a family outside the skeleton set, so ordinarily
  * `nodes` is never empty for a real filter. This only fires if even that is missing, and it still
  * reads as an explicit statement rather than a blank box. */
+/** `job.trace_summary.nodes_elided` beside the list (acceptance item 5): the session-level count of
+ * decisions the recorded trace dropped, stated even when the fetch itself is not truncated. Null
+ * when the job has no summary yet or nothing was elided. */
+export function nodesElidedNote(job: Pick<AnalyzeJob, "trace_summary">): string | null {
+  const n = job.trace_summary?.nodes_elided;
+  return typeof n === "number" && n > 0 ? `${n} decision${n === 1 ? "" : "s"} elided from the recorded trace (nodes_elided)` : null;
+}
+
+/** A failed trace fetch, stated plainly (a trace expires with its job; a bad filter is a 400) —
+ * never "loading" forever. */
+export function traceErrorText(e: unknown): string {
+  if (e instanceof ControlError) return `trace fetch failed: HTTP ${e.status} ${e.code} — ${e.message}`;
+  return `trace fetch failed: ${e instanceof Error ? e.message : String(e)}`;
+}
+
+/** The trace poll may stop only when both the trace is `final` AND the job copy the panel holds is
+ * the handed-back one: it carries its `resolution`, or has ended (a solved job has none). The
+ * backend sets both in the same hand-back, so a `final` trace can arrive before the job poll has
+ * brought the resolution — stopping then would lose the headline (review FAIL, T-570). */
+export function tracePollDone(trace: Pick<TraceFetch, "final">, job: AnalyzeJob): boolean {
+  return trace.final && (job.resolution != null || !jobIsActive(job));
+}
+
 export function emptyTraceText(t: Pick<TraceFetch, "nodes" | "elided">): string | null {
   return t.nodes.length || t.elided.length ? null : "no trace nodes recorded for this filter";
 }
@@ -147,10 +171,11 @@ function resolutionBlock(r: Resolution): HTMLElement {
  * `mountTracePanel` below) cannot touch the family `<input>` a user may be mid-keystroke in
  * (found in review: rebuilding the whole panel on every ~1 s job poll wiped focus and typed text,
  * so "Why not PSK?" could not be used at all). */
-function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, trace: TraceFetch | null): void {
+function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, trace: TraceFetch | null, error: string | null = null): void {
   const kids: Array<Node | undefined> = [];
+  if (error) kids.push(h("div", { class: "tr-error" }, error));
   if (!trace) {
-    kids.push(h("div", { class: "empty" }, "loading trace…"));
+    if (!error) kids.push(h("div", { class: "empty" }, "loading trace…"));
   } else {
     const resolution = job.resolution as Resolution | undefined;
     if (resolution) kids.push(resolutionBlock(resolution));
@@ -165,21 +190,24 @@ function renderTraceResults(el: HTMLElement, ctx: AppContext, job: AnalyzeJob, t
     for (const e of trace.elided) kids.push(h("div", { class: "tr-elided" }, elidedText(e)));
     const note = truncationNote(trace);
     if (note) kids.push(h("small", { class: "tr-trunc" }, note));
+    const elidedNote = nodesElidedNote(job);
+    if (elidedNote) kids.push(h("small", { class: "tr-trunc" }, elidedNote));
   }
   el.replaceChildren(...kids.filter((k): k is Node => k !== undefined));
 }
 
 /** Mounts the trace panel into `el`. The caller (`mountAnalyzeSection`, via its own `AnalyzeJob`
  * poll) drives `setJob`; this module makes no `GET /api/analyze/{id}` call of its own, only the
- * trace fetch, at 2 s while a job is watched (stopped once the trace reports `final`, restarted on
- * the next job).
+ * trace fetch, at 2 s while a job is watched (stopped per `tracePollDone`, restarted on the next
+ * job; a failed fetch is stated and rethrown so `startPoll` backs off).
  *
  * The filter row (the family `<input>` and its buttons) is built exactly once per watched job and
- * never rebuilt by a results redraw — the fix for the review finding above. Only `renderTraceResults`
- * runs on every trace fetch; `setJob` being called again for the *same* job id (the 1 s `AnalyzeJob`
- * poll) touches nothing here at all, so nothing about the filter row or the results list is on that
- * cadence. A monotonic request sequence discards a stale trace response that resolves after a newer
- * one (e.g. the unfiltered fetch still in flight when "why not psk" is asked) rather than letting it
+ * never rebuilt by a results redraw — the fix for the review finding above. `renderTraceResults`
+ * runs on every trace fetch, and on a same-id `setJob` (the 1 s `AnalyzeJob` poll) only when that
+ * job brings a new or changed `resolution`/`trace_summary` — so the headline appears even when the
+ * `final` trace arrived before the job poll carried the resolution. The poll stops only when the
+ * trace is final AND the job copy is the handed-back one (`tracePollDone`). A monotonic request
+ * sequence discards a stale trace response that resolves after a newer one (e.g. the unfiltered fetch still in flight when "why not psk" is asked) rather than letting it
  * overwrite the answer to a later question. */
 export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: AnalyzeJob | null): void } {
   let job: AnalyzeJob | null = null;
@@ -188,31 +216,46 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
   let seq = 0;
 
   const familyInput = h("input", { type: "text", class: "mono", placeholder: "family (e.g. psk)", "aria-label": "Why not this family?" }) as HTMLInputElement;
-  const ask = () => { filter = { ...filter, family: familyInput.value.trim() || undefined }; void fetchTrace(); };
+  const ask = () => { filter = { ...filter, family: familyInput.value.trim() || undefined }; fetchQuiet(); };
   familyInput.onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); ask(); } };
   const goBtn = h("button", { class: "mini", type: "button", onclick: ask }, "Why not?");
-  const clearBtn = h("button", { class: "mini", type: "button", onclick: () => { familyInput.value = ""; filter = { ...filter, family: undefined }; void fetchTrace(); } }, "Clear");
+  const clearBtn = h("button", { class: "mini", type: "button", onclick: () => { familyInput.value = ""; filter = { ...filter, family: undefined }; fetchQuiet(); } }, "Clear");
   const resultsEl = h("div", { class: "tr-results" });
   el.replaceChildren(h("div", { class: "section-h" }, "Search trace"), h("div", { class: "tr-filter" }, familyInput, goBtn, clearBtn), resultsEl);
 
+  // The last trace drawn, so a job poll bringing a new `resolution` (or trace_summary) can redraw
+  // the headline without refetching, and a failed fetch keeps what was already shown.
+  let lastTrace: TraceFetch | null = null;
+  let lastError: string | null = null;
+  const redraw = () => { if (job) renderTraceResults(resultsEl, ctx, job, lastTrace, lastError); };
+
+  /** One trace fetch. Draws with the LATEST job (never a copy saved before the await: the backend
+   * hands the resolution and the final trace back together, so a saved copy can predate it).
+   * Rethrows a failure after stating it, so the poll's back-off applies. */
   const fetchTrace = async () => {
     if (!job) return;
     const mySeq = ++seq;
-    const j = job;
-    let trace: TraceFetch | null;
+    const id = job.id;
+    let trace: TraceFetch;
     try {
-      trace = await ctx.client.get<TraceFetch>(tracePath(j.id, filter));
-    } catch {
-      trace = null;
+      trace = await ctx.client.get<TraceFetch>(tracePath(id, filter));
+    } catch (e) {
+      if (seq !== mySeq || job?.id !== id) return;
+      lastError = traceErrorText(e);
+      redraw();
+      throw e;
     }
-    if (seq !== mySeq || job?.id !== j.id) return; // superseded by a later filter, or the job changed
-    renderTraceResults(resultsEl, ctx, j, trace);
-    if (trace?.final && stopPoll) { stopPoll(); stopPoll = null; }
+    if (seq !== mySeq || job?.id !== id) return; // superseded by a later filter, or the job changed
+    lastTrace = trace; lastError = null;
+    redraw();
+    if (tracePollDone(trace, job) && stopPoll) { stopPoll(); stopPoll = null; }
   };
+  const fetchQuiet = () => { fetchTrace().catch(() => {}); }; // a click's failure is already on screen
 
   return {
     setJob(j) {
-      const changed = j?.id !== job?.id;
+      const prev = job;
+      const changed = j?.id !== prev?.id;
       job = j;
       if (!j) {
         if (stopPoll) { stopPoll(); stopPoll = null; }
@@ -220,7 +263,14 @@ export function mountTracePanel(el: HTMLElement, ctx: AppContext): { setJob(j: A
         return;
       }
       el.hidden = false;
-      if (!changed) return; // the 1 s AnalyzeJob poll for the SAME job touches nothing below
+      if (!changed) {
+        // The 1 s AnalyzeJob poll for the SAME job: the filter row is never touched, and the
+        // results redraw only when the served resolution or trace_summary actually changed.
+        if (lastTrace && (JSON.stringify(prev?.resolution ?? null) !== JSON.stringify(j.resolution ?? null)
+          || JSON.stringify(prev?.trace_summary ?? null) !== JSON.stringify(j.trace_summary ?? null))) redraw();
+        return;
+      }
+      lastTrace = null; lastError = null;
       filter = {}; familyInput.value = "";
       resultsEl.replaceChildren(h("div", { class: "empty" }, "loading trace…"));
       if (stopPoll) stopPoll();
