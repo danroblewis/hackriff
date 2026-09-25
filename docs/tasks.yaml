@@ -28400,7 +28400,7 @@ tasks:
   - id: T-959
     milestone: MLIVE
     title: Tile client charges abandoned reads the average service time; use the server's per-client in_flight_held (and state it in the 503)
-    status: in-progress
+    status: done
     priority: P2
     deps: []
     parallel_group: TILE-CLIENT
@@ -28411,6 +28411,7 @@ tasks:
       FROM T-932's deflake (task-rcfix-surface-nav 9aab332e): the client (ui/src/surface/tilecache.ts AIMD) charges an abandoned tile read only the route's AVERAGE service time, but /api/tiles cannot see the abort and keeps building the tile and holding its slot until done - under load overview reads take 7-9 s and outlive the charge, so the page's next reads are refused over slots its own leftover reads still hold (the 03:53 RC red). The spec now waits for the route's own in_flight report; the product estimate is still a guess. Injected worst case (both share slots held ~27 s): 18 refusals over 9 gestures, red on the per-gesture bound.
       DELIVER: the client stops guessing - it reads the per-client in_flight_held every tile answer already states and treats slots it still holds as its own (never as contention); the 503 body also states what THIS client holds beside share (docs/api.md + api_contract.rs together, T-079), so a refusal can be told apart as stale-charge vs contention. Thin client: the server reports, the client does arithmetic over it. Tests: ui/test asserts the client's cap/issue decision from a sequence of answers carrying in_flight_held (red on the average-charge logic); a contract test for the 503 field; surface-nav stays green.
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; api_contract; surface-nav alone), then HAND BACK. Never `just gate`.
+    commit: 2328c7d4
   - id: T-960
     milestone: MAUTO
     title: "Two more explorer FM captures into fixtures/ with hidden truth: 88.5 PI 3AAB, 106.1 PI 1323 (oracle-confirmed)"
