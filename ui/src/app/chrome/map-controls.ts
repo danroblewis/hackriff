@@ -38,6 +38,10 @@ export interface PaneControl {
   zoomBoth(id: string, factor: number, anchorF?: number, anchorT?: number): void;
   isFollowing(id: string): boolean;
   setFollowing(id: string, on: boolean): void;
+  /** Move the pane's frequency window (view arithmetic; never a device route). Used by
+   * `followLive` (T-955) to bring a pane's FREQUENCY back to the tuned window too, not only its
+   * time, when the caller supplies one. */
+  setFreq(id: string, centerHz: number, spanHz: number): void;
 }
 
 /** What the Go-to offer shows: the words and acceptability `retune.ts` computed, and the press. */
@@ -137,8 +141,21 @@ const MODE_TEXT = {
  *
  * Zoom anchors frequency at the pane's centre and time at the newest row when the pane follows
  * (so zooming never walks a live pane off the growing edge) and at the middle when it is frozen.
+ *
+ * `tunedWindow` (T-955) is the front end's OWN current centre/span (`frequency.current`, off the
+ * navigation poll the host already runs), asked only here and only on an explicit follow-live press — never at open
+ * (see `surface/bootstrap.ts`'s recency-narrowed opening) and never as a background correction. A
+ * pane can drift to spectrum the radio is no longer tuned to (a stale reload, a pan, a retune
+ * elsewhere) while still reading as "following" in TIME; pressing follow-live is the explicit ask to
+ * return to what the front end is doing now, in both axes, so it also resets the pane's frequency
+ * window when the caller has one to give. View arithmetic only — `setFreq` reaches no route.
  */
-export function paneActions(panes: PaneControl, activePane: () => string | null, onFollow?: (on: boolean) => void) {
+export function paneActions(
+  panes: PaneControl,
+  activePane: () => string | null,
+  onFollow?: (on: boolean) => void,
+  tunedWindow?: () => { centerHz: number; spanHz: number } | null,
+) {
   return {
     zoom(factor: number): void {
       const id = activePane();
@@ -151,6 +168,10 @@ export function paneActions(panes: PaneControl, activePane: () => string | null,
       // T-442: following is a coordinate change on the pane, nothing more — the SDR, the ring and
       // detection never paused, so there is nothing to resume anywhere but the screen.
       panes.setFollowing(id, true);
+      const w = tunedWindow?.();
+      if (w && Number.isFinite(w.centerHz) && Number.isFinite(w.spanHz) && w.spanHz > 0) {
+        panes.setFreq(id, w.centerHz, w.spanHz);
+      }
       onFollow?.(true);
     },
     pauseLive(): void {
