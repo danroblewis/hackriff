@@ -24094,7 +24094,6 @@ tasks:
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
     status: in-progress
-    branch: task-t813
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -24124,6 +24123,15 @@ tasks:
       DEFINITION OF DONE - WHAT THE USER WILL SEE ON STAGING (user 2026-09-24): every layer stays legible over the waterfall (figure-ground) and distinguishable under a colour-blind simulation; no two layers share a colour meaning. Say in your handback exactly what to open on staging to see it.
 
       2026-09-24 coordinator, USER DECISION 19:35 (docs/23 §10.6 rule 6, 'the map is GIS, not Google Maps'; handoff ~/.hackriff-ops/handoffs/map-gis-symbolization-2026-09-24.md): ADDED: (a) the SYMBOLOGY TABLE on the polygon - Confirmed = solid outline + light fill; Candidate = dashed outline, no/very light fill; unexplained = outline + '?' label; curated/human = distinct outline style; class carried by fill/outline/label, never glyph shape; colour-blind safe; (b) LABEL PLACEMENT - freq · bw · class inside or just above a box wide enough to hold it, overlapping labels thinned by priority (Confirmed > Candidate), GIS-style. Coordinate with T-910 (which draws the polygons).
+    branch: task-t813
+    result: |
+      DONE (work-runner, from handback.json, 2026-09-25 01:31).
+      Figure-ground/CVD-safety pass across the map layers. Audit found T-807/T-808/T-809/T-910 already meet docs/23 §7 structurally: coverage-fog states are desaturated flats plus pattern (never a saturated hue pair), and T-910's SYMBOLOGY table already ties every FeatureClass (confirmed/candidate/unexplained/artifact/curated) to a distinct outline/fill in addition to colour. Added what was missing: a CVD-simulation verification utility (ui/src/surface/cvd.ts, Vienot/Brettel/Mollon protanopia/deuteranopia matrices + redmean distance) and a regression test (ui/test/surface-cvd.test.ts) asserting every differently-meaning mark ink stays distinguishable under simulated colour-blindness and that classes sharing a box colour are told apart by shape/pattern. Also added markKeyEntries() to ui/src/surface/legend.ts, wired into the layers menu's 'Detections' overlay row (ui/src/app/centre/surface.ts) the same way fogKeyEntries() already wires into 'Coverage', so a viewer can open Layers and read what each mark means, not just infer it from colour.
+      Tests: just test-ui -> exit 0 (79/79 test files passed (build + tsc --noEmit + node test suites), including the new 6-test surface-cvd.test.ts)
+      precheck exit 0
+      Commits: 4e3f9983
+      Observed, not chased: Old .sf-pin.confirmed/.candidate/.unknown/.curated CSS rules in ui/src/app/centre/centre.css (shape-glyph pins: filled square/open diamond/circle+?/pennant) appear dead since T-910's user decision that detections draw no DOM glyph at all (.sf-pin.area/.sf-pin.symbol only) - not touched, out of this ticket's scope, and removing them risked breaking a path I didn't fully trace (e.g. the collections/curated marker pins, which may still use the shaped glyph classes via research-slice.ts). Worth a follow-up cleanup ticket if confirmed dead. | ui/src/surface/preview-main.ts (the standalone /surface preview page) still only shows legendEntries()/fogKeyEntries(), not markKeyEntries() - left as-is since the preview page is a dev tool, not the product surface docs/23 targets, and MAP-13's acceptance names the mockup/app as reference.
+      Resources: 0 CPU-s, peak 0.0 GB
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
