@@ -28533,7 +28533,8 @@ tasks:
   - id: T-975
     milestone: MAUTO
     title: Explorer P25 capture into fixtures/ with hidden truth (852.859 MHz intermittent C4FM, 2.4 Msps) + a P25 sync reference oracle
-    status: todo
+    status: in-progress
+    branch: task-t975
     priority: P1
     deps: []
     parallel_group: FIXTURE-EXPLORER
