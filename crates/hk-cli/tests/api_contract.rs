@@ -846,10 +846,14 @@ fn discovery_history_floor_status_and_control_state_have_the_documented_shape() 
     ] {
         assert!(tc[field].is_u64(), "tile_cache.{field}: {tc}");
     }
-    assert_eq!(tc["max_entries"], json!(256), "{tc}");
-    assert_eq!(tc["max_bytes"], json!(32 * 1024 * 1024), "{tc}");
-    assert!(tc["entries"].as_u64().unwrap() <= 256, "{tc}");
-    assert!(tc["bytes"].as_u64().unwrap() <= 32 * 1024 * 1024, "{tc}");
+    // T-1020: sized in viewports (256 MiB / 600 entries), past the 135-290 tiles/screen the
+    // tile-latency review measured against the old 32 MiB / ~35-tile bound.
+    assert_eq!(tc["max_entries"], json!(600), "{tc}");
+    assert_eq!(tc["max_bytes"], json!(256 * 1024 * 1024), "{tc}");
+    assert!(tc["entries"].as_u64().unwrap() <= 600, "{tc}");
+    assert!(tc["bytes"].as_u64().unwrap() <= 256 * 1024 * 1024, "{tc}");
+    // T-1020: per-client hit/miss, so a pan-back over one pane's own viewport is measurable.
+    assert!(is_object(&tc["by_client"]), "tile_cache.by_client: {tc}");
 
     // T-132: the baseline memory bound (docs/api.md `attention`).
     for field in [

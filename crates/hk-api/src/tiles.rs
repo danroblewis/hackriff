@@ -2737,7 +2737,7 @@ fn tile_body(
         .map(|_| hot_tile_key(&key, store, planes, max_live));
     let epoch = coverage_epoch(state);
     if let (Some(c), Some(k)) = (state.tile_cache.as_ref(), cache_key.as_ref())
-        && let Some(mut v) = c.get(k, epoch)
+        && let Some(mut v) = c.get(k, epoch, slot.client())
     {
         // The answer is the cached one, but the measurement of what THIS read cost, and whose
         // share it was admitted under (T-630), is this read's — `http.rs` strips exactly these
@@ -2899,17 +2899,30 @@ fn tile_body(
 ///
 /// **Bounded is the point, and the bound is in bytes** (T-453): residency must not grow with node
 /// count, and a cache sized in *tiles* would, because a tile's size is a property of the grid.
-/// Thirty-two mebibytes is a few viewports' worth of `planes=f16` tiles and a small fraction of
-/// what one `/api/history` query already allocates; it does not move when the pyramid deepens,
-/// when a pane zooms, or when a second client connects.
-pub const TILE_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+///
+/// **Sized in viewports (T-1020).** This is a RAM ACCELERATOR in front of the rolling tile
+/// storage T-1023 owns — it holds no data the disk pyramid does not, so growing it costs RAM
+/// only, never durability. The tile-latency review (2026-09-25) measured a screen at 135-290
+/// tiles; the prior 32 MiB bound held ~35 of today's `planes=f16` tiles (staging: 0 hits / 27
+/// misses on a single pan-back), so a pan re-read everything every time. T-1019 landed and cut a
+/// `planes=compact` tile to ~467 kB against f16's ~922 kB on the acceptance fixture (roughly
+/// half; the docstring below still says "a few viewports' worth" for the reasoning, not the
+/// number). 256 MiB / 467 kB is ~560 compact tiles, comfortably past 290 without chasing an exact
+/// multiple of a screen that varies with pane count and zoom. On the Jetson Orin Nano target
+/// (docs/02 hardware tiers, 4/8 GB variants) 256 MiB is under 6% of the smallest module's RAM and
+/// well inside the budget the pyramid, ring and inference stages already share.
+pub const TILE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// The cache's entry bound.
 ///
 /// The byte bound alone would admit an unbounded number of tiny answers — a 7.5 kB
 /// coverage-short-circuit tile is 4300 of them inside 32 MiB — and each entry costs a key and a
 /// `Value` tree beyond its serialized size. Whichever bound binds first evicts.
-pub const TILE_CACHE_MAX_ENTRIES: usize = 256;
+///
+/// **T-1020:** raised past the 135-290 tiles/screen the review measured, so the byte bound above
+/// is what actually binds in the common case; the entry bound still stops a flood of tiny answers
+/// from being free.
+pub const TILE_CACHE_MAX_ENTRIES: usize = 600;
 
 /// One cached answer.
 struct HotTile {
@@ -2954,23 +2967,46 @@ struct HotTileCacheInner {
     misses: u64,
     evictions: u64,
     invalidations: u64,
+    /// Per-client hit/miss, so a pan-back can be measured per pane's declared `client` (T-1020)
+    /// rather than only in aggregate. Bounded the same way the T-630 share table is: an idle
+    /// client's row is dropped for a new one rather than growing without bound.
+    by_client: std::collections::HashMap<String, ClientHitStats>,
+    client_clock: u64,
 }
 
+/// One client's hit/miss counters (T-1020), plus the clock stamp that makes eviction LRU.
+#[derive(Default, Clone, Copy)]
+struct ClientHitStats {
+    hits: u64,
+    misses: u64,
+    used: u64,
+}
+
+/// Client identities tracked in the hit/miss table at once (T-1020). Shares its bound with the
+/// T-630 admission share table (`TILE_CLIENT_MAX`) — the same population of declared clients asks
+/// both routes.
+const TILE_CACHE_CLIENT_MAX: usize = TILE_CLIENT_MAX;
+
 impl HotTileCache {
-    /// A cached answer for `key`, if one is held at `epoch`.
-    fn get(&self, key: &str, epoch: (u64, u64)) -> Option<Value> {
+    /// A cached answer for `key`, if one is held at `epoch`. `client` is the caller's declared
+    /// `client` id (T-1020): its own hit/miss counters are updated so a pan-back over a viewport
+    /// can be measured per pane, not only in aggregate.
+    fn get(&self, key: &str, epoch: (u64, u64), client: &str) -> Option<Value> {
         let mut g = self.inner.lock().ok()?;
         g.reset_if_stale(epoch);
         g.clock += 1;
         let clock = g.clock;
-        let Some(e) = g.map.get_mut(key) else {
+        let hit = g.map.get_mut(key).map(|e| {
+            e.used = clock;
+            e.body.clone()
+        });
+        g.record_client(client, hit.is_some());
+        if hit.is_some() {
+            g.hits += 1;
+        } else {
             g.misses += 1;
-            return None;
-        };
-        e.used = clock;
-        let body = e.body.clone();
-        g.hits += 1;
-        Some(body)
+        }
+        hit
     }
 
     /// Hold `body` for `key`, evicting the least recently used until both bounds hold.
@@ -3018,6 +3054,16 @@ impl HotTileCache {
         let Ok(g) = self.inner.lock() else {
             return Value::Null;
         };
+        let by_client: serde_json::Map<String, Value> = g
+            .by_client
+            .iter()
+            .map(|(client, s)| {
+                (
+                    client.clone(),
+                    json!({ "hits": s.hits, "misses": s.misses }),
+                )
+            })
+            .collect();
         json!({
             "entries": g.map.len(),
             "bytes": g.bytes,
@@ -3027,12 +3073,16 @@ impl HotTileCache {
             "misses": g.misses,
             "evictions": g.evictions,
             "invalidations": g.invalidations,
+            "by_client": by_client,
             "rule": "SEALED TILES ONLY. A sealed tile's time extent has fully passed the \
                 pyramid's watermark, so it can never change again; a live tile at the growing \
                 edge changes on every arriving row and is never cached, never looked up and \
                 always re-read. `invalidations` counts the times the observation log moved \
                 (records written or segments deleted) and every entry was dropped, because the \
-                coverage plane beside a sealed grid is derived from that log.",
+                coverage plane beside a sealed grid is derived from that log. `by_client` is the \
+                same hits/misses split by the caller's declared `client` id (T-1020, T-630's \
+                identity), bounded to the least-recently-seen 64 the same way the admission share \
+                table is, so a pan-back over one pane's own viewport is directly measurable.",
         })
     }
 }
@@ -3047,6 +3097,41 @@ impl HotTileCacheInner {
             self.bytes = 0;
             self.epoch = epoch;
         }
+    }
+
+    /// Record one lookup's outcome against `client`'s own counters (T-1020), evicting the
+    /// least-recently-seen client row first when the table is full — the same bound as the T-630
+    /// share table, over the same population.
+    fn record_client(&mut self, client: &str, hit: bool) {
+        self.client_clock += 1;
+        let clock = self.client_clock;
+        if let Some(s) = self.by_client.get_mut(client) {
+            if hit {
+                s.hits += 1;
+            } else {
+                s.misses += 1;
+            }
+            s.used = clock;
+            return;
+        }
+        if self.by_client.len() >= TILE_CACHE_CLIENT_MAX {
+            if let Some(victim) = self
+                .by_client
+                .iter()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(k, _)| k.clone())
+            {
+                self.by_client.remove(&victim);
+            }
+        }
+        self.by_client.insert(
+            client.to_string(),
+            ClientHitStats {
+                hits: u64::from(hit),
+                misses: u64::from(!hit),
+                used: clock,
+            },
+        );
     }
 }
 
@@ -3138,7 +3223,7 @@ fn hot_hit_unslotted(
     }
     let max_live = crate::http::max_live_span_hz(state);
     let k = hot_tile_key(&key, store, planes, max_live);
-    let mut v = cache.get(&k, coverage_epoch(state))?;
+    let mut v = cache.get(&k, coverage_epoch(state), client)?;
     let cost = &mut v["cost"];
     cost["build_ms"] = json!((started.elapsed().as_secs_f64() * 1e6).round() / 1000.0);
     cost["in_flight"] = json!(state.tile_admission.in_flight());
@@ -5349,6 +5434,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **T-1020: a pan back over a just-seen viewport is answered from the cache — the per-client
+    /// hit count rises and no filesystem read happens — measured through the mock SDR's own state
+    /// path (`tiles_json`), the same one `/api/tiles?client=` uses.**
+    #[test]
+    fn a_pan_back_over_a_just_seen_viewport_is_a_cache_hit_reported_per_client() {
+        let dir = temp_dir("cache-by-client");
+        let (mut state, _, _) = state_with_history(&dir, (N as i64) + 36);
+        state.tile_cache = Some(Arc::new(HotTileCache::default()));
+
+        let mut with_client = tile_params(F_INDEX, T_INDEX);
+        with_client.push(("client".into(), "pane-a".into()));
+
+        let first = tiles_json(&state, &with_client).unwrap();
+        assert!(
+            first["cost"]["served_from"].is_null(),
+            "the first read (a miss) is a real read"
+        );
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["by_client"]["pane-a"]["hits"], json!(0), "{stats}");
+
+        reset_source_reads(&state);
+        // The pan back: the SAME viewport, the SAME declared client.
+        let again = tiles_json(&state, &with_client).unwrap();
+        assert_eq!(
+            again["cost"]["served_from"],
+            json!("hot-tile-cache"),
+            "a pan back over a just-seen viewport must be a cache hit"
+        );
+        assert_eq!(source_reads(&state), 0, "a hit must not touch the pyramid");
+
+        let stats = state.tile_cache.as_ref().unwrap().stats_json();
+        assert_eq!(
+            stats["by_client"]["pane-a"]["hits"],
+            json!(1),
+            "the pane's own hit count must rise: {stats}"
+        );
+        assert_eq!(stats["by_client"]["pane-a"]["misses"], json!(1), "{stats}");
+        assert_eq!(stats["hits"], json!(1), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **A LIVE tile is re-read every time, and that is the correctness half of the ticket.**
     ///
     /// The growing edge changes on every arriving row: serving a stale copy would break *"the live
@@ -5423,17 +5550,22 @@ mod tests {
         for i in 0..TILE_CACHE_MAX_ENTRIES {
             c.put(format!("k{i}"), &body, epoch);
         }
-        assert!(c.get("k0", epoch).is_some());
+        assert!(c.get("k0", epoch, ANONYMOUS_CLIENT).is_some());
         c.put("fresh".into(), &body, epoch);
         assert!(
-            c.get("k0", epoch).is_some(),
+            c.get("k0", epoch, ANONYMOUS_CLIENT).is_some(),
             "the touched entry was evicted"
         );
-        assert!(c.get("k1", epoch).is_none(), "the coldest entry survived");
+        assert!(
+            c.get("k1", epoch, ANONYMOUS_CLIENT).is_none(),
+            "the coldest entry survived"
+        );
 
-        // And a body larger than the whole cache is never held: the bound is unconditional.
+        // And a body larger than the whole cache is never held: the bound is unconditional. A
+        // plain string of that length (rather than a huge numeric array) so the test builds and
+        // serializes it in memcpy time, not per-element formatting time, however big the bound is.
         let c = HotTileCache::default();
-        let huge = json!({ "grid": vec![-80.0f64; TILE_CACHE_MAX_BYTES / 4] });
+        let huge = json!({ "grid": "a".repeat(TILE_CACHE_MAX_BYTES + 1024) });
         c.put("huge".into(), &huge, epoch);
         let s = c.stats_json();
         assert_eq!(s["entries"], json!(0), "{s}");
@@ -5451,16 +5583,16 @@ mod tests {
         let c = HotTileCache::default();
         let body = json!({ "coverage": "observed" });
         c.put("t".into(), &body, (1, 0));
-        assert!(c.get("t", (1, 0)).is_some());
+        assert!(c.get("t", (1, 0), ANONYMOUS_CLIENT).is_some());
         // A record appended.
         assert!(
-            c.get("t", (2, 0)).is_none(),
+            c.get("t", (2, 0), ANONYMOUS_CLIENT).is_none(),
             "a new record left a stale coverage answer"
         );
         c.put("t".into(), &body, (2, 0));
         // A segment pruned.
         assert!(
-            c.get("t", (2, 1)).is_none(),
+            c.get("t", (2, 1), ANONYMOUS_CLIENT).is_none(),
             "retention left a stale coverage answer"
         );
         let s = c.stats_json();
