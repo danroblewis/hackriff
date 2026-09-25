@@ -29176,7 +29176,8 @@ tasks:
   - id: T-996
     milestone: MMAP
     title: Scale bar per pane (frequency + time, Google-Maps style, bottom-right) and retire the stats 'more' panel and the white centre/span block
-    status: todo
+    status: in-progress
+    branch: task-t996
     priority: high
     deps: []
     parallel_group: MAP-SCALE
@@ -29731,7 +29732,7 @@ tasks:
   - id: T-1025
     milestone: MMAP
     title: "Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them"
-    status: in-progress
+    status: done
     branch: task-t1025
     priority: high
     deps:
@@ -29747,6 +29748,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on ports >= 9216), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs asserting retired chrome are rewritten/retired per the rcfix rule, never loosened.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (map chrome feedback / retune mode): Top chrome is still a bar after T-993: the status pill and top-right cluster sit on an opaque strip - make them separate translucent chips with canvas visible between them
+    commit: b74b371b
   - id: T-1026
     milestone: MMAP
     title: "Detail card is hidden until a feature is clicked (Google-Maps place card): click a box/pin/marker/path opens it, bare-map click or Esc closes it, another feature swaps it; the inventory pills open it on the list"
@@ -29787,7 +29789,8 @@ tasks:
   - id: T-1028
     milestone: MMAP
     title: "Retune mode: a visible toggle (and a held key for one gesture) in which a settled pan/zoom issues ONE retune through the gated DeviceAction path; a too-wide view tunes the largest achievable span centred on it; off by default = today's rule"
-    status: todo
+    status: in-progress
+    branch: task-t1028
     priority: high
     deps:
     - T-1000
