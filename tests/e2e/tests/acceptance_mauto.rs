@@ -115,3 +115,7 @@ mod mauto_negatives;
 // quality clause through the mock SDR and `/api/analyze`, armed on `server_backend()`.
 #[path = "acceptance/mauto_eval.rs"]
 mod mauto_eval;
+// T-576: the false-confirm acceptance suite (ADR-0022 §10, docs/22 §3): A1 zero confirms on the
+// negatives, A2 the analytic null's measured tail, A3 the recall control.
+#[path = "acceptance/mauto_false_confirm.rs"]
+mod mauto_false_confirm;

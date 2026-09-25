@@ -195,6 +195,46 @@ impl ListenConfig {
     }
 }
 
+/// How long a wait for the probe's samples may go on: the limit is charged **only while the
+/// source is free to deliver**.
+///
+/// In lossless replay ([`crate::gate`]) the capture thread is deliberately stopped whenever a
+/// reader still needs samples the next block would overwrite, for as long as that reader takes -
+/// `hk-survey`'s one-off receiver-line measurement holds it for its whole duration *by design*, so
+/// that a replay answers the same however slowly the machine runs. A probe that charged that hold
+/// to its own deadline refused the request 504 `probe-timeout` while the writer was stopped on
+/// purpose: T-929 measured `hk-survey` frozen 2 015 232 samples behind a head of 4 014 080 (exactly
+/// the gate's slack) for the full 20 s, every other reader at the head, and not one sample
+/// delivered to the probe. The refusal was reporting a stall it had caused nobody and could not
+/// cure, against the gate module's own promise that a lossless replay is unchanged "however slowly
+/// a debug build runs".
+///
+/// So held time is not charged, and the refusal keeps its meaning: **no samples arrived while the
+/// source could have sent them**. The wait is still bounded - a segment that ends reads as
+/// [`Next::Closed`] and refuses - and on a live source the gate is disabled, so nothing changes.
+struct Patience {
+    left: Duration,
+    last: Instant,
+}
+
+impl Patience {
+    /// A limit of `left`, counted from `now`.
+    fn new(left: Duration, now: Instant) -> Self {
+        Self { left, last: now }
+    }
+
+    /// Charges the time since the previous call unless capture was `held`, and reports whether
+    /// the limit is spent.
+    fn spent(&mut self, now: Instant, held: bool) -> bool {
+        let since = now.saturating_duration_since(self.last);
+        self.last = now;
+        if !held {
+            self.left = self.left.saturating_sub(since);
+        }
+        self.left.is_zero()
+    }
+}
+
 fn seconds(s: f64) -> Option<Duration> {
     (s.is_finite() && s > 0.0).then(|| Duration::from_secs_f64(s))
 }
@@ -598,9 +638,10 @@ impl ListenManager {
         };
         let mut iq: Vec<Complex<i8>> = Vec::with_capacity(want);
         let mut head: Option<(SampleTime, ProvenanceHandle)> = None;
-        let deadline = Instant::now() + cfg.probe_timeout;
+        // The limit is charged only while capture is free to run ([`Patience`]).
+        let mut patience = Patience::new(cfg.probe_timeout, Instant::now());
         while iq.len() < want {
-            if Instant::now() > deadline {
+            if patience.spent(Instant::now(), shared.gate.holding()) {
                 return Err(OpenRefusal::new(
                     504,
                     "probe-timeout",
@@ -1332,6 +1373,40 @@ fn round2(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-929: the probe's limit is time the source could have delivered in. A lossless hold
+    /// (`hk-survey` measuring, holding the flow gate) is not charged, however long it lasts; the
+    /// 504 still fires promptly once capture is free again and nothing arrives.
+    #[test]
+    fn a_held_capture_never_spends_the_probes_patience() {
+        let t0 = Instant::now();
+        let limit = Duration::from_secs(20);
+
+        // Held for a hundred times the limit: still patient, because no sample could arrive.
+        let mut p = Patience::new(limit, t0);
+        for k in 1..=200 {
+            assert!(
+                !p.spent(t0 + Duration::from_secs(10 * k), true),
+                "spent while capture was held, at {} s",
+                10 * k
+            );
+        }
+        // Capture is free again: the whole limit is still there, and it is spent in real time.
+        assert!(!p.spent(t0 + Duration::from_secs(2000 + 19), false));
+        assert!(p.spent(t0 + Duration::from_secs(2000 + 20), false));
+
+        // Free throughout: unchanged behaviour - the limit expires after exactly `limit`.
+        let mut p = Patience::new(limit, t0);
+        assert!(!p.spent(t0 + Duration::from_millis(19_999), false));
+        assert!(p.spent(t0 + limit, false));
+
+        // Mixed: 15 s free, an hour held, 5 s free.
+        let mut p = Patience::new(limit, t0);
+        assert!(!p.spent(t0 + Duration::from_secs(15), false));
+        assert!(!p.spent(t0 + Duration::from_secs(3615), true));
+        assert!(!p.spent(t0 + Duration::from_secs(3619), false));
+        assert!(p.spent(t0 + Duration::from_secs(3620), false));
+    }
 
     #[test]
     fn replumbing_is_503_and_a_finished_run_is_410() {
