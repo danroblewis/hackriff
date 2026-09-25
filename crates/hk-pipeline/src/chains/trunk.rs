@@ -1049,10 +1049,23 @@ fn hunt(
                     symbols.dibits.len(),
                 ),
             };
-            // Re-filed only when the answer CHANGED. The same verdict every half-second for the
-            // life of the run is one fact, not thousands of rows.
+            // Re-filed only when [`may_file_unconfirmed`] says so: the same verdict every half
+            // second is one fact, and a confirmation is never walked back by a window that failed
+            // to confirm.
+            let stands = filed.get(&channel_k) == Some(&CcOutcome::Confirmed);
+            let reason = if stands {
+                format!(
+                    "{reason}. A control channel was CONFIRMED here on an earlier pass, by frame \
+                     sync AND CRC; this window produced no valid check, which is the absence of \
+                     evidence and not evidence of absence (a fade, a shorter dwell or a drifted \
+                     grid all look like this), so the confirmed analysis stands and nothing was \
+                     filed over it."
+                )
+            } else {
+                reason
+            };
             let mut repo = shared.repo();
-            let filing = filed.get(&k) != Some(&outcome);
+            let filing = may_file_unconfirmed(filed.get(&channel_k).copied(), outcome);
             let attached = if filing {
                 attach_to_inventory(
                     shared,
@@ -1080,7 +1093,7 @@ fn hunt(
             drop(repo);
             if attached.is_some() {
                 inc(&c.cc_verdicts);
-                filed.insert(k, outcome);
+                filed.insert(channel_k, outcome);
             }
             push(
                 &mut verdicts,
@@ -1358,6 +1371,34 @@ fn hunt(
     // is the answer to "which channels did this pass look at, and what did each come to", which no
     // counter can give and no durable row holds for the channels that never reached an emitter.
     report(shared, verdicts, t_end);
+}
+
+/// Whether an unconfirmed pass may file its verdict over what this chain has already filed for the
+/// channel (T-977).
+///
+/// Two rules, and the first is the one that matters:
+///
+/// 1. **A confirmation is never walked back by a window that failed to confirm.** `Confirmed` means
+///    frame sync *and* CRC-valid blocks were measured on this channel — 16 bits per valid block
+///    against chance — and a later window with no valid check is the **absence of evidence**, not
+///    evidence of absence: a fade, a shorter dwell, a grid that drifted, or the admission cap
+///    spending its slots elsewhere all produce exactly that. Letting one such window file
+///    `resolution: unknown, "this is NOT a control channel"` over a CRC-confirmed emitter would
+///    make the strongest decode in the run retractable by the weakest observation, which is the
+///    same defect as [`CallHeader::fold`] refusing to let a clear header walk back an encrypted
+///    grant. A control channel that genuinely moves is a *new* confirmation elsewhere, not a denial
+///    here.
+/// 2. Otherwise, file only a **changed** answer. The hunt runs every `period_s` for the life of the
+///    run; re-writing the same verdict every half-second would grow the database without adding a
+///    fact.
+///
+/// `None` (nothing filed yet) always files: that is the case the whole ticket exists for.
+fn may_file_unconfirmed(previous: Option<CcOutcome>, outcome: CcOutcome) -> bool {
+    match previous {
+        Some(CcOutcome::Confirmed) => false,
+        Some(p) => p != outcome,
+        None => true,
+    }
 }
 
 /// The longest contiguous **keyed** run of an intermittent channel's baseband (T-977).
@@ -2875,6 +2916,92 @@ mod tests {
 
     /// Occupancy separates a continuous channel from a bursty one and from empty ones — which is
     /// candidacy, and candidacy alone. Nothing here confirms anything.
+    /// **T-977 review: a confirmation is never walked back by a window that failed to confirm.**
+    ///
+    /// The defect this pins: `filed` was compared with `!=`, so `Confirmed` followed by `NoSync`
+    /// read as "the answer changed" and an unconfirmed pass filed
+    /// `resolution: unknown, "this is NOT a control channel"` over an emitter carrying a CRC-valid
+    /// P25 decode. One fade, one shorter dwell, one drifted grid, or the admission cap spending its
+    /// slots elsewhere is enough to produce that window — so the strongest decode in the run was
+    /// retractable by the weakest observation.
+    ///
+    /// Re-inject the defect (`previous != Some(outcome)`) and the first two assertions go red.
+    #[test]
+    fn a_crc_confirmed_channel_is_never_denied_by_a_later_window_that_did_not_confirm() {
+        for outcome in [
+            CcOutcome::NoSync,
+            CcOutcome::SyncWithoutCheck,
+            CcOutcome::NotDemodulated,
+        ] {
+            assert!(
+                !may_file_unconfirmed(Some(CcOutcome::Confirmed), outcome),
+                "{outcome:?} filed over a CRC-valid confirmation: the absence of a check in one \
+                 window is not evidence that the control channel is not one",
+            );
+        }
+    }
+
+    /// The other half of the rule, so the fix cannot be "never file anything": a channel that was
+    /// never confirmed files its first verdict and every CHANGED one, and stops re-filing an
+    /// unchanged one — the hunt runs every `period_s` for the life of the run.
+    #[test]
+    fn an_unconfirmed_channel_files_its_first_verdict_and_only_changes_after_it() {
+        assert!(
+            may_file_unconfirmed(None, CcOutcome::SyncWithoutCheck),
+            "the first verdict is the whole point: without it the row reads `not-searched`",
+        );
+        assert!(!may_file_unconfirmed(
+            Some(CcOutcome::SyncWithoutCheck),
+            CcOutcome::SyncWithoutCheck
+        ));
+        assert!(may_file_unconfirmed(
+            Some(CcOutcome::NoSync),
+            CcOutcome::SyncWithoutCheck
+        ));
+        assert!(may_file_unconfirmed(
+            Some(CcOutcome::SyncWithoutCheck),
+            CcOutcome::NoSync
+        ));
+    }
+
+    /// A continuous channel's window IS the emission, so [`keyed_span`] must give the whole of it
+    /// back — the confirmed path cannot be changed by the intermittent-channel measurement.
+    /// A keyed run too short to be a symbol alphabet also gives the window back rather than a
+    /// fragment: a bad split is worse than no split.
+    #[test]
+    fn keyed_span_splits_an_intermittent_channel_and_leaves_a_continuous_one_whole() {
+        let n = 20_000;
+        let steady: Vec<Complex32> = (0..n).map(|_| Complex32::new(0.5, 0.0)).collect();
+        assert_eq!(
+            keyed_span(&steady),
+            0..n,
+            "a continuous channel has no split"
+        );
+
+        // 60 % keyed in the middle, 20 dB down either side.
+        let keyed: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let on = (n / 5..4 * n / 5).contains(&i);
+                Complex32::new(if on { 0.5 } else { 0.005 }, 0.0)
+            })
+            .collect();
+        let span = keyed_span(&keyed);
+        let (lo, hi) = (span.start as f64 / n as f64, span.end as f64 / n as f64);
+        assert!(
+            (lo - 0.2).abs() < 0.02 && (hi - 0.8).abs() < 0.02,
+            "the keyed run should be found at 20..80 %, got {lo:.2}..{hi:.2}",
+        );
+
+        // A 5 % blip is below MIN_KEYED_FRACTION_PCT: claim nothing, hand the window back.
+        let blip: Vec<Complex32> = (0..n)
+            .map(|i| {
+                let on = (n / 2..n / 2 + n / 20).contains(&i);
+                Complex32::new(if on { 0.5 } else { 0.005 }, 0.0)
+            })
+            .collect();
+        assert_eq!(keyed_span(&blip), 0..n);
+    }
+
     #[test]
     fn occupancy_separates_continuous_from_bursty_and_empty() {
         let (fs, raster) = (500_000.0, 12_500.0);

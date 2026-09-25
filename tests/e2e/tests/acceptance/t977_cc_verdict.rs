@@ -30,7 +30,7 @@
 use hk_core::Pacing;
 use hk_e2e::{Fixture, SynthRequest};
 use hk_model::repo::synthesis::ResolutionKind;
-use hk_model::{EmitterId, Repository};
+use hk_model::{EmitterId, InventoryQuery, Repository};
 use serde_json::json;
 
 use crate::blind::{replay_config, start};
@@ -136,9 +136,15 @@ fn run(tag: &str, duration_s: f64) -> Option<Run> {
 /// `not-searched`, which is the decode-side form of painting observed spectrum grey.
 ///
 /// Red on the old code by construction: nothing but a confirmation wrote a synthesis row at all.
+///
+/// **Why it asserts over every emitter rather than a named channel.** An unpaced replay completes
+/// as many hunt passes as the chain thread is scheduled for, and the first pass always lands before
+/// blind detection has written anything — so *which* channel a pass reaches is a property of the
+/// box, not of the code. Asserting through it made this test fail under a loaded gate and pass
+/// alone. The invariant below holds whatever runs.
 #[test]
 fn t977_a_rejected_candidate_leaves_a_searched_verdict_on_its_emitter_row() {
-    let Some(run) = run("t977verdict", 3.0) else {
+    let Some(run) = run("t977verdict", 6.0) else {
         return;
     };
     eprintln!(
@@ -163,55 +169,68 @@ fn t977_a_rejected_candidate_leaves_a_searched_verdict_on_its_emitter_row() {
         run.count("/chains/cc_confirmed"),
     );
 
-    // Every synthesis row the run wrote for a channel that did not confirm must state a finished
-    // search. `not-searched` is refused at the storage layer (a stored row IS a finished search),
-    // so what this checks is that the kinds are the *sealed* ones and carry a reason and a
-    // sentence a person can read.
+    // ---- The invariant, over EVERY emitter the run has.
+    //
+    // Not over the voice channels specifically, and that is deliberate: how many hunt passes an
+    // unpaced replay completes depends on when the chain thread is scheduled, so *which* channel a
+    // pass reaches is not a property of the code under test. What IS a property of it is that no
+    // row the trunking engine wrote may read `not-searched`, may resolve without a reason, or may
+    // resolve without a sentence naming the channel — the defect this ticket exists for, asserted
+    // wherever it could appear rather than where one run happened to put it.
     let r = run.repo();
-    let mut checked = 0;
-    for hz in run.voice_channels() {
-        let Some(e) = run.emitter_near(&r, hz) else {
+    let rows: Vec<_> = inventory(&r, InventoryQuery::default())
+        .into_iter()
+        .filter_map(|e| r.synthesis(e.emitter.id).unwrap())
+        .filter(|row| row.engine == hk_pipeline::synth::TRUNK_SYNTH_ENGINE)
+        .collect();
+    assert!(
+        !rows.is_empty(),
+        "[{T977}] the hunt filed {} verdict(s) and the inventory holds no trunking analysis row \
+         at all",
+        run.count("/chains/cc_verdicts"),
+    );
+    let mut unconfirmed = 0;
+    for row in &rows {
+        // A `solved` row resolves nothing and is right not to: the control channel CRC-decoded and
+        // its messages named the system, which is an answer rather than a residue. Every row below
+        // solved must carry one.
+        let Some(res) = row.resolution.as_ref() else {
+            assert_eq!(
+                row.verdict,
+                hk_model::repo::synthesis::Verdict::Solved,
+                "[{T977}] only a solved row may resolve nothing",
+            );
             continue;
         };
-        let Some(row) = r.synthesis(e).unwrap() else {
-            continue;
-        };
-        checked += 1;
-        let res = row
-            .resolution
-            .as_ref()
-            .expect("a rejected channel resolves to something, never to `solved`");
         eprintln!(
-            "[{T977}] {:.4} MHz -> {:?} / {:?}: {}",
-            hz / 1e6,
-            row.verdict,
-            res.kind,
-            res.summary
+            "[{T977}] {:?} / {:?}: {}",
+            row.verdict, res.kind, res.summary
         );
         assert_ne!(
             res.kind,
             ResolutionKind::NotSearched,
-            "[{T977}] {:.4} MHz was demodulated and rejected, and still reads `not-searched`",
-            hz / 1e6,
+            "[{T977}] a demodulated channel still reads `not-searched`: {res:?}",
         );
         assert!(
             res.reason.is_some(),
-            "[{T977}] {:.4} MHz resolves with no reason: {res:?}",
-            hz / 1e6,
+            "[{T977}] a finished search with no reason: {res:?}",
         );
-        assert!(
-            res.summary.contains("MHz"),
-            "[{T977}] the verdict must be a sentence naming the channel: {:?}",
-            res.summary,
-        );
+        if res.kind == ResolutionKind::Unknown {
+            unconfirmed += 1;
+            assert!(
+                res.summary.contains("MHz") && res.summary.contains("demodulated and scanned"),
+                "[{T977}] a rejected channel's verdict must be a sentence naming what was looked \
+                 at and what came of it: {:?}",
+                res.summary,
+            );
+        }
     }
     assert!(
-        checked >= 1,
-        "[{T977}] no voice-frame channel reached both an emitter and a synthesis row; the hunt \
-         demodulated {} channel(s) over {} pass(es) with {} detected-emitter admission(s)",
-        run.count("/chains/cc_demods"),
-        run.count("/chains/cc_passes"),
-        run.count("/chains/cc_emitter_candidates"),
+        unconfirmed >= 1,
+        "[{T977}] the hunt filed {} verdict(s) and not one of the {} trunking row(s) is a \
+         REJECTED channel's: before T-977 only a confirmation wrote a row at all",
+        run.count("/chains/cc_verdicts"),
+        rows.len(),
     );
 }
 
@@ -223,7 +242,7 @@ fn t977_a_rejected_candidate_leaves_a_searched_verdict_on_its_emitter_row() {
 /// `Demodulation`'s `estimated_params`, and the family is the hunt's own `p25-frame-sync` evidence.
 #[test]
 fn t977_an_intermittent_p25_voice_channel_measures_four_levels_and_reads_p25_like() {
-    let Some(run) = run("t977levels", 3.0) else {
+    let Some(run) = run("t977levels", 6.0) else {
         return;
     };
     let r = run.repo();
@@ -296,7 +315,7 @@ fn t977_an_intermittent_p25_voice_channel_measures_four_levels_and_reads_p25_lik
 /// fell off the list, would fail here.
 #[test]
 fn t977_looking_at_more_channels_confirms_no_more_control_channels() {
-    let Some(run) = run("t977control", 3.0) else {
+    let Some(run) = run("t977control", 6.0) else {
         return;
     };
     let passes = run.count("/chains/cc_passes");
