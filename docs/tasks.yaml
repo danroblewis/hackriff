@@ -27246,7 +27246,7 @@ tasks:
   - id: T-916
     milestone: MLIVE
     title: "Shadow follow-ups: ladder-fallback departures read hotter, auto/viewport contrast re-ranges the shadow, re-measure tile cost after the own-level search (T-911 residue)"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-911
@@ -27272,6 +27272,7 @@ tasks:
       Commits: e95c730d
       Observed, not chased: Measurement, not a failure: in the T-523 zoom-burst fixture the own-level search and the ladder never both spend cells - at level_f 0-4 the own level answers everything, at level_f 5-9 no own level divides the tile's row so only the ladder runs. The shared-budget path where both spend is only exercised by the new stale-departure fixture, and there the own-level search spends 0. | crates/hk-api/tests/tile_cost.rs level_f 9 of the T-527 backward-fill burst took 1723 ms of route time on this (loaded, debug-profile) box, against ~25 ms for the same address in the T-523 burst. Not thresholded by the test and not investigated here; it is the arrived-band fixture's full-path read, not the shadow search (its shadow leg was 23 ms).
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 892d3edc
   - id: T-917
     milestone: M2-hardening
     title: "hk-pipeline: requests_during_a_replumb (survey thread outlives its segment by 8 s) and chains_attached_and_detached_mid_run (wall-clock attach cycles) fail on main under load - triage and make deterministic"
