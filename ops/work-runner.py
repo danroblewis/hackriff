@@ -1642,37 +1642,58 @@ def _target_written(t):
 _HASHED = re.compile(r"^(.+)-([0-9a-f]{16})$")
 
 
-def superseded_executables(deps):
-    """Every executable in a cargo `deps` dir except the newest per stem: the same test/bin binary at an
-    older hash, which cargo never runs again (a rebuild relinks the newest; a missing one is rebuilt)."""
-    groups = {}
+def _units(profile_dir):
+    """hash -> the build unit it belongs to, from cargo's own `.fingerprint/<pkg>-<hash>/` directory: the
+    package plus the target kind files it holds (`bin-hk`, `test-bin-hk`, `test-integration-test-api_contract`).
+    A file stem is NOT a unit: `hk` is both hk-cli's bin and its unit-test harness, and four integration-test
+    names exist in two crates each (review, 2026-09-24 - the stem-keyed first pass deleted current twins)."""
+    out, fp = {}, os.path.join(profile_dir, ".fingerprint")
+    for d in os.listdir(fp) if os.path.isdir(fp) else []:
+        m = _HASHED.match(d)
+        if not m:
+            continue
+        try:
+            kinds = sorted({re.sub(r"^(dep|output)-", "", f) for f in os.listdir(os.path.join(fp, d))
+                            if f != "invoked.timestamp" and not f.endswith(".json")})
+        except OSError:
+            continue
+        out[m.group(2)] = (m.group(1), tuple(kinds))
+    return out
+
+
+def superseded_executables(profile_dir):
+    """Every executable in `<profile>/deps` whose build unit has a NEWER executable there: the same unit at an
+    older hash, which cargo never runs again (and rebuilds if it is ever wanted). An executable whose unit
+    cargo's fingerprints do not name is kept."""
+    deps, units, groups = os.path.join(profile_dir, "deps"), _units(profile_dir), {}
     for n in os.listdir(deps) if os.path.isdir(deps) else []:
         m, p = _HASHED.match(n), os.path.join(deps, n)
-        if not m or os.path.islink(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
+        if not m or m.group(2) not in units or os.path.islink(p) or not os.path.isfile(p) or not os.access(p, os.X_OK):
             continue
-        groups.setdefault(m.group(1), []).append((os.stat(p).st_mtime, p))
+        groups.setdefault(units[m.group(2)], []).append((os.stat(p).st_mtime, p))
     return [p for g in groups.values() for _, p in sorted(g)[:-1]]
 
 
 def _building(target, builds):
-    """A compiler/linker/test run writes into this target: a process in its tree whose CARGO_TARGET_DIR
-    is unset (then <tree>/target), or one whose CARGO_TARGET_DIR names this target from anywhere. The
-    stage daemon's release build runs in main's checkout into $HACKRIFF_OPS/target-serve and does not
-    count for main's target/ (2026-09-24 21:17: it made the first sweep skip main, 3.7 of ~40 GB freed)."""
+    """A cargo process writes into this target: one whose CARGO_TARGET_DIR names it, or one with none set
+    working in its tree (main's checkout: anywhere under it but the worktrees, which are judged one by one).
+    Only cargo is asked - every build, test run and link is under one, and its environment is readable
+    (Apple's ld hides its own; the stage daemon's link step read as 'building main' - review, 2026-09-24)."""
     tree = os.path.dirname(target)
     for cwd, ctd in builds:
         if ctd:
             if os.path.realpath(ctd) == os.path.realpath(target):
                 return True
-        elif cwd == tree or (tree != REPO and cwd.startswith(tree + "/")):
+        elif cwd == tree or (cwd.startswith(tree + "/") and
+                             not (tree == REPO and cwd.startswith(os.path.join(REPO, ".claude", "worktrees") + "/"))):
             return True
     return False
 
 
 def _builds():
-    """(cwd, CARGO_TARGET_DIR or "") for every running cargo / rustc / linker / nextest process."""
+    """(cwd, CARGO_TARGET_DIR or "") for every running cargo process (cargo, cargo-nextest, cargo-clippy...)."""
     out, pid, cwd = [], None, {}
-    for l in sh(["lsof", "-a", "-c", "cargo", "-c", "rustc", "-c", "ld", "-c", "ld64.lld", "-d", "cwd", "-Fpn"], timeout=60).splitlines():
+    for l in sh(["lsof", "-a", "-c", "cargo", "-d", "cwd", "-Fpn"], timeout=60).splitlines():
         if l.startswith("p"):
             pid = l[1:]
         elif l.startswith("n") and pid:
@@ -1688,12 +1709,13 @@ def sweep_superseded(dry):
     """User via supervisor, 2026-09-24 21:14 (Serves: cost - disk 303 -> 54 GB that day): superseded test
     executables piled up in main's target/, gate-target and every worker clone - 2365 of them, ~40 GB
     apparent, the SAME blocks in each (clones), so they free only when the last copy goes. After every
-    landing (main's HEAD moved since the last sweep) and between gates, keep the newest hash per binary
-    in all of them in one pass. A target where cargo/rustc/the linker is at work is skipped whole, and a
+    landing (a new merge commit on main since the last sweep) and between gates, keep the newest executable
+    per build unit in all of them in one pass. A target a cargo process writes into is skipped whole, and a
     file any process holds open is never touched."""
     if gate_running():
         return
-    head = sh(["git", "-C", REPO, "rev-parse", "HEAD"]).strip()
+    # A landing is a merge commit on main; the work runner's own board-sync commits move HEAD too, and are not one.
+    head = sh(["git", "-C", REPO, "log", "-1", "--merges", "--format=%H"]).strip()
     mark = f"{S}/sweep-last"
     try:
         last = open(mark).read().strip()
@@ -1706,30 +1728,30 @@ def sweep_superseded(dry):
     targets += [(os.path.join(root, n), os.path.join(root, n, "target")) for n in sorted(os.listdir(root))] if os.path.isdir(root) else []
     # Where the compilers write: a target a build is writing into is left for the next landing.
     builds = _builds()
-    before, swept, skipped = disk_free_gb(), 0, []
+    before, swept, skipped, todo = disk_free_gb(), 0, [], []
     for wt, t in targets:
-        deps = os.path.join(t, "debug", "deps")
-        if os.path.islink(t) or not os.path.isdir(deps):
+        prof = os.path.join(t, "debug")
+        if os.path.islink(t) or not os.path.isdir(os.path.join(prof, "deps")):
             continue
         if _building(t, builds):
             skipped.append(os.path.basename(wt or t))
             continue
-        stale = superseded_executables(deps)
-        if not stale:
+        todo += superseded_executables(prof)
+    held = set()
+    if todo:
+        dirs = sorted({os.path.dirname(p) for p in todo})
+        held = {l[1:] for l in sh(["lsof", "-Fn"] + [a for d in dirs for a in ("+d", d)], timeout=120).splitlines()
+                if l.startswith("n")}
+    for p in todo:
+        if p in held:
             continue
-        held = {l[1:] for l in sh(["lsof", "+d", deps, "-Fn"], timeout=60).splitlines() if l.startswith("n")}
-        for p in stale:
-            if p in held:
-                continue
-            if dry:
-                swept += 1
-                continue
+        if not dry:
             for q in (p, p + ".d"):
                 try:
                     os.remove(q)
                 except FileNotFoundError:
                     pass
-            swept += 1
+        swept += 1
     if not dry:
         with open(mark, "w") as f:
             f.write(head + "\n")
