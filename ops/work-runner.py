@@ -2365,6 +2365,15 @@ def read_deflake_requests(path=None):
 # specs under the user's authorization; the coordinator had to hold one by hand).
 _INFLIGHT = ("running", "queued", "review-failed", "gate-failed", "fix-held", "conflict")
 _DEFER_SAID = set()
+DEFLAKE_STALE_H = 12
+
+
+def branch_tip_ts(branch):
+    """Committer time of a branch's tip; now (i.e. fresh) when it cannot be read - never abandon on doubt."""
+    try:
+        return float(sh(["git", "log", "-1", "--format=%ct", branch]).strip())
+    except (ValueError, Exception):
+        return time.time()
 
 
 def deflake_deferred(slug, req, claims):
@@ -2376,7 +2385,13 @@ def deflake_deferred(slug, req, claims):
     target = merge_target()
     c = claims.get(DEFLAKE_PREFIX + slug)
     if c and c.get("branch") and commits_ahead(c["branch"], target) > 0:
-        return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+        # ...unless that branch is abandoned: not queued or gating, and untouched for DEFLAKE_STALE_H.
+        # 2026-09-24: fog-of-war's 00:35 WIP branch, retired by the coordinator at 03:55 but kept,
+        # deferred every new fog-of-war deflake for 17 h while the spec went red in 8 gates.
+        if c["branch"] in branches_waiting() or time.time() - branch_tip_ts(c["branch"]) < DEFLAKE_STALE_H * 3600:
+            return f"its branch {c['branch']} ({c.get('state')}) has unmerged commits"
+        log(f"DEFLAKE {slug}: its old branch {c['branch']} ({c.get('state')}) is abandoned "
+            f"(> {DEFLAKE_STALE_H} h untouched, not queued) - a fresh run starts from main; the branch is kept")
     test = str(req.get("test", ""))
     if not test.endswith(".e2e.mjs"):
         return ""

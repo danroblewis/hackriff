@@ -1759,3 +1759,25 @@ def test_a_fix_run_asked_for_while_the_limit_holds_waits_quietly(monkeypatch, tm
     c = {"ticket": "T-9", "branch": "task-t9", "wt": str(tmp_path), "session_id": "s", "state": "queued", "kind": "work"}
     held = R.launch_fix(c, "GATE_FAIL x", claims={"T-9": c})
     assert held["state"] == "fix-held" and notes == []
+
+def test_an_abandoned_deflake_branch_no_longer_blocks_a_fresh_run(df, monkeypatch):
+    """2026-09-24: fog-of-war's 00:35 WIP branch, retired at 03:55 but kept, deferred every new
+    fog-of-war deflake for 17 h while the spec went red in 8 gates."""
+    tmp, write, launched, _ = df
+    monkeypatch.setattr(R, "_DEFER_SAID", set())
+    write(_req("deflake-a", 600.0))
+    monkeypatch.setattr(R, "commits_ahead", lambda b, t: 2)
+    claims = {"DEFLAKE:deflake-a": {"ticket": "DEFLAKE:deflake-a", "deflake": "deflake-a", "kind": "deflake",
+                                    "state": "uncommitted", "branch": "task-deflake-a", "run": 1, "request_ts": 100.0, "ended": 500.0}}
+    now = R.time.time()
+    monkeypatch.setattr(R, "branch_tip_ts", lambda b: now - 3600)       # touched an hour ago: still waits
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []
+    (tmp / "merge-queue.txt").write_text("task-deflake-a\n")
+    monkeypatch.setattr(R, "branch_tip_ts", lambda b: now - 17 * 3600)
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == []                                                 # old but QUEUED: still waits
+    (tmp / "merge-queue.txt").write_text("")
+    R.dispatch_deflakes(claims, dry=False)
+    assert launched == [("deflake-a", 600.0, 2)]                          # abandoned: a fresh run
+    assert "is abandoned" in (tmp / "work-runner.log").read_text()
