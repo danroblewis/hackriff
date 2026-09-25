@@ -1,0 +1,150 @@
+{
+ "global": {
+  "core:datatype": "ci8",
+  "core:version": "1.2.0",
+  "core:sample_rate": 2400000.0,
+  "core:description": "hk-pipeline IQ capture buffer clip, FM broadcast band at 98.5 MHz / 2.4 Msps (T-926 per-station set)",
+  "core:hw": "HackRF One serial 0000000000000000d2b861dc263bc293, firmware 2026.01.3 (USB API 1.10), board rev 0, libhackrf 0.9.2 (2026.01.3), antenna unknown",
+  "core:recorder": "hk-pipeline:iqbuffer",
+  "core:extensions": [
+   {
+    "name": "hackriff",
+    "version": "0.1.0",
+    "optional": true
+   }
+  ],
+  "hackriff:provenance": {
+   "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+   "tune": {
+    "center_hz": 98500000.0,
+    "sample_rate_hz": 2400000.0,
+    "lna_db": 32.0,
+    "vga_db": 30.0,
+    "amp_on": true,
+    "bandwidth_hz": 1750000.0
+   },
+   "overload": true,
+   "quantisation_limited": false,
+   "antenna_port": "unknown",
+   "bias_tee": "off",
+   "clock_source": "internal",
+   "clock_locked": true,
+   "timestamp_method": "host-arrival"
+  }
+ },
+ "captures": [
+  {
+   "core:sample_start": 0,
+   "core:frequency": 98500000.0,
+   "core:datetime": "2026-09-25T11:08:23.510765667Z",
+   "hackriff:provenance": {
+    "device_id": "hackrf:0000000000000000d2b861dc263bc293",
+    "tune": {
+     "center_hz": 98500000.0,
+     "sample_rate_hz": 2400000.0,
+     "lna_db": 32.0,
+     "vga_db": 30.0,
+     "amp_on": true,
+     "bandwidth_hz": 1750000.0
+    },
+    "overload": true,
+    "quantisation_limited": false,
+    "antenna_port": "unknown",
+    "bias_tee": "off",
+    "clock_source": "internal",
+    "clock_locked": true,
+    "timestamp_method": "host-arrival"
+   },
+   "core:global_index": 12815713792,
+   "hackriff:buffer_run": 1,
+   "hackriff:buffer_segment": 27
+  }
+ ],
+ "annotations": [
+  {
+   "core:sample_start": 0,
+   "core:sample_count": 12000000,
+   "core:label": "capture",
+   "hackriff:truth": {
+    "role": "scenario",
+    "kind": "capture",
+    "recording": "fm-20260925-98p5",
+    "use_cases": [
+     "SIGNAL-062"
+    ],
+    "datatype": "ci8",
+    "sample_rate_hz": 2400000.0,
+    "tuner_center_hz": 98500000.0,
+    "n_samples": 12000000,
+    "capture": "the explorer agent (T-923 window 2026-09-25 03:43-06:43 PDT) clipped it from the live app's IQ ring with POST /api/iqbuffer/clip while the app was on the station; HackRF One 0000000000000000d2b861dc263bc293, LNA 32 / VGA 30 / amp on, bias-tee off, antenna unknown (stock), baseband filter 1.75 MHz, provenance overload=true (San Francisco strong-signal FM)",
+    "task": "T-926",
+    "set": "fixtures/hackrf/fm-stations: one narrow capture per RDS station (2.4 Msps, ~5 s, 24 MB), a set that grows every explorer window; tests/e2e/tests/acceptance/fm_stations.rs asserts every station carrying an identity decodes its PI blind through the mock SDR",
+    "annotation_completeness": "the stations inside the 1.75 MHz baseband passband; a station with a pilot but no RDS the reference decoder could read carries no identity",
+    "legal": "Receive-only capture. Truth is broadcast RDS station identity (PI/PTY) only.",
+    "t_start_s": 0.0,
+    "duration_s": 5.0,
+    "explorer_name": "fm-98p9-piA4FF"
+   }
+  },
+  {
+   "core:sample_start": 0,
+   "core:sample_count": 12000000,
+   "core:freq_lower_edge": 98803104.2,
+   "core:freq_upper_edge": 99003104.2,
+   "core:label": "WFM broadcast 98.9031 MHz",
+   "hackriff:truth": {
+    "role": "emission",
+    "kind": "wfm-broadcast",
+    "modulation": "WFM",
+    "center_hz": 98903104.2,
+    "bandwidth_hz": 200000.0,
+    "stereo": true,
+    "pilot": {
+     "present": true,
+     "measurement": "reference decoder: 18999.85 Hz"
+    },
+    "note": "weak RDS: 3 CRC-valid groups in 5 s (BLER 0.64). The app decoded PI A4FF prompted live (106 groups in 45 s); the explorer saw one PS row 'QueBuena', stability unverified, so no PS truth.",
+    "rds": {
+     "pi_hex": "A4FF",
+     "pty": 9,
+     "groups_decoded": 3,
+     "block_error_rate": 0.639,
+     "decoder": "py/fixtures/rds_ref.py decode_ci8 over the whole 5 s (FM discriminator, pilot-locked 57 kHz BPSK, EN 50067 syndromes; PI a majority vote over CRC-valid groups): an independent decoder, not the app's hk-rds"
+    },
+    "identity": {
+     "type": "rds_pi",
+     "value": "A4FF"
+    },
+    "t_start_s": 0.0,
+    "duration_s": 5.0
+   }
+  },
+  {
+   "core:sample_start": 0,
+   "core:sample_count": 12000000,
+   "core:freq_lower_edge": 97998414.7,
+   "core:freq_upper_edge": 98198414.7,
+   "core:label": "WFM broadcast 98.0984 MHz",
+   "hackriff:truth": {
+    "role": "emission",
+    "kind": "wfm-broadcast",
+    "modulation": "WFM",
+    "center_hz": 98098414.7,
+    "bandwidth_hz": 200000.0,
+    "stereo": true,
+    "pilot": {
+     "present": true,
+     "measurement": "reference decoder: 18999.89 Hz"
+    },
+    "note": "pilot present, but no CRC-valid RDS group in 5 s from the reference decoder (the app live: 3 groups in 45 s, no PI). Not an RDS station for this capture's truth.",
+    "rds": {
+     "pi_hex": null,
+     "decoder": "py/fixtures/rds_ref.py decode_ci8 over the whole 5 s (FM discriminator, pilot-locked 57 kHz BPSK, EN 50067 syndromes; PI a majority vote over CRC-valid groups): an independent decoder, not the app's hk-rds",
+     "groups_decoded": 0
+    },
+    "t_start_s": 0.0,
+    "duration_s": 5.0
+   }
+  }
+ ]
+}

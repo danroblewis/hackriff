@@ -299,6 +299,10 @@ counter_group!(
         /// T-209: pilot-locked analog sessions without a decoded identity whose emitter was not
         /// placed because the window's front end was overloaded or clipping.
         mode_emitters_withheld,
+        /// T-926: analog windows restarted inside the ring's history after the chain was lapped
+        /// (an overrun while it computed its probe or early identification) — instead of writing
+        /// the fragment it had, too short for RDS.
+        window_restarts,
         /// Chain rows written without their triggering detection, which was never stored within
         /// the wait (detect reader overrun, failed store).
         detection_ref_missing,

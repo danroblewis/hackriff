@@ -650,6 +650,64 @@
         "SPACE-050"
       ],
       "source": []
+    },
+    {
+      "name": "fm-20260925-98p5",
+      "status": "committed",
+      "path": "hackrf/fm-stations/fm-20260925-98p5.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "45d0ad2f26691c721725b9ec1d058e20a83075ec9c19e70b3307f80e1c1775a1",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source": "explorer agent capture 2026-09-25 ($HACKRIFF_OPS/explorer/captures/20260925/fm-98p9-piA4FF), POST /api/iqbuffer/clip",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "98.9 MHz PI A4FF (reference decoder: 3 groups/5 s, BLER 0.64, weak); 98.1 MHz pilot without decodable RDS (no identity); tuner 98.5 MHz"
+    },
+    {
+      "name": "fm-20260925-98p5",
+      "status": "committed",
+      "path": "hackrf/fm-stations/fm-20260925-98p5.sigmf-meta",
+      "size_bytes": 5252,
+      "sha256": "f1d8c8f6c0e14e6cb47072ac9979e09848ca747cacde94b5fdf0514d612b1f43",
+      "kind": "sigmf-meta",
+      "source": "explorer agent capture 2026-09-25 ($HACKRIFF_OPS/explorer/captures/20260925/fm-98p9-piA4FF), POST /api/iqbuffer/clip",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "98.9 MHz PI A4FF (reference decoder: 3 groups/5 s, BLER 0.64, weak); 98.1 MHz pilot without decodable RDS (no identity); tuner 98.5 MHz"
+    },
+    {
+      "name": "fm-20260925-100p9",
+      "status": "committed",
+      "path": "hackrf/fm-stations/fm-20260925-100p9.sigmf-data",
+      "size_bytes": 24000000,
+      "sha256": "53a51802110669bb41c44002344bd88ac6046e1d61c09ab54ae80e92e264b715",
+      "kind": "sigmf-data",
+      "lfs": true,
+      "source": "explorer agent capture 2026-09-25 ($HACKRIFF_OPS/explorer/captures/20260925/fm-101p3-pi1694), POST /api/iqbuffer/clip",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "101.3 MHz PI 1694 (reference decoder: 56 groups/5 s, BLER 0); PS dynamic, not recorded; tuner 100.9 MHz"
+    },
+    {
+      "name": "fm-20260925-100p9",
+      "status": "committed",
+      "path": "hackrf/fm-stations/fm-20260925-100p9.sigmf-meta",
+      "size_bytes": 4224,
+      "sha256": "32e1f32e1c04e8f1491d806f6e5f317f0fd77f60a98152c1ee50f3e8d857fd4e",
+      "kind": "sigmf-meta",
+      "source": "explorer agent capture 2026-09-25 ($HACKRIFF_OPS/explorer/captures/20260925/fm-101p3-pi1694), POST /api/iqbuffer/clip",
+      "use_cases": [
+        "SIGNAL-062"
+      ],
+      "license": "project-owned capture",
+      "truth_summary": "101.3 MHz PI 1694 (reference decoder: 56 groups/5 s, BLER 0); PS dynamic, not recorded; tuner 100.9 MHz"
     }
   ]
 }

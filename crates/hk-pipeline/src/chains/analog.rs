@@ -152,12 +152,84 @@ struct Window {
     head: Option<(SampleTime, ProvenanceHandle)>,
     ended: bool,
     /// A `Detach` arrived; it ends collection as soon as the window holds samples (kept pending
-    /// while it is still empty, never dropped).
+    /// while it is still empty, never dropped) — unless the window is [`committed`](Self::committed).
     detached: bool,
+    /// T-926: the probe accepted the channel, so the window is collected to its full length
+    /// whatever happens to the track that triggered it (see [`collect`]).
+    committed: bool,
+    /// Times the window was restarted after the chain was lapped ([`MAX_WINDOW_RESTARTS`]).
+    restarts: u32,
 }
+
+/// What a window does when its reader reports an overrun.
+#[derive(Debug, PartialEq, Eq)]
+enum OnLost {
+    /// Discard what it holds and collect a fresh contiguous window (T-926).
+    Restart,
+    /// Stop collecting and demodulate what it holds.
+    End,
+    /// Nothing collected yet: keep reading.
+    Continue,
+}
+
+impl Window {
+    /// Whether a `Detach` ends collection now: only a window holding samples, and never a
+    /// committed one (T-926, see [`collect`]).
+    fn ends_on_detach(&self) -> bool {
+        !self.committed && !self.iq.is_empty()
+    }
+
+    /// Empties a committed window so a fresh contiguous one is collected, at most
+    /// [`MAX_WINDOW_RESTARTS`] times; `false` (and nothing changed) otherwise.
+    fn restart(&mut self) -> bool {
+        if !self.committed || self.restarts >= MAX_WINDOW_RESTARTS {
+            return false;
+        }
+        self.restarts += 1;
+        self.iq.clear();
+        self.head = None;
+        true
+    }
+
+    /// The window's answer to an overrun, applied to its own state: a committed window restarts
+    /// empty ([`Self::restart`]); any other window holding samples ends.
+    fn on_lost(&mut self) -> OnLost {
+        if self.restart() {
+            OnLost::Restart
+        } else if self.iq.is_empty() {
+            OnLost::Continue
+        } else {
+            OnLost::End
+        }
+    }
+}
+
+/// Most times a committed window restarts after an overrun (T-926). Each restart costs one window
+/// of collection and nothing else — the samples are copied, not demodulated, until the window is
+/// whole — so the bound only stops a chain that can never keep up (the host is saturated) from
+/// collecting forever.
+const MAX_WINDOW_RESTARTS: u32 = 2;
 
 /// Collects until `iq` holds `target` samples, the stream ends, a discontinuity arrives, or the
 /// chain is detached.
+///
+/// **A committed window is not cut short (T-926).** Measured on live air on 2026-09-25 (the
+/// explorer's 88–108 MHz window): every full-window WFM session the chain wrote was **0.5 s** —
+/// the probe — or 1.0 s, never the 4 s the spec asks for, so RDS saw at most five groups and one
+/// station of nineteen decoded a PI unprompted. Two things ended the windows early, both
+/// reproduced by a paced replay of the explorer's per-station captures:
+///
+/// - **`Detach`.** The chain is triggered by a *track*, and a broadcast station reaches the
+///   tracker as a scatter of 9–47 kHz fragments whose tracks open and close within a second. The
+///   chain's window was tied to that fragment's life. Once the probe has accepted the channel the
+///   window is a bounded commitment (`window_s`), so a detach no longer truncates it; the stream
+///   ending, a retune and the segment stopping still do. A gap or a provenance change at the same
+///   tune (the sticky overload flag, a gain step) restarts it, as an overrun does.
+/// - **An overrun.** The chain computes its probe and early identification *between* reads,
+///   while the ring (seconds deep) keeps filling; a lapped chain used to write the fragment it
+///   held. A committed window instead **restarts** inside the retained history
+///   ([`ChainReader::restart_in_history`]) — RDS needs a contiguous window, not that particular
+///   one — at most [`MAX_WINDOW_RESTARTS`] times.
 fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target: usize) {
     while w.iq.len() < target && !w.ended {
         while !w.detached {
@@ -167,34 +239,74 @@ fn collect(cr: &mut ChainReader, rx: &Receiver<ChainMsg>, w: &mut Window, target
                 Err(_) => break,
             }
         }
-        if w.detached && !w.iq.is_empty() {
+        if w.detached && w.ends_on_detach() {
+            ended_early(w, "the trigger track detached");
             w.ended = true;
             break;
         }
         match cr.next() {
             Next::Data(c) => {
-                if let Some((t, p)) = &w.head {
-                    if c.first_sample() != t.sample_index + w.iq.len() as u64
-                        || c.provenance.id() != p.id()
-                    {
+                if let Some((t, p)) = &w.head
+                    && (c.first_sample() != t.sample_index + w.iq.len() as u64
+                        || c.provenance.id() != p.id())
+                {
+                    // A gap or a new provenance at the **same** tune (the front end's sticky
+                    // overload flag, a gain step) leaves the channel where it was: a committed
+                    // window starts again at this chunk. A retune moved the channel away.
+                    let (a, b) = (&c.provenance.get().tune, &p.get().tune);
+                    let same_tune =
+                        a.center_hz == b.center_hz && a.sample_rate_hz == b.sample_rate_hz;
+                    if !(same_tune && w.restart()) {
+                        ended_early(
+                            w,
+                            if same_tune {
+                                "a discontinuity"
+                            } else {
+                                "a retune"
+                            },
+                        );
                         w.ended = true;
                         break;
                     }
-                } else {
+                    inc(&cr.shared.counters.chains.window_restarts);
+                }
+                if w.head.is_none() {
                     w.head = Some((c.time, c.provenance.clone()));
                 }
                 let take = (target - w.iq.len()).min(c.len);
                 w.iq.extend_from_slice(&cr.buf[..take]);
                 cr.release_to(c.end_sample());
             }
-            Next::Lost => {
-                if !w.iq.is_empty() {
+            Next::Lost => match w.on_lost() {
+                OnLost::Restart => {
+                    inc(&cr.shared.counters.chains.window_restarts);
+                    cr.restart_in_history();
+                }
+                OnLost::End => {
+                    ended_early(w, "an overrun");
                     w.ended = true;
                 }
-            }
+                OnLost::Continue => {}
+            },
             Next::Idle => {}
-            Next::Closed => w.ended = true,
+            Next::Closed => {
+                ended_early(w, "the stream ending");
+                w.ended = true;
+            }
         }
+    }
+}
+
+/// `HK_PIPELINE_DEBUG`: why a window ended before it was whole (T-926: the question the live
+/// 0.5 s windows raised, and the one a run log could not answer).
+fn ended_early(w: &Window, why: &str) {
+    if crate::debug_enabled() {
+        eprintln!(
+            "hk-pipeline: analog window ended by {why} at {} samples (committed {}, {} restarts)",
+            w.iq.len(),
+            w.committed,
+            w.restarts
+        );
     }
 }
 
@@ -277,6 +389,8 @@ pub(crate) fn run(
         head: None,
         ended: false,
         detached: false,
+        committed: false,
+        restarts: 0,
     };
     let mut probe_mode = None;
     let mut probe_refined = None;
@@ -362,6 +476,8 @@ pub(crate) fn run(
             }
             return;
         }
+        // T-926: accepted, so the rest of the window is collected whatever the trigger track does.
+        w.committed = true;
     }
     // The recording runs beside the window collection, never inline: in lossless replay this
     // chain's gate cursor would otherwise stay parked at the probe end while the recorder waits
@@ -969,6 +1085,65 @@ fn collect_and_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(samples: usize, committed: bool) -> Window {
+        Window {
+            iq: vec![Complex::new(1, 1); samples],
+            head: None,
+            ended: false,
+            detached: false,
+            committed,
+            restarts: 0,
+        }
+    }
+
+    /// T-926: a broadcast station reaches the tracker as short-lived fragments, and the track
+    /// that triggered the chain closing (a `Detach`) cut every live WFM window to the probe's
+    /// 0.5 s. Once the probe accepted the channel, the window is collected in full.
+    #[test]
+    fn a_detach_ends_an_uncommitted_window_but_never_a_committed_one() {
+        assert!(
+            window(1200, false).ends_on_detach(),
+            "uncommitted, holding samples"
+        );
+        assert!(
+            !window(0, false).ends_on_detach(),
+            "an empty window keeps the detach pending"
+        );
+        assert!(
+            !window(1200, true).ends_on_detach(),
+            "the probe accepted the channel: the window is a bounded commitment"
+        );
+    }
+
+    /// T-926: a chain lapped while it computed its probe used to demodulate the fragment it
+    /// held. A committed window restarts empty, a bounded number of times, then ends as before.
+    #[test]
+    fn an_overrun_restarts_a_committed_window_a_bounded_number_of_times() {
+        let mut w = window(2_400_000, true);
+        for k in 0..MAX_WINDOW_RESTARTS {
+            w.iq.push(Complex::new(0, 0));
+            assert_eq!(w.on_lost(), OnLost::Restart, "restart {k}");
+            assert!(
+                w.iq.is_empty() && w.head.is_none(),
+                "a fresh contiguous window"
+            );
+        }
+        w.iq.push(Complex::new(0, 0));
+        assert_eq!(
+            w.on_lost(),
+            OnLost::End,
+            "past the bound it ends with what it holds"
+        );
+
+        let mut u = window(1200, false);
+        assert_eq!(
+            u.on_lost(),
+            OnLost::End,
+            "an uncommitted window ends as before"
+        );
+        assert_eq!(window(0, false).on_lost(), OnLost::Continue);
+    }
 
     fn node(raster_hz: f64) -> AnalogNode {
         AnalogNode {
