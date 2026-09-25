@@ -28877,7 +28877,7 @@ tasks:
     parallel_group: MAP-TOPBAR
     needs: none
     model: opus
-    effort: high
+    effort: medium
     acceptance: |
       USER-VISIBLE ON STAGING (user 2026-09-25 10:02, via supervisor): "The top bar ... Explore/Decode/History tab buttons, the Review button, the Theme button, and the nudge buttons" are still there. T-801 ('the app-shell frame retires') did not retire T-150's top bar.
       WHAT THE USER WILL SEE ON STAGING: no fixed-height bar above the map; the canvas's top row is the first pixel row of the page; the former bar's controls are small floating chrome that fades with the rest.
@@ -28913,6 +28913,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone; a targeted nextest binary if the API changes), then HAND BACK. Never `just gate`.
     notes: |
       FOUND BY user 2026-09-25 10:02 + amendment 10:06 via supervisor (staging): Outputs on the map: active boxes show an active outline + output-kind badge (audio level pulse), a right-click/long-press context menu on any box or pin carries Listen/Decode/Record/Stream/Analyze/Promote/Delete/Go to, and the Outputs dock retires
+    high_effort_reason: "cross-cutting: new server output-state records (listen/stream/decode/record) reach the map as per-frame box symbology + a context menu that replaces the dock and becomes the only Listen entry point - UI + API contract together"
   - id: T-995
     milestone: MMAP
     title: "Remove the full-spectrum minimap bar: the whole spectrum is reached by zooming out (Google-Maps style); its coverage segments move to the fog layer; docs say the minimap is retired"
@@ -28922,7 +28923,7 @@ tasks:
     parallel_group: MAP-MINIMAP
     needs: none
     model: opus
-    effort: high
+    effort: medium
     acceptance: |
       USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User: "I don't want that [full-spectrum minimap bar] there at all. If I want to see the whole width of the waterfall map, I would zoom or scale to see it, which is how Google Maps works - there is never a 'whole world' minimap. The minimap was an idea for the previous UI."
       DELIVER: remove the minimap pane and its bar; the whole-spectrum view is reached by zooming out (the canvas already spans 1 MHz-6 GHz). What only the minimap showed - active capture windows per SDR, survey/sweep coverage segments - moves to the coverage-fog layer and the scale bar's tier text (sibling scale-bar ticket), never lost. Update docs/16 §8, docs/23 and the root CLAUDE.md sentences that say 'with a minimap' / 'the minimap lights every active capture window' to say the minimap is retired by the user's decision 2026-09-25 and where its information now lives. The follow-live FAB's minimap toggle (surface.ts:1340) goes with it.
@@ -28939,7 +28940,7 @@ tasks:
     parallel_group: MAP-SCALE
     needs: none
     model: opus
-    effort: high
+    effort: medium
     acceptance: |
       USER-VISIBLE ON STAGING (user 2026-09-25 10:12, map-UI nit-picks via supervisor; ~/.hackriff-ops/handoffs/coordinator-1012-map-nits.md). User: the Retune/stats bar's "more" expansion (slice, peak dB, a signal selection stuck at 101.3, phosphor style "totally unnecessary", capture rules "also unnecessary", "0.4 % of this surface was ever sampled (18 of 4096 coverage cells)..." "can probably go") and the white panel block "100.980 MHz ± 937 kHz LIVE" "can definitely be replaced with something on the waterfall map. Google Maps has a very small short section bottom-right that shows the distance measure ... A sense of scale is what the current centre freq and width is."
       DELIVER: a Google-Maps-style SCALE BAR bottom-right of EACH pane (built per pane from the start - the split-view per-pane status ticket depends on it): a short bar labelled with the frequency it spans at the current zoom ("200 kHz") and a second short bar for time ("10 s"), recomputed every render frame from that pane's own Hz/px and capture-time mappings; the pane's honesty tier/level in tiny text beside it (the existing three-tier rule). REMOVE: phosphor style, capture rules, the coverage-percentage statement, the white centre/span panel block, the stale signal-selection line, the "more" expansion. KEEP as a one-line readout in the pane's bottom-left status: centre / span / LIVE-or-time-position, and peak dB only while hovering. The Retune button stays where Go-to lives (small; it commands the radio through the gated DeviceAction path).
@@ -29017,6 +29018,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: make the active pane visible (outline; Go-to/zoom/layers name the pane; click and right-click set it; keys switch panes and toggle Live) + the global-vs-active chrome rule in docs/23 §10
+    high_effort_reason: replaces a hidden global (preview.activePane) that nearly every chrome control binds to; the input model and the global-vs-active chrome rule in docs/23 are designed here and every later split-view ticket builds on it
   - id: T-1001
     milestone: MMAP
     title: "Split view: a Live/Freeze button inside each pane's rectangle; the single follow-live FAB retires"
@@ -29053,6 +29055,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Split view: detections queried per pane - each pane draws the rows for its own (t, f) window; the lists follow the active pane and name it
+    high_effort_reason: per-pane inventory queries change how the time-scoped inventory invariant is served (one query per pane window, lists bound to the active pane) - backend query shape + client data flow
   - id: T-1003
     milestone: MMAP
     title: "Split view: status line, scale bar, Retune and IQ-backing words per pane inside each rectangle - nothing clipped or dropped at two panes"
@@ -29119,7 +29122,7 @@ tasks:
     parallel_group: MAP-DEVICE
     needs: none
     model: opus
-    effort: high
+    effort: medium
     acceptance: |
       USER-VISIBLE (user 2026-09-25 10:40, multi-SDR + scan overlay via supervisor; ~/.hackriff-ops/handoffs/coordinator-1040-multisdr-scan.md). MULTI-SDR IS DONE IN THE BACKEND (MSDR): T-510 N source/ring/capture sets in one Pipeline, T-511 N live controls + device selector on control routes, T-512 repeatable --device, T-513 two-device mock e2e, T-514 RTL-SDR driver (the user's NooElec Nano 3), coverage by device (hk-api coverage.rs by_device_over), device_id in provenance, /api/devices in docs/api.md. What is missing is the UI - build on those routes, do not re-implement them.
       THIS TICKET: a pane's `device` (docs/16 §8: it chooses whose coverage decides the pane's grey) becomes visible: a small device pill in each pane's status ("HackRF · 2.4 Msps" / "RTL-SDR"), a picker in the pane's context/⋯ menu, and - when two devices are attached (/api/devices) - the split-view offer "one pane per device". Go-to/retune in a pane commands THAT pane's device through T-511's device selector on the control routes (one gated DeviceAction path, device_id recorded).
@@ -29162,6 +29165,7 @@ tasks:
       TESTING PROTOCOL (CLAUDE.md): targeted tests only (just test-ui; the touched e2e specs alone via `cd ui && node e2e/run.mjs <spec>` on your own ports >= 9216; a targeted nextest binary if an API changes, with docs/api.md + api_contract.rs together per T-079), then HAND BACK with screenshots at 1280x800 and 400 px. Never `just gate`. Specs that asserted retired chrome are rewritten or retired per the rcfix rule, never loosened to pass.
     notes: |
       FOUND BY user 2026-09-25 via supervisor (staging map UI): Scan as a buttoned map overlay: a small Scan button draws the plan (regions + dwell steps, hatched over grey cells too, device, step/dwell) on the canvas; drag to adjust, Start, progress on the map, Stop
+    high_effort_reason: the scan plan must be the server engine own step schedule rendered and edited on the map (no client step arithmetic), incl. progress over grey cells - new API surface over T-452 plus an editable overlay
   - id: T-1009
     milestone: MMAP
     title: "Measure boxes -> actions: 'Scan this region with <device>', 'Record IQ of this region with <device>', 'Save as marker' from the box's context menu"
@@ -29243,6 +29247,7 @@ tasks:
     notes: |
       FOUND BY merge runner bisect 2026-09-25: Bulk red with no single culprit: loop_survives_replumb a_looping_replay_keeps_wrapping_after_a_replumb_and_a_recovery (red on base+t567+t934+t938, green on each alone) + t884 analyze-read load flake - triage and fix
     dispatch: manual
+    high_effort_reason: "bulk red with no single culprit: interaction-vs-nondeterminism triage across three branches on the replay/recovery path, a real-time-adjacent area"
 notes:
   - "Build session 2026-09-13: Fable budget unavailable -> every task marked model: fable runs on opus at high effort (user instruction). Core-interface tasks still get a separate Opus review before merge."
   - "Retention task (post-M0): FKs default NO ACTION except track_detection CASCADE; retention must delete children first; never use INSERT OR REPLACE on immutable tables (bypasses UPDATE triggers). From T-002 review."
