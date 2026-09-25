@@ -25694,7 +25694,7 @@ tasks:
   - id: T-861
     milestone: MAUTO
     title: "MAUTO M-10: save-as-template; label to C15, signature proposal to C18, snippets to T-205"
-    status: in-progress
+    status: done
     priority: normal
     deps:
     - T-856
@@ -25725,6 +25725,7 @@ tasks:
       Commits: 0655d1c8
       Observed, not chased: The POST /api/analyze/{id}/results/{rank}/template route (ADR-0015 section 4.3) is not wired: no ApiState capability exists for templates at all today (grep for TemplateLibrary/TemplateControl outside hk-synth's own crate finds nothing), so serving save_as_template needs a new hk-api trait, ApiState field, hk-cli backend implementation, docs/api.md delta and hk-cli/tests/api_contract.rs coverage -- proposed as a follow-up ticket the coordinator can size and allocate. | save_as_template's free list is always empty (every solved-recipe param fixed), not narrowed ranges for unsolved stages at twice the measured uncertainty as ADR-0015 section 4.3 also describes: PipelineResult does not currently carry the original per-stage search-space domains past stage_reached, so there is nothing to narrow from. Widening this needs that data added to PipelineResult/candidate tracking first -- noted in the function's own doc comment, not silently dropped. | recipe_family (and therefore the C15 label and the C18 signature's family field) only recognises five block ids (fsk_demod, msk_demod, am_demod, psk_demod, ppm_demod) at S1 -- every block the built-in generic skeletons commit to a family at today. A future demod block reaching S1 in a solved search (e.g. an OFDM/CSS/DSSS block, currently absent from the catalogue per ADR-0011 section 9.2) will label_classification/propose_signature return None for family rather than mis-map; this is intentional (documented in recipe_family's own comment) but worth flagging as the catalogue grows.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: b1735776
   - id: T-862
     milestone: MAUTO
     title: "MAUTO M-11: MUI: Analyze progress, ranked results, evidence ladder, start-as-pipeline and save-template in the output panel"
