@@ -112,3 +112,22 @@ def test_release_records_the_minutes_held(tmp_path):
     knobs.cmd_release(ops, "p", now=300.0)
     rec = json.loads((tmp_path / "hold.jsonl").read_text().splitlines()[-1])
     assert rec["event"] == "release" and rec["held_minutes"] == 5.0 and knobs.read_hold(ops) is None
+
+
+def test_gate_tiers_takes_a_word_and_only_full_or_check(tmp_path):
+    """User, 2026-09-24: GATE_TIERS=check gates merges with the check phase only."""
+    ops = str(tmp_path)
+    assert knobs.cmd_set(ops, ["GATE_TIERS=all"], why="", who="t") == 2
+    assert knobs.cmd_set(ops, ["GATE_TIERS=1"], why="", who="t") == 2
+    assert knobs.read_store(ops) == {}
+    assert knobs.cmd_set(ops, ["GATE_TIERS=check"], why="", who="t") == 0
+    assert knobs.read_store(ops) == {"GATE_TIERS": "check"}
+
+
+def test_the_merge_runner_passes_the_gate_tier_to_every_merge_gate():
+    """Every gate call the runner makes on a merge carries $GATE_PHASE, and the retry commands too."""
+    import pathlib, re
+    src = (pathlib.Path(__file__).resolve().parents[2] / "ops" / "merge-runner.sh").read_text()
+    calls = re.findall(r"limited just gate(?:-merge)?[^;\n]*", src)
+    assert calls and all("$GATE_PHASE" in c for c in calls), calls
+    assert '"just gate-merge $GATE_PHASE"' in src and 'retry=${4:-"just gate --base $base $GATE_PHASE"}' in src

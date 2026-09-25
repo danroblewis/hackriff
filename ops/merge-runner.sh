@@ -71,6 +71,14 @@ fi
 MAX_ATTEMPTS=${MAX_ATTEMPTS:-2}
 # Most branches one batch may carry (user, 2026-09-22); the rest keep their queue order.
 BULK_MAX=${BULK_MAX:-15}
+# GATE TIERS (user, 2026-09-24 20:00: "GATE_TIERS=check now"). `full` (the default) gates every merge
+# with both phases; `check` gates it with `--phase check` only (lint + test for `full`-class diffs,
+# test-ui for `ui`, the py/ops suites) - the split CI has: check per push, acceptance once a day.
+# The acceptance phase's home under `check` is the daily release-candidate run (`just rc`, user rule
+# the same evening: its reds become P1 tickets, never an un-land). Rollback: GATE_TIERS=full.
+GATE_TIERS=${GATE_TIERS:-full}
+case "$GATE_TIERS" in full) GATE_PHASE="" ;; check) GATE_PHASE="--phase check" ;;
+  *) echo "merge-runner: GATE_TIERS=$GATE_TIERS is not full|check - using full" >&2; GATE_TIERS=full; GATE_PHASE="" ;; esac
 DRY_RUN=${DRY_RUN:-0}
 touch "$QUEUE" "$NEEDS" "$DONELOG" "$ATTEMPTS" "$LANDED"
 
@@ -254,14 +262,14 @@ process(){
     log "CONFLICT $branch -> flag for AI"
     echo "$(date '+%m-%d %H:%M')  $branch  $ticket  CONFLICT" >> "$NEEDS"; notify_coordinator "$ticket ($branch) hit a MERGE CONFLICT with main." "merge conflict - fix run"; return 0
   fi
-  log "GATE $branch (just gate-merge; may take 15-25 min)…"
+  log "GATE $branch (just gate-merge${GATE_PHASE:+ $GATE_PHASE}; may take 15-25 min)…"
   GATE_T0=$SECONDS
   local gate_line rc; gate_line=$(( $(wc -l < "$LOG") ))
-  limited just gate-merge; rc=$?
+  limited just gate-merge $GATE_PHASE; rc=$?
   # Same triage as a bulk (flake_retry): a single branch's red used to go straight to
   # GATE_FAIL and burn one of its MAX_ATTEMPTS on a load flake it never touched - task-gatefix
   # spent its second and last attempt that way on 2026-09-22 (api_contract tile_shadow…).
-  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge"; rc=$?; fi
+  if [ "$rc" -ne 0 ]; then flake_retry "" "$gate_line" "$ticket" "just gate-merge $GATE_PHASE"; rc=$?; fi
   if [ "$rc" -eq 0 ]; then
     # T-840: THE STAGED MERGE MUST STILL BE THE ONE WE GATED.
     #
@@ -604,7 +612,7 @@ _flake_retry(){ # base gate_log_start_line tickets [retry_cmd] -> exit 0 if the 
   # test files a deflake request the work runner dispatches) and alerted - never a silent pass.
   # retry_cmd defaults to `just gate --base $base` (a bulk, already committed on main); the
   # single-branch path passes `just gate-merge`, because its merge is still STAGED.
-  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base"} tests filter t0
+  local base=$1 from=$2 tickets=$3 retry=${4:-"just gate --base $base $GATE_PHASE"} tests filter t0
   # nextest prints `FAIL [` for a plain failure and `TRY n FAIL [` once .config/nextest.toml
   # gives a test retries (T-841); a test that passed on a retry prints `FLAKY` and is not red.
   # Every way nextest reports a red test - a crash (SIGSEGV/SIGABRT/...), a TIMEOUT, a leak - not
@@ -775,13 +783,13 @@ try_bulk(){
   tickets="${tickets# }"
   after=$(git -C "$REPO" rev-parse HEAD)
   echo "after=$after" >> "$BULKMARK"
-  log "BULK gate (just gate --base $base over ${#branches[@]} merged branches; may take 15-25 min)…"
+  log "BULK gate (just gate --base $base${GATE_PHASE:+ $GATE_PHASE} over ${#branches[@]} merged branches; may take 15-25 min)…"
   GATE_T0=$SECONDS
   # $(( )) strips the leading spaces macOS `wc -l` prints; `tail -n +"   381417"` is an
   # "illegal offset", prints nothing, and flake_retry then saw "no FAIL lines" on every red
   # gate it was ever given (2026-09-22 13:55: one flake -> 14 branches isolated).
   local gate_line; gate_line=$(( $(wc -l < "$LOG") ))
-  limited just gate --base "$base"; rc=$?
+  limited just gate --base "$base" $GATE_PHASE; rc=$?
   # TRIAGE BEFORE ISOLATING. A red batch used to mean "rewind and re-gate every branch alone" -
   # 22 branches x 50 min on 2026-09-22, for one load-sensitive test no branch had touched. Now the
   # failing tests are re-run ALONE first (seconds to minutes); if they pass alone it is a load flake,
@@ -891,7 +899,7 @@ fi
 log "GATE TARGET: $CARGO_TARGET_DIR (main's target/ is the workers' clone source and is not rebuilt by gates)"
 log "=== merge-runner up (DRY_RUN=$DRY_RUN, bulk mode); watching $QUEUE ==="
 # What this process is actually running with - `just knobs show` reads it back as "effective".
-log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0}"
+log "KNOBS: WORKER_DRAIN_MAX=$WORKER_DRAIN_MAX FOREIGN_DRAIN_MAX=$FOREIGN_DRAIN_MAX BULK_MAX=$BULK_MAX GATE_TIMEOUT=$GATE_TIMEOUT MAX_ATTEMPTS=$MAX_ATTEMPTS FLAKE_SOLO_ONE=${FLAKE_SOLO_ONE:-0} GATE_TIERS=$GATE_TIERS"
 self_version
 # STARTUP REPAIR (user, 2026-09-22 16:55: "Why would I need to abort a merge? Shouldn't that
 # happen automatically?"). This runner is the only writer of main, so a staged merge or a
