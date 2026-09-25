@@ -54,6 +54,7 @@ def _never_the_real_ops_dir(tmp_path_factory, monkeypatch):
         monkeypatch.setattr(R, name, str(ops / pathlib.Path(getattr(R, name)).name))
     monkeypatch.setattr(R, "PROJECTS", str(ops / "projects"))
     monkeypatch.setattr(R, "S", str(ops))
+    monkeypatch.setattr(R, "_REPOSYNC", {})
 
 def rows(*specs):
     """(pid, ppid, pgid, rss_mb, cpu_s, cmd) tuples -> the row dicts the helpers consume."""
@@ -1400,44 +1401,177 @@ def test_a_remote_run_is_asked_about_and_stopped_explicitly_on_the_host(remote_h
     p.wait(timeout=10)
 
 
-def test_a_sync_back_with_no_local_worktree_moves_the_branch(remote_host, monkeypatch):
-    """2026-09-25 09:26: T-958's Mac worktree had been reaped; its resumed node2 run committed 08d76b41, the sync-back
-    fetched it, but task-t958 stayed at its base and the reap judged the run NO_WORK."""
+@pytest.fixture
+def git_node2(remote_host, monkeypatch):
+    """remote_host with real repos (invariant 29): this Mac's repo, the host's bare mirror (this Mac's git remote
+    `node2`, the host clone's `origin`) and the host's clone, detached like node2's. remote_prepare runs for real
+    (the LFS rsync skipped), so the host worktree carries hkpy.reposync's hooks."""
     local_ops, local_repo, far = remote_host
-    g = lambda *a: subprocess.run(["git", "-C", str(local_repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
-                                  check=True, capture_output=True, text=True).stdout.strip()
-    g("init", "-q", "-b", "main")
-    g("commit", "-q", "--allow-empty", "-m", "base")
-    g("branch", "task-t9")
-    g("commit", "-q", "--allow-empty", "-m", "the resumed run's work")
-    work = g("rev-parse", "HEAD")
-    g("update-ref", "refs/remotes/node2/task-t9", work)            # what the fetch brings back
-    g("reset", "-q", "--hard", "HEAD~1")
-    real_sh = R.sh
-    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "" if args[:2] == ["git", "fetch"] else real_sh(args, cwd=cwd or str(local_repo), **k))
+    gcfg = local_ops.parent / "gitconfig"
+    gcfg.write_text("[init]\n\tdefaultBranch = main\n")
+    for k, v in {"GIT_CONFIG_GLOBAL": str(gcfg), "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
+        monkeypatch.setenv(k, v)
+    mirror = far / "mirror.git"
 
+    def git(where, *a, check=True):
+        r = subprocess.run(["git", "-C", str(where), *a], capture_output=True, text=True)
+        assert r.returncode == 0 or not check, r.stderr
+        return r.stdout.strip()
+    git(local_repo, "init", "-q")
+    git(local_repo, "commit", "-q", "--allow-empty", "-m", "base")
+    subprocess.run(["git", "init", "-q", "--bare", str(mirror)], check=True)
+    git(local_repo, "remote", "add", "node2", str(mirror))
+    git(local_repo, "push", "-q", "node2", "main")
+    (far / "repo").rmdir()
+    subprocess.run(["git", "clone", "-q", str(mirror), str(far / "repo")], check=True)
+    git(far / "repo", "checkout", "-q", "--detach")
+    real_sh = R.sh
+    monkeypatch.setattr(R, "sh", lambda args, cwd=None, **k: "" if args[0] == "rsync" else real_sh(args, cwd=cwd or R.REPO, **k))
+    monkeypatch.setattr(R, "sync_transcript", lambda c: None)
+    wt = f"{local_repo}/.claude/worktrees/t9"
+    hwt = far / "repo" / ".claude" / "worktrees" / "t9"
+    return git, local_repo, mirror, wt, hwt
+
+
+def _dispatch_t9(git, local_repo, wt):
+    """What launch() does for a remote ticket: the branch cut here, then the host prepared."""
+    git(local_repo, "branch", "task-t9", "main")
+    R.remote_prepare("node2", wt, "task-t9", f"{R.WORKDIR}/T-9")
+
+
+def test_a_commit_on_the_host_is_on_this_mac_within_one_tick(git_node2):
+    """Invariant 29 (user ruling 2026-09-25 11:50) - T-957..T-972: a node2 commit this Mac never saw."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit")      # its hook pushes it to the mirror
+    host = git(hwt, "rev-parse", "HEAD")
+    assert git(mirror, "rev-parse", "task-t9") == host
+    R.sync_repos(dry=False)                                                    # one tick
+    assert git(local_repo, "rev-parse", "task-t9") == host
+    assert R._REPOSYNC["node2"]["refs_in_sync"] is True and R._REPOSYNC["node2"]["drifting"] == 0
+    b = R._REPOSYNC["node2"]["branches"]["task-t9"]
+    assert (b["state"], b["mirror"], b["local"], b["behind"], b["ahead"]) == ("fast-forwarded", host, host, 1, 0)
+
+
+def test_a_mac_side_commit_is_on_the_mirror_within_one_tick_and_reaches_the_host_worktree(git_node2):
+    """The other direction: a runner board result or a coordinator's merge, committed here."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(local_repo, "worktree", "add", "-q", wt, "task-t9")
+    git(wt, "commit", "-q", "--allow-empty", "-m", "T-9: result and status (work-runner)")
+    mac = git(wt, "rev-parse", "HEAD")
+    R.sync_repos(dry=False)
+    assert git(mirror, "rev-parse", "task-t9") == mac and R._REPOSYNC["node2"]["branches"]["task-t9"]["state"] == "pushed"
+    R.remote_prepare("node2", wt, "task-t9", f"{R.WORKDIR}/T-9", resume=True)      # a fix run resumes there
+    assert git(hwt, "rev-parse", "HEAD") == mac
+
+
+def test_local_only_commits_are_never_dropped_and_divergence_is_reported(git_node2):
+    """Fast-forward only, both ways: a branch with commits on each side is moved nowhere, and says so."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(local_repo, "worktree", "add", "-q", wt, "task-t9")
+    git(wt, "commit", "-q", "--allow-empty", "-m", "a person's commit here")
+    mac = git(wt, "rev-parse", "HEAD")
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit there")
+    host = git(mirror, "rev-parse", "task-t9")
+    R.sync_repos(dry=False)
+    assert git(wt, "rev-parse", "HEAD") == mac and git(mirror, "rev-parse", "task-t9") == host
+    r = R._REPOSYNC["node2"]
+    assert r["refs_in_sync"] is False and r["drifting"] == 1 and r["branches"]["task-t9"]["state"] == "diverged"
+    assert (r["branches"]["task-t9"]["behind"], r["branches"]["task-t9"]["ahead"]) == (1, 1)
+    # ...and the host's hook never pushes over a mirror tip it never had (this Mac's, pushed while it worked)
+    git(hwt, "reset", "-q", "--hard", "HEAD~1")
+    git(local_repo, "push", "-q", "node2", "task-t9", "--force")               # (a person resolving it here)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker again, on the old tip")
+    assert git(mirror, "rev-parse", "task-t9") == mac
+
+
+def test_a_dirty_mac_worktree_is_never_reset_under_its_owner(git_node2):
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(local_repo, "worktree", "add", "-q", wt, "task-t9")
+    (pathlib.Path(wt) / "f").write_text("x")
+    git(wt, "add", "f")
+    base = git(wt, "rev-parse", "HEAD")
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the worker's commit")
+    R.sync_repos(dry=False)
+    assert git(wt, "rev-parse", "HEAD") == base and (pathlib.Path(wt) / "f").exists()
+    assert R._REPOSYNC["node2"]["branches"]["task-t9"]["state"] == "held"
+    git(wt, "commit", "-q", "--allow-empty", "-m", "unrelated")                # (index kept for the next line)
+    git(wt, "reset", "-q", "--hard", base)
+    R.sync_repos(dry=False)                                                    # clean: that worktree is reset
+    assert git(wt, "rev-parse", "HEAD") == git(mirror, "rev-parse", "task-t9")
+
+
+def test_an_amend_on_the_host_reaches_this_mac(git_node2):
+    """The host rewriting its own history is not divergence: its hook leases the tip it held, and this Mac, holding
+    nothing the mirror never had, follows."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "wip")
+    R.sync_repos(dry=False)
+    git(hwt, "commit", "-q", "--amend", "--allow-empty", "-m", "the finished commit")
+    host = git(hwt, "rev-parse", "HEAD")
+    assert git(mirror, "rev-parse", "task-t9") == host
+    R.sync_repos(dry=False)
+    assert git(local_repo, "rev-parse", "task-t9") == host and R._REPOSYNC["node2"]["branches"]["task-t9"]["state"] == "rewritten"
+
+
+def _finished_remote_claim(git_node2, monkeypatch):
+    """A remote run that ended with a DONE hand-back: its files arrive by scp, the host says its group is gone."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    d = pathlib.Path(R.WORKDIR) / "T-9"
     real_run = subprocess.run
 
-    def scp(args, **kw):                                            # the host's files arrive
+    def scp(args, **kw):
         if args[0] != "scp":
             return real_run(args, **kw)
-        pathlib.Path(args[-1]).write_text("")
+        name = pathlib.Path(args[-1]).name.removesuffix(".remote")
+        pathlib.Path(args[-1]).write_text({"out.json": json.dumps({"result": "HANDBACK: DONE", "session_id": "s"}),
+                                           "handback.json": json.dumps({"ticket": "T-9", "outcome": "done", "summary": "x"})}.get(name, ""))
         return subprocess.CompletedProcess(args, 0, b"", b"")
     monkeypatch.setattr(R.subprocess, "run", scp)
-    monkeypatch.setattr(R, "remote_sh", lambda host, cmd, timeout=120, input=None: (0, ""))
-    monkeypatch.setattr(R, "sync_transcript", lambda c: None)
-    (local_ops / "work" / "T-9").mkdir(parents=True, exist_ok=True)
-    c = {"ticket": "T-9", "host": "node2", "branch": "task-t9", "wt": str(local_repo / "gone")}
-    assert R.sync_back(c) is True
-    assert g("rev-parse", "task-t9") == work
-    # review: a local-only commit on the branch is never dropped - held for a person instead
-    g("checkout", "-q", "task-t9")
-    g("commit", "-q", "--allow-empty", "-m", "a person's local commit")
-    local = g("rev-parse", "HEAD")
-    g("checkout", "-q", "main")
+    monkeypatch.setattr(R, "remote_run_state", lambda c: "gone")
+    monkeypatch.setattr(R, "alive", lambda pid: False)
+    monkeypatch.setattr(R, "leaked_processes", lambda c, rows=None: [])
+    monkeypatch.setattr(R, "handle_gate_failures", lambda claims, dry: False)
     seen = []
     monkeypatch.setattr(R, "attention", lambda *a: seen.append(a))
-    assert R.sync_back(c) is False and g("rev-parse", "task-t9") == local and [a[2] for a in seen] == ["REMOTE_SYNC"]
+    d.mkdir(parents=True, exist_ok=True)
+    return {"T-9": {"ticket": "T-9", "branch": "task-t9", "wt": wt, "pid": 1, "started": 0, "kind": "work",
+                    "state": "running", "model": "opus", "host": "node2", "session_id": "s"}}, seen
+
+
+def test_a_withheld_push_is_a_sync_error_never_no_work(git_node2, monkeypatch):
+    """The 2026-09-25 shape: the worker committed on node2, the commit never reached this Mac. Held and said - and
+    judged, with its commits, the tick the refs agree."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    claims, seen = _finished_remote_claim(git_node2, monkeypatch)
+    git(hwt, "-c", "core.hooksPath=/dev/null", "commit", "-q", "--allow-empty", "-m", "committed, never pushed")
+    R.reap(claims, dry=False)
+    assert claims["T-9"]["state"] == "sync-error" and [a[2] for a in seen] == ["SYNC_ERROR"]
+    R.reap(claims, dry=False)
+    assert claims["T-9"]["state"] == "sync-error" and len(seen) == 1                   # said once, re-tried each tick
+    git(hwt, "push", "-q", "origin", "task-t9")                                          # the push arrives
+    R.reap(claims, dry=False)
+    assert claims["T-9"]["state"] == "queued" and "NO_WORK" not in [a[2] for a in seen]
+    assert git(local_repo, "rev-parse", "task-t9") == git(hwt, "rev-parse", "HEAD")
+
+
+def test_a_sync_back_with_no_local_worktree_moves_the_branch(git_node2, monkeypatch):
+    """2026-09-25 09:26: T-958's Mac worktree had been reaped; its resumed node2 run committed 08d76b41, the sync-back
+    fetched it, but task-t958 stayed at its base and the reap judged the run NO_WORK."""
+    git, local_repo, mirror, wt, hwt = git_node2
+    _dispatch_t9(git, local_repo, wt)
+    claims, seen = _finished_remote_claim(git_node2, monkeypatch)
+    git(hwt, "commit", "-q", "--allow-empty", "-m", "the resumed run's work")
+    assert not pathlib.Path(wt).exists()
+    R.reap(claims, dry=False)
+    assert claims["T-9"]["state"] == "queued" and seen == []
+    assert git(local_repo, "rev-parse", "task-t9") == git(hwt, "rev-parse", "HEAD")
 
 
 def test_the_host_unreachable_or_a_failed_sync_holds_the_claim(remote_host, monkeypatch):
@@ -1604,7 +1738,9 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
                  "release_stale_claims": lambda c, b: False, "sync_board": lambda c, d: None, "reap_worktrees": lambda c, d: None,
                  "reclaim_e2e_data": lambda d: None, "reclaim_idle_targets": lambda c, d: None, "sweep_superseded": lambda d: None,
                  "sync_remote_view": lambda c, d: None, "dispatch_deflakes": lambda c, d: False, "record_queue_depth": lambda: None,
-                 "gate_holds_dispatch": lambda: False, "dispatch_cap": lambda: 2, "disk_free_gb": lambda: 400.0}.items():
+                 "gate_holds_dispatch": lambda: False, "dispatch_cap": lambda: 2, "disk_free_gb": lambda: 400.0,
+                 "sync_repos": lambda d: R._REPOSYNC.update(node2={"refs_in_sync": False, "drifting": 1, "error": None, "branches": {
+                     "task-t9": {"mirror": "b" * 40, "local": "a" * 40, "behind": 1, "ahead": 1, "state": "diverged", "why": "x"}}})}.items():
         monkeypatch.setattr(R, k, v)
     R.tick(dry=False)
     st = json.load(open(tmp_path / "work-runner-status.json"))
@@ -1613,7 +1749,10 @@ def test_the_status_file_carries_each_host_and_a_committed_orphan_branch_is_name
     R.tick(dry=False)
     f = json.load(open(tmp_path / "work-runner-status.json"))["frontier"]
     assert f["dispatchable"] == 0 and f["dispatchable_ids"] == [] and f["held_by_branch"] == []
-    assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0}
+    # invariant 29 on the dashboard: per host whether its refs agree, and per branch mirror / local / behind / ahead
+    assert st["hosts"]["node2"] == {"running": 1, "cap": 5, "ready": True, "held": None, "probe_age_s": 0, "refs_in_sync": False,
+                                    "drifting": 1, "branches": {"task-t9": {"mirror": "b" * 40, "local": "a" * 40, "behind": 1,
+                                                                            "ahead": 1, "state": "diverged"}}}
     assert st["hosts"]["mac"] == {"running": 0, "cap": 2, "held": None}
     assert [a[2] for a in seen] == ["ORPHAN_BRANCH"]
     R.tick(dry=False)
