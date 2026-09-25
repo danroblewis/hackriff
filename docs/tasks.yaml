@@ -24093,7 +24093,7 @@ tasks:
   - id: T-813
     milestone: MMAP
     title: 'Figure-ground + colorblind-safe encoding pass across all layers'
-    status: in-progress
+    status: done
     priority: normal
     parallel_group: MAP-LAYERS
     model: sonnet
@@ -24132,6 +24132,7 @@ tasks:
       Commits: 4e3f9983
       Observed, not chased: Old .sf-pin.confirmed/.candidate/.unknown/.curated CSS rules in ui/src/app/centre/centre.css (shape-glyph pins: filled square/open diamond/circle+?/pennant) appear dead since T-910's user decision that detections draw no DOM glyph at all (.sf-pin.area/.sf-pin.symbol only) - not touched, out of this ticket's scope, and removing them risked breaking a path I didn't fully trace (e.g. the collections/curated marker pins, which may still use the shaped glyph classes via research-slice.ts). Worth a follow-up cleanup ticket if confirmed dead. | ui/src/surface/preview-main.ts (the standalone /surface preview page) still only shows legendEntries()/fogKeyEntries(), not markKeyEntries() - left as-is since the preview page is a dev tool, not the product surface docs/23 targets, and MAP-13's acceptance names the mockup/app as reference.
       Resources: 0 CPU-s, peak 0.0 GB
+    commit: 767c19c2
   - id: T-814
     milestone: MMAP
     title: 'Explore drawer: a collapsed bottom sheet of interesting signals and past surveys'
